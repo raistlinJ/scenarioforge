@@ -1,0 +1,433 @@
+from pathlib import Path
+
+
+FLOW_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "flow.html"
+
+
+def test_flow_assignment_persists_resolved_paths() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "'resolved_paths',",
+        "const resolvedPaths = (curA && typeof curA.resolved_paths === 'object'",
+        "if (resolvedPaths !== undefined) out.resolved_paths = resolvedPaths;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing resolved_paths persistence snippets in flow template: " + "; ".join(missing)
+
+
+def test_flow_chain_editor_hides_resolved_paths_row() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    removed_snippets = [
+        "const resolved = (fa && typeof fa.resolved_paths === 'object'",
+        "addPathEntry('artifacts_dir'",
+        "inject_source ${srcIdx + 1}",
+        "addRow('Resolved Paths', wrapLive",
+    ]
+
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not present, "Resolved paths row snippets should be removed from flow chain editor: " + "; ".join(present)
+
+
+def test_flow_injects_table_shows_resolved_path_column() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "headLabel.textContent = 'Resolved path';",
+        "viewToggle.title = 'Toggle path view (CORE VM or Container)';",
+        "const resolvedInjectSources = (fa && fa.resolved_paths && Array.isArray(fa.resolved_paths.inject_sources))",
+        "function resolvedPathsForCandidate(srcValue, resolvedValue)",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing resolved path column wiring in injects table: " + "; ".join(missing)
+
+
+def test_flow_inject_override_editor_shows_resolved_column() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const h2Label = document.createElement('span');",
+        "h2Label.textContent = 'Resolved path';",
+        "pathViewToggleBtn.title = 'Toggle path view (CORE VM or Container)';",
+        "h3.textContent = 'Destination dir';",
+        "function refreshPathHints()",
+        "const resolvedInjectSources = (fa && fa.resolved_paths && Array.isArray(fa.resolved_paths.inject_sources))",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing resolved-path column wiring in inject override editor: " + "; ".join(missing)
+
+
+def test_flow_inject_override_editor_lists_generator_inject_choices() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const generatedInjectSpecs = getGeneratedInjectsFromAssignment();",
+        "const listedInjectDefaults = new Map();",
+        "const availableListedInjects = [];",
+        "addGroup('Listed injects', Array.from(new Set(availableListedInjects)));",
+        "const listedDefaultDest = String(listedInjectDefaults.get(v) || '').trim();",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing listed inject dropdown wiring in inject override editor: " + "; ".join(missing)
+
+
+def test_flow_hint_node_ip_rewrites_stale_ip_values() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const ipv4Pattern = '(?:\\\\d{1,3}\\\\.){3}\\\\d{1,3}';",
+        "const staleIpPattern = new RegExp(`${escapedName}\\\\s*@\\\\s*(${ipv4Pattern})`, 'g');",
+        "const parentheticalIpPattern = new RegExp(`${escapedName}\\\\s*\\\\(\\\\s*(${ipv4Pattern})\\\\s*\\\\)`, 'g');",
+        "out = out.replace(parentheticalIpPattern, `${needle} @ ${ip}`);",
+        "return dedupeRenderedIps(out);",
+        "out = out.replace(staleIpPattern, `${needle} @ ${ip}`);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing stale hint IP rewrite wiring in flow template: " + "; ".join(missing)
+
+
+def test_flow_visualization_groups_parallel_dependency_layers() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function buildFlowDependencyLayout(chain, assignments, dependencyLevelOverride) {",
+        "const requestedDependencyLevel = normalizeDependencyLevel(dependencyLevelOverride !== undefined ? dependencyLevelOverride : getFlowDependencyLevel());",
+        "const providerIndexes = new Set();",
+        "const providerFactsByIndex = new Map();",
+        "addProvider(providerFactsByIndex, providerIndex, factName);",
+        "addEdge(providerIndex, nodeIndex, providerFactsByIndex.get(providerIndex) || []);",
+        "const stageLabel = indices.length > 1 ? 'Parallel' : 'Step';",
+        "lines.push(`  subgraph G${stageOrdinal}[",
+        "(Array.isArray(layout.edges) ? layout.edges : []).forEach((edge) => {",
+        "const edgeLabel = mermaidSafeEdgeLabel(edge && edge.facts);",
+        "lines.push(`  N${fromIndex} -->|\"${edgeLabel}\"| N${toIndex}`);",
+        "function flowDependencyTooltipText(facts) {",
+        "function buildFlowDependencyEdgeTooltips(chain, assignments, dependencyLevelOverride) {",
+        "function applyFlowDependencyEdgeTooltips(wrap, chain, assignments, dependencyLevelOverride) {",
+        "target.setAttribute('data-dependency-tooltip', tooltip);",
+        "const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'title');",
+        "applyFlowDependencyEdgeTooltips(wrap, currentChain, currentFlagAssignments);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing dependency-layered flow visualization wiring: " + "; ".join(missing)
+
+    removed_snippets = [
+        "lines.push(`  N${i - 1} --> ${safeId}`);",
+        "const visualProvidersForIndex = (nodeIndex) => {",
+        "lines.push(`  N${previousIndices[0]} -.-> N${currentIndices[0]}`);",
+    ]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not present, "Flow visualization should not force a linear edge between every adjacent chain item: " + "; ".join(present)
+
+
+def test_flow_visualization_quotes_dependency_edge_labels() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippet = "lines.push(`  N${fromIndex} -->|\"${edgeLabel}\"| N${toIndex}`);"
+    assert expected_snippet in text, (
+        "Mermaid edge labels must be quoted so real fact names like "
+        "Credential(user, password) render instead of producing a syntax error"
+    )
+
+    forbidden_snippet = "lines.push(`  N${fromIndex} -->|${edgeLabel}| N${toIndex}`);"
+    assert forbidden_snippet not in text
+
+
+def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        '<label class="form-label" for="flowLength">Number of Challenges</label>',
+        'data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions"',
+        '<div class="collapse mt-3" id="flowAdvancedOptions">',
+        'id="flowDependencyLevel" class="form-range" type="range" min="1" max="5" step="1" value="3"',
+        '<span>Non-dependent</span>',
+        '<span>Completely dependent</span>',
+        "function normalizeDependencyLevel(value) {",
+        "dependency_level: getFlowDependencyLevel(),",
+        "dependency_level: dependencyLevel,",
+        "dependencyLevelEl.addEventListener('input'",
+        "setFlowDependencyLevel(dependencyLevelEl.value",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing dependency slider/challenge count wiring in flow template: " + "; ".join(missing)
+
+    assert "Max Chain length" not in text
+
+
+def test_flow_page_does_not_auto_generate_on_load() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    forbidden_snippet = "await generate(false, { autoLoad: true, resolveOnGenerate: false });"
+    assert forbidden_snippet not in text, "Flow page should not auto-generate on load; Generate button must be explicit"
+
+
+def test_flow_inject_path_view_roundtrips_via_flow_state() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "out.inject_path_view = injectPathView;",
+        "curA.inject_path_view = String(savedA.inject_path_view).trim().toLowerCase();",
+        "fa.inject_path_view = pathView;",
+        "persistFlowStateAndXmlBestEffort();",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing inject path view XML/state round-trip snippets: " + "; ".join(missing)
+
+
+def test_flow_inject_path_view_defaults_to_container_when_unset() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "let pathView = (fa && String(fa.inject_path_view || '').trim().toLowerCase() === 'core-vm') ? 'core-vm' : 'container';",
+        "let injectsResolvedPathView = (fa && String(fa.inject_path_view || '').trim().toLowerCase() === 'core-vm') ? 'core-vm' : 'container';",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Inject path view should default to Container when unset: " + "; ".join(missing)
+
+
+def test_flow_restore_prefers_xml_authoritative_state() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const xmlAuthoritative = hasAuthoritativeXmlPathForScenario(scenarioName);",
+        "if (xmlAuthoritative) {",
+        "if (serverUsable) return fromServer;",
+        "return null;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing XML-authoritative flow restore snippets: " + "; ".join(missing)
+
+
+def test_flow_restore_refreshes_xml_before_state_selection() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "if (hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {",
+        "const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath });",
+        "if (key) flowStateByScenario[key] = fs;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow restore should refresh XML-backed scenario state first: " + "; ".join(missing)
+
+
+def test_flow_restore_emits_debug_logs_for_roundtrip_diagnostics() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "console.debug('[flow.restore] start'",
+        "console.debug('[flow.restore] xml refresh'",
+        "console.debug('[flow.restore] selected state'",
+        "console.debug('[flow.restore] attackflow_preview response'",
+        "console.error('[flow.restore] failed'",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing flow restore debug logging snippets: " + "; ".join(missing)
+
+
+def test_flow_save_to_xml_clears_chain_when_disabled() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const chain_ids = (!flowEnabled)",
+        "flag_assignments: (!flowEnabled) ? [] : buildPersistAssignments(chain_ids),",
+        "flow_enabled: !!flowEnabled,",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Disabled flow saves should clear chain/assignments in XML payload: " + "; ".join(missing)
+
+
+def test_flow_state_with_topology_dirty_field_is_usable_on_restore() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippet = "if (Object.prototype.hasOwnProperty.call(state, 'topology_dirty')) return true;"
+    assert expected_snippet in text, "Flow restore should treat topology_dirty-bearing flow_state as usable"
+
+
+def test_flow_restore_requires_resolved_values_for_saved_chain() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const hasResolvedValues = (flowState) => {",
+        "const assignments = Array.isArray(flowState.flag_assignments) ? flowState.flag_assignments : [];",
+        "return hasResolvedValues(normalized);",
+        "setStatus('Chain does not exist. Click Generate to start.', false);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow restore should hide partial chain states without resolved values: " + "; ".join(missing)
+
+
+def test_flow_saved_state_merge_preserves_empty_assignment_metadata_arrays() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "if (savedA.input_fields_required && !Array.isArray(curA.input_fields_required)) curA.input_fields_required = savedA.input_fields_required;",
+        "if (savedA.input_fields_optional && !Array.isArray(curA.input_fields_optional)) curA.input_fields_optional = savedA.input_fields_optional;",
+        "if (savedA.output_fields && !Array.isArray(curA.output_fields)) curA.output_fields = savedA.output_fields;",
+        "if (savedA.requires && !Array.isArray(curA.requires)) curA.requires = savedA.requires;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Saved-flow merge should preserve empty current metadata arrays instead of reviving stale values: " + "; ".join(missing)
+
+    forbidden_snippets = [
+        "if (savedA.input_fields_required && (!Array.isArray(curA.input_fields_required) || !curA.input_fields_required.length)) curA.input_fields_required = savedA.input_fields_required;",
+        "if (savedA.input_fields_optional && (!Array.isArray(curA.input_fields_optional) || !curA.input_fields_optional.length)) curA.input_fields_optional = savedA.input_fields_optional;",
+        "if (savedA.output_fields && (!Array.isArray(curA.output_fields) || !curA.output_fields.length)) curA.output_fields = savedA.output_fields;",
+        "if (savedA.requires && (!Array.isArray(curA.requires) || !curA.requires.length)) curA.requires = savedA.requires;",
+    ]
+
+    present = [snippet for snippet in forbidden_snippets if snippet in text]
+    assert not present, "Saved-flow merge should not treat empty metadata arrays as missing: " + "; ".join(present)
+
+
+def test_flow_refresh_does_not_mark_dirty_from_preview_plan_fetch_errors() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    forbidden_snippet = "setTopologyDirtyState(true, 'topology_or_ip_changed');"
+    assert forbidden_snippet not in text, "Transient preview-plan fetch errors should not force topology_dirty on refresh"
+
+
+def test_flow_preview_tab_persists_flow_state_before_redirect() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "link.addEventListener('click', async (ev) => {",
+        "if (!(await saveFlowStateToXml(xmlPath))) {",
+        "window.location.href = url;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Preview-tab navigation should persist flow state before redirect: " + "; ".join(missing)
+
+
+def test_flow_empty_state_uses_placeholder_message_instead_of_mermaid_error() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        '<div id="flowDiagram">Please generate a chain. It will appear here.</div>',
+        "const fallbackText = 'Please generate a chain. It will appear here.';",
+        "if (!diagramText || !String(diagramText).trim()) {",
+        "if (renderedText.includes('syntax error in text')) {",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing flow empty-state placeholder snippets: " + "; ".join(missing)
+
+
+def test_flow_visualization_self_heals_placeholder_for_existing_chain() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        '<dialog id="flowDiagramWaitDialog"',
+        "function showFlowDiagramWait(message) {",
+        "flowDiagramWaitDialogEl.showModal();",
+        "function hideFlowDiagramWait() {",
+        "function renderFlowDiagramError(message) {",
+        "let flowDiagramRepairQueued = false;",
+        "let flowMermaidRetryQueued = false;",
+        "function queueMermaidRenderRetry(attempt) {",
+        "const retryAttempt = Number.isFinite(+attempt) ? Math.max(1, +attempt) : 1;",
+        "queueMermaidRenderRetry(retryAttempt + 1);",
+        "showFlowDiagramWait('Please wait, rendering visualization…');",
+        "queueMermaidRenderRetry(attempt + 1);",
+        "function ensureFlowDiagramForCurrentChain() {",
+        "if (hasSvg) {",
+        "hideFlowDiagramWait();",
+        "const placeholderVisible = !text || text === fallbackText || text === 'No Chain Exists' || text.includes('Please generate a chain');",
+        "ensureFlowDiagramForCurrentChain();",
+        "renderFlowDiagramError('Diagram could not render. Try Generate again.');",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow visualization placeholder self-heal snippets: " + "; ".join(missing)
+
+
+def test_flow_restore_uses_backend_assignments_before_merging_saved_values() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "currentFlagAssignments = Array.isArray(data.flag_assignments) ? data.flag_assignments.slice() : [];",
+        "mergeResolvedFromFlowState(saved, currentChain);",
+        "if (savedA.id && (!curA.id || !String(curA.id).trim())) curA.id = savedA.id;",
+        "if (savedA.flag_generator && (!curA.flag_generator || !String(curA.flag_generator).trim())) curA.flag_generator = savedA.flag_generator;",
+        "if (savedA.hint && (!curA.hint || !String(curA.hint).trim())) curA.hint = savedA.hint;",
+        "if (savedA.hints && !Array.isArray(curA.hints)) curA.hints = savedA.hints;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow assignment restore snippets: " + "; ".join(missing)
+
+
+def test_flow_generate_max_retries_defaults_to_ten() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        'max="50" value="10" style="width: 90px;">',
+        "parseInt(generateMaxRetriesEl.value || '10', 10) || 10",
+        "} catch (e) { retriesRemaining = 10; }",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing flow max-retries default snippets: " + "; ".join(missing)
+
+
+def test_flow_generate_button_and_options_are_wired() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        'id="flowGenerateBtn"',
+        'data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions"',
+        'id="flowGenerateMaxRetries"',
+        "if (btnEl) btnEl.addEventListener('click'",
+        'generate(true, { savePreviewResolve: true, allow_node_duplicates: !!allowNodeDuplicates, resolveOnGenerate: true });',
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing direct generate/options wiring in flow template: " + "; ".join(missing)
+
+
+def test_flow_non_json_error_classifier_does_not_call_all_html_login() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function nonJsonResponseError(res, text) {",
+        "const loginUrl = /\\/login(?:[?#]|$)/.test(finalUrl);",
+        "const looksLikeLogin = status === 401 || status === 403 || loginUrl || (res && res.redirected && lowerText.includes('login'));",
+        "new Error(status >= 500 ? `Server error (${status}).`",
+        "throw nonJsonResponseError(res, text);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow non-JSON error classification snippets: " + "; ".join(missing)
+
+    assert "text && text.includes('<html')" not in text
+
+
+def test_flow_enabled_state_is_declared_before_use() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const flowEnabledToggleEl = document.getElementById('flowEnabledToggle');",
+        "let flowEnabled = !!(flowEnabledToggleEl ? flowEnabledToggleEl.checked : true);",
+        'const enabled = !!flowEnabled;',
+        'if (!flowEnabled) {',
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing declared flowEnabled state binding in flow template: " + "; ".join(missing)

@@ -1,0 +1,5049 @@
+from __future__ import annotations
+import copy
+import logging
+import os
+import csv
+import json
+import random
+import re
+import shlex
+from typing import Iterable, Tuple, List, Dict, Optional, Set
+import urllib.request
+import shutil
+import sys
+import select
+
+try:
+	import yaml  # type: ignore
+except Exception:  # pragma: no cover - optional dependency handled at runtime
+	yaml = None  # type: ignore
+
+
+logger = logging.getLogger(__name__)
+
+_COMPOSE_PORT_CACHE: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+
+
+_DOCKER_SUDO_PASSWORD_CACHE: Optional[str] = None
+
+
+def _docker_sudo_password() -> Optional[str]:
+	"""Return sudo password for docker commands, if configured.
+
+	Supports:
+	- `CORETG_DOCKER_SUDO_PASSWORD`: explicit password
+	- `CORETG_DOCKER_SUDO_PASSWORD_STDIN=1`: read one line from stdin once
+	"""
+	global _DOCKER_SUDO_PASSWORD_CACHE
+	if _DOCKER_SUDO_PASSWORD_CACHE is not None:
+		return _DOCKER_SUDO_PASSWORD_CACHE or None
+	try:
+		pw = os.getenv('CORETG_DOCKER_SUDO_PASSWORD')
+		if pw is not None and str(pw).strip() != '':
+			_DOCKER_SUDO_PASSWORD_CACHE = str(pw).rstrip('\n')
+			return _DOCKER_SUDO_PASSWORD_CACHE
+	except Exception:
+		pass
+	try:
+		flag = os.getenv('CORETG_DOCKER_SUDO_PASSWORD_STDIN')
+		if flag is not None and str(flag).strip().lower() in ('1', 'true', 'yes', 'y', 'on'):
+			# Avoid hanging indefinitely if stdin is not connected (common in remote exec).
+			line = ''
+			try:
+				r, _w, _x = select.select([sys.stdin], [], [], 2.0)
+				if r:
+					line = sys.stdin.readline()
+				else:
+					return None
+			except Exception:
+				return None
+			pw2 = (line or '').rstrip('\n')
+			if pw2.strip() != '':
+				_DOCKER_SUDO_PASSWORD_CACHE = pw2
+				try:
+					os.environ['CORETG_DOCKER_SUDO_PASSWORD'] = pw2
+				except Exception:
+					pass
+				return _DOCKER_SUDO_PASSWORD_CACHE
+			_DOCKER_SUDO_PASSWORD_CACHE = ''
+			return None
+	except Exception:
+		pass
+	_DOCKER_SUDO_PASSWORD_CACHE = ''
+	return None
+
+
+def _discover_flow_artifacts_dir(scenario_tag: str = '', node_name: str = '', out_base: str = '/tmp/vulns') -> Optional[str]:
+	"""Discover the latest flow artifacts directory when ArtifactsDir is missing.
+
+	Scans /tmp/vulns/flag_generators_runs/ and /tmp/vulns/flag_node_generators_runs/
+	for the most recent flow run directory, optionally filtered by scenario_tag.
+
+	This is a fallback for when loading from saved XML where artifacts_dir was not persisted.
+	"""
+	try:
+		search_dirs = [
+			os.path.join(out_base, 'flag_generators_runs'),
+			os.path.join(out_base, 'flag_node_generators_runs'),
+			'/tmp/vulns/flag_generators_runs',
+			'/tmp/vulns/flag_node_generators_runs',
+		]
+		candidates: List[str] = []
+		scenario_norm = re.sub(r'[^a-zA-Z0-9_-]', '_', str(scenario_tag or '').strip().lower()) if scenario_tag else ''
+		for base_dir in search_dirs:
+			if not os.path.isdir(base_dir):
+				continue
+			try:
+				for entry in os.scandir(base_dir):
+					if not entry.is_dir():
+						continue
+					# Match flow-{scenario}-{uuid} or cli-{scenario}-{node}-{uuid} pattern
+					if entry.name.startswith('flow-') or entry.name.startswith('cli-'):
+						# If scenario_tag provided, filter by it
+						if scenario_norm and scenario_norm not in entry.name.lower():
+							continue
+						candidates.append(entry.path)
+			except Exception:
+				continue
+
+		if not candidates:
+			return None
+
+		# Sort by modification time descending (most recent first)
+		candidates.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+
+		# Prefer directories with 'artifacts' subdirectory
+		for cand in candidates:
+			artifacts_sub = os.path.join(cand, 'artifacts')
+			if os.path.isdir(artifacts_sub):
+				logger.debug('[vuln] discovered flow artifacts dir: %s', artifacts_sub)
+				return artifacts_sub
+
+		# Fall back to most recent run directory directly
+		if candidates:
+			logger.debug('[vuln] discovered flow run dir (no artifacts subdir): %s', candidates[0])
+			return candidates[0]
+
+		return None
+	except Exception as exc:
+		logger.debug('[vuln] _discover_flow_artifacts_dir failed: %s', exc)
+		return None
+
+
+def _read_csv(path: str) -> List[Dict[str, str]]:
+	rows: List[Dict[str, str]] = []
+	def _get(row: Dict[str, str], key: str) -> str:
+		try:
+			v = row.get(key)
+			if v is not None:
+				return v
+		except Exception:
+			pass
+		# Handle BOM-prefixed header names seen in some CSV exports.
+		try:
+			if not key.startswith('\ufeff'):
+				v2 = row.get('\ufeff' + key)
+				if v2 is not None:
+					return v2
+		except Exception:
+			pass
+		return ''
+
+	try:
+		with open(path, newline='', encoding='utf-8', errors='ignore') as f:
+			r = csv.DictReader(f)
+			for row in r:
+				# Normalize keys we care about; ignore rows without mandatory fields
+				name = (_get(row, 'Name') or '').strip()
+				path_val = (_get(row, 'Path') or '').strip()
+				if not name or not path_val:
+					continue
+				rows.append({
+					'Name': name,
+					'Path': path_val,
+					'Type': (_get(row, 'Type') or '').strip(),
+					'Vector': (_get(row, 'Vector') or '').strip(),
+					'Startup': (_get(row, 'Startup') or '').strip(),
+					'CVE': (_get(row, 'CVE') or '').strip(),
+					'Description': (_get(row, 'Description') or '').strip(),
+					'References': (_get(row, 'References') or '').strip(),
+				})
+	except Exception:
+		return []
+	return rows
+
+
+def _extract_vulnerability_slug(path: str) -> str:
+	text = str(path or '').strip()
+	if not text:
+		return ''
+	text = text.replace('\\', '/')
+	text = text.split('?', 1)[0].split('#', 1)[0]
+	for marker in ('/tree/master/', '/blob/master/', '/content/vulhub/', '/repo/', '/vulhub/'):
+		if marker not in text:
+			continue
+		suffix = text.split(marker, 1)[1].strip('/')
+		parts = [part for part in suffix.split('/') if part]
+		if parts and parts[-1] in ('docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'README.md', 'README.zh-cn.md'):
+			parts = parts[:-1]
+		if len(parts) >= 2:
+			return '/'.join(parts[-2:])
+		if parts:
+			return parts[0]
+	return ''
+
+
+def canonical_vulnerability_name(name: str, path: str = '', cve: str = '') -> str:
+	raw_name = str(name or '').strip()
+	raw_cve = str(cve or '').strip()
+	slug = _extract_vulnerability_slug(path)
+	if slug and '/' in slug:
+		return slug
+	if raw_name and raw_cve and '/' not in raw_name and raw_cve.lower() not in raw_name.lower():
+		return f'{raw_name}/{raw_cve}'
+	return raw_name or slug
+
+
+def vulnerability_catalog_identity(name: str = '', path: str = '', cve: str = '') -> str:
+	canonical_name = canonical_vulnerability_name(name, path, cve)
+	if canonical_name:
+		return canonical_name.strip().lower()
+	slug = _extract_vulnerability_slug(path)
+	if slug:
+		return slug.strip().lower()
+	raw_name = str(name or '').strip().lower()
+	if raw_name:
+		return raw_name
+	raw_cve = str(cve or '').strip().lower()
+	if raw_cve:
+		return raw_cve
+	return ''
+
+
+def resolve_vulnerability_catalog_entry(catalog: Iterable[Dict[str, str]], *, v_name: str | None = None, v_path: str | None = None) -> Optional[Dict[str, str]]:
+	def _normalize(value: str | None) -> str:
+		return str(value or '').strip().lower()
+
+	normalized_name = _normalize(v_name)
+	normalized_path = _normalize(v_path)
+	requested_identity = vulnerability_catalog_identity(str(v_name or ''), str(v_path or ''), '')
+
+	for entry in catalog:
+		entry_path = str(entry.get('Path') or '').strip()
+		if normalized_path and _normalize(entry_path) == normalized_path:
+			return {
+				'name': canonical_vulnerability_name(str(entry.get('Name') or ''), entry_path, str(entry.get('CVE') or '')),
+				'path': entry_path,
+			}
+
+	for entry in catalog:
+		entry_name = str(entry.get('Name') or '').strip()
+		if normalized_name and _normalize(entry_name) == normalized_name:
+			return {
+				'name': canonical_vulnerability_name(entry_name, str(entry.get('Path') or ''), str(entry.get('CVE') or '')),
+				'path': str(entry.get('Path') or '').strip(),
+			}
+
+	if requested_identity:
+		for entry in catalog:
+			entry_name = str(entry.get('Name') or '').strip()
+			entry_path = str(entry.get('Path') or '').strip()
+			entry_identity = vulnerability_catalog_identity(entry_name, entry_path, str(entry.get('CVE') or ''))
+			if entry_identity and entry_identity == requested_identity:
+				return {
+					'name': canonical_vulnerability_name(entry_name, entry_path, str(entry.get('CVE') or '')),
+					'path': entry_path,
+				}
+
+	return None
+
+
+def _normalize_known_catalog_service_image(rec: Dict[str, str], image: str) -> str:
+	"""Repair known-bad catalog image references before compose wrapping.
+
+	Some installed vuln catalog entries reference tags that are not published on the
+	upstream registry. Rewrite those image tags here so downstream iproute2 wrapper
+	builds still use a valid vulnerable base image.
+	"""
+	image_text = str(image or '').strip()
+	if not image_text:
+		return image_text
+	identity = vulnerability_catalog_identity(
+		str(rec.get('Name') or ''),
+		str(rec.get('Path') or ''),
+		str(rec.get('CVE') or ''),
+	)
+	if identity == 'craftcms/cve-2025-32432' and image_text == 'vulhub/craftcms:5.6.16':
+		return 'vulhub/craftcms:5.5.1.1'
+	return image_text
+
+
+def _known_catalog_iproute2_wrapper_bypass_reason(rec: Dict[str, str], image: str) -> str:
+	"""Return a reason when a known catalog image should bypass the wrapper."""
+	image_text = str(image or '').strip()
+	if not image_text:
+		return ''
+	identity = vulnerability_catalog_identity(
+		str(rec.get('Name') or ''),
+		str(rec.get('Path') or ''),
+		str(rec.get('CVE') or ''),
+	)
+	if identity == 'ingress-nginx/cve-2025-1974' and image_text == 'vulhub/ingress-nginx:1.9.5':
+		return 'base image already provides ip tooling; wrapper build is incompatible'
+	return ''
+
+
+def _rewrite_known_catalog_struts_s2016_context(staged_ctx: str) -> bool:
+	"""Downgrade the local Struts template to the S2-016 vulnerable line."""
+	pom_path = os.path.join(staged_ctx, 'pom.xml')
+	try:
+		with open(pom_path, 'r', encoding='utf-8') as f:
+			pom_text = f.read()
+	except Exception:
+		return False
+	try:
+		patched_text, replacements = re.subn(
+			r'(<artifactId>\s*struts2-core\s*</artifactId>\s*<version>)2\.3\.28(</version>)',
+			r'\g<1>2.3.15\g<2>',
+			pom_text,
+			count=1,
+		)
+	except Exception:
+		return False
+	if replacements != 1:
+		return False
+	try:
+		with open(pom_path, 'w', encoding='utf-8') as f:
+			f.write(patched_text)
+		return True
+	except Exception:
+		return False
+
+
+def _repair_known_catalog_compose(obj: dict, rec: Dict[str, str], *, src_dir: str, base_dir: str) -> dict:
+	"""Repair known catalog compose entries that need local staging behavior."""
+	try:
+		if not isinstance(obj, dict):
+			return obj
+		services = obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return obj
+		identity = vulnerability_catalog_identity(
+			str(rec.get('Name') or ''),
+			str(rec.get('Path') or ''),
+			str(rec.get('CVE') or ''),
+		)
+		if identity == 'struts2/s2-016':
+			candidates: List[str] = []
+			local_ctx = os.path.abspath(os.path.join(src_dir, '..', '..', 'base', 'struts2', '2.3.28'))
+			candidates.append(local_ctx)
+			try:
+				repo_root = str(os.getenv('CORETG_REPO_ROOT') or '').strip()
+				if not repo_root:
+					repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+			except Exception:
+				repo_root = ''
+			if repo_root:
+				candidates.append(os.path.join(repo_root, 'repo', 'base', 'struts2', '2.3.28'))
+				installed_root = os.path.join(repo_root, 'outputs', 'installed_vuln_catalogs')
+				try:
+					if os.path.isdir(installed_root):
+						for entry in sorted(os.scandir(installed_root), key=lambda item: item.name):
+							if not entry.is_dir():
+								continue
+							candidates.append(os.path.join(entry.path, 'content', 'vulhub', 'base', 'struts2', '2.3.28'))
+				except Exception:
+					pass
+			local_ctx = ''
+			for candidate in candidates:
+				try:
+					if candidate and os.path.isdir(candidate):
+						local_ctx = os.path.abspath(candidate)
+						break
+				except Exception:
+					pass
+			if not os.path.isdir(local_ctx):
+				return obj
+			staged_ctx = os.path.join(base_dir, 'coretg-known-struts2-s2-016')
+			try:
+				shutil.copytree(local_ctx, staged_ctx, dirs_exist_ok=True)
+			except Exception:
+				return obj
+			if not _rewrite_known_catalog_struts_s2016_context(staged_ctx):
+				return obj
+			for svc_key, svc in services.items():
+				if not isinstance(svc, dict) or 'build' not in svc:
+					continue
+				svc.pop('image', None)
+				svc['build'] = {'context': staged_ctx, 'network': 'host'}
+				labs = svc.get('labels')
+				if not isinstance(labs, dict):
+					labs = {}
+				labs.setdefault('coretg.repaired_catalog_build_context', staged_ctx)
+				labs.setdefault('coretg.repaired_catalog_template', 'repo/base/struts2/2.3.28')
+				labs.setdefault('coretg.repaired_catalog_dependency_version', '2.3.15')
+				svc['labels'] = labs
+				try:
+					logger.info('[vuln] repaired catalog compose to local struts2 S2-016 build context identity=%s service=%s context=%s', identity, svc_key, staged_ctx)
+				except Exception:
+					pass
+			return obj
+		if identity != 'python/cve-2024-23334':
+			return obj
+		candidates: List[str] = []
+		local_ctx = os.path.abspath(os.path.join(src_dir, '..', '..', 'base', 'python', 'aiohttp', '3.9.1'))
+		candidates.append(local_ctx)
+		try:
+			repo_root = str(os.getenv('CORETG_REPO_ROOT') or '').strip()
+			if not repo_root:
+				repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+		except Exception:
+			repo_root = ''
+		if repo_root:
+			candidates.append(os.path.join(repo_root, 'repo', 'base', 'python', 'aiohttp', '3.9.1'))
+			installed_root = os.path.join(repo_root, 'outputs', 'installed_vuln_catalogs')
+			try:
+				if os.path.isdir(installed_root):
+					for entry in sorted(os.scandir(installed_root), key=lambda item: item.name):
+						if not entry.is_dir():
+							continue
+						candidates.append(os.path.join(entry.path, 'content', 'vulhub', 'base', 'python', 'aiohttp', '3.9.1'))
+			except Exception:
+				pass
+		local_ctx = ''
+		for candidate in candidates:
+			try:
+				if candidate and os.path.isdir(candidate):
+					local_ctx = os.path.abspath(candidate)
+					break
+			except Exception:
+				pass
+		if not os.path.isdir(local_ctx):
+			return obj
+		staged_ctx = os.path.join(base_dir, 'coretg-known-aiohttp-3.9.1')
+		try:
+			shutil.copytree(local_ctx, staged_ctx, dirs_exist_ok=True)
+		except Exception:
+			staged_ctx = local_ctx
+		for svc_key, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			image_text = str(svc.get('image') or '').strip()
+			if image_text != 'vulhub/aiohttp:3.9.1':
+				continue
+			svc.pop('image', None)
+			svc['build'] = {'context': staged_ctx, 'network': 'host'}
+			labs = svc.get('labels')
+			if not isinstance(labs, dict):
+				labs = {}
+			labs.setdefault('coretg.repaired_catalog_image', 'vulhub/aiohttp:3.9.1')
+			labs.setdefault('coretg.repaired_catalog_build_context', staged_ctx)
+			svc['labels'] = labs
+			try:
+				logger.info('[vuln] repaired catalog compose to local aiohttp build context identity=%s service=%s context=%s', identity, svc_key, staged_ctx)
+			except Exception:
+				pass
+		return obj
+	except Exception:
+		return obj
+
+
+def load_vuln_catalog(repo_root: str) -> List[Dict[str, str]]:
+	"""Load a vulnerability catalog for CLI selection.
+
+	Best-effort: prefer an "active" installed catalog (written by the Web UI) and
+	fall back to raw_datasources CSVs shipped with the repo.
+	Returns a list of dicts with at least Name, Path, and optional Type and Vector metadata.
+	"""
+	def _normalize_catalog_path(root: str, raw_path: str) -> str:
+		p = (raw_path or '').strip()
+		if not p:
+			return p
+		# Preserve URLs as-is.
+		try:
+			if re.match(r'^https?://', p, re.IGNORECASE):
+				return p
+		except Exception:
+			pass
+		# Relative paths resolve against repo root.
+		if not os.path.isabs(p):
+			try:
+				return os.path.abspath(os.path.join(root, p))
+			except Exception:
+				return p
+		# Absolute path exists: keep it.
+		try:
+			if os.path.exists(p):
+				return p
+		except Exception:
+			pass
+		# Remap installed catalog absolute paths from another machine.
+		try:
+			norm = p.replace('\\', '/')
+			marker = '/outputs/installed_vuln_catalogs/'
+			if marker in norm:
+				suffix = norm.split(marker, 1)[1]
+				candidate = os.path.join(root, 'outputs', 'installed_vuln_catalogs', suffix)
+				return os.path.abspath(candidate)
+		except Exception:
+			pass
+		return p
+	def _installed_state_path(root: str) -> str:
+		return os.path.join(root, 'outputs', 'installed_vuln_catalogs', '_catalogs_state.json')
+
+	def _load_installed_state(root: str) -> Dict[str, object]:
+		try:
+			p = _installed_state_path(root)
+			if not os.path.exists(p):
+				return {}
+			with open(p, 'r', encoding='utf-8') as f:
+				obj = json.load(f)
+			return obj if isinstance(obj, dict) else {}
+		except Exception:
+			return {}
+
+	def _active_installed_csvs(root: str) -> List[str]:
+		state = _load_installed_state(root)
+		active_id = str(state.get('active_id') or '').strip() if isinstance(state, dict) else ''
+		catalogs = state.get('catalogs') if isinstance(state, dict) else None
+		if not active_id or not isinstance(catalogs, list):
+			return []
+		for c in catalogs:
+			if not isinstance(c, dict):
+				continue
+			cid = str(c.get('id') or '').strip()
+			if cid != active_id:
+				continue
+			paths = c.get('csv_paths')
+			out: List[str] = []
+			if isinstance(paths, list):
+				for p in paths:
+					ps = str(p or '').strip()
+					if not ps:
+						continue
+					# Allow relative paths in state for portability.
+					if not os.path.isabs(ps):
+						ps = os.path.join(root, ps)
+					out.append(ps)
+				return out
+			# Back-compat: a single csv_path string
+			ps2 = str(c.get('csv_path') or '').strip()
+			if ps2:
+				if not os.path.isabs(ps2):
+					ps2 = os.path.join(root, ps2)
+				return [ps2]
+			return []
+		return []
+
+	active_csvs = list(_active_installed_csvs(repo_root) or [])
+	items: List[Dict[str, str]] = []
+
+	# 1) Active installed catalog (if present). Important behavior: if the active
+	# installed catalog exists but contains zero rows, treat the catalog as empty
+	# (do NOT fall back to repo defaults). This matches the Web UI expectation
+	# that deleting all items results in no selectable vulnerabilities.
+	active_any_exists = False
+	for p in active_csvs:
+		if os.path.exists(p):
+			active_any_exists = True
+			items.extend(_read_csv(p))
+	if active_csvs and active_any_exists and items:
+		pass
+	if active_csvs and active_any_exists and not items:
+		return []
+
+	# 2) Repo-shipped defaults (only when no active installed catalog is present,
+	# or when active paths are missing entirely).
+	if not (active_csvs and active_any_exists and items):
+		for p in [
+			os.path.join(repo_root, 'raw_datasources', 'vuln_list_w_url.csv'),
+			os.path.join(repo_root, 'raw_datasources', 'vuln_list.csv'),
+		]:
+			if os.path.exists(p):
+				items.extend(_read_csv(p))
+	# Normalize Path entries for portability between local GUI and remote CORE host.
+	try:
+		for it in items:
+			try:
+				path_val = it.get('Path') if isinstance(it, dict) else None
+				if path_val:
+					it['Path'] = _normalize_catalog_path(repo_root, str(path_val))
+				it['Name'] = canonical_vulnerability_name(
+					str(it.get('Name') or ''),
+					str(it.get('Path') or ''),
+					str(it.get('CVE') or ''),
+				)
+			except Exception:
+				continue
+	except Exception:
+		pass
+	# Deduplicate by vulnerability identity so installed-catalog rows win over
+	# repo defaults that describe the same vulnerability differently.
+	seen = set()
+	out: List[Dict[str, str]] = []
+	for it in items:
+		identity = vulnerability_catalog_identity(
+			str(it.get('Name') or ''),
+			str(it.get('Path') or ''),
+			str(it.get('CVE') or ''),
+		)
+		key = ('identity', identity) if identity else ('name-path', it.get('Name'), it.get('Path'))
+		if key in seen:
+			continue
+		seen.add(key)
+		out.append(it)
+	return out
+
+
+def _norm_type(s: str) -> str:
+	s = (s or '').strip().lower()
+	if s in ("docker", "compose", "docker compose", "docker-compose", "docker_compose"):
+		return "docker-compose"
+	return s
+
+
+def select_vulnerabilities(density: float, items_cfg: List[dict], catalog: List[Dict[str, str]]) -> List[Dict[str, str]]:
+	"""Select vulnerabilities from catalog based on density and config items.
+
+	- density in [0..1] scales the total number of selections.
+	- items_cfg is a list of entries with 'selected' and optional fields:
+	  * 'Random': use entire catalog
+	  * 'Specific': use provided 'v_name' and 'v_path'
+	"""
+	# Even if catalog is empty, we can still honor 'Specific' selections by returning them directly
+	dens = max(0.0, min(1.0, float(density or 0.0)))
+	total_target = int(round(dens * len(catalog))) if catalog else 0
+	if dens > 0.0 and total_target == 0 and len(catalog) > 0:
+		total_target = 1
+	# Determine per-item allocations based on factors
+	factors: List[float] = []
+	s_items = items_cfg or []
+	if s_items:
+		total_factor = 0.0
+		for it in s_items:
+			try:
+				total_factor += float(it.get('factor') or 0.0)
+			except Exception:
+				continue
+		if total_factor <= 0:
+			factors = [1.0 / len(s_items) for _ in s_items]
+		else:
+			factors = [max(0.0, float((it.get('factor') or 0.0))) / total_factor for it in s_items]
+	else:
+		s_items = [{'selected': 'Random', 'factor': 1.0}]
+		factors = [1.0]
+
+	selected: List[Dict[str, str]] = []
+	used = set()
+	remaining = total_target
+	for it, frac in zip(s_items, factors):
+		sel = (it.get('selected') or 'Random').strip()
+		pool: List[Dict[str, str]] = []
+		if sel == 'Specific':
+			v_name = str(it.get('v_name') or '').strip()
+			v_path = str(it.get('v_path') or '').strip()
+			if catalog:
+				pool = [
+					rec for rec in catalog
+					if (v_path and str(rec.get('Path') or '').strip() == v_path)
+					or (v_name and str(rec.get('Name') or '').strip() == v_name)
+				]
+			elif v_name or v_path:
+				pool = [{'Name': v_name, 'Path': v_path, 'Type': 'docker-compose', 'Vector': ''}]
+		elif sel == 'Random':
+			pool = list(catalog or [])
+		else:
+			continue
+		# Allocate count
+		alloc = int(round(frac * total_target)) if total_target > 0 else 0
+		alloc = min(max(0, alloc), max(0, remaining))
+		if alloc <= 0:
+			continue
+		# Random sample without replacement respecting already used items
+		pool2 = [p for p in pool if (p.get('Name'), p.get('Path')) not in used] if pool else []
+		if not pool2:
+			continue
+		if alloc >= len(pool2):
+			picks = pool2
+		else:
+			picks = random.sample(pool2, alloc)
+		for p in picks:
+			key = (p.get('Name'), p.get('Path'))
+			if key in used:
+				continue
+			used.add(key)
+			selected.append(p)
+		remaining = max(0, remaining - len(picks))
+		if remaining <= 0:
+			break
+	return selected
+
+
+# ---------------- docker-compose assignment helpers ----------------
+
+def _parse_github_url(url: str) -> dict:
+	try:
+		from urllib.parse import urlparse
+		u = urlparse(url)
+		if u.netloc.lower() != 'github.com':
+			return {'is_github': False}
+		parts = [p for p in u.path.strip('/').split('/') if p]
+		if len(parts) < 2:
+			return {'is_github': False}
+		owner, repo = parts[0], parts[1]
+		git_url = f"https://github.com/{owner}/{repo}.git"
+		if len(parts) == 2:
+			return {'is_github': True, 'git_url': git_url, 'branch': None, 'subpath': '', 'mode': 'root'}
+		mode = parts[2]
+		if mode not in ('tree', 'blob') or len(parts) < 4:
+			return {'is_github': True, 'git_url': git_url, 'branch': None, 'subpath': '', 'mode': 'root'}
+		branch = parts[3]
+		rest = '/'.join(parts[4:])
+		return {'is_github': True, 'git_url': git_url, 'branch': branch, 'subpath': rest, 'mode': mode}
+	except Exception:
+		return {'is_github': False}
+
+
+def _compose_candidates(base_dir: str) -> List[str]:
+	cands = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
+	out: List[str] = []
+	try:
+		if not os.path.isdir(base_dir):
+			return out
+		for nm in cands:
+			p = os.path.join(base_dir, nm)
+			if os.path.exists(p):
+				out.append(p)
+	except Exception:
+		pass
+	return out
+
+
+def _normalize_vuln_record_path(rec: Dict[str, str], repo_root: Optional[str] = None) -> None:
+	"""Best-effort normalize a vulnerability record Path for the local runtime host.
+
+	- Remaps absolute paths that reference outputs/installed_vuln_catalogs to the local repo root.
+	- Resolves relative paths against repo_root.
+	- Leaves URLs untouched.
+	"""
+	try:
+		if not isinstance(rec, dict):
+			return
+		raw = rec.get('Path') or rec.get('path')
+		if not raw:
+			return
+		p = str(raw).strip()
+		if not p:
+			return
+		try:
+			if re.match(r'^https?://', p, re.IGNORECASE):
+				return
+		except Exception:
+			pass
+		if repo_root is None:
+			try:
+				repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+			except Exception:
+				repo_root = None
+		if repo_root:
+			# Remap installed catalog absolute paths from a different host.
+			try:
+				norm = p.replace('\\', '/')
+				marker = '/outputs/installed_vuln_catalogs/'
+				if marker in norm:
+					suffix = norm.split(marker, 1)[1]
+					candidate = os.path.join(repo_root, 'outputs', 'installed_vuln_catalogs', suffix)
+					rec['Path'] = os.path.abspath(candidate)
+					return
+			except Exception:
+				pass
+			# Resolve relative path to repo root.
+			try:
+				if not os.path.isabs(p):
+					rec['Path'] = os.path.abspath(os.path.join(repo_root, p))
+					return
+			except Exception:
+				pass
+		return
+	except Exception:
+		return
+
+
+def _compose_path_from_download(rec: Dict[str, str], out_base: str = "/tmp/vulns", compose_name: str = 'docker-compose.yml') -> Optional[str]:
+	"""Resolve local compose path for a previously downloaded catalog item (webapp stores under /tmp/vulns).
+
+	Returns a file path if found, else None.
+	"""
+	try:
+		name = (rec.get('Name') or '').strip()
+		path = (rec.get('Path') or '').strip()
+		safe = _safe_name(name or 'vuln')
+		vdir = os.path.join(out_base, safe)
+		gh = _parse_github_url(path)
+		if gh.get('is_github'):
+			repo_dir = os.path.join(vdir, '_repo')
+			sub = gh.get('subpath') or ''
+			is_file_sub = bool(sub) and sub.lower().endswith(('.yml', '.yaml'))
+			if is_file_sub:
+				p = os.path.join(repo_dir, sub)
+				return p if os.path.exists(p) else None
+			base = os.path.join(repo_dir, sub) if sub else repo_dir
+			pref = os.path.join(base, compose_name)
+			if os.path.exists(pref):
+				return pref
+			cand = _compose_candidates(base)
+			return cand[0] if cand else None
+		else:
+			p = os.path.join(vdir, compose_name)
+			return p if os.path.exists(p) else None
+	except Exception:
+		return None
+
+
+def _images_pulled_for_compose(yml_path: str) -> bool:
+	try:
+		import subprocess
+		import shutil as _sh
+		if not _sh.which('docker'):
+			return False
+		proc = subprocess.run(['docker', 'compose', '-f', yml_path, 'config', '--images'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+		if proc.returncode != 0:
+			return False
+		images = []
+		for ln in (proc.stdout or '').splitlines():
+			text = (ln or '').strip()
+			if not text:
+				continue
+			low = text.lower()
+			if 'defaulting to a blank string' in low:
+				continue
+			if low.startswith('time="') and ' level=warning ' in low:
+				continue
+			if low.startswith('warning:'):
+				continue
+			images.append(text)
+		if not images:
+			return False
+		for img in images:
+			p2 = subprocess.run(['docker', 'image', 'inspect', img], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+			if p2.returncode != 0:
+				return False
+		return True
+	except Exception:
+		return False
+
+
+def extract_compose_images_and_container_names(yml_path: str) -> tuple[list[str], list[str]]:
+	"""Best-effort parse of docker-compose YAML to extract image and container_name values.
+
+	This intentionally does not require Docker to be installed; it only parses the YAML.
+	"""
+	images: list[str] = []
+	containers: list[str] = []
+	try:
+		if not yml_path or (not os.path.exists(yml_path)):
+			return images, containers
+		try:
+			import yaml  # type: ignore
+		except Exception:
+			return images, containers
+		with open(yml_path, 'r', encoding='utf-8', errors='ignore') as f:
+			doc = yaml.safe_load(f)  # type: ignore
+		if not isinstance(doc, dict):
+			return images, containers
+		svcs = doc.get('services')
+		if not isinstance(svcs, dict):
+			return images, containers
+		for _svc_name, svc in svcs.items():
+			if not isinstance(svc, dict):
+				continue
+			img = svc.get('image')
+			if isinstance(img, str) and img.strip():
+				images.append(img.strip())
+			cn = svc.get('container_name')
+			if isinstance(cn, str) and cn.strip():
+				containers.append(cn.strip())
+		# De-dupe while keeping order
+		images = list(dict.fromkeys(images))
+		containers = list(dict.fromkeys(containers))
+		return images, containers
+	except Exception:
+		return [], []
+
+
+def detect_docker_conflicts_for_compose_files(paths: list[str]) -> dict:
+	"""Check for Docker container/image name conflicts for the given compose file paths.
+
+	Returns a dict with keys: containers (list[str]), images (list[str]).
+	"""
+	conflicting_containers: list[str] = []
+	conflicting_images: list[str] = []
+	try:
+		import subprocess
+		import shutil as _sh
+		if not paths:
+			return {'containers': [], 'images': []}
+		if not _sh.which('docker'):
+			return {'containers': [], 'images': []}
+		all_images: list[str] = []
+		all_container_names: list[str] = []
+		for p in paths:
+			imgs, cns = extract_compose_images_and_container_names(p)
+			all_images.extend(imgs)
+			all_container_names.extend(cns)
+		all_images = list(dict.fromkeys([s for s in all_images if s]))
+		all_container_names = list(dict.fromkeys([s for s in all_container_names if s]))
+
+		for cn in all_container_names:
+			try:
+				p2 = subprocess.run(['docker', 'container', 'inspect', cn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+				if p2.returncode == 0:
+					conflicting_containers.append(cn)
+			except Exception:
+				continue
+
+		for img in all_images:
+			try:
+				p3 = subprocess.run(['docker', 'image', 'inspect', img], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+				if p3.returncode == 0:
+					conflicting_images.append(img)
+			except Exception:
+				continue
+		return {
+			'containers': list(dict.fromkeys(conflicting_containers)),
+			'images': list(dict.fromkeys(conflicting_images)),
+		}
+	except Exception:
+		return {'containers': [], 'images': []}
+
+
+def remove_docker_conflicts(conflicts: dict) -> dict:
+	"""Best-effort removal of conflicting Docker containers/images.
+
+	Returns a dict with removal results.
+	"""
+	result = {
+		'removed_containers': [],
+		'removed_images': [],
+		'container_errors': {},
+		'image_errors': {},
+	}
+	try:
+		import subprocess
+		import shutil as _sh
+		if not _sh.which('docker'):
+			return result
+		containers = conflicts.get('containers') if isinstance(conflicts, dict) else []
+		images = conflicts.get('images') if isinstance(conflicts, dict) else []
+		if not isinstance(containers, list):
+			containers = []
+		if not isinstance(images, list):
+			images = []
+
+		def _container_image_ids(name: str) -> list[str]:
+			ids: list[str] = []
+			try:
+				p0 = subprocess.run(
+					['docker', 'container', 'inspect', '-f', '{{.Image}}', str(name)],
+					stdout=subprocess.PIPE,
+					stderr=subprocess.DEVNULL,
+					text=True,
+				)
+				if p0.returncode == 0:
+					val = (p0.stdout or '').strip()
+					if val:
+						ids.append(val)
+			except Exception:
+				pass
+			return list(dict.fromkeys([x for x in ids if x]))
+
+		def _image_unused(img: str) -> bool:
+			try:
+				p1 = subprocess.run(
+					['docker', 'ps', '-a', '-q', '--filter', f'ancestor={img}'],
+					stdout=subprocess.PIPE,
+					stderr=subprocess.DEVNULL,
+					text=True,
+				)
+				if p1.returncode != 0:
+					return False
+				return not bool((p1.stdout or '').strip())
+			except Exception:
+				return False
+
+		def _try_remove_image(img: str) -> None:
+			try:
+				p = subprocess.run(['docker', 'image', 'rm', '-f', str(img)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+				if p.returncode == 0:
+					result['removed_images'].append(str(img))
+				else:
+					out = (p.stdout or '').strip()[-500:]
+					result['image_errors'][str(img)] = out or f'rc={p.returncode}'
+			except Exception as exc:
+				result['image_errors'][str(img)] = str(exc)
+
+		# Collect image IDs for containers we intend to remove.
+		container_image_ids: list[str] = []
+		for cn in containers:
+			try:
+				container_image_ids.extend(_container_image_ids(str(cn)))
+			except Exception:
+				pass
+		container_image_ids = list(dict.fromkeys([x for x in container_image_ids if x]))
+
+		for cn in containers:
+			try:
+				p = subprocess.run(['docker', 'rm', '-f', str(cn)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+				if p.returncode == 0:
+					result['removed_containers'].append(str(cn))
+				else:
+					out = (p.stdout or '').strip()[-500:]
+					result['container_errors'][str(cn)] = out or f'rc={p.returncode}'
+			except Exception as exc:
+				result['container_errors'][str(cn)] = str(exc)
+
+		# Remove explicit conflicting images.
+		for img in images:
+			if not img:
+				continue
+			_try_remove_image(str(img))
+
+		# Remove images associated with removed containers (only if unused now).
+		for img_id in container_image_ids:
+			try:
+				if img_id in (result.get('removed_images') or []):
+					continue
+				if _image_unused(img_id):
+					_try_remove_image(img_id)
+			except Exception:
+				pass
+		return result
+	except Exception:
+		return result
+
+
+def _eligible_compose_items(catalog: Iterable[Dict[str, str]], v_type: Optional[str], v_vector: Optional[str], out_base: str = "/tmp/vulns") -> List[Dict[str, str]]:
+	"""Filter catalog to docker-compose items matching type/vector and with local compose pulled.
+	v_type/v_vector may be 'Random' or falsy to indicate no filtering on that dimension.
+	"""
+	vt = (v_type or '').strip().lower()
+	vv = (v_vector or '').strip().lower()
+	items: List[Dict[str, str]] = []
+	for it in catalog:
+		t = (it.get('Type') or '').strip().lower()
+		if t != 'docker-compose':
+			continue
+		if vt and vt != 'random' and t != vt:
+			# type mismatch; note vt would be 'docker-compose' normally
+			continue
+		vec = (it.get('Vector') or '').strip().lower()
+		if vv and vv != 'random' and vec != vv:
+			continue
+		yml = _compose_path_from_download(it, out_base=out_base)
+		if not yml or not os.path.exists(yml):
+			continue
+		if not _images_pulled_for_compose(yml):
+			continue
+		items.append(it)
+	return items
+
+
+def assign_compose_to_nodes(node_names: List[str], density: float, items_cfg: List[dict], catalog: List[Dict[str, str]], out_base: str = "/tmp/vulns", require_pulled: bool = True, base_host_pool: int | None = None, seed: int | None = None, shuffle_nodes: bool = True) -> Dict[str, Dict[str, str]]:
+	"""Assign docker-compose vulnerabilities to nodes.
+
+	Rules (updated semantics):
+	- Weight-based vulnerability rows (v_metric == Weight or default) allocate up to
+	  round(density * base_host_pool) nodes, where base_host_pool is the scenario
+	  "Count for Density". Additive Count rows (v_metric == Count or Specific with
+	  explicit v_count) do NOT contribute to the density base and are applied in
+	  addition to the density-derived allocation.
+	- Count rows are allocated first (absolute), consuming nodes from the pool.
+	- Weight rows then allocate from remaining nodes up to the density target.
+	- If require_pulled is True, only locally pulled compose items are eligible.
+
+	Returns: mapping of node_name -> catalog record (docker-compose entries only).
+	"""
+	if not node_names or not items_cfg:
+		return {}
+
+	# Determine base for density (fallback to total nodes if missing)
+	try:
+		base_for_density = int(base_host_pool) if (base_host_pool is not None and int(base_host_pool) >= 0) else len(node_names)
+	except Exception:
+		base_for_density = len(node_names)
+	dens = max(0.0, min(1.0, float(density or 0.0)))
+	# Use floor (not round) to align with router density semantics and avoid over-allocation
+	import math as _math
+	density_target = int(_math.floor(dens * base_for_density + 1e-9))
+
+	# Logging (best-effort)
+	try:
+		import logging as _logging
+		_logging.getLogger(__name__).debug(
+			"assign_compose_to_nodes: base_for_density=%d total_nodes=%d dens=%.3f density_target=%d",
+			base_for_density, len(node_names), dens, density_target
+		)
+	except Exception:
+		pass
+
+	rng = random.Random(seed) if seed is not None else random.Random()
+	nodes_pool = list(node_names)
+	if shuffle_nodes:
+		rng.shuffle(nodes_pool)
+	assigned: Dict[str, Dict[str, str]] = {}
+
+	# Normalize and classify items
+	norm_items: List[dict] = [dict(it) for it in items_cfg if isinstance(it, dict)]
+
+	# Normalize catalog record paths (important for remote CORE VM).
+	try:
+		for r in catalog or []:
+			try:
+				_normalize_vuln_record_path(r)
+			except Exception:
+				continue
+	except Exception:
+		pass
+
+	def specific_compose_pool(it: dict) -> List[Dict[str, str]]:
+		nm = (it.get('v_name') or '').strip()
+		pp = (it.get('v_path') or '').strip()
+		pool: List[Dict[str, str]] = []
+		for r in catalog:
+			if _norm_type(r.get('Type') or '') != 'docker-compose':
+				continue
+			if (pp and r.get('Path') == pp) or (nm and r.get('Name') == nm):
+				pool.append(r)
+		if pool:
+			return pool
+		if pp:
+			return [{"Name": nm or 'vuln', "Path": pp, "Type": 'docker-compose', "Vector": ''}]
+		return []
+
+	def random_compose_pool() -> List[Dict[str, str]]:
+		if require_pulled:
+			return _eligible_compose_items(catalog, 'docker-compose', 'Random', out_base=out_base)
+		return [r for r in catalog if _norm_type(r.get('Type') or '') == 'docker-compose']
+
+	count_items: List[dict] = []
+	weight_items: List[dict] = []
+	for it in norm_items:
+		sel = (it.get('selected') or '').strip()
+		metric = (it.get('v_metric') or '').strip()  # optional
+		has_count = False
+		if metric.lower() == 'count':
+			has_count = True
+		# Specific with v_count provided is also treated as count-based
+		if sel == 'Specific':
+			try:
+				if int(it.get('v_count') or 0) > 0:
+					has_count = True
+			except Exception:
+				pass
+		if has_count:
+			count_items.append(it)
+		else:
+			weight_items.append(it)
+
+	def pop_nodes(k: int) -> List[str]:
+		nonlocal nodes_pool
+		k = max(0, min(k, len(nodes_pool)))
+		taken = nodes_pool[:k]
+		nodes_pool = nodes_pool[k:]
+		return taken
+
+	# 1) Allocate Count items (absolute, additive)
+	for it in count_items:
+		try:
+			req = int(it.get('v_count') or 0)
+		except Exception:
+			req = 0
+		if req <= 0 or not nodes_pool:
+			continue
+		sel = (it.get('selected') or 'Random').strip()
+		pool: List[Dict[str, str]] = []
+		if sel == 'Specific':
+			pool = specific_compose_pool(it)
+		elif sel == 'Random':
+			pool = random_compose_pool()
+		else:
+			continue
+		if not pool:
+			continue
+		take_nodes = pop_nodes(req)
+		if not take_nodes:
+			break
+		# choose (with replacement if needed) for each node
+		for nn in take_nodes:
+			rec = rng.choice(pool)
+			# ensure compose is present if required (only matters for Specific synthetic)
+			if require_pulled:
+				pth = _compose_path_from_download(rec, out_base=out_base)
+				if not pth or not _images_pulled_for_compose(pth):
+					continue
+			assigned[nn] = rec
+			try:
+				logger.info(
+					"[vuln-assign] count allocation node=%s name=%s path=%s",
+					nn,
+					rec.get('Name'),
+					rec.get('Path'),
+				)
+			except Exception:
+				pass
+
+	# 2) Allocate Weight items up to density_target (independent of how many count nodes consumed)
+	if density_target <= 0 or not weight_items or not nodes_pool:
+		return assigned
+	remaining = min(density_target, len(nodes_pool))
+
+	# Gather weights
+	weights: List[Tuple[dict, float]] = []
+	total_w = 0.0
+	for it in weight_items:
+		try:
+			w = float(it.get('v_weight') or it.get('factor') or 0.0)
+		except Exception:
+			w = 0.0
+		if w > 0:
+			weights.append((it, w))
+			total_w += w
+	if total_w <= 0:
+		# even split
+		weights = [(it, 1.0) for it in weight_items]
+		total_w = float(len(weight_items))
+
+	# Compute integer allocations with remainder distribution
+	allocs: List[Tuple[dict, int]] = []
+	remainders: List[Tuple[float, int]] = []  # (fractional_part, index)
+	for idx, (it, w) in enumerate(weights):
+		exact = (w / total_w) * remaining
+		base_cnt = int(exact)
+		allocs.append((it, base_cnt))
+		remainders.append((exact - base_cnt, idx))
+	used = sum(c for _, c in allocs)
+	left = remaining - used
+	# sort by largest fractional remainder
+	remainders.sort(key=lambda x: x[0], reverse=True)
+	ri = 0
+	while left > 0 and ri < len(remainders):
+		_, idx = remainders[ri]
+		it, c = allocs[idx]
+		allocs[idx] = (it, c + 1)
+		left -= 1
+		ri += 1
+
+	# Perform allocations
+	for it, cnt in allocs:
+		if cnt <= 0 or not nodes_pool:
+			continue
+		sel = (it.get('selected') or '').strip()
+		pool: List[Dict[str, str]] = []
+		if sel == 'Specific':
+			pool = specific_compose_pool(it)
+		elif sel == 'Random':
+			pool = random_compose_pool()
+		else:
+			continue
+		if not pool:
+			continue
+		take_nodes = pop_nodes(cnt)
+		if not take_nodes:
+			break
+		# sample with replacement if pool smaller than cnt
+		for nn in take_nodes:
+			rec = rng.choice(pool)
+			assigned[nn] = rec
+			try:
+				logger.info(
+					"[vuln-assign] weight allocation node=%s name=%s path=%s",
+					nn,
+					rec.get('Name'),
+					rec.get('Path'),
+				)
+			except Exception:
+				pass
+
+	return assigned
+
+
+def _safe_name(s: str) -> str:
+	s = s.strip().lower()
+	s = re.sub(r'[^a-z0-9._-]+', '-', s)
+	s = s.strip('-_.')
+	return s or 'vuln'
+
+
+def _github_tree_to_raw(base_url: str, filename: str) -> str | None:
+	"""Convert a GitHub tree/blob URL to a raw file URL if possible."""
+	try:
+		m = re.match(r'^https?://github.com/([^/]+)/([^/]+)/(tree|blob)/([^/]+)/(.*)$', base_url.strip())
+		if not m:
+			return None
+		user, repo, _kind, branch, path = m.groups()
+		# Use provided filename under that path
+		path = path.strip('/')
+		file_part = filename.strip('/')
+		raw = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}/{file_part}"
+		return raw
+	except Exception:
+		return None
+
+
+def _guess_compose_raw_url(path: str, compose_name: str = 'docker-compose.yml') -> Optional[str]:
+	"""Best-effort: given a catalog Path, try to produce a raw URL to a compose file.
+
+	Supports:
+	- GitHub tree URLs pointing to a directory: append compose_name via raw content endpoint
+	- GitHub blob URLs pointing directly to a .yml/.yaml file
+	- Direct HTTP(S) URLs ending with .yml/.yaml
+	"""
+	try:
+		p = (path or '').strip()
+		if not p:
+			return None
+		# direct raw file
+		if p.lower().endswith(('.yml', '.yaml')):
+			# If it's a github blob URL, convert to raw
+			m = re.match(r'^https?://github.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$', p)
+			if m:
+				user, repo, branch, rest = m.groups()
+				return f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{rest}"
+			return p
+		# GitHub tree URL to a directory
+		raw = _github_tree_to_raw(p, compose_name)
+		if raw:
+			return raw
+		# Otherwise, append compose_name naively
+		p2 = p.rstrip('/') + '/' + compose_name
+		return p2
+	except Exception:
+		return None
+
+
+def _download_to(path: str, dest_path: str, timeout: float = 30.0) -> bool:
+	"""Download a URL or copy a local file to dest_path. Returns True on success."""
+	try:
+		if not path:
+			return False
+		if re.match(r'^https?://', path, re.IGNORECASE):
+			with urllib.request.urlopen(path, timeout=timeout) as resp:
+				data = resp.read(5_000_000)
+			os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+			with open(dest_path, 'wb') as f:
+				f.write(data)
+			return True
+		# Local file path
+		if os.path.exists(path):
+			os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+			shutil.copy2(path, dest_path)
+			return True
+		return False
+	except Exception:
+		return False
+
+
+def _strip_port_mapping_value(port_value: str) -> str:
+	"""Return only the container-side port component from a port mapping string."""
+	text = str(port_value).strip()
+	if ':' not in text:
+		return text
+	parts = text.split(':')
+	if not parts:
+		return text
+	container_segment = parts[-1].strip()
+	return container_segment or text
+
+
+def _prune_service_ports(service: Dict[str, object]) -> None:
+	"""Update a docker-compose service entry to drop published host ports."""
+	if not isinstance(service, dict):
+		return
+	ports = service.get('ports')
+	if not ports or not isinstance(ports, list):
+		return
+	changed = False
+	new_ports: List[object] = []
+	for entry in ports:
+		if isinstance(entry, str):
+			value = entry.strip()
+			if ':' in value and not value.startswith('{'):
+				new_value = _strip_port_mapping_value(value)
+				if new_value != value:
+					changed = True
+					new_ports.append(new_value)
+				continue
+		elif isinstance(entry, dict):
+			entry_copy = dict(entry)
+			removed = False
+			if 'published' in entry_copy:
+				entry_copy.pop('published', None)
+				removed = True
+			if 'host_ip' in entry_copy:
+				entry_copy.pop('host_ip', None)
+				removed = True
+			if removed:
+				changed = True
+			new_ports.append(entry_copy)
+			continue
+		new_ports.append(entry)
+	if changed:
+		service['ports'] = new_ports
+
+
+def _ports_to_expose(service: Dict[str, object]) -> None:
+	"""Convert compose `ports:` entries into container-side `expose:` (best-effort).
+
+	Why: when we force `network_mode: none` we must not publish host ports, but we
+	still want to preserve *which* container ports a node is expected to serve so
+	we can surface them in reports/metadata and allow downstream logic to discover
+	service ports.
+
+	This does not change runtime behavior by itself; it only preserves port intent
+	without Docker host publishing.
+	"""
+	if not isinstance(service, dict):
+		return
+	ports = service.get('ports')
+	if not ports:
+		return
+	if not isinstance(ports, list):
+		ports = [ports]
+
+	existing_expose = service.get('expose')
+	if existing_expose is None:
+		expose_list: List[object] = []
+	elif isinstance(existing_expose, list):
+		expose_list = list(existing_expose)
+	else:
+		expose_list = [existing_expose]
+
+	seen: set[str] = set()
+	for x in expose_list:
+		try:
+			seen.add(str(x).strip())
+		except Exception:
+			continue
+
+	for entry in ports:
+		try:
+			if isinstance(entry, dict):
+				# long syntax: published/target
+				target = entry.get('target') or entry.get('container_port') or entry.get('port')
+				if target in (None, ''):
+					continue
+				proto = str(entry.get('protocol') or 'tcp').strip().lower() or 'tcp'
+				val = str(target).strip()
+				# Keep the common `port/proto` shape when proto is explicit.
+				if '/' not in val and proto and proto != 'tcp':
+					val = f"{val}/{proto}"
+				if val and val not in seen:
+					expose_list.append(val)
+					seen.add(val)
+				continue
+			# short syntax: "published:target[/proto]" or "target[/proto]"
+			text = str(entry).strip()
+			if not text:
+				continue
+			if '#' in text:
+				text = text.split('#', 1)[0].strip()
+			if not text or text.startswith('{'):
+				continue
+			# Keep only the container segment.
+			container_seg = _strip_port_mapping_value(text)
+			if container_seg and container_seg not in seen:
+				expose_list.append(container_seg)
+				seen.add(container_seg)
+		except Exception:
+			continue
+
+	if expose_list:
+		service['expose'] = expose_list
+
+
+def _force_service_network_mode_none(service: Dict[str, object]) -> None:
+	"""Force a docker-compose service to run without Docker-managed networking.
+
+	This prevents Docker from injecting an eth0 + default gateway (bridge/NAT),
+	so CORE can own all container networking via interfaces it adds.
+	"""
+	if not isinstance(service, dict):
+		return
+	# Compose cannot combine explicit networks with network_mode.
+	service.pop('networks', None)
+	service['network_mode'] = 'none'
+
+
+def _force_compose_no_network(compose_obj: dict) -> dict:
+	"""Best-effort: make all services run with network_mode: none.
+
+	Also drops top-level networks to avoid compose validation conflicts.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		for _svc_name, svc in services.items():
+			if isinstance(svc, dict):
+				_force_service_network_mode_none(svc)
+				# With network_mode none, host port publishing is meaningless and can
+				# create collisions or validation errors. Preserve container-side port intent
+				# via `expose`, then drop `ports` entirely.
+				_ports_to_expose(svc)
+				svc.pop('ports', None)
+		compose_obj.pop('networks', None)
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _compose_force_no_network_enabled() -> bool:
+	"""Whether generated vuln docker-compose stacks should run with network_mode: none.
+
+	Default: enabled (Option B). Disable by setting `CORETG_COMPOSE_FORCE_NO_NETWORK=0/false/off`.
+	"""
+	val = os.getenv('CORETG_COMPOSE_FORCE_NO_NETWORK')
+	if val is None:
+		return True
+	return str(val).strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
+def _compose_allow_internal_networking_enabled() -> bool:
+	"""Whether multi-service stacks may keep Docker/Compose networking.
+
+	Default is disabled so exploited CORE nodes do not get a Docker-managed eth0/default
+	gateway that can reach the host/backend. Enable only for trusted lab stacks that must
+	use Compose DNS/service networking, and pair with CORETG_DOCKER_IFID_START=1.
+	"""
+	val = os.getenv('CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING')
+	if val is None:
+		return False
+	return str(val).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _compose_requires_internal_networking(compose_obj: dict) -> bool:
+	"""Return True when a compose stack appears to require Compose service networking.
+
+	Multi-service vuln stacks that use `depends_on`, `links`, or explicit service/top-level
+	networks rely on Docker Compose DNS/service discovery. For those stacks, forcing
+	`network_mode: none` breaks service-to-service resolution (for example nginx -> php).
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return False
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return False
+		service_keys = [str(k).strip() for k in services.keys() if str(k).strip()]
+		if len(service_keys) <= 1:
+			return False
+		if compose_obj.get('networks'):
+			return True
+		for _svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			if svc.get('depends_on') or svc.get('links') or svc.get('network_mode') or svc.get('networks'):
+				return True
+		return False
+	except Exception:
+		return False
+
+
+def _compose_force_root_workdir_enabled() -> bool:
+	"""Whether to force `working_dir: /` on generated vuln docker-compose services.
+
+	Rationale: CORE services (e.g., DefaultRoute) can create/chmod relative paths inside
+	Docker nodes. Docker exec defaults to the container's WORKDIR, while docker cp uses
+	paths relative to the container filesystem root. For images with non-root WORKDIR,
+	this can cause CORE to fail to chmod service files that were copied into `/`.
+
+	Default: auto (force only for base OS / known-safe images). Modes:
+	- unset / auto: force only for base OS / known-safe images
+	- 1/true/yes/on/all: force for all services
+	- 0/false/no/off: disable
+	"""
+	mode = _compose_force_root_workdir_mode()
+	return mode != 'off'
+
+
+def _compose_force_root_workdir_mode() -> str:
+	"""Return root-workdir forcing mode: off | auto | all."""
+	val = os.getenv('CORETG_COMPOSE_FORCE_ROOT_WORKDIR')
+	if val is None:
+		return 'auto'
+	low = str(val).strip().lower()
+	if low in ('0', 'false', 'no', 'off', ''):
+		return 'off'
+	if low in ('1', 'true', 'yes', 'on', 'all'):
+		return 'all'
+	if low in ('auto', 'default'):
+		return 'auto'
+	return 'auto'
+
+
+def _looks_like_base_os_image(image_ref: str) -> bool:
+	"""Return True when image reference appears to be a base OS image."""
+	import re as _re
+	norm = str(image_ref or '').lower().strip()
+	if not norm:
+		return False
+	base_os_patterns = (
+		r'(^|/)ubuntu([:@]|$)',
+		r'(^|/)debian([:@]|$)',
+		r'(^|/)alpine([:@]|$)',
+		r'(^|/)centos([:@]|$)',
+		r'(^|/)fedora([:@]|$)',
+		r'(^|/)rockylinux([:@]|$)',
+		r'(^|/)amazonlinux([:@]|$)',
+		r'(^|/)busybox([:@]|$)',
+		r'(^|/)kalilinux([:@]|$)',
+		r'(^|/)kali([:@]|$)',
+	)
+	return any(_re.search(pat, norm) for pat in base_os_patterns)
+
+
+def _service_effective_image(service: Dict[str, object]) -> str:
+	"""Best-effort effective image for a service, preferring wrapper base labels."""
+	if not isinstance(service, dict):
+		return ''
+	labels = service.get('labels') if isinstance(service.get('labels'), dict) else {}
+	try:
+		base_label = str(
+			labels.get('coretg.wrapper_effective_base_image')
+			or labels.get('coretg.wrapper_base_image')
+			or ''
+		).strip()
+		if base_label:
+			return base_label
+	except Exception:
+		pass
+	try:
+		return str(service.get('image') or '').strip()
+	except Exception:
+		return ''
+
+
+def _should_force_service_workdir_root(service: Dict[str, object]) -> bool:
+	"""Decide whether working_dir should be forced to root for this service."""
+	mode = _compose_force_root_workdir_mode()
+	if mode == 'off':
+		return False
+	if mode == 'all':
+		return True
+	# auto mode: only base OS-like images to reduce risk of breaking app startup.
+	image_ref = _service_effective_image(service)
+	if _looks_like_base_os_image(image_ref):
+		return True
+	# Some vuln app images are known to be compatible with root workdir and are
+	# prone to CORE service relative-path chmod failures when workdir is non-root.
+	# Keep this list conservative: app stacks (for example Next.js) can rely on a
+	# non-root working directory for startup and fail if forced to '/'.
+	try:
+		img = str(image_ref or '').lower().strip()
+		if 'nginx' in img:
+			return True
+		if 'weblogic' in img:
+			return True
+	except Exception:
+		pass
+	return False
+
+
+def _force_service_workdir_root(service: Dict[str, object], *, override_existing: bool = False) -> None:
+	"""Force a compose service to run with working_dir: / (best-effort)."""
+	if not isinstance(service, dict):
+		return
+	try:
+		current = service.get('working_dir')
+		if (not override_existing) and isinstance(current, str) and current.strip():
+			return
+	except Exception:
+		pass
+	service['working_dir'] = '/'
+
+
+def _service_uses_relative_command_path(service: Dict[str, object]) -> bool:
+	"""Return True when entrypoint/command appears to invoke a relative executable path.
+
+	Examples:
+	- command: "java -jar ./build/libs/ofbiz.jar"
+	- command: ["./start.sh"]
+	- command: ["sh", "-lc", "./run.sh"]
+	- command: "ruby web.rb -p 8080" (relative script argument)
+	"""
+	if not isinstance(service, dict):
+		return False
+
+	def _looks_like_relative_script_arg(token: str) -> bool:
+		try:
+			t = str(token or '').strip()
+			if not t:
+				return False
+			if t.startswith('/'):
+				return False
+			if t.startswith('./') or t.startswith('../'):
+				return True
+			# Bare script/file in current working directory (no path separator).
+			if ('/' not in t) and ('.' in t):
+				ext = t.rsplit('.', 1)[-1].lower()
+				if ext in {'rb', 'py', 'pl', 'php', 'js', 'mjs', 'cjs', 'jar', 'sh', 'bash', 'zsh', 'ksh'}:
+					return True
+		except Exception:
+			return False
+		return False
+
+	def _has_relative_ref(value: object) -> bool:
+		try:
+			if isinstance(value, str):
+				text = value.strip()
+				if not text:
+					return False
+				if text.startswith('./'):
+					return True
+				if (' ./' in text) or (';./' in text) or ('&&./' in text) or ('|./' in text):
+					return True
+				parts = [p for p in text.split() if p]
+				if len(parts) >= 2:
+					head = parts[0].lower()
+					# Interpreter + relative script/file argument.
+					if head in {'ruby', 'python', 'python3', 'perl', 'php', 'node', 'java', 'bash', 'sh', 'zsh', 'ksh'}:
+						for token in parts[1:4]:
+							if token.startswith('-'):
+								continue
+							if _looks_like_relative_script_arg(token):
+								return True
+				return False
+			if isinstance(value, list):
+				for item in value:
+					s = str(item or '').strip()
+					if not s:
+						continue
+					if s.startswith('./'):
+						return True
+					if (' ./' in s) or (';./' in s) or ('&&./' in s) or ('|./' in s):
+						return True
+				if len(value) >= 2:
+					head = str(value[0] or '').strip().lower()
+					if head in {'ruby', 'python', 'python3', 'perl', 'php', 'node', 'java', 'bash', 'sh', 'zsh', 'ksh'}:
+						for item in value[1:4]:
+							t = str(item or '').strip()
+							if not t or t.startswith('-'):
+								continue
+							if _looks_like_relative_script_arg(t):
+								return True
+		except Exception:
+			return False
+		return False
+
+	try:
+		if _has_relative_ref(service.get('entrypoint')):
+			return True
+	except Exception:
+		pass
+	try:
+		if _has_relative_ref(service.get('command')):
+			return True
+	except Exception:
+		pass
+	return False
+
+
+def _service_requires_image_workdir(service: Dict[str, object]) -> bool:
+	"""Return True when known images require their original image working directory."""
+	if not isinstance(service, dict):
+		return False
+	try:
+		img = str(_service_effective_image(service) or '').strip().lower()
+	except Exception:
+		img = ''
+	if not img:
+		return False
+	# OFBiz startup often uses relative paths (e.g. ./build/libs/ofbiz.jar)
+	# from image-default command/entrypoint behavior.
+	if 'ofbiz' in img:
+		return True
+	return False
+
+
+def _maybe_force_service_workdir_root(service: Dict[str, object]) -> None:
+	"""Force root working_dir when policy and service characteristics require it."""
+	if not isinstance(service, dict):
+		return
+	mode = _compose_force_root_workdir_mode()
+	if mode == 'off':
+		return
+	if not _should_force_service_workdir_root(service):
+		return
+	# Compatibility guard: do not override working_dir for services that execute
+	# binaries/scripts via relative paths (for example OFBiz jars under ./build).
+	# Operators can force strict behavior with CORETG_COMPOSE_FORCE_ROOT_WORKDIR_STRICT=1.
+	try:
+		strict = str(os.getenv('CORETG_COMPOSE_FORCE_ROOT_WORKDIR_STRICT') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+	except Exception:
+		strict = False
+	if (not strict) and _service_requires_image_workdir(service):
+		return
+	if (not strict) and _service_uses_relative_command_path(service):
+		return
+	_force_service_workdir_root(service, override_existing=(mode == 'all'))
+
+
+def _copy_build_contexts(obj: dict, src_dir: str, base_dir: str) -> dict:
+	"""Copy build contexts into base_dir and rewrite to absolute paths.
+
+	Helps compose files that use relative build contexts (e.g., build: .)
+	so the generated compose can be run from a different directory.
+	"""
+	try:
+		if not isinstance(obj, dict):
+			return obj
+		services = obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return obj
+		seen: Set[str] = set()
+		for _svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			build = svc.get('build')
+			ctx = None
+			if isinstance(build, dict):
+				ctx = build.get('context')
+			elif isinstance(build, str):
+				ctx = build
+			if not isinstance(ctx, str) or not ctx.strip():
+				continue
+			ctx = ctx.strip()
+			src_ctx = ctx if os.path.isabs(ctx) else os.path.join(src_dir, ctx)
+			# Only copy when source exists and is a directory.
+			if not os.path.isdir(src_ctx):
+				continue
+			rel = None
+			try:
+				if os.path.abspath(src_ctx).startswith(os.path.abspath(src_dir) + os.sep):
+					rel = os.path.relpath(src_ctx, src_dir)
+			except Exception:
+				rel = None
+			if not rel:
+				rel = os.path.basename(src_ctx.rstrip(os.sep)) or 'build-context'
+			dest_ctx = os.path.join(base_dir, rel)
+			if dest_ctx not in seen:
+				try:
+					shutil.copytree(src_ctx, dest_ctx, dirs_exist_ok=True)
+				except Exception:
+					pass
+				seen.add(dest_ctx)
+			# Rewrite build context to absolute dest path
+			try:
+				if isinstance(build, dict):
+					build['context'] = dest_ctx
+					# Ensure Dockerfile path is relative to context if provided
+					if isinstance(build.get('dockerfile'), str):
+						build['dockerfile'] = str(build.get('dockerfile'))
+					# Force host network to avoid missing bridge on CORE VM
+					build.setdefault('network', 'host')
+				else:
+					svc['build'] = {'context': dest_ctx, 'network': 'host'}
+			except Exception:
+				pass
+		return obj
+	except Exception:
+		return obj
+
+
+def _prune_compose_published_ports(compose_obj: dict) -> dict:
+	"""Best-effort: strip *published* host ports from all services.
+
+	This preserves the compose networking definition (networks/network_mode) but
+	removes fixed host port publishing to avoid collisions when many docker-compose
+	stacks run on the same CORE host.
+
+	Note: This does not remove container-side ports; it rewrites mappings like
+	`"8080:80"` to `"80"` and removes `published/host_ip` from long-syntax entries.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		for _svc_name, svc in services.items():
+			if isinstance(svc, dict):
+				_prune_service_ports(svc)
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _iter_bind_sources_from_service(svc: Dict[str, object]) -> List[str]:
+	"""Return candidate host-side bind mount sources referenced by a compose service.
+
+	Only returns non-absolute sources; caller should validate existence.
+	"""
+	results: List[str] = []
+	if not isinstance(svc, dict):
+		return results
+	vols = svc.get('volumes')
+	if isinstance(vols, list):
+		for v in vols:
+			if isinstance(v, str):
+				# Format: source:target[:mode]
+				parts = v.split(':', 2)
+				if not parts:
+					continue
+				src = str(parts[0] or '').strip()
+				if not src or os.path.isabs(src):
+					continue
+				results.append(src)
+			elif isinstance(v, dict):
+				vtype = str(v.get('type') or '').strip().lower()
+				src = str(v.get('source') or '').strip()
+				if vtype and vtype != 'bind':
+					continue
+				if not src or os.path.isabs(src):
+					continue
+				results.append(src)
+	# env_file can be str or list
+	env_file = svc.get('env_file')
+	if isinstance(env_file, str):
+		p = env_file.strip()
+		if p and not os.path.isabs(p):
+			results.append(p)
+	elif isinstance(env_file, list):
+		for p in env_file:
+			if isinstance(p, str):
+				ps = p.strip()
+				if ps and not os.path.isabs(ps):
+					results.append(ps)
+	return results
+
+
+def _copy_path_replace_wrong_type(src_path: str, dst_path: str) -> None:
+	"""Copy src_path to dst_path, replacing stale wrong-type destinations.
+
+	This avoids a common docker bind-mount failure mode where a support file path
+	was left behind as a directory (or vice-versa) from an earlier preparation run.
+	"""
+	src_is_dir = os.path.isdir(src_path)
+	if os.path.lexists(dst_path):
+		try:
+			dst_is_dir = os.path.isdir(dst_path)
+		except Exception:
+			dst_is_dir = False
+		if src_is_dir != dst_is_dir:
+			try:
+				if dst_is_dir and (not os.path.islink(dst_path)):
+					shutil.rmtree(dst_path, ignore_errors=True)
+				else:
+					os.remove(dst_path)
+			except Exception:
+				try:
+					shutil.rmtree(dst_path, ignore_errors=True)
+				except Exception:
+					pass
+	if src_is_dir:
+		shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
+	else:
+		os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+		shutil.copy2(src_path, dst_path)
+
+
+def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, base_dir: str) -> dict:
+	"""Copy referenced relative bind sources into base_dir and rewrite to absolute paths.
+
+	This makes per-node compose files runnable from any working directory.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		# Gather all referenced relative paths that actually exist alongside the source compose.
+		seen: set[str] = set()
+		for _svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			for rel in _iter_bind_sources_from_service(svc):
+				candidate = os.path.normpath(os.path.join(src_dir, rel))
+				# Only treat as support file/dir if it exists next to the source compose.
+				if os.path.exists(candidate):
+					seen.add(rel)
+
+		# Copy support paths into base_dir, preserving relative structure.
+		for rel in sorted(seen):
+			src_path = os.path.normpath(os.path.join(src_dir, rel))
+			dst_path = os.path.normpath(os.path.join(base_dir, rel))
+			try:
+				_copy_path_replace_wrong_type(src_path, dst_path)
+			except Exception:
+				# Best-effort: continue even if some optional paths fail.
+				pass
+
+		# Rewrite bind sources to absolute paths rooted in base_dir.
+		for _svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			vols = svc.get('volumes')
+			if isinstance(vols, list):
+				new_vols: List[object] = []
+				for v in vols:
+					if isinstance(v, str):
+						parts = v.split(':', 2)
+						if not parts:
+							new_vols.append(v)
+							continue
+						src = str(parts[0] or '').strip()
+						if src and (not os.path.isabs(src)) and os.path.exists(os.path.join(src_dir, src)):
+							abs_src = os.path.abspath(os.path.join(base_dir, src))
+							parts[0] = abs_src
+							new_vols.append(':'.join(parts))
+						else:
+							new_vols.append(v)
+					elif isinstance(v, dict):
+						v2 = dict(v)
+						vtype = str(v2.get('type') or '').strip().lower()
+						src = str(v2.get('source') or '').strip()
+						if (not vtype or vtype == 'bind') and src and (not os.path.isabs(src)) and os.path.exists(os.path.join(src_dir, src)):
+							v2['source'] = os.path.abspath(os.path.join(base_dir, src))
+						new_vols.append(v2)
+					else:
+						new_vols.append(v)
+				if new_vols != vols:
+					svc['volumes'] = new_vols
+			# env_file rewrite
+			env_file = svc.get('env_file')
+			if isinstance(env_file, str):
+				p = env_file.strip()
+				if p and (not os.path.isabs(p)) and os.path.exists(os.path.join(src_dir, p)):
+					svc['env_file'] = os.path.abspath(os.path.join(base_dir, p))
+			elif isinstance(env_file, list):
+				new_env: List[object] = []
+				changed = False
+				for p in env_file:
+					if isinstance(p, str):
+						ps = p.strip()
+						if ps and (not os.path.isabs(ps)) and os.path.exists(os.path.join(src_dir, ps)):
+							new_env.append(os.path.abspath(os.path.join(base_dir, ps)))
+							changed = True
+							continue
+					new_env.append(p)
+				if changed:
+					svc['env_file'] = new_env
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _rewrite_abs_paths_from_dir_to_dir(compose_obj: dict, from_dir: str, to_dir: str) -> dict:
+	"""Rewrite absolute bind/env_file sources from from_dir to to_dir.
+
+	Also copies referenced files/dirs from from_dir into to_dir (preserving relative structure).
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		if not from_dir or not to_dir:
+			return compose_obj
+		from_dir_abs = os.path.abspath(from_dir)
+		to_dir_abs = os.path.abspath(to_dir)
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+
+		def _map_path(p: str) -> str:
+			p_abs = os.path.abspath(p)
+			if not (p_abs == from_dir_abs or p_abs.startswith(from_dir_abs + os.sep)):
+				return p
+			rel = os.path.relpath(p_abs, from_dir_abs)
+			dst = os.path.normpath(os.path.join(to_dir_abs, rel))
+			try:
+				os.makedirs(os.path.dirname(dst), exist_ok=True)
+				if os.path.isdir(p_abs):
+					# Avoid pathological recursion when destination is inside source
+					# (common when isolating a base_dir into base_dir/node-<name>/...).
+					try:
+						src_common = os.path.commonpath([p_abs, dst])
+					except Exception:
+						src_common = ''
+					if src_common and os.path.abspath(src_common) == os.path.abspath(p_abs) and os.path.abspath(dst) != os.path.abspath(p_abs):
+						# Copy directory contents excluding the destination subtree.
+						os.makedirs(dst, exist_ok=True)
+						for child in os.listdir(p_abs):
+							src_child = os.path.join(p_abs, child)
+							dst_child = os.path.join(dst, child)
+							try:
+								src_child_abs = os.path.abspath(src_child)
+								dst_abs = os.path.abspath(dst)
+								if src_child_abs == dst_abs or src_child_abs.startswith(dst_abs + os.sep):
+									continue
+							except Exception:
+								pass
+							try:
+								if os.path.exists(src_child):
+									_copy_path_replace_wrong_type(src_child, dst_child)
+							except Exception:
+								pass
+					else:
+						_copy_path_replace_wrong_type(p_abs, dst)
+				elif os.path.exists(p_abs):
+					_copy_path_replace_wrong_type(p_abs, dst)
+			except Exception:
+				pass
+			return dst
+
+		for _svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			vols = svc.get('volumes')
+			if isinstance(vols, list):
+				new_vols: List[object] = []
+				changed = False
+				for v in vols:
+					if isinstance(v, str):
+						parts = v.split(':', 2)
+						if not parts:
+							new_vols.append(v)
+							continue
+						src = str(parts[0] or '').strip()
+						if src and os.path.isabs(src):
+							mapped = _map_path(src)
+							if mapped != src:
+								parts[0] = mapped
+								changed = True
+						new_vols.append(':'.join(parts))
+					elif isinstance(v, dict):
+						v2 = dict(v)
+						vtype = str(v2.get('type') or '').strip().lower()
+						src = str(v2.get('source') or '').strip()
+						if (not vtype or vtype == 'bind') and src and os.path.isabs(src):
+							mapped = _map_path(src)
+							if mapped != src:
+								v2['source'] = mapped
+								changed = True
+						new_vols.append(v2)
+					else:
+						new_vols.append(v)
+				if changed:
+					svc['volumes'] = new_vols
+			# env_file rewrite (absolute paths under from_dir)
+			env_file = svc.get('env_file')
+			if isinstance(env_file, str):
+				p = env_file.strip()
+				if p and os.path.isabs(p):
+					mapped = _map_path(p)
+					if mapped != p:
+						svc['env_file'] = mapped
+			elif isinstance(env_file, list):
+				new_env: List[object] = []
+				changed = False
+				for p in env_file:
+					if isinstance(p, str):
+						ps = p.strip()
+						if ps and os.path.isabs(ps):
+							mapped = _map_path(ps)
+							if mapped != ps:
+								new_env.append(mapped)
+								changed = True
+								continue
+					new_env.append(p)
+				if changed:
+					svc['env_file'] = new_env
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _inject_network_mode_none_text(text: str) -> str:
+	"""Fallback text-level injection of network_mode: none.
+
+	Only used when YAML parsing isn't available; conservative best-effort.
+	"""
+	if 'network_mode:' in text:
+		return text
+	lines = text.splitlines()
+	result: List[str] = []
+	in_services = False
+	services_indent: Optional[int] = None
+	for line in lines:
+		stripped = line.lstrip()
+		indent = len(line) - len(stripped)
+		# Enter services block
+		if not in_services and stripped.startswith('services:'):
+			in_services = True
+			services_indent = indent
+			result.append(line)
+			continue
+		# Exit services block when indentation drops back
+		if in_services and stripped and services_indent is not None and indent <= services_indent and not stripped.startswith('#'):
+			in_services = False
+			services_indent = None
+		# When inside services, detect service header lines like "  app:" and inject
+		if in_services and services_indent is not None:
+			# Service header is typically indented 2 spaces beyond services:
+			if stripped.endswith(':') and not stripped.startswith(('-', '#')) and indent == services_indent + 2 and ' ' not in stripped[:-1]:
+				result.append(line)
+				result.append(' ' * (indent + 2) + 'network_mode: none')
+				continue
+		result.append(line)
+	if text.endswith('\n'):
+		return '\n'.join(result) + '\n'
+	return '\n'.join(result)
+
+
+def _inject_working_dir_root_text(text: str) -> str:
+	"""Fallback text-level injection of `working_dir: /` under each service.
+
+	Only used when YAML parsing isn't available; conservative best-effort.
+	"""
+	if 'working_dir:' in text:
+		return text
+	lines = text.splitlines()
+	result: List[str] = []
+	in_services = False
+	services_indent: Optional[int] = None
+	for line in lines:
+		stripped = line.lstrip()
+		indent = len(line) - len(stripped)
+		if not in_services and stripped.startswith('services:'):
+			in_services = True
+			services_indent = indent
+			result.append(line)
+			continue
+		if in_services and stripped and services_indent is not None and indent <= services_indent and not stripped.startswith('#'):
+			in_services = False
+			services_indent = None
+		if in_services and services_indent is not None:
+			if stripped.endswith(':') and not stripped.startswith(('-', '#')) and indent == services_indent + 2 and ' ' not in stripped[:-1]:
+				result.append(line)
+				result.append(' ' * (indent + 2) + 'working_dir: /')
+				continue
+		result.append(line)
+	if text.endswith('\n'):
+		return '\n'.join(result) + '\n'
+	return '\n'.join(result)
+
+
+def _strip_port_mappings_from_text(text: str) -> str:
+	"""Best-effort removal of host->container port mappings in compose YAML text."""
+	lines = text.splitlines()
+	result: List[str] = []
+	in_ports = False
+	ports_indent: Optional[int] = None
+	for line in lines:
+		stripped = line.lstrip()
+		indent = len(line) - len(stripped)
+		if in_ports:
+			if stripped and indent <= (ports_indent or 0) and not stripped.startswith('-'):
+				in_ports = False
+			if not in_ports:
+				pass
+			else:
+				if stripped.startswith('-'):
+					raw_entry = stripped[1:].strip()
+					body = raw_entry
+					comment = ''
+					if '#' in raw_entry:
+						hash_index = raw_entry.find('#')
+						body = raw_entry[:hash_index].rstrip()
+						comment = raw_entry[hash_index:].strip()
+					if body and not body.startswith('{'):
+						quote_char = ''
+						closing_quote = ''
+						content = body
+						if len(body) >= 2 and body[0] in ("'", '"') and body[-1] == body[0]:
+							quote_char = body[0]
+							closing_quote = body[-1]
+							content = body[1:-1]
+						if ':' in content and ' ' not in content.split(':', 1)[0]:
+							new_content = _strip_port_mapping_value(content)
+							if quote_char:
+								body = f"{quote_char}{new_content}{closing_quote}"
+							else:
+								body = new_content
+							line = f"{' ' * indent}- {body}"
+							if comment:
+								line = f"{line} {comment}"
+							result.append(line)
+							continue
+				if stripped.startswith('published:') or stripped.startswith('host_ip:'):
+					continue
+		if not in_ports and stripped.startswith('ports:'):
+			in_ports = True
+			ports_indent = indent
+			result.append(line)
+			continue
+		result.append(line)
+	if text.endswith('\n'):
+		return '\n'.join(result) + '\n'
+	return '\n'.join(result)
+
+
+def _drop_key_block_from_text(text: str, key: str) -> str:
+	"""Best-effort removal of a YAML mapping key block from compose YAML text.
+
+	This is only used in the fallback (text) path when YAML parsing failed.
+	It removes blocks like:
+	  ports:\n    - ...
+	  networks:\n    default: ...
+	at any indentation level.
+	"""
+	try:
+		key = str(key or '').strip()
+		if not key:
+			return text
+		lines = text.splitlines()
+		result: List[str] = []
+		in_block = False
+		block_indent: Optional[int] = None
+		for line in lines:
+			stripped = line.lstrip()
+			indent = len(line) - len(stripped)
+			if in_block:
+				# End block when indentation returns to parent level (or lower)
+				# and the line is not a list continuation.
+				if stripped and (block_indent is not None) and indent <= block_indent and not stripped.startswith('-'):
+					in_block = False
+					block_indent = None
+				else:
+					# Skip lines within the removed block
+					continue
+			# Start block
+			if not in_block and stripped.startswith(f'{key}:'):
+				in_block = True
+				block_indent = indent
+				continue
+			result.append(line)
+		if text.endswith('\n'):
+			return '\n'.join(result) + '\n'
+		return '\n'.join(result)
+	except Exception:
+		return text
+
+
+def _remove_container_names_all_services(compose_obj: dict) -> dict:
+	"""Remove any container_name fields from all services to avoid collisions.
+
+	Returns the mutated object. If services are missing, no changes are made.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return compose_obj
+		for svc_key, svc in list(services.items()):
+			if isinstance(svc, dict) and 'container_name' in svc:
+				try:
+					svc.pop('container_name', None)
+				except Exception:
+					pass
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _select_service_key(compose_obj: dict, prefer_service: Optional[str] = None) -> Optional[str]:
+	"""Select a best-effort target service key from a compose object.
+
+	Matches the selection logic used by _set_container_name_one_service.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return None
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return None
+		target_key: Optional[str] = None
+		if prefer_service:
+			pref = prefer_service.strip().lower()
+			for svc_key in services.keys():
+				if pref in str(svc_key).strip().lower():
+					target_key = str(svc_key)
+					break
+		if target_key is None:
+			# Heuristic selection for multi-service stacks where the first service is
+			# often infra (db/redis) and the "main" app/web service appears later.
+			# This is important for CORE docker nodes because we alias a single service
+			# under the node name (docker compose up -d <node_name>).
+			infra_name_tokens = {
+				'db', 'database', 'postgres', 'postgresql', 'mysql', 'mariadb', 'redis', 'memcached',
+				'mongo', 'mongodb', 'rabbit', 'rabbitmq', 'zookeeper', 'kafka', 'etcd',
+				'elasticsearch', 'kibana', 'logstash', 'prometheus', 'grafana', 'minio',
+				'vault', 'consul', 'registry', 'smtp', 'mail', 'mq',
+			}
+			app_name_tokens = {
+				'web', 'webserver', 'server', 'app', 'api', 'ui', 'frontend', 'front',
+				'nginx', 'apache', 'http', 'gunicorn', 'uwsgi', 'php-fpm',
+			}
+			init_name_tokens = {
+				'init', 'setup', 'bootstrap', 'migrate', 'migration', 'seed', 'worker', 'scheduler',
+				'queue', 'celery', 'cron', 'beat',
+			}
+
+			def _svc_score(svc_key: str, svc_obj: object) -> int:
+				key_l = str(svc_key or '').strip().lower()
+				score = 0
+				# Prefer services that expose ports (likely interactive web/API entrypoints).
+				try:
+					if isinstance(svc_obj, dict):
+						ports = svc_obj.get('ports')
+						expose = svc_obj.get('expose')
+						if ports:
+							score += 40
+						if expose:
+							score += 10
+						cmd = svc_obj.get('command')
+						if cmd is not None:
+							cmd_l = str(cmd).lower()
+							if any(t in cmd_l for t in ('web', 'webserver', 'server', 'gunicorn', 'uwsgi')):
+								score += 15
+				except Exception:
+					pass
+
+				# Name-based boosts/penalties.
+				if any(t in key_l for t in infra_name_tokens):
+					score -= 50
+				if any(t in key_l for t in init_name_tokens):
+					score -= 15
+				if any(t in key_l for t in app_name_tokens):
+					score += 20
+				# Slight preference for shorter/cleaner keys when scores tie.
+				score -= min(len(key_l), 40) // 10
+				return score
+
+			best_key: Optional[str] = None
+			best_score: Optional[int] = None
+			for svc_key, svc_obj in services.items():
+				try:
+					k = str(svc_key)
+				except Exception:
+					continue
+				s = _svc_score(k, svc_obj)
+				if best_score is None or s > best_score or (s == best_score and k < str(best_key)):
+					best_key = k
+					best_score = s
+			if best_key is not None:
+				target_key = best_key
+			else:
+				target_key = str(next(iter(services.keys())))
+		return target_key
+	except Exception:
+		return None
+
+
+def _inject_service_bind_mount(compose_obj: dict, bind: str, prefer_service: Optional[str] = None) -> dict:
+	"""Inject a bind mount into the selected service's volumes list (best-effort)."""
+	try:
+		if not bind or not isinstance(bind, str):
+			return compose_obj
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return compose_obj
+		svc_key = _select_service_key(compose_obj, prefer_service=prefer_service)
+		if not svc_key:
+			return compose_obj
+		svc = services.get(svc_key)
+		if not isinstance(svc, dict):
+			return compose_obj
+		vols = svc.get('volumes')
+		# Normalize to list form.
+		if vols is None:
+			vol_list: List[object] = []
+		elif isinstance(vols, list):
+			vol_list = list(vols)
+		elif isinstance(vols, str):
+			vol_list = [vols]
+		else:
+			# Unknown structure (e.g., dict); don't mutate.
+			return compose_obj
+		# Avoid duplicates (string compare).
+		if bind not in [str(v) for v in vol_list if v is not None]:
+			vol_list.append(bind)
+		svc['volumes'] = vol_list
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _inject_service_environment(compose_obj: dict, env: Dict[str, str], prefer_service: Optional[str] = None) -> dict:
+	"""Inject environment variables into the selected service (best-effort).
+
+	Supports both dict-form and list-form `environment` entries.
+	"""
+	try:
+		if not env or not isinstance(env, dict):
+			return compose_obj
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return compose_obj
+		svc_key = _select_service_key(compose_obj, prefer_service=prefer_service)
+		if not svc_key:
+			return compose_obj
+		svc = services.get(svc_key)
+		if not isinstance(svc, dict):
+			return compose_obj
+
+		cur = svc.get('environment')
+		# Prefer dict form when possible.
+		if cur is None:
+			svc['environment'] = {k: str(v) for k, v in env.items()}
+			return compose_obj
+		if isinstance(cur, dict):
+			new_env = dict(cur)
+			for k, v in env.items():
+				new_env[str(k)] = str(v)
+			svc['environment'] = new_env
+			return compose_obj
+		if isinstance(cur, list):
+			# Normalize list entries to KEY=VAL
+			existing_keys = set()
+			out_list: List[str] = []
+			for item in cur:
+				if item is None:
+					continue
+				text = str(item)
+				out_list.append(text)
+				if '=' in text:
+					existing_keys.add(text.split('=', 1)[0])
+			for k, v in env.items():
+				ks = str(k)
+				if ks in existing_keys:
+					continue
+				out_list.append(f"{ks}={v}")
+			svc['environment'] = out_list
+			return compose_obj
+		# Unknown structure; don't mutate.
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _normalize_compose_environment_entries_for_core(compose_obj: dict) -> dict:
+	"""Rewrite compose service environments into forms CORE's DockerNode parser accepts.
+
+	Docker Compose permits list-form passthrough entries like `DISPLAY`, but CORE's
+	Docker startup path expects each environment item to contain `=`. Normalize bare
+	entries to `KEY=value`, using the current environment when available and an empty
+	string otherwise.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		for svc in services.values():
+			if not isinstance(svc, dict):
+				continue
+			env = svc.get('environment')
+			if env is None:
+				continue
+			if isinstance(env, dict):
+				normalized_env = {}
+				for key, value in env.items():
+					key_s = str(key or '').strip()
+					if not key_s:
+						continue
+					normalized_env[key_s] = '' if value is None else str(value)
+				svc['environment'] = normalized_env
+				continue
+			if isinstance(env, list):
+				normalized_list: List[str] = []
+				for item in env:
+					if item is None:
+						continue
+					if isinstance(item, dict):
+						for key, value in item.items():
+							key_s = str(key or '').strip()
+							if not key_s:
+								continue
+							normalized_list.append(f"{key_s}={'' if value is None else str(value)}")
+						continue
+					text = str(item or '').strip()
+					if not text:
+						continue
+					if '=' not in text:
+						text = f"{text}={os.environ.get(text, '')}"
+					normalized_list.append(text)
+				svc['environment'] = normalized_list
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _inject_service_labels(compose_obj: dict, labels: Dict[str, str], prefer_service: Optional[str] = None) -> dict:
+	"""Inject labels into the selected service (best-effort).
+
+	Supports both dict-form and list-form `labels` entries.
+	"""
+	try:
+		if not labels or not isinstance(labels, dict):
+			return compose_obj
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return compose_obj
+		svc_key = _select_service_key(compose_obj, prefer_service=prefer_service)
+		if not svc_key:
+			return compose_obj
+		svc = services.get(svc_key)
+		if not isinstance(svc, dict):
+			return compose_obj
+
+		cur = svc.get('labels')
+		if cur is None:
+			svc['labels'] = {str(k): str(v) for k, v in labels.items()}
+			return compose_obj
+		if isinstance(cur, dict):
+			new_labels = dict(cur)
+			for k, v in labels.items():
+				new_labels[str(k)] = str(v)
+			svc['labels'] = new_labels
+			return compose_obj
+		if isinstance(cur, list):
+			existing_keys = set()
+			out_list: List[str] = []
+			for item in cur:
+				if item is None:
+					continue
+				text = str(item)
+				out_list.append(text)
+				if '=' in text:
+					existing_keys.add(text.split('=', 1)[0])
+			for k, v in labels.items():
+				ks = str(k)
+				if ks in existing_keys:
+					continue
+				out_list.append(f"{ks}={v}")
+			svc['labels'] = out_list
+			return compose_obj
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _flow_artifacts_mode() -> str:
+	"""How Flow generator artifacts are delivered into containers.
+
+	This project only supports copy-based delivery.
+	"""
+	return 'copy'
+
+
+def _inject_files_copy_mode() -> str:
+	"""How inject_files are delivered into containers.
+
+	This project only supports copy-based delivery.
+	"""
+	return 'copy'
+
+
+def _norm_inject_rel(raw: str) -> str:
+	s = str(raw or '').strip()
+	if not s:
+		return ''
+	s = s.replace('\\', '/')
+	while s.startswith('./'):
+		s = s[2:]
+	while s.startswith('/'):
+		s = s[1:]
+	if s.startswith('flow_artifacts/'):
+		s = s[len('flow_artifacts/'):]
+	if s.startswith('artifacts/'):
+		s = s[len('artifacts/'):]
+	while s.startswith('./'):
+		s = s[2:]
+	s = s.strip('/')
+	if not s:
+		return ''
+	try:
+		parts = [p for p in s.split('/') if p]
+		if any(p == '..' for p in parts):
+			return ''
+	except Exception:
+		return ''
+	return s
+
+
+def _split_inject_spec(raw: str) -> tuple[str, str]:
+	text = str(raw or '').strip()
+	if not text:
+		return '', ''
+	for sep in ('->', '=>'):
+		if sep in text:
+			left, right = text.split(sep, 1)
+			return left.strip(), right.strip()
+	return text, ''
+
+
+def _normalize_inject_dest_dir(raw: str, *, default: str = '/tmp') -> str:
+	s = str(raw or '').strip()
+	if not s:
+		return default
+	if not s.startswith('/'):
+		return default
+	parts = [p for p in s.split('/') if p]
+	if any(p == '..' for p in parts):
+		return default
+	return '/' + '/'.join(parts) if parts else default
+
+
+def _expand_injects_from_outputs(out_manifest: str, inject_files: list[str]) -> list[str]:
+	if not out_manifest or not os.path.exists(out_manifest):
+		return list(inject_files or [])
+	try:
+		with open(out_manifest, 'r', encoding='utf-8') as f:
+			doc = json.load(f) or {}
+	except Exception:
+		return list(inject_files or [])
+	outputs = doc.get('outputs') if isinstance(doc, dict) else None
+	if not isinstance(outputs, dict):
+		return list(inject_files or [])
+
+	def _looks_like_path(s: str, *, key_hint: str = '') -> bool:
+		"""Heuristic: treat both absolute/relative paths and bare filenames as paths.
+
+		Flow generators often emit outputs like:
+		  "File(path)": "flag.txt"
+		which has no '/' but is still a path relative to the artifacts dir.
+		"""
+		text = str(s or '').strip()
+		if not text:
+			return False
+		# obvious paths
+		if '/' in text or text.startswith('./'):
+			return True
+		# treat file-like artifact keys as paths even when value is a bare filename
+		kh = str(key_hint or '').strip().lower()
+		if kh:
+			if 'file(' in kh or 'directory(' in kh or kh.endswith('(path)'):
+				return True
+		# common filenames/extensions
+		base = os.path.basename(text)
+		if base != text:
+			return True
+		if '.' in base:
+			return True
+		return False
+
+	out: list[str] = []
+	for raw in inject_files or []:
+		src_raw, dest_raw = _split_inject_spec(str(raw))
+		key = str(src_raw or '').strip()
+		if not key:
+			continue
+		if key in outputs:
+			v = outputs.get(key)
+			if isinstance(v, str):
+				vv = v.strip()
+				if vv and _looks_like_path(vv, key_hint=key):
+					out.append(f"{vv} -> {dest_raw}" if dest_raw else vv)
+					continue
+			if isinstance(v, list):
+				vals: list[str] = []
+				for item in v:
+					s = str(item or '').strip()
+					if s and _looks_like_path(s, key_hint=key):
+						vals.append(s)
+				if vals:
+					if dest_raw:
+						out.extend([f"{vv} -> {dest_raw}" for vv in vals])
+					else:
+						out.extend(vals)
+					continue
+		if dest_raw:
+			out.append(f"{key} -> {dest_raw}")
+		else:
+			out.append(key)
+	return out
+
+
+def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str], source_dir: str, outputs_manifest: str = '', prefer_service: str = '', inject_candidate_paths: list[str] | None = None) -> dict:
+	if not isinstance(compose_obj, dict):
+		return compose_obj
+	explicit_requested = bool(inject_files)
+	if source_dir:
+		try:
+			if not os.path.isabs(source_dir):
+				source_dir = os.path.abspath(source_dir)
+		except Exception:
+			pass
+	if not source_dir or not os.path.isdir(source_dir):
+		raise RuntimeError(f"[injects] source_dir missing or not a dir: {source_dir} (inject_files={inject_files})")
+
+	try:
+		logger.info(
+			"[injects] prepare injects source_dir=%s outputs_manifest=%s inject_files=%s",
+			source_dir,
+			outputs_manifest,
+			inject_files,
+		)
+	except Exception:
+		pass
+
+	inject_files = _expand_injects_from_outputs(outputs_manifest, inject_files)
+	if not inject_files:
+		return compose_obj
+	try:
+		logger.info("[injects] expanded injects=%s", inject_files)
+	except Exception:
+		pass
+
+	services = compose_obj.get('services')
+	if not isinstance(services, dict):
+		return compose_obj
+
+	# Build inject mapping: relpath -> dest_dir
+	inject_map: dict[str, str] = {}
+	# Flow default: if inject specs omit a destination, prefer /flow_injects so the
+	# UI validation and user expectations align.
+	flow_default_dest = str(os.getenv('CORETG_FLOW_INJECTS_DIR') or '').strip() or '/flow_injects'
+	# If the generator declares candidate injection paths, pick one non-deterministically
+	# as the effective flow default so the inject lands in a random location on each run.
+	_valid_candidates = [
+		str(p or '').strip().rstrip('/')
+		for p in (inject_candidate_paths or [])
+		if str(p or '').strip().startswith('/')
+	]
+	if _valid_candidates:
+		try:
+			import random as _random
+			flow_default_dest = _random.choice(_valid_candidates)
+		except Exception:
+			pass
+	is_flow_source = False
+	try:
+		sd_low = str(source_dir or '').replace('\\', '/').lower()
+		if '/tmp/vulns/flag_generators_runs/' in sd_low or '/tmp/vulns/flag_node_generators_runs/' in sd_low:
+			is_flow_source = True
+		elif '/flag_generators_runs/' in sd_low or '/flag_node_generators_runs/' in sd_low:
+			is_flow_source = True
+	except Exception:
+		is_flow_source = False
+	for raw in inject_files or []:
+		src_raw, dest_raw = _split_inject_spec(str(raw))
+		src_raw_s = str(src_raw or '').strip()
+		# Legacy fallback semantics: `/tmp/flag.txt` denotes an in-container
+		# path that may be provided by downstream runtime logic. Do not treat
+		# it as a host source artifact in compose inject mapping.
+		if src_raw_s == '/tmp/flag.txt' and not str(dest_raw or '').strip():
+			try:
+				logger.info('[injects] skipping legacy container fallback source: %s', src_raw_s)
+			except Exception:
+				pass
+			continue
+		# If src is an absolute path that points into source_dir, interpret it as an
+		# artifacts path (relative to source_dir) rather than a container destination.
+		try:
+			if src_raw_s.startswith('/'):
+				sd_abs = os.path.abspath(source_dir)
+				src_abs = os.path.abspath(src_raw_s)
+				if os.path.commonpath([sd_abs, src_abs]) == sd_abs:
+					rel = os.path.relpath(src_abs, sd_abs)
+					src_norm2 = _norm_inject_rel(rel)
+					if src_norm2:
+						dest_dir2 = _normalize_inject_dest_dir(dest_raw)
+						try:
+							if (not str(dest_raw or '').strip()) and is_flow_source and dest_dir2 == '/tmp' and flow_default_dest.startswith('/'):
+								dest_dir2 = flow_default_dest
+						except Exception:
+							pass
+						inject_map[src_norm2] = dest_dir2
+						continue
+		except Exception:
+			pass
+		# If src is an absolute path, treat it as a destination path inside the
+		# container and map the source to the basename in artifacts. If a dest is
+		# provided, honor it but still use the basename to avoid /tmp/tmp/... paths.
+		if src_raw_s.startswith('/'):
+			try:
+				src_raw_s = src_raw_s.rstrip('/')
+			except Exception:
+				pass
+			parent = os.path.dirname(src_raw_s)
+			base = os.path.basename(src_raw_s)
+			if base:
+				if dest_raw:
+					dest_dir = _normalize_inject_dest_dir(dest_raw)
+					inject_map[base] = dest_dir
+					continue
+				# No dest provided: for Flow-sourced injects prefer /flow_injects;
+				# otherwise default to /tmp to avoid /tmp/tmp/... paths.
+				try:
+					if is_flow_source and flow_default_dest.startswith('/'):
+						inject_map[base] = flow_default_dest
+					else:
+						inject_map[base] = '/tmp'
+				except Exception:
+					inject_map[base] = '/tmp'
+				continue
+		src_norm = _norm_inject_rel(src_raw)
+		if not src_norm:
+			continue
+		dest_dir = _normalize_inject_dest_dir(dest_raw)
+		# If no destination was specified and this is a Flow artifacts source,
+		# use /flow_injects rather than /tmp.
+		try:
+			if (not str(dest_raw or '').strip()) and is_flow_source and dest_dir == '/tmp' and flow_default_dest.startswith('/'):
+				dest_dir = flow_default_dest
+		except Exception:
+			pass
+		inject_map[src_norm] = dest_dir
+
+	if not inject_map:
+		if explicit_requested:
+			raise RuntimeError(f"[injects] no valid inject mappings produced from {inject_files}")
+		return compose_obj
+
+	def _volume_name_for_dest(dest_dir: str) -> str:
+		slug = dest_dir.strip('/') or 'injects'
+		slug = ''.join([c if c.isalnum() else '-' for c in slug])
+		while '--' in slug:
+			slug = slug.replace('--', '-')
+		slug = slug.strip('-') or 'injects'
+		return f"inject-{slug}"[:50]
+
+	def _select_target_service() -> str:
+		if prefer_service and prefer_service in services:
+			return prefer_service
+			
+		# fall back to first service
+		for k in services.keys():
+			return str(k)
+		return ''
+
+	target_service = _select_target_service()
+	if not target_service or target_service not in services:
+		try:
+			logger.warning(
+				"[injects] target service not found: %s (services=%s)",
+				target_service,
+				list(services.keys()),
+			)
+		except Exception:
+			pass
+		return compose_obj
+
+	# Copy mode: use a helper init service to copy into named volumes.
+	copy_service_name = 'inject_copy'
+	if copy_service_name in services:
+		i = 2
+		while f"inject_copy_{i}" in services:
+			i += 1
+		copy_service_name = f"inject_copy_{i}"
+
+	copy_vols: list[Any] = []
+	copy_vols.append(f"{source_dir}:/src:ro")
+
+	dest_to_volume: dict[str, str] = {}
+	dest_mounts: dict[str, str] = {}
+	for dest_dir in set(inject_map.values()):
+		vol_name = dest_to_volume.setdefault(dest_dir, _volume_name_for_dest(dest_dir))
+		slug = vol_name.replace('inject-', '')
+		mount_path = f"/dst/{slug}"
+		dest_mounts[dest_dir] = mount_path
+		copy_vols.append(f"{vol_name}:{mount_path}")
+
+	missing_sources: list[str] = []
+	skipped_legacy_fallbacks: list[str] = []
+	for rel in list(inject_map.keys()):
+		src_path = os.path.join(source_dir, rel)
+		if not os.path.exists(src_path):
+			# Older FlowState payloads can carry the legacy text-flag fallback even when
+			# explicit generator injects are also present. Ignore that stale fallback so
+			# the valid /flow_injects copy set still applies.
+			if is_flow_source and rel == 'flag.txt' and inject_map.get(rel) == '/tmp' and len(inject_map) > 1:
+				skipped_legacy_fallbacks.append(src_path)
+				inject_map.pop(rel, None)
+				continue
+			missing_sources.append(src_path)
+			if not explicit_requested:
+				inject_map.pop(rel, None)
+	if skipped_legacy_fallbacks:
+		try:
+			logger.info(
+				"[injects] dropping missing legacy fallback sources=%s",
+				skipped_legacy_fallbacks,
+			)
+		except Exception:
+			pass
+	if missing_sources and explicit_requested:
+		raise RuntimeError(f"[injects] missing source files: {missing_sources}")
+	if not inject_map:
+		return compose_obj
+
+	# Persist inject mapping metadata for remote copy mode (labels on target service).
+	try:
+		inject_items = [{'src': k, 'dest': v} for k, v in inject_map.items()]
+		compose_obj = _inject_service_labels(
+			compose_obj,
+			{
+				'coretg.inject.source_dir': str(source_dir),
+				'coretg.inject.map': json.dumps(inject_items, ensure_ascii=False),
+			},
+			prefer_service=target_service,
+		)
+	except Exception:
+		pass
+	try:
+		logger.info(
+			"[injects] applying injects to service=%s mode=%s map=%s",
+			target_service,
+			'copy',
+			inject_map,
+		)
+		logger.info(
+			"[injects] clearing destination directories before copy: %s",
+			list(set(inject_map.values())),
+		)
+	except Exception:
+		pass
+
+	# Use a neutral helper image by default. Reusing the target image can invoke
+	# application entrypoints before our copy command runs (for example EULA gates),
+	# leaving /flow_injects empty while compose still reports success.
+	copy_image = str(os.getenv('CORETG_INJECT_COPY_IMAGE') or '').strip() or 'alpine:3.19'
+	try:
+		reuse_target_image = str(os.getenv('CORETG_INJECT_COPY_REUSE_TARGET_IMAGE') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+	except Exception:
+		reuse_target_image = False
+	if reuse_target_image:
+		try:
+			svc = services.get(target_service)
+			if isinstance(svc, dict):
+				img = str(svc.get('image') or '').strip()
+				if img:
+					copy_image = img
+		except Exception:
+			copy_image = str(os.getenv('CORETG_INJECT_COPY_IMAGE') or '').strip() or 'alpine:3.19'
+
+	use_wrapper_busybox = bool(
+		str(copy_image).startswith('coretg/') and str(copy_image).endswith(':iproute2')
+	)
+
+	cmds: list[str] = []
+	# If we're running inside a coretg wrapper image, we can rely on a BusyBox
+	# binary at /usr/local/coretg/bin/busybox.
+	# Otherwise, avoid referencing that path (it won't exist pre-wrapper) and
+	# fall back to standard coreutils (`mkdir`, `cp`) provided by the image.
+	bb_path = '/usr/local/coretg/bin/busybox'
+	bb_fallback = 'busybox'
+
+	# Clean destination directories before copying to avoid mixing old and new artifacts.
+	for dest_dir in set(inject_map.values()):
+		mount_path = dest_mounts.get(dest_dir)
+		if not mount_path:
+			continue
+		# Remove all contents of the destination directory (but keep the directory itself).
+		if use_wrapper_busybox:
+			cmds.append(f"{bb_path} rm -rf \"{mount_path}\"/* 2>/dev/null || {bb_fallback} rm -rf \"{mount_path}\"/*")
+		else:
+			cmds.append(f"rm -rf \"{mount_path}\"/*")
+
+	for rel, dest_dir in inject_map.items():
+		mount_path = dest_mounts.get(dest_dir)
+		if not mount_path:
+			continue
+		rel_dir = os.path.dirname(rel)
+		rel_dir_escaped = rel_dir.replace('"', '\\"')
+		src_escaped = rel.replace('"', '\\"')
+		dst_escaped = rel.replace('"', '\\"')
+		if rel_dir:
+			if use_wrapper_busybox:
+				cmds.append(
+					f"{bb_path} mkdir -p \"{mount_path}/{rel_dir_escaped}\" 2>/dev/null || "
+					f"{bb_fallback} mkdir -p \"{mount_path}/{rel_dir_escaped}\""
+				)
+			else:
+				cmds.append(f"mkdir -p \"{mount_path}/{rel_dir_escaped}\"")
+		if use_wrapper_busybox:
+			cmds.append(
+				f"if [ -e \"/src/{src_escaped}\" ]; then "
+				f"{bb_path} cp -a \"/src/{src_escaped}\" \"{mount_path}/{dst_escaped}\" 2>/dev/null || "
+				f"{bb_fallback} cp -a \"/src/{src_escaped}\" \"{mount_path}/{dst_escaped}\"; "
+				f"else echo \"[injects] missing /src/{src_escaped}; skipping\"; fi"
+			)
+		else:
+			cmds.append(
+				f"if [ -e \"/src/{src_escaped}\" ]; then "
+				f"cp -a \"/src/{src_escaped}\" \"{mount_path}/{dst_escaped}\"; "
+				f"else echo \"[injects] missing /src/{src_escaped}; skipping\"; fi"
+			)
+
+	if not cmds:
+		raise RuntimeError("[injects] no copy commands generated; refusing to skip inject service")
+
+	services[copy_service_name] = {
+		'image': copy_image,
+		'user': '0:0',
+		'volumes': copy_vols,
+		# If the image is a coretg wrapper, run via its BusyBox so we don't depend
+		# on `/bin/sh` existing in the base image.
+		**({
+			'entrypoint': ['/usr/local/coretg/bin/busybox'],
+			'command': ['sh', '-lc', ' && '.join(cmds)],
+		} if use_wrapper_busybox else {
+			'command': ['sh', '-lc', ' && '.join(cmds)],
+		}),
+	}
+
+	# Mount volumes into target service
+	for dest_dir, vol_name in dest_to_volume.items():
+		bind = f"{vol_name}:{dest_dir}"
+		compose_obj = _inject_service_bind_mount(compose_obj, bind, prefer_service=target_service)
+
+	# Ensure target has an ordering dependency on copy service.
+	#
+	# IMPORTANT:
+	# Using `service_completed_successfully` can block target startup when the
+	# helper image lacks expected shell/coreutils for the generated copy command.
+	# That ultimately leaves CORE Docker nodes at PID=0 (`/proc/0/environ`).
+	#
+	# Default to no dependency at all so target containers always start even if
+	# inject_copy is incompatible with a specific image. Operators can opt into
+	# strict blocking with CORETG_INJECT_COPY_REQUIRE_SUCCESS=1.
+	try:
+		svc = services.get(target_service)
+		if isinstance(svc, dict):
+			strict_dep = False
+			try:
+				strict_dep = str(os.getenv('CORETG_INJECT_COPY_REQUIRE_SUCCESS') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+			except Exception:
+				strict_dep = False
+			dep = svc.get('depends_on')
+			if strict_dep:
+				if isinstance(dep, dict):
+					dep.setdefault(copy_service_name, {'condition': 'service_completed_successfully'})
+					svc['depends_on'] = dep
+				elif isinstance(dep, list):
+					if copy_service_name not in dep:
+						dep.append(copy_service_name)
+					svc['depends_on'] = dep
+				else:
+					svc['depends_on'] = {copy_service_name: {'condition': 'service_completed_successfully'}}
+			else:
+				if isinstance(dep, list):
+					dep = [x for x in dep if str(x) != copy_service_name]
+					if dep:
+						svc['depends_on'] = dep
+					else:
+						svc.pop('depends_on', None)
+				elif isinstance(dep, dict):
+					dep.pop(copy_service_name, None)
+					if dep:
+						svc['depends_on'] = dep
+					else:
+						svc.pop('depends_on', None)
+	except Exception:
+		pass
+
+	# Register volumes
+	try:
+		top_vols = compose_obj.get('volumes')
+		if not isinstance(top_vols, dict):
+			top_vols = {}
+		for vol_name in dest_to_volume.values():
+			top_vols.setdefault(vol_name, {})
+		compose_obj['volumes'] = top_vols
+	except Exception:
+		pass
+
+	return compose_obj
+
+
+def _ensure_list_field_has(value: object, item: str) -> List[str]:
+	"""Normalize a compose field that may be a string/list and ensure item is present."""
+	out: List[str] = []
+	try:
+		if value is None:
+			out = []
+		elif isinstance(value, str):
+			out = [value]
+		elif isinstance(value, list):
+			out = [str(v) for v in value if v is not None and str(v).strip()]
+		else:
+			out = [str(value)]
+	except Exception:
+		out = []
+	if item not in out:
+		out.append(item)
+	return out
+
+
+def _ensure_keepalive_for_base_os_images(compose_obj: dict, node_name: str, prefer_service: Optional[str] = None) -> dict:
+	"""Best-effort: keep base OS images running by injecting a default command.
+
+	Rationale: docker-compose templates that use a base OS image (ubuntu/alpine/debian/etc)
+	with no long-running entrypoint will exit immediately (often CMD=/bin/bash or /bin/sh).
+	That leaves CORE docker nodes with pid=0, which can break core-daemon startup.
+
+	We only apply this for images that *look* like base OS images, and only when the
+	compose service does not already specify a command/entrypoint.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return compose_obj
+		svc_key = _select_service_key(compose_obj, prefer_service=prefer_service or node_name)
+		if not svc_key or svc_key not in services:
+			return compose_obj
+		svc = services.get(svc_key)
+		if not isinstance(svc, dict):
+			return compose_obj
+
+		if svc.get('command') is not None:
+			return compose_obj
+		if svc.get('entrypoint') is not None:
+			return compose_obj
+
+		labels = svc.get('labels') if isinstance(svc.get('labels'), dict) else {}
+		base_image = ''
+		try:
+			base_image = str(labels.get('coretg.wrapper_base_image') or '').strip()
+		except Exception:
+			base_image = ''
+		if not base_image:
+			try:
+				base_image = str(svc.get('image') or '').strip()
+			except Exception:
+				base_image = ''
+		is_base_os = _looks_like_base_os_image(base_image)
+		if not is_base_os:
+			return compose_obj
+
+		# Use POSIX sh (works on ubuntu/alpine) and keep the container alive.
+		svc['command'] = ['sh', '-lc', 'sleep infinity']
+		try:
+			logger.info('[vuln] injected keepalive command node=%s service=%s image=%s', node_name, svc_key, base_image)
+		except Exception:
+			pass
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _write_iproute2_wrapper(
+	out_dir: str,
+	base_image: str,
+	*,
+	extra_apt_packages: Optional[List[str]] = None,
+	extra_pip_packages: Optional[List[str]] = None,
+) -> str:
+	"""Write a wrapper Dockerfile that ensures an `ip` command exists.
+
+	Rationale: CORE docker nodes often run with no internet access from inside the container
+	(e.g., network_mode none + CORE-managed interfaces). A missing `ip` breaks CORE services
+	like DefaultRoute.
+
+	By default we avoid using a package manager at build time (no `apt-get`, `apk`, etc.)
+	by injecting a tiny `ip` implementation from BusyBox.
+
+	Fallback: set `CORETG_IPROUTE2_WRAPPER_STRATEGY=packages` to use the legacy
+	package-manager install behavior.
+	"""
+	os.makedirs(out_dir, exist_ok=True)
+	dockerfile_path = os.path.join(out_dir, 'Dockerfile')
+	# Best-effort: optional Python dependencies (installed at image build time on the CORE host).
+	# This is used to fix stacks like Airflow that may crash immediately when a Python module
+	# is missing (e.g., `argcomplete`), which in turn triggers CORE PID=0 errors.
+	extra_pip: list[str] = []
+	try:
+		if isinstance(extra_pip_packages, list):
+			extra_pip = [str(x).strip() for x in extra_pip_packages if x is not None and str(x).strip()]
+	except Exception:
+		extra_pip = []
+	try:
+		base_low = str(base_image or '').lower()
+	except Exception:
+		base_low = ''
+	# Airflow: ensure `argcomplete` is available so `airflow webserver` doesn't crash.
+	if base_low and 'airflow' in base_low and 'argcomplete' not in {p.lower() for p in extra_pip}:
+		extra_pip.append('argcomplete')
+	is_airflow = bool(base_low and 'airflow' in base_low)
+	# Strategy: default to a no-package-manager wrapper (BusyBox `ip`).
+	try:
+		strategy = str(os.getenv('CORETG_IPROUTE2_WRAPPER_STRATEGY') or '').strip().lower()
+		# Historical behavior was package-manager installs; keep it available.
+		use_packages = strategy in ('packages', 'pkg', 'apt', 'apk', 'yum', 'dnf')
+	except Exception:
+		use_packages = False
+
+	if not use_packages:
+		# NOTE: we keep a small, predictable Dockerfile. This wrapper is intended to be built
+		# on the CORE host and then started inside CORE networks that may be offline.
+		#
+		# We install *nothing* via apt/apk/yum. We only inject an `ip` command.
+		lines = [
+			"# coretg: ensure iproute2-like `ip` command present for CORE DefaultRoute",
+			"# Strategy: busybox injection (no package manager, offline-safe)",
+			"FROM busybox:1.36.1-musl AS coretg_iptools",
+			"",
+			f"FROM {base_image}",
+			"",
+		]
+		if is_airflow:
+			# Airflow images often install python packages under /home/airflow/.local.
+			# When CORE runs the container as root (to allow DefaultRoute chmod/scripts),
+			# Python's user-site resolves under /root/.local by default, breaking imports.
+			lines += [
+				"ENV HOME=/home/airflow",
+				"ENV PYTHONUSERBASE=/home/airflow/.local",
+				"ENV PATH=/home/airflow/.local/bin:$PATH",
+				"",
+			]
+		lines += [
+			"USER 0",
+			"",
+			"# Preserve the base image WORKDIR; some upstream services rely on it.",
+			"",
+			"# CORE may chmod relative service script paths (e.g., defaultroute.sh, runtraffic.sh).",
+			"# Ensure those relative names resolve from common runtime working directories.",
+			"RUN set -eu; \\",
+			"\tfor d in / /root /tmp /home /home/core /home/ubuntu /app /opt /workspace /work; do \\",
+			"\t\tmkdir -p \"$d\" 2>/dev/null || true; \\",
+			"\t\tln -sfn /defaultroute.sh \"$d/defaultroute.sh\" || true; \\",
+			"\t\tln -sfn /runtraffic.sh \"$d/runtraffic.sh\" || true; \\",
+			"\tdone",
+			"",
+			"# If the base image already provides `ip`, keep it; otherwise inject busybox as `ip`.",
+			"# We avoid any RUN that relies on networked package repositories.",
+			"COPY --from=coretg_iptools /bin/busybox /usr/local/coretg/bin/busybox",
+			"",
+			"RUN set -eu; \\",
+			f"\techo '[coretg-wrapper] STRICT=0 mode=busybox base={base_image}' >&2; \\",
+			"\tchmod 0755 /usr/local/coretg/bin/busybox; \\",
+			"\tif command -v ip >/dev/null 2>&1; then \\",
+			"\t\techo '[coretg-wrapper] ip already present; leaving base image ip as-is' >&2; \\",
+			"\t\texit 0; \\",
+			"\tfi; \\",
+			"\tmkdir -p /usr/sbin /sbin; \\",
+			"\t# Provide `ip` on common paths (CORE scripts typically call `ip` directly). \\",
+			"\tln -sf /usr/local/coretg/bin/busybox /usr/sbin/ip; \\",
+			"\tln -sf /usr/local/coretg/bin/busybox /sbin/ip; \\",
+			"\t/usr/sbin/ip -V >/dev/null 2>&1 || true",
+		]
+		if extra_pip:
+			pkgs = ' '.join(extra_pip)
+			lines += [
+				"",
+				"# coretg: optional python deps (installed at build time on host)",
+				"RUN set -eu; \\",
+				f"\techo '[coretg-wrapper] python_deps={pkgs}' >&2; \\",
+				"\tPY=''; \\",
+				"\tif command -v python >/dev/null 2>&1; then PY=python; fi; \\",
+				"\tif [ -z \"$PY\" ] && command -v python3 >/dev/null 2>&1; then PY=python3; fi; \\",
+				"\tif [ -z \"$PY\" ]; then echo '[coretg-wrapper] python not found; cannot install python deps' >&2; exit 1; fi; \\",
+				f"\t$PY -c 'import {extra_pip[0]}' >/dev/null 2>&1 && echo '[coretg-wrapper] python deps already present' >&2 && exit 0 || true; \\",
+				"\tif $PY -m pip --version >/dev/null 2>&1; then \\",
+				f"\t\t$PY -m pip install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+				"\telif command -v pip3 >/dev/null 2>&1; then \\",
+				f"\t\tpip3 install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+				"\telif command -v pip >/dev/null 2>&1; then \\",
+				f"\t\tpip install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+				"\telif command -v apt-get >/dev/null 2>&1; then \\",
+				"\t\tapt-get update; \\",
+				"\t\tapt-get install -y --no-install-recommends python3-pip; \\",
+				f"\t\tpython3 -m pip install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+				"\t\trm -rf /var/lib/apt/lists/*; \\",
+				"\telif command -v apk >/dev/null 2>&1; then \\",
+				"\t\tapk add --no-cache py3-pip; \\",
+				f"\t\tpython3 -m pip install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+				"\telse \\",
+				"\t\techo '[coretg-wrapper] pip not available; cannot install python deps' >&2; exit 1; \\",
+				"\tfi",
+			]
+		content = "\n".join(lines) + "\n"
+		with open(dockerfile_path, 'w', encoding='utf-8') as f:
+			f.write(content)
+		return dockerfile_path
+
+	# Strict by default: fail wrapper build when we cannot install baseline tools
+	# and the base image doesn't already include them. This prevents silent starts
+	# where CORE services later fail mysteriously.
+	try:
+		strict = str(os.getenv('CORETG_IPROUTE2_WRAPPER_STRICT') or '').strip().lower()
+		strict_enabled = True if strict == '' else (strict not in ('0', 'false', 'no', 'off'))
+	except Exception:
+		strict_enabled = True
+	install_suffix = '' if strict_enabled else ' || true'
+	update_suffix = '' if strict_enabled else ' || true'
+	strict_note = 'STRICT=1' if strict_enabled else 'STRICT=0'
+	extra_apt = []
+	try:
+		if isinstance(extra_apt_packages, list):
+			extra_apt = [str(x).strip() for x in extra_apt_packages if x is not None and str(x).strip()]
+	except Exception:
+		extra_apt = []
+	extra_apt_suffix = (' ' + ' '.join(extra_apt)) if extra_apt else ''
+	# Many vuln images set a non-root USER by default (e.g., airflow). The wrapper
+	# needs root privileges to install iproute2 tooling.
+	lines = [
+		f"FROM {base_image}",
+		"",
+		"USER 0",
+		"",
+		"# Preserve the base image WORKDIR; some upstream services rely on it.",
+		"",
+		"# CORE may chmod relative service script paths (e.g., defaultroute.sh, runtraffic.sh).",
+		"# Ensure those relative names resolve from common runtime working directories.",
+		"RUN set -eu; \\",
+		"\tfor d in / /root /tmp /home /home/core /home/ubuntu /app /opt /workspace /work; do \\",
+		"\t\tmkdir -p \"$d\" 2>/dev/null || true; \\",
+		"\t\tln -sfn /defaultroute.sh \"$d/defaultroute.sh\" || true; \\",
+		"\t\tln -sfn /runtraffic.sh \"$d/runtraffic.sh\" || true; \\",
+		"\tdone",
+		"",
+		"",
+		# Avoid `set -x` to reduce giant build logs; keep `-e` and `-u`.
+		"RUN set -eu; \\",
+		f"\techo '[coretg-wrapper] {strict_note} base={base_image}' >&2; \\",
+		"\t# If ip already exists in the base image, we don't need a package manager. \\",
+		"\tif command -v ip >/dev/null 2>&1; then \\",
+		"\t\techo '[coretg-wrapper] ip already present; skipping install' >&2; \\",
+		"\texit 0; \\",
+		"\tfi; \\",
+		"\tif command -v apt-get >/dev/null 2>&1; then \\",
+		# Use conservative timeouts/retries so builds don't hang on offline CORE VMs.
+		"\t\tAPT_OPTS='-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15'; \\",
+		f"\t\tif ! apt-get $APT_OPTS update{update_suffix}; then \\",
+		"\t\t\trm -f /etc/apt/sources.list; \\",
+		"\t\t\trm -f /etc/apt/sources.list.d/*.list || true; \\",
+		"\t\t\tprintf '%s\\n' \\",
+		"\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian-security jessie/updates main\" \\",
+		"\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian jessie main\" \\",
+		"\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian stretch main\" \\",
+		"\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian-security stretch/updates main\" \\",
+		"\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian buster main\" \\",
+		"\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian buster-updates main\" \\",
+		"\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian-security buster/updates main\" > /etc/apt/sources.list; \\",
+		f"\t\t\tapt-get $APT_OPTS -o Acquire::Check-Valid-Until=false update{update_suffix}; \\",
+		"\t\tfi; \\",
+		f"\t\tapt-get install -y --no-install-recommends ca-certificates curl iproute2 ethtool iptables iputils-ping net-tools procps{extra_apt_suffix}{install_suffix}; \\",
+		"\t\trm -rf /var/lib/apt/lists/*; \\",
+		"\telif command -v apk >/dev/null 2>&1; then \\",
+		f"\t\tapk add --no-cache ca-certificates curl iproute2 ethtool iptables iputils net-tools procps{install_suffix}; \\",
+		"\telif command -v dnf >/dev/null 2>&1; then \\",
+		f"\t\tdnf install -y iproute ethtool iptables iputils net-tools procps ca-certificates curl{install_suffix}; \\",
+		"\t\tdnf clean all || true; \\",
+		"\telif command -v yum >/dev/null 2>&1; then \\",
+		f"\t\tyum install -y iproute ethtool iptables iputils net-tools procps ca-certificates curl{install_suffix}; \\",
+		"\t\tyum clean all || true; \\",
+		"\telse \\",
+		"\t\techo \"[coretg-wrapper] no supported package manager found\" >&2; \\",
+		f"\t\t{'exit 1' if strict_enabled else 'exit 0'}; \\",
+		"\tfi; \\",
+		("\tcommand -v ip >/dev/null 2>&1" if strict_enabled else "\ttrue"),
+	]
+	if is_airflow:
+		lines += [
+			"",
+			"ENV HOME=/home/airflow",
+			"ENV PYTHONUSERBASE=/home/airflow/.local",
+			"ENV PATH=/home/airflow/.local/bin:$PATH",
+		]
+	if extra_pip:
+		pkgs = ' '.join(extra_pip)
+		lines += [
+			"",
+			"# coretg: optional python deps (installed at build time on host)",
+			"RUN set -eu; \\",
+			f"\techo '[coretg-wrapper] python_deps={pkgs}' >&2; \\",
+			"\tPY=''; \\",
+			"\tif command -v python >/dev/null 2>&1; then PY=python; fi; \\",
+			"\tif [ -z \"$PY\" ] && command -v python3 >/dev/null 2>&1; then PY=python3; fi; \\",
+			"\tif [ -z \"$PY\" ]; then echo '[coretg-wrapper] python not found; cannot install python deps' >&2; exit 1; fi; \\",
+			f"\t$PY -c 'import {extra_pip[0]}' >/dev/null 2>&1 && echo '[coretg-wrapper] python deps already present' >&2 && exit 0 || true; \\",
+			"\tif $PY -m pip --version >/dev/null 2>&1; then \\",
+			f"\t\t$PY -m pip install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+			"\telif command -v pip3 >/dev/null 2>&1; then \\",
+			f"\t\tpip3 install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+			"\telif command -v pip >/dev/null 2>&1; then \\",
+			f"\t\tpip install --no-cache-dir{' --user' if is_airflow else ''} {pkgs}; \\",
+			"\telse \\",
+			"\t\techo '[coretg-wrapper] pip not available; cannot install python deps' >&2; exit 1; \\",
+			"\tfi",
+		]
+	content = "\n".join(lines) + "\n"
+	with open(dockerfile_path, 'w', encoding='utf-8') as f:
+		f.write(content)
+	return dockerfile_path
+
+
+def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: logging.Logger, node_name: str, svc_key: str) -> bool:
+	"""Best-effort ensure build-only service installs iproute2.
+
+	When a compose service has `build:` but no `image:`, the wrapper strategy (which
+	rewrites `image` + `build` to a wrapper context) can't be applied without losing
+	the original build context. Instead, we patch the copied build context Dockerfile
+	(in /tmp/vulns/... produced by _copy_build_contexts) to install iproute2.
+
+	Returns True if we modified the Dockerfile.
+	"""
+	try:
+		build = svc.get('build') if isinstance(svc, dict) else None
+		ctx = None
+		dockerfile_rel = 'Dockerfile'
+		if isinstance(build, dict):
+			ctx = build.get('context')
+			df = build.get('dockerfile')
+			if isinstance(df, str) and df.strip():
+				dockerfile_rel = df.strip()
+		elif isinstance(build, str):
+			ctx = build.strip()
+		if not isinstance(ctx, str) or not ctx.strip():
+			return False
+		ctx = ctx.strip()
+		if not os.path.isdir(ctx):
+			return False
+
+		# Resolve Dockerfile path (relative to context by compose convention).
+		dockerfile_path = dockerfile_rel
+		if not os.path.isabs(dockerfile_path):
+			dockerfile_path = os.path.join(ctx, dockerfile_path)
+		if not os.path.isfile(dockerfile_path):
+			return False
+
+		try:
+			text = open(dockerfile_path, 'r', encoding='utf-8', errors='ignore').read()
+		except Exception:
+			return False
+		low = text.lower()
+		if 'iproute2' in low or '\nrun ip ' in low or ' command -v ip ' in low:
+			# Still ensure NET_ADMIN for DefaultRoute.
+			svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
+			svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
+			return False
+
+		entrypoint_paths: List[str] = []
+		try:
+			seen_paths: Set[str] = set()
+			for match in re.finditer(r'^\s*(?:ENTRYPOINT|CMD)\s+(.+)$', text, flags=re.IGNORECASE | re.MULTILINE):
+				payload = str(match.group(1) or '')
+				for path_match in re.findall(r'(/[^"\'\s,\]]+\.sh)\b', payload):
+					path_text = str(path_match or '').strip()
+					if not path_text or path_text in seen_paths:
+						continue
+					seen_paths.add(path_text)
+					entrypoint_paths.append(path_text)
+		except Exception:
+			entrypoint_paths = []
+
+		# Keep this best-effort by default; allow strict mode to fail builds when desired.
+		try:
+			strict = str(os.getenv('CORETG_IPROUTE2_WRAPPER_STRICT') or '').strip().lower()
+			strict_enabled = True if strict == '' else (strict not in ('0', 'false', 'no', 'off'))
+		except Exception:
+			strict_enabled = True
+		install_suffix = '' if strict_enabled else ' || true'
+		update_suffix = '' if strict_enabled else ' || true'
+		entrypoint_fixup = ''
+		if entrypoint_paths:
+			parts: List[str] = []
+			for entrypoint_path in entrypoint_paths:
+				quoted = shlex.quote(entrypoint_path)
+				parts.append(f"\tif [ -f {quoted} ]; then chmod 0755 {quoted}; fi; \\\n")
+			entrypoint_fixup = ''.join(parts)
+
+		snippet = (
+			"\n\n"
+			"# coretg: ensure iproute2 present for CORE DefaultRoute / network scripts\n"
+			"USER 0\n"
+			"RUN set -eu; \\\n"
+			+ entrypoint_fixup
+			+ "\tif command -v ip >/dev/null 2>&1; then exit 0; fi; \\\n"
+			+ "\tif command -v apt-get >/dev/null 2>&1; then \\\n"
+			+ "\t\tAPT_OPTS='-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15'; \\\n"
+				+ f"\t\tif ! apt-get $APT_OPTS update{update_suffix}; then \\\n"
+				+ "\t\t\trm -f /etc/apt/sources.list; \\\n"
+				+ "\t\t\trm -f /etc/apt/sources.list.d/*.list || true; \\\n"
+				+ "\t\t\tprintf '%s\\n' \\\n"
+				+ "\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian-security jessie/updates main\" \\\n"
+				+ "\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian jessie main\" \\\n"
+				+ "\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian stretch main\" \\\n"
+				+ "\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian-security stretch/updates main\" \\\n"
+				+ "\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian buster main\" \\\n"
+				+ "\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian buster-updates main\" \\\n"
+				+ "\t\t\t\t\"deb [trusted=yes] http://archive.debian.org/debian-security buster/updates main\" > /etc/apt/sources.list; \\\n"
+				+ f"\t\t\tapt-get $APT_OPTS -o Acquire::Check-Valid-Until=false update{update_suffix}; \\\n"
+				+ "\t\tfi; \\\n"
+			f"\t\tapt-get install -y --no-install-recommends ca-certificates curl iproute2 ethtool iptables iputils-ping net-tools procps python3{install_suffix}; \\\n"
+			"\t\trm -rf /var/lib/apt/lists/*; \\\n"
+			"\telif command -v apk >/dev/null 2>&1; then \\\n"
+			f"\t\tapk add --no-cache ca-certificates curl iproute2 ethtool iptables iputils net-tools procps python3{install_suffix}; \\\n"
+			"\telif command -v dnf >/dev/null 2>&1; then \\\n"
+			f"\t\tdnf install -y iproute ethtool iptables iputils net-tools procps python3 ca-certificates curl{install_suffix}; \\\n"
+			"\t\tdnf clean all || true; \\\n"
+			"\telif command -v yum >/dev/null 2>&1; then \\\n"
+			f"\t\tyum install -y iproute ethtool iptables iputils net-tools procps python3 ca-certificates curl{install_suffix}; \\\n"
+			"\t\tyum clean all || true; \\\n"
+			"\telse \\\n"
+			+ (
+				"\t\techo '[coretg] no package manager found for iproute2 install' >&2; exit 1; \\\n"
+				if strict_enabled
+				else "\t\techo '[coretg] no package manager found for iproute2 install' >&2; exit 0; \\\n"
+			)
+			+ "\tfi; \\\n"
+			+ ("\tcommand -v ip >/dev/null 2>&1\n" if strict_enabled else "\ttrue\n")
+		)
+
+		try:
+			with open(dockerfile_path, 'a', encoding='utf-8') as f:
+				f.write(snippet)
+		except Exception:
+			return False
+
+		# Ensure NET_ADMIN for DefaultRoute.
+		svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
+		svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
+		try:
+			logger.info('[vuln] injected iproute2 install into build-only Dockerfile node=%s service=%s dockerfile=%s', node_name, svc_key, dockerfile_path)
+		except Exception:
+			pass
+		return True
+	except Exception:
+		return False
+
+
+def _parse_compose_ports_entry(entry: object) -> List[Tuple[str, int]]:
+	"""Convert a docker-compose ports entry into one or more (protocol, port) tuples."""
+	results: List[Tuple[str, int]] = []
+	try:
+		if isinstance(entry, int):
+			if entry > 0:
+				results.append(("tcp", int(entry)))
+			return results
+		if isinstance(entry, str):
+			text = entry.strip()
+			if not text:
+				return results
+			if '#' in text:
+				text = text.split('#', 1)[0].strip()
+			if not text:
+				return results
+			if text.startswith('{'):
+				return results
+			proto = 'tcp'
+			if ':' in text:
+				parts = text.split(':')
+				text = parts[-1].strip()
+			if '/' in text:
+				value, proto_part = text.split('/', 1)
+				text = value.strip()
+				proto = (proto_part or 'tcp').strip().lower() or 'tcp'
+			else:
+				proto = 'tcp'
+			port = int(text)
+			if port > 0:
+				results.append((proto, port))
+			return results
+		if isinstance(entry, dict):
+			proto = str(entry.get('protocol') or entry.get('mode') or 'tcp').strip().lower() or 'tcp'
+			for key in ('target', 'container_port', 'port'):
+				value = entry.get(key)
+				if value in (None, ''):
+					continue
+				text = str(value).strip()
+				if '/' in text:
+					text = text.split('/', 1)[0].strip()
+				try:
+					port = int(text)
+				except Exception:
+					continue
+				if port > 0:
+					results.append((proto, port))
+					break
+	except Exception:
+		return []
+	return results
+
+
+def extract_compose_ports(rec: Dict[str, str], out_base: str = "/tmp/vulns", compose_name: str = 'docker-compose.yml') -> List[Dict[str, object]]:
+	"""Best-effort extraction of container ports for a docker-compose vulnerability record."""
+	if not rec:
+		return []
+	name_key = (rec.get('Name') or rec.get('name') or '').strip()
+	path_key = (rec.get('Path') or rec.get('path') or '').strip()
+	cache_key = (name_key, path_key)
+	if cache_key in _COMPOSE_PORT_CACHE:
+		return list(_COMPOSE_PORT_CACHE[cache_key])
+
+	ports: List[Dict[str, object]] = []
+	compose_path = rec.get('compose_path')
+	if compose_path and not os.path.isabs(compose_path):
+		compose_path = os.path.abspath(compose_path)
+	if not compose_path or not os.path.exists(compose_path):
+		safe = _safe_name(name_key or 'vuln') or 'vuln'
+		base_dir = os.path.join(out_base, safe)
+		os.makedirs(base_dir, exist_ok=True)
+		if path_key and os.path.exists(path_key):
+			compose_path = path_key
+		else:
+			candidates = _compose_candidates(base_dir)
+			if candidates:
+				compose_path = candidates[0]
+			else:
+				raw_url = _guess_compose_raw_url(path_key, compose_name=compose_name)
+				if raw_url:
+					dest = os.path.join(base_dir, compose_name)
+					if _download_to(raw_url, dest):
+						compose_path = dest
+				elif path_key:
+					dest = os.path.join(base_dir, compose_name)
+					if _download_to(path_key, dest):
+						compose_path = dest
+	if not compose_path or not os.path.exists(compose_path):
+		logger.debug("extract_compose_ports: compose file unavailable for %s (path=%s)", cache_key, compose_path)
+		_COMPOSE_PORT_CACHE[cache_key] = ports
+		return []
+
+	if yaml is None:
+		logger.debug("extract_compose_ports: PyYAML unavailable; skipping port extraction for %s", cache_key)
+		_COMPOSE_PORT_CACHE[cache_key] = ports
+		return []
+
+	try:
+		with open(compose_path, 'r', encoding='utf-8') as f:
+			compose_obj = yaml.safe_load(f) or {}
+	except Exception as exc:
+		logger.debug("extract_compose_ports: failed to parse %s: %s", compose_path, exc)
+		_COMPOSE_PORT_CACHE[cache_key] = ports
+		return []
+
+	services = compose_obj.get('services') if isinstance(compose_obj, dict) else None
+	if not isinstance(services, dict):
+		_COMPOSE_PORT_CACHE[cache_key] = ports
+		return []
+	seen: Set[Tuple[str, int]] = set()
+	for svc_name, svc_body in services.items():
+		if not isinstance(svc_body, dict):
+			continue
+		# Prefer ports, but fall back to expose for sanitized compose (network_mode none).
+		fields: List[object] = []
+		ports_field = svc_body.get('ports')
+		if ports_field:
+			fields.append(ports_field)
+		expose_field = svc_body.get('expose')
+		if expose_field:
+			fields.append(expose_field)
+		if not fields:
+			continue
+		for field in fields:
+			entries = field if isinstance(field, list) else [field]
+			for entry in entries:
+				for proto, port in _parse_compose_ports_entry(entry):
+					key = (proto, port)
+					if key in seen:
+						continue
+					seen.add(key)
+					ports.append({"protocol": proto, "port": port, "service": svc_name})
+
+	_COMPOSE_PORT_CACHE[cache_key] = ports
+	if ports and 'compose_ports' not in rec:
+		try:
+			rec['compose_ports'] = list(ports)
+		except Exception:
+			pass
+	return list(ports)
+
+
+def prepare_compose_for_nodes(selected: List[Dict[str, str]], node_names: List[str], out_base: str = "/tmp/vulns", compose_name: str = 'docker-compose.yml') -> List[str]:
+	"""Prepare per-node docker-compose files for selected docker-compose vulnerabilities.
+
+	Steps:
+	- Identify the first selected item that appears to reference a docker-compose catalog entry
+	- Download its compose file to out_base/<safe_name>/<compose_name> (best-effort)
+	- For each node name, copy to out_base/docker-compose-<node>.yml and set `container_name: <node>` for all services
+
+ 	Returns a list of per-node compose file paths created.
+	"""
+	created: List[str] = []
+	if not selected or not node_names:
+		return created
+
+
+def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out_base: str = "/tmp/vulns", compose_name: str = 'docker-compose.yml') -> List[str]:
+	"""Backward compatible helper used by CLI to build per-node compose files.
+
+	Accepts a mapping of node name -> vulnerability record and produces
+	docker-compose-<node>.yml for each record whose Type is docker-compose.
+	"""
+	created: List[str] = []
+	if not name_to_vuln:
+		return created
+	os.makedirs(out_base, exist_ok=True)
+
+	def _rec_get(rec: Dict[str, str], *keys: str) -> str:
+		for k in keys:
+			try:
+				v = rec.get(k)
+			except Exception:
+				v = None
+			if v is None:
+				continue
+			try:
+				s = str(v)
+			except Exception:
+				continue
+			if s is not None:
+				return s
+		return ""
+
+	def _is_docker_compose_record(rec: Dict[str, str]) -> bool:
+		try:
+			# Accept multiple key spellings and normalize
+			vtype = _rec_get(rec, 'Type', 'type', 'v_type', 'VType')
+			return _norm_type(vtype) == 'docker-compose'
+		except Exception:
+			return False
+
+	def _is_truthy(value: object) -> bool:
+		try:
+			v = str(value or '').strip().lower()
+		except Exception:
+			v = ''
+		return v in ('1', 'true', 'yes', 'y', 'on')
+
+	def _effective_vuln_flag_type(rec: Dict[str, str]) -> str:
+		try:
+			raw = str(rec.get('FlagType') or rec.get('flag_type') or '').strip().lower()
+		except Exception:
+			raw = ''
+		if raw:
+			return raw
+		try:
+			env_raw = str(os.getenv('CORETG_VULN_FLAG_TYPE') or '').strip().lower()
+		except Exception:
+			env_raw = ''
+		return env_raw or 'text'
+
+	def _ensure_vuln_text_flag_source(node_name: str) -> tuple[str, str]:
+		node_slug = _safe_name(str(node_name or '').strip()) or 'node'
+		source_dir = os.path.join(out_base, 'flag_injects', node_slug)
+		os.makedirs(source_dir, exist_ok=True)
+		flag_path = os.path.join(source_dir, 'flag.txt')
+		needs_write = True
+		try:
+			needs_write = (not os.path.exists(flag_path)) or os.path.getsize(flag_path) <= 0
+		except Exception:
+			needs_write = True
+		if needs_write:
+			alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+			token = ''.join(random.choice(alphabet) for _ in range(24))
+			with open(flag_path, 'w', encoding='utf-8') as fh:
+				fh.write(f'FLAG{{{token}}}\n')
+		return source_dir, flag_path
+
+	def _set_container_name_for_selected_service(compose_obj: dict, node_name: str, prefer_service: Optional[str] = None) -> dict:
+		"""Set container_name for the selected service to the CORE node name (best-effort).
+
+		NOTE: Some COREEMU deployments require container_name to match the CORE node
+		name for docker-node management to work reliably.
+
+		You can opt out by setting `CORETG_COMPOSE_SET_CONTAINER_NAME=0`.
+		"""
+		try:
+			if not isinstance(compose_obj, dict):
+				return compose_obj
+			services = compose_obj.get('services')
+			if not isinstance(services, dict) or not services:
+				return compose_obj
+			svc_key = _select_service_key(compose_obj, prefer_service=prefer_service)
+			if not svc_key:
+				return compose_obj
+			svc = services.get(svc_key)
+			if not isinstance(svc, dict):
+				return compose_obj
+			svc['container_name'] = str(node_name)
+			return compose_obj
+		except Exception:
+			return compose_obj
+
+	def _ensure_service_named_as_node(compose_obj: dict, node_name: str, prefer_service: Optional[str] = None) -> dict:
+		"""Ensure compose has a service key exactly matching the CORE node name.
+
+		CORE docker nodes typically run: `docker compose up -d <node_name>`.
+		If the compose YAML only defines a generic service name (e.g. `generator`),
+		core-daemon fails with: `no such service: <node_name>`.
+
+		Strategy (best-effort):
+		- If `services[node_name]` exists: keep as-is.
+		- Else pick a source service (prefer_service, otherwise first/selected)
+		  and alias it under `node_name` (do not delete the original).
+		"""
+		try:
+			if not isinstance(compose_obj, dict):
+				return compose_obj
+			services = compose_obj.get('services')
+			if not isinstance(services, dict) or not services:
+				return compose_obj
+			node_key = str(node_name or '').strip()
+			if not node_key:
+				return compose_obj
+			if node_key in services:
+				# Even when the node-name service already exists, ensure container_name
+				# matches the CORE node name when enabled. CORE docker-node startup can
+				# rely on predictable container naming for PID discovery.
+				try:
+					if _compose_set_container_name_enabled() and isinstance(services.get(node_key), dict):
+						services.get(node_key)['container_name'] = node_key
+				except Exception:
+					pass
+				return compose_obj
+
+			src_key = None
+			if prefer_service:
+				ps = str(prefer_service).strip()
+				if ps and ps in services:
+					src_key = ps
+			if not src_key:
+				try:
+					src_key = _select_service_key(compose_obj, prefer_service=prefer_service)
+				except Exception:
+					src_key = None
+			if not src_key and len(services) == 1:
+				try:
+					src_key = next(iter(services.keys()))
+				except Exception:
+					src_key = None
+			if not src_key or src_key not in services:
+				return compose_obj
+
+			import copy as _copy
+			services[node_key] = _copy.deepcopy(services.get(src_key) or {})
+			try:
+				if _compose_set_container_name_enabled() and isinstance(services.get(node_key), dict):
+					services.get(node_key)['container_name'] = node_key
+			except Exception:
+				pass
+			return compose_obj
+		except Exception:
+			return compose_obj
+
+	def _compose_set_container_name_enabled() -> bool:
+		"""Whether to inject container_name into generated docker-compose files.
+
+		Default: enabled.
+		Disable by setting `CORETG_COMPOSE_SET_CONTAINER_NAME=0/false/off`.
+		"""
+		val = os.getenv('CORETG_COMPOSE_SET_CONTAINER_NAME')
+		if val is None:
+			return True
+		return str(val).strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+	def _escape_mako_dollars(text: str) -> str:
+		"""Escape Mako-sensitive `${...}` so they render literally in output.
+
+		Mako treats `${var}` as an expression and will raise NameError if undefined.
+		Use `${"${var}"}` so Mako renders a literal `${var}`.
+		This function also normalizes legacy `\\${...}` and `$${...}` forms.
+		"""
+		try:
+			import re as _re
+
+			safe_re = _re.compile(r'\$\{\s*([\"\'])\$\{[^}]*\}\1\s*\}')
+			stash: dict[str, str] = {}
+
+			def _stash(m) -> str:
+				idx = len(stash)
+				key = f"__CORETG_SAFE_MAKO_EXPR_{idx}__"
+				stash[key] = str(m.group(0))
+				return key
+
+			fixed = safe_re.sub(_stash, text)
+
+			def _wrap(m) -> str:
+				expr = str(m.group(1) or '')
+				if not expr:
+					return str(m.group(0))
+				return '${"${' + expr + '}"}'
+
+			# Normalize legacy escapes first, then convert remaining raw `${...}`.
+			fixed = _re.sub(r'\\+\$\{([^}]*)\}', _wrap, fixed)
+			fixed = _re.sub(r'\$\$\{([^}]*)\}', _wrap, fixed)
+			# Protect wrappers we just created so the next pass doesn't wrap them again.
+			fixed = safe_re.sub(_stash, fixed)
+			fixed = _re.sub(r'(?<!\$)\$\{([^}]*)\}', _wrap, fixed)
+
+			for key, original in stash.items():
+				fixed = fixed.replace(key, original)
+			return fixed
+		except Exception:
+			return text
+
+	def _resolve_compose_interpolations(text: str) -> str:
+		"""Resolve docker-compose `${VAR}` interpolation patterns to plain literals.
+
+		This is preferable to the Mako wrapper form `${"${VAR}"}` because docker-compose
+		rejects that wrapper as an invalid interpolation format.
+
+		Rules (best-effort):
+		- `${VAR}` -> env(VAR) or ''
+		- `${VAR:-default}` -> env(VAR) if set and non-empty else default
+		- `${VAR-default}` -> env(VAR) if set else default
+		- `${VAR:?msg}`/`${VAR?msg}` -> env(VAR) or ''
+		- `${VAR:+alt}`/`${VAR+alt}` -> alt when set
+		Also unwraps legacy wrapper form `${"${VAR}"}` back to `${VAR}` before resolving.
+		"""
+		try:
+			import re as _re
+			if not text or '${' not in text:
+				return text
+
+			def _hostname_default() -> str:
+				try:
+					import socket as _socket
+					return str(_socket.gethostname() or '')
+				except Exception:
+					return ''
+
+			def _resolve_expr(expr: str) -> str:
+				inner = str(expr or '').strip()
+				m = _re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$', inner)
+				if not m:
+					return ''
+				var = str(m.group(1) or '').strip()
+				tail = str(m.group(2) or '')
+				op = None
+				arg = ''
+				if tail.startswith(':-'):
+					op = ':-'; arg = tail[2:]
+				elif tail.startswith(':?'):
+					op = ':?'; arg = tail[2:]
+				elif tail.startswith(':+'):
+					op = ':+'; arg = tail[2:]
+				elif tail.startswith('-'):
+					op = '-'; arg = tail[1:]
+				elif tail.startswith('?'):
+					op = '?'; arg = tail[1:]
+				elif tail.startswith('+'):
+					op = '+'; arg = tail[1:]
+				arg = arg.lstrip() if arg else ''
+				try:
+					is_set = var in os.environ
+					val = os.environ.get(var)
+				except Exception:
+					is_set = False
+					val = None
+				val_str = str(val) if val is not None else ''
+				nonempty = bool(val_str)
+				if op is None:
+					if is_set:
+						return val_str
+					if var == 'HOSTNAME':
+						return _hostname_default()
+					return ''
+				if op == ':-':
+					return val_str if nonempty else str(arg)
+				if op == '-':
+					return val_str if is_set else str(arg)
+				if op in (':?', '?'):
+					return val_str if (nonempty if op == ':?' else is_set) else ''
+				if op in (':+', '+'):
+					return str(arg) if (nonempty if op == ':+' else is_set) else ''
+				return val_str
+
+			out = text
+			# Mako hazard: docker-compose uses `$${VAR}` to escape a literal `$`.
+			# But Mako will still see `${VAR}` starting at the second `$` and raise
+			# NameError("Undefined"). Rewrite `$${VAR}` to `$VAR` so shells inside the
+			# container can still expand it, without braces.
+			try:
+				out = _re.sub(r'\$\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}', r'$\1', out)
+			except Exception:
+				pass
+			# Unwrap wrapper forms: ${"${VAR}"} -> ${VAR}
+			wrapper_re = _re.compile(r"\$\{\s*(?:\\)?(['\"])\s*\$\{([^}]*)\}\s*(?:\\)?\1\s*\}")
+			for _ in range(5):
+				out2 = wrapper_re.sub(lambda m: '${' + str(m.group(2) or '') + '}', out)
+				if out2 == out:
+					break
+				out = out2
+			# Resolve remaining ${...}
+			token_re = _re.compile(r'(?<!\$)\$\{([^}]*)\}')
+			for _ in range(3):
+				if '${' not in out:
+					break
+				out2 = token_re.sub(lambda m: _resolve_expr(m.group(1) or ''), out)
+				if out2 == out:
+					break
+				out = out2
+			# Final safety: remove any remaining `${...}` tokens so core-daemon Mako
+			# rendering cannot fail.
+			try:
+				if '${' in out:
+					out = _re.sub(r'\$\{[^}]*\}', '', out)
+			except Exception:
+				pass
+			return out
+		except Exception:
+			return text
+
+	def _escape_core_printf_percents(text: str) -> str:
+		"""Escape `%` so CORE's `printf "..." >> docker-compose.yml` writes literal percents.
+
+		CORE (core-daemon) writes rendered docker-compose templates using a shell printf
+		format string. Any unescaped `%` in the compose content is interpreted as a
+		printf directive and can fail (e.g. `%Y` in `date +"%Y-%m-%d"`).
+
+		We rewrite single `%` to `%%` (printf escapes) while preserving existing `%%`.
+		"""
+		try:
+			import re as _re
+			return _re.sub(r'(?<!%)%(?!%)', '%%', text)
+		except Exception:
+			return text
+
+	def _escape_core_printf_backslashes(text: str) -> str:
+		"""Escape backslashes so CORE's host-side printf doesn't interpret sequences like `\n`.
+
+		CORE writes rendered docker-compose templates via a shell `printf "<content>"`.
+		That means both the shell and printf can interpret backslashes, which can inject
+		newlines mid-line (e.g. `\n`) and corrupt YAML indentation.
+
+		We pre-escape each literal backslash (`\\`) to `\\\\` so that after shell double-quote
+		processing and printf escape handling, the written compose contains the original
+		single backslash.
+		"""
+		try:
+			# Replace a single backslash with 4 backslashes.
+			# This prevents CORE's host-side printf from interpreting sequences like `\n`
+			# mid-line, which can corrupt YAML indentation.
+			return text.replace('\\', '\\\\' * 2)
+		except Exception:
+			return text
+
+	def _yaml_dump_literal_multiline(data: object) -> str:
+		"""Dump YAML while forcing literal block style for multiline strings.
+
+		Why: PyYAML often serializes multiline strings using `\n` escape sequences inside
+		double-quoted scalars. Our CORE host-side printf escaping must escape backslashes,
+		which turns `\n` into `\\n`, and that then reaches containers as a literal
+		backslash-n (breaking bash conditionals like `then\\n`).
+
+		By forcing multiline strings to use a literal block scalar (`|`), the dumped YAML
+		contains real newlines instead of `\n` escape sequences, so backslash-escaping
+		does not corrupt the command.
+		"""
+		try:
+			class _CoreTGYamlDumper(yaml.SafeDumper):
+				pass
+
+			def _repr_str(dumper, value: str):
+				style = '|' if '\n' in value else None
+				return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
+
+			_CoreTGYamlDumper.add_representer(str, _repr_str)
+			return yaml.dump(data, Dumper=_CoreTGYamlDumper, sort_keys=False)
+		except Exception:
+			# Fall back to PyYAML default behavior.
+			return yaml.safe_dump(data, sort_keys=False)
+	cache: Dict[Tuple[str, str], Tuple[Optional[dict], Optional[str], Optional[str], bool]] = {}
+	for node_name, rec in name_to_vuln.items():
+		if not _is_docker_compose_record(rec):
+			continue
+		# Normalize any catalog paths embedded from another host (e.g., GUI machine).
+		try:
+			_normalize_vuln_record_path(rec)
+		except Exception:
+			pass
+		try:
+			logger.info(
+				"[vuln] preparing docker-compose for node=%s name=%s path=%s",
+				node_name,
+				_rec_get(rec, 'Name', 'name', 'Title', 'title') or None,
+				_rec_get(rec, 'Path', 'path') or None,
+			)
+		except Exception:
+			pass
+		key = ((_rec_get(rec, 'Name', 'name', 'Title', 'title') or '').strip(), (_rec_get(rec, 'Path', 'path') or '').strip())
+		hint_text = str(rec.get('HintText') or '').strip()
+		base_compose_obj: Optional[dict]
+		src_path: Optional[str]
+		base_dir: Optional[str]
+		is_local: bool
+		if key in cache:
+			base_compose_obj, src_path, base_dir, is_local = cache[key]
+			try:
+				logger.debug(
+					"[vuln] compose cache hit key=%s src=%s has_yaml=%s",
+					key,
+					src_path,
+					base_compose_obj is not None,
+				)
+			except Exception:
+				pass
+		else:
+			safe = _safe_name(key[0] or 'vuln') or 'vuln'
+			base_dir = os.path.join(out_base, safe)
+			os.makedirs(base_dir, exist_ok=True)
+			src_path = os.path.join(base_dir, compose_name)
+			ok = False
+			is_local = False
+			# IMPORTANT: if the record points at a local compose file (common for flag-node-generators
+			# and Flow-injected artifacts), prefer that path over any previously cached/downloaded
+			# compose under out_base/<safe_name>/... . Otherwise we can accidentally reuse a stale
+			# compose and end up mounting empty directories.
+			try:
+				if key[1] and os.path.exists(key[1]):
+					logger.info("[vuln] copying compose from local path=%s dest=%s", key[1], src_path)
+					ok = _download_to(key[1], src_path)
+					is_local = True
+			except Exception:
+				ok = False
+				is_local = False
+			if not ok:
+				# Prefer already-downloaded compose artifacts under out_base/<safe_name>/... .
+				# This avoids re-fetching from the network on offline CORE hosts.
+				try:
+					dl_path = _compose_path_from_download(rec, out_base=out_base, compose_name=compose_name)
+					if dl_path and os.path.exists(dl_path):
+						src_path = dl_path
+						ok = True
+				except Exception:
+					pass
+			if not ok:
+				raw_url = _guess_compose_raw_url(key[1], compose_name=compose_name)
+				if raw_url:
+					logger.info("[vuln] fetching compose url=%s dest=%s", raw_url, src_path)
+					ok = _download_to(raw_url, src_path)
+			if not ok:
+				cache[key] = (None, None, None, False)
+				try:
+					logger.warning("[vuln] unable to retrieve compose for key=%s", key)
+				except Exception:
+					pass
+				continue
+			base_compose_obj = None
+			if yaml is not None:
+				try:
+					with open(src_path, 'r', encoding='utf-8') as f:
+						base_compose_obj = yaml.safe_load(f) or {}
+					# Track that we successfully parsed the chosen src_path.
+					# Copy referenced support files (e.g., ./web.rb, env files, build contexts)
+					# and rewrite relative bind sources to absolute paths under base_dir.
+					# Use the actual parsed compose location (src_path), falling back to key[1].
+					try:
+						src_dir = ''
+						if key[1] and os.path.exists(key[1]):
+							src_dir = os.path.dirname(os.path.abspath(key[1]))
+						elif src_path and os.path.exists(src_path):
+							src_dir = os.path.dirname(os.path.abspath(src_path))
+						if src_dir and base_dir:
+							base_compose_obj = _copy_support_paths_and_absolutize_binds(
+								base_compose_obj,
+								src_dir=src_dir,
+								base_dir=base_dir,
+							)
+							base_compose_obj = _copy_build_contexts(
+								base_compose_obj,
+								src_dir=src_dir,
+								base_dir=base_dir,
+							)
+							base_compose_obj = _repair_known_catalog_compose(
+								base_compose_obj,
+								rec,
+								src_dir=src_dir,
+								base_dir=base_dir,
+							)
+					except Exception:
+						pass
+					logger.debug(
+						"[vuln] parsed compose yaml key=%s services=%s",
+						key,
+						list((base_compose_obj.get('services') or {}).keys()),
+					)
+				except Exception:
+					# If the cached/downloaded compose under out_base is corrupt (eg partial download
+					# or non-YAML error page), fall back to parsing the original local path (key[1])
+					# when available.
+					logger.exception("[vuln] yaml parse error for compose path=%s", src_path)
+					base_compose_obj = None
+					try:
+						fallback_path = key[1] if (key[1] and os.path.exists(key[1])) else None
+						if fallback_path and os.path.abspath(fallback_path) != os.path.abspath(src_path):
+							with open(fallback_path, 'r', encoding='utf-8') as f2:
+								base_compose_obj = yaml.safe_load(f2) or {}
+							# Mark this as a local template so downstream can isolate binds/hints per node.
+							is_local = True
+							src_path_bad = src_path
+							src_path = fallback_path
+							# Best-effort self-heal the cached path for future runs.
+							try:
+								shutil.copy2(fallback_path, src_path_bad)
+							except Exception:
+								pass
+							try:
+								src_dir = os.path.dirname(os.path.abspath(fallback_path))
+								base_compose_obj = _copy_support_paths_and_absolutize_binds(
+									base_compose_obj,
+									src_dir=src_dir,
+									base_dir=base_dir,
+								)
+								base_compose_obj = _copy_build_contexts(
+									base_compose_obj,
+									src_dir=src_dir,
+									base_dir=base_dir,
+								)
+								base_compose_obj = _repair_known_catalog_compose(
+									base_compose_obj,
+									rec,
+									src_dir=src_dir,
+									base_dir=base_dir,
+								)
+							except Exception:
+								pass
+							try:
+								logger.warning(
+									"[vuln] recovered compose yaml parse using local path=%s (was=%s)",
+									fallback_path,
+									src_path_bad,
+								)
+							except Exception:
+								pass
+					except Exception:
+						# Keep best-effort behavior: callers may still copy the raw compose.
+						base_compose_obj = None
+			cache[key] = (base_compose_obj, src_path, base_dir, is_local)
+		out_path = os.path.join(out_base, f"docker-compose-{node_name}.yml")
+		# For troubleshooting: keep a copy of the source compose used for this node.
+		# This makes it easy to diff what CORE receives vs the original vulnerability compose.
+		orig_copy_path = os.path.join(out_base, f"docker-compose-{node_name}.orig.yml")
+		wrote = False
+		if base_compose_obj is not None and yaml is not None:
+			prefer = key[0]
+			# IMPORTANT: deep-copy to avoid mutating cached base YAML across nodes.
+			# A shallow copy here can leak per-node wrapper image/build modifications
+			# into subsequent nodes, which can cause Docker to attempt pulling the
+			# wrapper tag from docker.io (unauthorized) or wrap the wrapper.
+			obj = copy.deepcopy(base_compose_obj)
+			# If this compose comes from a local template, isolate bind mounts per node
+			# so we can materialize per-node hint files without cross-node collisions.
+			try:
+				if is_local and base_dir:
+					node_dir = os.path.join(base_dir, f"node-{_safe_name(node_name)}")
+					os.makedirs(node_dir, exist_ok=True)
+					obj = _rewrite_abs_paths_from_dir_to_dir(obj, from_dir=base_dir, to_dir=node_dir)
+					if hint_text:
+						try:
+							with open(os.path.join(node_dir, 'hint.txt'), 'w', encoding='utf-8') as hf:
+								hf.write(hint_text.strip() + "\n")
+						except Exception:
+							pass
+						try:
+							html_dir = os.path.join(node_dir, 'html')
+							if os.path.isdir(html_dir):
+								with open(os.path.join(html_dir, 'hint.txt'), 'w', encoding='utf-8') as hf2:
+									hf2.write(hint_text.strip() + "\n")
+						except Exception:
+							pass
+			except Exception:
+				pass
+			# Best-effort: copy the original compose file for diffing.
+			try:
+				if src_path and os.path.exists(src_path) and (not os.path.exists(orig_copy_path)):
+					shutil.copy2(src_path, orig_copy_path)
+			except Exception:
+				pass
+			# Avoid name collisions: ensure no hard-coded container_name remains in any service.
+			obj = _remove_container_names_all_services(obj)
+			# NOTE: do NOT force all injections to target the node-name service.
+			# Many callers/tests expect the original selected service (often the first
+			# service, e.g. `app`) to be modified in-place.
+			# We create/refresh the node-name alias AFTER modifications, just before dump.
+			# Track which service we modified (used later to alias it under node_name).
+			modified_service_key: Optional[str] = None
+			try:
+				modified_service_key = _select_service_key(obj, prefer_service=prefer)
+				if modified_service_key:
+					rec['compose_service_selected'] = str(modified_service_key)
+					logger.info("[vuln] compose selected service node=%s service=%s", node_name, modified_service_key)
+			except Exception:
+				modified_service_key = None
+			# Remove obsolete top-level 'version' key to suppress warnings.
+			try:
+				obj.pop('version', None)
+			except Exception:
+				pass
+			# Preserve original compose networking as-authored, but strip published host
+			# ports to avoid host-level collisions when multiple stacks run on the CORE VM.
+			# Flow flag-generators: mount generated artifacts into the container.
+			try:
+				art_dir = str(rec.get('ArtifactsDir') or '').strip()
+				mount_path = str(rec.get('ArtifactsMountPath') or '').strip() or '/flow_artifacts'
+				# Fallback: discover latest flow artifacts directory when ArtifactsDir is missing
+				# This handles the case when loading from saved XML where artifacts_dir wasn't persisted.
+				if not art_dir:
+					scenario_tag = str(rec.get('ScenarioTag') or '').strip()
+					art_dir = _discover_flow_artifacts_dir(scenario_tag=scenario_tag, node_name=node_name, out_base=out_base) or ''
+					if art_dir:
+						logger.info('[vuln] fallback discovered artifacts for node=%s: %s', node_name, art_dir)
+						rec['ArtifactsDir'] = art_dir
+						if not rec.get('InjectSourceDir'):
+							rec['InjectSourceDir'] = art_dir
+				if art_dir:
+					# Always emit labels so callers can inspect/copy artifacts even when mounting.
+					obj = _inject_service_labels(
+						obj,
+						{
+							'coretg.flow_artifacts.src': art_dir,
+							'coretg.flow_artifacts.dest': mount_path,
+						},
+						prefer_service=prefer,
+					)
+			except Exception:
+				pass
+
+			# Inject allowlisted files into the target container (copy by default).
+			source_dir = ''
+			outputs_manifest = ''
+			try:
+				inject_files = rec.get('InjectFiles') or rec.get('inject_files')
+				source_dir = str(rec.get('InjectSourceDir') or rec.get('ArtifactsDir') or '').strip()
+				outputs_manifest = str(rec.get('OutputsManifest') or '')
+				inject_candidate_paths_rec = rec.get('InjectCandidatePaths') or rec.get('inject_candidate_paths')
+				inject_candidate_paths_rec = [
+					str(p or '').strip()
+					for p in (inject_candidate_paths_rec if isinstance(inject_candidate_paths_rec, list) else [])
+					if str(p or '').strip().startswith('/')
+				] or None
+				if (not isinstance(inject_files, list) or not inject_files):
+					is_vuln_assignment = _is_truthy(rec.get('CoreTGVulnAssignment') or rec.get('coretg_vuln_assignment'))
+					if is_vuln_assignment and _effective_vuln_flag_type(rec) == 'text':
+						auto_source_dir, auto_flag_path = _ensure_vuln_text_flag_source(node_name)
+						source_dir = auto_source_dir
+						inject_files = ['flag.txt -> /tmp']
+						try:
+							logger.info(
+								"[vuln] auto-inject text flag for node=%s source=%s inject=%s",
+								node_name,
+								auto_flag_path,
+								inject_files,
+							)
+						except Exception:
+							pass
+				if not outputs_manifest:
+					# best-effort: look for outputs.json in run dir
+					run_dir = str(rec.get('RunDir') or '').strip()
+					cand = os.path.join(run_dir, 'outputs.json') if run_dir else ''
+					if cand and os.path.exists(cand):
+						outputs_manifest = cand
+					# Fallback: Flow artifacts often live under ArtifactsDir (or its parent)
+					# even when RunDir wasn't persisted.
+					if (not outputs_manifest) and source_dir:
+						try:
+							sd = source_dir
+							if not os.path.isabs(sd):
+								sd = os.path.abspath(sd)
+							cand2 = os.path.join(sd, 'outputs.json')
+							cand3 = os.path.join(os.path.dirname(sd), 'outputs.json')
+							if os.path.exists(cand2):
+								outputs_manifest = cand2
+							elif os.path.exists(cand3):
+								outputs_manifest = cand3
+						except Exception:
+							pass
+				if isinstance(inject_files, list) and inject_files and source_dir:
+					obj = _inject_copy_for_inject_files(
+						obj,
+						inject_files=[str(x) for x in inject_files if x is not None],
+						source_dir=source_dir,
+						outputs_manifest=outputs_manifest,
+						prefer_service=prefer,
+						inject_candidate_paths=inject_candidate_paths_rec,
+					)
+			except Exception as exc:
+				try:
+					logger.warning(
+						"[injects] failed to apply injects node=%s source_dir=%s outputs_manifest=%s err=%s",
+						node_name,
+						source_dir,
+						outputs_manifest,
+						exc,
+					)
+				except Exception:
+					pass
+			# Optional overlays for traffic/segmentation nodes (kept out of baseline template).
+			try:
+				def _truthy(val: object) -> bool:
+					v = str(val or '').strip().lower()
+					return v in ('1', 'true', 'yes', 'y', 'on')
+				enable_traffic = _truthy(rec.get('EnableTrafficMount') or rec.get('traffic_mount') or rec.get('is_traffic_node'))
+				enable_seg = _truthy(rec.get('EnableSegmentationMount') or rec.get('segmentation_mount') or rec.get('is_segmentation_node'))
+				if enable_traffic:
+					obj = _inject_service_bind_mount(obj, '/tmp/traffic:/tmp/traffic:ro', prefer_service=prefer)
+					obj = _inject_service_environment(obj, {'CORETG_TRAFFIC_NODE': '1'}, prefer_service=prefer)
+				if enable_seg:
+					obj = _inject_service_bind_mount(obj, '/tmp/segmentation:/tmp/segmentation:ro', prefer_service=prefer)
+					obj = _inject_service_environment(obj, {'CORETG_SEGMENTATION_NODE': '1'}, prefer_service=prefer)
+			except Exception:
+				pass
+			# Generic compose overlays (intended for flag-sequencer).
+			try:
+				extra_binds = rec.get('ExtraBinds') or rec.get('ExtraVolumes')
+				if isinstance(extra_binds, str):
+					# Allow semicolon-separated list
+					parts = [p.strip() for p in extra_binds.split(';') if p.strip()]
+					for b in parts:
+						obj = _inject_service_bind_mount(obj, b, prefer_service=prefer)
+				elif isinstance(extra_binds, list):
+					for b in extra_binds:
+						if b is None:
+							continue
+						obj = _inject_service_bind_mount(obj, str(b), prefer_service=prefer)
+			except Exception:
+				pass
+			try:
+				extra_env = rec.get('ExtraEnv') or rec.get('ExtraEnvironment')
+				if isinstance(extra_env, dict):
+					obj = _inject_service_environment(obj, {str(k): str(v) for k, v in extra_env.items()}, prefer_service=prefer)
+			except Exception:
+				pass
+			# Ensure the selected service uses a wrapper build that installs iproute2.
+			try:
+				skip_wrap_raw = str(rec.get('SkipIproute2Wrapper') or '').strip().lower()
+				skip_wrapper = skip_wrap_raw in ('1', 'true', 'yes', 'y', 'on')
+				if skip_wrapper:
+					raise RuntimeError('skip_iproute2_wrapper')
+				scenario_tag_raw = str(
+					rec.get('ScenarioTag')
+					or rec.get('scenario_tag')
+					or os.getenv('CORETG_SCENARIO_TAG')
+					or ''
+				).strip()
+				scenario_tag_safe = _safe_name(scenario_tag_raw) if scenario_tag_raw else 'scenario'
+				svc_key = _select_service_key(obj, prefer_service=prefer)
+				services = obj.get('services') if isinstance(obj, dict) else None
+				if svc_key and isinstance(services, dict) and isinstance(services.get(svc_key), dict):
+					svc = services.get(svc_key)
+					base_image = _normalize_known_catalog_service_image(rec, str(svc.get('image') or '').strip())
+					if base_image:
+						svc['image'] = base_image
+					# Some vulhub images (notably airflow) rely on an ENTRYPOINT of `airflow`
+					# with a bare subcommand (e.g. `command: webserver`). If ENTRYPOINT is not
+					# set/preserved, Docker will try to exec `webserver` directly and fail.
+					try:
+						img_low = base_image.lower().strip() if isinstance(base_image, str) else ''
+						cmd = svc.get('command')
+						cmd_token = None
+						if isinstance(cmd, str):
+							cmd_token = cmd.strip().split()[0] if cmd.strip() else None
+						elif isinstance(cmd, list) and cmd:
+							cmd_token = str(cmd[0]).strip() if str(cmd[0]).strip() else None
+						airflow_cmds = {
+							'webserver',
+							'scheduler',
+							'worker',
+							'flower',
+							'initdb',
+							'db',
+						}
+						if 'airflow' in img_low and cmd_token in airflow_cmds:
+							# CORE DockerNodes do not use docker-compose's default network/DNS once CORE
+							# attaches its own interfaces, so service-name DNS like `postgres` often
+							# fails. Make Airflow self-contained for CORE by using SQLite + SequentialExecutor
+							# and initializing the DB before starting the webserver.
+							try:
+								env = svc.get('environment')
+								if not isinstance(env, dict):
+									env = {}
+								# Force overrides: many upstream compose files set postgres/redis/celery defaults.
+								env['AIRFLOW__CORE__EXECUTOR'] = 'SequentialExecutor'
+								env['AIRFLOW__CORE__SQL_ALCHEMY_CONN'] = 'sqlite:////home/airflow/airflow.db'
+								env['AIRFLOW__CORE__LOAD_EXAMPLES'] = 'False'
+								# Remove celery/redis broker settings when present.
+								for k in [
+									'AIRFLOW__CELERY__BROKER_URL',
+									'AIRFLOW__CELERY__RESULT_BACKEND',
+									'CELERY_BROKER_URL',
+									'CELERY_RESULT_BACKEND',
+								]:
+									env.pop(k, None)
+								svc['environment'] = env
+							except Exception:
+								pass
+							# Avoid starting additional compose services that won't be reachable anyway.
+							try:
+								svc.pop('depends_on', None)
+								svc.pop('links', None)
+							except Exception:
+								pass
+							# Run initdb and then start webserver. Use sh so we don't rely on docker
+							# entrypoint semantics for airflow subcommands.
+							try:
+								svc['entrypoint'] = 'sh'
+								svc['command'] = ['-lc', 'airflow initdb && airflow webserver']
+							except Exception:
+								pass
+					except Exception:
+						pass
+					try:
+						# Some base images (e.g., ActiveMQ) rely on relative startup paths.
+						# Preserve their expected WORKDIR to avoid '/bin/activemq: not found'.
+						if base_image and 'activemq' in base_image.lower():
+							if not isinstance(svc.get('working_dir'), str) or not str(svc.get('working_dir')).strip():
+								svc['working_dir'] = '/opt/activemq'
+					except Exception:
+						pass
+					# If this compose already references our wrapper tag, don't wrap again.
+					# Double-wrapping can make Docker try to pull the wrapper tag as a base image.
+					already_wrapped = bool(base_image.startswith('coretg/') and base_image.endswith(':iproute2'))
+					if already_wrapped:
+						# Already wrapped: still apply best-effort runtime fixes to avoid
+						# immediate container exit (PID=0) and DefaultRoute chmod failures.
+						try:
+							labs = svc.get('labels')
+							if not isinstance(labs, dict):
+								labs = {}
+							base_hint = str(
+								labs.get('coretg.wrapper_effective_base_image')
+								or labs.get('coretg.wrapper_base_image')
+								or ''
+							).strip().lower()
+							cmd = svc.get('command')
+							cmd_token = None
+							if isinstance(cmd, str):
+								cmd_token = cmd.strip().split()[0] if cmd.strip() else None
+							elif isinstance(cmd, list) and cmd:
+								cmd_token = str(cmd[0]).strip() if str(cmd[0]).strip() else None
+							aif_cmds = {
+								'webserver',
+								'scheduler',
+								'worker',
+								'flower',
+								'initdb',
+								'db',
+							}
+							if base_hint and 'airflow' in base_hint and cmd_token in aif_cmds and svc.get('entrypoint') in (None, ''):
+								svc['entrypoint'] = 'airflow'
+						except Exception:
+							pass
+						try:
+							svc['pull_policy'] = 'never'
+						except Exception:
+							pass
+						try:
+							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
+							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
+						except Exception:
+							pass
+						try:
+							u = svc.get('user')
+							u_s = str(u).strip() if u is not None else ''
+							if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
+								svc.pop('user', None)
+								try:
+									logger.info('[vuln] removed non-root user (already wrapped) node=%s service=%s user=%s', node_name, svc_key, u_s)
+								except Exception:
+									pass
+						except Exception:
+							pass
+						try:
+							if _compose_force_root_workdir_enabled():
+								_maybe_force_service_workdir_root(svc)
+						except Exception:
+							pass
+					wrapper_bypass_reason = ''
+					try:
+						wrapper_bypass_reason = _known_catalog_iproute2_wrapper_bypass_reason(rec, base_image)
+					except Exception:
+						wrapper_bypass_reason = ''
+					if base_image and not already_wrapped:
+						if wrapper_bypass_reason:
+							try:
+								labs = svc.get('labels')
+								if not isinstance(labs, dict):
+									labs = {}
+								labs.setdefault('coretg.wrapper_bypassed_image', str(base_image))
+								labs.setdefault('coretg.wrapper_bypassed_reason', wrapper_bypass_reason)
+								svc['labels'] = labs
+							except Exception:
+								pass
+							try:
+								svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
+								svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
+							except Exception:
+								pass
+							try:
+								u = svc.get('user')
+								u_s = str(u).strip() if u is not None else ''
+								if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
+									svc.pop('user', None)
+							except Exception:
+								pass
+							try:
+								if _compose_force_root_workdir_enabled():
+									_maybe_force_service_workdir_root(svc)
+							except Exception:
+								pass
+							try:
+								logger.info('[vuln] bypassed iproute2 wrapper node=%s service=%s image=%s reason=%s', node_name, svc_key, base_image, wrapper_bypass_reason)
+							except Exception:
+								pass
+						else:
+							# Quay.io may require auth on some CORE VMs (401). If the upstream image is
+							# nfs-ganesha from Quay, switch to a public base and install Ganesha in the
+							# wrapper so we don't need to pull from Quay at all.
+							orig_base_image = base_image
+							extra_apt: Optional[List[str]] = None
+							try:
+								low = base_image.lower()
+							except Exception:
+								low = base_image
+							if isinstance(low, str) and low.startswith('quay.io/nfs-ganesha/nfs-ganesha'):
+								try:
+									override = str(os.getenv('CORETG_NFS_GANESHA_WRAPPER_BASE_IMAGE') or 'ubuntu:22.04').strip() or 'ubuntu:22.04'
+								except Exception:
+									override = 'ubuntu:22.04'
+								base_image = override
+								extra_apt = ['nfs-ganesha', 'nfs-ganesha-vfs']
+							wrap_dir = os.path.join(out_base, f"docker-wrap-{scenario_tag_safe}-{_safe_name(node_name)}")
+							_write_iproute2_wrapper(wrap_dir, base_image, extra_apt_packages=extra_apt)
+							# IMPORTANT: do NOT leave a `build:` stanza in the compose file that CORE will
+							# later run. core-daemon uses `docker compose up -d <node>` and will attempt to
+							# build (and therefore pull packages/images) during scenario startup.
+							#
+							# Instead, we rely on host-side preflight (executed on the CORE VM) to build the
+							# wrapper image ahead of time, then CORE only needs to start the already-built
+							# `image:` tag.
+							svc.pop('build', None)
+							svc['image'] = f"coretg/{scenario_tag_safe}-{_safe_name(node_name)}:iproute2"
+							# Preserve the original base image for later heuristics/diagnostics.
+							try:
+								labs = svc.get('labels')
+								if not isinstance(labs, dict):
+									labs = {}
+								# Provide wrapper build metadata for host-side preflight.
+								labs.setdefault('coretg.wrapper_build_context', str(wrap_dir))
+								labs.setdefault('coretg.wrapper_build_dockerfile', 'Dockerfile')
+								labs.setdefault('coretg.wrapper_build_network', 'host')
+								labs.setdefault('coretg.wrapper_base_image', str(orig_base_image))
+								if str(orig_base_image) != str(base_image):
+									labs.setdefault('coretg.wrapper_effective_base_image', str(base_image))
+								svc['labels'] = labs
+							except Exception:
+								pass
+							# Avoid pull warnings for local wrapper image.
+							svc['pull_policy'] = 'never'
+							# DefaultRoute needs iproute2 + NET_ADMIN in many images.
+							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
+							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
+							# IMPORTANT: Many upstream vuln stacks pin a non-root `user:` (e.g., airflow
+							# `50000:50000`). CORE's DefaultRoute service writes and chmods scripts inside
+							# the container using `docker exec <node> chmod ...`. When the container runs
+							# as non-root, this fails with "Operation not permitted".
+							#
+							# For CORE DockerNodes, prefer running the wrapped service as root.
+							try:
+								u = svc.get('user')
+								u_s = str(u).strip() if u is not None else ''
+								if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
+									svc.pop('user', None)
+									try:
+										logger.info('[vuln] removed non-root user for CORE docker wrapper node=%s service=%s user=%s', node_name, svc_key, u_s)
+									except Exception:
+										pass
+							except Exception:
+								pass
+							# CORE services often manipulate files using relative paths; force root workdir.
+							try:
+								if _compose_force_root_workdir_enabled():
+									_maybe_force_service_workdir_root(svc)
+							except Exception:
+								pass
+					else:
+						try:
+							svc_obj = services.get(svc_key) if isinstance(services, dict) else None
+							has_build = isinstance(svc_obj, dict) and bool(svc_obj.get('build'))
+						except Exception:
+							has_build = False
+						if has_build:
+							# Build-only: patch the build context Dockerfile to install iproute2.
+							try:
+								_inject_iproute2_into_build_only_service(svc, logger=logger, node_name=node_name, svc_key=str(svc_key))
+							except Exception:
+								logger.debug("[vuln] compose service has no image (build-only); iproute2 injection failed node=%s service=%s", node_name, svc_key)
+						else:
+							logger.warning("[vuln] compose service has no image; cannot inject iproute2 wrapper for node=%s service=%s", node_name, svc_key)
+			except Exception:
+				# Best-effort: wrapper injection is optional.
+				pass
+				# Even if wrapper injection is skipped, force root workdir when enabled.
+				try:
+					if _compose_force_root_workdir_enabled():
+						svc_key = _select_service_key(obj, prefer_service=prefer)
+						services = obj.get('services') if isinstance(obj, dict) else None
+						if svc_key and isinstance(services, dict) and isinstance(services.get(svc_key), dict):
+							_maybe_force_service_workdir_root(services.get(svc_key))
+				except Exception:
+					pass
+			# Apply published-port pruning late so overlays/wrappers can't reintroduce
+			# fixed host port publishing.
+			try:
+				force_no_network = _compose_force_no_network_enabled()
+				allow_internal_networking = _compose_allow_internal_networking_enabled()
+				if force_no_network and (not _compose_requires_internal_networking(obj) or not allow_internal_networking):
+					if _compose_requires_internal_networking(obj) and not allow_internal_networking:
+						logger.warning(
+							'[vuln] forcing network_mode=none for multi-service compose node=%s; '
+							'set CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 and CORETG_DOCKER_IFID_START=1 '
+							'only if this lab intentionally needs Docker-managed internal networking',
+							node_name,
+						)
+					obj = _force_compose_no_network(obj)
+				else:
+					obj = _prune_compose_published_ports(obj)
+			except Exception:
+				pass
+			try:
+				# Dump YAML to string first, then escape sequences that CORE's host-side printf
+				# would otherwise interpret.
+				# Ensure CORE can start this docker node by service name: docker compose up -d <node_name>.
+				# Do this late so the alias includes all wrapper/mount/port-pruning modifications.
+				try:
+					alias_src = None
+					try:
+						alias_src = str(rec.get('compose_service_selected') or '').strip() or None
+					except Exception:
+						alias_src = None
+					obj = _ensure_service_named_as_node(obj, node_name, prefer_service=alias_src or prefer)
+					# CORE should start the node-name service.
+					rec['compose_service'] = str(node_name)
+					# Optional: set container_name ONLY for the node-name service.
+					# This avoids duplicate container_name across multiple services (which can
+					# cause docker compose conflicts or cause CORE to inspect the wrong container).
+					try:
+						if _compose_set_container_name_enabled():
+							obj = _remove_container_names_all_services(obj)
+							services = obj.get('services') if isinstance(obj, dict) else None
+							if isinstance(services, dict) and isinstance(services.get(node_name), dict):
+								services.get(node_name)['container_name'] = str(node_name)
+					except Exception:
+						pass
+					# Compose node services can fail once during dependency warm-up (e.g., DB not ready).
+					# Keep them resilient so transient startup races do not become hard validation failures.
+					try:
+						services = obj.get('services') if isinstance(obj, dict) else None
+						node_svc = services.get(node_name) if isinstance(services, dict) else None
+						if isinstance(node_svc, dict):
+							node_svc['restart'] = 'unless-stopped'
+					except Exception:
+						pass
+				except Exception:
+					pass
+				# Keep base OS images alive (avoid immediate exit -> pid=0 -> core-daemon errors).
+				try:
+					obj = _ensure_keepalive_for_base_os_images(obj, node_name, prefer_service=str(node_name))
+				except Exception:
+					pass
+				try:
+					obj = _normalize_compose_environment_entries_for_core(obj)
+				except Exception:
+					pass
+				text = _yaml_dump_literal_multiline(obj)
+				# Resolve docker-compose ${...} env interpolation into literals so both
+				# CORE (Mako) and docker-compose can process the file.
+				text = _resolve_compose_interpolations(text)
+				with open(out_path, 'w', encoding='utf-8') as f:
+					f.write(text)
+				services_keys = list((obj.get('services') or {}).keys()) if isinstance(obj, dict) else []
+				logger.info("[vuln] wrote compose yaml node=%s services=%s dest=%s", node_name, services_keys, out_path)
+				wrote = True
+			except Exception:
+				logger.exception("[vuln] failed writing compose yaml for node=%s", node_name)
+		elif src_path and os.path.exists(src_path):
+			try:
+				shutil.copy2(src_path, out_path)
+			except Exception:
+				logger.exception("[vuln] failed copying compose for node=%s", node_name)
+			else:
+				# Best-effort: copy the original compose file for diffing.
+				try:
+					if src_path and os.path.exists(src_path) and (not os.path.exists(orig_copy_path)):
+						shutil.copy2(src_path, orig_copy_path)
+				except Exception:
+					pass
+				try:
+					with open(out_path, 'r', encoding='utf-8', errors='ignore') as f:
+						txt = f.read()
+					# Remove obsolete 'version' key and all container_name lines to avoid warnings/collisions
+					import re as _re
+					txt = _re.sub(r'^\s*version\s*:\s*[^\n]+\n?', '', txt, flags=_re.MULTILINE)
+					txt = _re.sub(r'^\s*container_name\s*:\s*[^\n]+\n?', '', txt, flags=_re.MULTILINE)
+					# COREEMU: best-effort ensure container_name matches CORE node name.
+					try:
+						val = os.getenv('CORETG_COMPOSE_SET_CONTAINER_NAME')
+						enabled = True if val is None else (str(val).strip().lower() not in ('0', 'false', 'no', 'off', ''))
+					except Exception:
+						enabled = True
+					if enabled:
+						# Insert `container_name: <node>` under the first service definition.
+						# This is a fallback path (YAML parsing failed), so keep it simple.
+						m = _re.search(r'^(\s*services\s*:\s*\n)([ \t]+)([^\n:]+)\s*:\s*\n', txt, flags=_re.MULTILINE)
+						if m:
+							indent_svc = m.group(2)
+							inject = f"{indent_svc}container_name: {node_name}\n"
+							insert_at = m.end(0)
+							txt = txt[:insert_at] + inject + txt[insert_at:]
+					if _compose_force_no_network_enabled():
+						# Option B: ensure no Docker-managed network (no docker eth0/default route).
+						# Also drop ports/networks blocks to avoid compose validation conflicts.
+						text_sanitized = _inject_network_mode_none_text(txt)
+						if _compose_force_root_workdir_mode() == 'all':
+							text_sanitized = _inject_working_dir_root_text(text_sanitized)
+						text_sanitized = _drop_key_block_from_text(text_sanitized, 'ports')
+						text_sanitized = _drop_key_block_from_text(text_sanitized, 'networks')
+					else:
+						# Strip published host port mappings while preserving networks.
+						text_sanitized = _strip_port_mappings_from_text(txt)
+						if _compose_force_root_workdir_mode() == 'all':
+							text_sanitized = _inject_working_dir_root_text(text_sanitized)
+					# Resolve `${...}` to avoid both Mako NameError and docker-compose invalid wrappers.
+					text_sanitized = _resolve_compose_interpolations(text_sanitized)
+					logger.debug(
+						"[vuln] sanitized compose text node=%s original_len=%s new_len=%s",
+						node_name,
+						len(txt),
+						len(text_sanitized),
+					)
+					with open(out_path, 'w', encoding='utf-8') as f2:
+						f2.write(text_sanitized)
+				except Exception:
+					logger.exception("[vuln] failed sanitizing compose text for node=%s", node_name)
+				wrote = True
+		if wrote:
+			created.append(out_path)
+			try:
+				rec['compose_path'] = out_path
+				logger.info("[vuln] compose file ready for node=%s compose=%s", node_name, out_path)
+			except Exception:
+				pass
+		else:
+			try:
+				logger.warning("[vuln] compose not generated for node=%s", node_name)
+			except Exception:
+				pass
+	try:
+		# Verification summary for Execute progress dialog.
+		expected: Dict[str, str] = {}
+		for node_name, rec in (name_to_vuln or {}).items():
+			try:
+				if not _is_docker_compose_record(rec):
+					continue
+			except Exception:
+				continue
+			expected[node_name] = os.path.join(out_base, f"docker-compose-{node_name}.yml")
+		if expected:
+			present = [n for n, p in expected.items() if os.path.exists(p)]
+			missing = [n for n, p in expected.items() if not os.path.exists(p)]
+			logger.info(
+				"[vuln] compose verification: expected=%d present=%d missing=%d",
+				len(expected),
+				len(present),
+				len(missing),
+			)
+			if missing:
+				for n in missing:
+					rec = name_to_vuln.get(n, {}) if isinstance(name_to_vuln, dict) else {}
+					name_val = (rec.get('Name') or rec.get('name') or '').strip()
+					path_val = (rec.get('Path') or rec.get('path') or '').strip()
+					try:
+						src_hint = _compose_path_from_download(rec, out_base=out_base, compose_name=compose_name)
+					except Exception:
+						src_hint = None
+					logger.warning(
+						"[vuln] compose missing node=%s name=%s path=%s expected=%s source=%s",
+						n,
+						name_val or '-',
+						path_val or '-',
+						expected.get(n),
+						src_hint or 'unresolved',
+					)
+	except Exception:
+		pass
+	return created
+
+
+def process_vulnerabilities(selected: List[Dict[str, str]], out_dir: str) -> List[Tuple[Dict[str, str], str, bool, str]]:
+	"""Process selected vulnerabilities.
+
+	Minimal implementation: create a directory per item and write an info.json.
+	Returns list of tuples: (record, action, ok, directory)
+	"""
+	os.makedirs(out_dir, exist_ok=True)
+	results: List[Tuple[Dict[str, str], str, bool, str]] = []
+	for rec in selected:
+		name = (rec.get('Name') or '').strip() or 'vuln'
+		safe = _safe_name(name)
+		vdir = os.path.join(out_dir, safe)
+		ok = False
+		action = 'write-meta'
+		try:
+			os.makedirs(vdir, exist_ok=True)
+			meta = {
+				'Name': rec.get('Name'),
+				'Path': rec.get('Path'),
+				'Type': rec.get('Type'),
+				'Vector': rec.get('Vector'),
+			}
+			with open(os.path.join(vdir, 'info.json'), 'w', encoding='utf-8') as f:
+				json.dump(meta, f, indent=2)
+			ok = True
+		except Exception:
+			ok = False
+		results.append((rec, action, ok, vdir))
+	return results
+
+
+def start_compose_files(paths: List[str]) -> int:
+	"""Start docker compose stacks for the given file paths on the host.
+
+	Returns the number of successful "up -d" operations.
+	"""
+	ok = 0
+	if not paths:
+		return ok
+	try:
+		import subprocess, shutil as _sh
+		def _docker_cmd() -> List[str]:
+			try:
+				val = os.getenv('CORETG_DOCKER_USE_SUDO')
+				if val is None or str(val).strip().lower() in ('0', 'false', 'no', 'off', ''):
+					return ['docker']
+				pw = _docker_sudo_password()
+				if pw:
+					return ['sudo', '-S', '-p', '', 'docker']
+				return ['sudo', '-n', 'docker']
+			except Exception:
+				return ['docker']
+		if not _sh.which('docker'):
+			return 0
+		docker_cmd = _docker_cmd()
+		sudo_pw = _docker_sudo_password()
+		for p in paths:
+			try:
+				if not p or not os.path.exists(p):
+					continue
+				use_sudo_stdin = bool(sudo_pw) and len(docker_cmd) >= 1 and docker_cmd[0] == 'sudo' and ('-S' in docker_cmd)
+				proc = subprocess.run(
+					docker_cmd + ['compose', '-f', p, 'up', '-d'],
+					stdout=subprocess.PIPE,
+					stderr=subprocess.STDOUT,
+					text=True,
+					input=(sudo_pw + '\n') if use_sudo_stdin else None,
+				)
+				if proc.returncode == 0:
+					ok += 1
+			except Exception:
+				continue
+	except Exception:
+		return ok
+	return ok

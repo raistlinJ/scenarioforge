@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scenarioforge"
+version = "0.1.0"
+description = "Generate CORE network topologies from XML scenarios via CLI or Web UI."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "ScenarioForge Contributors" }
+]
+dependencies = [
+  "lxml==6.1.1",
+  "Flask==3.1.3",
+  "Werkzeug==3.1.8",
+  "PyYAML==6.0.2",
+  "psutil==5.9.8",
+  "Mako>=1.3.5",
+  "proxmoxer>=2.0.1",
+  "requests>=2.31.0",
+  "cryptography>=48.0.0",
+  "paramiko>=5.0.0",
+  "jsonschema>=4.21.1",
+  "mcp==1.25.0",
+  "Markdown>=3.6",
+  "bleach>=6.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["scenarioforge*"]
+exclude = ["tests*", "MCP*", "scripts*", "archive*", "outputs*", "reports*", "uploads*", "validation*", "webapp*", "nginx*", "data_sources*", "repo*"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.uv]
+# Install default and dev dependencies with: uv sync --all

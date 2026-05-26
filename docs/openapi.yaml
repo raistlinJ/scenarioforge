@@ -1,0 +1,4543 @@
+openapi: 3.1.0
+info:
+  title: ScenarioForge Web API
+  version: "2026-03-05"
+  description: >-
+    OpenAPI specification for the ScenarioForge web backend. The API
+    combines JSON endpoints used by the web UI with a set of HTML form
+    submissions and download helpers. Most routes require an authenticated
+    session established via `/login` and maintained with the Flask session
+    cookie.
+servers:
+  - url: http://localhost:9090
+    description: Default development server
+  - url: https://localhost
+    description: Reverse-proxied TLS endpoint (see README for nginx helper)
+tags:
+  - name: Authentication
+    description: Session management and user login endpoints.
+  - name: Scenario Editor
+    description: Uploading, downloading, and saving Scenario Editor XML payloads.
+  - name: Planning
+    description: Deterministic plan previews and related planning helpers.
+  - name: Flag Sequencing
+    description: Flag sequencing (Flow) endpoints for generating a chain and exporting Attack Flow Builder (.afb).
+  - name: Runs
+    description: Synchronous and asynchronous CLI execution routes.
+  - name: Reports
+    description: Report listing, download, and maintenance endpoints.
+  - name: Scripts
+    description: Generated traffic and segmentation script inspection endpoints.
+  - name: Docker
+    description: Docker compose status and cleanup helpers for vulnerability services.
+  - name: Core Sessions
+    description: CORE daemon session lifecycle helpers and diagnostics.
+  - name: Diagnostics
+    description: Introspection and health endpoints.
+  - name: Admin
+    description: Administrative helpers and cleanup tasks.
+  - name: Generator Builder
+    description: Helpers for scaffolding new flag-generators and flag-node-generators.
+  - name: Generator Packs
+    description: Install/manage Generator Packs and installed generators (manifest-based).
+  - name: Vulnerabilities
+    description: Compose download/pull helpers for vulnerability catalog entries.
+  - name: Users
+    description: Administrative endpoints for managing user accounts.
+  - name: Streaming
+    description: Server-sent events and cancellation endpoints.
+  - name: UI Pages
+    description: HTML-rendering routes that back the web interface.
+  - name: Participant UI
+    description: JSON endpoints used by the Participant UI topology/status views.
+security:
+  - sessionCookie: []
+paths:
+  /generator_builder:
+    get:
+      tags:
+        - Generator Builder
+        - UI Pages
+      summary: Render the Generator Builder page
+      description: >-
+        HTML page for prompt-driven generator authoring, scaffold preview, local test execution,
+        and direct README/docker-compose downloads.
+      responses:
+        '200':
+          description: Generator Builder HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect to /login when not authenticated.
+
+  /api/generators/ai_scaffold:
+    post:
+      tags:
+        - Generator Builder
+      summary: Generate a scaffold request and file preview using an AI provider
+      description: >-
+        Calls the selected AI provider, expects a strict JSON scaffold description, normalizes that
+        response into a generator-builder scaffold request, and returns previewable file contents.
+        The same endpoint is used for iterative refinement by supplying the current scaffold/files
+        and the last builder test result as additional context.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratorAiScaffoldRequest'
+      responses:
+        '200':
+          description: AI-generated scaffold preview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneratorAiScaffoldResponse'
+        '400':
+          description: Invalid request or unparsable AI response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Login required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Builder/admin role required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/generators/builder_test:
+    post:
+      tags:
+        - Generator Builder
+      summary: Run a locally staged test for a generated scaffold
+      description: >-
+        Stages a generated scaffold into a temporary repo-like directory and runs
+        `scripts/run_flag_generator.py` against it without requiring pack installation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratorBuilderTestRequest'
+      responses:
+        '200':
+          description: Builder test succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneratorBuilderTestResponse'
+        '400':
+          description: Invalid scaffold request or test failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Login required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Builder/admin role required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: Builder test timed out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/generators/install_generated:
+    post:
+      tags:
+        - Generator Builder
+      summary: Install the current generated scaffold into the Generator Packs catalog
+      description: >-
+        Wraps the current scaffold into a temporary ZIP and installs it using the same
+        generator-pack install path as the Flag Catalog upload flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratorInstallGeneratedRequest'
+      responses:
+        '200':
+          description: Scaffold installed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneratorInstallGeneratedResponse'
+        '400':
+          description: Invalid scaffold payload or install failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Login required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Builder/admin role required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/generators/scaffold_meta:
+    post:
+      tags:
+        - Generator Builder
+      summary: Generate scaffold metadata
+      description: >-
+        Returns the generated manifest YAML plus the list of scaffold file paths for the requested
+        generator. Used by the Generator Builder UI to preview the manifest and file list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratorBuilderRequest'
+      responses:
+        '200':
+          description: Scaffold metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneratorScaffoldMetaResponse'
+        '400':
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Login required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Builder/admin role required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/generators/scaffold_zip:
+    post:
+      tags:
+        - Generator Builder
+      summary: Download a scaffold ZIP for a generator
+      description: >-
+        Returns a ZIP archive containing a ready-to-unzip scaffold.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratorBuilderRequest'
+      responses:
+        '200':
+          description: ZIP archive.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Login required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Builder/admin role required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /generator_packs/upload:
+    post:
+      tags:
+        - Generator Packs
+        - UI Pages
+      summary: Upload and install a Generator Pack ZIP
+      description: >-
+        Upload a `.zip` file containing one or more generators under `flag_generators/` and/or
+        `flag_node_generators/`. Installs them under `outputs/installed_generators/`.
+
+        When called as an XMLHttpRequest (`X-Requested-With: XMLHttpRequest`), responds with JSON.
+        Otherwise, redirects back to the Flag Catalog page.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                zip_file:
+                  type: string
+                  format: binary
+      responses:
+        '302':
+          description: Redirect back to catalog page (HTML form submission).
+        '200':
+          description: JSON response (XHR).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  message:
+                    type: string
+                  error:
+                    type: string
+
+  /generator_packs/import_url:
+    post:
+      tags:
+        - Generator Packs
+        - UI Pages
+      summary: Install a Generator Pack from a URL
+      description: Downloads a `.zip` from the provided URL and installs it.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                zip_url:
+                  type: string
+      responses:
+        '302':
+          description: Redirect back to catalog page.
+
+  /generator_packs/delete/{pack_id}:
+    post:
+      tags:
+        - Generator Packs
+        - UI Pages
+      summary: Uninstall a Generator Pack
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect back to catalog page.
+
+  /generator_packs/set_disabled/{pack_id}:
+    post:
+      tags:
+        - Generator Packs
+        - UI Pages
+      summary: Toggle disabled state for a pack (form endpoint)
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                disabled:
+                  type: string
+                  description: Treats 'true' as disabled.
+      responses:
+        '302':
+          description: Redirect back to catalog page.
+
+  /api/generator_packs/set_disabled:
+    post:
+      tags:
+        - Generator Packs
+      summary: Toggle disabled state for a pack (JSON endpoint)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pack_id]
+              properties:
+                pack_id:
+                  type: string
+                disabled:
+                  type: boolean
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  message:
+                    type: string
+                  error:
+                    type: string
+
+  /api/flag_generators/set_disabled:
+    post:
+      tags:
+        - Generator Packs
+      summary: Toggle disabled state for an installed flag-generator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [generator_id]
+              properties:
+                generator_id:
+                  type: string
+                disabled:
+                  type: boolean
+      responses:
+        '200':
+          description: OK.
+
+  /api/flag_node_generators/set_disabled:
+    post:
+      tags:
+        - Generator Packs
+      summary: Toggle disabled state for an installed flag-node-generator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [generator_id]
+              properties:
+                generator_id:
+                  type: string
+                disabled:
+                  type: boolean
+      responses:
+        '200':
+          description: OK.
+
+  /api/flag_generators/delete:
+    post:
+      tags:
+        - Generator Packs
+      summary: Delete an installed flag-generator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [generator_id]
+              properties:
+                generator_id:
+                  type: string
+      responses:
+        '200':
+          description: OK.
+
+  /api/flag_node_generators/delete:
+    post:
+      tags:
+        - Generator Packs
+      summary: Delete an installed flag-node-generator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [generator_id]
+              properties:
+                generator_id:
+                  type: string
+      responses:
+        '200':
+          description: OK.
+
+  /generator_packs/download/{pack_id}:
+    get:
+      tags:
+        - Generator Packs
+        - UI Pages
+      summary: Download a ZIP for an installed pack
+      parameters:
+        - name: pack_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ZIP archive.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+
+  /generator_packs/export_all:
+    get:
+      tags:
+        - Generator Packs
+        - UI Pages
+      summary: Export all installed packs as a bundle ZIP
+      responses:
+        '200':
+          description: ZIP archive containing one ZIP per pack under packs/*.zip.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+
+  /flag_generators_data:
+    get:
+      tags:
+        - Generator Packs
+      summary: List installed flag-generators (manifest-based)
+      responses:
+        '200':
+          description: Generator list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generators:
+                    type: array
+                    items:
+                      type: object
+                  errors:
+                    type: array
+                    items:
+                      type: object
+
+  /flag_node_generators_data:
+    get:
+      tags:
+        - Generator Packs
+      summary: List installed flag-node-generators (manifest-based)
+      responses:
+        '200':
+          description: Generator list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generators:
+                    type: array
+                    items:
+                      type: object
+                  errors:
+                    type: array
+                    items:
+                      type: object
+  /login:
+    get:
+      tags:
+        - Authentication
+        - UI Pages
+      summary: Render the login form
+      description: Returns the HTML login template used by the web UI.
+      security: []
+      responses:
+        '200':
+          description: Login form HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      tags:
+        - Authentication
+      summary: Authenticate a user session
+      description: >-
+        Validates the submitted credentials and seeds a Flask session cookie.
+        On success the client is redirected to the index page; on failure the
+        login template is rendered with an error message.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+      responses:
+        '302':
+          description: Redirect to the index page after a successful login.
+        '400':
+          description: Missing credentials; HTML error response.
+          content:
+            text/html:
+              schema:
+                type: string
+        '401':
+          description: Invalid credentials; HTML error response.
+          content:
+            text/html:
+              schema:
+                type: string
+  /logout:
+    get:
+      tags:
+        - Authentication
+      summary: Log out the current session (GET convenience)
+      description: Clears the current session and redirects to the login page.
+      responses:
+        '302':
+          description: Redirect to the login page.
+    post:
+      tags:
+        - Authentication
+      summary: Log out the current session
+      description: Clears the current session and redirects to the login page.
+      responses:
+        '302':
+          description: Redirect to the login page.
+  /healthz:
+    get:
+      tags:
+        - Diagnostics
+      summary: Liveness probe
+      description: Returns a plain text `ok` body.
+      security: []
+      responses:
+        '200':
+          description: Service is healthy.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /save_xml_api:
+    post:
+      tags:
+        - Scenario Editor
+      summary: Save Scenario Editor payload via JSON
+      description: >-
+        Persists the Scenario Editor payload to XML.
+        When topology/IP edits invalidate a previously saved Flow chain, the server
+        marks the scenario `flow_state.topology_dirty=true` and clears chain fields
+        (`chain_ids`, `length`, `flag_assignments`, `flags_enabled`) to avoid stale
+        sequencing reuse.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveXmlApiRequest'
+      responses:
+        '200':
+          description: Scenario XML written successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveXmlApiResponse'
+        '400':
+          description: Invalid payload or scenarios list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveXmlApiResponse'
+        '500':
+          description: Unexpected server error while writing XML.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveXmlApiResponse'
+  /api/scenario/latest_xml:
+    get:
+      tags:
+        - Scenario Editor
+      summary: Get the latest saved XML path for a scenario
+      parameters:
+        - name: scenario
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Latest XML path for the scenario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatestScenarioXmlResponse'
+        '400':
+          description: Missing scenario name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No XML found for the scenario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/scenario/latest_state:
+    get:
+      tags:
+        - Scenario Editor
+      summary: Parse the latest saved scenario state from XML
+      description: >-
+        Returns the editor-shaped scenario JSON plus the top-level core configuration for the
+        requested scenario. This is useful for round-tripping saved XML back into structured state.
+      parameters:
+        - name: scenario
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: xml_path
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional explicit XML path to parse instead of the latest saved XML.
+      responses:
+        '200':
+          description: Parsed scenario state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatestScenarioStateResponse'
+        '400':
+          description: Missing scenario name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: XML not found or scenario missing from XML.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/host_interfaces:
+    get:
+      tags:
+        - Scenario Editor
+      summary: Enumerate host interfaces for HITL configuration
+      responses:
+        '200':
+          description: Available host interfaces on the web server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostInterfacesResponse'
+    post:
+      tags:
+        - Scenario Editor
+      summary: Enumerate CORE VM interfaces for HITL configuration via SSH tunnel
+      description: |
+        Enumerates network interfaces on the CORE VM via SSH using stored credentials.
+        Only physical adapters (interfaces with a backing `/sys/class/net/<iface>/device` entry)
+        are returned in the response payload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HostInterfacesRequest'
+      responses:
+        '200':
+          description: Interfaces enumerated successfully from the CORE VM.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostInterfacesResponse'
+        '400':
+          description: Missing credentials or invalid payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: SSH tunnel or remote command failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected server error while enumerating interfaces.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /run_cli_async:
+    post:
+      tags:
+        - Runs
+      summary: Launch the CLI asynchronously
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunCliAsyncRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - xml_path
+              properties:
+                xml_path:
+                  type: string
+                seed:
+                  type: integer
+                  nullable: true
+                preview_plan:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Run accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunCliAsyncResponse'
+        '400':
+          description: Validation error (missing or invalid XML path).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected server error launching the run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /run_status/{run_id}:
+    get:
+      tags:
+        - Runs
+      summary: Retrieve asynchronous run status
+      description: >-
+        Returns current state for an async execute job.
+        A `404` response indicates the run id is unknown/stale and should be treated
+        as terminal by clients (stop polling).
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current status for the asynchronous run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunStatusResponse'
+        '404':
+          description: Unknown run identifier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/plan/preview_full:
+    post:
+      tags:
+        - Planning
+      summary: Generate a deterministic full preview plan
+      description: >-
+        Computes a dry-run topology and services preview without starting a CORE session.
+        Clients may either provide `xml_path` for an existing saved scenario XML or send inline
+        `scenarios` plus optional `core` to have the server render a temporary XML for preview.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanPreviewRequest'
+      responses:
+        '200':
+          description: Full preview response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanPreviewResponse'
+        '400':
+          description: Validation error (missing XML path or file not found).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanPreviewResponse'
+        '500':
+          description: Unexpected planning failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanPreviewResponse'
+  /api/plan/persist_flow_plan:
+    post:
+      tags:
+        - Planning
+      summary: Persist preview metadata into XML
+      description: >-
+        Computes the full preview for a saved XML and persists preview metadata back into the XML
+        so Flow preview endpoints can reuse it later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PersistFlowPlanRequest'
+      responses:
+        '200':
+          description: Preview metadata persisted into XML.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersistFlowPlanResponse'
+        '400':
+          description: Missing XML path.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected planning failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/planner/ensure_plan:
+    post:
+      tags:
+        - Planning
+      summary: Ensure preview metadata exists for XML
+      description: >-
+        Planner helper that computes preview metadata for a saved XML and returns the resolved
+        XML path, scenario, seed, and preview-plan path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PersistFlowPlanRequest'
+      responses:
+        '200':
+          description: Preview metadata ensured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersistFlowPlanResponse'
+        '400':
+          description: Missing XML path.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected planning failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/planner/latest_plan:
+    get:
+      tags:
+        - Planning
+      summary: Resolve the latest XML for a scenario
+      description: >-
+        Returns the latest XML path associated with the scenario. Preview metadata is embedded in
+        XML, so `preview_plan_path` currently points at the XML file itself.
+      parameters:
+        - name: scenario
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Latest XML resolved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersistFlowPlanResponse'
+        '400':
+          description: Missing scenario name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No XML found for the scenario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/attackflow_preview:
+    get:
+      tags:
+        - Flag Sequencing
+      summary: Generate a flag-sequencing chain preview
+      description: >-
+        Computes an ordered chain of eligible nodes (Docker/vulnerability candidates) from the latest
+        preview plan and returns flag generator assignments plus validity metadata used by the Flow UI.
+        Flag-generators are placed on vulnerability nodes; flag-node-generators require non-vulnerability
+        Docker-role nodes. Initial/Goal facts (if persisted) are returned to steer sequencing.
+      parameters:
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Scenario label (defaults to latest run-history scenario when omitted).
+        - name: length
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 5
+        - name: preset
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional preset (forces a fixed chain shape/length).
+        - name: prefer_preview
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['0', '1']
+        - name: force_preview
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['0', '1']
+        - name: best_effort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['0', '1']
+          description: Clamp to available eligible nodes instead of returning 422.
+        - name: debug
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['0', '1']
+        - name: debug_dag
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['0', '1']
+      responses:
+        '200':
+          description: Chain preview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttackflowPreviewResponse'
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No preview plan available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Not enough eligible nodes to satisfy requested length.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/latest_preview_plan:
+    get:
+      tags:
+        - Flag Sequencing
+      summary: Locate the latest Flow-eligible preview metadata for a scenario
+      parameters:
+        - name: scenario
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: xml_path
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional XML path hint to prefer over the latest saved XML.
+      responses:
+        '200':
+          description: Preview metadata status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatestPreviewPlanResponse'
+        '400':
+          description: Missing scenario name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No saved XML with preview metadata found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: CORE VM has not been validated for Flow preview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/prepare_preview_for_execute:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Prepare a preview plan for hint resolution/execution
+      description: >-
+        Runs best-effort preparation steps (e.g., resolving hint placeholders) using the provided chain
+        and preview plan path. This endpoint is used by the Flow UI to materialize `hint.txt` after
+        generator outputs are available.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreparePreviewForExecuteRequest'
+      responses:
+        '200':
+          description: Preparation results.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreparePreviewForExecuteResponse'
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Missing preview plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Preparation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/save_flow_substitutions:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Persist Flow substitutions and overrides
+      description: >-
+        Persists user-edited chain positions plus generator overrides into the canonical
+        per-scenario plan (plan_<scenario>.json). Used by the Flow UI “Save Overrides” action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveFlowSubstitutionsRequest'
+      responses:
+        '200':
+          description: Persisted Flow substitutions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveFlowSubstitutionsResponse'
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Missing preview plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid chain or generator assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/save_flow_state_to_xml:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Persist FlowState into scenario XML
+      description: >-
+        Writes the current Flow state into the selected scenario inside the XML file. This is the
+        persistence step that makes saved Flow chains round-trip with Scenario Editor XML.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveFlowStateToXmlRequest'
+      responses:
+        '200':
+          description: Flow state saved into XML.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveFlowStateToXmlResponse'
+        '400':
+          description: Missing XML path or flow state payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: XML update failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/revalidate_flow:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Revalidate saved Flow outputs in XML
+      description: >-
+        Validates Flow artifacts already saved in XML. Useful after persisting FlowState to confirm
+        that resolved outputs and assignments are still structurally valid.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevalidateFlowRequest'
+      responses:
+        '200':
+          description: Flow validation result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevalidateFlowResponse'
+        '400':
+          description: Missing scenario or saved Flow outputs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: XML not found for the scenario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/upload_flow_input_file:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Upload a Flow input override file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - scenario
+                - file
+              properties:
+                scenario:
+                  type: string
+                step_index:
+                  type: string
+                  nullable: true
+                generator_id:
+                  type: string
+                  nullable: true
+                input_name:
+                  type: string
+                  nullable: true
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Upload result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  stored_path:
+                    type: string
+                  stored_filename:
+                    type: string
+                  original_filename:
+                    type: string
+                  input_name:
+                    type: string
+                  scenario:
+                    type: string
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: File too large.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/upload_flow_inject_file:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Upload a Flow inject override file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - scenario
+                - file
+              properties:
+                scenario:
+                  type: string
+                step_index:
+                  type: string
+                  nullable: true
+                generator_id:
+                  type: string
+                  nullable: true
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Upload result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  stored_path:
+                    type: string
+                  stored_filename:
+                    type: string
+                  original_filename:
+                    type: string
+                  inject_value:
+                    type: string
+                  scenario:
+                    type: string
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: File too large.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/flag-sequencing/afb_from_chain:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Export Attack Flow Builder (.afb) from a chain
+      description: >-
+        Returns an Attack Flow Builder native export document (OpenChart DiagramViewExport) for the
+        ordered chain. This is the supported export format.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AfbFromChainRequest'
+      responses:
+        '200':
+          description: AFB export.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AfbFromChainResponse'
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid chain or generator assignment error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/open_scripts:
+    get:
+      tags:
+        - Scripts
+      summary: List generated traffic or segmentation scripts
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [traffic, segmentation]
+            default: traffic
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [runtime, preview]
+            default: runtime
+      responses:
+        '200':
+          description: Script listing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenScriptsResponse'
+        '400':
+          description: Invalid request parameters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Requested directory not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/open_script_file:
+    get:
+      tags:
+        - Scripts
+      summary: Read the contents of a generated script file
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [traffic, segmentation]
+            default: traffic
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [runtime, preview]
+            default: runtime
+        - name: file
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Script preview (first 8KB).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenScriptFileResponse'
+        '400':
+          description: Invalid parameters or filename.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Script directory or file not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/download_scripts:
+    get:
+      tags:
+        - Scripts
+      summary: Download generated traffic or segmentation scripts as a zip archive
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [traffic, segmentation]
+            default: traffic
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [runtime, preview]
+            default: runtime
+      responses:
+        '200':
+          description: Zip archive of generated scripts.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid parameters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Requested script directory not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /docker/status:
+    get:
+      tags:
+        - Docker
+      summary: Inspect Docker compose status for vulnerability services
+      responses:
+        '200':
+          description: Compose status for tracked nodes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DockerStatusResponse'
+  /docker/cleanup:
+    post:
+      tags:
+        - Docker
+      summary: Stop and remove Docker containers created by the generator
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DockerCleanupRequest'
+      responses:
+        '200':
+          description: Cleanup results per container.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DockerCleanupResponse'
+        '500':
+          description: Docker command execution failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DockerCleanupResponse'
+  /reports_data:
+    get:
+      tags:
+        - Reports
+      summary: Retrieve saved run history metadata
+      responses:
+        '200':
+          description: Run history and scenario filters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportsDataResponse'
+  /reports/delete:
+    post:
+      tags:
+        - Reports
+      summary: Delete run history entries and associated artifacts under outputs/
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportsDeleteRequest'
+      responses:
+        '200':
+          description: Number of entries removed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportsDeleteResponse'
+        '400':
+          description: Invalid payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected failure deleting history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /download_report:
+    get:
+      tags:
+        - Reports
+      summary: Download generated reports or session XML artifacts
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Absolute or repository-relative path to the artifact.
+      responses:
+        '200':
+          description: Requested artifact stream.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Artifact not found.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /:
+    get:
+      tags:
+        - Scenario Editor
+        - UI Pages
+      summary: Render the Scenario Editor dashboard
+      responses:
+        '200':
+          description: Scenario editor HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+  /load_xml:
+    post:
+      tags:
+        - Scenario Editor
+      summary: Upload a Scenario Editor XML file via the web UI
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - scenarios_xml
+              properties:
+                scenarios_xml:
+                  type: string
+                  format: binary
+      responses:
+        '302':
+          description: Redirect to index on success or failure (flash message).
+        '200':
+          description: Rendered editor with the uploaded scenario loaded.
+          content:
+            text/html:
+              schema:
+                type: string
+  /save_xml:
+    post:
+      tags:
+        - Scenario Editor
+      summary: Persist Scenario Editor state via web form submission
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - scenarios_json
+              properties:
+                scenarios_json:
+                  type: string
+                  description: JSON string representing the editor payload.
+      responses:
+        '200':
+          description: Scenario saved; editor is re-rendered with flash messages.
+          content:
+            text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect when validation fails.
+  /run_cli:
+    post:
+      tags:
+        - Runs
+      summary: Execute the CLI synchronously from the editor
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - xml_path
+              properties:
+                xml_path:
+                  type: string
+      responses:
+        '200':
+          description: Rendered editor with CLI logs and flash messages.
+          content:
+            text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect to index on validation error.
+  /plan/full_preview_page:
+    post:
+      tags:
+        - Planning
+      summary: Generate a full preview HTML page for a scenario
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - xml_path
+              properties:
+                xml_path:
+                  type: string
+                scenario:
+                  type: string
+                  nullable: true
+                seed:
+                  type: integer
+                  nullable: true
+      responses:
+        '200':
+          description: Rendered full preview page.
+          content:
+            text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect to index when xml_path validation fails.
+  /reports:
+    get:
+      tags:
+        - Reports
+        - UI Pages
+      summary: Render the run history reports page
+      responses:
+        '200':
+          description: Reports HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+  /upload_base:
+    post:
+      tags:
+        - Scenario Editor
+      summary: Upload and validate a base CORE XML file for augmentation
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - base_xml
+              properties:
+                base_xml:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Editor re-rendered with base metadata attached.
+          content:
+            text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect to index on validation failure.
+  /remove_base:
+    post:
+      tags:
+        - Scenario Editor
+      summary: Clear the attached base CORE XML from the first scenario
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                scenarios_json:
+                  type: string
+                  description: Optional editor payload to preserve in-flight edits.
+      responses:
+        '200':
+          description: Editor re-rendered without the base attachment.
+          content:
+            text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect to index on errors.
+  /base_details:
+    get:
+      tags:
+        - Scenario Editor
+        - Core Sessions
+      summary: Inspect a base CORE XML file
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Base details HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: File not found.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /core:
+    get:
+      tags:
+        - Core Sessions
+        - UI Pages
+      summary: Render CORE session dashboard
+      responses:
+        '200':
+          description: CORE management page HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+  /core/upload:
+    post:
+      tags:
+        - Core Sessions
+      summary: Upload a CORE session XML file for later use
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - xml_file
+              properties:
+                xml_file:
+                  type: string
+                  format: binary
+      responses:
+        '302':
+          description: Redirect to CORE dashboard with status message.
+  /core/start:
+    post:
+      tags:
+        - Core Sessions
+      summary: Start a CORE session from a saved XML file
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - path
+              properties:
+                path:
+                  type: string
+      responses:
+        '302':
+          description: Redirect to CORE dashboard with flash status.
+  /core/stop:
+    post:
+      tags:
+        - Core Sessions
+      summary: Stop an active CORE session
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - session_id
+              properties:
+                session_id:
+                  type: string
+      responses:
+        '302':
+          description: Redirect to CORE dashboard with flash status.
+  /core/delete:
+    post:
+      tags:
+        - Core Sessions
+      summary: Delete CORE sessions or XML files via form submission
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                session_id:
+                  type: string
+                  nullable: true
+                path:
+                  type: string
+                  nullable: true
+      responses:
+        '302':
+          description: Redirect to CORE dashboard.
+  /core/details:
+    get:
+      tags:
+        - Core Sessions
+        - UI Pages
+      summary: Render detailed information for a CORE XML or session
+      parameters:
+        - name: path
+          in: query
+          schema:
+            type: string
+        - name: session_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CORE details HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+  /core/save_xml:
+    post:
+      tags:
+        - Core Sessions
+      summary: Save the current CORE session XML and stream it back
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                session_id:
+                  type: string
+      responses:
+        '200':
+          description: CORE session XML download.
+          content:
+            application/xml:
+              schema:
+                type: string
+                format: binary
+        '500':
+          description: Failed to save session XML.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /core/start_session:
+    post:
+      tags:
+        - Core Sessions
+      summary: Start an existing CORE session by id
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - session_id
+              properties:
+                session_id:
+                  type: string
+      responses:
+        '302':
+          description: Redirect to CORE dashboard with flash status.
+  /core/session/{sid}:
+    get:
+      tags:
+        - Core Sessions
+        - UI Pages
+      summary: Render details for a specific CORE session id
+      parameters:
+        - name: sid
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: CORE session detail HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+  /participant-ui:
+    get:
+      tags:
+        - Participant UI
+        - UI Pages
+      summary: Render the Participant Console page
+      description: >-
+        Renders the Participant UI HTML page.
+        Initial scenario selection priority is: incoming `?scenario=...` request,
+        then locally remembered last selection, then first listed scenario.
+      parameters:
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional scenario display name or normalized label hint.
+      responses:
+        '200':
+          description: Participant UI HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+  /participant-ui/gateway:
+    get:
+      tags:
+        - Participant UI
+      summary: Resolve nearest gateway for a participant scenario
+      parameters:
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Scenario label (display or normalized). Defaults to current selected scenario.
+      responses:
+        '200':
+          description: Gateway lookup result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantUiGatewayResponse'
+        '403':
+          description: Scenario not assigned for restricted users.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /participant-ui/details:
+    get:
+      tags:
+        - Participant UI
+      summary: Participant UI scenario status/details (JSON)
+      parameters:
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Scenario label (display or normalized). Defaults to the currently selected scenario.
+      responses:
+        '200':
+          description: Scenario details payload used by the Participant UI dashboard.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantUiDetailsResponse'
+  /participant-ui/topology:
+    get:
+      tags:
+        - Participant UI
+      summary: Participant UI topology graph (JSON)
+      description: >-
+        Returns graph nodes/links derived from the most recent saved CORE session XML for the requested scenario.
+        Network nodes may be returned as `type: switch` for styling purposes; HITL network/interface nodes are
+        returned with `type: hitl` and `is_hitl: true`.
+      parameters:
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Scenario label (display or normalized). Defaults to the currently selected scenario.
+      responses:
+        '200':
+          description: Topology graph payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantUiTopologyResponse'
+        '403':
+          description: Scenario not assigned for restricted users.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /participant-ui/stats:
+    get:
+      tags:
+        - Participant UI
+      summary: Retrieve Participant UI open-count stats
+      parameters:
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Scenario label (display or normalized). Defaults to current selected scenario.
+      responses:
+        '200':
+          description: Scenario and totals open-count telemetry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantUiStatsResponse'
+  /participant-ui/record-open:
+    post:
+      tags:
+        - Participant UI
+      summary: Record that a participant link was opened
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParticipantUiRecordOpenRequest'
+      responses:
+        '200':
+          description: Open count recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantUiRecordOpenResponse'
+        '400':
+          description: Missing or invalid href.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /participant-ui/open:
+    get:
+      tags:
+        - Participant UI
+      summary: Redirect to the participant URL for a scenario
+      parameters:
+        - name: scenario
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to participant URL.
+        '404':
+          description: No participant URL available for the resolved scenario.
+  /users:
+    get:
+      tags:
+        - Users
+        - UI Pages
+      summary: Render the user management page (admin only)
+      responses:
+        '200':
+          description: Users HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      tags:
+        - Users
+      summary: Create a new user account
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                role:
+                  type: string
+                  enum: [user, admin]
+                  default: user
+      responses:
+        '302':
+          description: Redirect to users page with flash status.
+  /users/delete/{username}:
+    post:
+      tags:
+        - Users
+      summary: Delete an existing user account
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to users page.
+  /users/password/{username}:
+    post:
+      tags:
+        - Users
+      summary: Update another user's password (admin only)
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - password
+              properties:
+                password:
+                  type: string
+      responses:
+        '302':
+          description: Redirect to users page.
+  /me/password:
+    get:
+      tags:
+        - Users
+        - UI Pages
+      summary: Render self-service password change form
+      responses:
+        '200':
+          description: Password change HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      tags:
+        - Users
+      summary: Change password for the logged-in user
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - current_password
+                - password
+              properties:
+                current_password:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '302':
+          description: Redirect to index with flash status.
+  /vuln_catalog:
+    get:
+      tags:
+        - Vulnerabilities
+      summary: Return the vulnerability catalog (JSON)
+      responses:
+        '200':
+          description: Vulnerability catalog JSON.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  types:
+                    type: array
+                    items:
+                      type: string
+                  vectors:
+                    type: array
+                    items:
+                      type: string
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /vuln_catalog_page:
+    get:
+      tags:
+        - Vulnerabilities
+        - UI Pages
+      summary: Render the vulnerability catalog page
+      responses:
+        '200':
+          description: Vulnerability catalog HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /vuln_catalog_packs/upload:
+    post:
+      tags:
+        - Vulnerabilities
+        - UI Pages
+      summary: Upload and install a Vulnerability Catalog Pack ZIP
+      description: >-
+        Upload a `.zip` file containing directories/subdirectories. Each valid vulnerability directory
+        must include a `docker-compose.yml`. The server extracts all files under
+        `outputs/installed_vuln_catalogs/<id>/content/` and generates a `vuln_list_w_url.csv`
+        that points to the extracted compose files.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                zip_file:
+                  type: string
+                  format: binary
+      responses:
+        '302':
+          description: Redirect back to vulnerability catalog page.
+
+  /vuln_catalog_packs/import_url:
+    post:
+      tags:
+        - Vulnerabilities
+        - UI Pages
+      summary: Install a Vulnerability Catalog Pack from a URL
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                zip_url:
+                  type: string
+      responses:
+        '302':
+          description: Redirect back to vulnerability catalog page.
+
+  /vuln_catalog_packs/download/{catalog_id}:
+    get:
+      tags:
+        - Vulnerabilities
+      summary: Download a previously uploaded Vulnerability Catalog Pack ZIP
+      parameters:
+        - name: catalog_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ZIP archive.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+
+  /vuln_catalog_packs/browse/{catalog_id}:
+    get:
+      tags:
+        - Vulnerabilities
+        - UI Pages
+      summary: Browse extracted vulnerability pack files (root)
+      parameters:
+        - name: catalog_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: HTML directory listing.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /vuln_catalog_packs/browse/{catalog_id}/{subpath}:
+    get:
+      tags:
+        - Vulnerabilities
+        - UI Pages
+      summary: Browse extracted vulnerability pack files (subpath)
+      parameters:
+        - name: catalog_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: subpath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: HTML directory listing (or redirects to file download).
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /vuln_catalog_packs/file/{catalog_id}/{subpath}:
+    get:
+      tags:
+        - Vulnerabilities
+      summary: Download a single extracted file from a vulnerability pack
+      parameters:
+        - name: catalog_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: subpath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: File download.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /vuln_catalog_packs/set_active/{catalog_id}:
+    post:
+      tags:
+        - Vulnerabilities
+        - UI Pages
+      summary: Mark a Vulnerability Catalog Pack as active
+      parameters:
+        - name: catalog_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect back to vulnerability catalog page.
+
+  /vuln_catalog_packs/delete/{catalog_id}:
+    post:
+      tags:
+        - Vulnerabilities
+        - UI Pages
+      summary: Delete a Vulnerability Catalog Pack
+      parameters:
+        - name: catalog_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect back to vulnerability catalog page.
+  /stream/{run_id}:
+    get:
+      tags:
+        - Streaming
+      summary: Stream live CLI logs for an asynchronous run
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Server-sent events stream of CLI output.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /cancel_run/{run_id}:
+    post:
+      tags:
+        - Streaming
+      summary: Cancel an asynchronous CLI run
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Run cancelled (or already finished).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelRunResponse'
+        '404':
+          description: Run id not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /core/data:
+    get:
+      tags:
+        - Core Sessions
+      summary: List CORE sessions and known XML files
+      responses:
+        '200':
+          description: CORE session summaries and XML catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  xmls:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+  /test_core:
+    post:
+      tags:
+        - Core Sessions
+      summary: Validate connectivity to the CORE daemon
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestCoreRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                host:
+                  type: string
+                port:
+                  type: integer
+      responses:
+        '200':
+          description: Connectivity test result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCoreResponse'
+  /diag/modules:
+    get:
+      tags:
+        - Diagnostics
+      summary: Report module import locations for troubleshooting
+      responses:
+        '200':
+          description: Module diagnostic map.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagModulesResponse'
+  /admin/cleanup_pycore:
+    post:
+      tags:
+        - Admin
+      summary: Remove stale `/tmp/pycore.*` directories
+      responses:
+        '200':
+          description: Cleanup summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminCleanupPycoreResponse'
+        '500':
+          description: Cleanup failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminCleanupPycoreResponse'
+  /vuln_compose/status:
+    post:
+      tags:
+        - Vulnerabilities
+      summary: Inspect compose availability for catalog entries
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VulnComposeRequest'
+      responses:
+        '200':
+          description: Compose status per item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposeStatusResponse'
+        '500':
+          description: Failure reading compose status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposeStatusResponse'
+  /vuln_compose/download:
+    post:
+      tags:
+        - Vulnerabilities
+      summary: Download compose assets for catalog entries
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VulnComposeRequest'
+      responses:
+        '200':
+          description: Download result per item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposeDownloadResponse'
+        '500':
+          description: Failure downloading compose assets.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposeDownloadResponse'
+  /vuln_compose/pull:
+    post:
+      tags:
+        - Vulnerabilities
+      summary: Pull docker images defined by compose files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VulnComposeRequest'
+      responses:
+        '200':
+          description: Pull results per item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposePullResponse'
+        '500':
+          description: Pull failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposePullResponse'
+  /vuln_compose/remove:
+    post:
+      tags:
+        - Vulnerabilities
+      summary: Remove downloaded compose assets and stop containers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VulnComposeRequest'
+      responses:
+        '200':
+          description: Removal results per item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposeRemoveResponse'
+        '500':
+          description: Removal failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VulnComposeRemoveResponse'
+  /purge_history_for_scenario:
+    post:
+      tags:
+        - Reports
+      summary: Purge run history for a specific scenario name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PurgeHistoryRequest'
+      responses:
+        '200':
+          description: Number of entries removed; `error` is present when pruning failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurgeHistoryResponse'
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: session
+      description: Flask session cookie issued after authenticating with `/login`.
+  schemas:
+    SaveXmlApiRequest:
+      type: object
+      required:
+        - scenarios
+      properties:
+        scenarios:
+          type: array
+          description: Full Scenario Editor payload serialized as JSON objects.
+          items:
+            type: object
+            additionalProperties: true
+        active_index:
+          type: integer
+          minimum: 0
+          description: Index of the active scenario in the editor (optional).
+    SaveXmlApiResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        result_path:
+          type: string
+          description: Absolute path to the saved Scenario XML file.
+        error:
+          type: string
+          description: Error message when `ok` is false.
+    LatestScenarioXmlResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        scenario:
+          type: string
+        xml_path:
+          type: string
+        error:
+          type: string
+    LatestScenarioStateResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        scenario:
+          type: string
+        scenario_norm:
+          type: string
+        xml_path:
+          type: string
+        xml_mtime:
+          type: number
+        scenario_state:
+          type: object
+          additionalProperties: true
+        core:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: string
+    ProxmoxInterfaceMapping:
+      type: object
+      properties:
+        id:
+          type: string
+          nullable: true
+        macaddr:
+          type: string
+          nullable: true
+        bridge:
+          type: string
+          nullable: true
+        model:
+          type: string
+          nullable: true
+        vm_key:
+          type: string
+          nullable: true
+        vm_name:
+          type: string
+          nullable: true
+        vm_node:
+          type: string
+          nullable: true
+        vmid:
+          type: string
+          nullable: true
+        raw:
+          type: object
+          nullable: true
+          additionalProperties: true
+      additionalProperties: true
+    HostInterface:
+      type: object
+      properties:
+        name:
+          type: string
+        display:
+          type: string
+        mac:
+          type: string
+          nullable: true
+        ipv4:
+          type: array
+          items:
+            type: string
+            format: ipv4
+        ipv6:
+          type: array
+          items:
+            type: string
+            format: ipv6
+        mtu:
+          type: integer
+          nullable: true
+        speed:
+          type: integer
+          nullable: true
+          description: Interface speed in Mbps when available.
+        flags:
+          type: array
+          items:
+            type: string
+        is_up:
+          type: boolean
+        proxmox:
+          $ref: '#/components/schemas/ProxmoxInterfaceMapping'
+          nullable: true
+    HostInterfacesResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        interfaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostInterface'
+        source:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        fetched_at:
+          type: string
+          description: Local timestamp string in `MM/DD/YY/HH/MM/SS` format.
+          example: "02/15/26/09/47/31"
+          nullable: true
+      required:
+        - interfaces
+    HostInterfacesRequest:
+      type: object
+      properties:
+        core_secret_id:
+          type: string
+          description: Identifier returned when CORE credentials were stored.
+        include_down:
+          type: boolean
+          description: Include interfaces that are currently DOWN.
+        core_vm:
+          $ref: '#/components/schemas/CoreVmDescriptor'
+        scenario_index:
+          type: integer
+          nullable: true
+        scenario_name:
+          type: string
+          nullable: true
+      required:
+        - core_secret_id
+    CoreVmDescriptor:
+      type: object
+      properties:
+        vm_key:
+          type: string
+          nullable: true
+        vm_name:
+          type: string
+          nullable: true
+        vm_node:
+          type: string
+          nullable: true
+        vmid:
+          type: string
+          nullable: true
+        interfaces:
+          type: array
+          nullable: true
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+    PlanPreviewRequest:
+      type: object
+      properties:
+        xml_path:
+          type: string
+          description: Absolute path to the Scenario Editor XML file. Optional when inline `scenarios` are provided.
+        scenarios:
+          type: array
+          description: Inline Scenario Editor payload used to render a temporary XML for preview.
+          items:
+            type: object
+            additionalProperties: true
+        core:
+          type: object
+          nullable: true
+          description: Optional top-level core connection/settings payload used when rendering inline scenarios.
+          additionalProperties: true
+        scenario:
+          type: string
+          description: Specific scenario name to plan (defaults to the first scenario).
+        seed:
+          type: integer
+          description: Deterministic seed for topology generation (optional).
+        r2s_hosts_min_list:
+          type: array
+          items:
+            type: integer
+          description: Optional per-router minimum host assignments for aggregation replay.
+        r2s_hosts_max_list:
+          type: array
+          items:
+            type: integer
+          description: Optional per-router maximum host assignments for aggregation replay.
+    PlanPreviewResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        full_preview:
+          type: object
+          additionalProperties: true
+          description: Deterministic preview payload generated by planning.full_preview.
+        plan:
+          type: object
+          additionalProperties: true
+          description: Raw orchestrator plan used to derive the full preview.
+        breakdowns:
+          type: object
+          additionalProperties: true
+          description: Section breakdowns (routers, services, vulnerabilities, segmentation, traffic).
+        flow_meta:
+          type: object
+          additionalProperties: true
+          description: Flow state metadata attached to the preview when available.
+        error:
+          type: string
+      required:
+        - ok
+    PersistFlowPlanRequest:
+      type: object
+      required:
+        - xml_path
+      properties:
+        xml_path:
+          type: string
+          description: Absolute path to the Scenario Editor XML file.
+        scenario:
+          type: string
+          nullable: true
+        seed:
+          type: integer
+          nullable: true
+    PersistFlowPlanResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        xml_path:
+          type: string
+          nullable: true
+        scenario:
+          type: string
+          nullable: true
+        seed:
+          type: integer
+          nullable: true
+        preview_plan_path:
+          type: string
+          nullable: true
+        error:
+          type: string
+    RunCliAsyncRequest:
+      type: object
+      required:
+        - xml_path
+      properties:
+        xml_path:
+          type: string
+          description: Absolute path to the Scenario XML to execute with the CLI.
+        seed:
+          type: integer
+          nullable: true
+          description: Optional deterministic seed forwarded to the CLI.
+        preview_plan:
+          type: string
+          nullable: true
+          description: Optional absolute path to a persisted plan preview JSON file.
+    RunCliAsyncResponse:
+      type: object
+      required:
+        - run_id
+      properties:
+        run_id:
+          type: string
+          description: UUID identifying the asynchronous run.
+    RunStatusResponse:
+      type: object
+      properties:
+        done:
+          type: boolean
+        returncode:
+          type: integer
+          nullable: true
+        report_path:
+          type: string
+          nullable: true
+          description: Absolute path to the generated Markdown report when available.
+        summary_path:
+          type: string
+          nullable: true
+          description: Absolute path to the generated JSON summary when available.
+        xml_path:
+          type: string
+          nullable: true
+          description: Absolute path to the captured post-run CORE session XML when available.
+        scenario_xml_path:
+          type: string
+          description: Absolute path to the Scenario Editor XML file used for the run.
+        pre_xml_path:
+          type: string
+          nullable: true
+          description: Absolute path to the captured pre-run CORE session XML when available.
+        full_scenario_path:
+          type: string
+          nullable: true
+          description: Absolute path to the generated artifact bundle zip file when available.
+        log_path:
+          type: string
+          nullable: true
+          description: Absolute path to the CLI log file updated during the run.
+    RunHistoryEntry:
+      type: object
+      description: Run history entries persisted in `outputs/run_history.json`.
+      additionalProperties: true
+      properties:
+        timestamp:
+          type: string
+          description: Local timestamp string in `MM/DD/YY/HH/MM/SS` format.
+          example: "02/15/26/09/47/31"
+        mode:
+          type: string
+          description: Execution mode (`sync` or `async`).
+        returncode:
+          type: integer
+          nullable: true
+        scenario_xml_path:
+          type: string
+        report_path:
+          type: string
+          nullable: true
+        pre_xml_path:
+          type: string
+          nullable: true
+        post_xml_path:
+          type: string
+          nullable: true
+        full_scenario_path:
+          type: string
+          nullable: true
+        run_id:
+          type: string
+          nullable: true
+        scenario_names:
+          type: array
+          items:
+            type: string
+    ReportsDataResponse:
+      type: object
+      properties:
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunHistoryEntry'
+        scenarios:
+          type: array
+          items:
+            type: string
+    ReportsDeleteRequest:
+      type: object
+      required:
+        - run_ids
+      properties:
+        run_ids:
+          type: array
+          items:
+            type: string
+    ReportsDeleteResponse:
+      type: object
+      properties:
+        deleted:
+          type: integer
+      required:
+        - deleted
+    ScriptFileSummary:
+      type: object
+      properties:
+        file:
+          type: string
+        size:
+          type: integer
+    OpenScriptsResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        kind:
+          type: string
+          enum: [traffic, segmentation]
+        path:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScriptFileSummary'
+        error:
+          type: string
+      required:
+        - ok
+    OpenScriptFileResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        file:
+          type: string
+        path:
+          type: string
+        content:
+          type: string
+        truncated:
+          type: boolean
+        error:
+          type: string
+      required:
+        - ok
+    DockerStatusItem:
+      type: object
+      properties:
+        name:
+          type: string
+        compose:
+          type: string
+        exists:
+          type: boolean
+        pulled:
+          type: boolean
+        container_exists:
+          type: boolean
+        running:
+          type: boolean
+    DockerStatusResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DockerStatusItem'
+        timestamp:
+          type: integer
+          description: Unix epoch seconds when docker status was collected.
+          example: 1771148851
+      required:
+        - items
+        - timestamp
+    DockerCleanupRequest:
+      type: object
+      properties:
+        names:
+          type: array
+          items:
+            type: string
+          description: Optional explicit container names to stop and remove.
+    DockerCleanupResult:
+      type: object
+      properties:
+        name:
+          type: string
+        stopped:
+          type: boolean
+        removed:
+          type: boolean
+    DockerCleanupResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DockerCleanupResult'
+        error:
+          type: string
+      required:
+        - ok
+    CancelRunResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+    TestCoreRequest:
+      type: object
+      properties:
+        host:
+          type: string
+          description: CORE gRPC hostname.
+        port:
+          type: integer
+          description: CORE gRPC port number.
+    TestCoreResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        host:
+          type: string
+        port:
+          type: integer
+        error:
+          type: string
+      required:
+        - ok
+    DiagModulesResponse:
+      type: object
+      additionalProperties: true
+      description: Map describing where `scenarioforge` modules are imported from.
+    AdminCleanupPycoreResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        removed:
+          type: array
+          items:
+            type: string
+        kept:
+          type: array
+          items:
+            type: string
+        active_session_ids:
+          type: array
+          items:
+            type: integer
+        error:
+          type: string
+      required:
+        - ok
+    PurgeHistoryRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Scenario name to purge from run history.
+    PurgeHistoryResponse:
+      type: object
+      properties:
+        removed:
+          type: integer
+        error:
+          type: string
+      required:
+        - removed
+    VulnComposeRequestItem:
+      type: object
+      properties:
+        Name:
+          type: string
+        Path:
+          type: string
+        compose:
+          type: string
+          description: Optional override compose filename.
+    VulnComposeRequest:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VulnComposeRequestItem'
+    VulnComposeStatusEntry:
+      type: object
+      properties:
+        Name:
+          type: string
+        Path:
+          type: string
+        compose:
+          type: string
+        compose_path:
+          type: string
+          nullable: true
+        exists:
+          type: boolean
+        pulled:
+          type: boolean
+        dir:
+          type: string
+      additionalProperties: true
+    VulnComposeStatusResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VulnComposeStatusEntry'
+        log:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+    VulnComposeDownloadEntry:
+      type: object
+      properties:
+        Name:
+          type: string
+        Path:
+          type: string
+        ok:
+          type: boolean
+        dir:
+          type: string
+        message:
+          type: string
+        compose:
+          type: string
+      additionalProperties: true
+    VulnComposeDownloadResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VulnComposeDownloadEntry'
+        log:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+    VulnComposePullEntry:
+      type: object
+      properties:
+        Name:
+          type: string
+        Path:
+          type: string
+        ok:
+          type: boolean
+        message:
+          type: string
+        compose:
+          type: string
+      additionalProperties: true
+    VulnComposePullResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VulnComposePullEntry'
+        log:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+    VulnComposeRemoveEntry:
+      type: object
+      properties:
+        Name:
+          type: string
+        Path:
+          type: string
+        ok:
+          type: boolean
+        message:
+          type: string
+        compose:
+          type: string
+      additionalProperties: true
+    VulnComposeRemoveResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VulnComposeRemoveEntry'
+        log:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+    ErrorResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          nullable: true
+        error:
+          type: string
+
+    GeneratorBuilderInputsFlags:
+      type: object
+      description: Convenience flags indicating which standard inputs to include in the generated catalog schema.
+      additionalProperties: false
+      properties:
+        seed:
+          type: boolean
+        secret:
+          type: boolean
+        node_name:
+          type: boolean
+        flag_prefix:
+          type: boolean
+
+    GeneratorArtifactRequirement:
+      type: object
+      additionalProperties: false
+      required:
+        - artifact
+      properties:
+        artifact:
+          type: string
+        optional:
+          type: boolean
+          description: When true, the artifact is treated as optional input.
+
+    GeneratorRuntimeInput:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          default: string
+        required:
+          type: boolean
+          default: true
+        sensitive:
+          type: boolean
+          default: false
+
+    GeneratorBuilderRequest:
+      type: object
+      required:
+        - plugin_type
+        - plugin_id
+      properties:
+        plugin_type:
+          type: string
+          enum: ['flag-generator', 'flag-node-generator']
+        plugin_id:
+          type: string
+          description: Unique generator plugin identifier.
+        folder_name:
+          type: string
+          nullable: true
+          description: Folder name to scaffold inside the flag_generators/ or flag_node_generators/ Generator Pack layout.
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        requires:
+          description: Artifact inputs with per-artifact optional flags.
+          type: array
+          items:
+            $ref: '#/components/schemas/GeneratorArtifactRequirement'
+        optional_requires:
+          type: array
+          nullable: true
+          description: Optional artifact keys that may be present in the chain if available.
+          items:
+            type: string
+        produces:
+          type: array
+          items:
+            type: string
+        runtime_inputs:
+          type: array
+          nullable: true
+          description: Preferred manifest runtime input descriptors.
+          items:
+            $ref: '#/components/schemas/GeneratorRuntimeInput'
+        inputs:
+          $ref: '#/components/schemas/GeneratorBuilderInputsFlags'
+        hint_templates:
+          type: array
+          items:
+            type: string
+        inject_files:
+          type: array
+          nullable: true
+          description: Allowlist of injected files/dirs (or output keys) to stage into injected/.
+          items:
+            type: string
+        inject_candidate_paths:
+          type: array
+          nullable: true
+          description: Absolute candidate destinations for injected artifacts without explicit destination syntax.
+          items:
+            type: string
+        access_instructions:
+          type: object
+          nullable: true
+          description: Guide-facing access instructions rendered in participant/facilitator guides.
+          additionalProperties: true
+          properties:
+            title:
+              type: string
+            steps:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+                properties:
+                  step:
+                    oneOf:
+                      - type: integer
+                      - type: string
+                  title:
+                    type: string
+                  instructions:
+                    type: string
+                  vars:
+                    type: object
+                    additionalProperties:
+                      type: string
+        compose_text:
+          type: string
+          nullable: true
+          description: Optional full docker-compose.yml override used in the scaffold.
+        readme_text:
+          type: string
+          nullable: true
+          description: Optional full README.md override used in the scaffold.
+        generator_py_text:
+          type: string
+          nullable: true
+          description: Optional full generator.py override used in the scaffold.
+
+    GeneratorAiScaffoldRequest:
+      type: object
+      required:
+        - plugin_type
+        - prompt
+        - provider
+        - model
+      properties:
+        plugin_type:
+          type: string
+          enum: ['flag-generator', 'flag-node-generator']
+        source_id_hint:
+          type: string
+          nullable: true
+        name_hint:
+          type: string
+          nullable: true
+        prompt:
+          type: string
+        provider:
+          type: string
+        base_url:
+          type: string
+          nullable: true
+        model:
+          type: string
+        api_key:
+          type: string
+          nullable: true
+        enforce_ssl:
+          type: boolean
+          default: true
+        current_scaffold_request:
+          allOf:
+            - $ref: '#/components/schemas/GeneratorBuilderRequest'
+          nullable: true
+        current_files:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+        last_test_result:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    GeneratorScaffoldMetaResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        manifest_yaml:
+          type: string
+          description: Generated `manifest.yaml` (YAML text).
+        scaffold_paths:
+          type: array
+          items:
+            type: string
+
+    GeneratorAiScaffoldResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        provider:
+          type: string
+        base_url:
+          type: string
+        model:
+          type: string
+        assistant_json:
+          type: object
+          additionalProperties: true
+        assistant_text:
+          type: string
+        scaffold_request:
+          $ref: '#/components/schemas/GeneratorBuilderRequest'
+        folder_path:
+          type: string
+        manifest_yaml:
+          type: string
+        scaffold_paths:
+          type: array
+          items:
+            type: string
+        files:
+          type: object
+          additionalProperties:
+            type: string
+
+    GeneratorBuilderTestRequest:
+      type: object
+      required:
+        - scaffold_request
+      properties:
+        scaffold_request:
+          $ref: '#/components/schemas/GeneratorBuilderRequest'
+        config:
+          type: object
+          additionalProperties: true
+
+    GeneratorBuilderTestFile:
+      type: object
+      properties:
+        path:
+          type: string
+        name:
+          type: string
+        size:
+          type: integer
+          nullable: true
+        text:
+          type: string
+          nullable: true
+
+    GeneratorBuilderTestResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        plugin_id:
+          type: string
+        plugin_type:
+          type: string
+        folder_path:
+          type: string
+        manifest_yaml:
+          type: string
+        config:
+          type: object
+          additionalProperties: true
+        returncode:
+          type: integer
+        stdout:
+          type: string
+        stderr:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/GeneratorBuilderTestFile'
+
+    GeneratorInstallGeneratedRequest:
+      type: object
+      required:
+        - scaffold_request
+      properties:
+        pack_label:
+          type: string
+          nullable: true
+        scaffold_request:
+          $ref: '#/components/schemas/GeneratorBuilderRequest'
+
+    GeneratorInstallGeneratedResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        message:
+          type: string
+        pack_label:
+          type: string
+
+    FlowChainNode:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          nullable: true
+        type:
+          type: string
+          nullable: true
+        is_vuln:
+          type: boolean
+          nullable: true
+      additionalProperties: true
+
+    FlowFactsOverride:
+      type: object
+      description: User-specified initial/goal facts override (artifacts + fields).
+      properties:
+        artifacts:
+          type: array
+          items:
+            type: string
+        fields:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+
+    FlagAssignment:
+      type: object
+      description: Flag generator assignment metadata (best-effort, UI-oriented).
+      properties:
+        node_id:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: ['flag-generator', 'flag-node-generator']
+        generator_catalog:
+          type: string
+          nullable: true
+        flag_generator:
+          type: string
+          nullable: true
+        config_overrides:
+          type: object
+          nullable: true
+          additionalProperties: true
+        output_overrides:
+          type: object
+          nullable: true
+          additionalProperties: true
+        inject_files_override:
+          type: array
+          items:
+            type: string
+        hint_overrides:
+          type: array
+          items:
+            type: string
+        flag_override:
+          type: string
+          nullable: true
+        resolved_inputs:
+          type: object
+          nullable: true
+          additionalProperties: true
+        resolved_outputs:
+          type: object
+          nullable: true
+          additionalProperties: true
+        flag_value:
+          type: string
+          nullable: true
+        inputs:
+          type: array
+          items:
+            type: string
+        outputs:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+
+    AttackflowPreviewResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        scenario:
+          type: string
+          nullable: true
+        length:
+          type: integer
+          nullable: true
+        requested_length:
+          type: integer
+          nullable: true
+        preview_plan_path:
+          type: string
+          nullable: true
+        chain:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlowChainNode'
+        flag_assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlagAssignment'
+        stats:
+          type: object
+          nullable: true
+          additionalProperties: true
+        flow_valid:
+          type: boolean
+          nullable: true
+        flow_errors:
+          type: array
+          items:
+            type: string
+        flags_enabled:
+          type: boolean
+          nullable: true
+        allow_node_duplicates:
+          type: boolean
+          nullable: true
+        initial_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+        goal_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+        warning:
+          type: string
+          nullable: true
+        debug:
+          type: object
+          nullable: true
+          additionalProperties: true
+        sequencer_dag:
+          type: object
+          nullable: true
+          additionalProperties: true
+      additionalProperties: true
+    LatestPreviewPlanResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        scenario:
+          type: string
+          nullable: true
+        preview_plan_path:
+          type: string
+          nullable: true
+        preview_source:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        docker_count:
+          type: integer
+          nullable: true
+        vuln_count:
+          type: integer
+          nullable: true
+        flow_eligible:
+          type: boolean
+          nullable: true
+        core_validated:
+          type: boolean
+          nullable: true
+        error:
+          type: string
+      additionalProperties: true
+
+    PreparePreviewForExecuteRequest:
+      type: object
+      required:
+        - scenario
+      properties:
+        scenario:
+          type: string
+        length:
+          type: integer
+          nullable: true
+        preset:
+          type: string
+          nullable: true
+        chain_ids:
+          type: array
+          items:
+            type: string
+        preview_plan:
+          type: string
+          nullable: true
+        mode:
+          type: string
+          nullable: true
+        best_effort:
+          type: boolean
+          nullable: true
+        allow_node_duplicates:
+          type: boolean
+          nullable: true
+        allow_duplicates:
+          type: boolean
+          nullable: true
+        timeout_s:
+          type: integer
+          nullable: true
+      additionalProperties: true
+
+    PreparePreviewForExecuteResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+      additionalProperties: true
+    SaveFlowStateToXmlRequest:
+      type: object
+      required:
+        - xml_path
+      properties:
+        xml_path:
+          type: string
+        scenario:
+          type: string
+          nullable: true
+        flow_state:
+          type: object
+          nullable: true
+          additionalProperties: true
+        clear:
+          type: boolean
+          nullable: true
+    SaveFlowStateToXmlResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        xml_path:
+          type: string
+          nullable: true
+        error:
+          type: string
+    RevalidateFlowRequest:
+      type: object
+      required:
+        - scenario
+      properties:
+        scenario:
+          type: string
+        xml_path:
+          type: string
+          nullable: true
+        flag_assignments:
+          type: array
+          nullable: true
+          items:
+            type: object
+            additionalProperties: true
+    RevalidateFlowResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+      additionalProperties: true
+
+    AfbFromChainRequest:
+      type: object
+      required:
+        - scenario
+        - chain
+      properties:
+        scenario:
+          type: string
+        chain:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlowChainNode'
+      additionalProperties: true
+
+    AfbFromChainResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        scenario:
+          type: string
+          nullable: true
+        length:
+          type: integer
+          nullable: true
+        chain:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        flag_assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlagAssignment'
+        afb:
+          type: object
+          description: Attack Flow Builder .afb export document.
+          additionalProperties: true
+        attack_graph:
+          type: object
+          description: Simple attack graph JSON derived from the chain.
+          additionalProperties: true
+        attack_graph_dot:
+          type: string
+          description: Graphviz DOT representation of the attack graph.
+        attack_graph_pdf_base64:
+          type: string
+          nullable: true
+          description: Base64-encoded PDF rendition of the attack graph (requires Graphviz dot).
+        flow_valid:
+          type: boolean
+          nullable: true
+        flow_errors:
+          type: array
+          items:
+            type: string
+        flags_enabled:
+          type: boolean
+          nullable: true
+        initial_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+        goal_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+      additionalProperties: true
+
+    SaveFlowSubstitutionsRequest:
+      type: object
+      required:
+        - scenario
+        - chain_ids
+        - flag_assignments
+      properties:
+        scenario:
+          type: string
+        chain_ids:
+          type: array
+          items:
+            type: string
+        preview_plan:
+          type: string
+          nullable: true
+        allow_node_duplicates:
+          type: boolean
+          nullable: true
+        flag_assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlagAssignment'
+        initial_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+        goal_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+      additionalProperties: true
+
+    SaveFlowSubstitutionsResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        scenario:
+          type: string
+          nullable: true
+        length:
+          type: integer
+          nullable: true
+        chain:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlowChainNode'
+        flag_assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlagAssignment'
+        flow_valid:
+          type: boolean
+          nullable: true
+        flow_errors:
+          type: array
+          items:
+            type: string
+        flags_enabled:
+          type: boolean
+          nullable: true
+        preview_plan_path:
+          type: string
+          nullable: true
+        allow_node_duplicates:
+          type: boolean
+          nullable: true
+        initial_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+        goal_facts:
+          $ref: '#/components/schemas/FlowFactsOverride'
+      additionalProperties: true
+    DataSourceSaveResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        skipped:
+          type: integer
+          description: Number of invalid rows skipped during save.
+        error:
+          type: string
+
+    ParticipantUiGraphInterface:
+      type: object
+      description: Best-effort interface details extracted from CORE session XML.
+      properties:
+        name:
+          type: string
+          nullable: true
+        mac:
+          type: string
+          nullable: true
+        ipv4:
+          type: string
+          nullable: true
+        ipv4_mask:
+          type: string
+          nullable: true
+        ipv6:
+          type: string
+          nullable: true
+        ipv6_mask:
+          type: string
+          nullable: true
+      additionalProperties: true
+
+    ParticipantUiGraphNode:
+      type: object
+      required:
+        - id
+        - name
+        - type
+      properties:
+        id:
+          type: string
+          description: Node identifier (device or network id from CORE XML).
+        name:
+          type: string
+        type:
+          type: string
+          description: Node category (e.g., router/host/switch/hitl).
+        services:
+          type: array
+          items:
+            type: string
+        interfaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantUiGraphInterface'
+        ipv4s:
+          type: array
+          items:
+            type: string
+        subnets:
+          type: array
+          items:
+            type: string
+        is_vulnerability:
+          type: boolean
+        is_hitl:
+          type: boolean
+      additionalProperties: true
+
+    ParticipantUiGraphLink:
+      type: object
+      required:
+        - node1
+        - node2
+      properties:
+        node1:
+          type: string
+        node2:
+          type: string
+        node1_name:
+          type: string
+          nullable: true
+        node2_name:
+          type: string
+          nullable: true
+      additionalProperties: true
+
+    ParticipantUiTopologyResponse:
+      type: object
+      required:
+        - ok
+        - nodes
+        - links
+        - subnets
+        - vulnerability_ips
+      properties:
+        ok:
+          type: boolean
+        scenario_norm:
+          type: string
+          nullable: true
+        status:
+          type: string
+          nullable: true
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantUiGraphNode'
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantUiGraphLink'
+        subnets:
+          type: array
+          items:
+            type: string
+        vulnerability_ips:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+
+    ParticipantUiDetailsResponse:
+      type: object
+      required:
+        - ok
+        - scenario_norm
+        - scenario
+        - gateway
+        - open_stats
+        - execute
+        - session
+        - counts
+        - subnetworks
+        - vulnerability_ips
+      properties:
+        ok:
+          type: boolean
+        scenario_norm:
+          type: string
+        scenario:
+          type: object
+          required:
+            - participant_link_configured
+          properties:
+            display:
+              type: string
+              nullable: true
+            assigned:
+              type: boolean
+            placeholder:
+              type: boolean
+            participant_link_configured:
+              type: boolean
+          additionalProperties: true
+        gateway:
+          type: string
+          description: Best-effort gateway IPv4 address (without CIDR mask).
+        open_stats:
+          type: object
+          properties:
+            open_count:
+              type: integer
+            last_open_ts:
+              type: string
+              nullable: true
+          additionalProperties: true
+        execute:
+          type: object
+          properties:
+            last_execute_ts:
+              type: string
+              nullable: true
+            returncode:
+              type: integer
+              nullable: true
+            ok:
+              type: boolean
+              nullable: true
+          additionalProperties: true
+        session:
+          type: object
+          properties:
+            session_id:
+              type: integer
+              nullable: true
+            running:
+              type: boolean
+              nullable: true
+            state:
+              type: string
+              nullable: true
+          additionalProperties: true
+        counts:
+          type: object
+          properties:
+            nodes:
+              type: integer
+              nullable: true
+            routers:
+              type: integer
+              nullable: true
+            switches:
+              type: integer
+              nullable: true
+            vulnerabilities:
+              type: integer
+              nullable: true
+          additionalProperties: true
+        subnetworks:
+          type: array
+          items:
+            type: string
+        vulnerability_ips:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+
+    ParticipantUiGatewayResponse:
+      type: object
+      required:
+        - ok
+        - scenario_norm
+        - nearest_gateway
+      properties:
+        ok:
+          type: boolean
+        scenario_norm:
+          type: string
+        nearest_gateway:
+          type: string
+
+    ParticipantUiStatsResponse:
+      type: object
+      required:
+        - ok
+        - scenario_norm
+        - scenario
+        - totals
+      properties:
+        ok:
+          type: boolean
+        scenario_norm:
+          type: string
+        scenario:
+          type: object
+          properties:
+            open_count:
+              type: integer
+            last_open_ts:
+              type: string
+              nullable: true
+          additionalProperties: true
+        totals:
+          type: object
+          properties:
+            open_count:
+              type: integer
+            last_open_ts:
+              type: string
+              nullable: true
+          additionalProperties: true
+
+    ParticipantUiRecordOpenRequest:
+      type: object
+      required:
+        - href
+      properties:
+        scenario_norm:
+          type: string
+          nullable: true
+        href:
+          type: string
+
+    ParticipantUiRecordOpenResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        scenario_norm:
+          type: string
+          nullable: true
+        last_open_ts:
+          type: string
+          nullable: true
+        totals:
+          type: object
+          additionalProperties: true
+        scenario:
+          type: object
+          additionalProperties: true

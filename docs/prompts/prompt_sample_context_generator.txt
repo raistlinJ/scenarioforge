@@ -1,0 +1,69 @@
+Use this sample context when asking AI to scaffold a new generator.
+
+TYPE: <flag-generator | flag-node-generator>
+SOURCE_ID: <my_source_id>
+
+Files I am providing:
+- manifest.yaml
+- generator.py (template scaffold)
+- optional docker-compose.yml
+
+Generator behavior I want:
+<describe behavior>
+
+Runtime contract (strict):
+- Read /inputs/config.json
+- Write /outputs/outputs.json with:
+	{
+		"generator_id": "<stable string>",
+		"outputs": {
+			"Flag(flag_id)": "FLAG{...}",
+			"...": "..."
+		}
+	}
+- Deterministic outputs for same inputs
+- Exit non-zero on true failure with clear stderr message
+
+Manifest alignment (strict):
+- outputs.json.outputs keys must exactly match artifacts.produces
+- optional runtime inputs must be marked required: false
+- injects (if present) must resolve to real output files
+- if File(path) is present, its value must be relative to /outputs (for example artifacts/<name> or docker-compose.yml), not absolute /outputs/...
+- inject_candidate_paths (if present) must contain absolute paths only and must not contain .. segments
+
+If TYPE is flag-node-generator:
+- Write /outputs/docker-compose.yml
+- Include File(path): "docker-compose.yml" in outputs.json
+
+If TYPE is flag-generator and it emits a file:
+- Write the file under /outputs or /outputs/artifacts
+- Include File(path) in outputs.json using a path relative to /outputs
+
+Optional manifest field: access_instructions
+- Helps participants interact with generated artifacts (mount, connect, exploit, read files)
+- Include step-by-step walkthrough with variable substitution ({{PORT}}, {{NODE}}, {{PATH}}, etc.)
+- When present, overrides auto-generated guide instructions in downloaded participant/facilitator guides
+- When omitted, guides use artifact-pattern heuristics to suggest relevant access steps
+- Include access_instructions whenever the participant needs to mount, connect, authenticate, exploit, or read generated artifacts
+- Expected shape: {"title":"...","steps":[{"step":1,"title":"...","instructions":"...","vars":{"PORT":"PortForward(host, port)"}}]}
+
+Optional manifest field: inject_candidate_paths
+- Use with injected artifacts when the destination should be chosen from several plausible directories per execution
+- Paths must be absolute, for example /opt/uploads, /var/www/html, /srv/data
+- Explicit inject destinations such as File(path) -> /opt/bin still take priority over candidate paths
+
+CORE docker-node / compose restrictions (do not violate):
+- Avoid `${...}` in emitted docker-compose.yml (CORE may treat it as template syntax)
+- Avoid fragile shell PID bookkeeping in emitted docker-compose.yml commands, including `$$`, `$!`, `$$!`, `trap`, and background-process cleanup wrappers
+- Prefer one stable foreground process or a simple fallback like `cmd || sleep infinity` over trap-based shell orchestration
+- Do not rely on `ports:` for in-CORE reachability; peers use CORE node IP
+- Assume services may run with `network_mode: none` and no outbound internet
+
+Code style constraints:
+- Use Python standard library only unless explicitly asked otherwise
+- Keep imports (`json`, `sys`, etc.) at module scope
+- Do not use function-local imports in scopes with nested helpers
+
+Output format request to AI:
+- Reply with ONLY full updated generator.py
+- If I ask for docs too, output generator.py then manifest.yaml then README.md

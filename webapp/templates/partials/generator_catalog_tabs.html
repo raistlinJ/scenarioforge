@@ -1,0 +1,43 @@
+<ul class="nav nav-tabs mb-3" id="generatorCatalogTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <a class="nav-link {% if active_generator_catalog_tab == 'packs' %}active{% endif %}"
+       id="flagGenSourcesTab"
+       data-bs-toggle="tab"
+       href="#flagGenSources"
+       role="tab"
+       aria-controls="flagGenSources"
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'packs' else 'false' }}">Generator Packs</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link {% if active_generator_catalog_tab == 'flag-generators' %}active{% endif %}"
+       id="flagGeneratorsTab"
+       data-bs-toggle="tab"
+       href="#flagGenerators"
+       role="tab"
+       aria-controls="flagGenerators"
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'flag-generators' else 'false' }}">Flag-Generators</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link {% if active_generator_catalog_tab == 'flag-node-generators' %}active{% endif %}"
+       id="flagNodeGeneratorsTab"
+       data-bs-toggle="tab"
+       href="#flagNodeGenerators"
+       role="tab"
+       aria-controls="flagNodeGenerators"
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'flag-node-generators' else 'false' }}">Flag-Node-Generators</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link {% if active_generator_catalog_tab == 'batch-test' %}active{% endif %}"
+       id="flagBatchTab"
+       data-bs-toggle="tab"
+       href="#flagBatch"
+       role="tab"
+       aria-controls="flagBatch"
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'batch-test' else 'false' }}">Batch Test</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link {% if active_generator_catalog_tab == 'generator-builder' %}active{% endif %}"
+       id="flagGeneratorBuilderTab"
+       href="{{ url_for('generator_builder_page') }}"><i class="bi bi-wrench-adjustable me-1"></i>Generator Builder</a>
+  </li>
+</ul>

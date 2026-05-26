@@ -1,0 +1,1243 @@
+{% extends 'layout.html' %}
+{% block title %}Participant UI{% endblock %}
+{% block active_page %}{% set active_page = 'participant_ui' %}{% endblock %}
+{% block header_icon %}<i class="bi bi-person-video2 fs-4"></i>{% endblock %}
+{% block header_title %}Participant Console{% endblock %}
+{% block extra_head %}
+{{ super() }}
+<style>
+  #participantUiRoot.participant-sidebar-hidden .participant-sidebar-col { display: none !important; }
+  #participantUiRoot.participant-sidebar-hidden .participant-content-col {
+    flex: 0 0 100%;
+    max-width: 100%;
+  }
+  .participant-sidebar-toggle-restore { display: none; }
+  #participantUiRoot.participant-sidebar-hidden .participant-sidebar-toggle-restore {
+    display: inline-flex !important;
+  }
+  .participant-mission-title { letter-spacing: 0.08em; text-transform: uppercase; }
+  .participant-open-primary { letter-spacing: 0.12em; }
+
+  /* Mirror core_details.html D3 graph styling */
+  #topologyGraphCard .link.highlight { stroke: #ff5722 !important; stroke-width: 2.2px; }
+  #topologyGraphCard .node.fade { opacity: 0.15; }
+  #topologyGraphCard .node text { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  #topologyGraphCard .node rect { transition: stroke-dasharray 0.25s, width 0.25s, height 0.25s; }
+  #topologyGraphCard .node:hover rect { stroke-width: 2; }
+  #topologyGraphCard .node.switch-node rect { stroke: #ff9800; stroke-width: 2; }
+  #topologyGraphCard .node.switch-node text.label { font-weight: 600; }
+  #topologyGraphCard .btn-group .btn { white-space: nowrap; }
+  #topologyGraph .graph-tooltip { position:absolute; pointer-events:none; background:rgba(33,33,33,0.92); color:#fff; font-size:11px; line-height:1.3; padding:6px 8px; border-radius:4px; box-shadow:0 2px 4px rgba(0,0,0,0.3); z-index:20; max-width:260px; text-align:left; }
+  #topologyGraph .graph-tooltip.hidden { display:none; }
+</style>
+{% endblock %}
+{% block content %}
+{% set _user_role = (current_user.role.lower() if (current_user is defined and current_user.is_authenticated and current_user.role) else '') %}
+{% set participant_hide_urls = _user_role in ['builder', 'participant'] %}
+<div class="row g-3" id="participantUiRoot" data-active-norm="{{ participant_active_norm or '' }}" data-initial-href="{% if not participant_hide_urls %}{{ participant_url or '' }}{% endif %}">
+  <div class="col-12 col-lg-4 participant-sidebar-col">
+    <div class="card shadow-sm h-100 bg-dark text-light">
+      <div class="card-body d-flex flex-column gap-3">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+          <div>
+            <h5 class="mb-0">{{ participant_scenarios_heading or 'Available Scenarios' }}</h5>
+            {% if participant_scenarios_hint %}<small class="text-secondary">{{ participant_scenarios_hint }}</small>{% endif %}
+          </div>
+          {% if participant_scenarios %}
+            <button class="btn btn-sm btn-outline-secondary" type="button" data-participant-toggle-sidebar aria-expanded="true">
+              <span class="participant-collapse-label" data-label-expanded="Hide" data-label-collapsed="Show All Scenarios">Hide</span>
+            </button>
+          {% endif %}
+        </div>
+        {% if participant_scenarios %}
+          <div class="collapse show flex-grow-1" id="participantScenarioListWrap">
+            <div class="list-group list-group-flush overflow-auto" style="max-height: 65vh;">
+              {% for scenario in participant_scenarios %}
+                <div class="list-group-item bg-black text-light border-top border-secondary {% if loop.first %}border-top-0{% endif %} participant-scenario-item {% if scenario.active %}active border border-primary{% endif %} {% if not scenario.has_url %}opacity-75{% endif %}"
+                     role="button" tabindex="0"
+                     data-participant-scenario
+                     data-scenario-norm="{{ scenario.norm|e }}"
+                     data-scenario-display="{{ scenario.display|e }}"
+                     data-scenario-url="{% if not participant_hide_urls %}{{ scenario.url|e }}{% endif %}"
+                     data-scenario-has-url="{{ 1 if scenario.has_url else 0 }}">
+                  <div class="d-flex flex-column gap-1">
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                      <span class="fw-semibold">{{ scenario.display }}</span>
+                      {% if not scenario.has_url %}<span class="badge bg-warning text-dark">No Link</span>{% endif %}
+                    </div>
+                    {% if scenario.has_url %}
+                      <div class="text-secondary small">
+                        Participant console link available.
+                      </div>
+                    {% else %}
+                      <div class="text-secondary small">Participant URL not configured yet.</div>
+                    {% endif %}
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% else %}
+          <div class="alert alert-secondary mb-0">{{ participant_scenarios_empty or 'No scenarios available.' }}</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-8 participant-content-col">
+    <div class="card shadow-sm mb-0 bg-dark text-light">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+          <div class="d-flex align-items-center gap-2">
+            <button class="btn btn-sm btn-outline-secondary participant-sidebar-toggle-restore" type="button" data-participant-show-sidebar>Show All Scenarios</button>
+            <div>
+              <h5 class="mb-0 participant-mission-title font-monospace">Mission Briefing</h5>
+              <small class="text-secondary" id="participantScenarioSubhead" data-default-text="Select a scenario to load its participant console below.">{% if participant_scenario_label %}Scenario: {{ participant_scenario_label }}{% else %}Select a scenario to load its participant console below.{% endif %}</small>
+            </div>
+          </div>
+        </div>
+        <div class="text-center mb-3">
+          <button class="btn btn-lg btn-warning fw-bold text-uppercase font-monospace participant-open-primary px-4" type="button" id="participantOpenBtn" disabled>
+            <i class="bi bi-box-arrow-up-right me-2"></i>Open Console
+          </button>
+        </div>
+        <div class="card border bg-black mb-3" id="participantStatsCard" style="display:none;">
+          <div class="card-body py-2">
+            <div class="row g-2 small font-monospace">
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Session Status</div>
+                <div>
+                  <span class="badge bg-secondary text-uppercase" id="participantStatSessionStatus">-</span>
+                </div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Session ID</div>
+                <div class="fw-semibold text-white" id="participantStatSessionId">-</div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Nearest Gateway Address</div>
+                <div class="fw-semibold text-white" id="participantStatGateway">{{ participant_nearest_gateway or '-' }}</div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Scenario Link</div>
+                <div class="fw-semibold text-white" id="participantStatLinkConfigured">-</div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Last opened (all users)</div>
+                <div class="fw-semibold text-white" id="participantStatLastAll">-</div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Open count (all users)</div>
+                <div class="fw-semibold text-white" id="participantStatCountAll">0</div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Last Execute</div>
+                <div class="fw-semibold text-white" id="participantStatLastExecute">-</div>
+              </div>
+              <div class="col-12 col-md-6">
+                <div class="text-secondary">Last Execute Result</div>
+                <div class="fw-semibold text-white" id="participantStatLastExecuteResult">-</div>
+              </div>
+              <div class="col-12 col-md-3">
+                <div class="text-secondary">Nodes</div>
+                <div class="fw-semibold text-white" id="participantStatNodes">-</div>
+              </div>
+              <div class="col-12 col-md-3">
+                <div class="text-secondary">Routers</div>
+                <div class="fw-semibold text-white" id="participantStatRouters">-</div>
+              </div>
+              <div class="col-12 col-md-3">
+                <div class="text-secondary">Switches</div>
+                <div class="fw-semibold text-white" id="participantStatSwitches">-</div>
+              </div>
+              <div class="col-12 col-md-3">
+                <div class="text-secondary">Key Nodes</div>
+                <div class="fw-semibold text-white" id="participantStatVulns">-</div>
+              </div>
+              <div class="col-12">
+                <details id="participantSubnetworksDetails">
+                  <summary class="text-secondary" id="participantSubnetworksSummary">Subnetworks (CIDR) (0)</summary>
+                  <div class="mt-2">
+                    <div class="row g-2" id="participantSubnetworksList" aria-label="Subnetworks"></div>
+                  </div>
+                </details>
+              </div>
+              <div class="col-12">
+                <details id="participantVulnIpsDetails">
+                  <summary class="text-secondary" id="participantVulnIpsSummary">Key Nodes IP Addresses (0)</summary>
+                  <div class="mt-2">
+                    <div class="row g-2" id="participantVulnIpsList" aria-label="Key Nodes IP Addresses"></div>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+            <div id="topologyGraphCard" style="display:none;">
+              <hr class="border-secondary my-3" />
+              <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <div class="d-flex align-items-center gap-2">
+                  <strong class="text-white">Graph View</strong>
+                  <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary" id="graphCollapseBtn" data-bs-toggle="collapse" data-bs-target="#topologyGraphCollapse" aria-expanded="false">Show</button>
+                  </div>
+                  <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary" id="graphResetBtn" title="Reset zoom & layout">Reset</button>
+                    <button type="button" class="btn btn-outline-secondary" id="graphClusterBtn" title="Cluster by type">Cluster: Off</button>
+                  </div>
+                  <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary" id="graphExportSvgBtn" title="Download SVG">SVG</button>
+                    <button type="button" class="btn btn-outline-secondary" id="graphExportPngBtn" title="Download PNG">PNG</button>
+                  </div>
+                </div>
+                <div class="small text-secondary" id="graphStats"></div>
+              </div>
+              <div class="collapse" id="topologyGraphCollapse">
+                <div class="pt-2">
+                  <div id="topologyGraph" style="width:100%; height:460px; position:relative; border:1px solid #e0e0e0; border-radius:4px; background:#fafafa; overflow:hidden;"></div>
+                  <div class="form-text mt-1">Drag nodes to reposition (they’ll stay pinned), scroll or pinch to zoom, and drag the background to pan. Hover highlights neighbors. Use Reset to clear zoom & unpin positions; Cluster groups by type; SVG/PNG export the view.</div>
+                  <div class="text-secondary small mt-2" id="participantTopologyStatus"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="topologyDetailsCard" style="display:none;">
+              <hr class="border-secondary my-3" />
+              <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <div class="d-flex align-items-center gap-2">
+                  <strong class="text-white">Details View</strong>
+                  <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary" id="detailsCollapseBtn" data-bs-toggle="collapse" data-bs-target="#topologyDetailsCollapse" aria-expanded="false">Show</button>
+                  </div>
+                </div>
+                <div class="small text-secondary" id="detailsStats"></div>
+              </div>
+              <div class="collapse" id="topologyDetailsCollapse">
+                <div class="pt-2">
+                  <div class="row g-2 align-items-center">
+                    <div class="col-md-7">
+                      <input type="search" class="form-control form-control-sm" id="participantNodeFilter" placeholder="Filter nodes by name, id, type, service, or linked node">
+                      <div class="form-text text-secondary small" id="participantVisibleCount">&nbsp;</div>
+                    </div>
+                    <div class="col-md-5 d-flex justify-content-end gap-2">
+                      <button class="btn btn-sm btn-outline-secondary" id="participantClearFilterBtn" type="button">Clear</button>
+                      <button class="btn btn-sm btn-outline-secondary" id="participantExpandAllBtn" type="button">Expand All</button>
+                      <button class="btn btn-sm btn-outline-secondary" id="participantCollapseAllBtn" type="button">Collapse All</button>
+                    </div>
+                  </div>
+
+                  <div class="accordion mt-2" id="participantNodesAccordion"></div>
+                  <div id="participantNoMatches" class="text-secondary fst-italic d-none small">No nodes match the filter.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block extra_scripts %}
+{{ super() }}
+<script src="/static/vendor/d3.v7.min.js"></script>
+<script src="{{ url_for('static', filename='core_graph.js') }}"></script>
+<script>
+(function(){
+  if(typeof window === 'undefined') return;
+  const root = document.getElementById('participantUiRoot');
+  if(!root) return;
+  const subhead = document.getElementById('participantScenarioSubhead');
+  const openBtn = document.getElementById('participantOpenBtn');
+  const statsCard = document.getElementById('participantStatsCard');
+  const statGateway = document.getElementById('participantStatGateway');
+  const statLinkConfigured = document.getElementById('participantStatLinkConfigured');
+  const statLastAll = document.getElementById('participantStatLastAll');
+  const statCountAll = document.getElementById('participantStatCountAll');
+  const statSessionStatus = document.getElementById('participantStatSessionStatus');
+  const statSessionId = document.getElementById('participantStatSessionId');
+  const statLastExecute = document.getElementById('participantStatLastExecute');
+  const statLastExecuteResult = document.getElementById('participantStatLastExecuteResult');
+  const statNodes = document.getElementById('participantStatNodes');
+  const statRouters = document.getElementById('participantStatRouters');
+  const statSwitches = document.getElementById('participantStatSwitches');
+  const statVulns = document.getElementById('participantStatVulns');
+  const subnetworksDetails = document.getElementById('participantSubnetworksDetails');
+  const subnetworksSummary = document.getElementById('participantSubnetworksSummary');
+  const subnetworksList = document.getElementById('participantSubnetworksList');
+  const vulnIpsDetails = document.getElementById('participantVulnIpsDetails');
+  const vulnIpsSummary = document.getElementById('participantVulnIpsSummary');
+  const vulnIpsList = document.getElementById('participantVulnIpsList');
+  const topologyGraphCard = document.getElementById('topologyGraphCard');
+  const topologyGraph = document.getElementById('topologyGraph');
+  const topologyStatus = document.getElementById('participantTopologyStatus');
+  const graphCollapseBtn = document.getElementById('graphCollapseBtn');
+  const topologyGraphCollapse = document.getElementById('topologyGraphCollapse');
+  const topologyDetailsCard = document.getElementById('topologyDetailsCard');
+  const detailsCollapseBtn = document.getElementById('detailsCollapseBtn');
+  const topologyDetailsCollapse = document.getElementById('topologyDetailsCollapse');
+  const detailsStats = document.getElementById('detailsStats');
+  const participantNodeFilter = document.getElementById('participantNodeFilter');
+  const participantClearFilterBtn = document.getElementById('participantClearFilterBtn');
+  const participantExpandAllBtn = document.getElementById('participantExpandAllBtn');
+  const participantCollapseAllBtn = document.getElementById('participantCollapseAllBtn');
+  const participantNodesAccordion = document.getElementById('participantNodesAccordion');
+  const participantNoMatches = document.getElementById('participantNoMatches');
+  const participantVisibleCount = document.getElementById('participantVisibleCount');
+  const scenarioItems = Array.from(document.querySelectorAll('[data-participant-scenario]'));
+  const toggleSidebarBtn = document.querySelector('[data-participant-toggle-sidebar]');
+  const showSidebarBtn = document.querySelector('[data-participant-show-sidebar]');
+  const collapseLabel = toggleSidebarBtn ? toggleSidebarBtn.querySelector('.participant-collapse-label') : null;
+
+  let currentNorm = root.getAttribute('data-active-norm') || '';
+  let currentHasUrl = false;
+  let currentHref = '';
+  let currentSessionRunning = false;
+
+  const openRedirectHref = (norm) => {
+    if(!norm) return '/participant-ui/open';
+    return `/participant-ui/open?scenario=${encodeURIComponent(norm)}`;
+  };
+
+  const updateSubhead = (display) => {
+    if(!subhead) return;
+    const base = subhead.getAttribute('data-default-text') || '';
+    subhead.textContent = display ? `Scenario: ${display}` : base;
+  };
+
+  const updateOpenButton = (href) => {
+    if(!openBtn) return;
+    currentHref = href || '';
+    openBtn.disabled = !(currentHref && currentHasUrl && currentSessionRunning === true);
+    if(statsCard){
+      statsCard.style.display = currentNorm ? '' : 'none';
+    }
+  };
+
+  const fmtTs = (ts) => {
+    if(!ts) return 'Never';
+    try {
+      const d = new Date(ts);
+      if(Number.isNaN(d.getTime())) return String(ts);
+      return d.toLocaleString();
+    } catch(e){
+      return String(ts);
+    }
+  };
+
+  const renderSubnetworks = (items) => {
+    if(!subnetworksList || !subnetworksSummary) return;
+    const names = Array.isArray(items) ? items.map(v => String(v || '').trim()).filter(Boolean) : [];
+    const ipToInt = (ip) => {
+      const parts = String(ip || '').trim().split('.');
+      if(parts.length !== 4) return null;
+      const nums = parts.map(p => Number(p));
+      if(nums.some(n => !Number.isFinite(n) || n < 0 || n > 255)) return null;
+      return ((nums[0] << 24) >>> 0) + (nums[1] << 16) + (nums[2] << 8) + nums[3];
+    };
+    const parseCidr = (cidr) => {
+      const text = String(cidr || '').trim();
+      const [ip, suffix] = text.split('/', 2);
+      const ipInt = ipToInt(ip);
+      const prefix = suffix !== undefined ? Number(suffix) : null;
+      return { text, ip, ipInt, prefix: Number.isFinite(prefix) ? prefix : null };
+    };
+    const sorted = names
+      .map(parseCidr)
+      .sort((a, b) => {
+        if(a.ipInt !== null && b.ipInt !== null) {
+          if(a.ipInt !== b.ipInt) return a.ipInt - b.ipInt;
+          const ap = a.prefix === null ? 999 : a.prefix;
+          const bp = b.prefix === null ? 999 : b.prefix;
+          return ap - bp;
+        }
+        return a.text.localeCompare(b.text);
+      });
+    subnetworksSummary.textContent = `Subnetworks (CIDR) (${names.length})`;
+    subnetworksList.innerHTML = '';
+    sorted.forEach((row) => {
+      const col = document.createElement('div');
+      col.className = 'col-6 col-md-4 col-lg-3';
+      const box = document.createElement('div');
+      box.className = 'border border-secondary rounded px-2 py-1 small font-monospace text-white';
+      box.textContent = row.text;
+      col.appendChild(box);
+      subnetworksList.appendChild(col);
+    });
+    if(subnetworksDetails){
+      subnetworksDetails.style.display = '';
+      if(names.length === 0){
+        subnetworksDetails.open = false;
+      }
+    }
+  };
+
+  const renderVulnerabilityIps = (items) => {
+    if(!vulnIpsList || !vulnIpsSummary) return;
+    const names = Array.isArray(items) ? items.map(v => String(v || '').trim()).filter(Boolean) : [];
+    const ipToInt = (ip) => {
+      const parts = String(ip || '').trim().split('.');
+      if(parts.length !== 4) return null;
+      const nums = parts.map(p => Number(p));
+      if(nums.some(n => !Number.isFinite(n) || n < 0 || n > 255)) return null;
+      return ((nums[0] << 24) >>> 0) + (nums[1] << 16) + (nums[2] << 8) + nums[3];
+    };
+    const uniq = Array.from(new Set(names));
+    const sorted = uniq
+      .map(ip => ({ ip, ipInt: ipToInt(ip) }))
+      .sort((a, b) => {
+        if(a.ipInt !== null && b.ipInt !== null) return a.ipInt - b.ipInt;
+        if(a.ipInt !== null) return -1;
+        if(b.ipInt !== null) return 1;
+        return a.ip.localeCompare(b.ip);
+      });
+    vulnIpsSummary.textContent = `Key Nodes IP Addresses (${uniq.length})`;
+    vulnIpsList.innerHTML = '';
+    sorted.forEach((row) => {
+      const col = document.createElement('div');
+      col.className = 'col-6 col-md-4 col-lg-3';
+      const box = document.createElement('div');
+      box.className = 'border border-secondary rounded px-2 py-1 small font-monospace text-white';
+      box.textContent = row.ip;
+      col.appendChild(box);
+      vulnIpsList.appendChild(col);
+    });
+    if(vulnIpsDetails){
+      vulnIpsDetails.style.display = '';
+      if(uniq.length === 0){
+        vulnIpsDetails.open = false;
+      }
+    }
+  };
+
+  const fetchScenarioDetails = async (norm) => {
+    try {
+      const url = norm ? `/participant-ui/details?scenario=${encodeURIComponent(norm)}` : '/participant-ui/details';
+      const resp = await fetch(url, { credentials: 'same-origin' });
+      if(!resp.ok) return null;
+      const payload = await resp.json();
+      if(!payload || !payload.ok) return null;
+      return payload;
+    } catch(e){
+      return null;
+    }
+  };
+
+  const fetchScenarioTopology = async (norm) => {
+    try {
+      const url = norm ? `/participant-ui/topology?scenario=${encodeURIComponent(norm)}` : '/participant-ui/topology';
+      const resp = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+      if(!resp.ok) return null;
+      const payload = await resp.json();
+      if(!payload || !payload.ok) return null;
+      return payload;
+    } catch(e){
+      return null;
+    }
+  };
+
+  // Defensive: expose helpers on window so runtime calls won't fail if the
+  // surrounding script is accidentally re-scoped by a formatter/edit.
+  try {
+    window.fetchScenarioDetails = fetchScenarioDetails;
+    window.fetchScenarioTopology = fetchScenarioTopology;
+  } catch(e) {}
+
+  const _topologyGraphScaffoldHtml = () => {
+    return `
+      <div class="position-absolute top-50 start-50 translate-middle text-muted" id="graphLoading">Rendering graph...</div>
+      <div class="position-absolute top-50 start-50 translate-middle text-muted d-none" id="graphNoData" style="max-width:70%; text-align:center;">
+        <div class="mb-2">No device nodes were parsed from this scenario yet.</div>
+        <div class="small text-muted">Links detected: <span id="graphNoDataLinksCount">0</span>.</div>
+      </div>
+      <div class="position-absolute top-0 end-0 m-2 p-2 bg-white border rounded shadow-sm small" id="graphLegend" style="max-width:220px;">
+        <div class="fw-semibold mb-1">Legend</div>
+        <div id="graphLegendItems" class="d-flex flex-wrap gap-2"></div>
+        <div class="mt-1 text-muted" style="font-size:0.7rem;">Circle size = services count</div>
+      </div>
+      <div id="graphMiniMap" class="position-absolute bg-white border rounded shadow-sm" style="bottom:8px; right:8px; width:160px; height:120px; overflow:hidden; cursor:grab;">
+        <svg width="160" height="120"></svg>
+      </div>
+      <div id="graphTooltip" class="graph-tooltip hidden"></div>
+    `;
+  };
+
+  let _participantGraphInstance = null;
+
+  // Basic helpers for the Details View (keep in sync with core_graph.js behavior).
+  const _toRoman = (num) => {
+    const n = Number(num);
+    if(!Number.isFinite(n) || n <= 0 || n >= 4000) return '';
+    const parts = [
+      [1000,'M'],[900,'CM'],[500,'D'],[400,'CD'],
+      [100,'C'],[90,'XC'],[50,'L'],[40,'XL'],
+      [10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I'],
+    ];
+    let x = Math.floor(n);
+    let out = '';
+    for(const [v,s] of parts){
+      while(x >= v){ out += s; x -= v; }
+    }
+    return out;
+  };
+
+  const _nodeIsHitl = (node) => {
+    try {
+      if(!node) return false;
+      if(node.is_hitl === true || node.is_hitl === 'true' || node.is_hitl === 'True') return true;
+      const hitlMarkers = ['rj45','rj-45','hitl','tap','bridge','ethernet','physical'];
+      const typeVal = String(node.type || '').toLowerCase();
+      if(typeVal && hitlMarkers.some(m => typeVal.includes(m))) return true;
+      const nameVal = String(node.name || '').toLowerCase();
+      if(nameVal && hitlMarkers.some(m => nameVal.includes(m))) return true;
+      return false;
+    } catch(e){
+      return false;
+    }
+  };
+
+  const _displayNameForDetails = (node) => {
+    const raw = String((node && node.name) ? node.name : '').trim();
+    if(!raw) return '';
+    if(!_nodeIsHitl(node)) return raw;
+    // Match core_graph.js: strip trailing "(10.0.0.0/24)"-like suffixes.
+    return raw.replace(/\s*\(([^)]*[\d.:]+[^)]*)\)\s*$/,'').trim();
+  };
+
+  const _displayNameWithSequenceForDetails = (node) => {
+    const base = _displayNameForDetails(node);
+    if(!base) return '';
+    if(_nodeIsHitl(node)) return base;
+    const seq = (node && (node.sequence_index ?? node.sequenceIndex)) ? Number(node.sequence_index ?? node.sequenceIndex) : null;
+    if(!seq || !Number.isFinite(seq)) return base;
+    const roman = _toRoman(seq);
+    return roman ? `${roman} ${base}` : base;
+  };
+
+  // Mirror the Preview tab graph view: annotate topology nodes with
+  // sequence_index based on saved flow chain so Roman numerals can render.
+  const _annotateSequenceNodesFromFlow = (nodes, flow) => {
+    try {
+      const list = Array.isArray(nodes) ? nodes : [];
+      if(!list.length) return;
+      const chain = (flow && Array.isArray(flow.chain)) ? flow.chain : null;
+      if(!chain || !chain.length) return;
+
+      const canonical = (t) => String(t || '').trim().toLowerCase();
+      const isSequenceEligible = (node) => {
+        const t = canonical(node && (node.type ?? node.kind ?? node.role));
+        return t === 'host' || t === 'docker' || t === 'vulnerability' || t === 'vuln';
+      };
+
+      const nodeById = new Map();
+      list.forEach(n => { if(n && n.id !== undefined && n.id !== null) nodeById.set(String(n.id), n); });
+      const nodeByName = new Map();
+      const nameCounts = new Map();
+      list.forEach(n => {
+        if(!n || !isSequenceEligible(n)) return;
+        const nm = String(n.name ?? n.label ?? '').trim();
+        if(!nm) return;
+        const k = nm.toLowerCase();
+        nameCounts.set(k, (nameCounts.get(k) || 0) + 1);
+        nodeByName.set(k, n);
+      });
+      const chainLen = chain.length;
+
+      const resolveNodeForChainEntry = (entry) => {
+        let raw = entry;
+        if(entry && typeof entry === 'object'){
+          raw = entry.id ?? entry.node_id ?? entry.nodeId ?? entry.host_id ?? entry.hostId ?? entry;
+        }
+        if(raw === undefined || raw === null) return null;
+
+        const key = String(raw).trim();
+        if(key && nodeById.has(key)){
+          const node = nodeById.get(key);
+          return (node && isSequenceEligible(node)) ? node : null;
+        }
+        if(/^\d+$/.test(key)){
+          const node = nodeById.get(String(Number(key)));
+          return (node && isSequenceEligible(node)) ? node : null;
+        }
+        const nameKey = key.toLowerCase();
+        if(nameCounts.get(nameKey) === 1 && nodeByName.has(nameKey)){
+          return nodeByName.get(nameKey);
+        }
+        return null;
+      };
+
+      chain.forEach((entry, idx) => {
+        const target = resolveNodeForChainEntry(entry);
+        if(!target) return;
+        target.isSequence = true;
+        target.sequence_index = idx + 1;
+        target.sequence_chain_len = chainLen;
+      });
+    } catch(e) {}
+  };
+
+  const renderTopologyGraph = (payload) => {
+    if(!topologyGraphCard || !topologyGraph) return;
+    if(!currentNorm){
+      topologyGraphCard.style.display = 'none';
+      return;
+    }
+    topologyGraphCard.style.display = '';
+
+    const nodesRaw = Array.isArray(payload && payload.nodes) ? payload.nodes : [];
+    const linksRaw = Array.isArray(payload && payload.links) ? payload.links : [];
+    // Keep this quiet; backend status can include filenames.
+    if(topologyStatus) topologyStatus.textContent = '';
+
+    if(!window.d3 || !window.CoreGraph){
+      topologyGraph.innerHTML = `<div class="p-3 text-muted small">Graph libraries not loaded (d3/CoreGraph).</div>`;
+      return;
+    }
+
+    topologyGraph.innerHTML = _topologyGraphScaffoldHtml();
+
+    const mappedNodes = nodesRaw
+      .filter(n => n && n.id !== null && n.id !== undefined)
+      .map(n => {
+        const idVal = String(n.id);
+        const nameVal = (n.name !== null && n.name !== undefined) ? String(n.name) : idVal;
+        const typeVal = (n.type !== null && n.type !== undefined) ? String(n.type) : 'node';
+        const servicesVal = Array.isArray(n.services) ? n.services : [];
+        const ifacesVal = Array.isArray(n.interfaces) ? n.interfaces : [];
+        const ipv4sVal = Array.isArray(n.ipv4s) ? n.ipv4s : [];
+        const subnetsVal = Array.isArray(n.subnets) ? n.subnets : [];
+        return {
+          id: idVal,
+          name: nameVal || idVal,
+          type: typeVal || 'node',
+          services: servicesVal,
+          interfaces: ifacesVal,
+          ipv4s: ipv4sVal,
+          subnets: subnetsVal,
+          hasVuln: !!n.is_vulnerability,
+        };
+      });
+
+    const mappedLinks = linksRaw
+      .map(l => {
+        const n1 = (l && (l.node1 ?? l.source)) !== null && (l && (l.node1 ?? l.source)) !== undefined ? String(l.node1 ?? l.source) : '';
+        const n2 = (l && (l.node2 ?? l.target)) !== null && (l && (l.node2 ?? l.target)) !== undefined ? String(l.node2 ?? l.target) : '';
+        const n1Name = (l && l.node1_name) !== null && (l && l.node1_name) !== undefined ? String(l.node1_name) : '';
+        const n2Name = (l && l.node2_name) !== null && (l && l.node2_name) !== undefined ? String(l.node2_name) : '';
+        return { node1: n1, node2: n2, node1_name: n1Name, node2_name: n2Name };
+      })
+      .filter(l => l.node1 && l.node2 && l.node1 !== l.node2);
+
+    // Add sequencing info (if present) before rendering.
+    try { _annotateSequenceNodesFromFlow(mappedNodes, payload && payload.flow); } catch(e) {}
+
+    // Lightweight diagnostics (mirrors Details page graph stats area)
+    try {
+      const statsEl = document.getElementById('graphStats');
+      if(statsEl){
+        const idIndex = new Map();
+        mappedNodes.forEach((n,i)=>{ idIndex.set(String(n.id), i); idIndex.set(String(n.name), i); });
+        const resolved = mappedLinks.filter(l => {
+          const s = idIndex.get(String(l.node1)) ?? idIndex.get(String(l.node1_name));
+          const t = idIndex.get(String(l.node2)) ?? idIndex.get(String(l.node2_name));
+          return s !== undefined && t !== undefined && s !== t;
+        }).length;
+        statsEl.textContent = `Nodes: ${mappedNodes.length} • Links: ${mappedLinks.length} • Resolved: ${resolved}`;
+      }
+    } catch(e) {}
+
+    const noDataEl = document.getElementById('graphNoData');
+    const loadingEl = document.getElementById('graphLoading');
+
+    if(mappedNodes.length === 0){
+      if(loadingEl) loadingEl.remove();
+      if(noDataEl){
+        noDataEl.classList.remove('d-none');
+        const lc = document.getElementById('graphNoDataLinksCount');
+        if(lc) lc.textContent = String(mappedLinks.length);
+      }
+      return;
+    }
+
+    if(noDataEl) noDataEl.classList.add('d-none');
+    try {
+      _participantGraphInstance = window.CoreGraph.init({
+        containerSelector: '#topologyGraph',
+        nodes: mappedNodes,
+        linksRaw: mappedLinks,
+        xmlPath: `participant_${currentNorm}`
+      });
+    } finally {
+      const loading2 = document.getElementById('graphLoading');
+      if(loading2) loading2.remove();
+    }
+  };
+
+  const renderTopologyDetails = (payload) => {
+    if(!topologyDetailsCard || !participantNodesAccordion) return;
+    if(!currentNorm){
+      topologyDetailsCard.style.display = 'none';
+      return;
+    }
+
+    topologyDetailsCard.style.display = '';
+    participantNodesAccordion.innerHTML = '';
+    if(participantNoMatches) participantNoMatches.classList.add('d-none');
+    if(participantVisibleCount) participantVisibleCount.textContent = '';
+
+    const nodesRaw = Array.isArray(payload && payload.nodes) ? payload.nodes : [];
+    const linksRaw = Array.isArray(payload && payload.links) ? payload.links : [];
+
+    const nodes = nodesRaw
+      .filter(n => n && n.id !== null && n.id !== undefined)
+      .map(n => {
+        const idVal = String(n.id);
+        const nameVal = (n.name !== null && n.name !== undefined) ? String(n.name) : idVal;
+        const typeVal = (n.type !== null && n.type !== undefined) ? String(n.type) : 'node';
+        const servicesVal = Array.isArray(n.services) ? n.services : [];
+        const ifacesVal = Array.isArray(n.interfaces) ? n.interfaces : [];
+        const ipv4sVal = Array.isArray(n.ipv4s) ? n.ipv4s : [];
+        const subnetsVal = Array.isArray(n.subnets) ? n.subnets : [];
+        return {
+          id: idVal,
+          name: nameVal || idVal,
+          type: typeVal || 'node',
+          services: servicesVal,
+          interfaces: ifacesVal,
+          ipv4s: ipv4sVal,
+          subnets: subnetsVal,
+          is_hitl: !!n.is_hitl,
+          hasVuln: !!n.is_vulnerability,
+        };
+      });
+
+    const links = linksRaw
+      .map(l => {
+        const n1 = (l && (l.node1 ?? l.source)) !== null && (l && (l.node1 ?? l.source)) !== undefined ? String(l.node1 ?? l.source) : '';
+        const n2 = (l && (l.node2 ?? l.target)) !== null && (l && (l.node2 ?? l.target)) !== undefined ? String(l.node2 ?? l.target) : '';
+        const n1Name = (l && l.node1_name) !== null && (l && l.node1_name) !== undefined ? String(l.node1_name) : '';
+        const n2Name = (l && l.node2_name) !== null && (l && l.node2_name) !== undefined ? String(l.node2_name) : '';
+        return { node1: n1, node2: n2, node1_name: n1Name, node2_name: n2Name };
+      })
+      .filter(l => l.node1 && l.node2 && l.node1 !== l.node2);
+
+    // Apply the same flow annotation used by the graph.
+    try { _annotateSequenceNodesFromFlow(nodes, payload && payload.flow); } catch(e) {}
+
+    // Build adjacency so linked nodes mirror what the graph shows.
+    const byId = new Map();
+    nodes.forEach(n => { byId.set(String(n.id), n); });
+    const neighbors = new Map();
+    const addNeighbor = (a, b) => {
+      if(!a || !b) return;
+      const k = String(a);
+      const arr = neighbors.get(k) || [];
+      if(!arr.includes(String(b))) arr.push(String(b));
+      neighbors.set(k, arr);
+    };
+    links.forEach(l => {
+      addNeighbor(l.node1, l.node2);
+      addNeighbor(l.node2, l.node1);
+    });
+
+    // Sort: sequence nodes first by sequence_index, then by type/name.
+    const canonicalType = (t) => String(t || '').trim().toLowerCase();
+    const tier = (n) => {
+      const t = canonicalType(n && n.type);
+      if(t === 'router') return 1;
+      if(t === 'switch' || t === 'hub' || t === 'wlan') return 2;
+      if(_nodeIsHitl(n)) return 3;
+      return 4;
+    };
+
+    const sorted = nodes.slice().sort((a, b) => {
+      const aSeq = Number(a.sequence_index || 0);
+      const bSeq = Number(b.sequence_index || 0);
+      const aHasSeq = Number.isFinite(aSeq) && aSeq > 0;
+      const bHasSeq = Number.isFinite(bSeq) && bSeq > 0;
+      if(aHasSeq && bHasSeq && aSeq !== bSeq) return aSeq - bSeq;
+      if(aHasSeq !== bHasSeq) return aHasSeq ? -1 : 1;
+      const ta = tier(a);
+      const tb = tier(b);
+      if(ta !== tb) return ta - tb;
+      return _displayNameWithSequenceForDetails(a).localeCompare(_displayNameWithSequenceForDetails(b));
+    });
+
+    if(detailsStats){
+      detailsStats.textContent = `Nodes: ${sorted.length} • Links: ${links.length}`;
+    }
+
+    if(sorted.length === 0){
+      participantNodesAccordion.innerHTML = '<div class="text-secondary small">No nodes available.</div>';
+      return;
+    }
+
+    const makeBadge = (text, klass) => {
+      const span = document.createElement('span');
+      span.className = klass;
+      span.textContent = text;
+      return span;
+    };
+
+    sorted.forEach((node, idx) => {
+      const nodeId = String(node.id);
+      const title = _displayNameWithSequenceForDetails(node) || nodeId;
+      const item = document.createElement('div');
+      item.className = 'accordion-item bg-black text-light border border-secondary';
+      item.setAttribute('data-node-id', nodeId);
+
+      const linkedIds = neighbors.get(nodeId) || [];
+      const linkedNames = linkedIds.map(id => {
+        const n = byId.get(String(id));
+        return n ? (_displayNameWithSequenceForDetails(n) || String(n.name || id)) : String(id);
+      });
+
+      const ifaces = Array.isArray(node.interfaces) ? node.interfaces : [];
+      const services = Array.isArray(node.services) ? node.services : [];
+      const searchBits = [
+        title, nodeId, String(node.type || ''),
+        ...(services.map(s => String(s || ''))),
+        ...(linkedNames.map(s => String(s || ''))),
+      ];
+      ifaces.forEach(iface => {
+        if(!iface || typeof iface !== 'object') return;
+        searchBits.push(String(iface.name || ''));
+        searchBits.push(String(iface.mac || ''));
+        if(!_nodeIsHitl(node)){
+          searchBits.push(String(iface.ipv4 || iface.ip4 || ''));
+          searchBits.push(String(iface.ipv6 || ''));
+        }
+      });
+      item.setAttribute('data-search', searchBits.join(' ').toLowerCase());
+
+      const headerId = `pui-heading-${idx+1}`;
+      const collapseId = `pui-collapse-${idx+1}`;
+
+      const h2 = document.createElement('h2');
+      h2.className = 'accordion-header';
+      h2.id = headerId;
+
+      const btn = document.createElement('button');
+      btn.className = 'accordion-button collapsed bg-black text-light';
+      btn.type = 'button';
+      btn.setAttribute('data-bs-toggle', 'collapse');
+      btn.setAttribute('data-bs-target', `#${collapseId}`);
+      btn.setAttribute('aria-expanded', 'false');
+      btn.setAttribute('aria-controls', collapseId);
+
+      const headerWrap = document.createElement('div');
+      headerWrap.className = 'd-flex flex-wrap align-items-center gap-2';
+      const titleEl = document.createElement('span');
+      titleEl.className = 'fw-semibold';
+      titleEl.textContent = `${title} (ID: ${nodeId})`;
+      headerWrap.appendChild(titleEl);
+
+      const typeBadge = makeBadge(String(node.type || 'node'), 'badge bg-secondary');
+      headerWrap.appendChild(typeBadge);
+      if(_nodeIsHitl(node)) headerWrap.appendChild(makeBadge('YOU ARE HERE', 'badge bg-success'));
+      if(services.length) headerWrap.appendChild(makeBadge(`${services.length} svc`, 'badge bg-info text-dark'));
+      btn.appendChild(headerWrap);
+
+      h2.appendChild(btn);
+      item.appendChild(h2);
+
+      const collapse = document.createElement('div');
+      collapse.className = 'accordion-collapse collapse';
+      collapse.id = collapseId;
+      collapse.setAttribute('aria-labelledby', headerId);
+
+      const body = document.createElement('div');
+      body.className = 'accordion-body';
+
+      const row = document.createElement('div');
+      row.className = 'row g-3';
+
+      const colType = document.createElement('div');
+      colType.className = 'col-lg-3 col-md-6';
+      colType.innerHTML = `
+        <div class="card h-100 bg-black text-light border border-secondary">
+          <div class="card-header"><strong>Node Type</strong></div>
+          <div class="card-body"><span class="badge bg-secondary">${String(node.type || 'N/A')}</span></div>
+        </div>
+      `;
+
+      const colLinked = document.createElement('div');
+      colLinked.className = 'col-lg-3 col-md-6';
+      const linkedHtml = linkedNames.length
+        ? `<ul class="mb-0 small">${linkedNames.map(nm => `<li>${String(nm)}</li>`).join('')}</ul>`
+        : '<em class="text-secondary">None</em>';
+      colLinked.innerHTML = `
+        <div class="card h-100 bg-black text-light border border-secondary">
+          <div class="card-header"><strong>Linked Nodes</strong></div>
+          <div class="card-body">${linkedHtml}</div>
+        </div>
+      `;
+
+      const colServices = document.createElement('div');
+      colServices.className = 'col-lg-3 col-md-6';
+      const servicesHtml = services.length
+        ? `<div class="d-flex flex-wrap gap-2">${services.map(s => `<span class="badge bg-info text-dark">${String(s)}</span>`).join('')}</div>`
+        : '<em class="text-secondary">None</em>';
+      colServices.innerHTML = `
+        <div class="card h-100 bg-black text-light border border-secondary">
+          <div class="card-header"><strong>Services</strong></div>
+          <div class="card-body">${servicesHtml}</div>
+        </div>
+      `;
+
+      const colIfaces = document.createElement('div');
+      colIfaces.className = 'col-lg-3 col-md-6';
+      let ifaceHtml = '<em class="text-secondary">None</em>';
+      if(ifaces.length){
+        const rows = ifaces.slice(0, 6).map(iface => {
+          if(!iface || typeof iface !== 'object') return '';
+          const parts = [];
+          if(iface.name) parts.push(String(iface.name));
+          if(iface.mac) parts.push(String(iface.mac));
+          if(!_nodeIsHitl(node)){
+            const addrParts = [];
+            if(iface.ipv4){ addrParts.push(String(iface.ipv4) + (iface.ipv4_mask ? '/' + String(iface.ipv4_mask) : '')); }
+            if(iface.ipv6){ addrParts.push(String(iface.ipv6) + (iface.ipv6_mask ? '/' + String(iface.ipv6_mask) : '')); }
+            if(addrParts.length) parts.push(addrParts.join(' | '));
+          }
+          return parts.length ? `<div class="small font-monospace">${parts.join(' • ')}</div>` : '';
+        }).filter(Boolean);
+        ifaceHtml = rows.join('') || ifaceHtml;
+        if(ifaces.length > 6){
+          ifaceHtml += `<div class="text-secondary small mt-1">(+${ifaces.length - 6} more)</div>`;
+        }
+      }
+      colIfaces.innerHTML = `
+        <div class="card h-100 bg-black text-light border border-secondary">
+          <div class="card-header"><strong>Interfaces</strong></div>
+          <div class="card-body">${ifaceHtml}</div>
+        </div>
+      `;
+
+      row.appendChild(colType);
+      row.appendChild(colLinked);
+      row.appendChild(colServices);
+      row.appendChild(colIfaces);
+      body.appendChild(row);
+      collapse.appendChild(body);
+      item.appendChild(collapse);
+      participantNodesAccordion.appendChild(item);
+    });
+
+    // Filter + expand/collapse helpers.
+    const items = Array.from(participantNodesAccordion.querySelectorAll('.accordion-item'));
+    const totalNodes = items.length;
+    const applyFilter = () => {
+      const q = String(participantNodeFilter?.value || '').trim().toLowerCase();
+      let shown = 0;
+      items.forEach(item => {
+        const hay = String(item.getAttribute('data-search') || '');
+        const match = !q || hay.includes(q);
+        item.classList.toggle('d-none', !match);
+        if(!match){
+          const col = item.querySelector('.accordion-collapse');
+          try { if (col && col.classList.contains('show')) new bootstrap.Collapse(col, { toggle: false }).hide(); } catch(e) {}
+        } else {
+          shown += 1;
+        }
+      });
+      if(participantNoMatches) participantNoMatches.classList.toggle('d-none', shown !== 0);
+      if(participantVisibleCount) participantVisibleCount.textContent = `Showing ${shown} of ${totalNodes} nodes`;
+    };
+    const expandAll = () => {
+      items.forEach(item => {
+        if(item.classList.contains('d-none')) return;
+        const col = item.querySelector('.accordion-collapse');
+        try { if(col && !col.classList.contains('show')) new bootstrap.Collapse(col, { toggle: false }).show(); } catch(e) {}
+      });
+    };
+    const collapseAll = () => {
+      items.forEach(item => {
+        const col = item.querySelector('.accordion-collapse');
+        try { if(col && col.classList.contains('show')) new bootstrap.Collapse(col, { toggle: false }).hide(); } catch(e) {}
+      });
+    };
+
+    if(participantNodeFilter){
+      participantNodeFilter.__puiApplyFilter = applyFilter;
+      if(!participantNodeFilter.dataset.bound){
+        participantNodeFilter.dataset.bound = '1';
+        participantNodeFilter.addEventListener('input', ()=>{
+          try { participantNodeFilter.__puiApplyFilter && participantNodeFilter.__puiApplyFilter(); } catch(e) {}
+        });
+      }
+    }
+
+    if(participantClearFilterBtn){
+      participantClearFilterBtn.__puiClear = () => { if(participantNodeFilter) participantNodeFilter.value = ''; applyFilter(); };
+      if(!participantClearFilterBtn.dataset.bound){
+        participantClearFilterBtn.dataset.bound = '1';
+        participantClearFilterBtn.addEventListener('click', ()=>{
+          try { participantClearFilterBtn.__puiClear && participantClearFilterBtn.__puiClear(); } catch(e) {}
+        });
+      }
+    }
+
+    if(participantExpandAllBtn){
+      participantExpandAllBtn.__puiExpandAll = expandAll;
+      if(!participantExpandAllBtn.dataset.bound){
+        participantExpandAllBtn.dataset.bound = '1';
+        participantExpandAllBtn.addEventListener('click', ()=>{
+          try { participantExpandAllBtn.__puiExpandAll && participantExpandAllBtn.__puiExpandAll(); } catch(e) {}
+        });
+      }
+    }
+
+    if(participantCollapseAllBtn){
+      participantCollapseAllBtn.__puiCollapseAll = collapseAll;
+      if(!participantCollapseAllBtn.dataset.bound){
+        participantCollapseAllBtn.dataset.bound = '1';
+        participantCollapseAllBtn.addEventListener('click', ()=>{
+          try { participantCollapseAllBtn.__puiCollapseAll && participantCollapseAllBtn.__puiCollapseAll(); } catch(e) {}
+        });
+      }
+    }
+
+    // Initialize
+    applyFilter();
+  };
+
+  const renderScenarioDetails = (payload) => {
+    const gw = payload && typeof payload.gateway === 'string' ? payload.gateway : '';
+    if(statGateway) statGateway.textContent = gw || '-';
+
+    const openStats = (payload && payload.open_stats) || {};
+    if(statLastAll) statLastAll.textContent = fmtTs(openStats.last_open_ts || '');
+    if(statCountAll) statCountAll.textContent = String(Number(openStats.open_count) || 0);
+
+    const scen = (payload && payload.scenario) || {};
+    if(statLinkConfigured) statLinkConfigured.textContent = scen.participant_link_configured ? 'Configured' : 'Missing';
+
+    const sess = (payload && payload.session) || {};
+    currentSessionRunning = (sess.running === true);
+    if(statSessionStatus){
+      statSessionStatus.classList.remove('bg-success', 'bg-danger', 'bg-secondary');
+      if(sess.running === true) {
+        statSessionStatus.textContent = sess.state ? `Running (${sess.state})` : 'Running';
+        statSessionStatus.classList.add('bg-success');
+      }
+      else if(sess.running === false) {
+        statSessionStatus.textContent = 'Not running';
+        statSessionStatus.classList.add('bg-secondary');
+      }
+      else {
+        statSessionStatus.textContent = 'Unknown';
+        statSessionStatus.classList.add('bg-secondary');
+      }
+    }
+    if(statSessionId) statSessionId.textContent = (sess.session_id !== null && sess.session_id !== undefined) ? String(sess.session_id) : '-';
+
+    // Session status affects Open Console gating.
+    updateOpenButton(currentHref);
+
+    const exec = (payload && payload.execute) || {};
+    if(statLastExecute) statLastExecute.textContent = fmtTs(exec.last_execute_ts || '');
+    if(statLastExecuteResult){
+      if(exec.ok === true) {
+        statLastExecuteResult.textContent = 'Success';
+      }
+      else if(exec.ok === false) {
+        statLastExecuteResult.textContent = 'Failure';
+      }
+      else {
+        statLastExecuteResult.textContent = '-';
+      }
+    }
+
+    const counts = (payload && payload.counts) || {};
+    if(statNodes) statNodes.textContent = (counts.nodes !== null && counts.nodes !== undefined) ? String(counts.nodes) : '-';
+    if(statRouters) statRouters.textContent = (counts.routers !== null && counts.routers !== undefined) ? String(counts.routers) : '-';
+    if(statSwitches) statSwitches.textContent = (counts.switches !== null && counts.switches !== undefined) ? String(counts.switches) : '-';
+    if(statVulns) statVulns.textContent = (counts.vulnerabilities !== null && counts.vulnerabilities !== undefined) ? String(counts.vulnerabilities) : '-';
+
+    renderSubnetworks(payload && payload.subnetworks);
+    renderVulnerabilityIps(payload && payload.vulnerability_ips);
+  };
+
+  const refreshStats = async () => {
+    const details = await fetchScenarioDetails(currentNorm);
+    if(details) renderScenarioDetails(details);
+
+    const topo = await fetchScenarioTopology(currentNorm);
+    if(topo) {
+      renderTopologyGraph(topo);
+      renderTopologyDetails(topo);
+    } else {
+      if(topologyGraphCard && currentNorm) topologyGraphCard.style.display = '';
+      if(topologyGraph && currentNorm) topologyGraph.innerHTML = `<div class="p-3 text-muted small">Loading topology…</div>`;
+      if(topologyStatus && currentNorm) topologyStatus.textContent = '';
+      if(topologyDetailsCard && currentNorm) topologyDetailsCard.style.display = '';
+      if(participantNodesAccordion && currentNorm) participantNodesAccordion.innerHTML = `<div class="p-3 text-muted small">Loading details…</div>`;
+    }
+  };
+
+  try { window.participantRefreshStats = refreshStats; } catch(e) {}
+
+  if(openBtn && !openBtn.dataset.bound){
+    openBtn.dataset.bound = '1';
+    openBtn.addEventListener('click', async (ev)=>{
+      ev.preventDefault();
+      if(!(currentHref && currentHasUrl && currentSessionRunning === true)) return;
+      try {
+        fetch('/participant-ui/record-open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ scenario_norm: currentNorm, href: currentHref })
+        }).then(()=> refreshStats()).catch(()=>{});
+      } catch(e){}
+      try { window.open(currentHref, '_blank', 'noopener'); } catch(e) {}
+    });
+  }
+
+  const highlightScenario = (norm) => {
+    scenarioItems.forEach(item => {
+      const isActive = norm && item.getAttribute('data-scenario-norm') === norm;
+      item.classList.toggle('active', !!isActive);
+      item.classList.toggle('border', !!isActive);
+      item.classList.toggle('border-primary', !!isActive);
+    });
+  };
+
+  const persistSelectionInQuery = (norm) => {
+    try {
+      const urlObj = new URL(window.location.href);
+      if(norm) {
+        urlObj.searchParams.set('scenario', norm);
+      } else {
+        urlObj.searchParams.delete('scenario');
+      }
+      window.history.replaceState({}, '', `${urlObj.pathname}${urlObj.search}${urlObj.hash}`);
+    } catch(err) {
+      /* ignore */
+    }
+  };
+
+  const persistSelectionInLocalStorage = (norm) => {
+    try {
+      if(!norm) return;
+      window.localStorage.setItem('participant_ui_last_scenario_norm', String(norm));
+    } catch(err) {
+      /* ignore */
+    }
+  };
+
+  const applyScenarioSelection = (norm, display, hasUrl) => {
+    currentNorm = norm || '';
+    currentHasUrl = !!hasUrl;
+    highlightScenario(currentNorm);
+    updateSubhead(display || '');
+    const resolvedHref = currentNorm ? openRedirectHref(currentNorm) : '';
+    updateOpenButton(resolvedHref);
+    persistSelectionInQuery(currentNorm);
+    persistSelectionInLocalStorage(currentNorm);
+    refreshStats();
+  };
+
+  const activateFromElement = (item) => {
+    if(!item) return;
+    const norm = item.getAttribute('data-scenario-norm') || '';
+    const display = item.getAttribute('data-scenario-display') || '';
+    const hasUrl = item.getAttribute('data-scenario-has-url') === '1';
+    applyScenarioSelection(norm, display, hasUrl);
+  };
+
+  scenarioItems.forEach(item => {
+    item.addEventListener('click', () => activateFromElement(item));
+    item.addEventListener('keydown', (evt) => {
+      if(evt.key === 'Enter' || evt.key === ' '){
+        evt.preventDefault();
+        activateFromElement(item);
+      }
+    });
+  });
+
+  let storedNorm = '';
+  try { storedNorm = window.localStorage.getItem('participant_ui_last_scenario_norm') || ''; } catch(e) { storedNorm = ''; }
+
+  const incomingScenarioRequested = (() => {
+    try {
+      const params = new URLSearchParams(window.location.search || '');
+      const raw = (params.get('scenario') || '').toString().trim();
+      return raw;
+    } catch(e) {
+      return '';
+    }
+  })();
+  const hasIncomingScenario = !!incomingScenarioRequested;
+
+  const initialTarget = (hasIncomingScenario
+      ? scenarioItems.find(el => el.getAttribute('data-scenario-norm') === currentNorm)
+      : null)
+    || scenarioItems.find(el => storedNorm && el.getAttribute('data-scenario-norm') === storedNorm)
+    || scenarioItems[0];
+  if(initialTarget){
+    activateFromElement(initialTarget);
+  } else {
+    updateSubhead('');
+    currentHasUrl = false;
+    updateOpenButton('');
+    persistSelectionInQuery('');
+    refreshStats();
+  }
+
+  window.addEventListener('storage', (evt) => {
+    if(evt && evt.key && evt.key !== 'coretg_project_state_map_v3') return;
+    const nextHref = currentNorm ? openRedirectHref(currentNorm) : '';
+    updateOpenButton(nextHref);
+    refreshStats();
+  });
+
+  const applySidebarHidden = (hidden) => {
+    if(!root) return;
+    root.classList.toggle('participant-sidebar-hidden', hidden);
+    if(toggleSidebarBtn){
+      toggleSidebarBtn.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+    }
+    if(collapseLabel){
+      const expandedText = collapseLabel.getAttribute('data-label-expanded') || 'Hide list';
+      const collapsedText = collapseLabel.getAttribute('data-label-collapsed') || 'Show list';
+      collapseLabel.textContent = hidden ? collapsedText : expandedText;
+    }
+  };
+  if(toggleSidebarBtn){
+    toggleSidebarBtn.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      const currentlyHidden = root.classList.contains('participant-sidebar-hidden');
+      applySidebarHidden(!currentlyHidden);
+    });
+    // Default to hidden to keep the center action prominent.
+    applySidebarHidden(true);
+  }
+  if(showSidebarBtn){
+    showSidebarBtn.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      applySidebarHidden(false);
+    });
+  }
+
+  // Graph collapse button label + layout nudge on expand.
+  try {
+    if(topologyGraphCollapse && graphCollapseBtn){
+      topologyGraphCollapse.addEventListener('hidden.bs.collapse', ()=>{ graphCollapseBtn.textContent = 'Show'; graphCollapseBtn.setAttribute('aria-expanded','false'); });
+      topologyGraphCollapse.addEventListener('shown.bs.collapse', ()=>{
+        graphCollapseBtn.textContent = 'Hide'; graphCollapseBtn.setAttribute('aria-expanded','true');
+        try { setTimeout(()=>{ _participantGraphInstance?.simulation?.alpha(0.15).restart(); }, 50); } catch(e) {}
+      });
+    }
+  } catch(e) {}
+
+  // Details collapse button label.
+  try {
+    if(topologyDetailsCollapse && detailsCollapseBtn){
+      topologyDetailsCollapse.addEventListener('hidden.bs.collapse', ()=>{ detailsCollapseBtn.textContent = 'Show'; detailsCollapseBtn.setAttribute('aria-expanded','false'); });
+      topologyDetailsCollapse.addEventListener('shown.bs.collapse', ()=>{ detailsCollapseBtn.textContent = 'Hide'; detailsCollapseBtn.setAttribute('aria-expanded','true'); });
+    }
+  } catch(e) {}
+})();
+</script>
+{% endblock %}

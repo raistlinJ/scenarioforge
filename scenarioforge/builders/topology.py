@@ -1,0 +1,5897 @@
+from __future__ import annotations
+from typing import Dict, List, Optional, Tuple, Set, Any
+from types import SimpleNamespace
+from collections import defaultdict
+import math
+import random
+import logging
+import ipaddress
+import subprocess
+import time
+import sys
+import select
+import os
+import json
+
+try:  # pragma: no cover - offline mode exercised via CLI tests
+    from core.api.grpc import client  # type: ignore
+    from core.api.grpc.wrappers import NodeType, Position, Interface  # type: ignore
+    CORE_GRPC_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover
+    CORE_GRPC_AVAILABLE = False
+
+    class _DummyCoreClient:
+        def __init__(self, *_, **__):  # noqa: D401 - minimal placeholder
+            raise RuntimeError("core.api.grpc is not installed; CORE operations are unavailable")
+
+    import types as _types
+    client = _types.SimpleNamespace(CoreGrpcClient=_DummyCoreClient)  # type: ignore[attr-defined]
+
+    class _NodeTypeValue:
+        def __init__(self, name: str):
+            self.name = name
+
+        def __repr__(self) -> str:  # pragma: no cover - debug aid
+            return self.name
+
+    class NodeType:  # type: ignore
+        DEFAULT = _NodeTypeValue("DEFAULT")
+        SWITCH = _NodeTypeValue("SWITCH")
+        ROUTER = _NodeTypeValue("ROUTER")
+        DOCKER = _NodeTypeValue("DOCKER")
+        RJ45 = _NodeTypeValue("RJ45")
+
+    class Position:  # type: ignore
+        def __init__(self, x: int = 0, y: int = 0, z: int = 0):
+            self.x = x
+            self.y = y
+            self.z = z
+
+    class Interface:  # type: ignore
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+from ..types import NodeInfo, ServiceInfo, RoutingInfo
+from ..utils.allocators import UniqueAllocator, SubnetAllocator, make_subnet_allocator
+from ..planning.router_host_plan import plan_router_counts  # new pure-planning helper
+from ..utils.grpc_helpers import safe_create_session
+from ..utils.services import (
+    map_role_to_node_type,
+    distribute_services,
+    mark_node_as_router,
+    set_node_services,
+    ensure_service,
+    remove_service,
+    has_service,
+    ROUTING_STACK_SERVICES,
+)
+from ..utils.allocation import compute_counts_by_factor
+
+logger = logging.getLogger(__name__)
+import os
+
+# Track which docker-node compose files we've prepared this process.
+_PREPARED_DOCKER_NODE_COMPOSES: Set[str] = set()
+
+# Track which per-node compose files have had docker preflight executed.
+_PREFLIGHTED_DOCKER_NODE_COMPOSES: Set[str] = set()
+
+
+def _reset_docker_compose_prepare_caches(context: str = '') -> None:
+    """Reset per-process docker compose prep/preflight caches.
+
+    The web UI runs multiple executes in one Python process. Reset these caches at
+    the start of each topology build so a previous run cannot skip compose prep or
+    preflight in a later run.
+    """
+    try:
+        _PREPARED_DOCKER_NODE_COMPOSES.clear()
+    except Exception:
+        pass
+    try:
+        _PREFLIGHTED_DOCKER_NODE_COMPOSES.clear()
+    except Exception:
+        pass
+    try:
+        if context:
+            logger.info('[docker-node] reset compose caches context=%s', context)
+        else:
+            logger.info('[docker-node] reset compose caches')
+    except Exception:
+        pass
+
+
+_DOCKER_SUDO_PASSWORD_CACHE: Optional[str] = None
+
+
+def _docker_sudo_password() -> Optional[str]:
+    """Return sudo password for docker commands, if configured.
+
+    Supports:
+    - `CORETG_DOCKER_SUDO_PASSWORD`: explicit password (not recommended for shared environments)
+    - `CORETG_DOCKER_SUDO_PASSWORD_STDIN=1`: read a single line from stdin once
+
+    This is primarily used for remote execution via SSH where the caller can securely
+    write the password to stdin without placing it on the process command line.
+    """
+    global _DOCKER_SUDO_PASSWORD_CACHE
+    if _DOCKER_SUDO_PASSWORD_CACHE is not None:
+        return _DOCKER_SUDO_PASSWORD_CACHE
+    try:
+        pw = os.getenv('CORETG_DOCKER_SUDO_PASSWORD')
+        if pw is not None and str(pw).strip() != '':
+            _DOCKER_SUDO_PASSWORD_CACHE = str(pw).rstrip('\n')
+            return _DOCKER_SUDO_PASSWORD_CACHE
+    except Exception:
+        pass
+    try:
+        flag = os.getenv('CORETG_DOCKER_SUDO_PASSWORD_STDIN')
+        if flag is not None and str(flag).strip().lower() in ('1', 'true', 'yes', 'y', 'on'):
+            # Avoid hanging indefinitely if stdin is not connected (common in remote exec).
+            line = ''
+            try:
+                r, _w, _x = select.select([sys.stdin], [], [], 2.0)
+                if r:
+                    line = sys.stdin.readline()
+                else:
+                    # No data available; don't block.
+                    return None
+            except Exception:
+                return None
+            pw2 = (line or '').rstrip('\n')
+            if pw2.strip() != '':
+                _DOCKER_SUDO_PASSWORD_CACHE = pw2
+                try:
+                    # Make available to other modules without additional stdin reads.
+                    os.environ['CORETG_DOCKER_SUDO_PASSWORD'] = pw2
+                except Exception:
+                    pass
+                return _DOCKER_SUDO_PASSWORD_CACHE
+            _DOCKER_SUDO_PASSWORD_CACHE = ''
+            return None
+    except Exception:
+        pass
+    _DOCKER_SUDO_PASSWORD_CACHE = ''
+    return None
+
+
+def _docker_compose_cmd() -> List[str]:
+    """Return a docker compose command that works on this host."""
+    def _sudo_prefix() -> List[str]:
+        # Default OFF. When enabled, use non-interactive sudo so web/CLI doesn't hang.
+        # Requires NOPASSWD for docker commands, or run the process with sufficient privileges.
+        try:
+            val = os.getenv('CORETG_DOCKER_USE_SUDO')
+            if val is None:
+                return []
+            if str(val).strip().lower() in ('0', 'false', 'no', 'off', ''):
+                return []
+            pw = _docker_sudo_password()
+            if pw:
+                return ['sudo', '-S', '-p', '']
+            return ['sudo', '-n']
+        except Exception:
+            return []
+
+    prefix = _sudo_prefix()
+    try:
+        sudo_pw = _docker_sudo_password()
+        use_sudo_stdin = bool(sudo_pw) and ('-S' in prefix)
+        p = subprocess.run(
+            prefix + ['docker', 'compose', 'version'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            text=True,
+            input=(sudo_pw + '\n') if use_sudo_stdin else None,
+        )
+        if p.returncode == 0:
+            return prefix + ['docker', 'compose']
+    except Exception:
+        pass
+    return prefix + ['docker-compose']
+
+
+def _docker_cmd() -> List[str]:
+    """Return a docker engine command, optionally via sudo."""
+    try:
+        val = os.getenv('CORETG_DOCKER_USE_SUDO')
+        if val is None or str(val).strip().lower() in ('0', 'false', 'no', 'off', ''):
+            return ['docker']
+        pw = _docker_sudo_password()
+        if pw:
+            return ['sudo', '-S', '-p', '', 'docker']
+        return ['sudo', '-n', 'docker']
+    except Exception:
+        return ['docker']
+
+
+def _sanitize_compose_incompatible_workdirs(compose_path: str) -> bool:
+    """Best-effort sanitize known incompatible `working_dir` overrides.
+
+    Removes `working_dir: /` for OFBiz images because their default startup
+    uses relative paths (for example `./build/libs/ofbiz.jar`) and fails when
+    forced to filesystem root.
+
+    Returns True when the compose file was modified.
+    """
+    try:
+        strict = str(os.getenv('CORETG_COMPOSE_FORCE_ROOT_WORKDIR_STRICT') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+    except Exception:
+        strict = False
+    if strict:
+        return False
+
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return False
+
+    try:
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            compose_obj = yaml.safe_load(fh)  # type: ignore
+    except Exception:
+        return False
+
+    if not isinstance(compose_obj, dict):
+        return False
+    services = compose_obj.get('services')
+    if not isinstance(services, dict):
+        return False
+
+    changed = False
+    for _svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        image = ''
+        try:
+            image = str(svc.get('image') or '').strip().lower()
+        except Exception:
+            image = ''
+        if 'ofbiz' not in image:
+            continue
+        workdir = str(svc.get('working_dir') or '').strip()
+        if workdir == '/':
+            svc.pop('working_dir', None)
+            changed = True
+
+    if not changed:
+        return False
+
+    try:
+        with open(compose_path, 'w', encoding='utf-8') as fh:
+            yaml.safe_dump(compose_obj, fh, sort_keys=False)  # type: ignore
+        logger.info('[docker-node] sanitized incompatible working_dir overrides for compose=%s', compose_path)
+    except Exception:
+        return False
+    return True
+
+
+def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
+    """Best-effort prepare docker-compose assets before CORE starts docker nodes.
+
+    This is intended to run on the CORE VM host (when the CLI itself runs there, e.g. via ssh).
+    It makes container start-time independent of internet by:
+    - pulling required images
+    - building wrapper images (iproute2/tooling)
+    - creating containers without starting them (up --no-start)
+    """
+    try:
+        if not compose_path:
+            return
+        key = os.path.abspath(compose_path)
+        if key in _PREFLIGHTED_DOCKER_NODE_COMPOSES:
+            return
+    except Exception:
+        return
+
+    cmd = _docker_compose_cmd()
+    docker_cmd = _docker_cmd()
+    start = time.time()
+    try:
+        logger.info('[docker-node] preflight begin node=%s compose=%s cmd=%s', node_name, compose_path, ' '.join(cmd))
+    except Exception:
+        pass
+
+    strict_pull = False
+    try:
+        strict_pull = str(os.getenv('CORETG_DOCKER_STRICT_PULL') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+    except Exception:
+        strict_pull = False
+
+    # IMPORTANT: `docker build --pull` forces registry metadata fetches, which can
+    # fail on restricted/offline CORE VMs or hit Docker Hub rate limits even when
+    # the base image is already present locally. Keep pulls strict for *pull-only*
+    # services, but default builds to NOT forcing pull unless explicitly enabled.
+    build_pull = False
+    try:
+        raw = str(os.getenv('CORETG_DOCKER_BUILD_PULL') or '').strip().lower()
+        build_pull = raw in ('1', 'true', 'yes', 'y', 'on')
+    except Exception:
+        build_pull = False
+
+    def _run(args: List[str], timeout: int) -> tuple[int, str]:
+        returncode = 1
+        tail = ''
+        try:
+            sudo_pw = _docker_sudo_password()
+            use_sudo_stdin = bool(sudo_pw) and len(args) >= 1 and args[0] == 'sudo' and ('-S' in args)
+            proc = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                input=(sudo_pw + '\n') if use_sudo_stdin else None,
+            )
+            returncode = int(proc.returncode or 0)
+            out = (proc.stdout or '').strip()
+            # Avoid flooding logs; keep last few lines.
+            if out:
+                lines = out.splitlines()
+                tail = '\n'.join(lines[-12:])
+            try:
+                logger.info('[docker-node] preflight cmd=%s rc=%s%s', ' '.join(args), returncode, (f"\n{tail}" if tail else ''))
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                logger.warning('[docker-node] preflight cmd failed: %s err=%s', ' '.join(args), exc)
+            except Exception:
+                pass
+        return returncode, tail
+
+    # IMPORTANT: Use the same docker compose project name that core-daemon will use.
+    # core-daemon typically runs compose from a directory named "<node>conf" (e.g. h7conf),
+    # which becomes the default project name. If we preflight from a different cwd without
+    # `-p`, docker will create a container named `container_name: h7` under a different
+    # project, and core-daemon will later fail with:
+    #   "Conflict. The container name \"/h7\" is already in use"
+    # By forcing `-p <node>conf` here, preflight creates the same project resources
+    # (network `h7conf_default`, container `h7`) that core-daemon will manage.
+    project = f"{node_name}conf" if node_name else "coretg"
+    compose_base = cmd + ['-p', project, '-f', compose_path]
+
+    # Runtime safety net: sanitize known incompatible workdir overrides before
+    # any compose build/pull/up commands are executed.
+    try:
+        _sanitize_compose_incompatible_workdirs(compose_path)
+    except Exception:
+        pass
+
+    # Determine which services are buildable vs pull-only.
+    # `docker compose pull` fails for buildable services with scenario-scoped tags
+    # (e.g., `coretg/scenarios-...`) because those are expected to be built locally.
+    pull_services: List[str] = []
+    wrapper_builds: List[tuple[str, str, str]] = []  # (service, image, context)
+    try:
+        import yaml  # type: ignore
+
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            compose_obj = yaml.safe_load(fh)  # type: ignore
+        services = compose_obj.get('services') if isinstance(compose_obj, dict) else None
+        if isinstance(services, dict):
+            for svc_name, svc in services.items():
+                if not isinstance(svc, dict):
+                    continue
+                image = str(svc.get('image') or '').strip()
+                labels = svc.get('labels') if isinstance(svc.get('labels'), dict) else {}
+
+                # Wrapper strategy: compose may omit `build:` to prevent core-daemon from
+                # building during scenario startup. In that case, host-side preflight must
+                # build the wrapper image using label-provided context.
+                try:
+                    ctx = str(labels.get('coretg.wrapper_build_context') or '').strip()
+                except Exception:
+                    ctx = ''
+                if image.startswith('coretg/') and image.endswith(':iproute2') and ctx:
+                    wrapper_builds.append((str(svc_name), image, ctx))
+                    # Do NOT include in pull services; it's a local-only tag.
+                    continue
+
+                # Buildable services are handled by build phase.
+                if svc.get('build'):
+                    continue
+
+                # Local-only tags should not be pulled.
+                if image.startswith('coretg/'):
+                    continue
+                try:
+                    if str(svc.get('pull_policy') or '').strip().lower() == 'never':
+                        continue
+                except Exception:
+                    pass
+                # pull-only service
+                pull_services.append(str(svc_name))
+    except Exception:
+        # If parsing fails, fall back to best-effort pulls with flags that avoid buildables when available.
+        pull_services = []
+
+    # Track whether we successfully built anything.
+    built_any = False
+
+    # Build wrapper images declared via labels (no `build:` stanza) first.
+    # This ensures core-daemon will not attempt to build/pull when it later starts nodes.
+    try:
+        compose_dir = os.path.dirname(os.path.abspath(compose_path))
+        for svc_name, image, ctx in wrapper_builds:
+            df_path = os.path.join(ctx, 'Dockerfile')
+            if not os.path.isabs(df_path):
+                df_path = os.path.abspath(df_path)
+            ctx_path = ctx
+            if not os.path.isabs(ctx_path):
+                ctx_path = os.path.join(compose_dir, ctx_path)
+            try:
+                logger.info('[docker-node] preflight wrapper build service=%s image=%s context=%s dockerfile=%s', svc_name, image, ctx_path, df_path)
+            except Exception:
+                pass
+
+            args = docker_cmd + ['build', '--network', 'host']
+            if build_pull:
+                args.append('--pull')
+            args += ['-t', image, '-f', df_path, ctx_path]
+            rc, _tail = _run(args, timeout=1800)
+            if rc == 0:
+                built_any = True
+    except Exception:
+        pass
+
+    # Build any services that declare a `build:` stanza using host networking.
+    # This avoids reliance on Docker's default bridge network (which may be disabled
+    # on CORE VMs) and prevents apt/apk installs from failing due to missing DNS.
+    try:
+        import yaml  # type: ignore
+
+        compose_dir = os.path.dirname(os.path.abspath(compose_path))
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            compose_obj = yaml.safe_load(fh)  # type: ignore
+        services = compose_obj.get('services') if isinstance(compose_obj, dict) else None
+        if isinstance(services, dict):
+            for svc_name, svc in services.items():
+                if not isinstance(svc, dict):
+                    continue
+                build = svc.get('build')
+                if not build:
+                    continue
+                image = str(svc.get('image') or '').strip()
+                context = None
+                dockerfile = None
+                if isinstance(build, str):
+                    context = build
+                elif isinstance(build, dict):
+                    context = build.get('context')
+                    dockerfile = build.get('dockerfile')
+                context = str(context or '').strip()
+                dockerfile = str(dockerfile or 'Dockerfile').strip() or 'Dockerfile'
+                if not context:
+                    continue
+                if not image:
+                    # Compose auto-tags unnamed build services as <project>-<service>:latest.
+                    # Build the same repo name here so later `up --no-build` can resolve it.
+                    image = f'{project}-{str(svc_name).strip()}'
+                # Resolve compose-relative paths. Compose interprets build.context and build.dockerfile
+                # relative to the compose file directory, not our current working directory.
+                ctx_path = context
+                if not os.path.isabs(ctx_path):
+                    ctx_path = os.path.join(compose_dir, ctx_path)
+                df_path = dockerfile
+                if not os.path.isabs(df_path):
+                    df_path = os.path.join(ctx_path, df_path)
+
+                try:
+                    logger.info(
+                        '[docker-node] preflight build service=%s image=%s context=%s dockerfile=%s',
+                        svc_name,
+                        image,
+                        ctx_path,
+                        df_path,
+                    )
+                except Exception:
+                    pass
+
+                args = docker_cmd + ['build', '--network', 'host']
+                if build_pull:
+                    args.append('--pull')
+                args += ['-t', image, '-f', df_path, ctx_path]
+                rc, _tail = _run(args, timeout=1800)
+                if rc == 0:
+                    built_any = True
+    except Exception:
+        built_any = False
+
+    if not built_any:
+        # Fallback: let compose handle builds (best-effort). This will pull base images.
+        build_args = compose_base + ['build']
+        if build_pull:
+            build_args.append('--pull')
+        _run(build_args, timeout=1200)
+
+    # Pull only non-build services (if any). This avoids pulling scenario-scoped build targets.
+    if pull_services:
+        # In strict mode, any pull failure should abort the run.
+        pull_args = compose_base + ['pull'] + pull_services
+        if not strict_pull:
+            pull_args = compose_base + ['pull', '--ignore-pull-failures'] + pull_services
+        rc, tail = _run(pull_args, timeout=600)
+        if strict_pull and rc != 0:
+            raise RuntimeError(f"docker compose pull failed (node={node_name} rc={rc})\n{tail}".strip())
+    else:
+        # If we couldn't parse services, try to avoid buildables when supported by this compose version.
+        # Strict mode: do not ignore failures.
+        if strict_pull:
+            rc, tail = _run(compose_base + ['pull', '--ignore-buildable'], timeout=600)
+            if rc != 0:
+                raise RuntimeError(f"docker compose pull failed (node={node_name} rc={rc})\n{tail}".strip())
+        else:
+            rc, _tail = _run(compose_base + ['pull', '--ignore-buildable'], timeout=600)
+            if rc != 0:
+                _run(compose_base + ['pull', '--ignore-pull-failures'], timeout=600)
+
+    # Create containers without rebuilding. This allows any one-time initialization that
+    # occurs at container create/start to run ahead of CORE isolating networks.
+    if built_any:
+        _run(compose_base + ['up', '--no-start', '--no-build'], timeout=600)
+    else:
+        _run(compose_base + ['up', '--no-start'], timeout=600)
+
+    # IMPORTANT: Some CORE daemon versions start Docker nodes immediately during add_node()
+    # and then attempt to read `/proc/<pid>/environ` for the container PID. If the container
+    # is not running yet (or exited quickly), Docker reports PID=0 and CORE errors on
+    # `cat /proc/0/environ`.
+    #
+    # Mitigation: start the target compose service here (host-side) and wait until the
+    # container PID is non-zero before allowing CORE to proceed.
+    try:
+        import yaml  # type: ignore
+
+        target_service = None
+        inject_helper_services: list[str] = []
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            compose_obj = yaml.safe_load(fh)  # type: ignore
+        services = compose_obj.get('services') if isinstance(compose_obj, dict) else None
+        if isinstance(services, dict) and services:
+            inject_helper_services = [str(key) for key in services.keys() if str(key).startswith('inject_copy')]
+            if node_name in services:
+                target_service = node_name
+            else:
+                # Fall back to first service key; docker compose will include dependencies.
+                try:
+                    target_service = str(next(iter(services.keys())))
+                except Exception:
+                    target_service = None
+
+        if target_service:
+            inject_copy_required = False
+            try:
+                inject_copy_required = str(os.getenv('CORETG_INJECT_COPY_REQUIRE_SUCCESS') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+            except Exception:
+                inject_copy_required = False
+            helper_wait_seconds = 300
+            try:
+                raw_helper_wait = str(os.getenv('CORETG_INJECT_COPY_WAIT_SECONDS') or '').strip()
+                if raw_helper_wait:
+                    helper_wait_seconds = max(30, int(float(raw_helper_wait)))
+            except Exception:
+                helper_wait_seconds = 300
+            for helper_service in [svc for svc in inject_helper_services if svc and svc != target_service]:
+                helper_rc, helper_tail = _run(
+                    compose_base + ['up', '--no-build', str(helper_service)],
+                    timeout=helper_wait_seconds,
+                )
+                helper_failed = helper_rc != 0
+                helper_reason = helper_tail
+                try:
+                    tail_lower = str(helper_tail or '').lower()
+                    if 'exited with code ' in tail_lower:
+                        after = tail_lower.rsplit('exited with code ', 1)[-1].strip().split()
+                        exit_code = int(after[0]) if after else 0
+                        if exit_code != 0:
+                            helper_failed = True
+                            helper_rc = exit_code
+                except Exception:
+                    pass
+                try:
+                    ps_rc, ps_tail = _run(compose_base + ['ps', '--all', '-q', str(helper_service)], timeout=30)
+                    helper_container = ''
+                    if ps_rc == 0:
+                        helper_container = next((line.strip() for line in str(ps_tail or '').splitlines() if line.strip()), '')
+                    if helper_container:
+                        inspect_rc, inspect_tail = _run(
+                            docker_cmd + ['inspect', '--format', '{{.State.ExitCode}} {{.State.Status}}', helper_container],
+                            timeout=30,
+                        )
+                        if inspect_rc == 0:
+                            helper_reason = inspect_tail or helper_reason
+                            parts = str(inspect_tail or '').strip().split()
+                            exit_code = int(parts[0]) if parts else 0
+                            status = str(parts[1] if len(parts) > 1 else '').strip().lower()
+                            if status in ('exited', 'dead') and exit_code != 0:
+                                helper_failed = True
+                                helper_rc = exit_code
+                except Exception:
+                    pass
+                if helper_failed:
+                    try:
+                        logger.warning(
+                            '[docker-node] inject helper failed before target start node=%s helper=%s rc=%s tail=%s',
+                            node_name,
+                            helper_service,
+                            helper_rc,
+                            helper_reason,
+                        )
+                    except Exception:
+                        pass
+                    allow_helper_failure = False
+                    try:
+                        allow_helper_failure = str(os.getenv('CORETG_INJECT_COPY_ALLOW_FAILURE') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+                    except Exception:
+                        allow_helper_failure = False
+                    if inject_copy_required or not allow_helper_failure:
+                        raise RuntimeError(
+                            f"docker compose inject helper failed (node={node_name} helper={helper_service} rc={helper_rc})\n{helper_reason}".strip()
+                        )
+
+            up_services = [str(target_service)]
+            # Never build here; wrapper images should already be built above.
+            rc, tail = _run(compose_base + ['up', '-d', '--no-build'] + up_services, timeout=900)
+            if strict_pull and rc != 0:
+                raise RuntimeError(
+                    f"docker compose up -d failed (node={node_name} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
+                )
+
+            # Best-effort: wait for PID to be non-zero.
+            # Container name should match node_name when `container_name` is set (our default).
+            # If not, this still helps in many cases because CORE uses the node name.
+            #
+            # IMPORTANT:
+            # Docker restart backoff can keep PID=0 for several seconds while status is
+            # `restarting`. A short fixed wait (e.g. ~6s) can fail healthy-but-slow starts.
+            # Use a configurable wait budget with periodic retries.
+            inspect_name = node_name
+            pid_ready = False
+            last_inspect_tail = ''
+            last_status = ''
+            wait_seconds = 60.0
+            poll_seconds = 1.0
+            try:
+                raw_wait = str(os.getenv('CORETG_DOCKER_PREFLIGHT_WAIT_SECONDS') or '').strip()
+                if raw_wait:
+                    wait_seconds = max(5.0, float(raw_wait))
+            except Exception:
+                wait_seconds = 60.0
+            try:
+                raw_poll = str(os.getenv('CORETG_DOCKER_PREFLIGHT_POLL_SECONDS') or '').strip()
+                if raw_poll:
+                    poll_seconds = max(0.2, float(raw_poll))
+            except Exception:
+                poll_seconds = 1.0
+
+            attempts = max(1, int(wait_seconds / poll_seconds))
+            def _wait_for_nonzero_pid() -> tuple[bool, str, str]:
+                pid_ready_local = False
+                last_tail_local = ''
+                last_status_local = ''
+                for _ in range(attempts):
+                    try:
+                        rc2, tail2 = _run(docker_cmd + ['inspect', '--format', '{{.State.Pid}} {{.State.Status}}', inspect_name], timeout=20)
+                        last_tail_local = tail2 or ''
+                        if rc2 == 0:
+                            parts = (tail2 or '').strip().split()
+                            if parts:
+                                try:
+                                    pid = int(parts[0])
+                                except Exception:
+                                    pid = 0
+                                try:
+                                    last_status_local = str(parts[1]).strip().lower() if len(parts) > 1 else ''
+                                except Exception:
+                                    last_status_local = ''
+                                if pid and pid > 0:
+                                    pid_ready_local = True
+                                    break
+                                # If compose left the container in Created state, try an explicit
+                                # start once and continue waiting.
+                                if last_status_local == 'created':
+                                    _run(compose_base + ['start', str(target_service)], timeout=120)
+                    except Exception:
+                        pass
+                    time.sleep(poll_seconds)
+                return pid_ready_local, last_tail_local, last_status_local
+
+            pid_ready, last_inspect_tail, last_status = _wait_for_nonzero_pid()
+
+            # Recovery path: restart loops can come from stale containers left by previous
+            # runs. Remove the existing container and force-recreate it once before giving up.
+            if (not pid_ready) and last_status in ('restarting', 'exited', 'dead', 'created'):
+                try:
+                    logger.warning(
+                        '[docker-node] preflight detected unhealthy container state; force-recreating node=%s service=%s status=%s inspect=%s',
+                        node_name,
+                        target_service,
+                        last_status,
+                        inspect_name,
+                    )
+                except Exception:
+                    pass
+                rm_rc, _rm_tail = _run(docker_cmd + ['rm', '-f', inspect_name], timeout=120)
+                if rm_rc != 0:
+                    _run(compose_base + ['rm', '-f', '-s', str(target_service)], timeout=120)
+                rc, tail = _run(compose_base + ['up', '-d', '--force-recreate', '--no-build'] + up_services, timeout=900)
+                if strict_pull and rc != 0:
+                    raise RuntimeError(
+                        f"docker compose up -d --force-recreate failed (node={node_name} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
+                    )
+                pid_ready, last_inspect_tail, last_status = _wait_for_nonzero_pid()
+
+            # If PID never becomes non-zero, core-daemon may fail with `/proc/0/environ`.
+            # Treat this as a hard preflight failure so Execute exits with a clear cause.
+            if not pid_ready:
+                ps_rc, ps_tail = _run(compose_base + ['ps', '--all'], timeout=30)
+                logs_rc, logs_tail = _run(compose_base + ['logs', '--no-color', '--tail', '120', str(target_service)], timeout=45)
+                st_rc, st_tail = _run(docker_cmd + ['inspect', '--format', '{{json .State}}', inspect_name], timeout=20)
+                raise RuntimeError(
+                    (
+                        f"docker preflight startup failed: container PID remained 0 "
+                        f"(node={node_name} service={target_service} inspect={inspect_name} rc={ps_rc}). "
+                        "This would cause CORE to fail with /proc/0/environ.\n"
+                        f"wait_seconds={wait_seconds} poll_seconds={poll_seconds} status={last_status}\n"
+                        f"inspect_tail={last_inspect_tail}\n"
+                        f"state_rc={st_rc} state_tail={st_tail}\n"
+                        f"compose_ps_tail={ps_tail}\n"
+                        f"compose_logs_rc={logs_rc} compose_logs_tail={logs_tail}"
+                    ).strip()
+                )
+    except Exception as exc:
+        # PID instability is a hard failure regardless of strict pull settings.
+        # Continuing would let core-daemon hit `/proc/0/environ` and fail later.
+        if 'container PID remained 0' in str(exc):
+            raise
+        if 'inject helper failed' in str(exc):
+            raise
+        if strict_pull:
+            raise
+        try:
+            logger.warning('[docker-node] preflight start/wait skipped node=%s err=%s', node_name, exc)
+        except Exception:
+            pass
+
+    try:
+        logger.info('[docker-node] preflight done node=%s elapsed_ms=%s', node_name, int((time.time() - start) * 1000))
+    except Exception:
+        pass
+    try:
+        _PREFLIGHTED_DOCKER_NODE_COMPOSES.add(key)
+    except Exception:
+        pass
+
+
+def _resolve_compose_interpolations(text: str) -> str:
+    """Resolve docker-compose `${VAR}` interpolation patterns to plain literals.
+
+    CORE treats compose files as Mako templates, which conflicts with docker-compose
+    env interpolation syntax `${...}`. Our earlier approach wrapped `${...}` into a
+    Mako-safe string, but that can produce docker-compose-invalid interpolation
+    (e.g. `${"${HOSTNAME}"}`) and break `docker compose pull`.
+
+    This resolver removes `${...}` tokens entirely by substituting values from the
+    current environment (and defaults when provided). This is intended to run on
+    the CORE host where docker compose preflight executes.
+
+    Notes:
+    - `${VAR}` -> env(VAR) or ''
+    - `${VAR:-default}` -> env(VAR) if set and non-empty else default
+    - `${VAR-default}` -> env(VAR) if set else default
+    - `${VAR:?msg}` / `${VAR?msg}` -> env(VAR) or '' (best-effort)
+    - `${VAR:+alt}` / `${VAR+alt}` -> alt when set (best-effort)
+    """
+    import re as _re
+
+    if not text or '${' not in text:
+        return text
+
+    def _hostname_default() -> str:
+        try:
+            import socket as _socket
+
+            return str(_socket.gethostname() or '')
+        except Exception:
+            return ''
+
+    def _resolve_expr(expr: str) -> str:
+        raw = str(expr or '')
+        inner = raw.strip()
+
+        # Unwrap our previous wrapper form `${"${VAR}"}` -> treat as `${VAR}`.
+        if '${' in inner and '}' in inner:
+            m_inner = _re.search(r'\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*([:\-\?\+].*)?\s*\}', inner)
+            if m_inner:
+                inner = (m_inner.group(1) or '') + (m_inner.group(2) or '')
+                inner = inner.strip()
+
+        m = _re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$', inner)
+        if not m:
+            return ''
+        var = str(m.group(1) or '').strip()
+        tail = str(m.group(2) or '')
+
+        # Parse operator and default/alt clause.
+        op = None
+        arg = ''
+        for cand in (':-', ':-', ':-', ':?', ':+', '-', '?', '+'):
+            # keep longer operators first via explicit checks
+            pass
+        if tail.startswith(':-'):
+            op = ':-'
+            arg = tail[2:]
+        elif tail.startswith(':?'):
+            op = ':?'
+            arg = tail[2:]
+        elif tail.startswith(':+'):
+            op = ':+'
+            arg = tail[2:]
+        elif tail.startswith('-'):
+            op = '-'
+            arg = tail[1:]
+        elif tail.startswith('?'):
+            op = '?'
+            arg = tail[1:]
+        elif tail.startswith('+'):
+            op = '+'
+            arg = tail[1:]
+        arg = arg.lstrip() if arg else ''
+
+        try:
+            is_set = var in os.environ
+            val = os.environ.get(var)
+        except Exception:
+            is_set = False
+            val = None
+        val_str = str(val) if val is not None else ''
+        nonempty = bool(val_str)
+
+        if op is None:
+            if is_set:
+                return val_str
+            # Provide a sensible default for HOSTNAME (compose commonly references it).
+            if var == 'HOSTNAME':
+                return _hostname_default()
+            return ''
+
+        if op == ':-':
+            return val_str if nonempty else str(arg)
+        if op == '-':
+            return val_str if is_set else str(arg)
+        if op == ':?':
+            return val_str if nonempty else ''
+        if op == '?':
+            return val_str if is_set else ''
+        if op == ':+':
+            return str(arg) if nonempty else ''
+        if op == '+':
+            return str(arg) if is_set else ''
+        return val_str
+
+    out = text
+
+    # Mako hazard: docker-compose uses `$${VAR}` to escape a literal `$`.
+    # Mako will still parse `${VAR}` starting at the second `$` and raise NameError.
+    # Rewrite to `$VAR` (no braces) so shells inside the container can expand it.
+    try:
+        out = _re.sub(r'\$\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}', r'$\1', out)
+    except Exception:
+        pass
+
+    # First, unwrap wrapper forms used to make `${...}` Mako-safe.
+    #
+    # Examples seen in the wild:
+    #   ${"${VAR}"}
+    #   ${"${VAR:-default}"}
+    #   ${'${VAR}'}
+    #   ${\"${HOSTNAME}\"}   (when wrappers appear inside a quoted YAML scalar)
+    #
+    # Without unwrapping first, a naive `${...}` regex matches only up to the *inner* `}`
+    # and leaves garbage like `"}:"}` which breaks YAML.
+    wrapper_re = _re.compile(r"\$\{\s*(?:\\)?(['\"])\s*\$\{([^}]*)\}\s*(?:\\)?\1\s*\}")
+    for _ in range(5):
+        out2 = wrapper_re.sub(lambda m: '${' + str(m.group(2) or '') + '}', out)
+        if out2 == out:
+            break
+        out = out2
+
+    # Replace patterns iteratively in case defaults contain nested patterns.
+    token_re = _re.compile(r'(?<!\$)\$\{([^}]*)\}')
+    for _ in range(3):
+        if '${' not in out:
+            break
+        out2 = token_re.sub(lambda m: _resolve_expr(m.group(1) or ''), out)
+        if out2 == out:
+            break
+        out = out2
+
+    # Final safety: remove any remaining `${...}` tokens so core-daemon Mako
+    # rendering cannot fail.
+    try:
+        if '${' in out:
+            out = _re.sub(r'\$\{[^}]*\}', '', out)
+    except Exception:
+        pass
+    return out
+
+
+def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str, str]]) -> None:
+    """Best-effort ensure /tmp/vulns/docker-compose-<node>.yml exists and is Mako-safe.
+
+    CORE treats docker compose files as Mako templates. Unescaped `${...}` in compose YAML
+    causes core-daemon startup to fail with NameError("Undefined").
+
+    This is especially important because CORE starts Docker nodes immediately on add_node()
+    (default start=True), and /tmp/vulns may contain stale files from earlier runs.
+    """
+    try:
+        strict_pull = False
+        try:
+            strict_pull = str(os.getenv('CORETG_DOCKER_STRICT_PULL') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+        except Exception:
+            strict_pull = False
+
+        if not node_name:
+            return
+        if node_name in _PREPARED_DOCKER_NODE_COMPOSES:
+            return
+        out_base = "/tmp/vulns"
+        os.makedirs(out_base, exist_ok=True)
+        out_path = os.path.join(out_base, f"docker-compose-{node_name}.yml")
+        # Remove any stale compose file so we don't accidentally reuse an older, unescaped version.
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except Exception:
+            pass
+        rec_source = "provided"
+        if rec is None:
+            rec = _standard_docker_compose_record()
+            rec_source = "default"
+
+        try:
+            skip_wrap_raw = str((rec or {}).get('SkipIproute2Wrapper') or '').strip().lower()
+            skip_wrapper = skip_wrap_raw in ('1', 'true', 'yes', 'y', 'on')
+        except Exception:
+            skip_wrapper = False
+        try:
+            logger.info(
+                "[docker-node] compose prep node=%s src=%s out=%s rec_name=%s rec_path=%s skip_iproute2_wrapper=%s",
+                node_name,
+                rec_source,
+                out_path,
+                (rec or {}).get('Name') if isinstance(rec, dict) else None,
+                (rec or {}).get('Path') if isinstance(rec, dict) else None,
+                skip_wrapper,
+            )
+        except Exception:
+            pass
+        # Ensure downstream helpers know the intended per-node output path.
+        try:
+            if isinstance(rec, dict):
+                rec['compose_path'] = out_path
+        except Exception:
+            pass
+        # Pass scenario tag through so vuln wrapper images can be scoped per run/scenario.
+        try:
+            scenario_tag_env = (os.getenv('CORETG_SCENARIO_TAG') or '').strip()
+            if scenario_tag_env and isinstance(rec, dict):
+                rec.setdefault('ScenarioTag', scenario_tag_env)
+        except Exception:
+            pass
+        try:
+            from ..utils.vuln_process import prepare_compose_for_assignments  # type: ignore
+
+            prepare_compose_for_assignments({node_name: rec}, out_base=out_base)
+        except Exception as exc:
+            if strict_pull:
+                raise
+            # Non-fatal in non-strict mode.
+            try:
+                logger.warning("[vuln-node] compose preparation failed for node=%s (%s)", node_name, exc)
+            except Exception:
+                pass
+
+        # Final safety pass: ensure no raw `${...}` remain in the output compose.
+        # This catches cases where upstream generation fails, or where compose_path points
+        # to a source file that couldn't be parsed/rewritten.
+        try:
+            if os.path.exists(out_path):
+                with open(out_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                    txt = fh.read()
+                fixed = _resolve_compose_interpolations(txt)
+                # If any `${...}` survive, docker compose will likely fail; keep visible.
+                if '${' in fixed:
+                    try:
+                        logger.warning('[docker-node] unresolved ${...} interpolation remains in compose node=%s path=%s', node_name, out_path)
+                    except Exception:
+                        pass
+                if fixed != txt:
+                    with open(out_path, 'w', encoding='utf-8') as fh:
+                        fh.write(fixed)
+                    try:
+                        logger.info("[vuln-node] compose sanitized for node=%s path=%s", node_name, out_path)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        _PREPARED_DOCKER_NODE_COMPOSES.add(node_name)
+
+        # Preflight: pull/build/create docker containers before CORE starts docker nodes.
+        # This reduces failures when containers have no internet access.
+        try:
+            if os.path.exists(out_path):
+                _docker_compose_preflight(out_path, node_name=node_name)
+        except Exception as exc:
+            # When strict pull mode is enabled (used by the Web UI Execute flow), treat
+            # preflight failures as fatal so the run is cancelled and the user sees the error.
+            exc_text = str(exc or '')
+            if strict_pull or ('PID remained 0' in exc_text) or ('/proc/0/environ' in exc_text):
+                raise
+            try:
+                logger.warning('[docker-node] preflight skipped/failed node=%s err=%s', node_name, exc)
+            except Exception:
+                pass
+    except Exception as exc:
+        # Never swallow critical preflight startup failures; otherwise CORE may
+        # proceed and crash later with `/proc/0/environ` when PID is still 0.
+        try:
+            exc_text = str(exc or '')
+        except Exception:
+            exc_text = ''
+        if (
+            'preflight startup failed' in exc_text
+            or 'PID remained 0' in exc_text
+            or '/proc/0/environ' in exc_text
+        ):
+            raise
+        try:
+            strict_pull2 = str(os.getenv('CORETG_DOCKER_STRICT_PULL') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+        except Exception:
+            strict_pull2 = False
+        if strict_pull2:
+            raise
+        return
+
+
+def _docker_ifid_start() -> int:
+    """Return the first interface id to use for CORE-attached DockerNode interfaces.
+
+    CORE-owned docker vulnerability nodes are sanitized to avoid Docker-managed
+    networking, so CORE should own eth0 by default. Set CORETG_DOCKER_IFID_START=1
+    only when intentionally allowing Docker/Compose to create its own eth0.
+    """
+    raw = os.getenv('CORETG_DOCKER_IFID_START', '0')
+    try:
+        val = int(str(raw).strip() or '0')
+    except Exception:
+        val = 0
+    return 0 if val < 0 else val
+
+
+def _docker_default_route_enabled() -> bool:
+    """Whether to auto-add CORE's DefaultRoute service to Docker nodes.
+
+    Default is ON so Docker nodes behave like other hosts from CORE's perspective.
+    Can be explicitly disabled by setting CORETG_DOCKER_ADD_DEFAULTROUTE=0/false.
+    """
+    val = os.getenv('CORETG_DOCKER_ADD_DEFAULTROUTE')
+    if val is None:
+        return True
+    return val not in ('0', 'false', 'False', '')
+
+
+def _docker_default_route_service_name() -> str:
+    """Service name to use for Docker node default route management."""
+    raw = os.getenv('CORETG_DOCKER_DEFAULT_ROUTE_SERVICE')
+    if raw is None:
+        return 'DockerDefaultRoute'
+    name = str(raw).strip()
+    return name if name else 'DockerDefaultRoute'
+
+
+def _docker_default_route_dependencies(route_service: str) -> List[str]:
+    """Return required dependencies for the selected docker default-route service."""
+    service_name = str(route_service or '').strip()
+    if service_name == 'DockerDefaultRoute':
+        return ['CoreTGPrereqs']
+    return []
+
+
+def _docker_traffic_service_enabled() -> bool:
+    """Whether Docker nodes should keep CORE's Traffic service.
+
+    Default is OFF for Docker nodes because some CORE service templates execute
+    relative file paths (for example `runtraffic.sh`) that can fail on
+    compose-based images with non-root working directories.
+    Enable explicitly with CORETG_DOCKER_ADD_TRAFFIC=1/true.
+    """
+    val = os.getenv('CORETG_DOCKER_ADD_TRAFFIC')
+    if val is None:
+        return False
+    return str(val).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
+def _session_add_node(
+    session: object,
+    node_id: int,
+    *,
+    node_type: object,
+    position: object = None,
+    name: str | None = None,
+    start: bool | None = None,
+    extra_kwargs: dict[str, Any] | None = None,
+):
+    """Best-effort wrapper around CORE session.add_node.
+
+    Some CORE setups start Docker nodes immediately during add_node() which makes it
+    impossible to swap compose metadata after topology build (e.g., flag-node-generator
+    generated compose). When supported, passing start=False delays node startup until
+    session start.
+    """
+    base_kwargs: dict[str, Any] = {'_type': node_type}
+    if position is not None:
+        base_kwargs['position'] = position
+    if name is not None:
+        base_kwargs['name'] = name
+
+    kwargs: dict[str, Any] = dict(base_kwargs)
+    if extra_kwargs:
+        try:
+            for k, v in dict(extra_kwargs).items():
+                if v is None:
+                    continue
+                kwargs[k] = v
+        except Exception:
+            # If merge fails, fall back to base kwargs.
+            kwargs = dict(base_kwargs)
+
+    def _call(call_kwargs: dict[str, Any]):
+        """Invoke session.add_node() in a version-tolerant way.
+
+        CORE's Python client API has varied across releases:
+        - some versions reject unknown kwargs (compose/start)
+        - some expose positional-only parameters
+        - some rename parameters (_type vs type vs _class, etc.)
+
+        If we get this wrong, we can silently drop docker-compose/options metadata and end up
+        with "vanilla" Docker nodes. Use signature binding to construct a compatible call.
+        """
+        try:
+            import inspect
+
+            # session is often wrapped (logging proxy, retry proxy). Those wrappers typically expose
+            # (*args, **kwargs) signatures, which defeats filtering/binding. Unwrap to the real CORE
+            # Session object for signature inspection.
+            sess_for_sig: Any = session
+            for _ in range(10):
+                try:
+                    inner = getattr(sess_for_sig, "_target", None)
+                except Exception:
+                    inner = None
+                if inner is None or inner is sess_for_sig:
+                    break
+                sess_for_sig = inner
+
+            fn = getattr(sess_for_sig, "add_node", None)
+            if fn is None:
+                return session.add_node(node_id, **call_kwargs)
+            sig = inspect.signature(fn)
+            params = list(sig.parameters.values())
+            allowed = {p.name for p in params}
+
+            # Build a few alias variants to accommodate different parameter names.
+            base = dict(call_kwargs)
+            variants: list[dict[str, Any]] = [base]
+
+            def _alias(src: str, dest: str) -> None:
+                if src in base and dest not in base:
+                    d = dict(base)
+                    d[dest] = d.pop(src)
+                    variants.append(d)
+
+            # Type aliases across versions.
+            _alias("_type", "type")
+            _alias("_type", "_class")
+            _alias("type", "_type")
+            _alias("type", "_class")
+            _alias("_class", "_type")
+            _alias("_class", "type")
+
+            # ID aliases (rare, but some wrappers use _id/id).
+            # We still prefer passing node_id positionally when possible.
+            id_aliases = ("node_id", "_id", "id")
+
+            def _try_bind(*args: Any, **kwargs: Any):
+                try:
+                    return sig.bind_partial(*args, **kwargs)
+                except TypeError:
+                    return None
+
+            for kw in variants:
+                # First try: node_id passed positionally (most common modern API).
+                bound = _try_bind(node_id, **kw)
+                if bound is not None:
+                    return session.add_node(*bound.args, **bound.kwargs)
+
+                # Second try: node_id passed by keyword under common aliases.
+                for id_name in id_aliases:
+                    if id_name in allowed:
+                        kw2 = dict(kw)
+                        kw2[id_name] = node_id
+                        bound = _try_bind(**kw2)
+                        if bound is not None:
+                            return session.add_node(*bound.args, **bound.kwargs)
+
+                # Third try: filter unknown kwargs by signature names and try again.
+                if allowed:
+                    filtered = {k: v for k, v in kw.items() if k in allowed}
+                    bound = _try_bind(node_id, **filtered)
+                    if bound is not None:
+                        return session.add_node(*bound.args, **bound.kwargs)
+                    for id_name in id_aliases:
+                        if id_name in allowed:
+                            filtered2 = dict(filtered)
+                            filtered2[id_name] = node_id
+                            bound = _try_bind(**filtered2)
+                            if bound is not None:
+                                return session.add_node(*bound.args, **bound.kwargs)
+
+            # As a last resort, attempt the original call; let the underlying error surface.
+            return session.add_node(node_id, **call_kwargs)
+        except Exception:
+            return session.add_node(node_id, **call_kwargs)
+
+    if start is None:
+        try:
+            return _call(kwargs)
+        except TypeError:
+            # Some wrapper versions reject docker-specific kwargs at add_node.
+            if extra_kwargs:
+                return _call(base_kwargs)
+            raise
+    kwargs_without_start = dict(kwargs)
+    # Try common kwarg spellings across wrapper versions.
+    for key in ('start', 'start_node', '_start'):
+        try:
+            return _call({**kwargs, key: bool(start)})
+        except TypeError:
+            # Preserve docker compose/options metadata when the client rejects the
+            # start flag. Dropping extra kwargs here creates plain Docker nodes and
+            # later CORE startup hits /proc/0/environ against PID 0 containers.
+            try:
+                return _call(kwargs_without_start)
+            except TypeError:
+                if extra_kwargs:
+                    try:
+                        return _call(base_kwargs)
+                    except TypeError:
+                        continue
+                continue
+    try:
+        return _call(kwargs)
+    except TypeError:
+        if extra_kwargs:
+            return _call(base_kwargs)
+        raise
+
+
+def _docker_compose_service_for_record(compose_path: str, rec: Optional[Dict[str, str]]) -> str | None:
+    """Pick a compose service name for a docker-compose-based CORE Docker node.
+
+    If we can't validate available services, return None to avoid passing an invalid
+    compose_name (CORE may treat it as an error).
+    """
+    try:
+        requested = None
+        if isinstance(rec, dict):
+            requested = rec.get('compose_service') or rec.get('compose_service_name')
+        requested = str(requested).strip() if requested is not None else ''
+        requested = requested or None
+    except Exception:
+        requested = None
+
+    def _parse_services(path: str) -> tuple[list[str], dict]:
+        p = str(path or '').strip()
+        if not p or not os.path.exists(p):
+            return [], {}
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            return [], {}
+        try:
+            with open(p, 'r', encoding='utf-8', errors='ignore') as fh:
+                obj = yaml.safe_load(fh) or {}
+            services = obj.get('services') if isinstance(obj, dict) else None
+            if isinstance(services, dict):
+                out: list[str] = []
+                for k in services.keys():
+                    kk = str(k or '').strip()
+                    if kk:
+                        out.append(kk)
+                return out, obj if isinstance(obj, dict) else {}
+        except Exception:
+            return [], {}
+        return [], {}
+
+    services, obj = _parse_services(compose_path)
+    if requested and services:
+        return requested if requested in services else None
+    if requested and not services:
+        return None
+
+    if not services:
+        return None
+
+    # Heuristic selection: avoid short-lived init/migrate services (e.g. airflow-init) that
+    # exit immediately. CORE's DockerNode startup reads `/proc/<pid>/environ`; for an exited
+    # container Docker reports PID=0, causing `/proc/0/environ` errors.
+    try:
+        svc_map = obj.get('services') if isinstance(obj, dict) else None
+        if not isinstance(svc_map, dict) or not svc_map:
+            return services[0]
+
+        infra_tokens = {
+            'db', 'database', 'postgres', 'postgresql', 'mysql', 'mariadb', 'redis', 'memcached',
+            'mongo', 'mongodb', 'rabbit', 'rabbitmq', 'zookeeper', 'kafka', 'etcd',
+            'elasticsearch', 'kibana', 'logstash',
+        }
+        app_tokens = {
+            'web', 'webserver', 'server', 'app', 'api', 'ui', 'frontend', 'nginx', 'apache', 'http',
+            'gunicorn', 'uwsgi',
+        }
+        init_tokens = {
+            'init', 'setup', 'bootstrap', 'migrate', 'migration', 'seed', 'upgrade',
+            'initdb',
+        }
+
+        def _score(name: str, svc: object) -> int:
+            key_l = str(name or '').strip().lower()
+            score = 0
+            try:
+                if isinstance(svc, dict):
+                    if svc.get('ports'):
+                        score += 40
+                    if svc.get('expose'):
+                        score += 10
+                    cmd = svc.get('command')
+                    if cmd is not None:
+                        cmd_l = str(cmd).lower()
+                        if any(t in cmd_l for t in ('web', 'webserver', 'server', 'gunicorn', 'uwsgi')):
+                            score += 15
+                        if any(t in cmd_l for t in ('init', 'migrate', 'upgrade', 'seed', 'initdb')):
+                            score -= 25
+                    try:
+                        rp = str(svc.get('restart') or '').strip().lower()
+                        if rp in ('no', 'false', '0'):
+                            score -= 20
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if any(t in key_l for t in infra_tokens):
+                score -= 50
+            if any(t in key_l for t in init_tokens):
+                score -= 30
+            if any(t in key_l for t in app_tokens):
+                score += 20
+            score -= min(len(key_l), 40) // 10
+            return score
+
+        best = services[0]
+        best_s = None
+        for k in services:
+            s = _score(k, svc_map.get(k))
+            if best_s is None or s > best_s:
+                best = k
+                best_s = s
+        return best
+    except Exception:
+        return services[0]
+
+
+def _new_docker_options_obj() -> Any:
+    """Create a real CORE Docker options object when the CORE package is available."""
+    try:
+        from core.nodes.docker import DockerNode, DockerOptions  # type: ignore
+    except Exception:
+        DockerNode = None  # type: ignore[assignment]
+        DockerOptions = None  # type: ignore[assignment]
+
+    factories: list[Any] = []
+    try:
+        create_options = getattr(DockerNode, 'create_options', None)
+        if callable(create_options):
+            factories.append(create_options)
+    except Exception:
+        pass
+    try:
+        if DockerOptions is not None:
+            factories.append(DockerOptions)
+    except Exception:
+        pass
+
+    for factory in factories:
+        try:
+            options_obj = factory()
+            if options_obj is not None:
+                return options_obj
+        except Exception:
+            continue
+    return SimpleNamespace()
+
+
+def _docker_node_add_node_kwargs(node_name: str, rec: Optional[Dict[str, str]]) -> dict[str, Any]:
+    """Best-effort kwargs to pass to session.add_node() for Docker nodes.
+
+    Rationale: some CORE deployments start Docker nodes immediately during add_node().
+    If compose metadata is applied only after add_node(), the container may come up with
+    a default keepalive (eg sleep infinity).
+    """
+    n = str(node_name or '').strip()
+    if not n:
+        return {}
+    compose_path = f"/tmp/vulns/docker-compose-{n}.yml"
+    compose_name = _docker_compose_service_for_record(compose_path, rec)
+    if not compose_name:
+        compose_name = n
+
+    options_obj = _new_docker_options_obj()
+    try:
+        setattr(options_obj, 'compose', compose_path)
+    except Exception:
+        pass
+    if compose_name:
+        try:
+            setattr(options_obj, 'compose_name', str(compose_name))
+        except Exception:
+            pass
+    try:
+        setattr(options_obj, 'image', "")
+    except Exception:
+        pass
+    try:
+        setattr(options_obj, 'type', "")
+    except Exception:
+        pass
+
+    return {
+        # Different wrapper versions accept these in different places.
+        'compose': compose_path,
+        'compose_name': str(compose_name) if compose_name else None,
+        'image': "",
+        'options': options_obj,
+    }
+
+
+def _is_docker_node_type(node_type: object) -> bool:
+    try:
+        return hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER")
+    except Exception:
+        return False
+
+
+def _ensure_default_route_for_docker(session: object, node_obj: object) -> None:
+    """Ensure DefaultRoute service is present on a DOCKER node (best-effort)."""
+    route_service = _docker_default_route_service_name()
+    if _docker_default_route_enabled():
+        try:
+            remove_service(session, getattr(node_obj, 'id'), "DefaultRoute", node_obj=node_obj)
+        except Exception:
+            pass
+        for dep_service in _docker_default_route_dependencies(route_service):
+            try:
+                ensure_service(session, getattr(node_obj, 'id'), dep_service, node_obj=node_obj)
+            except Exception:
+                pass
+        try:
+            ensure_service(session, getattr(node_obj, 'id'), route_service, node_obj=node_obj)
+        except Exception:
+            pass
+    if not _docker_traffic_service_enabled():
+        try:
+            remove_service(session, getattr(node_obj, 'id'), "Traffic", node_obj=node_obj)
+        except Exception:
+            pass
+
+
+def _enforce_default_route_on_docker_nodes(session: object, node_objs: List[object], *, context: str) -> None:
+    """Re-apply DefaultRoute to every Docker node at the end of a build.
+
+    Rationale: some build paths call set_node_services() later (eg distribution) which can overwrite
+    earlier service additions. This final pass makes DefaultRoute a last-write-wins policy for Docker.
+    """
+    add_default_route = _docker_default_route_enabled()
+    route_service = _docker_default_route_service_name()
+    if not add_default_route:
+        return
+    for node in node_objs:
+        try:
+            node_id = getattr(node, 'id', None)
+            if node_id is None:
+                continue
+            node_type = getattr(node, 'type', None)
+            if not _is_docker_node_type(node_type) and getattr(node, 'model', None) != 'docker':
+                continue
+            if add_default_route:
+                try:
+                    remove_service(session, node_id, "DefaultRoute", node_obj=node)
+                except Exception:
+                    pass
+                for dep_service in _docker_default_route_dependencies(route_service):
+                    try:
+                        ensure_service(session, node_id, dep_service, node_obj=node)
+                    except Exception:
+                        pass
+                try:
+                    ensure_service(session, node_id, route_service, node_obj=node)
+                except Exception:
+                    continue
+                try:
+                    if not has_service(session, node_id, route_service, node_obj=node):
+                        logger.info(
+                            "%s not confirmed after enforcement on docker node id=%s name=%s (context=%s); "
+                            "this can be a CORE service readback limitation for Docker nodes",
+                            route_service,
+                            node_id,
+                            getattr(node, 'name', None),
+                            context,
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+# Enable verbose gRPC call trace if env var set (default off unless user requests)
+def _env_flag(name: str, default_on: bool = True) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default_on  # default to ON for web GUI unless explicitly disabled
+    return val not in ("0", "false", "False", "")
+
+# By default (no env override) enable diagnostics and gRPC tracing so web GUI users get visibility automatically.
+# Users can explicitly disable by setting the env var to 0/false.
+GRPC_TRACE = _env_flag("CORETG_GRPC_TRACE", default_on=True)
+GRPC_FORCE_SIMPLE = _env_flag("CORETG_GRPC_FORCE_SIMPLE", default_on=False)  # keep simple fallback OFF by default
+DIAG_ENABLED = _env_flag("CORETG_DIAG", default_on=True)
+
+# Optional global seed for deterministic topology aspects (can be overridden externally)
+GLOBAL_RANDOM_SEED: Optional[int] = None
+
+def set_global_random_seed(seed: Optional[int]) -> None:
+    """Set a global random seed for deterministic router placement / protocol assignment.
+
+    Passing None leaves randomness untouched. This does not guarantee full determinism if
+    other modules use randomness separately, but it stabilizes this module's primary flows.
+    """
+    global GLOBAL_RANDOM_SEED
+    GLOBAL_RANDOM_SEED = seed
+    if seed is not None:
+        try:
+            random.seed(seed)
+            logger.info("Applied global random seed %s for topology generation", seed)
+        except Exception:
+            logger.debug("Failed applying random seed %s", seed)
+
+# --- Helper utilities (restored) ---
+
+def _type_desc(t: NodeType) -> str:
+    try:
+        return getattr(t, 'name', str(t))
+    except Exception:
+        return str(t)
+
+def _make_safe_link_tracker():
+    existing: Set[Tuple[int, int]] = set()
+    link_failures: int = 0
+    counters = { 'attempts': 0, 'success': 0, 'fail_total': 0 }
+
+    def _session_has_link(sess, key: Tuple[int, int]) -> Optional[bool]:
+        """Best-effort validation that a link was actually recorded.
+
+        Returns:
+        - True/False when we can confidently determine presence/absence
+        - None when we cannot introspect the session's link storage
+        """
+        try:
+            links_obj = getattr(sess, 'links', None)
+        except Exception:
+            return None
+        if links_obj is None:
+            return None
+        try:
+            links = list(links_obj)
+        except Exception:
+            return None
+        for lk in links:
+            a = b = None
+            try:
+                # Common test fakes store tuples.
+                a, b = lk[:2]
+            except Exception:
+                try:
+                    a = getattr(lk, 'node1_id', getattr(lk, 'node1', None))
+                    b = getattr(lk, 'node2_id', getattr(lk, 'node2', None))
+                except Exception:
+                    a = b = None
+            if a is None or b is None:
+                continue
+            try:
+                ka = int(a)
+                kb = int(b)
+            except Exception:
+                continue
+            if (min(ka, kb), max(ka, kb)) == key:
+                return True
+        return False
+    def _compat_add_link(sess, a_obj, b_obj, iface1=None, iface2=None):
+        """Attempt to add a link using multiple possible CORE API signatures.
+
+        Strategy:
+        1. Detect callable signature parameter names (via inspect) to decide whether positional args are allowed.
+        2. Prefer keyword-based calls (node1/node2) when available to avoid positional mismatch TypeErrors.
+        3. Only attempt positional fallbacks if the signature length suggests it still supports them.
+        4. Log (debug) each failed variant once per distinct error class to aid troubleshooting without spamming.
+        """
+        a_id = getattr(a_obj, 'id', a_obj)
+        b_id = getattr(b_obj, 'id', b_obj)
+        import inspect
+        add_link = getattr(sess, 'add_link', None)
+        if add_link is None:
+            raise RuntimeError('Session has no add_link method')
+        try:
+            sig = inspect.signature(add_link)
+            params = list(sig.parameters.values())
+        except Exception:
+            sig = None
+            params = []
+        # Determine capabilities
+        kw_names = {p.name for p in params}
+        has_var_pos = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        # Default allow positional
+        accepts_positional = True
+        # Only disable positional if we have a very small fixed signature AND no varargs/kwargs AND no known kw names
+        if (len(params) <= 2) and not has_var_pos and not has_var_kw and not (kw_names & {'node1','node2','node1_id','node2_id'}):
+            accepts_positional = False
+        # Prepare attempt call patterns
+        attempt_order = []
+        # Keyword object form
+        if {'node1', 'node2'} & kw_names:
+            attempt_order.append(('kw-obj-ifaces', lambda: add_link(node1=a_obj, node2=b_obj, iface1=iface1, iface2=iface2)))
+            attempt_order.append(('kw-obj-noif', lambda: add_link(node1=a_obj, node2=b_obj)))
+        # Keyword id form (some variants use node1_id/node2_id)
+        if {'node1_id', 'node2_id'} & kw_names:
+            attempt_order.append(('kw-id-ifaces', lambda: add_link(node1_id=a_id, node2_id=b_id, iface1=iface1, iface2=iface2)))
+            attempt_order.append(('kw-id-noif', lambda: add_link(node1_id=a_id, node2_id=b_id)))
+            # QoS keyword variant if user wants delay/bandwidth
+            try:
+                _d = int(os.getenv('CORETG_LINK_DELAY', '0') or 0)
+                _bw = int(os.getenv('CORETG_LINK_BW', '0') or 0)
+            except Exception:
+                _d = 0; _bw = 0
+            if _d or _bw:
+                def _kw_id_if_qos():
+                    kwargs = {'node1_id': a_id, 'node2_id': b_id, 'iface1': iface1, 'iface2': iface2}
+                    if _d: kwargs['delay'] = _d
+                    if _bw: kwargs['bandwidth'] = _bw
+                    return add_link(**kwargs)
+                attempt_order.insert(0, ('kw-id-ifaces-qos', _kw_id_if_qos))
+        # Positional object or id fallback only if accepted
+        if accepts_positional:
+            # with ifaces
+            attempt_order.append(('pos-obj-ifaces', lambda: add_link(a_obj, b_obj, iface1=iface1, iface2=iface2)))
+            attempt_order.append(('pos-id-ifaces', lambda: add_link(a_id, b_id, iface1=iface1, iface2=iface2)))
+            # no ifaces
+            attempt_order.append(('pos-obj-noif', lambda: add_link(a_obj, b_obj)))
+            attempt_order.append(('pos-id-noif', lambda: add_link(a_id, b_id)))
+            # Add positional QoS variant (sample provided by user)
+            try:
+                _d2 = int(os.getenv('CORETG_LINK_DELAY', '0') or 0)
+                _bw2 = int(os.getenv('CORETG_LINK_BW', '0') or 0)
+            except Exception:
+                _d2 = 0; _bw2 = 0
+            if _d2 or _bw2:
+                def _pos_id_ifaces_qos():
+                    return add_link(a_id, b_id, iface1=iface1, iface2=iface2, **({k:v for k,v in {'delay':_d2,'bandwidth':_bw2}.items() if v}))
+                # Put before plain positional iface variant to prefer QoS if requested
+                attempt_order.insert( (0 if not {'node1','node2'} & kw_names else 2), ('pos-id-ifaces-qos', _pos_id_ifaces_qos) )
+        # Heuristic: if we only have *args/**kwargs (generic signature) and no explicit kw variants were added, still try likely keyword patterns.
+        if has_var_kw and not any(lbl.startswith('kw-') for lbl, _ in attempt_order):
+            # Prefer object keyword forms first; id-based forms later (some CORE builds reject *_id kwargs)
+            attempt_order.insert(0, ('kw-guess-obj-ifaces', lambda: add_link(node1=a_obj, node2=b_obj, iface1=iface1, iface2=iface2)))
+            attempt_order.insert(1, ('kw-guess-obj-noif', lambda: add_link(node1=a_obj, node2=b_obj)))
+            attempt_order.insert(2, ('kw-guess-id-ifaces', lambda: add_link(node1_id=a_id, node2_id=b_id, iface1=iface1, iface2=iface2)))
+            attempt_order.insert(3, ('kw-guess-id-noif', lambda: add_link(node1_id=a_id, node2_id=b_id)))
+        if not attempt_order:
+            # Generic fallback for opaque signatures (e.g., def add_link(*args, **kwargs))
+            attempt_order = [
+                ('gen-obj-ifaces', lambda: add_link(a_obj, b_obj, iface1=iface1, iface2=iface2)),
+                ('gen-id-ifaces', lambda: add_link(a_id, b_id, iface1=iface1, iface2=iface2)),
+                ('gen-obj-noif', lambda: add_link(a_obj, b_obj)),
+                ('gen-id-noif', lambda: add_link(a_id, b_id)),
+            ]
+            if GRPC_TRACE or DIAG_ENABLED:
+                try:
+                    logger.warning("[grpc.sig.fallback] using generic variants; params=%s", [p.name for p in params])
+                except Exception:
+                    pass
+        last_exc = None
+        def _iface_repr(ifc):
+            if not ifc: return '-'
+            try:
+                return f"{getattr(ifc,'name','')}({getattr(ifc,'id','')}) {getattr(ifc,'ip4','')}/{getattr(ifc,'ip4_mask','')}"
+            except Exception:
+                return '-'
+        skip_positional = False
+        skip_id_kwargs = False
+        for label, fn in attempt_order:
+            if skip_id_kwargs and ('-id-' in label or label.startswith('kw-id') or label.startswith('kw-guess-id') or label.startswith('kw-id')):
+                continue
+            if skip_positional and label.startswith('pos-'):
+                continue
+            if GRPC_TRACE:
+                logger.info("[grpc.try] variant=%s a=%s b=%s iface1=%s iface2=%s", label, a_id, b_id, _iface_repr(iface1), _iface_repr(iface2))
+            try:
+                fn()
+                if GRPC_TRACE:
+                    logger.info("[grpc.try.ok] variant=%s a=%s b=%s", label, a_id, b_id)
+                return label
+            except Exception as e:
+                last_exc = e
+                # If this is a positional-variant failure complaining about positional args, stop trying further positional variants.
+                try:
+                    msg = str(e)
+                    if label.startswith('pos-') and 'takes 1 positional argument' in msg:
+                        skip_positional = True
+                    if ('unexpected keyword argument' in msg) and ("node1_id" in msg or "node2_id" in msg):
+                        skip_id_kwargs = True
+                        if GRPC_TRACE or DIAG_ENABLED:
+                            logger.info("[grpc.try.prune] pruning remaining id-based variants after %s failure", label)
+                except Exception:
+                    pass
+                if GRPC_TRACE:
+                    logger.info("[grpc.try.fail] variant=%s a=%s b=%s err=%s", label, a_id, b_id, e)
+                else:
+                    logger.debug("add_link fallback '%s' failed: %s", label, e)
+                continue
+        if last_exc:
+            raise last_exc
+
+    def safe_add(session_obj, a_obj, b_obj, iface1=None, iface2=None):
+        try:
+            a_id = getattr(a_obj, 'id', a_obj)
+            b_id = getattr(b_obj, 'id', b_obj)
+        except Exception:
+            a_id, b_id = a_obj, b_obj
+        key = (min(a_id, b_id), max(a_id, b_id))
+        if DIAG_ENABLED:
+            try:
+                logger.info("[diag.link.call] attempting link a=%s b=%s dup=%s iface1=%s iface2=%s", a_id, b_id, key in existing, getattr(iface1,'name',None), getattr(iface2,'name',None))
+            except Exception:
+                pass
+        if key in existing:
+            return False
+        try:
+            counters['attempts'] += 1
+            label = _compat_add_link(session_obj, a_obj, b_obj, iface1=iface1, iface2=iface2)
+            if label is None:
+                raise RuntimeError('add_link: internal inconsistency, label None after success')
+
+            # Some CORE bindings (and some test fakes) can silently no-op without raising.
+            # When we can introspect a link list, confirm the link actually exists.
+            present = _session_has_link(session_obj, key)
+            if present is False:
+                # CORE gRPC can be eventually consistent: add_link may return success, but
+                # the session.links view updates slightly later. Retry briefly before failing.
+                try:
+                    import time as _time
+
+                    for _i in range(10):
+                        _time.sleep(0.05)
+                        present2 = _session_has_link(session_obj, key)
+                        if present2 is True:
+                            present = True
+                            break
+                        if present2 is None:
+                            # Can't introspect; stop verifying.
+                            present = None
+                            break
+                except Exception:
+                    pass
+                if present is False:
+                    raise RuntimeError('add_link reported success but link not present in session.links')
+
+            if GRPC_TRACE:
+                try:
+                    def _iface_repr(ifc):
+                        if not ifc: return '-'
+                        return f"{getattr(ifc,'name', '')}({getattr(ifc,'id', '')}) {getattr(ifc,'ip4','')}/{getattr(ifc,'ip4_mask','')}"
+                    logger.info("[grpc] add_link a=%s b=%s via=%s iface1=%s iface2=%s", a_id, b_id, label, _iface_repr(iface1), _iface_repr(iface2))
+                except Exception:
+                    pass
+            existing.add(key)
+            counters['success'] += 1
+            return True
+        except Exception as e:
+            nonlocal link_failures
+            link_failures += 1
+            counters['attempts'] += 1
+            counters['fail_total'] += 1
+            if GRPC_TRACE:
+                logger.error("[grpc.fail] add_link all variants failed a=%s b=%s err=%s", a_id, b_id, e)
+            # Optional simple fallback if enabled
+            if GRPC_FORCE_SIMPLE:
+                try:
+                    if hasattr(session_obj, 'add_link'):
+                        try:
+                            session_obj.add_link(node1_id=a_id, node2_id=b_id)
+                        except TypeError:
+                            session_obj.add_link(a_id, b_id)  # type: ignore
+                        existing.add(key)
+                        if GRPC_TRACE:
+                            logger.info("[grpc.force-simple] add_link (no ifaces) a=%s b=%s", a_id, b_id)
+                        return True
+                except Exception as e2:
+                    if GRPC_TRACE:
+                        logger.error("[grpc.force-simple.fail] a=%s b=%s err=%s", a_id, b_id, e2)
+            return False
+    return existing, safe_add, counters
+
+
+def _log_add_node_result(session_obj, node_obj, requested_id, node_type, name, position=None):
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    try:
+        session_type = type(session_obj).__name__
+    except Exception:
+        session_type = str(type(session_obj))
+    try:
+        actual_id = getattr(node_obj, 'id', None)
+    except Exception:
+        actual_id = None
+    pos_desc = None
+    if position is not None:
+        try:
+            pos_desc = (getattr(position, 'x', None), getattr(position, 'y', None))
+        except Exception:
+            try:
+                pos_desc = (position[0], position[1]) if isinstance(position, (tuple, list)) else position
+            except Exception:
+                pos_desc = None
+    try:
+        attr_type = getattr(node_obj, "type", None)
+    except Exception:
+        attr_type = None
+    try:
+        attr_image = getattr(node_obj, "image", None)
+    except Exception:
+        attr_image = None
+    try:
+        attr_compose = getattr(node_obj, "compose", None)
+    except Exception:
+        attr_compose = None
+    try:
+        attr_compose_name = getattr(node_obj, "compose_name", None)
+    except Exception:
+        attr_compose_name = None
+    try:
+        attr_options = getattr(node_obj, 'options', None)
+    except Exception:
+        attr_options = None
+    try:
+        option_compose = getattr(attr_options, 'compose', None) if attr_options is not None else None
+    except Exception:
+        option_compose = None
+    try:
+        option_compose_name = getattr(attr_options, 'compose_name', None) if attr_options is not None else None
+    except Exception:
+        option_compose_name = None
+    try:
+        logger.info(
+            "[grpc.call] session.add_node name=%s requested_id=%s actual_id=%s type=%s session_type=%s position=%s attr_type=%s attr_image=%s compose=%s compose_name=%s option_compose=%s option_compose_name=%s",
+            name,
+            requested_id,
+            actual_id,
+            _type_desc(node_type) if node_type is not None else None,
+            session_type,
+            pos_desc,
+            attr_type,
+            attr_image,
+            attr_compose,
+            attr_compose_name,
+            option_compose,
+            option_compose_name,
+        )
+    except Exception:
+        pass
+
+def _apply_docker_compose_meta(node, rec, session=None):
+    """Attach docker compose metadata if available (best-effort, non-fatal)."""
+    try:
+        if not node:
+            return
+        n = getattr(node, 'name', None)
+        if not n:
+            return
+        # Always prefer the per-node compose path, because CORE's docker node treats
+        # compose files as Mako templates. Many upstream compose files contain `${...}`
+        # (e.g. `${UID:-1000}`), which causes NameError during Mako render unless we
+        # sanitize/escape them. Our pipeline writes sanitized per-node compose files
+        # to this fixed location.
+        default_per_node = f"/tmp/vulns/docker-compose-{n}.yml"
+
+        compose_path = None
+        source_compose_hint = None
+        try:
+            if rec and isinstance(rec, dict):
+                compose_path = rec.get('compose_path')
+                source_compose_hint = str(compose_path or '').strip() or None
+                logger.info(
+                    "[vuln-node] metadata lookup node=%s compose_path=%s record_keys=%s",
+                    n,
+                    compose_path,
+                    sorted(rec.keys()),
+                )
+                try:
+                    startup = rec.get('Startup') or rec.get('startup')
+                    if startup:
+                        logger.info("[vuln-node] node=%s record startup=%s", n, startup)
+                except Exception:
+                    pass
+                try:
+                    command = rec.get('Command') or rec.get('command')
+                    if command:
+                        logger.info("[vuln-node] node=%s record command=%s", n, command)
+                except Exception:
+                    pass
+        except Exception:
+            compose_path = None
+
+        # If a record points at a downloaded/shared compose file, override it with
+        # the per-node sanitized compose output path.
+        try:
+            if not compose_path or str(compose_path).strip() != default_per_node:
+                compose_path = default_per_node
+                logger.debug(
+                    "[vuln-node] node=%s using per-node compose path %s",
+                    n,
+                    compose_path,
+                )
+                try:
+                    if rec is not None and isinstance(rec, dict):
+                        rec['compose_path'] = compose_path
+                except Exception:
+                    pass
+        except Exception:
+            compose_path = default_per_node
+
+        # NOTE: The compose_path is evaluated on the CORE host (core-daemon). This
+        # code often runs on a different machine (e.g., webapp/CLI against remote CORE),
+        # and compose files may also be generated later in the CLI pipeline.
+        path_exists = False
+        path_size = None
+        try:
+            path_exists = os.path.exists(compose_path)
+            if path_exists:
+                path_size = os.path.getsize(compose_path)
+        except Exception:
+            path_exists = False
+        if path_exists:
+            logger.debug(
+                "[vuln-node] node=%s compose file present locally path=%s size=%s bytes",
+                n,
+                compose_path,
+                path_size,
+            )
+        else:
+            logger.debug(
+                "[vuln-node] node=%s compose file not present locally at %s (may be generated later or exist on CORE host)",
+                n,
+                compose_path,
+            )
+        def _first_compose_service_name(compose_file: str) -> str | None:
+            p = str(compose_file or '').strip()
+            if not p or not os.path.exists(p):
+                return None
+            try:
+                import yaml  # type: ignore
+            except Exception:
+                return None
+            try:
+                with open(p, 'r', encoding='utf-8', errors='ignore') as fh:
+                    obj = yaml.safe_load(fh) or {}
+                services = obj.get('services') if isinstance(obj, dict) else None
+                if isinstance(services, dict):
+                    for key in services.keys():
+                        k = str(key or '').strip()
+                        if k:
+                            return k
+            except Exception:
+                return None
+            return None
+
+        def _compose_service_names(compose_file: str) -> set[str]:
+            p = str(compose_file or '').strip()
+            if not p or not os.path.exists(p):
+                return set()
+            try:
+                import yaml  # type: ignore
+            except Exception:
+                return set()
+            try:
+                with open(p, 'r', encoding='utf-8', errors='ignore') as fh:
+                    text = fh.read()
+                obj = yaml.safe_load(text) or {}
+                services = obj.get('services') if isinstance(obj, dict) else None
+                if isinstance(services, dict):
+                    out: set[str] = set()
+                    for key in services.keys():
+                        k = str(key or '').strip()
+                        if k:
+                            out.add(k)
+                    if out:
+                        return out
+                # Fallback text parse for partially-invalid YAML: collect first-level keys
+                # under `services:` by indentation.
+                out_text: set[str] = set()
+                in_services = False
+                services_indent = None
+                for line in text.splitlines():
+                    if not in_services:
+                        m = re.match(r'^(\s*)services\s*:\s*$', line)
+                        if m:
+                            in_services = True
+                            services_indent = len(m.group(1) or '')
+                        continue
+                    if not line.strip() or line.lstrip().startswith('#'):
+                        continue
+                    indent = len(line) - len(line.lstrip(' '))
+                    if services_indent is not None and indent <= services_indent:
+                        break
+                    m = re.match(r'^\s*([A-Za-z0-9_.-]+)\s*:\s*(?:#.*)?$', line)
+                    if m and indent > (services_indent or 0):
+                        out_text.add(str(m.group(1) or '').strip())
+                return {name for name in out_text if name}
+            except Exception:
+                return set()
+            return set()
+
+        # Defensive final pass: ensure Mako-sensitive `${...}` does not leak into
+        # the compose file that CORE daemon will render.
+        try:
+            if compose_path and os.path.exists(compose_path):
+                with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                    _txt = fh.read()
+                import re as _re
+                _fixed = _resolve_compose_interpolations(_txt)
+                # CORE writes rendered compose via a shell `printf` format string, so escape
+                # backslashes and single percent signs only after docker preflight is done.
+                _fixed = _fixed.replace('\\', '\\\\\\\\')
+                _fixed = _re.sub(r'(?<!%)%(?!%)', '%%', _fixed)
+                if _fixed != _txt:
+                    with open(compose_path, 'w', encoding='utf-8') as fh:
+                        fh.write(_fixed)
+                    try:
+                        logger.info("[vuln-node] compose re-sanitized for mako/printf node=%s path=%s", n, compose_path)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        vname = None
+        service_names = _compose_service_names(compose_path) or _compose_service_names(source_compose_hint or '')
+        try:
+            if rec:
+                # Prefer explicit compose service name when available.
+                vname = rec.get('compose_service') or rec.get('compose_service_name')
+                if vname is not None:
+                    vname = str(vname).strip() or None
+                if vname and not service_names:
+                    try:
+                        logger.warning(
+                            "[vuln-node] compose services unavailable node=%s requested=%s; keeping requested compose_name",
+                            n,
+                            vname,
+                        )
+                    except Exception:
+                        pass
+                if vname and service_names and vname not in service_names:
+                    try:
+                        logger.warning(
+                            "[vuln-node] compose service mismatch node=%s requested=%s available=%s; falling back",
+                            n,
+                            vname,
+                            sorted(service_names),
+                        )
+                    except Exception:
+                        pass
+                    vname = None
+                if not vname and service_names:
+                    vname = _first_compose_service_name(compose_path) or _first_compose_service_name(source_compose_hint or '')
+        except Exception:
+            vname = None
+        if not vname and service_names:
+            vname = _first_compose_service_name(compose_path) or _first_compose_service_name(source_compose_hint or '')
+        if vname and service_names and vname not in service_names:
+            vname = None
+        if not vname:
+            vname = str(n or '').strip() or None
+        try:
+            logger.debug("[vuln-node] node=%s existing compose attr=%s", n, getattr(node, 'compose', None))
+        except Exception:
+            pass
+        try:
+            setattr(node, 'compose', compose_path)
+        except Exception:
+            pass
+        try:
+            setattr(node, 'image', "")
+        except Exception:
+            pass
+        if vname:
+            try:
+                setattr(node, 'compose_name', str(vname))
+            except Exception:
+                pass
+        try:
+            logger.debug(
+                "[vuln-node] node=%s after attribute set compose=%s compose_name=%s",
+                n,
+                getattr(node, 'compose', None),
+                getattr(node, 'compose_name', None),
+            )
+        except Exception:
+            pass
+        try:
+            options = getattr(node, 'options', None)
+            if options is not None:
+                try:
+                    logger.debug(
+                        "[vuln-node] node=%s existing options before compose update=%s",
+                        n,
+                        vars(options) if hasattr(options, '__dict__') else options,
+                    )
+                except Exception:
+                    pass
+                try:
+                    setattr(options, 'compose', compose_path)
+                except Exception:
+                    pass
+                if vname:
+                    try:
+                        setattr(options, 'compose_name', str(vname))
+                    except Exception:
+                        pass
+                try:
+                    setattr(options, 'type', "")
+                except Exception:
+                    pass
+                try:
+                    setattr(options, 'image', "")
+                except Exception:
+                    pass
+                try:
+                    logger.debug(
+                        "[vuln-node] node=%s options after compose update=%s",
+                        n,
+                        vars(options) if hasattr(options, '__dict__') else options,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if session is not None:
+            image_hint = None
+            try:
+                if rec:
+                    image_hint = rec.get('Image') or rec.get('image') or rec.get('DockerImage')
+            except Exception:
+                image_hint = None
+            try:
+                logger.info(
+                    "[vuln-node] node=%s compose=%s compose_name=%s image=%s exists=%s size=%s session_edit=%s",
+                    getattr(node, 'name', None),
+                    compose_path,
+                    vname,
+                    image_hint,
+                    path_exists,
+                    path_size,
+                    hasattr(session, 'edit_node'),
+                )
+            except Exception:
+                pass
+            try:
+                options_obj = getattr(node, 'options', None)
+            except Exception:
+                options_obj = None
+            if options_obj is None:
+                options_obj = _new_docker_options_obj()
+                try:
+                    setattr(node, 'options', options_obj)
+                except Exception:
+                    pass
+            else:
+                try:
+                    logger.debug(
+                        "[vuln-node] node=%s options namespace pre-edit=%s",
+                        n,
+                        vars(options_obj) if hasattr(options_obj, '__dict__') else options_obj,
+                    )
+                except Exception:
+                    pass
+            try:
+                setattr(options_obj, 'compose', compose_path)
+            except Exception:
+                pass
+            if vname:
+                try:
+                    setattr(options_obj, 'compose_name', str(vname))
+                except Exception:
+                    pass
+            try:
+                setattr(options_obj, 'type', "")
+            except Exception:
+                pass
+            try:
+                setattr(options_obj, 'image', "")
+            except Exception:
+                pass
+            try:
+                if hasattr(session, 'edit_node'):
+                    logger.debug(
+                        "[vuln-node] edit_node id=%s compose=%s compose_name=%s options=%s",
+                        node.id,
+                        getattr(options_obj, 'compose', None),
+                        getattr(options_obj, 'compose_name', None),
+                        vars(options_obj) if hasattr(options_obj, '__dict__') else options_obj,
+                    )
+                    resp = session.edit_node(node.id, options=options_obj)
+                    try:
+                        logger.debug("[vuln-node] edit_node response node=%s resp=%s", n, resp)
+                    except Exception:
+                        pass
+            except Exception:
+                logger.debug('Failed to push compose options via edit_node for node %s', getattr(node, 'name', None))
+    except Exception:
+        logger.debug('Failed to set docker compose metadata for node %s', getattr(node, 'name', None))
+
+
+def _standard_docker_compose_template_path() -> str:
+    """Return absolute path to the repo's standard docker-compose template."""
+    try:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        return os.path.join(repo_root, 'scripts', 'standard-ubuntu-docker-core', 'docker-compose.yml')
+    except Exception:
+        return 'scripts/standard-ubuntu-docker-core/docker-compose.yml'
+
+
+def _standard_docker_compose_record() -> Dict[str, str]:
+    """Compose record shaped like a vuln docker-compose entry (consumed by prepare_compose_for_assignments)."""
+    return {
+        'Type': 'docker-compose',
+        'Name': 'standard-ubuntu-docker-core',
+        'Path': _standard_docker_compose_template_path(),
+        'Vector': 'standard',
+        # Prefer a wrapper build so iproute2 exists immediately at container start.
+        # This avoids races where CORE's DefaultRoute service runs before a runtime
+        # bootstrap command (apt-get) finishes installing `ip`.
+    }
+
+
+def _repo_root_path() -> str:
+    try:
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    except Exception:
+        return os.path.abspath('.')
+
+
+def _flow_flag_record_from_host_metadata(hdata: Any) -> Optional[Dict[str, str]]:
+    """Return a docker-compose record for a Flow-injected flag, if present on host metadata."""
+    try:
+        if not isinstance(hdata, dict):
+            return None
+        meta = hdata.get('metadata')
+        if not isinstance(meta, dict):
+            return None
+        flow_flag = meta.get('flow_flag')
+        if not isinstance(flow_flag, dict):
+            # Flow can also pass assignments via env (CORETG_FLOW_ASSIGNMENTS_JSON) when
+            # running remote. In that case, host metadata may not include flow_flag.
+            try:
+                node_id = str(hdata.get('node_id') or hdata.get('id') or '').strip()
+            except Exception:
+                node_id = ''
+            if node_id:
+                try:
+                    assigns = _flow_assignments_from_env()
+                except Exception:
+                    assigns = []
+                match = None
+                for fa in assigns or []:
+                    if not isinstance(fa, dict):
+                        continue
+                    if str(fa.get('node_id') or '').strip() == node_id:
+                        match = fa
+                        break
+                if isinstance(match, dict):
+                    flow_flag = match
+        if not isinstance(flow_flag, dict):
+            return None
+        ftype = str(flow_flag.get('type') or '').strip().lower()
+        # Legacy behavior: Flow may inject a docker-compose based flag package.
+        if (not ftype) or ftype == 'docker-compose':
+            raw_path = str(flow_flag.get('path') or '').strip()
+            if not raw_path:
+                return None
+            resolved = raw_path
+            if not os.path.isabs(resolved):
+                try:
+                    resolved = os.path.abspath(os.path.join(_repo_root_path(), resolved))
+                except Exception:
+                    resolved = raw_path
+            name = str(flow_flag.get('name') or flow_flag.get('id') or '').strip() or 'flag'
+            hint_text = str(flow_flag.get('hint') or '').strip()
+            rec: Dict[str, str] = {
+                'Type': 'docker-compose',
+                'Name': name,
+                'Path': resolved,
+                'Vector': 'flag',
+            }
+            if hint_text:
+                rec['HintText'] = hint_text
+            return rec
+
+        # New behavior: flag-node-generators DO create a per-node docker-compose.yml
+        # intended to run on the next node.
+        if ftype == 'flag-node-generator':
+            run_dir = str(flow_flag.get('run_dir') or flow_flag.get('artifacts_dir') or '').strip()
+            if not run_dir:
+                return None
+            if not os.path.isabs(run_dir):
+                try:
+                    run_dir = os.path.abspath(os.path.join(_repo_root_path(), run_dir))
+                except Exception:
+                    pass
+            # Most node-generators emit docker-compose.yml at the run dir root.
+            cand = os.path.join(run_dir, 'docker-compose.yml')
+            if not os.path.exists(cand):
+                # Fallback: some generators may write to an outputs/ subdir.
+                cand2 = os.path.join(run_dir, 'outputs', 'docker-compose.yml')
+                if os.path.exists(cand2):
+                    cand = cand2
+            if not os.path.exists(cand):
+                return None
+            name = str(flow_flag.get('generator_name') or flow_flag.get('name') or flow_flag.get('generator_id') or '').strip() or 'flag-node-generator'
+            hint_text = str(flow_flag.get('hint') or '').strip()
+            inject_source_dir = str(flow_flag.get('inject_source_dir') or '').strip() or run_dir
+            rec_ng: Dict[str, str] = {
+                'Type': 'docker-compose',
+                'Name': name,
+                'Path': str(cand),
+                'Vector': 'flag-nodegen',
+                'InjectFiles': flow_flag.get('inject_files') or [],
+                'InjectSourceDir': inject_source_dir,
+                'OutputsManifest': str(flow_flag.get('outputs_manifest') or ''),
+                'RunDir': str(flow_flag.get('run_dir') or run_dir),
+                'InjectCandidatePaths': flow_flag.get('inject_candidate_paths') or [],
+            }
+            if hint_text:
+                rec_ng['HintText'] = hint_text
+            return rec_ng
+
+        # flag-generators do NOT create new nodes/services.
+        # They generate artifacts that should be inserted into an existing docker node.
+        if ftype == 'flag-generator':
+            artifacts_dir = str(flow_flag.get('artifacts_dir') or flow_flag.get('run_dir') or '').strip()
+            if not artifacts_dir:
+                return None
+            if not os.path.isabs(artifacts_dir):
+                try:
+                    artifacts_dir = os.path.abspath(os.path.join(_repo_root_path(), artifacts_dir))
+                except Exception:
+                    pass
+            
+            # Check for outputs/ subdirectory (new standard)
+            try:
+                outputs_sub = os.path.join(artifacts_dir, 'outputs')
+                if os.path.isdir(outputs_sub):
+                    artifacts_dir = outputs_sub
+            except Exception:
+                pass
+            hint_text = str(flow_flag.get('hint') or '').strip()
+            mount_path = str(flow_flag.get('mount_path') or flow_flag.get('artifacts_mount_path') or flow_flag.get('artifacts_mount') or '').strip() or '/flow_artifacts'
+
+            inject_source_dir = str(flow_flag.get('inject_source_dir') or '').strip() or artifacts_dir
+            # Many Flow runs store file outputs under <run_dir>/artifacts/.
+            # Prefer that as the inject source root so inject specs like "artifacts/x"
+            # normalize to "x" and exist on disk.
+            try:
+                if inject_source_dir and os.path.basename(inject_source_dir.rstrip('/')) != 'artifacts':
+                    cand = os.path.join(inject_source_dir, 'artifacts')
+                    if os.path.isdir(cand):
+                        inject_source_dir = cand
+            except Exception:
+                pass
+            rec2: Dict[str, str] = {
+                **_standard_docker_compose_record(),
+                'Vector': 'flag',
+                # Extra fields consumed by prepare_compose_for_assignments to mount artifacts.
+                'ArtifactsDir': artifacts_dir,
+                'ArtifactsMountPath': mount_path,
+                # Inject files (copy into container at runtime).
+                'InjectFiles': flow_flag.get('inject_files') or [],
+                'InjectSourceDir': inject_source_dir,
+                'OutputsManifest': str(flow_flag.get('outputs_manifest') or ''),
+                'RunDir': str(flow_flag.get('run_dir') or ''),
+                # Candidate injection paths (optional): one is chosen at random as destination.
+                'InjectCandidatePaths': flow_flag.get('inject_candidate_paths') or [],
+            }
+            if hint_text:
+                rec2['HintText'] = hint_text
+            return rec2
+
+        return None
+    except Exception:
+        return None
+
+
+def _flow_flag_artifacts_overlay_from_host_metadata(hdata: Any) -> Optional[Dict[str, str]]:
+    """Return a dict overlay for mounting Flow flag-generator artifacts onto an existing docker-compose record.
+
+    This is used for vulnerability docker nodes (slot-based) where we must preserve the base vulnerability compose
+    while injecting an artifacts bind mount.
+    """
+    try:
+        if not isinstance(hdata, dict):
+            return None
+        meta = hdata.get('metadata')
+        if not isinstance(meta, dict):
+            return None
+        flow_flag = meta.get('flow_flag')
+        if not isinstance(flow_flag, dict):
+            return _flow_flag_artifacts_overlay_from_env(hdata)
+        ftype = str(flow_flag.get('type') or '').strip().lower()
+        # Only flag-generators inject artifacts into an existing docker-compose.
+        # flag-node-generators are expected to provide their own docker-compose.yml.
+        if ftype != 'flag-generator':
+            return None
+        artifacts_dir = str(flow_flag.get('artifacts_dir') or flow_flag.get('run_dir') or '').strip()
+        if not artifacts_dir:
+            return None
+        if not os.path.isabs(artifacts_dir):
+            try:
+                artifacts_dir = os.path.abspath(os.path.join(_repo_root_path(), artifacts_dir))
+            except Exception:
+                pass
+
+        # Check for outputs/ subdirectory (new standard)
+        try:
+            outputs_sub = os.path.join(artifacts_dir, 'outputs')
+            if os.path.isdir(outputs_sub):
+                artifacts_dir = outputs_sub
+        except Exception:
+            pass
+        hint_text = str(flow_flag.get('hint') or '').strip()
+        mount_path = str(flow_flag.get('mount_path') or flow_flag.get('artifacts_mount_path') or flow_flag.get('artifacts_mount') or '').strip() or '/flow_artifacts'
+        inject_source_dir = str(flow_flag.get('inject_source_dir') or '').strip() or artifacts_dir
+        try:
+            if inject_source_dir and os.path.basename(inject_source_dir.rstrip('/')) != 'artifacts':
+                cand = os.path.join(inject_source_dir, 'artifacts')
+                if os.path.isdir(cand):
+                    inject_source_dir = cand
+        except Exception:
+            pass
+        overlay: Dict[str, str] = {
+            'ArtifactsDir': artifacts_dir,
+            'ArtifactsMountPath': mount_path,
+            'InjectFiles': flow_flag.get('inject_files') or [],
+            'InjectSourceDir': inject_source_dir,
+            'OutputsManifest': str(flow_flag.get('outputs_manifest') or ''),
+            'RunDir': str(flow_flag.get('run_dir') or ''),
+            'InjectCandidatePaths': flow_flag.get('inject_candidate_paths') or [],
+        }
+        if hint_text:
+            overlay['HintText'] = hint_text
+        return overlay
+    except Exception:
+        return None
+
+
+_FLOW_ASSIGNMENTS_CACHE: list[dict[str, Any]] | None = None
+
+
+def _flow_assignments_from_env() -> list[dict[str, Any]]:
+    global _FLOW_ASSIGNMENTS_CACHE
+    if _FLOW_ASSIGNMENTS_CACHE is not None:
+        return _FLOW_ASSIGNMENTS_CACHE
+    raw = os.environ.get('CORETG_FLOW_ASSIGNMENTS_JSON') or ''
+    if not raw:
+        _FLOW_ASSIGNMENTS_CACHE = []
+        return _FLOW_ASSIGNMENTS_CACHE
+    try:
+        data = json.loads(raw)
+        _FLOW_ASSIGNMENTS_CACHE = data if isinstance(data, list) else []
+    except Exception:
+        _FLOW_ASSIGNMENTS_CACHE = []
+    return _FLOW_ASSIGNMENTS_CACHE
+
+
+def _flow_flag_artifacts_overlay_from_env(hdata: Any) -> Optional[Dict[str, str]]:
+    try:
+        if not isinstance(hdata, dict):
+            return None
+        node_id = str(hdata.get('node_id') or hdata.get('id') or '').strip()
+        if not node_id:
+            return None
+        assigns = _flow_assignments_from_env()
+        if not assigns:
+            return None
+        match = None
+        for fa in assigns:
+            if not isinstance(fa, dict):
+                continue
+            if str(fa.get('node_id') or '').strip() == node_id:
+                match = fa
+                break
+        if not match:
+            return None
+        try:
+            ftype = str(match.get('type') or '').strip().lower()
+        except Exception:
+            ftype = ''
+        if ftype != 'flag-generator':
+            return None
+        artifacts_dir = str(match.get('artifacts_dir') or match.get('run_dir') or '').strip()
+        if not artifacts_dir:
+            return None
+        if not os.path.isabs(artifacts_dir):
+            try:
+                artifacts_dir = os.path.abspath(os.path.join(_repo_root_path(), artifacts_dir))
+            except Exception:
+                pass
+        
+        # Check for outputs/ subdirectory (new standard)
+        try:
+            outputs_sub = os.path.join(artifacts_dir, 'outputs')
+            if os.path.isdir(outputs_sub):
+                artifacts_dir = outputs_sub
+        except Exception:
+            pass
+        mount_path = '/flow_artifacts'
+        inject_source_dir = str(match.get('inject_source_dir') or '').strip() or artifacts_dir
+        try:
+            if inject_source_dir and os.path.basename(inject_source_dir.rstrip('/')) != 'artifacts':
+                cand = os.path.join(inject_source_dir, 'artifacts')
+                if os.path.isdir(cand):
+                    inject_source_dir = cand
+        except Exception:
+            pass
+        overlay: Dict[str, str] = {
+            'ArtifactsDir': artifacts_dir,
+            'ArtifactsMountPath': mount_path,
+            'InjectFiles': match.get('inject_files') or [],
+            'InjectSourceDir': inject_source_dir,
+            'OutputsManifest': str(match.get('outputs_manifest') or ''),
+            'RunDir': str(match.get('run_dir') or ''),
+        }
+        return overlay
+    except Exception:
+        return None
+
+def _router_node_type():
+    """Return router-capable node type (prefer DOCKER if available for richer services)."""
+    try:
+        if hasattr(NodeType, 'ROUTER'):
+            return getattr(NodeType, 'ROUTER')
+    except Exception:
+        pass
+    return NodeType.DEFAULT
+
+
+def build_star_from_roles(core,
+                          role_counts: Dict[str, int],
+                          services: Optional[List[ServiceInfo]] = None,
+                          ip4_prefix: str = "10.0.0.0/24",
+                          ip_mode: str = "private",
+                          ip_region: str = "all",
+                          layout_density: str = "normal",
+                          docker_slot_plan: Optional[Dict[str, Dict[str, str]]] = None,
+                          preview_plan: Optional[Dict[str, Any]] = None,
+                          enable_traffic_mount: bool = False,
+                          enable_segmentation_mount: bool = False):
+    _reset_docker_compose_prepare_caches('star')
+    logger.info("Creating CORE session and building star topology")
+    logger.info("Docker CORE interfaces start at eth%s (CORETG_DOCKER_IFID_START)", _docker_ifid_start())
+    mac_alloc = UniqueAllocator(ip4_prefix)
+    subnet_alloc = make_subnet_allocator(ip_mode, ip4_prefix, ip_region)
+    session = safe_create_session(core)
+    if DIAG_ENABLED:
+        try:
+            al = getattr(session, 'add_link', None)
+            logger.info("[diag.session] star session=%r has_add_link=%s add_link_type=%s", session, bool(al), type(al))
+        except Exception:
+            pass
+
+    cx, cy = 500, 400
+    # Track every (node_a,node_b) link (unordered) we successfully create in this topology builder
+    # to avoid accidental duplicate link attempts that can trigger interface rename collisions in CORE.
+    existing_links, safe_add_link, link_counters = _make_safe_link_tracker()
+    logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", 1, "switch", _type_desc(NodeType.SWITCH), cx, cy)
+    switch_pos = Position(x=cx, y=cy)
+    switch = _session_add_node(session, 1, node_type=NodeType.SWITCH, position=switch_pos)
+    _log_add_node_result(session, switch, 1, NodeType.SWITCH, "switch", position=switch_pos)
+    try:
+        setattr(switch, "model", "switch")
+    except Exception:
+        pass
+
+    total_hosts = sum(role_counts.values())
+    radius = 250
+    node_infos: List[NodeInfo] = []
+
+    expanded_roles: List[str] = []
+    for role, count in role_counts.items():
+        expanded_roles.extend([role] * count)
+
+    preview_hosts: List[Dict[str, Any]] = []
+    if isinstance(preview_plan, dict):
+        raw_preview_hosts = preview_plan.get('hosts') or []
+        if isinstance(raw_preview_hosts, list):
+            preview_hosts = [h for h in raw_preview_hosts if isinstance(h, dict)]
+
+    sw_ifid = 0
+    dev_next_ifid: Dict[int, int] = {}
+    docker_ifid_start = _docker_ifid_start()
+    nodes_by_id: Dict[int, object] = {}
+    # slot counter for host nodes (DEFAULT prior to any override)
+    host_slot_idx = 0
+    docker_by_name: Dict[str, Dict[str, str]] = {}
+    created_docker = 0
+
+    def _apply_mount_overlays(rec: Optional[Dict[str, str]]) -> None:
+        if not isinstance(rec, dict):
+            return
+        if enable_traffic_mount:
+            rec.setdefault('EnableTrafficMount', 'true')
+        if enable_segmentation_mount:
+            rec.setdefault('EnableSegmentationMount', 'true')
+
+    docker_slots_used: Set[str] = set()
+    for idx, role in enumerate(expanded_roles):
+        theta = (2 * math.pi * idx) / max(total_hosts, 1)
+        x = int(cx + radius * math.cos(theta))
+        y = int(cy + radius * math.sin(theta))
+
+        node_id = idx + 2
+        node_type = map_role_to_node_type(role)
+        node_name = f"{role.lower()}-{idx+1}"
+
+        host_slot_idx += 1
+        slot_key = f"slot-{host_slot_idx}"
+        is_docker_node = _is_docker_node_type(node_type)
+        is_explicit_docker = is_docker_node and role.lower() == 'docker'
+        hdata = preview_hosts[idx] if idx < len(preview_hosts) else {}
+        # Apply docker slot plan for any host slot (overrides default template when present).
+        try:
+            if docker_slot_plan and slot_key in docker_slot_plan:
+                if not is_docker_node:
+                    if hasattr(NodeType, "DOCKER"):
+                        node_type = getattr(NodeType, "DOCKER")
+                        is_docker_node = True
+                        created_docker += 1
+                    else:
+                        logger.warning("NodeType.DOCKER not available in this CORE build; cannot apply docker slot plan")
+                if is_docker_node:
+                    base_rec = docker_slot_plan[slot_key]
+                    overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+                    docker_by_name[node_name] = {**base_rec, **overlay} if overlay else base_rec
+                    _apply_mount_overlays(docker_by_name.get(node_name))
+                    docker_slots_used.add(slot_key)
+        except Exception:
+            pass
+        # Explicit Docker role: ensure we count it and have a compose record.
+        if is_explicit_docker:
+            created_docker += 1
+        if is_docker_node and node_name not in docker_by_name:
+            flow_rec = _flow_flag_record_from_host_metadata(hdata)
+            base_rec = flow_rec or _standard_docker_compose_record()
+            overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+            docker_by_name[node_name] = {**base_rec, **overlay} if overlay else base_rec
+            _apply_mount_overlays(docker_by_name.get(node_name))
+
+        # Prepare per-node compose file BEFORE creating the docker node.
+        # CORE starts Docker nodes immediately on add_node() and will Mako-render the compose file.
+        if _is_docker_node_type(node_type):
+            _ensure_docker_node_compose_prepared(node_name, docker_by_name.get(node_name))
+        logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", node_id, node_name, _type_desc(node_type), x, y)
+        node_position = Position(x=x, y=y)
+        add_node_extra = None
+        if _is_docker_node_type(node_type):
+            add_node_extra = _docker_node_add_node_kwargs(node_name, docker_by_name.get(node_name))
+        node = _session_add_node(
+            session,
+            node_id,
+            node_type=node_type,
+            position=node_position,
+            name=node_name,
+            start=False if _is_docker_node_type(node_type) else None,
+            extra_kwargs=add_node_extra,
+        )
+        # set model for better XML typing
+        try:
+            if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+                setattr(node, "model", "docker")
+            elif node_type == NodeType.SWITCH:
+                setattr(node, "model", "switch")
+            elif node_type == NodeType.DEFAULT:
+                setattr(node, "model", "PC")
+        except Exception:
+            pass
+        logger.debug("Added node id=%s name=%s type=%s at (%s,%s)", node.id, node_name, node_type, x, y)
+        nodes_by_id[node.id] = node
+
+        # Seed docker interface numbering to avoid colliding with Docker's eth0.
+        if _is_docker_node_type(node_type):
+            dev_next_ifid.setdefault(node.id, docker_ifid_start)
+
+        # If this is a DOCKER node, attach compose/compose_name metadata now
+        try:
+            if _is_docker_node_type(node_type):
+                rec = docker_by_name.get(node_name)
+                try:
+                    if rec:
+                        logger.info(
+                            "[vuln-node] created docker node id=%s name=%s from record keys=%s",
+                            getattr(node, "id", node_id),
+                            node_name,
+                            sorted(rec.keys()),
+                        )
+                except Exception:
+                    pass
+                _apply_docker_compose_meta(node, rec, session=session)
+                _ensure_default_route_for_docker(session, node)
+        except Exception:
+            pass
+
+        _log_add_node_result(session, node, node_id, node_type, node_name, position=node_position)
+
+        if node_type == NodeType.DEFAULT:
+            host_ip, host_mask = mac_alloc.next_ip()
+            host_mac = mac_alloc.next_mac()
+            host_iface = Interface(id=0, name="eth0", ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
+            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=role))
+            sw_iface = Interface(id=sw_ifid, name=f"sw{sw_ifid}", mac=mac_alloc.next_mac())
+            sw_ifid += 1
+            safe_add_link(session, node, switch, iface1=host_iface, iface2=sw_iface)
+            logger.debug("Link host %s <-> switch (ifids: host=0, sw=%d)", node.id, sw_ifid-1)
+            # Ensure default routing service on hosts
+            try:
+                ensure_service(session, node.id, "DefaultRoute", node_obj=node)
+            except Exception:
+                pass
+        else:
+            # add explicit device and switch interfaces for visibility in XML
+            is_docker = _is_docker_node_type(node_type)
+
+            dev_ifid = dev_next_ifid.get(node.id, docker_ifid_start if is_docker else 0)
+            dev_iface_name = f"eth{dev_ifid}" if is_docker else f"{node_name}-uplink"
+            if is_docker:
+                host_ip, host_mask = mac_alloc.next_ip()
+                host_mac = mac_alloc.next_mac()
+                dev_iface = Interface(id=dev_ifid, name=dev_iface_name, ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
+                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=role))
+            else:
+                dev_iface = Interface(id=dev_ifid, name=dev_iface_name)
+            dev_next_ifid[node.id] = dev_ifid + 1
+
+            sw_iface = Interface(id=sw_ifid, name=f"sw{sw_ifid}", mac=mac_alloc.next_mac())
+            sw_ifid += 1
+            safe_add_link(session, node, switch, iface1=dev_iface, iface2=sw_iface)
+            logger.debug("Link device %s <-> switch (dev ifid=%d, sw ifid=%d)", node.id, dev_ifid, sw_ifid-1)
+
+            if is_docker:
+                _ensure_default_route_for_docker(session, node)
+
+    if docker_slot_plan:
+        missing_slots = set(docker_slot_plan.keys()) - docker_slots_used
+        if missing_slots:
+            raise RuntimeError(
+                f"Unable to provision Docker nodes for vulnerability assignments: {sorted(missing_slots)}"
+            )
+
+    service_assignments: Dict[int, List[str]] = {}
+    if created_docker:
+        logger.info("Docker nodes created in star topology: %d", created_docker)
+    if services:
+        service_assignments = distribute_services(node_infos, services)
+        for node_id, service_list in service_assignments.items():
+            for service_name in service_list:
+                assigned = False
+                try:
+                    if hasattr(session, "add_service"):
+                        session.add_service(node_id=node_id, service_name=service_name)
+                        assigned = True
+                except Exception:
+                    pass
+                if not assigned:
+                    try:
+                        if hasattr(session, "services") and hasattr(session.services, "add"):
+                            try:
+                                session.services.add(node_id, service_name)
+                            except TypeError:
+                                node_obj_try = nodes_by_id.get(node_id)
+                                if node_obj_try is not None:
+                                    session.services.add(node_obj_try, service_name)
+                                else:
+                                    raise
+                            assigned = True
+                    except Exception:
+                        pass
+                if not assigned:
+                    node_obj = nodes_by_id.get(node_id)
+                    if node_obj is not None:
+                        try:
+                            if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
+                                node_obj.services.add(service_name)
+                                assigned = True
+                            elif hasattr(node_obj, "add_service"):
+                                node_obj.add_service(service_name)
+                                assigned = True
+                        except Exception:
+                            pass
+                if assigned and service_name in ROUTING_STACK_SERVICES:
+                    try:
+                        if hasattr(session, "add_service"):
+                            session.add_service(node_id=node_id, service_name="zebra")
+                        elif hasattr(session, "services") and hasattr(session.services, "add"):
+                            try:
+                                session.services.add(node_id, "zebra")
+                            except TypeError:
+                                node_obj_try = nodes_by_id.get(node_id)
+                                if node_obj_try is not None:
+                                    session.services.add(node_obj_try, "zebra")
+                    except Exception:
+                        pass
+
+    # Final pass: ensure Docker nodes still have DefaultRoute after any other service operations.
+    try:
+        _enforce_default_route_on_docker_nodes(session, list(nodes_by_id.values()), context="star")
+    except Exception:
+        pass
+    if DIAG_ENABLED:
+        try:
+            link_len = len(getattr(session, 'links', []) or []) if hasattr(session,'links') else 'n/a'
+            logger.info("[diag.summary.star] nodes=%s links_list=%s attempts=%s success=%s fail=%s", len(getattr(session,'nodes',{}) or {}), link_len, link_counters['attempts'], link_counters['success'], link_counters['fail_total'])
+        except Exception:
+            pass
+        if int(os.getenv('CORETG_LINK_FAIL_HARD','0') not in ('0','false','False','')) and link_counters['success']==0:
+            logger.error('[diag.summary.star] No links created; failing hard due to CORETG_LINK_FAIL_HARD')
+            raise RuntimeError('No links created in star topology')
+    # Normalize return type of switches to a list of IDs to match callers
+    try:
+        switch_ids = [getattr(switch, 'id')]
+    except Exception:
+        switch_ids = []
+    return session, switch_ids, node_infos, service_assignments, docker_by_name
+
+
+def build_multi_switch_topology(core,
+                                role_counts: Dict[str, int],
+                                services: Optional[List[ServiceInfo]] = None,
+                                ip4_prefix: str = "10.0.0.0/24",
+                                ip_mode: str = "private",
+                                ip_region: str = "all",
+                                access_switches: int = 3,
+                                layout_density: str = "normal",
+                                docker_slot_plan: Optional[Dict[str, Dict[str, str]]] = None,
+                                enable_traffic_mount: bool = False,
+                                enable_segmentation_mount: bool = False):
+    """Build a simple multi-switch topology with an aggregation switch.
+
+    Returns: session, [switch_ids], host NodeInfo list, service assignments
+    """
+    _reset_docker_compose_prepare_caches('multi-switch')
+    logger.info("Creating CORE session and building multi-switch topology (agg + access)")
+    mac_alloc = UniqueAllocator(ip4_prefix)
+    subnet_alloc = make_subnet_allocator(ip_mode, ip4_prefix, ip_region)
+    session = safe_create_session(core)
+    logger.info("Docker CORE interfaces start at eth%s (CORETG_DOCKER_IFID_START)", _docker_ifid_start())
+    existing_links, safe_add_link, link_counters = _make_safe_link_tracker()
+    if DIAG_ENABLED:
+        try:
+            al = getattr(session, 'add_link', None)
+            logger.info("[diag.session] multi-switch session=%r has_add_link=%s add_link_type=%s", session, bool(al), type(al))
+        except Exception:
+            pass
+
+    cx, cy = 800, 800
+    logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", 1, "agg-sw", _type_desc(NodeType.SWITCH), cx, cy)
+    agg_position = Position(x=cx, y=cy)
+    agg = _session_add_node(session, 1, node_type=NodeType.SWITCH, position=agg_position, name="agg-sw")
+    _log_add_node_result(session, agg, 1, NodeType.SWITCH, "agg-sw", position=agg_position)
+    try:
+        setattr(agg, "model", "switch")
+    except Exception:
+        pass
+    switch_ids: List[int] = [agg.id]
+
+    total_hosts = sum(role_counts.values())
+    # Derive initial access switch count heuristically (1 per ~10 hosts) but never exceed host count.
+    access_count = max(1, min(access_switches, max(1, total_hosts // 10)))
+    # Ensure we do not create more access switches than there are hosts; each switch should have >=1 host.
+    if total_hosts > 0 and access_count > total_hosts:
+        access_count = total_hosts
+    radius = 380 if layout_density == "compact" else (700 if layout_density == "spacious" else 500)
+    # create access switches around aggregation
+    # maintain interface id counters per-switch and for aggregation switch
+    agg_ifid = 0
+    for i in range(access_count):
+        theta = (2 * math.pi * i) / access_count
+        x = int(cx + radius * math.cos(theta))
+        y = int(cy + radius * math.sin(theta))
+        node_id = i + 2
+        logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", node_id, f"sw-{i+1}", _type_desc(NodeType.SWITCH), x, y)
+        sw_position = Position(x=x, y=y)
+        sw = _session_add_node(session, node_id, node_type=NodeType.SWITCH, position=sw_position, name=f"sw-{i+1}")
+        _log_add_node_result(session, sw, node_id, NodeType.SWITCH, f"sw-{i+1}", position=sw_position)
+        switch_ids.append(sw.id)
+        # link access switch to aggregation with explicit interfaces for clarity in saved XML
+        try:
+            sw_if = Interface(id=0, name=f"sw{i+1}-agg", mac=None)
+            agg_if = Interface(id=agg_ifid, name=f"agg-sw-{i+1}", mac=None)
+            agg_ifid += 1
+            safe_add_link(session, sw, agg, iface1=sw_if, iface2=agg_if)
+        except Exception:
+            # fallback: attempt link without explicit ifaces using compatibility helper
+            try:
+                # Reuse internal compatibility logic by constructing a trivial call
+                _ = session.add_link(node1_id=sw.id, node2_id=agg.id)
+            except TypeError:
+                try:
+                    _ = session.add_link(node1=sw, node2=agg)
+                except Exception:
+                    try:
+                        _ = session.add_link(sw.id, agg.id)
+                    except Exception:
+                        try:
+                            _ = session.add_link(sw, agg)
+                        except Exception:
+                            pass
+
+    # Expand roles
+    expanded_roles: List[str] = []
+    for role, count in role_counts.items():
+        expanded_roles.extend([role] * count)
+    random.shuffle(expanded_roles)
+
+    node_infos: List[NodeInfo] = []
+    service_assignments: Dict[int, List[str]] = {}
+    # Place hosts spreading them across access switches
+    host_radius = 120 if layout_density == "compact" else (240 if layout_density == "spacious" else 180)
+    sw_ifid: Dict[int, int] = {sid: 0 for sid in switch_ids}
+    nodes_by_id: Dict[int, object] = {}
+    dev_next_ifid: Dict[int, int] = {}
+    docker_ifid_start = _docker_ifid_start()
+    next_id = access_count + 2
+    host_slot_idx = 0
+    docker_by_name: Dict[str, Dict[str, str]] = {}
+    created_docker = 0
+
+    def _apply_mount_overlays(rec: Optional[Dict[str, str]]) -> None:
+        if not isinstance(rec, dict):
+            return
+        if enable_traffic_mount:
+            rec.setdefault('EnableTrafficMount', 'true')
+        if enable_segmentation_mount:
+            rec.setdefault('EnableSegmentationMount', 'true')
+    for idx, role in enumerate(expanded_roles):
+        # pick an access switch in round-robin
+        sw_index = (idx % access_count) + 1  # skip agg at index 0
+        # position around that access switch
+        theta = random.random() * 2 * math.pi
+        r = max(40, int(random.gauss(host_radius, 20)))
+        sw_node_id = switch_ids[sw_index]
+        sw_node = session.get_node(sw_node_id)
+        x = int(sw_node.position.x + r * math.cos(theta))
+        y = int(sw_node.position.y + r * math.sin(theta))
+
+        node_type = map_role_to_node_type(role)
+        name = f"{role.lower()}-{idx+1}"
+
+        host_slot_idx += 1
+        slot_key = f"slot-{host_slot_idx}"
+        is_docker_node = _is_docker_node_type(node_type)
+        is_explicit_docker = is_docker_node and role.lower() == 'docker'
+        try:
+            if docker_slot_plan and slot_key in docker_slot_plan:
+                if not is_docker_node:
+                    if hasattr(NodeType, "DOCKER"):
+                        node_type = getattr(NodeType, "DOCKER")
+                        is_docker_node = True
+                        created_docker += 1
+                    else:
+                        logger.warning("NodeType.DOCKER not available; cannot apply docker slot plan on multi-switch")
+                if is_docker_node:
+                    docker_by_name[name] = docker_slot_plan[slot_key]
+                    _apply_mount_overlays(docker_by_name.get(name))
+        except Exception:
+            pass
+        if is_explicit_docker:
+            created_docker += 1
+        if is_docker_node and name not in docker_by_name:
+            docker_by_name.setdefault(name, _standard_docker_compose_record())
+            _apply_mount_overlays(docker_by_name.get(name))
+
+        # Prepare per-node compose file BEFORE creating the docker node.
+        if _is_docker_node_type(node_type):
+            _ensure_docker_node_compose_prepared(name, docker_by_name.get(name))
+        logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", next_id, name, _type_desc(node_type), x, y)
+        node_position = Position(x=x, y=y)
+        add_node_extra = None
+        if _is_docker_node_type(node_type):
+            add_node_extra = _docker_node_add_node_kwargs(name, docker_by_name.get(name))
+        node = _session_add_node(
+            session,
+            next_id,
+            node_type=node_type,
+            position=node_position,
+            name=name,
+            start=False if _is_docker_node_type(node_type) else None,
+            extra_kwargs=add_node_extra,
+        )
+        try:
+            if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+                setattr(node, "model", "docker")
+            elif node_type == NodeType.SWITCH:
+                setattr(node, "model", "switch")
+            elif node_type == NodeType.DEFAULT:
+                setattr(node, "model", "PC")
+        except Exception:
+            pass
+
+        actual_node_id = getattr(node, "id", next_id)
+
+        if _is_docker_node_type(node_type):
+            dev_next_ifid.setdefault(actual_node_id, docker_ifid_start)
+
+        # If this is a DOCKER node, attach compose/compose_name metadata now
+        try:
+            if _is_docker_node_type(node_type):
+                rec = docker_by_name.get(name)
+                try:
+                    if rec:
+                        logger.info(
+                            "[vuln-node] created docker node id=%s name=%s from record keys=%s",
+                            actual_node_id,
+                            name,
+                            sorted(rec.keys()),
+                        )
+                except Exception:
+                    pass
+                _apply_docker_compose_meta(node, rec, session=session)
+                _ensure_default_route_for_docker(session, node)
+        except Exception:
+            pass
+
+        _log_add_node_result(session, node, next_id, node_type, name, position=node_position)
+        nodes_by_id[node.id] = node
+        next_id += 1
+
+        if node_type == NodeType.DEFAULT:
+            # Allocate a unique /24 LAN and assign a varied host IP (not always .2).
+            lan = subnet_alloc.next_random_subnet(24)
+            lan_hosts = list(lan.hosts())
+            _hv = (node.id * 2654435761 ^ int(lan.network_address)) & 0xFFFFFFFF
+            _hr = max(1, len(lan_hosts) - 1)
+            h_ip = str(lan_hosts[(_hv % _hr) + 1])
+            h_mac = mac_alloc.next_mac()
+            host_if = Interface(id=0, name="eth0", ip4=h_ip, ip4_mask=lan.prefixlen, mac=h_mac)
+            sw_ifid[sw_node_id] += 1
+            sw_if = Interface(id=sw_ifid[sw_node_id], name=f"sw{sw_node_id}-h{node.id}")
+            safe_add_link(session, node, sw_node, iface1=host_if, iface2=sw_if)
+            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=role))
+            try:
+                ensure_service(session, node.id, "DefaultRoute", node_obj=node)
+            except Exception:
+                pass
+        else:
+            sw_ifid[sw_node_id] += 1
+            sw_if = Interface(id=sw_ifid[sw_node_id], name=f"sw{sw_node_id}-d{node.id}")
+            is_docker = _is_docker_node_type(node_type)
+            if is_docker:
+                lan = subnet_alloc.next_random_subnet(24)
+                lan_hosts = list(lan.hosts())
+                _hv = (node.id * 2654435761 ^ int(lan.network_address)) & 0xFFFFFFFF
+                _hr = max(1, len(lan_hosts) - 1)
+                h_ip = str(lan_hosts[(_hv % _hr) + 1])
+                h_mac = mac_alloc.next_mac()
+                dev_ifid = dev_next_ifid.get(node.id, docker_ifid_start)
+                dev_next_ifid[node.id] = dev_ifid + 1
+                dev_if = Interface(id=dev_ifid, name=f"eth{dev_ifid}", ip4=h_ip, ip4_mask=lan.prefixlen, mac=h_mac)
+                safe_add_link(session, node, sw_node, iface1=dev_if, iface2=sw_if)
+                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=role))
+                _ensure_default_route_for_docker(session, node)
+            else:
+                safe_add_link(session, node, sw_node, iface2=sw_if)
+
+    if created_docker:
+        logger.info("Docker nodes created in multi-switch topology: %d", created_docker)
+    if services:
+        service_assignments = distribute_services(node_infos, services)
+        for node_id, svc_list in service_assignments.items():
+            for svc in svc_list:
+                try:
+                    if hasattr(session, "add_service"):
+                        session.add_service(node_id=node_id, service_name=svc)
+                    elif hasattr(session, "services") and hasattr(session.services, "add"):
+                        try:
+                            session.services.add(node_id, svc)
+                        except TypeError:
+                            node_obj_try = session.get_node(node_id)
+                            session.services.add(node_obj_try, svc)
+                except Exception:
+                    pass
+                if svc in ROUTING_STACK_SERVICES:
+                    try:
+                        if hasattr(session, "add_service"):
+                            session.add_service(node_id=node_id, service_name="zebra")
+                        elif hasattr(session, "services") and hasattr(session.services, "add"):
+                            try:
+                                session.services.add(node_id, "zebra")
+                            except TypeError:
+                                node_obj_try = session.get_node(node_id)
+                                session.services.add(node_obj_try, "zebra")
+                    except Exception:
+                        pass
+
+    # Final pass: ensure Docker nodes still have DefaultRoute after any other service operations.
+    try:
+        _enforce_default_route_on_docker_nodes(session, list(nodes_by_id.values()), context="multi-switch")
+    except Exception:
+        pass
+
+    if DIAG_ENABLED:
+        try:
+            link_len = len(getattr(session, 'links', []) or []) if hasattr(session,'links') else 'n/a'
+            logger.info("[diag.summary.multi] nodes=%s switches=%s links_list=%s attempts=%s success=%s fail=%s", len(getattr(session,'nodes',{}) or {}), len(switch_ids), link_len, link_counters['attempts'], link_counters['success'], link_counters['fail_total'])
+        except Exception:
+            pass
+        if int(os.getenv('CORETG_LINK_FAIL_HARD','0') not in ('0','false','False','')) and link_counters['success']==0:
+            logger.error('[diag.summary.multi] No links created; failing hard due to CORETG_LINK_FAIL_HARD')
+            raise RuntimeError('No links created in multi-switch topology')
+    return session, switch_ids, node_infos, service_assignments, docker_by_name
+
+
+def _sample_router_positions(count: int, width: int, height: int, min_dist: int = 140, max_tries: int = 5000) -> List[Tuple[int, int]]:
+    """Sample router positions randomly within bounds with a minimum spacing.
+
+    Simple rejection sampling: try random points, accept when far from previous.
+    """
+    rng = random.Random()
+    positions: List[Tuple[int, int]] = []
+    # keep some margins so nodes don't go off-canvas
+    margin = max(60, min_dist // 2)
+    tries = 0
+    while len(positions) < count and tries < max_tries:
+        tries += 1
+        x = rng.randint(margin, width - margin)
+        y = rng.randint(margin, height - margin)
+        ok = True
+        for (px, py) in positions:
+            dx = px - x
+            dy = py - y
+            if dx * dx + dy * dy < (min_dist * min_dist):
+                ok = False
+                break
+        if ok:
+            positions.append((x, y))
+    if len(positions) < count:
+        # fallback to rough circle for any missing
+        cx, cy = width // 2, height // 2
+        radius = int(min(width, height) * 0.35)
+        for i in range(count - len(positions)):
+            theta = (2 * math.pi * i) / max(1, (count - len(positions)))
+            positions.append((int(cx + radius * math.cos(theta)), int(cy + radius * math.sin(theta))))
+    return positions
+
+
+def _random_connected_pairs(n: int, extra_edges: Optional[int] = None) -> List[Tuple[int, int]]:
+    """Build a connected undirected graph over n nodes and return edge index pairs.
+
+    First create a random spanning tree, then add a few random extra edges.
+    Node indices are 0..n-1.
+    """
+    if n <= 1:
+        return []
+    rng = random.Random()
+    nodes = list(range(n))
+    rng.shuffle(nodes)
+    # spanning tree via randomized Prim-like growth
+    in_tree: Set[int] = {nodes[0]}
+    edges: List[Tuple[int, int]] = []
+    remaining: Set[int] = set(nodes[1:])
+    while remaining:
+        a = rng.choice(list(in_tree))
+        b = rng.choice(list(remaining))
+        edges.append((a, b))
+        in_tree.add(b)
+        remaining.remove(b)
+    # add extra edges to increase redundancy
+    if extra_edges is None:
+        extra_edges = max(0, n // 3)
+    existing = set(tuple(sorted(e)) for e in edges)
+    attempts = 0
+    while extra_edges > 0 and attempts < n * n:
+        attempts += 1
+        a, b = rng.sample(range(n), 2)
+        if a == b:
+            continue
+        key = tuple(sorted((a, b)))
+        if key in existing:
+            continue
+        existing.add(key)
+        edges.append((a, b))
+        extra_edges -= 1
+    return edges
+
+
+def _grid_positions(count: int, cols: Optional[int] = None, cell_w: int = 800, cell_h: int = 600, jitter: int = 60) -> List[Tuple[int, int]]:
+    """Lay out positions on a spacious grid for readability.
+
+    Returns a list of (x, y) coordinates. Jitter adds slight randomness.
+    """
+    if count <= 0:
+        return []
+    if cols is None:
+        cols = max(1, int(math.ceil(math.sqrt(count))))
+    rows = int(math.ceil(count / cols))
+    positions: List[Tuple[int, int]] = []
+    rng = random.Random()
+    for i in range(count):
+        r = i // cols
+        c = i % cols
+        x = c * cell_w + cell_w // 2 + rng.randint(-jitter, jitter)
+        y = r * cell_h + cell_h // 2 + rng.randint(-jitter, jitter)
+        positions.append((x, y))
+    return positions
+
+
+def _random_int_partition(total: int, parts: int, min_each: int = 0) -> List[int]:
+    """Randomly partition an integer total into `parts` buckets.
+
+    Ensures each bucket is at least min_each (clamped when infeasible) and that
+    the returned list sums to `total`. Remaining units are distributed based on
+    random weights with deterministic ordering by fractional remainder so that
+    callers can rely on seeded pseudo-randomness.
+    """
+    if parts <= 0:
+        return []
+    min_each = max(0, min_each)
+    if total <= 0:
+        return [0 for _ in range(parts)]
+    if min_each * parts > total:
+        min_each = 0
+    counts = [min_each] * parts
+    remaining = total - min_each * parts
+    if remaining <= 0:
+        return counts
+    weights = [random.random() + 0.01 for _ in range(parts)]
+    sum_w = sum(weights)
+    fractional: List[Tuple[float, int]] = []
+    for idx, w in enumerate(weights):
+        exact = (remaining * w) / sum_w if sum_w > 0 else 0.0
+        floor_val = int(math.floor(exact))
+        counts[idx] += floor_val
+        fractional.append((exact - floor_val, idx))
+    current = sum(counts)
+    if current < total:
+        fractional.sort(key=lambda t: t[0], reverse=True)
+        idx_cycle = 0
+        while current < total and idx_cycle < len(fractional):
+            _, idx = fractional[idx_cycle]
+            counts[idx] += 1
+            current += 1
+            idx_cycle += 1
+        while current < total:
+            idx = random.randrange(parts)
+            counts[idx] += 1
+            current += 1
+    elif current > total:
+        fractional.sort(key=lambda t: t[0])
+        idx_cycle = 0
+        while current > total and idx_cycle < len(fractional):
+            _, idx = fractional[idx_cycle]
+            if counts[idx] > min_each:
+                counts[idx] -= 1
+                current -= 1
+            idx_cycle += 1
+        while current > total:
+            idx = random.randrange(parts)
+            if counts[idx] > min_each:
+                counts[idx] -= 1
+                current -= 1
+            else:
+                break
+    random.shuffle(counts)
+    return counts
+
+
+def _ensure_router_iface_name(router_iface_names: Dict[int, Set[str]], router_id: int, base: str) -> str:
+    names = router_iface_names.setdefault(router_id, set())
+    if base not in names:
+        names.add(base)
+        return base
+    idx = 1
+    while True:
+        candidate = f"{base}-{idx}"
+        if candidate not in names:
+            names.add(candidate)
+            return candidate
+        idx += 1
+
+
+def _try_build_segmented_topology_from_preview(
+    core,
+    services: Optional[List[ServiceInfo]],
+    routing_items: List[RoutingInfo],
+    ip4_prefix: str,
+    ip_mode: str,
+    ip_region: str,
+    layout_density: str,
+    preview_plan: Dict[str, Any],
+    docker_slot_plan: Optional[Dict[str, Dict[str, str]]] = None,
+    enable_traffic_mount: bool = False,
+    enable_segmentation_mount: bool = False,
+) -> Optional[Tuple[Any, List[NodeInfo], List[NodeInfo], Dict[int, List[str]], Dict[int, List[str]], Dict[str, Dict[str, str]]]]:
+    """Attempt to realize the provided preview plan exactly. Returns None on failure."""
+
+    _reset_docker_compose_prepare_caches('segmented-preview')
+
+    routers_data = preview_plan.get('routers') or []
+    hosts_data = preview_plan.get('hosts') or []
+    switches_detail = preview_plan.get('switches_detail') or []
+    if not routers_data or not hosts_data:
+        logger.debug("[preview] missing routers or hosts in preview payload; skipping preview realization")
+        return None
+
+    layout_positions = preview_plan.get('layout_positions') or {}
+
+    def _layout_coord(layout_map: Any, node_id: int) -> Optional[Tuple[int, int]]:
+        if not isinstance(layout_map, dict):
+            return None
+        raw = layout_map.get(str(node_id)) if str(node_id) in layout_map else layout_map.get(node_id)
+        if not isinstance(raw, dict):
+            return None
+        try:
+            x = int(float(raw.get('x')))
+            y = int(float(raw.get('y')))
+            return (x, y)
+        except Exception:
+            return None
+
+    router_layout_map = layout_positions.get('routers') if isinstance(layout_positions, dict) else {}
+    host_layout_map = layout_positions.get('hosts') if isinstance(layout_positions, dict) else {}
+    switch_layout_map = layout_positions.get('switches') if isinstance(layout_positions, dict) else {}
+
+    try:
+        mac_alloc = UniqueAllocator(ip4_prefix)
+    except Exception as exc:
+        logger.warning("[preview] failed to init MAC allocator with prefix %s (%s); falling back to default pool", ip4_prefix, exc)
+        try:
+            mac_alloc = UniqueAllocator("10.0.0.0/16")
+        except Exception as exc2:
+            logger.warning("[preview] fallback MAC allocator init failed (%s); using emergency /8 pool", exc2)
+            mac_alloc = UniqueAllocator("10.0.0.0/8")
+    try:
+        subnet_alloc = make_subnet_allocator(ip_mode, ip4_prefix, ip_region)
+    except Exception as exc:
+        logger.warning("[preview] failed to init subnet allocator with prefix=%s mode=%s region=%s (%s); falling back to private pool", ip4_prefix, ip_mode, ip_region, exc)
+        try:
+            subnet_alloc = make_subnet_allocator("private", "10.0.0.0/8", "all")
+        except Exception as exc2:
+            logger.error("[preview] fallback subnet allocator also failed (%s); preview realization cannot continue", exc2)
+            return None
+
+    session = safe_create_session(core)
+    existing_links, safe_add_link, link_counters = _make_safe_link_tracker()
+    if DIAG_ENABLED:
+        try:
+            al = getattr(session, 'add_link', None)
+            logger.info("[diag.session.preview] session=%r has_add_link=%s add_link_type=%s", session, bool(al), type(al))
+        except Exception:
+            pass
+
+    if layout_density == "compact":
+        cell_w, cell_h = 600, 450
+        host_radius_mean = 140
+        host_radius_jitter = 40
+    elif layout_density == "spacious":
+        cell_w, cell_h = 1000, 750
+        host_radius_mean = 260
+        host_radius_jitter = 80
+    else:
+        cell_w, cell_h = 900, 650
+        host_radius_mean = 220
+        host_radius_jitter = 60
+
+    router_grid_positions = _grid_positions(len(routers_data), cell_w=cell_w, cell_h=cell_h, jitter=50)
+    router_index_order = sorted(routers_data, key=lambda r: r.get('node_id', 0))
+    router_index_map: Dict[int, int] = {}
+    router_coord_map: Dict[int, Tuple[int, int]] = {}
+
+    router_objs: List[Any] = []
+    router_nodes: Dict[int, Any] = {}
+    routers_info: List[NodeInfo] = []
+    router_iface_names: Dict[int, Set[str]] = {}
+    router_next_ifid: Dict[int, int] = defaultdict(int)
+
+    for idx, rdata in enumerate(router_index_order):
+        try:
+            rid = int(rdata.get('node_id', idx + 1))
+        except Exception:
+            rid = idx + 1
+        router_index_map[rid] = idx
+        name = str(rdata.get('name') or f"router-{idx+1}")
+        layout_coord = _layout_coord(router_layout_map, rid)
+        if layout_coord:
+            x, y = layout_coord
+        elif router_grid_positions:
+            x, y = router_grid_positions[idx % len(router_grid_positions)]
+        else:
+            x, y = (500 + idx * 120, 400)
+        router_coord_map[rid] = (x, y)
+        logger.info("[preview] add_router id=%s name=%s pos=(%s,%s)", rid, name, x, y)
+        router_position = Position(x=x, y=y)
+        rtype = _router_node_type()
+        node = _session_add_node(session, rid, node_type=rtype, position=router_position, name=name)
+        _log_add_node_result(session, node, rid, rtype, name, position=router_position)
+        mark_node_as_router(node, session)
+        try:
+            setattr(node, "model", "router")
+        except Exception:
+            pass
+        router_iface_names[rid] = set()
+        services_for_router = ["IPForward", "zebra"]
+        set_node_services(session, rid, services_for_router, node_obj=node)
+        routers_info.append(NodeInfo(node_id=rid, ip4=str(rdata.get('ip4') or ""), role="Router"))
+        router_objs.append(node)
+        router_nodes[rid] = node
+
+    host_router_map_preview: Dict[int, int] = {}
+    try:
+        hrm_raw = preview_plan.get('host_router_map') or {}
+        for key, val in hrm_raw.items():
+            try:
+                host_router_map_preview[int(key)] = int(val)
+            except Exception:
+                continue
+    except Exception:
+        host_router_map_preview = {}
+
+    host_nodes_by_id: Dict[int, Any] = {}
+    host_data_by_id: Dict[int, Dict[str, Any]] = {}
+    host_next_ifid: Dict[int, int] = defaultdict(int)
+    host_primary_ips: Dict[int, str] = {}
+    hosts_info: List[NodeInfo] = []
+    default_host_ids: Set[int] = set()
+
+    # Apply vulnerability docker slot plan (slot-N => convert Nth DEFAULT host to DOCKER)
+    host_slot_idx = 0
+    docker_slots_used: Set[str] = set()
+    docker_by_name: Dict[str, Dict[str, str]] = {}
+    created_docker = 0
+
+    def _apply_mount_overlays(rec: Optional[Dict[str, str]]) -> None:
+        if not isinstance(rec, dict):
+            return
+        if enable_traffic_mount:
+            rec.setdefault('EnableTrafficMount', 'true')
+        if enable_segmentation_mount:
+            rec.setdefault('EnableSegmentationMount', 'true')
+
+    docker_ifid_start = _docker_ifid_start()
+
+    sorted_hosts = sorted(hosts_data, key=lambda h: h.get('node_id', 0))
+    for idx, hdata in enumerate(sorted_hosts):
+        try:
+            hid = int(hdata.get('node_id', idx + len(router_objs) + 1))
+        except Exception:
+            hid = idx + len(router_objs) + 1
+        host_data_by_id[hid] = hdata
+        role = hdata.get('role') or "Host"
+        node_type = map_role_to_node_type(role)
+        router_id = host_router_map_preview.get(hid)
+        layout_coord = _layout_coord(host_layout_map, hid)
+        if layout_coord:
+            x, y = layout_coord
+        else:
+            if router_id in router_coord_map:
+                base_x, base_y = router_coord_map[router_id]
+            elif router_grid_positions:
+                base_x, base_y = router_grid_positions[idx % len(router_grid_positions)]
+            else:
+                base_x, base_y = (500 + idx * 35, 500)
+            angle = (idx % 12) * (math.pi / 6.0)
+            radius = max(60, int(random.gauss(host_radius_mean, host_radius_jitter)))
+            x = int(base_x + radius * math.cos(angle))
+            y = int(base_y + radius * math.sin(angle))
+        name = str(hdata.get('name') or f"host-{hid}")
+
+        host_slot_idx += 1
+        slot_key = f"slot-{host_slot_idx}"
+        is_docker_node = _is_docker_node_type(node_type)
+        is_explicit_docker = is_docker_node and str(role).lower() == 'docker'
+
+        # Apply docker slot plan for any host slot (overrides default template when present).
+        try:
+            if docker_slot_plan and slot_key in docker_slot_plan:
+                if not is_docker_node:
+                    if hasattr(NodeType, "DOCKER"):
+                        node_type = getattr(NodeType, "DOCKER")
+                        is_docker_node = True
+                        created_docker += 1
+                    else:
+                        logger.warning("NodeType.DOCKER not available; cannot apply docker slot plan during preview realization")
+                if is_docker_node:
+                    # IMPORTANT: slot-plan docker-compose records (e.g., vulnerabilities) must remain
+                    # the base record. Flow flag-generators should only overlay artifacts/injects,
+                    # not replace the compose stack with the standard ubuntu template.
+                    base_rec = docker_slot_plan[slot_key]
+                    overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+                    docker_by_name[name] = {**base_rec, **overlay} if overlay else base_rec
+                    _apply_mount_overlays(docker_by_name.get(name))
+                    docker_slots_used.add(slot_key)
+        except Exception:
+            pass
+
+        # Explicit Docker role: attach compose metadata so compose files can be prepared later.
+        # If Flow injected a flag compose reference into host metadata, prefer that over the standard template.
+        if is_explicit_docker:
+            try:
+                created_docker += 1
+                if name not in docker_by_name:
+                    flow_rec = _flow_flag_record_from_host_metadata(hdata)
+                    if flow_rec:
+                        docker_by_name[name] = flow_rec
+                    else:
+                        base_rec = _standard_docker_compose_record()
+                        overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+                        docker_by_name[name] = {**base_rec, **overlay} if overlay else base_rec
+                    _apply_mount_overlays(docker_by_name.get(name))
+            except Exception:
+                pass
+
+        if is_docker_node and name not in docker_by_name:
+            flow_rec = _flow_flag_record_from_host_metadata(hdata)
+            base_rec = flow_rec or _standard_docker_compose_record()
+            overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+            docker_by_name[name] = {**base_rec, **overlay} if overlay else base_rec
+            _apply_mount_overlays(docker_by_name.get(name))
+
+        # Prepare per-node compose file BEFORE creating the docker node.
+        # CORE starts Docker nodes immediately on add_node() and will Mako-render the compose file.
+        if _is_docker_node_type(node_type):
+            _ensure_docker_node_compose_prepared(name, docker_by_name.get(name))
+
+        logger.info("[preview] add_host id=%s name=%s type=%s pos=(%s,%s)", hid, name, _type_desc(node_type), x, y)
+        host_position = Position(x=x, y=y)
+        add_node_extra = None
+        if _is_docker_node_type(node_type):
+            add_node_extra = _docker_node_add_node_kwargs(name, docker_by_name.get(name))
+        host_node = _session_add_node(
+            session,
+            hid,
+            node_type=node_type,
+            position=host_position,
+            name=name,
+            start=False if _is_docker_node_type(node_type) else None,
+            extra_kwargs=add_node_extra,
+        )
+        _log_add_node_result(session, host_node, hid, node_type, name, position=host_position)
+        try:
+            if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+                setattr(host_node, "model", "docker")
+            elif node_type == NodeType.SWITCH:
+                setattr(host_node, "model", "switch")
+            elif node_type == NodeType.DEFAULT:
+                setattr(host_node, "model", "PC")
+        except Exception:
+            pass
+        host_nodes_by_id[hid] = host_node
+        is_docker = _is_docker_node_type(node_type)
+        # Docker-backed nodes typically already have a Docker eth0; start CORE interfaces at eth1.
+        host_next_ifid[hid] = docker_ifid_start if is_docker else 0
+        if node_type == NodeType.DEFAULT:
+            default_host_ids.add(hid)
+
+        # Attach compose metadata when the plan made this host a DOCKER node.
+        try:
+            if _is_docker_node_type(node_type):
+                rec = docker_by_name.get(name)
+                _apply_docker_compose_meta(host_node, rec, session=session)
+                _ensure_default_route_for_docker(session, host_node)
+        except Exception:
+            pass
+
+        ip_hint = str(hdata.get('ip4') or "")
+        if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
+            hosts_info.append(NodeInfo(node_id=hid, ip4=ip_hint, role=role))
+
+    if docker_slot_plan:
+        missing_slots = set(docker_slot_plan.keys()) - docker_slots_used
+        if missing_slots:
+            raise RuntimeError(
+                f"Unable to provision Docker nodes for vulnerability assignments during preview realization: {sorted(missing_slots)}"
+            )
+        if created_docker:
+            logger.info("[preview] Docker nodes created during preview realization: %d", created_docker)
+
+    switches_preview = preview_plan.get('switches') or []
+    switch_name_map = {}
+    for sval in switches_preview:
+        try:
+            switch_name_map[int(sval.get('node_id'))] = sval.get('name')
+        except Exception:
+            continue
+    declared_switch_ids: Set[int] = set(switch_name_map.keys())
+
+    switch_nodes: Dict[int, Any] = {}
+    for idx, detail in enumerate(switches_detail):
+        try:
+            sid = int(detail.get('switch_id'))
+        except Exception:
+            continue
+        # Skip orphan switch details that have no resolvable hosts unless the
+        # switch was explicitly declared in preview_plan['switches'].
+        try:
+            raw_hosts = detail.get('hosts') or []
+        except Exception:
+            raw_hosts = []
+        has_resolved_host = False
+        for h in raw_hosts:
+            try:
+                hid = int(h)
+            except Exception:
+                continue
+            if hid in host_nodes_by_id:
+                has_resolved_host = True
+                break
+        if (not has_resolved_host) and (sid not in declared_switch_ids):
+            continue
+        if sid in switch_nodes:
+            continue
+        router_id = int(detail.get('router_id') or 0)
+        layout_coord = _layout_coord(switch_layout_map, sid)
+        if layout_coord:
+            sx, sy = layout_coord
+        else:
+            if router_id in router_coord_map:
+                base_x, base_y = router_coord_map[router_id]
+            elif router_grid_positions:
+                base_x, base_y = router_grid_positions[idx % len(router_grid_positions)]
+            else:
+                base_x, base_y = (600 + idx * 40, 600)
+            sx = base_x + 120 + (idx % 3) * 40
+            sy = base_y + 60 + (idx % 5) * 35
+        switch_name = switch_name_map.get(sid) or f"rsw-{router_id}-{idx+1}"
+        logger.info("[preview] add_switch id=%s name=%s pos=(%s,%s)", sid, switch_name, sx, sy)
+        sw_position = Position(x=sx, y=sy)
+        sw_node = _session_add_node(session, sid, node_type=NodeType.SWITCH, position=sw_position, name=switch_name)
+        _log_add_node_result(session, sw_node, sid, NodeType.SWITCH, switch_name, position=sw_position)
+        try:
+            setattr(sw_node, "model", "switch")
+        except Exception:
+            pass
+        switch_nodes[sid] = sw_node
+
+    def _normalize_host_if_ips(raw: Any) -> Dict[int, str]:
+        out: Dict[int, str] = {}
+        if not isinstance(raw, dict):
+            return out
+        for k, v in raw.items():
+            try:
+                out[int(k)] = str(v)
+            except Exception:
+                continue
+        return out
+
+    hosts_attached: Set[int] = set()
+    host_switch_assignment: Dict[int, int] = {}
+    used_ipv4_addrs: Set[str] = set()
+
+    for detail in switches_detail:
+        try:
+            sid = int(detail.get('switch_id'))
+            router_id = int(detail.get('router_id'))
+        except Exception:
+            continue
+
+        # Skip orphan/empty switch details unless the switch was explicitly declared.
+        try:
+            raw_hosts = detail.get('hosts') or []
+        except Exception:
+            raw_hosts = []
+        has_resolved_host = False
+        for h in raw_hosts:
+            try:
+                hid = int(h)
+            except Exception:
+                continue
+            if hid in host_nodes_by_id:
+                has_resolved_host = True
+                break
+        if (not has_resolved_host) and (sid not in declared_switch_ids):
+            continue
+
+        sw_node = switch_nodes.get(sid)
+        router_node = router_nodes.get(router_id)
+        if not sw_node or not router_node:
+            continue
+
+        rsw_subnet = detail.get('rsw_subnet')
+        lan_subnet = detail.get('lan_subnet')
+        router_ip = detail.get('router_ip')
+        switch_ip = detail.get('switch_ip')
+        try:
+            rsw_net = ipaddress.ip_network(rsw_subnet, strict=False) if rsw_subnet else None
+        except Exception:
+            rsw_net = None
+        try:
+            lan_net = ipaddress.ip_network(lan_subnet, strict=False) if lan_subnet else None
+        except Exception:
+            lan_net = None
+        # IMPORTANT: Router<->switch and all hosts attached to that switch must share ONE subnet.
+        # Prefer the LAN subnet when provided; otherwise fall back to rsw_subnet.
+        shared_net = lan_net or rsw_net
+        shared_hosts = list(shared_net.hosts()) if shared_net else []
+        if lan_net and rsw_net and (lan_net.network_address != rsw_net.network_address or lan_net.prefixlen != rsw_net.prefixlen):
+            logger.warning(
+                "[preview] subnet mismatch for switch %s (router %s): rsw_subnet=%s lan_subnet=%s; using lan_subnet for all attachments",
+                sid,
+                router_id,
+                rsw_subnet,
+                lan_subnet,
+            )
+
+        # Router IP: force to the first usable address on the shared subnet.
+        # Ignore switch_ip entirely; switches are L2 and should not own gateway IPs.
+        if shared_hosts:
+            r_ip_val = str(shared_hosts[0])
+            r_mask_int = int(shared_net.prefixlen)
+        else:
+            # Last-resort fallback when no subnet is available.
+            if router_ip and '/' in str(router_ip):
+                r_ip_val, r_mask = str(router_ip).split('/', 1)
+                r_mask_int = int(r_mask)
+            else:
+                r_ip_val = None
+                r_mask_int = 24
+        s_ip_val = None
+        s_mask_int = r_mask_int
+
+        # Canonicalize the "shared" subnet to the router's actual interface subnet.
+        # This guarantees host IPs match the router<->switch link even if preview data
+        # contains mismatched rsw_subnet vs lan_subnet.
+        try:
+            if r_ip_val:
+                router_link_net = ipaddress.ip_network(f"{r_ip_val}/{r_mask_int}", strict=False)
+                if shared_net and (router_link_net.network_address != shared_net.network_address or router_link_net.prefixlen != shared_net.prefixlen):
+                    logger.warning(
+                        "[preview] overriding shared subnet for switch %s (router %s) from %s to router link %s",
+                        sid,
+                        router_id,
+                        shared_net,
+                        router_link_net,
+                    )
+                shared_net = router_link_net
+                shared_hosts = list(shared_net.hosts())
+        except Exception:
+            pass
+
+        r_ifid = router_next_ifid[router_id]
+        router_next_ifid[router_id] += 1
+        base_name = f"r{router_id}-rsw{sid}"
+        r_iface_name = _ensure_router_iface_name(router_iface_names, router_id, base_name)
+        r_iface = Interface(id=r_ifid, name=r_iface_name, ip4=r_ip_val, ip4_mask=r_mask_int, mac=mac_alloc.next_mac())
+        # Switches are L2; do not assign IPv4 fields at all on switch interfaces.
+        # Some CORE builds interpret even empty ip4/ip4_mask as an address assignment.
+        sw_iface = Interface(id=0, name=f"{getattr(sw_node, 'name', f'rsw-{sid}')}-r{router_id}", mac=mac_alloc.next_mac())
+        safe_add_link(session, router_node, sw_node, iface1=r_iface, iface2=sw_iface)
+        link_counters['attempts'] += 1
+        link_counters['success'] += 1
+
+        host_if_ips = _normalize_host_if_ips(detail.get('host_if_ips'))
+        host_list_raw = detail.get('hosts') or []
+        host_list: List[int] = []
+        seen_local: Set[int] = set()
+        for h in host_list_raw:
+            try:
+                hid_val = int(h)
+            except Exception:
+                continue
+            if hid_val in seen_local:
+                continue
+            seen_local.add(hid_val)
+            host_list.append(hid_val)
+        for index, hid in enumerate(host_list):
+            host_node = host_nodes_by_id.get(hid)
+            if not host_node:
+                continue
+            previous_sid = host_switch_assignment.get(hid)
+            if previous_sid is not None:
+                if previous_sid != sid:
+                    logger.warning("[preview] host %s already attached to switch %s; skipping duplicate attachment to switch %s", hid, previous_sid, sid)
+                else:
+                    logger.debug("[preview] host %s already attached to switch %s; skipping duplicate entry", hid, sid)
+                continue
+            ip_str = host_if_ips.get(hid)
+            # Only accept explicit host IPs that belong to the shared subnet.
+            ip_iface = None
+            if ip_str and '/' in str(ip_str):
+                try:
+                    ip_iface = ipaddress.ip_interface(str(ip_str))
+                    if shared_net and ip_iface.network != shared_net:
+                        ip_iface = None
+                except Exception:
+                    ip_iface = None
+
+            if ip_iface is None and shared_hosts:
+                # Allocate from shared subnet, skipping router's .1 address.
+                # Use a hash of (hid, subnet) for a varied starting offset rather than
+                # always starting at .2, so HITL targets don't all have the same last octet.
+                _hv = (hid * 2654435761 ^ int(shared_net.network_address)) & 0xFFFFFFFF
+                _hr = max(1, len(shared_hosts) - 1)
+                _base = (_hv % _hr) + 1
+                assign_idx = ((_base + index - 1) % _hr) + 1
+                # Ensure global uniqueness as well.
+                while assign_idx < len(shared_hosts) and str(shared_hosts[assign_idx]) in used_ipv4_addrs:
+                    assign_idx += 1
+                if assign_idx < len(shared_hosts):
+                    ip_iface = ipaddress.ip_interface(f"{shared_hosts[assign_idx]}/{shared_net.prefixlen}")
+
+            if ip_iface is not None:
+                hip_val = str(ip_iface.ip)
+                hip_mask_int = int(ip_iface.network.prefixlen)
+            else:
+                hip_val = None
+                hip_mask_int = int(shared_net.prefixlen) if shared_net else 24
+            iface_id = host_next_ifid[hid]
+            host_iface = Interface(id=iface_id, name=f"eth{iface_id}", ip4=hip_val, ip4_mask=hip_mask_int, mac=mac_alloc.next_mac())
+            # Switches are L2; do not assign IPv4 fields at all on switch interfaces.
+            sw_host_iface = Interface(id=index + 1, name=f"{getattr(sw_node, 'name', 'rsw')}-h{hid}", mac=mac_alloc.next_mac())
+            if safe_add_link(session, host_node, sw_node, iface1=host_iface, iface2=sw_host_iface):
+                host_next_ifid[hid] += 1
+                link_counters['attempts'] += 1
+                link_counters['success'] += 1
+                hosts_attached.add(hid)
+                host_switch_assignment[hid] = sid
+                if hip_val:
+                    host_primary_ips[hid] = f"{hip_val}/{hip_mask_int}"
+                    used_ipv4_addrs.add(str(hip_val))
+            else:
+                logger.warning("[preview] failed to link host %s to switch %s; host may remain unattached", hid, sid)
+
+    for hid, rid in host_router_map_preview.items():
+        if hid in hosts_attached:
+            continue
+        host_node = host_nodes_by_id.get(hid)
+        router_node = router_nodes.get(rid)
+        if not host_node or not router_node:
+            continue
+        hdata = host_data_by_id.get(hid, {})
+        ip_hint = str(hdata.get('ip4') or "")
+        hip_val = None
+        hip_mask_int = 24
+        router_ip_val = None
+        if ip_hint and '/' in ip_hint:
+            try:
+                iface = ipaddress.ip_interface(ip_hint)
+                hip_val = str(iface.ip)
+                hip_mask_int = iface.network.prefixlen
+                hosts_in_net = list(iface.network.hosts())
+                if hosts_in_net:
+                    router_ip_val = str(hosts_in_net[0]) if str(hosts_in_net[0]) != hip_val else (str(hosts_in_net[1]) if len(hosts_in_net) > 1 else None)
+            except Exception:
+                hip_val = None
+        if hip_val is None:
+            lan_net = subnet_alloc.next_random_subnet(24)
+            lan_hosts = list(lan_net.hosts())
+            if len(lan_hosts) > 1:
+                _hv = (hid * 2654435761 ^ int(lan_net.network_address)) & 0xFFFFFFFF
+                _hr = max(1, len(lan_hosts) - 1)
+                hip_val = str(lan_hosts[(_hv % _hr) + 1])
+            else:
+                hip_val = None
+            router_ip_val = str(lan_hosts[0]) if lan_hosts else None
+            hip_mask_int = lan_net.prefixlen
+        iface_id = host_next_ifid[hid]
+        host_next_ifid[hid] += 1
+        host_iface = Interface(id=iface_id, name=f"eth{iface_id}", ip4=hip_val, ip4_mask=hip_mask_int, mac=mac_alloc.next_mac())
+        r_ifid = router_next_ifid[rid]
+        router_next_ifid[rid] += 1
+        base_name = f"r{rid}-h{hid}"
+        r_iface_name = _ensure_router_iface_name(router_iface_names, rid, base_name)
+        router_iface = Interface(id=r_ifid, name=r_iface_name, ip4=router_ip_val, ip4_mask=hip_mask_int, mac=mac_alloc.next_mac())
+        safe_add_link(session, host_node, router_node, iface1=host_iface, iface2=router_iface)
+        link_counters['attempts'] += 1
+        link_counters['success'] += 1
+        hosts_attached.add(hid)
+        if hip_val:
+            host_primary_ips[hid] = f"{hip_val}/{hip_mask_int}"
+
+    router_protocols: Dict[int, List[str]] = defaultdict(list)
+    proto_sources = preview_plan.get('r2s_grouping_preview') or []
+    for entry in proto_sources:
+        try:
+            rid = int(entry.get('router_id'))
+        except Exception:
+            continue
+        proto = entry.get('protocol')
+        if rid and proto:
+            router_protocols[rid].append(proto)
+
+    r2r_links_preview = preview_plan.get('r2r_links_preview') or []
+    if not r2r_links_preview:
+        edges_preview = preview_plan.get('r2r_edges_preview') or []
+        for edge in edges_preview:
+            if not isinstance(edge, (list, tuple)) or len(edge) != 2:
+                continue
+            r2r_links_preview.append({'routers': [{'id': edge[0]}, {'id': edge[1]}]})
+
+    for link_entry in r2r_links_preview:
+        routers_descr = link_entry.get('routers') or []
+        if len(routers_descr) != 2:
+            continue
+        try:
+            a_id = int(routers_descr[0].get('id'))
+            b_id = int(routers_descr[1].get('id'))
+        except Exception:
+            continue
+        a_node = router_nodes.get(a_id)
+        b_node = router_nodes.get(b_id)
+        if not a_node or not b_node:
+            continue
+        subnet_str = link_entry.get('subnet')
+        try:
+            subnet_obj = ipaddress.ip_network(subnet_str, strict=False) if subnet_str else None
+        except Exception:
+            subnet_obj = None
+        if subnet_obj:
+            hosts_in_net = list(subnet_obj.hosts())
+        else:
+            subnet_obj = subnet_alloc.next_random_subnet(30)
+            hosts_in_net = list(subnet_obj.hosts())
+        a_ip_entry = routers_descr[0].get('ip')
+        b_ip_entry = routers_descr[1].get('ip')
+        if not a_ip_entry and hosts_in_net:
+            a_ip_entry = f"{hosts_in_net[0]}/{subnet_obj.prefixlen}"
+        if not b_ip_entry and len(hosts_in_net) >= 2:
+            b_ip_entry = f"{hosts_in_net[1]}/{subnet_obj.prefixlen}"
+        if a_ip_entry and '/' in a_ip_entry:
+            a_ip, a_mask = a_ip_entry.split('/', 1)
+            a_mask_int = int(a_mask)
+        else:
+            a_ip = a_ip_entry or None
+            a_mask_int = subnet_obj.prefixlen
+        if b_ip_entry and '/' in b_ip_entry:
+            b_ip, b_mask = b_ip_entry.split('/', 1)
+            b_mask_int = int(b_mask)
+        else:
+            b_ip = b_ip_entry or None
+            b_mask_int = subnet_obj.prefixlen
+        a_ifid = router_next_ifid[a_id]
+        router_next_ifid[a_id] += 1
+        b_ifid = router_next_ifid[b_id]
+        router_next_ifid[b_id] += 1
+        a_iface_name = _ensure_router_iface_name(router_iface_names, a_id, f"r{a_id}-proto-{b_id}")
+        b_iface_name = _ensure_router_iface_name(router_iface_names, b_id, f"r{b_id}-proto-{a_id}")
+        a_iface = Interface(id=a_ifid, name=a_iface_name, ip4=a_ip, ip4_mask=a_mask_int, mac=mac_alloc.next_mac())
+        b_iface = Interface(id=b_ifid, name=b_iface_name, ip4=b_ip, ip4_mask=b_mask_int, mac=mac_alloc.next_mac())
+        safe_add_link(session, a_node, b_node, iface1=a_iface, iface2=b_iface)
+        link_counters['attempts'] += 1
+        link_counters['success'] += 1
+
+    for rid, protos in router_protocols.items():
+        node = router_nodes.get(rid)
+        if not node:
+            continue
+        merged = ["IPForward", "zebra"]
+        for proto in protos:
+            if proto and proto not in merged:
+                merged.append(proto)
+        set_node_services(session, rid, merged, node_obj=node)
+        try:
+            setattr(node, "routing_protocol", protos[-1])
+        except Exception:
+            pass
+
+    for hid in default_host_ids:
+        node = host_nodes_by_id.get(hid)
+        if not node:
+            continue
+        try:
+            ensure_service(session, hid, "DefaultRoute", node_obj=node)
+        except Exception:
+            pass
+
+    host_service_assignments: Dict[int, List[str]] = {}
+    services_preview = preview_plan.get('services_preview') or {}
+    for key, svc_list in services_preview.items():
+        try:
+            hid = int(key)
+        except Exception:
+            continue
+        node = host_nodes_by_id.get(hid)
+        if not node:
+            continue
+        assigned: List[str] = []
+        for svc in svc_list or []:
+            if not svc:
+                continue
+            try:
+                ensure_service(session, hid, svc, node_obj=node)
+                assigned.append(svc)
+            except Exception as exc:
+                logger.debug("[preview] failed to assign service %s to host %s: %s", svc, hid, exc)
+        if assigned:
+            host_service_assignments[hid] = assigned
+
+    hosts_info_map = {ni.node_id: ni for ni in hosts_info}
+    for hid, primary in host_primary_ips.items():
+        info = hosts_info_map.get(hid)
+        if info:
+            info.ip4 = primary
+
+    topo_stats: Dict[str, Any] = {}
+    try:
+        topo_stats.update({
+            'routers_total_planned': len(router_objs),
+            'preview_realized': True,
+        })
+        policy = preview_plan.get('r2r_policy_preview')
+        if policy:
+            topo_stats['router_edges_policy'] = policy
+        degrees = preview_plan.get('r2r_degree_preview')
+        if degrees:
+            try:
+                topo_stats['router_degrees'] = {int(k): int(v) for k, v in degrees.items()}
+            except Exception:
+                topo_stats['router_degrees'] = degrees
+        r2s_policy = preview_plan.get('r2s_policy_preview')
+        if r2s_policy:
+            topo_stats['r2s_policy'] = r2s_policy
+        host_counts: Dict[int, int] = defaultdict(int)
+        for hid, rid in host_router_map_preview.items():
+            host_counts[rid] += 1
+        if host_counts:
+            topo_stats['router_host_counts'] = dict(host_counts)
+        router_plan_stats = preview_plan.get('router_plan_stats')
+        if isinstance(router_plan_stats, dict):
+            topo_stats['router_plan_stats'] = router_plan_stats
+        setattr(session, 'topo_stats', topo_stats)
+    except Exception:
+        pass
+    try:
+        if preview_plan.get('r2s_grouping_preview'):
+            setattr(session, 'r2s_grouping_preview', preview_plan.get('r2s_grouping_preview'))
+    except Exception:
+        pass
+
+    logger.info("[preview] topology realized from persisted preview: routers=%d hosts=%d switches=%d", len(router_objs), len(host_nodes_by_id), len(switch_nodes))
+
+    # Final pass: ensure Docker nodes still have DefaultRoute after preview service application.
+    try:
+        _enforce_default_route_on_docker_nodes(session, list(host_nodes_by_id.values()), context="segmented-preview")
+    except Exception:
+        pass
+
+    return session, routers_info, [ni for ni in hosts_info], {k: v for k, v in host_service_assignments.items()}, {k: v for k, v in router_protocols.items()}, docker_by_name
+
+
+def build_segmented_topology(core,
+                             role_counts: Dict[str, int],
+                             routing_density: float,
+                             routing_items: List[RoutingInfo],
+                             base_host_pool: int,
+                             services: Optional[List[ServiceInfo]] = None,
+                             ip4_prefix: str = "10.0.0.0/24",
+                             ip_mode: str = "private",
+                             ip_region: str = "all",
+                             layout_density: str = "normal",
+                             docker_slot_plan: Optional[Dict[str, Dict[str, str]]] = None,
+                             router_mesh_style: str = "full",
+                             preview_plan: Optional[Dict[str, Any]] = None,
+                             enable_traffic_mount: bool = False,
+                             enable_segmentation_mount: bool = False):
+    _reset_docker_compose_prepare_caches('segmented')
+    logger.info("Docker CORE interfaces start at eth%s (CORETG_DOCKER_IFID_START)", _docker_ifid_start())
+    def _preview_payload_present(payload: Optional[Dict[str, Any]]) -> bool:
+        """Return True when caller provided a preview-like payload (not just a seed override)."""
+        if not isinstance(payload, dict):
+            return False
+        # Keys that indicate a full preview payload from planning.full_preview
+        previewish_keys = {
+            'routers',
+            'hosts',
+            'switches',
+            'switches_detail',
+            'layout_positions',
+            'host_router_map',
+            'r2r_links_preview',
+            'r2r_edges_preview',
+            'r2s_grouping_preview',
+            'services_preview',
+        }
+        return any(k in payload for k in previewish_keys)
+
+    expected_switch_ids: Set[int] = set()
+    if preview_plan:
+        allow_preview_fallback = _env_flag("CORETG_ALLOW_PREVIEW_FALLBACK", default_on=False)
+        require_exact_preview = _preview_payload_present(preview_plan) and not allow_preview_fallback
+        preview_result = _try_build_segmented_topology_from_preview(
+            core=core,
+            services=services,
+            routing_items=routing_items,
+            ip4_prefix=ip4_prefix,
+            ip_mode=ip_mode,
+            ip_region=ip_region,
+            layout_density=layout_density,
+            preview_plan=preview_plan,
+            docker_slot_plan=docker_slot_plan,
+            enable_traffic_mount=enable_traffic_mount,
+            enable_segmentation_mount=enable_segmentation_mount,
+        )
+        if preview_result is not None:
+            return preview_result
+        if require_exact_preview:
+            issues: List[str] = []
+            try:
+                from ..planning.preview_validation import validate_full_preview  # local import to avoid cycles
+                issues = validate_full_preview(preview_plan)
+            except Exception:
+                issues = []
+            detail = ("; ".join(issues[:8]) + ("; ..." if len(issues) > 8 else "")) if issues else "(no validation details)"
+            raise RuntimeError(
+                "Preview plan was provided but could not be realized exactly; refusing to fall back to a randomized build. "
+                "Set CORETG_ALLOW_PREVIEW_FALLBACK=1 to permit fallback. "
+                f"Preview validation: {detail}"
+            )
+        try:
+            switches_decl = preview_plan.get('switches') or []
+            for sw in switches_decl:
+                try:
+                    expected_switch_ids.add(int(sw.get('node_id')))
+                except Exception:
+                    continue
+            switches_detail = preview_plan.get('switches_detail') or []
+            for detail in switches_detail:
+                try:
+                    expected_switch_ids.add(int(detail.get('switch_id')))
+                except Exception:
+                    continue
+        except Exception:
+            expected_switch_ids.clear()
+
+    preview_seed: Optional[int] = None
+    if preview_plan:
+        try:
+            raw_seed = preview_plan.get('seed')
+            if raw_seed is not None:
+                preview_seed = int(raw_seed)
+        except Exception:
+            preview_seed = None
+    if preview_seed is not None:
+        try:
+            set_global_random_seed(preview_seed)
+        except Exception:
+            try:
+                random.seed(preview_seed)
+            except Exception:
+                pass
+
+    logger.info("Creating CORE session and building segmented topology with routers (randomized placement)")
+    mac_alloc = UniqueAllocator(ip4_prefix)
+    subnet_alloc = make_subnet_allocator(ip_mode, ip4_prefix, ip_region)
+    session = safe_create_session(core)
+    existing_links, safe_add_link, link_counters = _make_safe_link_tracker()
+    if DIAG_ENABLED:
+        try:
+            al = getattr(session, 'add_link', None)
+            logger.info("[diag.session] segmented session=%r has_add_link=%s add_link_type=%s", session, bool(al), type(al))
+        except Exception:
+            pass
+
+    total_hosts = sum(role_counts.values())
+    if preview_plan:
+        try:
+            hosts_preview = preview_plan.get('hosts') or []
+            if isinstance(hosts_preview, list):
+                preview_host_total = len(hosts_preview)
+                if preview_host_total and preview_host_total != total_hosts:
+                    logger.info("[preview] overriding host total from %s to %s", total_hosts, preview_host_total)
+                    total_hosts = preview_host_total
+        except Exception:
+            pass
+    # Use shared pure-planning helper for router counts
+    _plan_stats = plan_router_counts(role_counts, routing_density, routing_items, base_host_pool)
+    router_count = _plan_stats['router_count']
+    if preview_plan:
+        try:
+            preview_router_override = len(preview_plan.get('routers') or [])
+        except Exception:
+            preview_router_override = 0
+        if preview_router_override > 0 and preview_router_override != router_count:
+            logger.info("[preview] overriding router count from %s to %s", router_count, preview_router_override)
+            router_count = preview_router_override
+            _plan_stats['preview_router_override'] = preview_router_override
+    density_router_count = _plan_stats['density_router_count']
+    count_router_count = _plan_stats['count_router_count']
+    effective_base = _plan_stats['effective_base']
+    try:
+        logger.debug(
+            "Router planning (shared helper): base=%s rd_raw=%.4f rd_clamped=%.4f weight_based=%s count_based=%s final=%s total_hosts=%s override=%s", 
+            _plan_stats['effective_base'], _plan_stats['rd_raw'], _plan_stats['rd_clamped'], _plan_stats['weight_based'], count_router_count, router_count, _plan_stats['total_hosts'], _plan_stats['preview_router_override']
+        )
+    except Exception:
+        pass
+    # If no routers are requested, fall back to a simple star topology.
+    # Explicit router counts should still realize router-only topologies even when there are no hosts.
+    if router_count <= 0:
+        logger.info("No routers created: routing density=%s, count_router_count=%s, total_hosts=%s", routing_density, count_router_count, total_hosts)
+        session, _switch_unused, nodes, svc, docker_by_name = build_star_from_roles(
+            core,
+            role_counts,
+            services=services,
+            ip4_prefix=ip4_prefix,
+            ip_mode=ip_mode,
+            ip_region=ip_region,
+            docker_slot_plan=docker_slot_plan,
+            preview_plan=preview_plan,
+            enable_traffic_mount=enable_traffic_mount,
+            enable_segmentation_mount=enable_segmentation_mount,
+        )
+        # Attach empty topo_stats for consistency
+        try:
+            setattr(session, "topo_stats", {
+                "routers_density_count": density_router_count,
+                "routers_count_count": count_router_count,
+                "routers_total_planned": 0,
+            })
+        except Exception:
+            pass
+        return session, [], nodes, svc, {}, docker_by_name
+
+    # placement parameters tuned by density
+    if layout_density == "compact":
+        cell_w, cell_h = 600, 450
+        host_radius_mean = 140
+        host_radius_jitter = 40
+    elif layout_density == "spacious":
+        cell_w, cell_h = 1000, 750
+        host_radius_mean = 260
+        host_radius_jitter = 80
+    else:  # normal
+        cell_w, cell_h = 900, 650
+        host_radius_mean = 220
+        host_radius_jitter = 60
+
+    routers: List[NodeInfo] = []
+    # Store stats for later reporting (attached to session to avoid changing return signature)
+    try:
+            setattr(session, "topo_stats", {
+                "routers_density_count": density_router_count,
+                "routers_count_count": count_router_count,
+                "routers_total_planned": router_count,
+            })
+    except Exception:
+        pass
+    logger.debug("Router planning: density=%s weight_based=%s count_based=%s final=%s total_hosts=%s", routing_density, density_router_count, count_router_count, router_count, total_hosts)
+    router_nodes: Dict[int, object] = {}
+    router_objs: List[object] = []
+    host_nodes_by_id: Dict[int, object] = {}
+    # Track next interface id per host to avoid reusing id=0 during rehome (prevents 'interface(0) already exists')
+    host_next_ifid: Dict[int, int] = {}
+    router_next_ifid: Dict[int, int] = {}
+    # Track router-facing interface names to guarantee uniqueness (avoid RTNETLINK rename collisions)
+    router_iface_names: Dict[int, Set[str]] = {}
+
+    # place routers on a spacious grid for easier viewing
+    r_positions = _grid_positions(router_count, cell_w=cell_w, cell_h=cell_h, jitter=50)
+    for i in range(router_count):
+        x, y = r_positions[i]
+        node_id = i + 1
+        rtype = _router_node_type()
+        logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", node_id, f"router-{i+1}", _type_desc(rtype), x, y)
+        router_position = Position(x=x, y=y)
+        node = _session_add_node(session, node_id, node_type=rtype, position=router_position, name=f"router-{i+1}")
+        _log_add_node_result(session, node, node_id, rtype, f"router-{i+1}", position=router_position)
+        logger.debug("Added router id=%s at (%s,%s)", node.id, x, y)
+        mark_node_as_router(node, session)
+        try:
+            setattr(node, "model", "router")
+        except Exception:
+            pass
+        # initialize iface name set for router
+        router_iface_names[node.id] = set()
+        # Always include mandatory router services
+        merged_services = ["IPForward", "zebra"]
+        set_node_services(session, node.id, merged_services, node_obj=node)
+        routers.append(NodeInfo(node_id=node.id, ip4="", role="Router"))
+        router_nodes[node.id] = node
+        router_objs.append(node)
+
+    # --- New Edge Connectivity Semantics ---
+    existing_router_links: Set[Tuple[int, int]] = set()
+    # Helper: compute stats (min/max/avg/std/gini) for a list of ints
+    def _int_list_stats(values: List[int]):
+        out = {"min": 0, "max": 0, "avg": 0.0, "std": 0.0, "gini": 0.0}
+        if not values:
+            return out
+        import math as _math
+        v = list(values)
+        mn = min(v); mx = max(v); sm = sum(v); n = len(v)
+        avg = sm / n if n else 0.0
+        var = 0.0
+        if n > 1:
+            var = sum((x - avg) ** 2 for x in v) / (n - 1)
+        std = _math.sqrt(var) if var > 0 else 0.0
+        # Gini (safe) – if all zero, remains 0
+        gini = 0.0
+        if sm > 0 and n > 1:
+            v_sorted = sorted(v)
+            # Using: G = (2*sum(i*x_i))/(n*sum(x_i)) - (n+1)/n
+            cum = 0
+            for i, x in enumerate(v_sorted, start=1):
+                cum += i * x
+            gini = (2 * cum) / (n * sm) - (n + 1) / n
+            # Numerical guard
+            if gini < 0:
+                gini = 0.0
+        out.update({"min": mn, "max": mx, "avg": round(avg, 4), "std": round(std, 4), "gini": round(gini, 4)})
+        return out
+
+    def add_router_link(a_obj, b_obj, prefix=30, label=""):
+        key = (min(a_obj.id, b_obj.id), max(a_obj.id, b_obj.id))
+        if key in existing_router_links:
+            return False
+        a_ifid = router_next_ifid.get(a_obj.id, 0)
+        b_ifid = router_next_ifid.get(b_obj.id, 0)
+        router_next_ifid[a_obj.id] = a_ifid + 1
+        router_next_ifid[b_obj.id] = b_ifid + 1
+        rr_net = subnet_alloc.next_random_subnet(prefix)
+        rr_hosts = list(rr_net.hosts())
+        if len(rr_hosts) < 2:
+            return False
+        a_ip = str(rr_hosts[0]); b_ip = str(rr_hosts[1])
+        tag = label or "to"
+        # Unique naming guard
+        def _uniq(router_id: int, base: str) -> str:
+            names = router_iface_names.setdefault(router_id, set())
+            if base not in names:
+                names.add(base)
+                return base
+            # append incremental suffix until unique
+            idx = 1
+            while True:
+                cand = f"{base}-{idx}"
+                if cand not in names:
+                    names.add(cand)
+                    return cand
+                idx += 1
+        a_name = _uniq(a_obj.id, f"r{a_obj.id}-{tag}-r{b_obj.id}")
+        b_name = _uniq(b_obj.id, f"r{b_obj.id}-{tag}-r{a_obj.id}")
+        a_if = Interface(id=a_ifid, name=a_name, ip4=a_ip, ip4_mask=rr_net.prefixlen, mac=mac_alloc.next_mac())
+        b_if = Interface(id=b_ifid, name=b_name, ip4=b_ip, ip4_mask=rr_net.prefixlen, mac=mac_alloc.next_mac())
+        # Use global existing_links guard in addition to existing_router_links for safety
+        key_all = (min(a_obj.id, b_obj.id), max(a_obj.id, b_obj.id))
+        if key_all not in existing_links:
+            safe_add_link(session, a_obj, b_obj, iface1=a_if, iface2=b_if)
+            if GRPC_TRACE:
+                logger.info("[grpc] add_router_link r1=%s r2=%s label=%s net=%s ifaceA=%s/%s ifaceB=%s/%s", a_obj.id, b_obj.id, label, rr_net, a_ip, rr_net.prefixlen, b_ip, rr_net.prefixlen)
+        existing_router_links.add(key)
+        return True
+    # Determine connectivity mode & target before creating links (allow deterministic injection)
+    connectivity_mode = 'Random'
+    target_degree: Optional[int] = None
+    injected_r2r = False
+    # R2R connectivity mode derived directly from routing items (approval path removed)
+    if not injected_r2r and routing_items and router_count > 1:
+        # Collect modes and explicit edge targets
+        modes_present = [ri.r2r_mode for ri in routing_items if getattr(ri, 'r2r_mode', None)]
+        exact_values = [int(getattr(ri, 'r2r_edges', 0)) for ri in routing_items if getattr(ri, 'r2r_mode', '') == 'Exact' and int(getattr(ri, 'r2r_edges', 0)) > 0]
+        uniform_values = [int(getattr(ri, 'r2r_edges', 0)) for ri in routing_items if getattr(ri, 'r2r_mode', '') == 'Uniform' and int(getattr(ri, 'r2r_edges', 0)) > 0]
+        # Priority: Exact > Min > Uniform > NonUniform > Random
+        if exact_values:
+            # If differing values specified, use median for stability and log a warning
+            unique_vals = sorted(set(exact_values))
+            chosen = unique_vals[len(unique_vals)//2]
+            if len(unique_vals) > 1:
+                logger.warning("[r2r] Multiple Exact edge targets specified %s; using median=%s", unique_vals, chosen)
+            target_degree = max(1, min(router_count - 1, chosen))
+            connectivity_mode = 'Exact'
+        elif 'Min' in modes_present:
+            # Minimal connectivity spanning structure (chain) – cannot achieve true k=1 regular connected graph for n>2
+            connectivity_mode = 'Min'
+            target_degree = 1  # semantic intent
+        elif 'Uniform' in modes_present:
+            connectivity_mode = 'Uniform'
+            if uniform_values:
+                uv_unique = sorted(set(uniform_values))
+                chosen = uv_unique[len(uv_unique)//2]
+                if len(uv_unique) > 1:
+                    logger.warning("[r2r] Multiple Uniform edge targets specified %s; using median=%s", uv_unique, chosen)
+                target_degree = max(1, min(router_count - 1, chosen))
+            else:
+                target_degree = None  # will derive heuristic later
+        elif 'NonUniform' in modes_present:
+            connectivity_mode = 'NonUniform'
+            if router_mesh_style == 'full':
+                router_mesh_style = ''
+        else:
+            connectivity_mode = 'Random'
+    # Build links according to connectivity_mode (unless injected already)
+    if router_count > 1 and injected_r2r:
+        logger.debug("R2R preview injection active: skipping connectivity_mode construction (using injected edges only)")
+    elif router_count > 1:
+        if connectivity_mode == 'Min':
+            # Chain topology: r1-r2-r3-...-rn
+            for i in range(router_count - 1):
+                add_router_link(router_objs[i], router_objs[i+1], prefix=30, label="chain")
+        elif connectivity_mode == 'Random':
+            # Random spanning tree only
+            order = list(range(router_count))
+            random.shuffle(order)
+            in_tree = {order[0]}; remaining = set(order[1:])
+            while remaining:
+                a_idx = random.choice(list(in_tree))
+                b_idx = random.choice(list(remaining))
+                add_router_link(router_objs[a_idx], router_objs[b_idx], prefix=30, label="tree")
+                in_tree.add(b_idx); remaining.remove(b_idx)
+        elif connectivity_mode == 'Uniform':
+            # If a specific target_degree supplied (user-specified), attempt k-regular.
+            # Otherwise derive heuristic and balance toward it.
+            import math as _math
+            if router_count == 2:
+                add_router_link(router_objs[0], router_objs[1], prefix=30, label="u")
+                target_degree = 1 if target_degree is None else target_degree
+            else:
+                if target_degree is None:
+                    # Heuristic similar to previous but explicit now
+                    td = min(router_count - 1, max(2, int(round(_math.log2(router_count))) + 1))
+                    td = min(td, max(2, (router_count // 2) + 1))
+                    target_degree = td
+                # Attempt direct regular construction for uniformity (without labeling as Exact)
+                def _build_regular(n: int, k: int) -> List[Tuple[int,int]]:
+                    if k < 0 or k >= n: return []
+                    if (n * k) % 2 != 0: return []
+                    if k == 0: return []
+                    import random as _r
+                    if k == 1:
+                        # Cannot produce connected k=1 for n>2; fallback to chain for minimal edges
+                        return []
+                    for _ in range(1200):
+                        stubs=[]
+                        for i in range(n): stubs.extend([i]*k)
+                        _r.shuffle(stubs)
+                        edges=set(); ok=True
+                        while stubs:
+                            if len(stubs) < 2: ok=False; break
+                            a=stubs.pop(); b=stubs.pop()
+                            if a==b: ok=False; break
+                            e=(a,b) if a<b else (b,a)
+                            if e in edges: ok=False; break
+                            edges.add(e)
+                        if ok:
+                            degs={i:0 for i in range(n)}
+                            for a,b in edges: degs[a]+=1; degs[b]+=1
+                            if all(v==k for v in degs.values()): return list(edges)
+                    return []
+                reg = _build_regular(router_count, target_degree or 0)
+                if reg:
+                    for a_idx,b_idx in reg:
+                        add_router_link(router_objs[a_idx], router_objs[b_idx], prefix=30, label="u-reg")
+                else:
+                    # Fallback: ring plus balancing toward target
+                    for i in range(router_count):
+                        add_router_link(router_objs[i], router_objs[(i+1) % router_count], prefix=30, label="u-ring")
+                    degrees: Dict[int, int] = {r.id: 0 for r in router_objs}
+                    for a_id, b_id in list(existing_router_links):
+                        degrees[a_id] += 1; degrees[b_id] += 1
+                    attempts = 0; max_attempts = router_count * router_count
+                    while attempts < max_attempts:
+                        attempts += 1
+                        low_nodes = sorted(degrees.items(), key=lambda kv: kv[1])
+                        if not low_nodes or low_nodes[0][1] >= (target_degree or 0):
+                            break
+                        a_id = low_nodes[0][0]
+                        candidates_b = [rid for rid,_d in low_nodes[1:] if degrees[rid] < (target_degree or 0) and (min(rid,a_id), max(rid,a_id)) not in existing_router_links]
+                        if not candidates_b:
+                            continue
+                        b_id = random.choice(candidates_b)
+                        a_obj = router_nodes.get(a_id); b_obj = router_nodes.get(b_id)
+                        if not a_obj or not b_obj:
+                            continue
+                        if add_router_link(a_obj, b_obj, prefix=30, label="u-bal"):
+                            degrees[a_id]+=1; degrees[b_id]+=1
+        elif connectivity_mode == 'NonUniform':
+            # Build a biased hub-and-spoke style overlay with dense hub links and sparse periphery connections.
+            order = list(range(router_count))
+            random.shuffle(order)
+            in_tree = {order[0]}; remaining = set(order[1:])
+            while remaining:
+                a_idx = random.choice(list(in_tree))
+                b_idx = random.choice(list(remaining))
+                add_router_link(router_objs[a_idx], router_objs[b_idx], prefix=30, label="base")
+                in_tree.add(b_idx); remaining.remove(b_idx)
+            degrees: Dict[int, int] = {r.id: 0 for r in router_objs}
+            for a_id, b_id in existing_router_links:
+                degrees[a_id] += 1; degrees[b_id] += 1
+            router_id_list = [r.id for r in router_objs]
+
+            def _try_add_edge(a_id: int, b_id: int, label: str) -> bool:
+                if a_id == b_id:
+                    return False
+                key = (min(a_id, b_id), max(a_id, b_id))
+                if key in existing_router_links:
+                    return False
+                a_obj = router_nodes.get(a_id)
+                b_obj = router_nodes.get(b_id)
+                if not a_obj or not b_obj:
+                    return False
+                if add_router_link(a_obj, b_obj, prefix=30, label=label):
+                    degrees[a_id] += 1
+                    degrees[b_id] += 1
+                    return True
+                return False
+
+            if len(router_id_list) > 1:
+                hub_pool = list(router_id_list)
+                max_hubs = int(round(max(2.0, math.sqrt(router_count))))
+                max_hubs = max(2, max_hubs)
+                hub_count = min(max_hubs, router_count - 1)
+                if hub_count <= 0:
+                    hub_count = 1
+                random.shuffle(hub_pool)
+                hub_ids = hub_pool[:hub_count]
+                if not hub_ids:
+                    hub_ids = [hub_pool[0]]
+                primary_hub = hub_ids[0]
+                secondary_hubs = hub_ids[1:]
+                periphery_ids = [rid for rid in router_id_list if rid not in hub_ids]
+                nonhub_cap = 2 if router_count >= 5 else max(2, router_count // 2)
+
+                def _eligible_target(hub_id: int, cand_id: int) -> bool:
+                    if hub_id == cand_id:
+                        return False
+                    key = (min(hub_id, cand_id), max(hub_id, cand_id))
+                    if key in existing_router_links:
+                        return False
+                    if cand_id in hub_ids:
+                        return True
+                    if hub_id == primary_hub:
+                        return degrees[cand_id] < (nonhub_cap + 1)
+                    return degrees[cand_id] < nonhub_cap
+
+                # Step 1: build a dense hub clique to create heavy hitters.
+                for idx, a_id in enumerate(hub_ids):
+                    for b_id in hub_ids[idx + 1:]:
+                        _try_add_edge(a_id, b_id, label="nu-hub")
+
+                # Step 2: connect periphery nodes primarily to the dominant hub (and occasionally to secondaries).
+                for per_id in periphery_ids:
+                    if _eligible_target(primary_hub, per_id):
+                        _try_add_edge(primary_hub, per_id, label="nu-pri")
+                    if secondary_hubs and random.random() < 0.2:
+                        hub_choice = random.choice(secondary_hubs)
+                        if _eligible_target(hub_choice, per_id):
+                            _try_add_edge(hub_choice, per_id, label="nu-sec")
+
+                def _degree_span() -> int:
+                    vals = list(degrees.values())
+                    if not vals:
+                        return 0
+                    return max(vals) - min(vals)
+
+                def _gini(values: List[int]) -> float:
+                    vals = [int(v) for v in values if v >= 0]
+                    n = len(vals)
+                    if n <= 1:
+                        return 0.0
+                    total = sum(vals)
+                    if total <= 0:
+                        return 0.0
+                    sorted_vals = sorted(vals)
+                    cum = 0
+                    for idx, val in enumerate(sorted_vals, start=1):
+                        cum += idx * val
+                    return (2 * cum) / (n * total) - (n + 1) / n
+
+                variance_target = 2 if router_count >= 5 else 1
+                current_span = _degree_span()
+                current_gini = _gini(list(degrees.values()))
+
+                # Step 3: if spread is still low, add a few more primary-to-hub edges without touching periphery caps.
+                if secondary_hubs and (current_span < variance_target or (router_count >= 5 and current_gini < 0.15)):
+                    for hub_id in secondary_hubs:
+                        if random.random() < 0.5 and _eligible_target(primary_hub, hub_id):
+                            _try_add_edge(primary_hub, hub_id, label="nu-boost")
+                    current_span = _degree_span()
+                    current_gini = _gini(list(degrees.values()))
+        elif connectivity_mode == 'Exact':
+            # Build a k-regular simple graph (k = target_degree) if feasible.
+            # Previous approach (chain + random augment) produced degrees >= target (not exact) and
+            # forced interior nodes to exceed degree 1 when target_degree == 1. Replace with a
+            # configuration-model style pairing to honor exact target degree semantics.
+            def _build_regular_edges(n: int, k: int, max_tries: int = 2000) -> List[Tuple[int,int]]:
+                # Basic feasibility checks: k < n and n*k even (handshaking lemma)
+                if k < 0 or k >= n:
+                    return []
+                if (n * k) % 2 != 0:
+                    return []
+                if k == 0:
+                    return []
+                # Fast path k == 1: random perfect matching (may leave one node unmatched if n odd)
+                import random as _r
+                if k == 1:
+                    nodes_idx = list(range(n))
+                    _r.shuffle(nodes_idx)
+                    pairs = []
+                    while len(nodes_idx) >= 2:
+                        a = nodes_idx.pop(); b = nodes_idx.pop()
+                        pairs.append((a, b))
+                    return pairs
+                # General k: attempt stub matching with rejection of self-loops & duplicates.
+                # (R2S/S2H approval-based injection previously occurred here; now unified path)
+            # Routing protocol assignment retained below (simplified after approval removal)
+
+    # (Former preview-based R2S/S2H injection path removed)
+    # Ensure degree stats present even if earlier block skipped due to refactor
+    try:
+        topo_stats = getattr(session, 'topo_stats', {}) or {}
+        if 'router_edges_policy' not in topo_stats:
+            degs: Dict[int, int] = {}
+            try:
+                for a_id, b_id in list(existing_router_links):
+                    degs[a_id] = degs.get(a_id, 0) + 1
+                    degs[b_id] = degs.get(b_id, 0) + 1
+            except Exception:
+                pass
+            def _stat(vals: List[int]):
+                if not vals: return {'min':0,'max':0,'avg':0.0,'std':0.0,'gini':0.0}
+                import math as _m
+                v=vals; mn=min(v); mx=max(v); sm=sum(v); n=len(v); avg=sm/n if n else 0.0
+                var = sum((x-avg)**2 for x in v)/(n-1) if n>1 else 0.0
+                std=_m.sqrt(var) if var>0 else 0.0
+                gini=0.0
+                if sm>0 and n>1:
+                    vs=sorted(v); cum=0
+                    for i,x in enumerate(vs, start=1): cum += i*x
+                    gini=(2*cum)/(n*sm)-(n+1)/n
+                    if gini<0: gini=0.0
+                return {'min':mn,'max':mx,'avg':round(avg,4),'std':round(std,4),'gini':round(gini,4)}
+            ds=_stat(list(degs.values()))
+            topo_stats['router_edges_policy'] = {
+                'mode': connectivity_mode,
+                'target_degree': target_degree or 0,
+                'degree_min': ds['min'],
+                'degree_max': ds['max'],
+                'degree_avg': ds['avg'],
+                'degree_std': ds['std'],
+                'degree_gini': ds['gini'],
+            }
+            topo_stats['router_degrees'] = degs
+            setattr(session, 'topo_stats', topo_stats)
+    except Exception:
+        pass
+
+    expanded_roles: List[str] = []
+    for role, count in role_counts.items():
+        expanded_roles.extend([role] * count)
+
+    random.shuffle(expanded_roles)
+    min_each = 1 if router_count > 0 and len(expanded_roles) >= router_count else 0
+    counts = _random_int_partition(len(expanded_roles), router_count, min_each=min_each)
+    buckets: List[List[str]] = []
+    cursor = 0
+    for c in counts:
+        if c <= 0:
+            buckets.append([])
+            continue
+        next_cursor = min(len(expanded_roles), cursor + c)
+        buckets.append(expanded_roles[cursor:next_cursor])
+        cursor = next_cursor
+    if len(buckets) < router_count:
+        buckets.extend([[] for _ in range(router_count - len(buckets))])
+    if cursor < len(expanded_roles) and buckets:
+        buckets[-1].extend(expanded_roles[cursor:])
+
+    hosts: List[NodeInfo] = []
+    # Track mapping host->router and whether currently directly connected (True) or will later be regrouped
+    host_router_map: Dict[int, int] = {}
+    host_direct_link: Dict[int, bool] = {}
+    # We defer LAN switch creation until AFTER R2S policy so R2S gets first priority creating hierarchical switches.
+    lan_switch_by_router: Dict[int, int] = {}
+    node_id_counter = router_count + 1
+    host_slot_idx = 0
+    docker_slots_used: Set[str] = set()
+    docker_by_name: Dict[str, Dict[str, str]] = {}
+    created_docker = 0
+
+    def _apply_mount_overlays(rec: Optional[Dict[str, str]]) -> None:
+        if not isinstance(rec, dict):
+            return
+        if enable_traffic_mount:
+            rec.setdefault('EnableTrafficMount', 'true')
+        if enable_segmentation_mount:
+            rec.setdefault('EnableSegmentationMount', 'true')
+
+    docker_ifid_start = _docker_ifid_start()
+    for ridx, roles in enumerate(buckets):
+        rx, ry = r_positions[ridx]
+        router_node = router_objs[ridx]
+        if len(roles) == 0:
+            continue
+        if len(roles) == 1:
+            role = roles[0]
+            theta = random.random() * math.tau
+            radius_center = host_radius_mean + random.uniform(-host_radius_jitter * 0.3, host_radius_jitter * 0.3)
+            radius_sigma = max(15, host_radius_jitter * random.uniform(0.5, 0.9))
+            r = max(60, int(random.gauss(radius_center, radius_sigma)))
+            x = int(rx + r * math.cos(theta) + random.uniform(-20, 20))
+            y = int(ry + r * math.sin(theta) + random.uniform(-20, 20))
+            node_type = map_role_to_node_type(role)
+            name = f"{role.lower()}-{ridx+1}-1"
+
+            host_slot_idx += 1
+            slot_key = f"slot-{host_slot_idx}"
+            is_docker_node = _is_docker_node_type(node_type)
+            is_explicit_docker = is_docker_node and role.lower() == 'docker'
+            try:
+                if docker_slot_plan and slot_key in docker_slot_plan:
+                    if not is_docker_node:
+                        if hasattr(NodeType, "DOCKER"):
+                            node_type = getattr(NodeType, "DOCKER")
+                            is_docker_node = True
+                            created_docker += 1
+                        else:
+                            logger.warning("NodeType.DOCKER not available; cannot apply docker slot plan on segmented (single-host)")
+                    if is_docker_node:
+                        docker_by_name[name] = docker_slot_plan[slot_key]
+                        _apply_mount_overlays(docker_by_name.get(name))
+                        docker_slots_used.add(slot_key)
+            except Exception:
+                pass
+            if is_explicit_docker:
+                created_docker += 1
+            if is_docker_node and name not in docker_by_name:
+                docker_by_name.setdefault(name, _standard_docker_compose_record())
+                _apply_mount_overlays(docker_by_name.get(name))
+
+            # Prepare per-node compose file BEFORE creating the docker node.
+            # CORE starts Docker nodes immediately on add_node() and will Mako-render the compose file.
+            if _is_docker_node_type(node_type):
+                _ensure_docker_node_compose_prepared(name, docker_by_name.get(name))
+            logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", node_id_counter, name, _type_desc(node_type), x, y)
+            host_position = Position(x=x, y=y)
+            add_node_extra = None
+            if _is_docker_node_type(node_type):
+                add_node_extra = _docker_node_add_node_kwargs(name, docker_by_name.get(name))
+            host = _session_add_node(
+                session,
+                node_id_counter,
+                node_type=node_type,
+                position=host_position,
+                name=name,
+                start=False if _is_docker_node_type(node_type) else None,
+                extra_kwargs=add_node_extra,
+            )
+            try:
+                if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+                    setattr(host, "model", "docker")
+                elif node_type == NodeType.SWITCH:
+                    setattr(host, "model", "switch")
+                elif node_type == NodeType.DEFAULT:
+                    setattr(host, "model", "PC")
+            except Exception:
+                pass
+            logger.debug("Added host id=%s name=%s type=%s at (%s,%s)", host.id, name, node_type, x, y)
+            actual_host_id = getattr(host, "id", node_id_counter)
+            host_nodes_by_id[host.id] = host
+            is_docker = _is_docker_node_type(node_type)
+            # Start CORE-attached interfaces from the configured base ifid for docker nodes.
+            host_next_ifid[host.id] = docker_ifid_start if is_docker else 1
+            # Apply DOCKER compose metadata when applicable
+            try:
+                if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+                    rec = docker_by_name.get(name)
+                    try:
+                        if rec:
+                            logger.info(
+                                "[vuln-node] created docker node id=%s name=%s from record keys=%s",
+                                actual_host_id,
+                                name,
+                                sorted(rec.keys()),
+                            )
+                    except Exception:
+                        pass
+                    _apply_docker_compose_meta(host, rec, session=session)
+                    _ensure_default_route_for_docker(session, host)
+            except Exception:
+                pass
+            _log_add_node_result(session, host, node_id_counter, node_type, name, position=host_position)
+            node_id_counter += 1
+            # Allocate a unique /24 LAN
+            lan_net = subnet_alloc.next_random_subnet(24)
+            lan_hosts = list(lan_net.hosts())
+            r_ip = str(lan_hosts[0])
+            _hv = (host.id * 2654435761 ^ int(lan_net.network_address)) & 0xFFFFFFFF
+            _hr = max(1, len(lan_hosts) - 1)
+            h_ip = str(lan_hosts[(_hv % _hr) + 1])
+            h_mac = mac_alloc.next_mac()
+            host_if_id = docker_ifid_start if is_docker else 0
+            host_if = Interface(id=host_if_id, name=f"eth{host_if_id}", ip4=h_ip, ip4_mask=lan_net.prefixlen, mac=h_mac)
+            r_ifid = router_next_ifid.get(router_node.id, 0)
+            router_next_ifid[router_node.id] = r_ifid + 1
+            r_if = Interface(id=r_ifid, name=f"r{router_node.id}-h{host.id}", ip4=r_ip, ip4_mask=lan_net.prefixlen, mac=mac_alloc.next_mac())
+            # enforce uniqueness for router iface names
+            base_name = r_if.name
+            if base_name in router_iface_names.setdefault(router_node.id, set()):
+                suf = 1
+                while f"{base_name}-{suf}" in router_iface_names[router_node.id]:
+                    suf += 1
+                r_if.name = f"{base_name}-{suf}"
+            router_iface_names[router_node.id].add(r_if.name)
+            safe_add_link(session, host, router_node, iface1=host_if, iface2=r_if)
+            host_router_map[host.id] = router_node.id
+            host_direct_link[host.id] = True
+            logger.debug("Host %s <-> Router %s LAN /%s", host.id, router_node.id, lan_net.prefixlen)
+            if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
+                hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=role))
+                # Ensure default routing service on hosts
+                try:
+                    ensure_service(session, host.id, "DefaultRoute", node_obj=host)
+                except Exception:
+                    pass
+        else:
+            # Multi-host group: create hosts directly (temporarily) off the router; we'll regroup after R2S.
+            roles = list(roles)
+            random.shuffle(roles)
+            base_angle = random.random() * math.tau
+            angle_step = math.tau / max(len(roles), 1)
+            angle_jitter = math.tau / max(len(roles) * 6, 18)
+            angles = [base_angle + angle_step * idx + random.uniform(-angle_jitter, angle_jitter) for idx in range(len(roles))]
+            random.shuffle(angles)
+            for j, role in enumerate(roles):
+                theta = angles[j % len(angles)] if angles else random.random() * math.tau
+                radius_center = host_radius_mean + 10 * math.sqrt(len(roles)) + random.uniform(-host_radius_jitter * 0.2, host_radius_jitter * 0.2)
+                radius_sigma = max(25, host_radius_jitter * random.uniform(0.5, 1.1))
+                r = max(80, int(random.gauss(radius_center, radius_sigma)))
+                x = int(rx + r * math.cos(theta) + random.uniform(-30, 30))
+                y = int(ry + r * math.sin(theta) + random.uniform(-30, 30))
+                node_type = map_role_to_node_type(role)
+                name = f"{role.lower()}-{ridx+1}-{j+1}"
+
+                host_slot_idx += 1
+                slot_key = f"slot-{host_slot_idx}"
+                is_docker_node = _is_docker_node_type(node_type)
+                is_explicit_docker = is_docker_node and role.lower() == 'docker'
+                try:
+                    if docker_slot_plan and slot_key in docker_slot_plan:
+                        if not is_docker_node:
+                            if hasattr(NodeType, "DOCKER"):
+                                node_type = getattr(NodeType, "DOCKER")
+                                is_docker_node = True
+                                created_docker += 1
+                            else:
+                                logger.warning("NodeType.DOCKER not available; cannot apply docker slot plan on segmented (multi-host deferred)")
+                        if is_docker_node:
+                            docker_by_name[name] = docker_slot_plan[slot_key]
+                            _apply_mount_overlays(docker_by_name.get(name))
+                            docker_slots_used.add(slot_key)
+                except Exception:
+                    pass
+                if is_explicit_docker:
+                    created_docker += 1
+                if is_docker_node and name not in docker_by_name:
+                    docker_by_name.setdefault(name, _standard_docker_compose_record())
+                    _apply_mount_overlays(docker_by_name.get(name))
+
+                # Prepare per-node compose file BEFORE creating the docker node.
+                # CORE starts Docker nodes immediately on add_node() and will Mako-render the compose file.
+                if _is_docker_node_type(node_type):
+                    _ensure_docker_node_compose_prepared(name, docker_by_name.get(name))
+                logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", node_id_counter, name, _type_desc(node_type), x, y)
+                host_position = Position(x=x, y=y)
+                add_node_extra = None
+                if _is_docker_node_type(node_type):
+                    add_node_extra = _docker_node_add_node_kwargs(name, docker_by_name.get(name))
+                host = _session_add_node(
+                    session,
+                    node_id_counter,
+                    node_type=node_type,
+                    position=host_position,
+                    name=name,
+                    start=False if _is_docker_node_type(node_type) else None,
+                    extra_kwargs=add_node_extra,
+                )
+                try:
+                    if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+                        setattr(host, "model", "docker")
+                    elif node_type == NodeType.SWITCH:
+                        setattr(host, "model", "switch")
+                    elif node_type == NodeType.DEFAULT:
+                        setattr(host, "model", "PC")
+                except Exception:
+                    pass
+                actual_host_id = getattr(host, "id", node_id_counter)
+                host_nodes_by_id[host.id] = host
+                is_docker = _is_docker_node_type(node_type)
+                host_next_ifid[host.id] = (docker_ifid_start + 1) if is_docker else 1
+                # Addressing: allocate per-host /24 directly to router (direct link) for now
+                lan_net = subnet_alloc.next_random_subnet(24)
+                lan_hosts = list(lan_net.hosts())
+                r_ip = str(lan_hosts[0])
+                _hv = (host.id * 2654435761 ^ int(lan_net.network_address)) & 0xFFFFFFFF
+                _hr = max(1, len(lan_hosts) - 1)
+                h_ip = str(lan_hosts[(_hv % _hr) + 1])
+                h_mac = mac_alloc.next_mac()
+                host_if_id = docker_ifid_start if is_docker else 0
+                host_if = Interface(id=host_if_id, name=f"eth{host_if_id}", ip4=h_ip, ip4_mask=lan_net.prefixlen, mac=h_mac)
+                r_ifid = router_next_ifid.get(router_node.id, 0)
+                router_next_ifid[router_node.id] = r_ifid + 1
+                r_if = Interface(id=r_ifid, name=f"r{router_node.id}-h{host.id}", ip4=r_ip, ip4_mask=lan_net.prefixlen, mac=mac_alloc.next_mac())
+                base_name = r_if.name
+                if base_name in router_iface_names.setdefault(router_node.id, set()):
+                    suf = 1
+                    while f"{base_name}-{suf}" in router_iface_names[router_node.id]:
+                        suf += 1
+                    r_if.name = f"{base_name}-{suf}"
+                router_iface_names[router_node.id].add(r_if.name)
+                safe_add_link(session, host, router_node, iface1=host_if, iface2=r_if)
+                host_router_map[host.id] = router_node.id
+                host_direct_link[host.id] = True
+                if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
+                    hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=role))
+                    try:
+                        ensure_service(session, host.id, "DefaultRoute", node_obj=host)
+                    except Exception:
+                        pass
+
+                # If this is a DOCKER node, attach compose/compose_name metadata now
+                try:
+                    if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+                        rec = docker_by_name.get(name)
+                        try:
+                            if rec:
+                                logger.info(
+                                    "[vuln-node] created docker node id=%s name=%s from record keys=%s",
+                                    actual_host_id,
+                                    name,
+                                    sorted(rec.keys()),
+                                )
+                        except Exception:
+                            pass
+                        _apply_docker_compose_meta(host, rec, session=session)
+                        _ensure_default_route_for_docker(session, host)
+                except Exception:
+                    pass
+
+                _log_add_node_result(session, host, node_id_counter, node_type, name, position=host_position)
+                node_id_counter += 1
+
+    if docker_slot_plan:
+        missing_slots = set(docker_slot_plan.keys()) - docker_slots_used
+        if missing_slots:
+            raise RuntimeError(
+                "Unable to provision Docker nodes for vulnerability assignments: "
+                + ", ".join(sorted(missing_slots))
+            )
+
+    # Prepare planner policy plan from preview metadata or routing items (legacy compatibility)
+    r2s_policy_plan: Optional[Dict[str, Any]] = None
+    if preview_plan:
+        try:
+            r2s_policy_plan = preview_plan.get('r2s_policy')  # type: ignore[assignment]
+        except Exception:
+            r2s_policy_plan = None
+    if not r2s_policy_plan and routing_items:
+        try:
+            first_r2s = next((ri for ri in routing_items if getattr(ri, 'r2s_mode', None)), None)
+        except Exception:
+            first_r2s = None
+        if first_r2s is not None:
+            try:
+                mode_val = getattr(first_r2s, 'r2s_mode', None)
+            except Exception:
+                mode_val = None
+            if mode_val:
+                if str(mode_val).lower() == 'exact':
+                    try:
+                        edges_val = int(getattr(first_r2s, 'r2s_edges', 0) or 0)
+                    except Exception:
+                        edges_val = 0
+                    r2s_policy_plan = {'mode': 'Exact'}
+                    if edges_val > 0:
+                        r2s_policy_plan['target_per_router'] = edges_val
+                else:
+                    r2s_policy_plan = {'mode': mode_val}
+
+    # --- Router-to-Switch grouping (shared planner for preview/runtime parity) ---
+    def _remove_link(a_id: int, b_id: int) -> None:
+        key = tuple(sorted((a_id, b_id)))
+        try:
+            if hasattr(session, 'delete_link'):
+                session.delete_link(node1_id=key[0], node2_id=key[1])  # type: ignore
+        except Exception:
+            pass
+        try:
+            if hasattr(session, 'links') and isinstance(session.links, list):
+                new_links = []
+                for lk in session.links:
+                    try:
+                        n1 = getattr(lk, 'node1_id', getattr(lk, 'node1', None))
+                        n2 = getattr(lk, 'node2_id', getattr(lk, 'node2', None))
+                    except Exception:
+                        if isinstance(lk, tuple) and len(lk) >= 2:
+                            n1, n2 = lk[0], lk[1]
+                        else:
+                            n1 = n2 = None
+                    if n1 is None or n2 is None:
+                        new_links.append(lk)
+                        continue
+                    if tuple(sorted((n1, n2))) == key:
+                        continue
+                    new_links.append(lk)
+                session.links = new_links
+        except Exception:
+            pass
+
+    grouping_out: Optional[Dict[str, Any]] = None
+    try:
+        from ..planning.router_host_plan import plan_r2s_grouping  # local import to avoid cycles
+        host_nodes_for_group = [SimpleNamespace(node_id=hid) for hid in sorted(host_nodes_by_id.keys())]
+        grouping_seed = GLOBAL_RANDOM_SEED if GLOBAL_RANDOM_SEED is not None else random.randint(1, 2**31 - 1)
+        grouping_out = plan_r2s_grouping(
+            router_count,
+            host_router_map,
+            host_nodes_for_group,
+            routing_items,
+            r2s_policy_plan,
+            grouping_seed,
+            ip4_prefix=ip4_prefix,
+            ip_mode=ip_mode,
+            ip_region=ip_region,
+        )
+    except Exception:
+        grouping_out = None
+
+    try:
+        switches_detail = (grouping_out or {}).get('switches_detail') or []
+        switch_nodes_preview = (grouping_out or {}).get('switch_nodes') or []
+        switch_name_map = {int(sn.get('node_id')): sn.get('name') for sn in switch_nodes_preview if isinstance(sn, dict) and 'node_id' in sn}
+        computed_policy = (grouping_out or {}).get('computed_r2s_policy')
+        grouping_preview = (grouping_out or {}).get('grouping_preview')
+
+        created_switch_nodes: Dict[int, Any] = {}
+        switch_shared_net: Dict[int, Any] = {}
+        switch_used_ipv4: Dict[int, Set[str]] = defaultdict(set)
+        switch_offsets: Dict[int, int] = {rid: 0 for rid in range(1, router_count + 1)}
+        rehomed_hosts: List[int] = []
+        router_switch_counts: Dict[int, int] = defaultdict(int)
+        switch_host_counts: Dict[int, List[int]] = defaultdict(list)
+
+        for detail in switches_detail:
+            try:
+                switch_id = int(detail.get('switch_id'))
+                router_id = int(detail.get('router_id'))
+            except Exception:
+                continue
+
+            # Defensive: skip creating/planning switches that would have no attached hosts.
+            # (Normally prevented by the planner, but this keeps us safe from malformed
+            # persisted previews or future planning changes.)
+            host_ids_raw = detail.get('hosts') or []
+            resolved_host_ids: List[int] = []
+            for hid_raw in host_ids_raw:
+                try:
+                    hid_int = int(hid_raw)
+                except Exception:
+                    continue
+                if hid_int in host_nodes_by_id:
+                    resolved_host_ids.append(hid_int)
+            if not resolved_host_ids:
+                continue
+            router_node = router_nodes.get(router_id)
+            if not router_node:
+                continue
+
+            def _best_effort_delete_node(node_id: int) -> None:
+                try:
+                    if hasattr(session, 'delete_node'):
+                        session.delete_node(node_id)  # type: ignore
+                        return
+                except Exception:
+                    pass
+                try:
+                    if hasattr(session, 'nodes') and isinstance(session.nodes, dict):  # type: ignore
+                        session.nodes.pop(node_id, None)  # type: ignore
+                except Exception:
+                    pass
+
+            # Determine or create switch node
+            sw_node = created_switch_nodes.get(switch_id)
+            if sw_node is None:
+                switch_offsets[router_id] = switch_offsets.get(router_id, 0) + 1
+                offset_idx = switch_offsets[router_id]
+                try:
+                    pos = getattr(router_node, 'position', None)
+                    if pos and hasattr(pos, 'x') and hasattr(pos, 'y'):
+                        base_x, base_y = pos.x, pos.y
+                    else:
+                        base_x, base_y = r_positions[router_id - 1]
+                except Exception:
+                    base_x, base_y = r_positions[router_id - 1]
+                sx = int(base_x + 60 + (offset_idx * 25))
+                sy = int(base_y + 40 + (offset_idx * 20))
+                name = switch_name_map.get(switch_id) or detail.get('name') or f"rsw-{router_id}-{offset_idx}"
+                logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", switch_id, name, _type_desc(NodeType.SWITCH), sx, sy)
+                sw_position = Position(x=sx, y=sy)
+                sw_node = _session_add_node(session, switch_id, node_type=NodeType.SWITCH, position=sw_position, name=name)
+                _log_add_node_result(session, sw_node, switch_id, NodeType.SWITCH, name, position=sw_position)
+                try:
+                    setattr(sw_node, 'model', 'switch')
+                except Exception:
+                    pass
+                created_switch_nodes[switch_id] = sw_node
+
+                # Create router-switch link using preview subnet information when available
+                router_ip_raw = detail.get('router_ip')
+                switch_ip_raw = detail.get('switch_ip')
+                rsw_subnet = detail.get('rsw_subnet')
+                lan_subnet = detail.get('lan_subnet')
+                # One subnet for router<->switch and all hosts behind this switch.
+                shared_net = None
+                try:
+                    if lan_subnet:
+                        shared_net = ipaddress.ip_network(lan_subnet, strict=False)
+                except Exception:
+                    shared_net = None
+                if shared_net is None:
+                    try:
+                        if rsw_subnet:
+                            shared_net = ipaddress.ip_network(rsw_subnet, strict=False)
+                    except Exception:
+                        shared_net = None
+                switch_shared_net[switch_id] = shared_net
+
+                r_ip = router_ip_raw
+                s_ip = switch_ip_raw
+                mask_len = None
+                if shared_net is not None:
+                    hosts_iter = list(shared_net.hosts())
+                    if hosts_iter:
+                        r_ip = f"{hosts_iter[0]}/{shared_net.prefixlen}"
+                        # Switch gets no IP (L2)
+                        s_ip = None
+                        mask_len = int(shared_net.prefixlen)
+                if r_ip and '/' in str(r_ip):
+                    r_ip_val, mask = str(r_ip).split('/', 1)
+                    mask_len = mask_len or int(mask)
+                else:
+                    r_ip_val = None
+                s_ip_val = None
+                if mask_len is None:
+                    mask_len = 24
+
+                # Canonicalize the shared subnet to the router's actual interface subnet so
+                # host IP allocation cannot drift to a different subnet.
+                try:
+                    if r_ip_val:
+                        router_link_net = ipaddress.ip_network(f"{r_ip_val}/{mask_len}", strict=False)
+                        switch_shared_net[switch_id] = router_link_net
+                except Exception:
+                    pass
+                r_ifid = router_next_ifid.get(router_id, 0)
+                router_next_ifid[router_id] = r_ifid + 1
+                base_name = f"r{router_id}-rsw{switch_id}-if{r_ifid}"
+                r_iface_name = _ensure_router_iface_name(router_iface_names, router_id, base_name)
+                r_iface = Interface(id=r_ifid, name=r_iface_name, ip4=r_ip_val, ip4_mask=mask_len, mac=mac_alloc.next_mac())
+                # Switch is L2: do not assign IPv4 fields on the switch interface.
+                sw_iface = Interface(id=0, name=f"{getattr(sw_node, 'name', f'rsw-{switch_id}')}-r{router_id}", mac=mac_alloc.next_mac())
+                router_link_ok = safe_add_link(session, router_node, sw_node, iface1=r_iface, iface2=sw_iface)
+                if not router_link_ok:
+                    # If we cannot link the switch to its router, do not keep the switch and do NOT
+                    # attempt to rehome hosts onto an isolated L2 island.
+                    try:
+                        logger.warning("[r2s] failed to link router %s <-> switch %s; removing switch and skipping host rehome", router_id, switch_id)
+                    except Exception:
+                        pass
+                    _best_effort_delete_node(switch_id)
+                    created_switch_nodes.pop(switch_id, None)
+                    switch_shared_net.pop(switch_id, None)
+                    switch_used_ipv4.pop(switch_id, None)
+                    continue
+
+            # Attach hosts for this switch
+            host_ids_raw = resolved_host_ids
+            lan_subnet = detail.get('lan_subnet')
+            host_if_ips_raw = detail.get('host_if_ips') or {}
+            host_if_ips: Dict[int, str] = {}
+            for hk, hv in host_if_ips_raw.items():
+                try:
+                    host_if_ips[int(hk)] = str(hv)
+                except Exception:
+                    continue
+            # Use the same subnet as the router-switch link.
+            lan_net = switch_shared_net.get(switch_id)
+            if lan_net is None and lan_subnet:
+                try:
+                    lan_net = ipaddress.ip_network(lan_subnet, strict=False)
+                    switch_shared_net[switch_id] = lan_net
+                except Exception:
+                    lan_net = None
+            lan_hosts: List[ipaddress.IPv4Address] = list(lan_net.hosts()) if lan_net else []
+            for idx, hid_raw in enumerate(host_ids_raw):
+                try:
+                    hid = int(hid_raw)
+                except Exception:
+                    continue
+                h_obj = host_nodes_by_id.get(hid)
+                if not h_obj:
+                    continue
+                ip_cidr = host_if_ips.get(hid)
+                ip_iface = None
+                if ip_cidr and '/' in str(ip_cidr):
+                    try:
+                        ip_iface = ipaddress.ip_interface(str(ip_cidr))
+                        if lan_net and ip_iface.network != lan_net:
+                            ip_iface = None
+                    except Exception:
+                        ip_iface = None
+                if ip_iface is None and lan_net and len(lan_hosts) > (idx + 1):
+                    assign_idx = idx + 1
+                    while assign_idx < len(lan_hosts) and str(lan_hosts[assign_idx]) in switch_used_ipv4[switch_id]:
+                        assign_idx += 1
+                    if assign_idx < len(lan_hosts):
+                        ip_iface = ipaddress.ip_interface(f"{lan_hosts[assign_idx]}/{lan_net.prefixlen}")
+                if ip_iface is not None:
+                    hip = str(ip_iface.ip)
+                    hip_mask = int(ip_iface.network.prefixlen)
+                else:
+                    hip = None
+                    hip_mask = lan_net.prefixlen if lan_net else 24
+                next_if = host_next_ifid.get(hid, 1)
+                host_iface = Interface(id=next_if, name=f"eth{next_if}", ip4=hip, ip4_mask=hip_mask, mac=mac_alloc.next_mac())
+                # Switch is L2: do not assign IPv4 fields on the switch interface.
+                sw_iface = Interface(id=idx + 1, name=f"{getattr(created_switch_nodes[switch_id], 'name', f'rsw-{switch_id}')}-h{hid}-{idx+1}", mac=mac_alloc.next_mac())
+                host_link_ok = safe_add_link(session, h_obj, created_switch_nodes[switch_id], iface1=host_iface, iface2=sw_iface)
+                if not host_link_ok:
+                    # Keep the host's direct router link intact if the rehome link fails.
+                    continue
+                # Only now that the host is successfully attached to the switch do we remove any
+                # pre-existing direct host<->router link.
+                if host_direct_link.get(hid):
+                    _remove_link(hid, router_id)
+                host_direct_link[hid] = False
+                host_next_ifid[hid] = next_if + 1
+                rehomed_hosts.append(hid)
+                if hip:
+                    switch_used_ipv4[switch_id].add(str(hip))
+
+            if host_ids_raw:
+                router_switch_counts[router_id] += 1
+                switch_host_counts[router_id].append(len(host_ids_raw))
+
+        if created_switch_nodes:
+            node_id_counter = max(node_id_counter, max(created_switch_nodes.keys()) + 1)
+
+        topo_stats = getattr(session, 'topo_stats', {}) or {}
+        policy_summary: Dict[str, Any] = {}
+        if computed_policy:
+            policy_summary.update(computed_policy)
+        if r2s_policy_plan:
+            policy_summary.setdefault('mode_requested', r2s_policy_plan.get('mode'))
+            if r2s_policy_plan.get('target_per_router') is not None:
+                policy_summary.setdefault('target_per_router', r2s_policy_plan.get('target_per_router'))
+        if policy_summary.get('target_per_router') is not None:
+            try:
+                policy_summary.setdefault('target', float(policy_summary['target_per_router']))
+            except Exception:
+                pass
+        if 'mode' not in policy_summary:
+            requested_mode = (r2s_policy_plan or {}).get('mode')
+            if requested_mode:
+                policy_summary['mode'] = requested_mode
+        if 'counts' not in policy_summary and router_switch_counts:
+            policy_summary['counts'] = dict(router_switch_counts)
+
+        counts_dict = policy_summary.get('counts') if isinstance(policy_summary.get('counts'), dict) else {}
+        applied_counts = list(counts_dict.values()) if counts_dict else []
+        if applied_counts:
+            stats = _int_list_stats(applied_counts)
+            policy_summary['count_min'] = stats['min']
+            policy_summary['count_max'] = stats['max']
+            policy_summary['count_avg'] = stats['avg']
+            policy_summary['count_std'] = stats['std']
+            policy_summary['count_gini'] = stats['gini']
+            policy_summary['display_min_count'] = stats['min']
+            policy_summary['display_max_count'] = stats['max']
+
+        if grouping_out:
+            pairs_possible = policy_summary.get('host_pairs_possible_total') or policy_summary.get('host_pairs_possible')
+            pairs_used = policy_summary.get('host_pairs_used_total') or policy_summary.get('host_pairs_used')
+            if isinstance(pairs_possible, dict):
+                policy_summary['host_pairs_possible'] = pairs_possible
+                policy_summary['host_pairs_possible_total'] = sum(pairs_possible.values())
+            if isinstance(pairs_used, dict):
+                policy_summary['host_pairs_used'] = pairs_used
+                policy_summary['host_pairs_used_total'] = sum(pairs_used.values())
+            if 'host_pair_saturation' in policy_summary:
+                policy_summary['saturation'] = policy_summary['host_pair_saturation']
+
+        if rehomed_hosts:
+            policy_summary['rehomed_hosts'] = sorted(set(rehomed_hosts))
+        if switch_host_counts:
+            policy_summary['switch_host_counts'] = {rid: counts for rid, counts in switch_host_counts.items() if counts}
+        if grouping_out and 'per_router_bounds' in policy_summary:
+            try:
+                bounds_map = policy_summary['per_router_bounds']
+                mins = [v.get('min') for v in bounds_map.values() if v and v.get('min')]
+                maxs = [v.get('max') for v in bounds_map.values() if v and v.get('max')]
+                host_counts_flat = [cnt for counts in switch_host_counts.values() for cnt in counts]
+                policy_summary['host_group_bounds'] = {
+                    'requested_min': min(mins) if mins else None,
+                    'requested_max': max(maxs) if maxs else None,
+                    'applied_min': min(host_counts_flat) if host_counts_flat else None,
+                    'applied_max': max(host_counts_flat) if host_counts_flat else None,
+                }
+            except Exception:
+                pass
+
+        topo_stats['r2s_policy'] = policy_summary
+        if grouping_preview is not None:
+            topo_stats['r2s_grouping_preview'] = grouping_preview
+        setattr(session, 'topo_stats', topo_stats)
+    except Exception:
+        logger.exception("R-to-S grouping application failed")
+
+    # Post-pass cleanup: ensure no host remains connected to both an original LAN switch (lan-*) and a rehome switch (rsw-*).
+    try:
+        if hasattr(session, 'links') and hasattr(session, 'get_node'):
+            # Build adjacency map host -> list of (switch_id, name)
+            for h_id, h_obj in list(host_nodes_by_id.items()):
+                switch_neighbors = []
+                try:
+                    for lk in list(getattr(session, 'links', []) or []):
+                        try:
+                            n1 = getattr(lk, 'node1_id', None)
+                            if n1 is None: n1 = getattr(lk, 'node1', None)
+                            n2 = getattr(lk, 'node2_id', None)
+                            if n2 is None: n2 = getattr(lk, 'node2', None)
+                        except Exception:
+                            n1 = n2 = None
+                        if n1 is None or n2 is None:
+                            continue
+                        if h_id not in (n1, n2):
+                            continue
+                        other = n2 if n1 == h_id else n1
+                        try:
+                            other_node = session.get_node(other)
+                            oname = getattr(other_node, 'name', '') or ''
+                            otype = getattr(other_node, 'type', '')
+                        except Exception:
+                            oname = ''
+                        lname = oname.lower()
+                        if lname.startswith('lan-') or lname.startswith('rsw-'):
+                            switch_neighbors.append((other, oname))
+                except Exception:
+                    continue
+                has_rsw = any(nm.startswith('rsw-') for _, nm in switch_neighbors)
+                has_lan = any(nm.startswith('lan-') for _, nm in switch_neighbors)
+                if has_rsw and has_lan:
+                    # Prefer keeping rsw-*; remove lan-* connections.
+                    for sid, nm in switch_neighbors:
+                        if nm.startswith('lan-'):
+                            _remove_link(h_id, sid)
+                    try:
+                        logger.debug("Host %s: removed legacy LAN switch links to avoid multi-switch attachment", h_id)
+                    except Exception:
+                        pass
+    except Exception:
+        logger.debug("Post R2S cleanup pass failed", exc_info=True)
+
+    # Deferred LAN aggregation: For any router that (a) has multiple directly connected hosts remaining and (b) did not receive R2S switches covering them, create a single LAN switch now.
+    try:
+        if router_count > 0:
+            # Build reverse: router -> list of directly connected host ids (still direct after R2S)
+            router_direct_hosts: Dict[int, List[int]] = {r.id: [] for r in router_objs}
+            for h_id, rid in host_router_map.items():
+                # A host is still "direct" if it has a link to router and NOT a link to any rsw-* switch
+                is_direct = False
+                has_rsw = False
+                try:
+                    for lk in list(getattr(session, 'links', []) or []):
+                        n1 = getattr(lk, 'node1_id', getattr(lk, 'node1', None))
+                        n2 = getattr(lk, 'node2_id', getattr(lk, 'node2', None))
+                        if n1 is None or n2 is None:
+                            continue
+                        if h_id not in (n1, n2):
+                            continue
+                        other = n2 if n1 == h_id else n1
+                        if other == rid:
+                            is_direct = True
+                        else:
+                            try:
+                                other_node = session.get_node(other)
+                                oname = getattr(other_node, 'name', '') or ''
+                            except Exception:
+                                oname = ''
+                            if oname.startswith('rsw-'):
+                                has_rsw = True
+                    if is_direct and not has_rsw:
+                        router_direct_hosts.setdefault(rid, []).append(h_id)
+                except Exception:
+                    pass
+            for rid, hlist in router_direct_hosts.items():
+                if len(hlist) <= 1:
+                    continue  # no need to aggregate a single (or zero) host
+                # Create one LAN switch for these leftover direct hosts
+                try:
+                    rnode = session.get_node(rid)
+                    rx = getattr(rnode, 'position', getattr(rnode, 'position_x', None))
+                    ry = None
+                    try:
+                        if rx and hasattr(rx, 'x'):
+                            ry = rx.y; rx = rx.x
+                        else:
+                            rx = r_positions[rid-1][0]; ry = r_positions[rid-1][1]
+                    except Exception:
+                        rx = r_positions[rid-1][0]; ry = r_positions[rid-1][1]
+                    sx = int(rx + random.randint(30, 70)); sy = int(ry + random.randint(30, 70))
+                    logger.info("[grpc] add_node id=%s name=%s type=%s pos=(%s,%s)", node_id_counter, f"lan-{rid}", _type_desc(NodeType.SWITCH), sx, sy)
+                    lan_position = Position(x=sx, y=sy)
+                    lan_sw = _session_add_node(session, node_id_counter, node_type=NodeType.SWITCH, position=lan_position, name=f"lan-{rid}")
+                    _log_add_node_result(session, lan_sw, node_id_counter, NodeType.SWITCH, f"lan-{rid}", position=lan_position)
+                    try: setattr(lan_sw, 'model', 'switch')
+                    except Exception: pass
+                    node_id_counter += 1
+                    # Link router <-> lan switch
+                    r_ifid = router_next_ifid.get(rid, 0); router_next_ifid[rid] = r_ifid + 1
+                    r_if = Interface(id=r_ifid, name=f"r{rid}-lan", mac=None)
+                    sw_if = Interface(id=0, name=f"lan-r{rid}")
+                    safe_add_link(session, rnode, lan_sw, iface1=r_if, iface2=sw_if)
+                    # Move each direct host onto new LAN switch: remove direct link and create LAN link with new host iface (reuse host eth0)
+                    for h_id in hlist:
+                        _remove_link(h_id, rid)
+                        # host side new iface id 1 (since eth0 id=0 already exists / may be reused for IP); treat as same IP, different link
+                        next_if = host_next_ifid.get(h_id, 1)
+                        h_if = Interface(id=next_if, name=f"eth{next_if}")
+                        host_next_ifid[h_id] = next_if + 1
+                        sw_ifid = next_if  # simplistic alignment
+                        sw_l_if = Interface(id=sw_ifid, name=f"lan{rid}-h{h_id}-if{sw_ifid}")
+                        try:
+                            h_node = session.get_node(h_id)
+                            safe_add_link(session, h_node, lan_sw, iface1=h_if, iface2=sw_l_if)
+                        except Exception:
+                            pass
+                    logger.debug("Deferred LAN switch lan-%s created aggregating %d hosts post-R2S", rid, len(hlist))
+                except Exception:
+                    logger.debug("Failed deferred LAN aggregation for router %s", rid, exc_info=True)
+    except Exception:
+        logger.debug("Deferred LAN aggregation phase failed", exc_info=True)
+
+    if created_docker:
+        logger.info("Docker nodes created in segmented topology: %d", created_docker)
+    router_protocols: Dict[int, List[str]] = {r.node_id: [] for r in routers}
+    if routing_items:
+        # Only allow protocols explicitly selected by user (excluding Random). If only Random provided, default to OSPFv2.
+        concrete_protocols = [ri.protocol for ri in routing_items if ri.protocol and ri.protocol.lower() != 'random']
+        fallback_pool = concrete_protocols or ["OSPFv2"]
+        for ri in routing_items:
+            try:
+                if (not ri.protocol) or (ri.protocol.lower() == 'random'):
+                    ri.protocol = random.choice(fallback_pool)
+            except Exception:
+                pass
+        # Split routing items into count-based and weight-based
+        count_items = [(ri.protocol, int(getattr(ri, 'abs_count', 0) or 0)) for ri in routing_items if int(getattr(ri, 'abs_count', 0) or 0) > 0]
+        weight_items = [(ri.protocol, float(getattr(ri, 'factor', 0.0) or 0.0)) for ri in routing_items if not (int(getattr(ri, 'abs_count', 0) or 0) > 0) and float(getattr(ri, 'factor', 0.0) or 0.0) > 0]
+        # Build expanded protocols list: first all count-based protocols (absolute), then density-based per weight (for density_router_count only)
+        expanded_protocols: List[str] = []
+        for proto, c in count_items:
+            expanded_protocols.extend([proto] * c)
+        # Now add density-based routers by weight factors up to density_router_count
+        if density_router_count > 0 and weight_items:
+            counts = compute_counts_by_factor(density_router_count, weight_items)
+            for proto, c in counts.items():
+                expanded_protocols.extend([proto] * c)
+        # Truncate/pad to the number of available routers placed
+        if len(expanded_protocols) > len(router_objs):
+            expanded_protocols = expanded_protocols[:len(router_objs)]
+        for i, rnode in enumerate(router_objs):
+            rid = rnode.id
+            if i < len(expanded_protocols):
+                proto = expanded_protocols[i]
+                router_protocols[rid].append(proto)
+                # IMPORTANT: earlier during router creation we applied mandatory router services (IPForward + zebra).
+                # This protocol-assignment pass overwrites the router service set, so ensure the mandatory services remain
+                # present before appending protocol-specific daemons.
+                base = ["IPForward", "zebra"]
+                proto_list = base + [proto] if proto else base
+                set_node_services(session, rid, proto_list, node_obj=rnode)
+                try:
+                    setattr(rnode, "routing_protocol", proto)
+                except Exception:
+                    pass
+        # After assigning protocols, optionally enrich R2R links for protocol groups.
+        # BUGFIX: Previously this block created a near/full mesh whenever all routers shared one protocol,
+        # even if the base connectivity mode was Random / Exact / Min / NonUniform. We now restrict
+        # enrichment to explicit 'Max' (and optionally 'Uniform' with degree budget) policies to avoid
+        # divergence from preview specification.
+        try:
+            if injected_r2r:
+                logger.debug("Skipping protocol-based R2R enrichment because preview edges were injected")
+                raise RuntimeError('skip_enrichment_injected')
+            protocol_groups: Dict[str, List[object]] = {}
+            for rnode in router_objs:
+                rid = rnode.id
+                protos = router_protocols.get(rid) or []
+                for p in protos:
+                    protocol_groups.setdefault(p, []).append(rnode)
+            # Track used interface ids per router (continue from router_next_ifid)
+            # Use previously computed topo_stats if available to gauge target degree and avoid over-meshing
+            policy = getattr(session, 'topo_stats', {}) or {}
+            target_policy = (policy.get('router_edges_policy') or {}).get('mode')
+            target_degree = (policy.get('router_edges_policy') or {}).get('target_degree') or 0
+            # Build current degree map (refresh after earlier augmentations)
+            current_degrees: Dict[int, int] = {r.id: 0 for r in router_objs}
+            for a_id, b_id in list(existing_router_links):
+                current_degrees[a_id] += 1
+                current_degrees[b_id] += 1
+            # Determine base connectivity policy to avoid over-enrichment
+            base_policy = (policy.get('router_edges_policy') or {}).get('mode')
+            for proto, group_nodes in protocol_groups.items():
+                if len(group_nodes) <= 1:
+                    continue
+                # Enrichment permission matrix:
+                #   Allow when base policy (connectivity mode) is 'Max'.
+                #   Allow limited (degree-budgeted) augmentation for 'Uniform'.
+                #   Disallow for ('Min','Exact','Random','NonUniform','Injected') to preserve preview edges.
+                #   Additionally: if no base_policy metadata exists (tests / legacy) honor explicit router_mesh_style.
+                # If router_mesh_style explicitly provided (tests / legacy), honor it regardless of base_policy.
+                explicit_style = bool(router_mesh_style)
+                allow_mesh = (base_policy in ('Max',)) or explicit_style
+                allow_uniform = base_policy == 'Uniform'
+                if not allow_mesh and not allow_uniform:
+                    continue
+                style = (router_mesh_style or "full").lower()
+                ordered = list(group_nodes)
+                # Budget: do not exceed target_degree (if specified) by more than +1 when adding protocol links
+                def can_link(a_id, b_id):
+                    if allow_mesh:
+                        return True
+                    if allow_uniform and target_degree > 0:
+                        # Only add if both endpoints still below (target_degree + 1) to avoid runaway
+                        return (current_degrees.get(a_id, 0) < (target_degree + 1) and
+                                current_degrees.get(b_id, 0) < (target_degree + 1))
+                    return False
+                candidate_pairs: List[Tuple[object, object]] = []
+                if style == 'ring' and len(ordered) > 2:
+                    ring_pairs = [(ordered[i], ordered[(i+1)%len(ordered)]) for i in range(len(ordered))]
+                    ring_keys = { (min(a.id,b.id), max(a.id,b.id)) for a,b in ring_pairs }
+                    existing_total = sum(1 for k in existing_router_links if k[0] in {r.id for r in ordered} and k[1] in {r.id for r in ordered})
+                    existing_ring = sum(1 for k in existing_router_links if k in ring_keys)
+                    # Extra non-ring edges present
+                    extra = existing_total - existing_ring
+                    target_total = len(ordered)  # ring edge count
+                    # We can only add up to (target_total - existing_total) edges
+                    remaining_budget = max(0, target_total - existing_total)
+                    candidate_pairs = []
+                    for a,b in ring_pairs:
+                        key = (min(a.id,b.id), max(a.id,b.id))
+                        if key in existing_router_links:
+                            continue
+                        if remaining_budget <= 0:
+                            break
+                        candidate_pairs.append((a,b))
+                        remaining_budget -= 1
+                elif style == 'tree':
+                    # Tree style: ensure no extra edges beyond existing spanning tree -> no candidate pairs
+                    # Build simple chain if none exist yet
+                    if explicit_style and not any(k[0] in {r.id for r in ordered} and k[1] in {r.id for r in ordered} for k in existing_router_links):
+                        for i in range(len(ordered)-1):
+                            candidate_pairs.append((ordered[i], ordered[i+1]))
+                    else:
+                        candidate_pairs = []
+                else:
+                    # Instead of full mesh, shuffle all potential pairs and apply budget
+                    for i in range(len(ordered)):
+                        for j in range(i+1, len(ordered)):
+                            candidate_pairs.append((ordered[i], ordered[j]))
+                    random.shuffle(candidate_pairs)
+                    # If not full-mesh allowed, down-select based on degree budget
+                    if not allow_mesh and allow_uniform and target_degree > 0:
+                        # Filter to pairs where at least one endpoint below target_degree
+                        candidate_pairs = [p for p in candidate_pairs if (current_degrees[p[0].id] < target_degree or current_degrees[p[1].id] < target_degree)]
+                logger.debug("[mesh-debug] proto=%s style=%s allow_mesh=%s base_policy=%s candidates=%d existing_r2r=%d", proto, style, allow_mesh, base_policy, len(candidate_pairs), len(existing_router_links))
+                for a, b in candidate_pairs:
+                    key = (min(a.id, b.id), max(a.id, b.id))
+                    if key in existing_router_links:
+                        continue
+                    if not can_link(a.id, b.id):
+                        continue
+                    a_ifid = router_next_ifid.get(a.id, 0)
+                    b_ifid = router_next_ifid.get(b.id, 0)
+                    router_next_ifid[a.id] = a_ifid + 1
+                    router_next_ifid[b.id] = b_ifid + 1
+                    rr_net = subnet_alloc.next_random_subnet(30)
+                    rr_hosts = list(rr_net.hosts())
+                    if len(rr_hosts) < 2:
+                        continue
+                    a_ip = str(rr_hosts[0]); b_ip = str(rr_hosts[1])
+                    # Uniqueness for protocol augmentation links
+                    an_base = f"r{a.id}-{proto.lower()}-{b.id}"
+                    bn_base = f"r{b.id}-{proto.lower()}-{a.id}"
+                    for rid, base in ((a.id, an_base),(b.id, bn_base)):
+                        rset = router_iface_names.setdefault(rid, set())
+                        if base in rset:
+                            si = 1
+                            while f"{base}-{si}" in rset:
+                                si += 1
+                            if rid == a.id:
+                                an_base = f"{base}-{si}"
+                            else:
+                                bn_base = f"{base}-{si}"
+                        # Add after potential rename
+                        if rid == a.id:
+                            router_iface_names[rid].add(an_base)
+                        else:
+                            router_iface_names[rid].add(bn_base)
+                    a_if = Interface(id=a_ifid, name=an_base, ip4=a_ip, ip4_mask=rr_net.prefixlen, mac=mac_alloc.next_mac())
+                    b_if = Interface(id=b_ifid, name=bn_base, ip4=b_ip, ip4_mask=rr_net.prefixlen, mac=mac_alloc.next_mac())
+                    # Guard against accidental duplicate augmentation links
+                    key_all2 = (min(a.id, b.id), max(a.id, b.id))
+                    if key_all2 not in existing_links:
+                        safe_add_link(session, a, b, iface1=a_if, iface2=b_if)
+                    existing_router_links.add(key)
+                    current_degrees[a.id] += 1; current_degrees[b.id] += 1
+                    logger.debug("Protocol %s link r%d<->r%d (style=%s deg=%s/%s)", proto, a.id, b.id, style, current_degrees[a.id], current_degrees[b.id])
+        except RuntimeError as e:
+            if str(e) != 'skip_enrichment_injected':
+                logger.debug("RuntimeError during protocol enrichment: %s", e)
+        except Exception as e:
+            logger.debug("Failed building protocol-specific router mesh: %s", e)
+
+    host_service_assignments: Dict[int, List[str]] = {}
+    if services:
+        host_service_assignments = distribute_services(hosts, services)
+        for node_id, svc_list in host_service_assignments.items():
+            for svc in svc_list:
+                assigned = False
+                try:
+                    if hasattr(session, "add_service"):
+                        session.add_service(node_id=node_id, service_name=svc)
+                        assigned = True
+                except Exception:
+                    pass
+                if not assigned:
+                    try:
+                        if hasattr(session, "services") and hasattr(session.services, "add"):
+                            try:
+                                session.services.add(node_id, svc)
+                            except TypeError:
+                                node_obj_try = host_nodes_by_id.get(node_id)
+                                if node_obj_try is not None:
+                                    session.services.add(node_obj_try, svc)
+                                    assigned = True
+                    except Exception:
+                        pass
+                if not assigned:
+                    node_obj = host_nodes_by_id.get(node_id)
+                    if node_obj is not None:
+                        try:
+                            if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
+                                node_obj.services.add(svc)
+                                assigned = True
+                            elif hasattr(node_obj, "add_service"):
+                                node_obj.add_service(svc)
+                                assigned = True
+                        except Exception:
+                            pass
+                if assigned and svc in ROUTING_STACK_SERVICES:
+                    try:
+                        if hasattr(session, "add_service"):
+                            session.add_service(node_id=node_id, service_name="zebra")
+                        elif hasattr(session, "services") and hasattr(session.services, "add"):
+                            try:
+                                session.services.add(node_id, "zebra")
+                            except TypeError:
+                                node_obj_try = host_nodes_by_id.get(node_id)
+                                if node_obj_try is not None:
+                                    session.services.add(node_obj_try, "zebra")
+                    except Exception:
+                        pass
+    # --- Post-build cleanup: remove any orphan switches (only connected to routers, no host endpoints) ---
+    try:
+        # Heuristic: a switch is orphan if (a) its model is 'switch'; (b) it has no directly connected DEFAULT or DOCKER hosts;
+        # and (c) every link involves only routers/switches. We exclude core LAN switches that actually have hosts.
+        # Because CORE API for deletion may differ across versions, we do best-effort: detach links and skip node in stats.
+        orphan_switch_ids: list[int] = []
+        # Build adjacency map if links iterable is available
+        link_entries = []
+        try:
+            if hasattr(session, 'links'):
+                link_entries = list(getattr(session, 'links'))  # type: ignore
+        except Exception:
+            link_entries = []
+        # Collect node objects if accessible
+        node_index: dict[int, object] = {}
+        try:
+            if hasattr(session, 'nodes') and isinstance(session.nodes, dict):  # type: ignore
+                node_index = session.nodes  # type: ignore
+        except Exception:
+            pass
+        # Helper to classify node type quickly
+        def _is_router(nid: int) -> bool:
+            try:
+                n = node_index.get(nid)
+                nm = getattr(n, 'model', '') or getattr(n, 'name', '')
+                return 'router' in str(nm).lower()
+            except Exception:
+                return False
+        def _is_host(nid: int) -> bool:
+            try:
+                n = node_index.get(nid)
+                m = getattr(n, 'model', '')
+                if not m:
+                    return False
+                ml = str(m).lower()
+                return ml in ('pc','docker','host','default')
+            except Exception:
+                return False
+        def _is_switch(nid: int) -> bool:
+            try:
+                n = node_index.get(nid)
+                return str(getattr(n, 'model', '')).lower() == 'switch'
+            except Exception:
+                return False
+        # Count host-attached links per switch
+        sw_links: dict[int, list[tuple[int,int]]] = {}
+        for lk in link_entries:
+            try:
+                a, b = lk[:2]
+            except Exception:
+                continue
+            if _is_switch(a):
+                sw_links.setdefault(a, []).append((a,b))
+            if _is_switch(b):
+                sw_links.setdefault(b, []).append((a,b))
+        # Also consider switches with zero degree (no links at all) as orphans.
+        try:
+            all_switch_ids = [nid for nid in node_index.keys() if _is_switch(nid)]
+        except Exception:
+            all_switch_ids = []
+        for sw_id in all_switch_ids:
+            if sw_id in sw_links:
+                continue
+            if sw_id in expected_switch_ids:
+                try:
+                    logger.debug("[preview] preserving degree-0 switch %s (expected in preview)", sw_id)
+                except Exception:
+                    pass
+                continue
+            orphan_switch_ids.append(sw_id)
+        for sw_id, edges in sw_links.items():
+            # Determine if any edge connects to a host
+            has_host = any(_is_host(b if a==sw_id else a) for a,b in edges)
+            only_router_or_switch = all((_is_router(b if a==sw_id else a) or _is_switch(b if a==sw_id else a)) for a,b in edges)
+            if not has_host and only_router_or_switch:
+                if sw_id in expected_switch_ids:
+                    try:
+                        logger.debug("[preview] preserving switch %s without host attachments (expected in preview)", sw_id)
+                    except Exception:
+                        pass
+                    continue
+                orphan_switch_ids.append(sw_id)
+        if orphan_switch_ids:
+            orphan_switch_ids = sorted(set(orphan_switch_ids))
+            try:
+                logger.info("Removing %d orphan switches with no host attachments: %s", len(orphan_switch_ids), orphan_switch_ids)
+            except Exception:
+                pass
+            # Remove associated links
+            try:
+                if hasattr(session, 'links') and isinstance(session.links, list):  # type: ignore
+                    session.links = [lk for lk in session.links if not (lk[0] in orphan_switch_ids or lk[1] in orphan_switch_ids)]  # type: ignore
+            except Exception:
+                pass
+            # Best effort node removal (depends on CORE API)
+            for sw_id in orphan_switch_ids:
+                try:
+                    if hasattr(session, 'delete_node'):
+                        session.delete_node(sw_id)  # type: ignore
+                except Exception:
+                    pass
+                try:
+                    if hasattr(session, 'nodes') and isinstance(session.nodes, dict):  # type: ignore
+                        session.nodes.pop(sw_id, None)  # type: ignore
+                except Exception:
+                    pass
+                # Also prune from internal maps where used for stats
+                try:
+                    routers[:] = [r for r in routers if r.node_id != sw_id]
+                except Exception:
+                    pass
+    except Exception:
+        logger.debug("Orphan switch cleanup failed", exc_info=True)
+
+    # Record host counts per router (direct + via any switches) for report connectivity matrix enrichment
+    try:
+        topo_stats = getattr(session, 'topo_stats', {}) or {}
+        # Build mapping from existing host_router_map if present in locals; else infer via links
+        if 'host_router_map' in locals() and isinstance(host_router_map, dict):
+            counts = {}
+            for hid, rid in host_router_map.items():
+                counts[rid] = counts.get(rid, 0) + 1
+            topo_stats['router_host_counts'] = counts
+        elif hasattr(session, 'links') and isinstance(session.links, list):  # fallback inference
+            # naive inference: host id > router_count and link to router id <= router_count
+            counts = {}
+            for lk in getattr(session, 'links'):
+                try:
+                    a, b = lk[:2]
+                    for r_id, h_id in ((a,b),(b,a)):
+                        if isinstance(r_id, int) and isinstance(h_id, int) and r_id <= router_count and h_id > router_count:
+                            counts[r_id] = counts.get(r_id, 0) + 1
+                except Exception:
+                    continue
+            if counts:
+                topo_stats['router_host_counts'] = counts
+        # Attach R2S grouping preview if not already attached (reuse shared helper)
+        if not hasattr(session, 'r2s_grouping_preview'):
+            try:
+                from ..planning.router_host_plan import plan_r2s_grouping  # local import to avoid cycles
+                # Build minimal host list for helper
+                _hosts_for_group = hosts if 'hosts' in locals() else []  # type: ignore
+                # host_router_map is defined earlier in segmented path; if missing, synthesize round-robin
+                if 'host_router_map' not in locals() or not isinstance(host_router_map, dict):
+                    synth_map: Dict[int,int] = {}
+                    seq = 0
+                    for h in _hosts_for_group:
+                        seq += 1
+                        if router_count > 0:
+                            synth_map[h.node_id] = ((seq-1) % router_count) + 1
+                    host_router_map_local = synth_map
+                else:
+                    host_router_map_local = host_router_map  # type: ignore
+                grouping_seed = GLOBAL_RANDOM_SEED if GLOBAL_RANDOM_SEED is not None else random.randint(1,2**31-1)
+                grouping_out = plan_r2s_grouping(router_count, host_router_map_local, _hosts_for_group, routing_items, None, grouping_seed, ip4_prefix=ip4_prefix, ip_mode=ip_mode, ip_region=ip_region)  # type: ignore
+                setattr(session, 'r2s_grouping_preview', grouping_out.get('grouping_preview'))
+                setattr(session, 'r2s_policy_preview', grouping_out.get('computed_r2s_policy'))
+            except Exception:
+                pass
+        setattr(session, 'topo_stats', topo_stats)
+    except Exception:
+        pass
+    if DIAG_ENABLED:
+        try:
+            link_len = len(getattr(session, 'links', []) or []) if hasattr(session,'links') else 'n/a'
+            logger.info('[diag.summary.segmented.final] routers=%s hosts=%s links_list=%s attempts=%s success=%s fail=%s', len(routers), len(hosts), link_len, link_counters['attempts'], link_counters['success'], link_counters['fail_total'])
+        except Exception:
+            pass
+        if int(os.getenv('CORETG_LINK_FAIL_HARD','0') not in ('0','false','False','')) and link_counters['success']==0:
+            raise RuntimeError('No links created in segmented topology')
+
+    # Final pass: ensure Docker nodes still have DefaultRoute after any service distribution/reset.
+    try:
+        _enforce_default_route_on_docker_nodes(session, list(host_nodes_by_id.values()), context="segmented")
+    except Exception:
+        pass
+    return session, routers, hosts, host_service_assignments, router_protocols, docker_by_name
+    

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Users - ScenarioForge</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+<div class="container py-4">
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for message in messages %}
+        <div class="alert alert-info">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  {% if self_change %}
+    <h3>Change My Password</h3>
+    <form method="post">
+      <div class="mb-3">
+        <label class="form-label">Current Password</label>
+        <input type="password" class="form-control" name="current_password" required>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">New Password</label>
+        <input type="password" class="form-control" name="password" required>
+      </div>
+    <button class="btn btn-primary">Update</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Back</a>
+    </form>
+  {% else %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h3 class="mb-0">User Administration</h3>
+      <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Back</a>
+    </div>
+    <div class="card mb-4">
+      <div class="card-header">Create User</div>
+      <div class="card-body">
+        <form action="{{ url_for('users_create') }}" method="post" class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label">Username</label>
+            <input type="text" name="username" class="form-control" required>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Password</label>
+            <input type="password" name="password" class="form-control" required>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Role</label>
+            <select name="role" class="form-select" required>
+              <option value="participant" selected>participant</option>
+              <option value="builder">builder</option>
+              <option value="admin">admin</option>
+            </select>
+            <div class="form-text">Participants see only the Participant UI. Builders get admin tools except user management.</div>
+          </div>
+          <div class="col-12">
+            <label class="form-label">Assigned Scenarios</label>
+            {% if scenario_options %}
+              <div class="row row-cols-1 row-cols-md-2 g-2">
+                {% for opt in scenario_options %}
+                  <div class="col">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="scenarios" value="{{ opt.value }}" id="createScenario_{{ loop.index }}">
+                      <label class="form-check-label" for="createScenario_{{ loop.index }}">{{ opt.label }}</label>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+              <div class="form-text">Leave unchecked to keep the user unassigned until later.</div>
+            {% else %}
+              <div class="form-text text-muted">No scenarios detected yet. Assignments can be added later.</div>
+            {% endif %}
+          </div>
+          <div class="col-12 text-end">
+            <button class="btn btn-primary">Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">Existing Users</div>
+      <div class="card-body">
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr>
+                    <th style="width: 12%">User</th>
+                    <th style="width: 10%">Role</th>
+                    <th>Assigned Scenarios</th>
+                    <th style="width: 26%">Password / Delete</th>
+                  </tr>
+                </thead>
+                <tbody>
+                {% for u in users %}
+                  <tr>
+                    <td class="fw-semibold">{{ u.username }}</td>
+                    <td>
+                      {% set role_locked = u.role_locked|default(False) %}
+                      {% set role_locked_reason = u.role_locked_reason|default('') %}
+                      <form action="{{ url_for('users_update_role', username=u.username) }}" method="post" class="d-flex flex-column gap-2">
+                        <select name="role" class="form-select form-select-sm" {% if role_locked %}disabled title="{{ role_locked_reason }}"{% endif %}>
+                          <option value="participant" {% if u.role == 'participant' %}selected{% endif %}>participant</option>
+                          <option value="builder" {% if u.role == 'builder' %}selected{% endif %}>builder</option>
+                          <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>admin</option>
+                        </select>
+                        <button type="submit" class="btn btn-sm btn-outline-primary align-self-start" {% if role_locked %}disabled title="{{ role_locked_reason }}"{% endif %}>Update</button>
+                      </form>
+                      {% if role_locked and role_locked_reason %}
+                        <div class="form-text text-danger small mt-1">{{ role_locked_reason }}</div>
+                      {% endif %}
+                    </td>
+                    <td>
+                      {% if u.role == 'admin' %}
+                        <div class="text-muted small">Admins inherit access to every scenario.</div>
+                      {% else %}
+                        {% if u.assigned_scenarios_display %}
+                          <div class="d-flex flex-wrap gap-1 mb-2">
+                            {% for label in u.assigned_scenarios_display %}
+                              <span class="badge text-bg-primary">{{ label }}</span>
+                            {% endfor %}
+                          </div>
+                        {% else %}
+                          <div class="text-muted small mb-2">No scenarios assigned</div>
+                        {% endif %}
+                        {% if scenario_options %}
+                        <form action="{{ url_for('users_assign_scenarios', username=u.username) }}" method="post" class="d-flex flex-column gap-2">
+                          <div class="border rounded p-2 bg-light-subtle">
+                            <div class="row row-cols-1 row-cols-md-2 g-2">
+                              {% for opt in scenario_options %}
+                                {% set checkbox_id = 'assign_' ~ u.username|replace(' ', '_') ~ '_' ~ loop.index %}
+                                <div class="col">
+                                  <div class="form-check form-check-sm">
+                                    <input class="form-check-input" type="checkbox" name="scenarios" value="{{ opt.value }}" id="{{ checkbox_id }}" {% if opt.value in u.assigned_scenarios %}checked{% endif %}>
+                                    <label class="form-check-label" for="{{ checkbox_id }}">{{ opt.label }}</label>
+                                  </div>
+                                </div>
+                              {% endfor %}
+                            </div>
+                          </div>
+                          <div class="d-flex gap-2 flex-wrap">
+                            <button class="btn btn-sm btn-outline-primary">Save</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" data-clear-scenarios>Clear</button>
+                          </div>
+                        </form>
+                        {% else %}
+                          <div class="text-muted small">No scenarios available to assign.</div>
+                        {% endif %}
+                      {% endif %}
+                    </td>
+                    <td>
+                      <form action="{{ url_for('users_password', username=u.username) }}" method="post" class="d-flex gap-2 flex-wrap align-items-center mb-2">
+                        <input type="password" name="password" class="form-control form-control-sm" placeholder="new password" required>
+                        <button class="btn btn-sm btn-outline-primary">Update</button>
+                      </form>
+                      <form action="{{ url_for('users_delete', username=u.username) }}" method="post" onsubmit="return confirm('Delete user {{ u.username }}?');">
+                        <button class="btn btn-sm btn-outline-danger w-100">Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+</div>
+<script>
+  document.addEventListener('click', function(ev){
+    const btn = ev.target.closest('[data-clear-scenarios]');
+    if(!btn) return;
+    const form = btn.closest('form');
+    if(!form) return;
+    let cleared = false;
+    const checkboxes = form.querySelectorAll('input[type="checkbox"][name="scenarios"]');
+    if (checkboxes.length) {
+      checkboxes.forEach(cb => cb.checked = false);
+      cleared = true;
+    }
+    const selectOptions = form.querySelectorAll('select option');
+    if (selectOptions.length) {
+      selectOptions.forEach(opt => opt.selected = false);
+      cleared = true;
+    }
+    if (!cleared) return;
+    form.submit();
+  });
+</script>
+</body>
+</html>

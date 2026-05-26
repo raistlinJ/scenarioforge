@@ -1,0 +1,7 @@
+include README.md
+recursive-include flag_templates *
+recursive-include generator_templates *
+recursive-include docs *
+recursive-include schemas *
+recursive-include examples *
+include .scenarioforge.env.example
