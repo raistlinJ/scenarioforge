@@ -5,6 +5,8 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 ## Table of contents
 - [Highlights](#highlights)
 - [Screenshots](docs/screenshots.md)
+- [VM-mode setup](#vm-mode-setup-recommended)
+- [Other operating modes](#other-operating-modes)
 - [Quick start](docs/QUICK_START.md)
 - [Full Preview workflow](docs/FULL_PREVIEW_WORKFLOW.md)
 - [Feature deep dive](docs/FEATURE_DEEP_DIVE.md)
@@ -16,6 +18,7 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 
 ## Highlights
 - **Single-source planning** – edit scenarios in the browser or any XML editor and reproduce results with the CLI.
+- **VM-mode first** – run ScenarioForge as the control application for a Proxmox-hosted CORE 9.2 VM and participant environment.
 - **Flexible editor state** – the Web UI can intentionally hold zero scenarios while you clear or stage a project; XML is produced only after at least one scenario exists.
 - **Deterministic previews** – optional RNG seed locks in host expansion, router placement, connectivity, services, segmentation, and vulnerability assignment.
 - **Live log dock** – stream run output, filter by level or text/regex, and toggle auto-follow for long runs.
@@ -47,82 +50,92 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 
 View the WebUI images gallery [`docs/screenshots.md`](docs/screenshots.md).
 
-## Install
-- Prereqs: Python 3.10+ and [uv](https://docs.astral.sh/uv/)
-- Optional for attack graph PDF export: Graphviz `dot`
-	- macOS: `brew install graphviz`
-	- Debian/Ubuntu: `sudo apt-get install graphviz`
-- Install dependencies:
-```bash
-uv sync --extra dev
-```
-- Or with pip:
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-- Run local Web UI:
-```bash
-uv run python webapp/app_backend.py
-```
-- With pip/venv:
-```bash
-python webapp/app_backend.py
-```
-- Optional shared env file for Docker Compose and direct Python launches:
+## VM-Mode Setup (Recommended)
+
+ScenarioForge supports both **VM mode** and **native mode**. The README focuses on VM mode because it matches the intended Proxmox lab workflow: ScenarioForge runs as the control application, talks to a CORE 9.2 VM over gRPC/SSH, and can prepare participant-facing HITL attachments.
+
+For local/native development, remote CORE without Proxmox, Docker-only notes, and CLI usage, see [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md).
+
+### Recommended Lab Layout
+
+Use three machines or clearly separated VM roles when possible:
+
+1. **ScenarioForge application host** – runs this repository, the Web UI, and optional Docker Compose/nginx wrapper.
+2. **CORE 9.2 machine** – usually a Proxmox VM with CORE 9.2, `core-daemon`, SSH access, and Docker if vulnerability compose targets are used.
+3. **Participant machine** – a Kali VM or physical participant host attached through HITL to the generated exercise network.
+
+The Proxmox server manages the CORE VM and participant VM/interface plumbing. In VM mode, ScenarioForge uses CORE gRPC for topology/session control, SSH for remote setup and validation, and Proxmox bridge workflows when you apply HITL wiring from the UI.
+
+### Configure VM Mode
+
+Copy the committed defaults and edit the local override file:
+
 ```bash
 cp .scenarioforge.env.example .scenarioforge.env
 ```
-- Runtime config precedence is: real environment variables, then `.scenarioforge.env` if present, then `.scenarioforge.env.example`, then built-in Python defaults.
-- Direct Python entry point `python webapp/app_backend.py` reads `.scenarioforge.env` / `.scenarioforge.env.example` automatically when present.
-- Run with explicit mode scripts (recommended for CORE VM workflows):
-```bash
-# backward-compatible default behavior (same style as before)
-bash scripts/run_webui_mode.sh
 
-# local CORE daemon on same machine
-bash scripts/run_webui_local.sh --web-port 9090
+The local `.scenarioforge.env` file is gitignored. Runtime config precedence is: real environment variables, then `.scenarioforge.env`, then `.scenarioforge.env.example`, then built-in defaults.
 
-# remote CORE daemon
-bash scripts/run_webui_remote.sh --core-host 10.0.0.50 --core-port 50051 --web-port 9090
+Key VM-mode variables in [.scenarioforge.env.example](.scenarioforge.env.example):
 
-# background variants via Make
-make run-web
-make run-web-local-bg
-make run-web-remote-bg CORE_REMOTE_HOST=10.0.0.50 CORE_REMOTE_PORT=50051
+- `CORE_HOST` / `CORE_PORT` – CORE gRPC endpoint for the CORE 9.2 VM, commonly `<core-vm-ip>:50051`.
+- `CORE_SSH_HOST` / `CORE_SSH_PORT` – SSH target used for remote setup, validation, file checks, and service operations. Usually the same host as `CORE_HOST`.
+- `CORE_SSH_USERNAME` / `CORE_SSH_PASSWORD` – SSH credentials for the CORE VM. Use local secrets or environment overrides for real deployments.
+- `CORETG_WEBUI_MODE` – set this to `vm` to pre-seed VM-oriented UI behavior and HITL defaults.
+- `CORETG_VM_MODE_HITL_ENABLED` – enables participant-facing HITL defaults in VM mode.
+- `CORETG_VM_MODE_HITL_CORE_IFX_NAME` – expected Linux interface name inside the CORE VM for the participant network, such as `ens18`.
+- `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
+- `CORETG_VM_MODE_PARTICIPANT_URL` – optional participant UI URL shown in VM-mode flows.
+
+Minimum VM-mode override example:
+
+```dotenv
+CORE_HOST=10.0.0.50
+CORE_PORT=50051
+CORE_SSH_HOST=10.0.0.50
+CORE_SSH_PORT=22
+CORE_SSH_USERNAME=corevm
+CORE_SSH_PASSWORD=change-me
+CORETG_WEBUI_MODE=vm
+CORETG_VM_MODE_HITL_ENABLED=true
+CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens18
+CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router
 ```
-- Local mode UX guard: CORE endpoint fields (`gRPC host/port`, `SSH host/port`) are pinned to localhost values and rendered read-only in the CORE Connection modal.
-- Scenario editor note: removing the final scenario now leaves the editor in an empty state instead of auto-creating a replacement scenario.
-- Run HTTPS Web UI with Docker Compose:
+
+### Run the Web UI
+
+Recommended HTTPS/Compose launch:
+
 ```bash
 docker compose up -d --build
 ```
-- Compose now reads committed defaults from `.scenarioforge.env.example` and optional local overrides from `.scenarioforge.env`.
-- Open `https://localhost` and verify health:
+
+- Open `https://localhost` and verify health with `curl -k https://localhost/healthz`.
+- Compose reads defaults from `.scenarioforge.env.example` and local overrides from `.scenarioforge.env`.
+- The Docker image includes Graphviz, so attack graph PDF export works in Compose-based runs.
+- In host-network mode, nginx serves `80/443` and the web backend binds to `127.0.0.1:9090`.
+
+Direct Python launch for development:
+
 ```bash
-curl -k https://localhost/healthz
+uv sync --extra dev
+uv run python webapp/app_backend.py
 ```
-- The Docker image now includes Graphviz, so attack graph PDF export works in Compose-based runs.
-- In host-network mode, nginx serves `80/443` and the web app is bound to `127.0.0.1:9090` (not externally exposed).
-- Safety: in Execute → Advanced, `Delete all docker containers` is disabled when the Web UI is running in Docker.
-- Stop Docker stack:
-```bash
-docker compose down
-```
-- Run CLI:
-```bash
-uv run python -m scenarioforge.cli --xml examples/sample.xml --seed 42 --verbose
-```
-- With pip/venv:
-```bash
-python -m scenarioforge.cli --xml examples/sample.xml --seed 42 --verbose
-```
-- Replace `examples/sample.xml` with your own ScenarioForge XML file for custom runs.
-- More setup detail: [docs/QUICK_START.md](docs/QUICK_START.md).
+
+After launch, use the CORE Management and Execute views to validate CORE connectivity, save VM/Proxmox credentials, apply participant bridge wiring, preview the scenario, and execute it.
+
+### DeployForge
+
+A ready-to-deploy DeployForge file is coming soon: [docs/DEPLOYFORGE.md](docs/DEPLOYFORGE.md).
+
+## Other Operating Modes
+
+Native mode runs ScenarioForge and CORE on the same machine, usually with `CORE_HOST=127.0.0.1` and `CORETG_WEBUI_MODE=native`. It is useful for local development, quick CLI checks, and non-Proxmox labs, but it does not mirror the participant/CORE VM separation used by VM mode.
+
+See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode, remote CORE mode, direct Python launches, Docker Compose notes, and CLI commands.
 
 ## Guides
+- [Operating modes](docs/OPERATING_MODES.md)
 - [Quick start](docs/QUICK_START.md)
 - [Full Preview workflow](docs/FULL_PREVIEW_WORKFLOW.md)
 - [Feature deep dive](docs/FEATURE_DEEP_DIVE.md)
