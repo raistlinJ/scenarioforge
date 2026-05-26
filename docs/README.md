@@ -4,6 +4,7 @@ Use this page to navigate the main project documentation.
 
 ## Getting started
 - [Quick Start](QUICK_START.md)
+- [Operating Modes](OPERATING_MODES.md)
 - [Runtime Validation (strict by default)](QUICK_START.md#runtime-validation)
 - [Screenshots](screenshots.md)
 
@@ -34,6 +35,7 @@ Use this page to navigate the main project documentation.
 - [XML Validation](reference/SCENARIO_XML_SCHEMA.md)
 
 ## Integration & Advanced
+- [DeployForge](DEPLOYFORGE.md) – Ready-to-deploy VM-mode lab file coming soon.
 - [MCP (Model Context Protocol) Server](reference/MCP_README.md) – Remote scenario authoring and LLM tool integration.
 - [Web UI Backend](webapp/README.md) – Web backend architecture, routes, and Docker deployment.
 
