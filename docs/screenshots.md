@@ -3,16 +3,16 @@
 Preview the major pages of the Web UI to get a feel for the workflow before running the app.
 
 <div align="center">
-	<img src="images/gui-overview.png" alt="ScenarioForge GUI overview" width="720" />
-	<p><em>Scenario dashboard with Full Preview summary, seed badge, and log dock.</em></p>
-	<img src="images/logs-dock.png" alt="Logs tab with follow toggle" width="720" />
-	<p><em>Logs tab showing level/filter controls and the Follow toggle.</em></p>
+	<img src="images/system-architecture.png" alt="Conceptual ScenarioForge system architecture" width="900" />
+	<p><em>Conceptual architecture across frontend, backend, Proxmox, and the CORE VM.</em></p>
+	<img src="images/flag-sequencing.png" alt="Flag sequencing challenge flow visualization" width="720" />
+	<p><em>Flag Sequencing view with generated challenge dependencies.</em></p>
 	<img src="images/full-preview.png" alt="Full Preview modal with topology graph" width="720" />
-	<p><em>Full Preview modal: counts, segmentation summary, graph layout, and quick actions.</em></p>
-	<img src="images/core-sessions.png" alt="CORE sessions management page" width="720" />
-	<p><em>CORE sessions page lists active sessions, available topologies, and safe actions.</em></p>
-	<img src="images/reports-history.png" alt="Reports history table" width="720" />
-	<p><em>Reports page summarises recent runs with quick filters and Markdown download links.</em></p>
+	<p><em>Full Preview graph with routers, hosts, switches, vulnerabilities, and HITL details.</em></p>
+	<img src="images/reports-downloads.png" alt="Reports history table with downloads menu" width="720" />
+	<p><em>Reports history with downloadable run artifacts.</em></p>
+	<img src="images/facilitator-guide.png" alt="Facilitator guide challenge sequence" width="720" />
+	<p><em>Facilitator guide export with the challenge sequence and step checklist.</em></p>
 </div>
 
 ## Execute retry prompt checklist

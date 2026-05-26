@@ -28,6 +28,23 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 
 ## Screenshots
 
+<div align="center">
+	<table>
+		<tr>
+			<td width="50%" align="center">
+				<img src="docs/images/system-architecture.png" alt="Conceptual ScenarioForge system architecture" />
+			</td>
+			<td width="50%" align="center">
+				<img src="docs/images/flag-sequencing.png" alt="Flag sequencing challenge flow visualization" />
+			</td>
+		</tr>
+		<tr>
+			<td align="center"><em>Conceptual system architecture.</em></td>
+			<td align="center"><em>Flag sequencing challenge flow.</em></td>
+		</tr>
+	</table>
+</div>
+
 View the WebUI images gallery [`docs/screenshots.md`](docs/screenshots.md).
 
 ## Install
