@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "scenarioforge": {
+      "command": "python",
+      "args": [
+        "MCP/server.py"
+      ],
+      "disabled": false
+    }
+  }
+}

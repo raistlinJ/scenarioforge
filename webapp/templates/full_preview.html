@@ -1,0 +1,869 @@
+{% extends 'layout.html' %}
+{% block title %}Full Preview{% endblock %}
+{% block active_page %}{% set active_page = 'scenarios' %}{% endblock %}
+{% block extra_head %}
+<style>
+  #previewGraph svg {
+    cursor: grab;
+  }
+
+  #previewGraph svg:active {
+    cursor: grabbing;
+  }
+
+  .form-switch.form-switch-sm .form-check-input {
+    height: 1rem;
+    width: 2rem;
+    transform: scale(0.85);
+    margin-top: 0.15rem;
+  }
+
+  .form-switch.form-switch-sm .form-check-label {
+    padding-left: .35rem;
+  }
+
+  /* Preview tables inside scroll containers */
+  .fp-scroll-table {
+    overflow: auto;
+  }
+
+  .fp-scroll-table .fp-sticky-head thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  .fp-vuln-cell {
+    white-space: normal;
+    word-break: break-word;
+  }
+</style>
+{% endblock %}
+{% block extra_scripts %}
+{# Using include to ensure large script block is loaded reliably #}
+{% include 'full_preview_scripts.html' %}
+{% endblock %}
+{% block content %}
+<div class="container-fluid mt-3">
+  {% macro render_r2r_interfaces(router_id, links) -%}
+  {% set ns = namespace(items=[]) %}
+  {% for link in links or [] %}
+  {% set routers = link.routers or [] %}
+  {% if routers|length == 2 %}
+  {% set a = routers[0] %}
+  {% set b = routers[1] %}
+  {% if a.id == router_id %}
+  {% set neighbor = b.id %}
+  {% set ip = a.ip or '-' %}
+  {% elif b.id == router_id %}
+  {% set neighbor = a.id %}
+  {% set ip = b.ip or '-' %}
+  {% else %}
+  {% set neighbor = None %}
+  {% endif %}
+  {% if neighbor is not none %}
+  {% set label = 'r' ~ neighbor %}
+  {% if link.subnet %}
+  {% set entry = label ~ ': ' ~ ip ~ ' [' ~ link.subnet ~ ']' %}
+  {% else %}
+  {% set entry = label ~ ': ' ~ ip %}
+  {% endif %}
+  {% set ns.items = ns.items + [entry] %}
+  {% endif %}
+  {% endif %}
+  {% endfor %}
+  {{ ns.items|join('; ') if ns.items else '-' }}
+  {%- endmacro %}
+
+  {% macro render_router_switch_links(router_id, switches) -%}
+  {% set ns = namespace(items=[]) %}
+  {% for sw in switches or [] %}
+  {% if sw.router_id == router_id %}
+  {% set label = 'sw-' ~ sw.switch_id %}
+  {% if sw.router_ip and sw.rsw_subnet %}
+  {% set entry = label ~ ': ' ~ sw.router_ip ~ ' [' ~ sw.rsw_subnet ~ ']' %}
+  {% elif sw.router_ip %}
+  {% set entry = label ~ ': ' ~ sw.router_ip %}
+  {% else %}
+  {% set entry = label %}
+  {% endif %}
+  {% set ns.items = ns.items + [entry] %}
+  {% endif %}
+  {% endfor %}
+  {{ ns.items|join('; ') if ns.items else '-' }}
+  {%- endmacro %}
+
+  <div class="d-flex align-items-center mb-2 gap-2">
+    {% if not hide_chrome %}
+    <h2 class="me-auto mb-0">Full Preview {{ scenario or '' }}</h2>
+    {% else %}
+    {# In embedded mode, keep controls on the left (no spacer). #}
+    {% endif %}
+    {% if not hide_chrome %}
+    <button id="executeRunBtn" class="btn btn-sm btn-warning" title="Execute this scenario now (invokes CLI)"
+      data-preview-plan="{{ preview_plan_path or '' }}">Execute</button>
+    {% else %}
+    <button id="executeRunBtn" class="d-none" type="button" aria-hidden="true"
+      data-preview-plan="{{ preview_plan_path or '' }}"></button>
+    {% endif %}
+  </div>
+    <p class="text-muted">Topology Seed: <strong>{{ seed }}</strong> | Flow Seed: <strong>{{ flow_meta.seed if flow_meta
+      and flow_meta.seed else '-' }}</strong> | Preview Source: <strong>{{ preview_source or 'unknown' }}</strong> | XML: {{ xml_path }}</p>
+  <div class="mb-3">
+    <button id="exportJsonBtn" class="btn btn-sm btn-outline-secondary me-2">Export JSON</button>
+    <button id="exportPngBtn" class="btn btn-sm btn-outline-secondary me-2">Export Graph PNG</button>
+    <!-- Approval workflow removed; button/status span deleted -->
+  </div>
+  <div class="row">
+    <div class="col-md-4">
+      {% set hitl_cfg = hitl_config or {} %}
+      <h5>Overview</h5>
+      <ul class="list-unstyled small">
+        <li>Routers: {{ (full_preview.routers or [])|length }}</li>
+        <li>Hosts: {{ (full_preview.hosts or [])|length }}</li>
+        <li>Switches: {{ (full_preview.switches or [])|length }}</li>
+        <li>R2R Edges: {{ (full_preview.r2r_edges_preview or [])|length }}</li>
+        <li>Seg Rules: {{ (full_preview.segmentation_preview.rules or [])|length if full_preview.segmentation_preview
+          and full_preview.segmentation_preview.rules else 0 }}</li>
+        <li>HITL: {{ 'Enabled' if hitl_cfg.get('enabled') else 'Disabled' }}</li>
+        <li>HITL Interfaces: {{ (hitl_cfg.get('interfaces') or [])|length }}</li>
+      </ul>
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <h6 class="mb-0">R2R Policy</h6>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-preview-collapse="fp-side-r2r"
+          data-label-collapse="Collapse" data-label-expand="Expand">Collapse</button>
+      </div>
+      <div id="fp-side-r2r" class="collapse">
+        <pre class="small bg-light p-2">{{ full_preview.r2r_policy_preview | tojson(indent=2) }}</pre>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mb-1 mt-3">
+        <h6 class="mb-0">R2S Policy</h6>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-preview-collapse="fp-side-r2s"
+          data-label-collapse="Collapse" data-label-expand="Expand">Collapse</button>
+      </div>
+      <div id="fp-side-r2s" class="collapse">
+        <pre class="small bg-light p-2">{{ full_preview.r2s_policy_preview | tojson(indent=2) }}</pre>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mb-1 mt-3">
+        <h6 class="mb-0">Services Preview</h6>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-preview-collapse="fp-side-services"
+          data-label-collapse="Collapse" data-label-expand="Expand">Collapse</button>
+      </div>
+      <div id="fp-side-services" class="collapse">
+        <pre class="small bg-light p-2">{{ full_preview.services_preview | tojson(indent=2) }}</pre>
+      </div>
+      {% set vuln_by_node = full_preview.vulnerabilities_by_node or {} %}
+      {% if vuln_by_node %}
+      <div class="d-flex justify-content-between align-items-center mb-1 mt-3">
+        <h6 class="mb-0">Vulnerabilities by Host</h6>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-preview-collapse="fp-side-vuln-host"
+          data-label-collapse="Collapse" data-label-expand="Expand">Collapse</button>
+      </div>
+      <div id="fp-side-vuln-host" class="collapse">
+        <pre class="small bg-light p-2">{{ vuln_by_node | tojson(indent=2) }}</pre>
+      </div>
+      {% endif %}
+    </div>
+    <div class="col-md-8">
+      <div id="fpFlowValidityAlert" class="alert alert-danger d-none mb-2" role="alert"></div>
+      <ul class="nav nav-tabs" id="fpTabs" role="tablist">
+        <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#fp-graph"
+            type="button">Graph</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-routers"
+            type="button">Routers</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-hosts"
+            type="button">Hosts</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-vulnerabilities"
+            type="button">Vulnerabilities</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-switches"
+            type="button">Switches</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-interfaces"
+            type="button">Interfaces</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-seg"
+            type="button">Segmentation</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-traffic"
+            type="button">Traffic</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-flag-sequence"
+            type="button">Flag-Sequence</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-node-sections"
+            type="button">Node Sections</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#fp-json" type="button">Raw
+            JSON</button></li>
+      </ul>
+      <div class="tab-content border border-top-0 p-2" id="fpTabsContent" style="min-height:680px;">
+        <div class="tab-pane fade show active position-relative" id="fp-graph">
+          <div id="previewGraph"
+            style="height:640px; position:relative; background:#fafafa; border:1px solid #e0e0e0; border-radius:4px; overflow:hidden;">
+          </div>
+          <div id="graphZoomControls" class="position-absolute" style="top:6px; right:8px; z-index:10;">
+            <div class="d-flex flex-column align-items-end gap-2">
+              <div class="form-check form-switch form-switch-sm mb-0 shadow-sm bg-white px-2 py-1 rounded"
+                id="graphLabelsToggleWrap">
+                <input class="form-check-input" type="checkbox" role="switch" id="graphLabelsToggle">
+                <label class="form-check-label small" for="graphLabelsToggle">Show labels</label>
+              </div>
+              <div class="btn-group btn-group-sm shadow-sm" role="group" aria-label="Zoom controls">
+                <button type="button" class="btn btn-outline-secondary" id="zoomInBtn" title="Zoom In">+</button>
+                <button type="button" class="btn btn-outline-secondary" id="zoomOutBtn" title="Zoom Out">−</button>
+                <button type="button" class="btn btn-outline-secondary" id="zoomResetBtn"
+                  title="Reset View">Reset</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-routers">
+          <div id="fp-routers-body">
+            <table class="table table-sm table-striped small">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>R2R Interfaces</th>
+                  <th>Switch Links</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for r in full_preview.routers %}<tr>
+                  <td>{{ r.node_id }}</td>
+                  <td>{{ r.name }}</td>
+                  <td>{{ render_r2r_interfaces(r.node_id, full_preview.r2r_links_preview) }}</td>
+                  <td>{{ render_router_switch_links(r.node_id, full_preview.switches_detail) }}</td>
+                </tr>{% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-hosts">
+          <div id="fp-hosts-body">
+            <table class="table table-sm table-striped small">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>Role</th>
+                  <th>IP</th>
+                  <th>Router</th>
+                  <th>Vulnerabilities</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% set hr = full_preview.host_router_map or {} %}
+                {% for h in full_preview.hosts %}{% set vulns = h.vulnerabilities or [] %}<tr>
+                  <td>{{ h.node_id }}</td>
+                  <td>{{ h.name }}</td>
+                  <td>{{ h.role }}</td>
+                    <td>{{ h.ip4.split('/')[0] if h.ip4 else '' }}</td>
+                  <td>{{ hr[h.node_id|string] or hr[h.node_id] }}</td>
+                  <td>{{ vulns|join(', ') if vulns else '-' }}</td>
+                </tr>{% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-vulnerabilities">
+          <div id="fp-vuln-body">
+            {# vulnerabilities_plan: vulnerability name -> planned count #}
+            {% set vuln_plan = full_preview.vulnerabilities_plan or {} %}
+            {% set vuln_assign = full_preview.vulnerabilities_by_node or {} %}
+
+            {# Summary totals #}
+            {% set planned_total = 0 %}
+            {% set planned_unique = 0 %}
+            {% if vuln_plan %}
+            {% set planned_unique = (vuln_plan|length) %}
+            {% for _k, _v in vuln_plan.items() %}
+            {% set planned_total = planned_total + (_v|int) %}
+            {% endfor %}
+            {% endif %}
+
+            {% set assigned_total = 0 %}
+            {% set assigned_unique = 0 %}
+            {% if vuln_assign %}
+            {% set uniq = namespace(v={}) %}
+            {% for _hid, _vv in vuln_assign.items() %}
+            {% if _vv is sequence and (_vv is not string) %}
+            {% set assigned_total = assigned_total + (_vv|length) %}
+            {% for _name in _vv %}
+            {% set _s = _name|string %}
+            {% if _s %}
+            {% set _ = uniq.v.update({_s: True}) %}
+            {% endif %}
+            {% endfor %}
+            {% endif %}
+            {% endfor %}
+            {% set assigned_unique = (uniq.v|length) %}
+            {% endif %}
+
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+              <span class="badge text-bg-secondary">Planned total: {{ planned_total }}</span>
+              <span class="badge text-bg-secondary">Assigned total: {{ assigned_total }}</span>
+              <span class="badge text-bg-light border">Unique planned: {{ planned_unique }}</span>
+              <span class="badge text-bg-light border">Unique assigned: {{ assigned_unique }}</span>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-md-4">
+                <h6 class="mb-2">Planned Counts</h6>
+                {% set plan_ns = namespace(has_rows=False) %}
+                <div class="table-responsive fp-scroll-table" style="max-height:220px;">
+                  <table class="table table-sm table-striped table-bordered small align-middle mb-0 fp-sticky-head">
+                    <thead class="table-light">
+                      <tr>
+                        <th>Vulnerability</th>
+                        <th class="text-end">Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for v_name, v_count in vuln_plan.items() %}
+                      {% if v_name != '__density_pool__' %}
+                      {% set plan_ns.has_rows = True %}
+                      <tr>
+                        <td>{{ v_name }}</td>
+                        <td class="text-end">{{ v_count }}</td>
+                      </tr>
+                      {% endif %}
+                      {% endfor %}
+                      {% if not plan_ns.has_rows %}
+                      <tr>
+                        <td colspan="2" class="text-muted fst-italic text-center">(no planned vulnerabilities)</td>
+                      </tr>
+                      {% endif %}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="col-md-8">
+                <h6 class="mb-2">Assignments by Host</h6>
+                {% set assign_rows_ns = namespace(rows=[]) %}
+                {% for node_id_str, vulns in (vuln_assign|dictsort) %}
+                {% if vulns %}
+                {% set assign_rows_ns.rows = assign_rows_ns.rows + [{'node_id': (node_id_str|int), 'node_id_str':
+                node_id_str, 'vulns': vulns}] %}
+                {% endif %}
+                {% endfor %}
+                {% set assign_rows = assign_rows_ns.rows|sort(attribute='node_id') %}
+                {% if assign_rows %}
+                <div class="table-responsive fp-scroll-table" style="max-height:220px;">
+                  <table class="table table-sm table-striped table-bordered small align-middle mb-0 fp-sticky-head"
+                    style="table-layout: fixed;">
+                    <thead class="table-light">
+                      <tr>
+                        <th>Host ID</th>
+                        <th>Name</th>
+                        <th>Role</th>
+                        <th>Vulnerabilities</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% set assign_ns = namespace(has_rows=False) %}
+                      {% for row in assign_rows %}
+                      {% set node_id_str = row.node_id_str %}
+                      {% set vulns = row.vulns %}
+                      {% if vulns %}
+                      {% set assign_ns.has_rows = True %}
+                      {% set node_id = row.node_id %}
+                      {% set host = (full_preview.hosts | selectattr('node_id','equalto', node_id) | first) %}
+                      <tr>
+                        <td>{{ node_id }}</td>
+                        <td>{{ host.name if host else 'Host ' ~ node_id }}</td>
+                        <td>{{ host.role if host and host.role else 'host' }}</td>
+                        <td class="fp-vuln-cell">
+                          {% if vulns is string %}
+                          {{ vulns }}
+                          {% elif vulns is sequence %}
+                          <div class="d-flex flex-wrap gap-1">
+                            {% for v in (vulns|sort) %}
+                            <span class="badge text-bg-danger">{{ v }}</span>
+                            {% endfor %}
+                          </div>
+                          {% else %}
+                          {{ vulns }}
+                          {% endif %}
+                        </td>
+                      </tr>
+                      {% endif %}
+                      {% endfor %}
+                      {% if not assign_ns.has_rows %}
+                      <tr>
+                        <td colspan="4" class="text-muted fst-italic text-center">(no host vulnerabilities assigned)
+                        </td>
+                      </tr>
+                      {% endif %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}
+                <div class="small text-muted fst-italic">(no host vulnerabilities assigned)</div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-switches">
+          <div id="fp-switches-body">
+            <table class="table table-sm table-striped small">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>Router</th>
+                  <th>Hosts</th>
+                  <th>R/S Subnet</th>
+                  <th>LAN Subnet</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for sw in full_preview.switches_detail %}<tr>
+                  <td>{{ sw.switch_id }}</td>
+                  <td>sw-{{ sw.switch_id }}</td>
+                  <td>{{ sw.router_id }}</td>
+                  <td>{{ sw.hosts|join(',') }}</td>
+                  <td>{{ sw.rsw_subnet }}</td>
+                  <td>{{ sw.lan_subnet }}</td>
+                </tr>{% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-interfaces">
+          <div id="fp-interfaces-body">
+            <div class="row g-3">
+              <div class="col-12">
+                <h6 class="mb-2">Router-to-Router Links</h6>
+                {% set r2r_links = full_preview.r2r_links_preview or [] %}
+                {% if r2r_links %}
+                <div class="table-responsive" style="max-height:240px;overflow:auto;">
+                  <table class="table table-sm table-bordered small align-middle">
+                    <thead class="table-light">
+                      <tr>
+                        <th>#</th>
+                        <th>Router A</th>
+                        <th>Router A IP</th>
+                        <th>Router B</th>
+                        <th>Router B IP</th>
+                        <th>Subnet</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for link in r2r_links %}
+                      {% set routers = link.routers or [] %}
+                      {% set ra = routers[0] if routers|length > 0 else {} %}
+                      {% set rb = routers[1] if routers|length > 1 else {} %}
+                      {% set ra_obj = (full_preview.routers|selectattr('node_id','equalto', ra.id)|first) %}
+                      {% set rb_obj = (full_preview.routers|selectattr('node_id','equalto', rb.id)|first) %}
+                      {% set ra_label = ra_obj.name if ra_obj else 'r' ~ (ra.id or '-') %}
+                      {% set rb_label = rb_obj.name if rb_obj else 'r' ~ (rb.id or '-') %}
+                      <tr>
+                        <td>{{ link.edge_id }}</td>
+                        <td>{{ ra_label }}</td>
+                        <td>{{ ra.ip or '-' }}</td>
+                        <td>{{ rb_label }}</td>
+                        <td>{{ rb.ip or '-' }}</td>
+                        <td>{{ link.subnet or '-' }}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}<div class="small text-muted fst-italic">(no router-to-router links)</div>{% endif %}
+              </div>
+              <div class="col-12">
+                <h6 class="mb-2">Router-to-Switch Links</h6>
+                {% set sw_detail = full_preview.switches_detail or [] %}
+                {% if sw_detail %}
+                <div class="table-responsive" style="max-height:220px;overflow:auto;">
+                  <table class="table table-sm table-bordered small align-middle">
+                    <thead class="table-light">
+                      <tr>
+                        <th>Router</th>
+                        <th>Switch</th>
+                        <th>Router IP</th>
+                        <th>Switch IP</th>
+                        <th>R/S Subnet</th>
+                        <th>LAN Subnet</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for sw in sw_detail %}
+                      {% set router_obj = (full_preview.routers|selectattr('node_id','equalto', sw.router_id)|first) %}
+                      {% set router_label = router_obj.name if router_obj else 'r' ~ (sw.router_id or '-') %}
+                      <tr>
+                        <td>{{ router_label }}</td>
+                        <td>sw-{{ sw.switch_id }}</td>
+                        <td>{{ sw.router_ip or '-' }}</td>
+                        <td>{{ sw.switch_ip or '-' }}</td>
+                        <td>{{ sw.rsw_subnet or '-' }}</td>
+                        <td>{{ sw.lan_subnet or '-' }}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}<div class="small text-muted fst-italic">(no router-to-switch links)</div>{% endif %}
+              </div>
+              <div class="col-12">
+                <h6 class="mb-2">Switch Host Interfaces</h6>
+                {% if sw_detail %}
+                <div class="table-responsive" style="max-height:220px;overflow:auto;">
+                  <table class="table table-sm table-bordered small align-middle">
+                    <thead class="table-light">
+                      <tr>
+                        <th>Switch</th>
+                        <th>Host ID</th>
+                        <th>Host IP</th>
+                        <th>LAN Subnet</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for sw in sw_detail %}
+                      {% set host_ips = (sw.host_if_ips or {})|dictsort(case_sensitive=False) %}
+                      {% if host_ips %}
+                      {% for hid, hip in host_ips %}
+                      <tr>
+                        <td>sw-{{ sw.switch_id }}</td>
+                        <td>{{ hid }}</td>
+                        <td>{{ hip or '-' }}</td>
+                        <td>{{ sw.lan_subnet or '-' }}</td>
+                      </tr>
+                      {% endfor %}
+                      {% else %}
+                      <tr>
+                        <td>sw-{{ sw.switch_id }}</td>
+                        <td class="text-muted" colspan="2">(no host interfaces)</td>
+                        <td>{{ sw.lan_subnet or '-' }}</td>
+                      </tr>
+                      {% endif %}
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}<div class="small text-muted fst-italic">(no switch host assignments)</div>{% endif %}
+              </div>
+              <div class="col-12">
+                <h6 class="mb-2">HITL Interfaces</h6>
+                {% set hitl_ifaces = hitl_cfg.get('interfaces') or [] %}
+                {% if hitl_ifaces %}
+                <div class="small mb-2">HITL is <strong>{{ 'enabled' if hitl_cfg.get('enabled') else 'disabled'
+                    }}</strong>{% if hitl_cfg.get('scenario_key') %} (scenario key: {{ hitl_cfg.get('scenario_key')
+                  }}){% endif %}.</div>
+                <div class="table-responsive" style="max-height:240px;overflow:auto;">
+                  <table class="table table-sm table-bordered small align-middle">
+                    <thead class="table-light">
+                      <tr>
+                        <th>Name</th>
+                        <th>Attachment</th>
+                        <th>Preview Router</th>
+                        <th>RJ45 IPv4</th>
+                        <th>New Router IPv4</th>
+                        <th>Existing Router IPv4</th>
+                        <th>Link Network</th>
+                        <th>IPv4 List</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for iface in hitl_ifaces %}
+                      <tr>
+                        <td>{{ iface.get('name') or '-' }}</td>
+                        <td>{{ (iface.get('attachment') or '')|replace('_', ' ')|title }}</td>
+                        <td>{{ iface.get('preview_router', {}).get('name') or '-' }}</td>
+                        <td>{{ iface.get('rj45_ip4') or '-' }}</td>
+                        <td>{{ iface.get('new_router_ip4') or '-' }}</td>
+                        <td>{{ iface.get('existing_router_ip4') or '-' }}</td>
+                        <td>{{ iface.get('link_network_cidr') or iface.get('link_network') or '-' }}</td>
+                        <td>{{ iface.get('ipv4')|join(', ') if iface.get('ipv4') else '-' }}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}
+                <div class="small text-muted fst-italic">(no HITL interfaces declared)</div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-seg">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0">Segmentation</h6>
+            <button class="btn btn-sm btn-outline-secondary" type="button" data-preview-collapse="fp-seg-body"
+              data-label-collapse="Collapse" data-label-expand="Expand">Collapse</button>
+          </div>
+          <div id="fp-seg-body" class="collapse">
+            {% set seg_prev = full_preview.segmentation_preview %}
+            {% set seg_artifacts = segmentation_artifacts or (display_artifacts.segmentation if display_artifacts else
+            None) %}
+            {% set seg_rows = seg_artifacts.table_rows if seg_artifacts and seg_artifacts.table_rows else [] %}
+            {% set seg_json = seg_artifacts.json if seg_artifacts else None %}
+            <!-- Segmentation action buttons removed per request; only rules table remains -->
+            {% if seg_rows %}
+            <div class="table-responsive" style="max-height:320px;overflow:auto;">
+              <table class="table table-sm table-bordered small align-middle" id="segRulesTable">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Node</th>
+                    <th>Type</th>
+                    <th>Summary</th>
+                    <th>Src</th>
+                    <th>Dst</th>
+                    <th>Subnet</th>
+                    <th>Internal</th>
+                    <th>External</th>
+                    <th>Proto</th>
+                    <th>Port</th>
+                    <th>Script</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in seg_rows %}
+                  {% set script_name = row.script_name %}
+                  {% if not script_name and row.script_path %}{% set script_name = row.script_path.rsplit('/', 1)[-1]
+                  %}{% endif %}
+                  <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ row.node_id if row.node_id is not none else '-' }}</td>
+                    <td>{{ row.type or '-' }}</td>
+                    <td>{{ row.summary or '-' }}</td>
+                    <td>{{ row.src or '-' }}</td>
+                    <td>{{ row.dst or '-' }}</td>
+                    <td>{{ row.subnet or '-' }}</td>
+                    <td>{{ row.internal or '-' }}</td>
+                    <td>{{ row.external or '-' }}</td>
+                    <td>{{ row.proto or '-' }}</td>
+                    <td>{{ row.port if row.port is not none else '-' }}</td>
+                    <td>
+                      {% if script_name %}
+                      <button class="btn btn-sm btn-outline-primary py-0 px-1 view-script-btn"
+                        data-file="{{ script_name }}" data-kind="segmentation"
+                        title="{{ row.script_path or script_name }}">View</button>
+                      {% else %}-{% endif %}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="small text-muted fst-italic">(no segmentation rules)</div>
+            {% endif %}
+            {% if seg_json %}
+            <div class="mt-2">
+              {% if seg_json.types_summary %}
+              <div class="small mb-1">
+                {% for t, count in seg_json.types_summary.items() %}
+                <span class="badge text-bg-light border me-1">{{ t }}: {{ count }}</span>
+                {% endfor %}
+              </div>
+              {% endif %}
+              <h6 class="small text-uppercase text-muted mb-1">Segmentation Summary</h6>
+              <pre class="small bg-light p-2"
+                style="max-height:220px;overflow:auto;">{{ seg_json | tojson(indent=2) }}</pre>
+            </div>
+            {% endif %}
+            <!-- Unified Scripts Listing Modal (segmentation + traffic) -->
+            <div class="modal fade" id="scriptsListingModal" tabindex="-1" aria-labelledby="scriptsListingModalLabel"
+              aria-hidden="true">
+              <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                <div class="modal-content">
+                  <div class="modal-header">
+                    <h5 class="modal-title" id="scriptsListingModalLabel">Scripts</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                  </div>
+                  <div class="modal-body">
+                    <div class="d-flex flex-wrap gap-2 mb-2">
+                      <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-secondary" data-kind="segmentation"
+                          data-scope="preview">Segmentation</button>
+                      </div>
+                      <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-success" data-kind="traffic"
+                          data-scope="preview">Traffic</button>
+                      </div>
+                      <span id="scriptsListingStatus" class="small text-muted align-self-center"></span>
+                    </div>
+                    <div class="table-responsive" style="max-height:55vh;">
+                      <table class="table table-sm table-hover small align-middle mb-0" id="scriptsListingTable">
+                        <thead class="table-light">
+                          <tr>
+                            <th style="width:55%;">File</th>
+                            <th style="width:15%;" class="text-end">Size (bytes)</th>
+                            <th style="width:30%;">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td colspan="3" class="text-muted fst-italic">Select a scope above to load scripts.</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div class="modal-footer">
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="segScriptModal" class="modal" tabindex="-1">
+              <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                <div class="modal-content">
+                  <div class="modal-header">
+                    <h5 class="modal-title">Script</h5><button type="button" class="btn-close"
+                      data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body">
+                    <pre class="small mb-0" id="segScriptContent" style="max-height:60vh;overflow:auto;"></pre>
+                  </div>
+                  <div class="modal-footer"><button class="btn btn-sm btn-secondary"
+                      data-bs-dismiss="modal">Close</button></div>
+                </div>
+              </div>
+            </div>
+            {% if seg_prev and seg_prev.runtime_summary %}
+            <hr class="my-2" />
+            <h6 class="mt-2">Runtime Segmentation Summary (segmentation_summary.json)</h6>
+            <pre class="small bg-light p-2"
+              style="max-height:260px;overflow:auto;">{{ seg_prev.runtime_summary | tojson(indent=2) }}</pre>
+            {% endif %}
+            {% if seg_prev and seg_prev.scripts_hash_sha256 %}
+            <div class="small text-muted">Scripts Hash (SHA-256): <code>{{ seg_prev.scripts_hash_sha256 }}</code></div>
+            {% endif %}
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-node-sections">
+          <div id="fp-node-sections-body">
+            <div class="table-responsive small">
+              <table class="table table-sm table-bordered mb-0" id="nodeSectionsTable">
+                <thead>
+                  <tr>
+                    <th>Node ID</th>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Primary IP</th>
+                    <th>Interfaces</th>
+                    <th>Services</th>
+                    <th>Vulns</th>
+                    <th>Seg Rules</th>
+                    <th>Traffic S</th>
+                    <th>Traffic R</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="fp-traffic">
+          <div id="fp-traffic-body">
+            {% set tsummary = full_preview.traffic_summary or {} %}
+            {% set flows = tsummary.flows or [] %}
+            {% if flows %}
+            <div class="table-responsive" style="max-height:440px;overflow:auto;">
+              <table class="table table-sm table-striped small" id="trafficFlowsTable">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Src ID</th>
+                    <th>Dst ID</th>
+                    <th>Pattern</th>
+                    <th>Rate (kbps)</th>
+                    <th>Proto</th>
+                    <th>Script</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for f in flows %}
+                  <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ f.src_id or f.src }}</td>
+                    <td>{{ f.dst_id or f.dst }}</td>
+                    <td>{{ f.pattern or '-' }}</td>
+                    <td>{{ f.rate_kbps or f.rate or '-' }}</td>
+                    <td>{{ f.protocol or f.kind or 'tcp' }}</td>
+                    <td>
+                      {% set sender = f.sender_script %}
+                      {% set receiver = f.receiver_script %}
+                      {% if sender or receiver %}
+                      <div class="d-flex gap-1 flex-wrap">
+                        {% if sender %}{% set send_name = sender.split('/')[-1] %}<button
+                          class="btn btn-sm btn-outline-primary py-0 px-1 view-script-btn" data-kind="traffic"
+                          data-file="{{ send_name }}" data-role="sender">Sender</button>{% endif %}
+                        {% if receiver %}{% set recv_name = receiver.split('/')[-1] %}<button
+                          class="btn btn-sm btn-outline-secondary py-0 px-1 view-script-btn" data-kind="traffic"
+                          data-file="{{ recv_name }}" data-role="receiver">Receiver</button>{% endif %}
+                      </div>
+                      {% else %}-{% endif %}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="small text-muted fst-italic">(no traffic flows)</div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="tab-pane fade" id="fp-flag-sequence">
+          <div id="fp-flag-sequence-body">
+            <div class="small text-muted fst-italic">Loading flag sequence…</div>
+          </div>
+        </div>
+
+        <div class="tab-pane fade" id="fp-json">
+          <div id="fp-json-body">
+            <pre class="small bg-light p-2" style="max-height:440px;overflow:auto;">{{ preview_json }}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal fade" id="executeProgressModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Executing scenario…</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
+          <div id="executeProgressStatus">Starting…</div>
+          <div id="executeProgressMeta"></div>
+        </div>
+        <div class="progress mb-3" role="progressbar" aria-label="Progress" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar progress-bar-striped progress-bar-animated" id="executeProgressBar"
+            style="width: 100%;">Working…</div>
+        </div>
+        <div class="border rounded" style="max-height: 260px; overflow: auto;">
+          <pre class="m-0 p-2 small" id="executeProgressLog" style="white-space: pre-wrap;"></pre>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="executeProgressHideBtn"
+          data-bs-dismiss="modal">Hide</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Flag Sequencing: node click (sequence badge) details modal -->
+<div class="modal fade" id="flowNodeFlagModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="flowNodeFlagModalTitle">Flag Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="flowNodeFlagModalBody" class="small text-muted">(no data)</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %} {# end content #}

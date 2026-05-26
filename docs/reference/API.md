@@ -1,0 +1,931 @@
+# ScenarioForge API
+
+This guide documents the HTTP surface exposed by the ScenarioForge web backend (`webapp/app_backend.py`) and the CLI entry point (`scenarioforge.cli`). Use it to script scenario management, trigger runs, download artifacts, and integrate with external systems.
+
+## Base Environment
+
+- **Default base URL:** `http://localhost:9090`
+- **Entry modules:**
+	- Web server: `python webapp/app_backend.py`
+	- CLI: `core-python -m scenarioforge.cli` (fall back to `python -m scenarioforge.cli` if `core-python` is unavailable)
+- **Artifacts:**
+	- Scenario XML snapshots: `outputs/scenarios-<timestamp>/`
+	- Run history index: `outputs/run_history.json`
+	- Reports: `./reports/scenario_report_<timestamp>.md`
+
+## Authentication
+
+The web UI uses cookie sessions. Script clients must authenticate once and reuse the cookie for subsequent requests.
+
+1. `POST /login`
+	 - Form fields: `username`, `password`
+	 - Success: HTTP 302 redirect to `/` with a `session` cookie.
+	 - Failure: HTTP 200 with an error message rendered in HTML.
+2. `POST /logout`
+	 - Clears the session and redirects to `/`.
+
+**First run:** The app may create a default admin user. Refer to the README for the bootstrap credentials and rotate them immediately.
+
+## Request & Response Conventions
+
+- JSON payloads and responses are UTF-8 encoded.
+- Unless noted, endpoints return `{ "ok": boolean, ... }` or redirect to HTML views.
+- File parameters must be provided using `multipart/form-data`.
+- Absolute paths are recommended (`os.path.abspath`). When a relative path is supplied, the server resolves it against the repo root where possible.
+- Safe-delete operations only touch files under `uploads/` or `outputs/`; reports in `./reports/` are preserved.
+- Planning preview results are cached in `outputs/plan_cache.json`, keyed by `(xml_hash, scenario, seed)`. Override the location with `TOPO_PLAN_CACHE_PATH`.
+
+## Endpoint Groups
+
+- [Health](#health)
+- [Scenario Lifecycle](#scenario-lifecycle)
+- [Planning Preview](#planning-preview)
+- [Flag Sequencing (Flow)](#flag-sequencing-flow)
+- [Run Execution & Reports](#run-execution--reports)
+- [Participant UI](#participant-ui)
+- [Script Inspection](#script-inspection)
+- [Docker Helpers](#docker-helpers)
+- [CORE Session Management](#core-session-management)
+- [Data Sources & Vulnerability Catalog](#data-sources--vulnerability-catalog)
+- [Generator Builder](#generator-builder)
+- [Generator Packs & Installed Generators](#generator-packs--installed-generators)
+- [Diagnostics & Maintenance](#diagnostics--maintenance)
+- [User Administration](#user-administration)
+
+### Health
+
+`GET /healthz`
+
+- Returns plain-text `OK` when the server is running.
+
+### Scenario Lifecycle
+
+`POST /load_xml`
+: Multipart upload (`scenarios_xml` `.xml` file). Loads the file into the editor state and renders the main page.
+
+`POST /save_xml`
+: Form field `scenarios_json` (stringified JSON). Persists the editor payload and re-renders the editor.
+
+- When `scenarios` contains one or more entries, the server writes per-scenario XML files under `outputs/scenarios-<timestamp>/`.
+- When `scenarios` is empty, the server preserves the empty editor snapshot and returns the editor view without generating XML.
+- Saved XML includes additive planning attributes (`base_nodes`, `combined_nodes`, `explicit_count`, etc.) for lossless round-tripping.
+
+`POST /save_xml_api`
+: JSON body `{ "scenarios": [...], "active_index"?: int }`.
+
+- With one or more scenarios, returns `{ "ok": true, "result_path": "/abs/path.xml", "scenario_paths_by_index": [...] }`.
+- With zero scenarios, returns `{ "ok": true, "result_path": null, "scenario_paths_by_index": [] }` and persists the empty editor snapshot without generating XML.
+- Invalid payloads still return `{ "ok": false, "error": "..." }` with HTTP 400/500.
+
+`GET /api/scenario/latest_xml`
+: Query `scenario=<name>`. Returns the latest saved XML path for the scenario: `{ "ok": true, "scenario": "...", "xml_path": "/abs/path.xml" }`.
+
+`GET /api/scenario/latest_state`
+: Query `scenario=<name>` and optional `xml_path=<abs_path>`. Returns the parsed scenario JSON state that the editor uses, plus top-level `core` settings. This is the easiest way for an LLM client to round-trip a saved XML back into structured JSON.
+
+Flow-state persistence notes for `save_xml` / `save_xml_api`:
+- When topology/IP planning changes are detected for a scenario, the server marks `flow_state.topology_dirty=true` and clears chain payload fields (`chain_ids=[]`, `length=0`, `flag_assignments=[]`, `flags_enabled=false`) so stale chains are not reused.
+- Flow persistence stores chain identity in `chain_ids`.
+
+`GET /api/host_interfaces`
+: Returns `{ "interfaces": [...] }` describing host NICs on the web host (`name`, `mac`, `ipv4`, `ipv6`, `mtu`, `speed`, `flags`, `is_up`). Requires `psutil`; if unavailable, returns an empty list with a warning in logs.
+
+`POST /api/host_interfaces`
+: JSON body `{ "core_secret_id": "...", "core_vm": { "vm_key": "node::vmid", "vm_name": "...", "vm_node": "...", "vmid": "...", "interfaces": [...] }, "include_down"?: bool }`. Enumerates network interfaces from the selected CORE VM over SSH using stored credentials. Response `{ "success": true, "interfaces": [...], "source": "core_vm", "metadata": { ... }, "fetched_at": "<iso8601>" }` includes Proxmox VM/interface metadata when MAC addresses match the supplied `core_vm.interfaces`. Only physical adapters (those backed by `/sys/class/net/<iface>/device`) are returned. Errors return `{ "success": false, "error": "..." }` with HTTP 4xx/5xx.
+
+`POST /upload_base`
+: Multipart upload (`base_xml`). Attaches a CORE base topology XML to the active scenario. Redirects to `/`.
+
+`POST /remove_base`
+: Optional `scenarios_json` to retain other edits while clearing the base topology. Renders the updated editor view.
+
+`GET /base_details`
+: Query `path=<abs_xml_path>`. Renders an HTML summary validating the CORE XML.
+
+### Planning Preview
+
+`POST /api/plan/preview_full`
+
+Generates a deterministic planning preview without starting a CORE session.
+
+**Request JSON**
+
+```json
+{
+	"xml_path": "/abs/path/to/scenarios.xml",
+	"scenario": "Scenario Name",        // optional
+	"seed": 12345                        // optional; random when omitted (returned in response)
+}
+```
+
+JSON-first preview is also supported without saving XML first:
+
+```json
+{
+	"scenarios": [{ "name": "Scenario 1", "node_info": {}, "routing": {}, "flow_state": {} }],
+	"core": { "host": "127.0.0.1", "port": 50051 },
+	"scenario": "Scenario 1",
+	"seed": 12345
+}
+```
+
+When `xml_path` is omitted and `scenarios` is provided, the server renders a temporary XML internally, computes the preview, and returns the same response shape. This is the most useful backend entry point for an LLM that wants to validate scenario structure before persisting XML.
+
+**Response JSON**
+
+```json
+{
+	"ok": true,
+	"full_preview": {
+		"routers": [...],
+		"hosts": [...],
+		"switches": [...],
+		"services_preview": {...},
+		"vulnerabilities_preview": {...},
+		"segmentation_preview": {...},
+		"traffic_preview": {...},
+		"seed": 12345,
+		"seed_generated": false
+	},
+	"plan": {
+		"role_counts": {"Workstation": 12, ...},
+		"routers_planned": 3,
+		"service_plan": {...},
+		"vulnerability_plan": {...},
+		"segmentation_plan": {...},
+		"traffic_plan": {...}
+	},
+	"breakdowns": {
+		"node": {...},
+		"router": {...},
+		"services": {...},
+		"vulnerabilities": {...},
+		"segmentation": {...},
+		"traffic": {...}
+	}
+}
+```
+
+**Notes**
+
+- `seed` is echoed or generated automatically. Store it to reproduce the same topology.
+- `r2s_policy_preview.per_router_bounds` includes min/max bounds when NonUniform host grouping is requested via XML attributes (`r2s_hosts_min`/`r2s_hosts_max`).
+- Exact aggregation (`r2s_mode=Exact` and `r2s_edges=1`) collapses hosts behind a single switch and ignores bounds.
+- Preview responses are cached; purge `outputs/plan_cache.json` to invalidate.
+
+`POST /api/plan/persist_flow_plan`
+: Request JSON `{ "xml_path": "/abs/path.xml", "scenario"?: "Name", "seed"?: 12345 }`. Computes the full preview and persists `PlanPreview` metadata into the XML. Returns `{ "ok": true, "xml_path": "...", "scenario": "...", "seed": 12345, "preview_plan_path": "/abs/path.xml" }`.
+
+`POST /api/planner/ensure_plan`
+: Lightweight helper that ensures a preview plan exists for a saved XML without writing extra plan files. Returns the same shape as `persist_flow_plan`.
+
+`GET /api/planner/latest_plan`
+: Query `scenario=<name>`. Returns the latest XML path associated with the scenario. Despite the name, `preview_plan_path` currently points at the scenario XML file because preview metadata is embedded in XML.
+
+### Flag Sequencing (Flow)
+
+These endpoints power the **Flow** page (Flag Sequencing) in the Web UI.
+
+Important notes:
+- The supported export format is **Attack Flow Builder native `.afb`**.
+- **Eligibility rules:** `flag-generators` are placed on vulnerability nodes only; `flag-node-generators` require non-vulnerability Docker-role nodes.
+- **Initial Facts / Goal Facts:** Flow accepts optional `initial_facts` and `goal_facts` overrides (artifacts + fields). Flag facts (`Flag(...)`) are filtered out.
+- **Sequencing algorithm:** Goal-aware scoring with pruning/backtracking (bounded by a 30s timeout) is used to select feasible generator assignments.
+
+`GET /api/flag-sequencing/attackflow_preview`
+: Returns a chain preview derived from the latest preview plan for the scenario. Response includes `chain`, `flag_assignments`, and validity metadata (`flow_valid`, `flow_errors`, `flags_enabled`).
+
+`GET /api/flag-sequencing/latest_preview_plan`
+: Query `scenario=<name>` and optional `xml_path=<abs_path>`. Returns whether the latest XML for that scenario already contains Flow-eligible preview metadata. This is a useful readiness check before asking for an attack-flow preview.
+
+Common query params:
+- `scenario=<name>` (optional; best to provide explicitly)
+- `length=<int>` (default 5)
+- `preset=<name>` (optional; forces a fixed chain)
+- `best_effort=1` (optional; clamps to available eligible nodes)
+- `debug_dag=1` (optional; include sequencing DAG diagnostics)
+
+`POST /api/flag-sequencing/prepare_preview_for_execute`
+: Resolves hint placeholders and materializes generator outputs for a chain (used for “Resolve hint values…” in the Flow UI).
+
+Request JSON (typical):
+```json
+{
+	"scenario": "My Scenario",
+	"length": 5,
+	"preset": "",
+	"chain_ids": ["n1", "n2"],
+	"preview_plan": "/abs/path/to/outputs/plans/plan_<scenario>.json",
+	"mode": "hint",
+	"best_effort": true,
+	"allow_node_duplicates": false,
+	"timeout_s": 30
+}
+```
+
+`POST /api/flag-sequencing/afb_from_chain`
+: Generates an Attack Flow Builder export for a user-specified ordered chain.
+
+Request JSON:
+```json
+{
+	"scenario": "My Scenario",
+	"chain": [{"id": "n1", "name": "Node 1"}, {"id": "n2", "name": "Node 2"}]
+}
+```
+
+Response JSON includes:
+- `afb` (an OpenChart DiagramViewExport document)
+- `attack_graph` (simple node/edge JSON derived from the chain)
+- `attack_graph_dot` (Graphviz DOT for the attack graph)
+- `attack_graph_pdf_base64` (base64-encoded PDF; requires Graphviz `dot`)
+- `flag_assignments` and validity metadata
+
+`POST /api/flag-sequencing/save_flow_substitutions`
+: Persists a user-edited chain + generator overrides into the canonical per-scenario plan `outputs/plans/plan_<scenario>.json`.
+
+Request JSON (typical):
+```json
+{
+	"scenario": "My Scenario",
+	"chain_ids": ["n1", "n2"],
+	"preview_plan": "/abs/path/to/outputs/plans/plan_<scenario>.json",
+	"allow_node_duplicates": false,
+	"flag_assignments": [
+		{
+			"node_id": "n1",
+			"id": "123",
+			"config_overrides": {"host_ip": "10.0.0.5"},
+			"output_overrides": {"Credential(user)": "alice"},
+			"inject_files_override": ["File(path) -> /opt/bin"],
+			"hint_overrides": ["Next: ..."],
+			"flag_override": "FLAG{OVERRIDE}",
+			"resolved_inputs": {"host_ip": "10.0.0.5"},
+			"resolved_outputs": {"Credential(user)": "alice"},
+			"flag_value": "FLAG{OVERRIDE}"
+		}
+	],
+	"initial_facts": {"artifacts": ["Knowledge(ip)"], "fields": ["host_ip"]},
+	"goal_facts": {"artifacts": ["Credential(user,password)"], "fields": []}
+}
+```
+
+`POST /api/flag-sequencing/upload_flow_input_file`
+: Uploads a file for a generator input override. Returns a stored file path to reference in `config_overrides`.
+
+`POST /api/flag-sequencing/upload_flow_inject_file`
+: Uploads a file for `inject_files_override`. Returns an `inject_value` token (`upload:<abs_path>`) that can be used in the override list.
+
+`POST /api/flag-sequencing/save_flow_state_to_xml`
+: Request JSON `{ "xml_path": "/abs/path.xml", "scenario": "Name", "flow_state": {...} }` or `{ "xml_path": "/abs/path.xml", "scenario": "Name", "clear": true }`. Persists the current Flow state directly into the XML under the scenario’s `FlagSequencing/FlowState` section. This is the endpoint that makes Flow assignments round-trip with saved XML.
+
+`POST /api/flag-sequencing/revalidate_flow`
+: Revalidates saved Flow outputs already embedded in XML. Use this after `save_flow_state_to_xml` if you want the backend to confirm the saved artifacts are still structurally valid.
+
+## LLM Scenario Authoring Workflow
+
+For an LLM integration whose goal is “produce valid scenario XML that loads into the editor and supports topology/Flow preview,” the current backend already supports a workable flow:
+
+1. Build Scenario Editor JSON in the same shape returned by `GET /api/scenario/latest_state`.
+2. Validate the scenario structurally with `POST /api/plan/preview_full` using inline `scenarios` + optional `core`.
+3. Persist the scenario to XML with `POST /save_xml_api`.
+4. Persist preview metadata into the XML with `POST /api/plan/persist_flow_plan`.
+5. Ask for Flow chain suggestions with `GET /api/flag-sequencing/attackflow_preview`.
+6. Save any chosen Flow overrides with `POST /api/flag-sequencing/save_flow_substitutions`.
+7. Write the Flow state back into the XML with `POST /api/flag-sequencing/save_flow_state_to_xml`.
+
+What this gives you today:
+- A backend-supported way to author Scenario Editor JSON and emit a valid XML file.
+- Deterministic topology planning before execution.
+- Flow preview and persisted Flow state embedded into XML.
+- Round-trip inspection via `latest_state`.
+
+What is still missing for a clean LLM integration:
+- A formally documented JSON schema for the full `scenarios[]` editor payload. Today the backend accepts it, but the contract is only implicit in UI state and parser code.
+- A dedicated “draft scenario” endpoint that validates editor JSON without first depending on UI-shaped objects.
+- Endpoint-level examples for common scenario patterns (basic topology, vulnerabilities, Flow-enabled scenario).
+- A smaller, stable API surface for non-browser clients so an LLM does not need to mimic the full editor state shape.
+
+### Generator Builder
+
+These endpoints power the **Generator-Builder** page in the Web UI.
+
+`GET /generator_builder`
+: HTML page for prompt-driven generator authoring with provider/model selection, scaffold file previews, local test execution, and direct README/docker-compose downloads.
+
+Intended workflow:
+- create a scaffold from an initial prompt
+- run a local builder test
+- refine the current scaffold with a follow-up prompt and the last test result as context
+- test again
+- add the current scaffold directly to the Flag Catalog when ready
+
+`POST /api/generators/ai_scaffold`
+: Prompt-driven authoring endpoint used by the Generator Builder page. It calls the selected AI provider, expects strict JSON scaffold output, normalizes that payload, and returns previewable scaffold files.
+
+This endpoint supports both:
+- initial scaffold creation
+- iterative refinement by passing the current scaffold/files and latest test result back into the prompt context
+
+Example request:
+
+```json
+{
+	"plugin_type": "flag-generator",
+	"source_id_hint": "ssh_creds_drop",
+	"name_hint": "SSH Credentials Drop",
+	"prompt": "Build a deterministic SSH credential generator with Knowledge(ip) as required input.",
+	"provider": "ollama",
+	"base_url": "http://127.0.0.1:11434",
+	"model": "qwen2.5:7b",
+	"api_key": "",
+	"enforce_ssl": true
+}
+```
+
+Response shape:
+- `ok`
+- `provider`, `base_url`, `model`
+- `assistant_json`: parsed JSON object returned by the model
+- `assistant_text`: raw assistant text used for parsing/debugging
+- `scaffold_request`: normalized request body compatible with `/api/generators/scaffold_meta` and `/api/generators/scaffold_zip`
+- `folder_path`, `manifest_yaml`, `scaffold_paths`, `files`
+
+Optional iterative request fields:
+- `current_scaffold_request`: the current normalized scaffold request
+- `current_files`: current scaffold files keyed by relative path
+- `last_test_result`: latest `/api/generators/builder_test` response payload (or a subset)
+
+`POST /api/generators/builder_test`
+: Runs a newly generated scaffold locally without first installing it as a generator pack.
+
+Request JSON:
+
+```json
+{
+	"scaffold_request": {
+		"plugin_type": "flag-node-generator",
+		"plugin_id": "demo_nodegen",
+		"folder_name": "py_demo_nodegen",
+		"name": "Demo NodeGen",
+		"description": "demo",
+		"requires": [],
+		"produces": ["Flag(flag_id)"],
+		"runtime_inputs": [
+			{"name": "seed", "type": "string", "required": true},
+			{"name": "node_name", "type": "string", "required": true}
+		],
+		"generator_py_text": "..."
+	},
+	"config": {
+		"seed": "demo-seed",
+		"node_name": "node1"
+	}
+}
+```
+
+Behavior:
+- Stages the scaffold into a temporary repo-like directory under `outputs/`
+- Runs `scripts/run_flag_generator.py` with `--repo-root <tempdir>`
+- Returns stdout/stderr and the produced output files as JSON
+
+Response fields:
+- `ok`, `returncode`
+- `plugin_id`, `plugin_type`, `folder_path`
+- `config`
+- `stdout`, `stderr`
+- `files`: generated files from the test output directory, including small text file contents when available
+
+`POST /api/generators/install_generated`
+: Installs the current scaffold directly into the installed Generator Packs catalog without requiring the user to manually download and re-upload a ZIP.
+
+Request JSON:
+
+```json
+{
+	"pack_label": "My Generated Pack",
+	"scaffold_request": {
+		"plugin_type": "flag-generator",
+		"plugin_id": "demo",
+		"folder_name": "py_demo",
+		"name": "My Generated Pack",
+		"description": "demo",
+		"requires": [],
+		"produces": ["Flag(flag_id)"]
+	}
+}
+```
+
+Response JSON:
+- `ok`
+- `message`
+- `pack_label`
+
+`POST /api/generators/scaffold_meta`
+: JSON request describing the generator you want. Returns `{ ok, manifest_yaml, scaffold_paths }`.
+
+UI terminology:
+- The Generator Builder page labels artifact dependencies as **Inputs (artifacts)** and **Outputs (artifacts)**.
+- The API field names remain `requires` / `optional_requires` / `produces` to match generator manifest fields.
+
+Example request:
+
+```json
+{
+	"plugin_type": "flag-generator",
+	"plugin_id": "my_ssh_creds",
+	"folder_name": "py_my_ssh_creds",
+	"name": "SSH Credentials",
+	"description": "Emits deterministic SSH credentials.",
+	"requires": [
+		{"artifact": "Credential(user)", "optional": true},
+		{"artifact": "Credential(user, password)", "optional": false}
+	],
+	"optional_requires": [],
+	"produces": ["Flag(flag_id)", "Credential(user)", "Credential(user, password)"],
+	"runtime_inputs": [
+		{"name": "seed", "type": "string", "required": true},
+		{"name": "secret", "type": "string", "required": true, "sensitive": true},
+		{"name": "flag_prefix", "type": "string", "required": false}
+	],
+	"hint_templates": ["Next: SSH using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"],
+	"inject_files": ["File(path)"],
+	"inject_candidate_paths": ["/opt/uploads", "/var/www/html"],
+	"access_instructions": {
+		"title": "SSH Access",
+		"steps": [
+			{
+				"step": 1,
+				"title": "Connect",
+				"instructions": "SSH to {{NODE}} using {{USER}} / {{PASSWORD}}.",
+				"vars": {
+					"NODE": "node_name",
+					"USER": "Credential(user)",
+					"PASSWORD": "Credential(user, password)"
+				}
+			}
+		]
+	},
+	"compose_text": "(optional full docker-compose.yml override)",
+	"readme_text": "(optional full README.md override)",
+	"generator_py_text": "(optional full generator.py override)"
+}
+```
+
+Notes:
+- `requires` accepts either a list of strings or a list of objects `{ artifact, optional }`; items with `optional: true` are written into `artifacts.optional_requires` in the manifest.
+- `runtime_inputs` is the preferred way to define manifest runtime inputs. The older `inputs` boolean flag map still works for standard fields such as `seed`, `secret`, `node_name`, and `flag_prefix`.
+- `inject_files` is optional; when present it is written into `manifest.yaml` as `injects`.
+- `inject_candidate_paths` is optional; when present it is written into `manifest.yaml` and must contain absolute destination paths without `..` segments.
+- `access_instructions` is optional but recommended for interactive generators; when present it is written into `manifest.yaml` and rendered in participant/facilitator guides.
+- `generator_py_text` lets callers override the default scaffolded `generator.py` body while still using the builder's manifest and ZIP conventions.
+- For `flag-node-generator`, the scaffold automatically ensures `File(path)` appears in `artifacts.produces` so the generated pack remains compatible with the node-generator runtime contract.
+- Optional destination directory syntax: `inject_files: ["File(path) -> /opt/bin"]`. If omitted or invalid, files default to `/tmp`.
+
+`POST /api/generators/scaffold_zip`
+: Same JSON request body as `/api/generators/scaffold_meta`, but returns a ZIP you can import as a Generator Pack or unpack into a scratch workspace.
+
+Registering the scaffolded generator:
+- The scaffold ZIP creates a folder under `flag_generators/<folder>/...` or `flag_node_generators/<folder>/...` inside the Generator Pack layout.
+- Package/install workflow: add a `manifest.yaml` to the generator folder, zip it as a Generator Pack, and install it via the Flag Catalog page.
+
+### Generator Packs & Installed Generators
+
+These endpoints support Generator Packs (ZIP files) and the installed generator set used by the Web UI + Flow.
+
+Important behavior:
+- Installed generators live under `outputs/installed_generators/`.
+- On install, each generator is assigned a **new numeric ID** (string) and the installed `manifest.yaml` is rewritten to that ID.
+- Packs and generators can be disabled; disabled generators are rejected by Flow preview/execute.
+
+#### Pack lifecycle (HTML form endpoints)
+
+`POST /generator_packs/upload`
+: Multipart form with `zip_file` (a `.zip`). Installs a pack and redirects back to the Flag Catalog page. If called with `X-Requested-With: XMLHttpRequest`, returns JSON `{ ok, message|error }`.
+
+`POST /generator_packs/import_url`
+: Form field `zip_url` (HTTP/HTTPS URL to a `.zip`). Downloads and installs the pack.
+
+`POST /generator_packs/delete/<pack_id>`
+: Uninstalls the pack. Deletes installed generator directories recorded in the pack state (scoped to the installed-generators root).
+
+`POST /generator_packs/set_disabled/<pack_id>`
+: Toggles pack disabled state (form endpoint).
+
+`GET /generator_packs/download/<pack_id>`
+: Downloads a ZIP representing the installed pack (including installed manifests).
+
+`GET /generator_packs/export_all`
+: Downloads a bundle ZIP containing one ZIP per installed pack under `packs/<pack_id>.zip`.
+
+#### Pack/generator disable + delete (JSON endpoints)
+
+`POST /api/generator_packs/set_disabled`
+: JSON `{ "pack_id": "...", "disabled": true|false }`.
+
+`POST /api/flag_generators/set_disabled`
+: JSON `{ "generator_id": "...", "disabled": true|false }`.
+
+`POST /api/flag_node_generators/set_disabled`
+: JSON `{ "generator_id": "...", "disabled": true|false }`.
+
+`POST /api/flag_generators/delete`
+: JSON `{ "generator_id": "..." }`. Deletes an installed flag-generator.
+
+`POST /api/flag_node_generators/delete`
+: JSON `{ "generator_id": "..." }`. Deletes an installed flag-node-generator.
+
+#### Installed generator listings
+
+`GET /flag_generators_data`
+: Returns `{ "generators": [...], "errors": [...] }` for installed flag-generators (manifest-based). Generator entries may include `_pack_id`, `_pack_label`, and `_disabled`.
+
+`GET /flag_node_generators_data`
+: Returns `{ "generators": [...], "errors": [...] }` for installed flag-node-generators (manifest-based).
+
+### Generator Tests (Flag Catalog)
+
+These endpoints back the **Test** button in the Flag Catalog UI. Tests can run either:
+- locally (inside the webapp host), or
+- remotely on a CORE VM (via SSH) when the request includes a `core` JSON payload.
+
+`POST /flag_generators_test/run`
+: Multipart form (text + file uploads).
+	- Required field: `generator_id`
+	- Optional field: `core` (JSON string containing SSH/gRPC config; when present, the generator runs on the CORE VM)
+	- Additional fields: generator-declared input names (from manifest `inputs[]`)
+
+Returns `{ ok, run_id, saved_uploads }`.
+
+`POST /flag_node_generators_test/run`
+: Same as `/flag_generators_test/run`, but runs a `flag-node-generator`.
+
+Artifacts/logs for generator tests:
+
+`GET /flag_generators_test/outputs/<run_id>`
+: Returns `{ ok, inputs, outputs, misc, done, returncode }` for the run directory.
+
+`GET /flag_generators_test/download/<run_id>?p=<rel_path>`
+: Downloads a file under the run directory.
+
+`GET /flag_node_generators_test/outputs/<run_id>`
+: Same as flag generator outputs, for node-generator runs.
+
+`GET /flag_node_generators_test/download/<run_id>?p=<rel_path>`
+: Downloads a file under the node-generator run directory.
+
+`POST /flag_node_generators_test/cleanup/<run_id>`
+: Deletes the run artifacts (scoped to `outputs/`).
+
+Parity note:
+- Generator tests exercise `scripts/run_flag_generator.py` directly.
+- They validate generator output/inject staging, but do not start a full CORE topology session.
+
+### Run Execution & Reports
+
+`POST /run_cli`
+: Form field `xml_path` (absolute path). Runs the CLI synchronously with forwarded args `--xml`, `--host`, `--port`, `--verbose` (values derived from the saved XML when available). Returns the main page with logs. Side effects:
+
+- Markdown report written to `./reports/`
+- JSON summary (`scenario_report_<timestamp>.json`) next to the report with counts and metadata
+- Router aggregation metrics appended when routers are generated
+- Pre/post CORE session XML captured under `outputs/core-sessions/` when available
+- Run history appended to `outputs/run_history.json`
+
+`POST /run_cli_async`
+: Same args as synchronous run. Returns `{ "run_id": "<uuid>" }` immediately and writes logs to `outputs/scenarios-<timestamp>/cli-<run_id>.log`.
+
+`GET /run_status/<run_id>`
+: Polling endpoint returning:
+
+```json
+{
+	"done": false,
+	"returncode": null,
+	"report_path": null,
+	"xml_path": null,
+	"log_path": "outputs/.../cli-<run_id>.log",
+	"scenario_xml_path": "outputs/.../scenarios.xml",
+	"pre_xml_path": null,
+	"full_scenario_path": null
+}
+```
+
+Polling semantics:
+- `404` means the run id is unknown/stale and should be treated as terminal by clients (stop polling and surface a clear status).
+
+When a run completes and validation finds issues, `validation_summary.error_logs` includes downloadable `.log` artifacts (for example `docker_not_running.log`, `injects_missing.log`, and `run_output.log`) with `url` fields that point to `/download_report?path=...`.
+
+Parity note:
+- Generator Test endpoints and Execute should be treated as complementary checks.
+- Authors should validate both local Test and full Execute paths before considering a generator pack production-ready.
+
+`GET /stream/<run_id>`
+: Server-Sent Events (SSE) endpoint streaming live CLI log lines for async runs.
+
+`POST /cancel_run/<run_id>`
+: Attempts to terminate a running async job.
+
+`GET /reports`
+: Renders the Reports UI.
+
+`GET /reports_data`
+: Returns `{ "history": [...], "scenarios": [...] }`, combining run metadata and known scenario files. Each history entry includes `timestamp`, `mode`, `returncode`, `scenario_xml_path`, `report_path`, `pre_xml_path`, `post_xml_path`, `full_scenario_path`, `run_id`, and parsed `scenario_names`.
+
+`GET /download_report?path=<path>`
+: Streams a report or artifact file. Accepts absolute or repo-relative paths.
+
+`POST /reports/delete`
+: JSON body `{ "run_ids": ["..."] }`. Removes matching run history entries and deletes their artifacts under `outputs/`. Reports in `./reports/` remain untouched. Responds with `{ "deleted": <count> }`.
+
+`POST /purge_history_for_scenario`
+: JSON body `{ "name": "Scenario" }`. Removes all history entries tied to the scenario name and deletes associated artifacts under `outputs/`. Returns `{ "removed": <count>, "error"?: string }`.
+
+**Report path detection:** The backend parses the CLI log line `Scenario report written to ...`. If missing, it falls back to the most recent `./reports/scenario_report_*.md`.
+
+### Participant UI
+
+`GET /participant-ui`
+: Renders the Participant Console page.
+
+Selection precedence:
+- If `?scenario=<name>` is provided, that incoming scenario selection is prioritized.
+- Otherwise, the client restores the last locally remembered scenario selection.
+- If neither is available, the first listed scenario is selected.
+
+`GET /participant-ui/details`
+: Returns the scenario status/details JSON used by the Participant dashboard cards (`gateway`, execute status, session info, counts, subnets, vulnerability IPs).
+
+`GET /participant-ui/topology`
+: Returns graph JSON (`nodes`, `links`, optional `flow`) derived from the latest session XML for the selected scenario.
+
+`GET /participant-ui/gateway`
+: Returns `{ "ok": true, "scenario_norm": "...", "nearest_gateway": "..." }`.
+
+`GET /participant-ui/stats`
+: Returns per-scenario and global Participant open stats.
+
+`POST /participant-ui/record-open`
+: JSON `{ "scenario_norm": "...", "href": "..." }`. Records open counters/timestamps.
+
+`GET /participant-ui/open`
+: Resolves and redirects to the participant URL for a scenario. Returns `404` when no URL is configured.
+
+### Script Inspection
+
+`GET /api/open_scripts`
+: Query params `kind=traffic|segmentation` (default `traffic`), `scope=runtime|preview` (default `runtime`). Returns `{ "ok": true, "kind": "traffic", "scope": "runtime", "path": "/tmp/traffic", "files": [...] }`.
+
+`GET /api/open_script_file`
+: Same parameters, plus `file=<filename>`. Returns `{ "content": "...", "truncated": false }` with up to 8KB per request.
+
+`GET /api/download_scripts`
+: Same parameters, responds with a ZIP archive containing the filtered scripts.
+
+### Docker Helpers
+
+`GET /docker/status`
+: Enumerates tracked Docker assignments with compose status:
+
+```json
+{
+	"items": [{
+		"name": "node1",
+		"compose": "docker-compose.yml",
+		"exists": true,
+		"pulled": false,
+		"container_exists": false,
+		"running": false
+	}],
+	"timestamp": 1733422330
+}
+```
+
+`POST /docker/cleanup`
+: Optional JSON body `{ "names": ["node1"] }`. Stops and removes containers via `docker stop` / `docker rm`, returning `{ "ok": true, "results": [{ "name": "node1", "stopped": true, "removed": true }] }`.
+
+### CORE Session Management
+
+`GET /core`
+: Renders the CORE session dashboard.
+
+`GET /core/data`
+: Returns `{ "sessions": [...], "xmls": [...] }`. Sessions include gRPC metadata (id, state, node count, backing XML). XML entries list discovered CORE files and their validation status.
+
+`POST /core/upload`
+: Multipart field `xml_file`. Saves validated CORE XML under `uploads/core/`.
+
+`POST /core/start`
+: Form field `path=<abs_xml_path>`. Starts a new CORE session using the provided XML.
+
+`POST /core/stop`
+: Form field `session_id=<int>`.
+
+`POST /core/delete`
+: Form fields:
+	- `session_id` (optional) to delete a running CORE session
+	- `path` (optional) to remove a CORE XML under `uploads/` or `outputs/`
+
+`GET /core/details`
+: Query parameters `path=<abs_xml_path>` and/or `session_id=<int>`. Renders validation results. When only `session_id` is provided, the server exports the current session XML for inspection.
+
+`POST /core/save_xml`
+: Form field `session_id=<int>`. Saves the running session’s XML into `outputs/core-sessions/` and streams it back as a download.
+
+`POST /core/start_session`
+: Form field `session_id=<int>` to start an existing session.
+
+`GET /core/session/<sid>`
+: Convenience view for a single session.
+
+`POST /test_core`
+: Form or JSON body with `host` (string) and `port` (int). Returns `{ "ok": true }` when gRPC connectivity succeeds.
+
+`GET /vuln_catalog`
+: Returns the vulnerability catalog as JSON (types/vectors/items).
+
+`GET /vuln_catalog_page`
+: HTML page that mirrors the Flag Catalog pack UX, but for vulnerability catalog packs.
+
+`POST /vuln_catalog_packs/upload`
+: Form upload endpoint. Expects multipart field `zip_file` containing a ZIP with directories/subdirectories.
+	Each valid vulnerability directory must include `docker-compose.yml`. The server extracts the ZIP and
+	generates a `vuln_list_w_url.csv` for selection.
+
+`POST /vuln_catalog_packs/import_url`
+: Form endpoint. Field `zip_url` points to a ZIP containing compose directories.
+
+`GET /vuln_catalog_packs/download/<catalog_id>`
+: Downloads the previously uploaded ZIP.
+
+`GET /vuln_catalog_packs/browse/<catalog_id>`
+: HTML directory browser for the extracted pack content.
+
+`GET /vuln_catalog_packs/browse/<catalog_id>/<subpath>`
+: Browse a subdirectory under the extracted content.
+
+`GET /vuln_catalog_packs/file/<catalog_id>/<subpath>`
+: Download a specific extracted file.
+
+`POST /vuln_catalog_packs/set_active/<catalog_id>`
+: Marks the selected catalog pack as active.
+
+`POST /vuln_catalog_packs/delete/<catalog_id>`
+: Deletes the selected catalog pack.
+
+### Vulnerability Catalog Item Tests
+
+These endpoints back the **Test** action in the Vuln-Catalog UI. When CORE VM credentials are provided, the test runs on the CORE VM and performs an offline-friendly preflight (build wrapper images, pull pull-only images, create containers with `--no-start`, then start with `--no-build`).
+
+`POST /vuln_catalog_items/test/start`
+: JSON body containing:
+	- `item_id` (int)
+	- `core` (object): CORE VM SSH/gRPC config (required)
+	- `force_replace` (bool, optional): remove existing conflicting images/containers on the CORE VM
+
+Returns `{ ok, run_id }` on success, or `{ ok: true, replace_required: true, existing_images, existing_containers }` when replacement confirmation is required.
+
+`POST /vuln_catalog_items/test/status`
+: JSON `{ run_id }` returning `{ ok, done, cleanup_started, cleanup_done }`.
+
+`POST /vuln_catalog_items/test/stop`
+: JSON `{ run_id, ok?: true|false|null }` to stop and cleanup the remote compose. `ok=null` marks the validation status as incomplete.
+
+`POST /vuln_catalog_items/test/stop_active`
+: Stops the currently running vulnerability test (if any) with `{ ok?: true|false|null }`.
+
+`POST /vuln_compose/status`
+: JSON `{ "items": [{ "Name": "Node1", "Path": "...", "compose"?: "docker-compose.yml" }] }`. Returns `{ "items": [...], "log": [...] }` with compose availability and Docker pull state.
+
+`POST /vuln_compose/download`
+: Same payload. Supports GitHub URLs (cloned via `git`), direct download URLs, and local compose paths (as produced by installed vulnerability packs). Responds with `{ "items": [...], "log": [...] }` summarizing results.
+
+`POST /vuln_compose/pull`
+: Performs `docker compose pull` for each item. Requires Docker CLI access.
+
+`POST /vuln_compose/remove`
+: Runs `docker compose down --volumes --remove-orphans`, removes images, and deletes downloaded directories under `outputs/`.
+
+### Diagnostics & Maintenance
+
+`GET /diag/modules`
+: Returns imported module metadata to help troubleshoot environment issues.
+
+`POST /admin/cleanup_pycore`
+: Removes stale `/tmp/pycore.*` directories. Response `{ "ok": true, "removed": [...], "kept": [...], "active_session_ids": [...] }`.
+
+### User Administration
+
+`GET /users`
+: Admin-only view listing users.
+
+`POST /users`
+: Form fields `username`, `password`, `role` (`user`|`admin`, default `user`). Fails with a flash error if the username already exists.
+
+`POST /users/delete/<username>`
+: Removes the specified user (admin only).
+
+`POST /users/password/<username>`
+: Admin resets another user’s password. Form field `password` (new value).
+
+`GET /me/password`
+: Renders self-service password form.
+
+`POST /me/password`
+: Form fields `current_password`, `password`. Allows users to update their own credential.
+
+## CLI Reference (`scenarioforge.cli`)
+
+Invoke from the repo root to ensure generated reports land in `./reports/`:
+
+```bash
+core-python -m scenarioforge.cli --xml /abs/path/scenarios.xml --verbose
+```
+
+### Core Arguments
+
+- `--xml` (required): Scenario XML path.
+- `--scenario`: Scenario name (defaults to the first in the file).
+- `--host`, `--port`: CORE gRPC endpoint (defaults `127.0.0.1:50051`).
+- `--prefix`: IPv4 prefix for auto-assigned addresses (default `10.0.0.0/24`).
+- `--ip-mode`: `private | mixed | public` (default `private`).
+- `--ip-region`: `all | na | eu | apac | latam | africa | middle-east` (default `all`).
+- `--max-nodes`: Hard cap on node creation.
+- `--verbose`: Enables debug logging.
+- `--seed`: RNG seed for deterministic randomness.
+- `--layout-density`: `compact | normal | spacious` (default `normal`).
+- `--router-mesh-style`: `full | ring | tree` (fallback when routing items omit `r2r_mode`).
+
+### Traffic Overrides
+
+- `--traffic-pattern`: `continuous | burst | periodic | poisson | ramp`
+- `--traffic-rate`: Float KB/s
+- `--traffic-period`: Float seconds
+- `--traffic-jitter`: Float percentage (0–100)
+- `--traffic-content`: `text | photo | audio | video`
+
+### Segmentation & Allow Rules
+
+- `--allow-src-subnet-prob`: Float 0–1 (default 0.3)
+- `--allow-dst-subnet-prob`: Float 0–1 (default 0.3)
+- `--nat-mode`: `SNAT | MASQUERADE` (default `SNAT`)
+- `--dnat-prob`: Float 0–1 (default 0.0)
+- `--seg-include-hosts`: Include hosts when deriving segmentation rules.
+- `--seg-allow-docker-ports`: Ensure host INPUT chains allow docker-compose ports when default deny is applied.
+
+### Planning Metadata Integration
+
+- CLI automatically parses additive planning metadata via `parse_planning_metadata`. Detected values are merged into scenario metadata with a `plan_` prefix and appear in reports under **Planning Metadata (from XML)**.
+- CORE host/port defaults are overridden by `core.host` and `core.port` saved in the editor payload when present.
+- Extend the web backend if additional CLI flags must be surfaced to the UI.
+
+## Routing Connectivity Example
+
+```xml
+<section name="Routing" density="0.5">
+	<!-- Balanced degree distribution among density-derived routers -->
+	<item selected="OSPF" factor="1" r2r_mode="Uniform" />
+	<!-- Two absolute routers with NonUniform aggregation targeting five hosts per switch -->
+	<item selected="BGP" v_metric="Count" v_count="2" r2r_mode="NonUniform"
+				r2s_mode="aggregate" r2s_edges="5" />
+</section>
+```
+
+- Density `0.5` over 12 base hosts yields 6 density routers.
+- Two `Count` routers bring the total to `min(total_hosts, 6 + 2)`.
+- NonUniform aggregation introduces additional layer-2 switches sized to approximately five hosts each.
+
+## Planning Metadata Quick Reference
+
+The web UI writes additive planning attributes onto section tags to support round-tripping and external tooling.
+
+### Node Information Section
+
+- `base_nodes`: Density-derived hosts.
+- `additive_nodes`: Hosts from Count rows.
+- `combined_nodes`: Total planned hosts (`base_nodes + additive_nodes`).
+- `weight_rows` / `count_rows`: Row counts by type.
+- `weight_sum`: Sum of weight factors.
+
+### Routing & Vulnerabilities Sections
+
+- `explicit_count`: Count-based entries with absolute values.
+- `derived_count`: Density-derived totals.
+- `total_planned`: `explicit_count + derived_count`.
+- `weight_rows`, `count_rows`, `weight_sum`: Analogous to Node Information.
+
+### Parsing Helper
+
+```python
+from scenarioforge.parsers.planning_metadata import parse_planning_metadata
+
+meta = parse_planning_metadata("outputs/scenarios-123/scenarios.xml", "Scenario 1")
+print(meta["node_info"]["combined_nodes"])
+```
+
+
+### Experimental Sections (Services / Traffic / Segmentation)
+
+- Currently expose structural placeholders (`explicit_count`, `weight_rows`, `count_rows`, `weight_sum`).
+- Derived totals may be added in future releases as semantics mature.
+

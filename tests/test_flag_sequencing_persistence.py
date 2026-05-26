@@ -1,0 +1,1090 @@
+import json
+import os
+import shutil
+import tempfile
+import uuid
+
+from webapp import app_backend
+
+
+IMPORTED_FLAG_GENERATOR_ID = 'imported_saved_flag_generator'
+IMPORTED_NODE_GENERATOR_ID = 'imported_saved_node_generator'
+
+
+def _install_imported_flow_catalog(monkeypatch) -> None:
+    flag_gen = {
+        'id': IMPORTED_FLAG_GENERATOR_ID,
+        'name': 'Imported Saved Flag Generator',
+        'language': 'python',
+        '_source_name': 'test-imported-catalog',
+        'inputs': [],
+        'outputs': [{'name': 'network.ip'}],
+        'inject_files': ['File(path)'],
+    }
+    node_gen = {
+        'id': IMPORTED_NODE_GENERATOR_ID,
+        'name': 'Imported Saved Node Generator',
+        'language': 'python',
+        '_source_name': 'test-imported-catalog',
+        'inputs': [{'name': 'network.ip', 'required': True}],
+        'outputs': [{'name': 'credential.pair'}],
+    }
+    plugins_by_id = {
+        IMPORTED_FLAG_GENERATOR_ID: {
+            'plugin_id': IMPORTED_FLAG_GENERATOR_ID,
+            'plugin_type': 'flag-generator',
+            'requires': [],
+            'produces': [{'artifact': 'network.ip'}],
+        },
+        IMPORTED_NODE_GENERATOR_ID: {
+            'plugin_id': IMPORTED_NODE_GENERATOR_ID,
+            'plugin_type': 'flag-node-generator',
+            'requires': ['network.ip'],
+            'produces': [{'artifact': 'credential.pair'}],
+        },
+    }
+
+    monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_gen], []))
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_gen], []))
+    monkeypatch.setattr(app_backend, '_flow_enabled_plugin_contracts_by_id', lambda: plugins_by_id)
+
+
+def _seed_xml_plan(scenario: str, full_preview: dict, flow_meta: dict | None = None) -> tuple[str, str]:
+        td = tempfile.mkdtemp(prefix="coretg-flow-persist-")
+        xml_path = os.path.join(td, f"{scenario}.xml")
+        xml = f"""<Scenarios>
+    <Scenario name='{scenario}'>
+        <ScenarioEditor>
+            <section name='Node Information'>
+                <item selected='Docker' v_metric='Count' v_count='2'/>
+            </section>
+            <section name='Routing' density='0.0'></section>
+            <section name='Services' density='0.0'></section>
+            <section name='Vulnerabilities' density='0.0'></section>
+            <section name='Segmentation' density='0.0'></section>
+            <section name='Traffic' density='0.0'></section>
+        </ScenarioEditor>
+    </Scenario>
+</Scenarios>"""
+        with open(xml_path, "w", encoding="utf-8") as f:
+                f.write(xml)
+
+        payload = {
+                "full_preview": full_preview,
+                "metadata": {
+                        "xml_path": xml_path,
+                        "scenario": scenario,
+                        "seed": full_preview.get("seed"),
+                },
+        }
+        if isinstance(flow_meta, dict) and flow_meta:
+                payload["metadata"]["flow"] = flow_meta
+        ok, err = app_backend._update_plan_preview_in_xml(xml_path, scenario, payload)
+        assert ok, err
+        if isinstance(flow_meta, dict) and flow_meta:
+                ok2, err2 = app_backend._update_flow_state_in_xml(xml_path, scenario, flow_meta)
+                assert ok2, err2
+        return xml_path, td
+
+
+def test_flag_sequencing_attackflow_preview_reuses_saved_flow_assignments(tmp_path, monkeypatch):
+    _install_imported_flow_catalog(monkeypatch)
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    # Authenticate (Flow endpoints are protected under /api/).
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f"zz-test-flow-{uuid.uuid4().hex[:10]}"
+
+    # Create a minimal preview plan payload with two docker hosts and embedded flow metadata.
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': 'h1', 'name': 'host-1', 'role': 'Docker', 'vulnerabilities': []},
+            {'node_id': 'h2', 'name': 'host-2', 'role': 'Docker', 'vulnerabilities': [{'id': 'dummy'}]},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    saved_chain = [
+        {'id': 'h2', 'name': 'host-2', 'type': 'docker'},
+        {'id': 'h1', 'name': 'host-1', 'type': 'docker'},
+    ]
+    saved_assignments = [
+        {
+            'node_id': 'h2',
+            'id': IMPORTED_FLAG_GENERATOR_ID,
+            'name': 'Saved Gen 2',
+            'type': 'flag-generator',
+            'hint': 'saved hint 2',
+            'outputs': ['network.ip'],
+        },
+        {
+            'node_id': 'h1',
+            'id': IMPORTED_NODE_GENERATOR_ID,
+            'name': 'Saved Gen 1',
+            'type': 'flag-node-generator',
+            'hint': 'saved hint 1',
+            'inputs': ['network.ip'],
+            'outputs': ['credential.pair'],
+        },
+    ]
+
+    plan_path, plan_dir = _seed_xml_plan(
+        scenario,
+        full_preview,
+        flow_meta={
+            'scenario': scenario,
+            'length': 2,
+            'chain': saved_chain,
+            'flag_assignments': saved_assignments,
+            'modified_at': '2026-01-06T00:00:00Z',
+        },
+    )
+
+    try:
+        # Now fetch preview using this plan explicitly.
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 2,
+            'preview_plan': plan_path,
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data and data.get('ok') is True
+
+        # Chain order should match saved chain.
+        chain = data.get('chain') or []
+        assert [c.get('id') for c in chain] == ['h2', 'h1']
+
+        # Assignments should be the persisted ones (not recomputed).
+        fas = data.get('flag_assignments') or []
+        assert [fa.get('id') for fa in fas] == [IMPORTED_FLAG_GENERATOR_ID, IMPORTED_NODE_GENERATOR_ID]
+        hints = [fa.get('hint') for fa in fas]
+        assert all(isinstance(h, str) and h.strip() for h in hints)
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def test_flag_sequencing_reload_with_default_length_does_not_break_saved_chain(tmp_path, monkeypatch):
+    """If the UI reloads with the default length, a shorter saved chain should still load."""
+    _install_imported_flow_catalog(monkeypatch)
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f"zz-test-flow-len-{uuid.uuid4().hex[:10]}"
+
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': 'h1', 'name': 'host-1', 'role': 'Docker', 'vulnerabilities': []},
+            {'node_id': 'h2', 'name': 'host-2', 'role': 'Docker', 'vulnerabilities': ['xstream/CVE-2021-29505']},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    saved_chain = [
+        {'id': 'h2', 'name': 'host-2', 'type': 'docker'},
+        {'id': 'h1', 'name': 'host-1', 'type': 'docker'},
+    ]
+    saved_assignments = [
+        {
+            'node_id': 'h2',
+            'id': IMPORTED_FLAG_GENERATOR_ID,
+            'name': 'Saved Gen 2',
+            'type': 'flag-generator',
+            'hint': 'saved hint 2',
+            'outputs': ['network.ip'],
+        },
+        {
+            'node_id': 'h1',
+            'id': IMPORTED_NODE_GENERATOR_ID,
+            'name': 'Saved Gen 1',
+            'type': 'flag-node-generator',
+            'hint': 'saved hint 1',
+            'inputs': ['network.ip'],
+            'outputs': ['credential.pair'],
+        },
+    ]
+
+    plan_path, plan_dir = _seed_xml_plan(
+        scenario,
+        full_preview,
+        flow_meta={
+            'scenario': scenario,
+            'length': 2,
+            'chain': saved_chain,
+            'flag_assignments': saved_assignments,
+            'modified_at': '2026-01-06T00:00:00Z',
+        },
+    )
+
+    try:
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            # Simulate a page reload where the length input defaulted back to 5.
+            'length': 5,
+            'preview_plan': plan_path,
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data and data.get('ok') is True
+        assert data.get('length') == 2
+        chain = data.get('chain') or []
+        assert [c.get('id') for c in chain] == ['h2', 'h1']
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def test_flow_state_flag_inject_roundtrip_saved_and_loaded_from_xml(tmp_path, monkeypatch):
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario_name = 'FlowRoundtripScenario'
+    scenario_norm = app_backend._normalize_scenario_label(scenario_name)
+
+    xml_path = tmp_path / f'{scenario_name}.xml'
+    xml_path.write_text(
+        '<Scenarios>'
+        f'<Scenario name="{scenario_name}"><ScenarioEditor/></Scenario>'
+        '</Scenarios>',
+        encoding='utf-8',
+    )
+
+    # Ensure participant topology resolves this scenario to our test XML.
+    monkeypatch.setattr(
+        app_backend,
+        '_latest_xml_path_for_scenario',
+        lambda norm: str(xml_path) if norm == scenario_norm else None,
+    )
+
+    flow_state = {
+        'chain_ids': ['live-proof'],
+        'flag_assignments': [
+            {
+                'chain_id': 'live-proof',
+                'step_id': 'proof-step',
+                'inject_files': ['flag.txt -> /tmp'],
+                'vulnerabilities': [{'name': 'xstream/CVE-2021-29505'}],
+            }
+        ],
+    }
+
+    save_resp = client.post(
+        '/api/flag-sequencing/save_flow_state_to_xml',
+        data=json.dumps(
+            {
+                'xml_path': str(xml_path),
+                'scenario': scenario_name,
+                'flow_state': flow_state,
+            }
+        ),
+        content_type='application/json',
+    )
+    assert save_resp.status_code == 200
+    save_data = save_resp.get_json() or {}
+    assert save_data.get('ok') is True
+
+    xml_flow = app_backend._flow_state_from_xml_path(str(xml_path), scenario_name)
+    assert isinstance(xml_flow, dict)
+    xml_assignments = xml_flow.get('flag_assignments') if isinstance(xml_flow, dict) else []
+    assert isinstance(xml_assignments, list) and xml_assignments
+    xml_injects = xml_assignments[0].get('inject_files') if isinstance(xml_assignments[0], dict) else []
+    assert isinstance(xml_injects, list)
+    assert 'flag.txt -> /tmp' in xml_injects
+
+    topo_resp = client.get('/participant-ui/topology', query_string={'scenario': scenario_name})
+    assert topo_resp.status_code == 200
+    topo_data = topo_resp.get_json() or {}
+    assert topo_data.get('ok') is True
+    flow_meta = topo_data.get('flow') if isinstance(topo_data.get('flow'), dict) else {}
+    topo_assignments = flow_meta.get('flag_assignments') if isinstance(flow_meta, dict) else []
+    assert isinstance(topo_assignments, list) and topo_assignments
+    topo_injects = topo_assignments[0].get('inject_files') if isinstance(topo_assignments[0], dict) else []
+    assert isinstance(topo_injects, list)
+    assert 'flag.txt -> /tmp' in topo_injects
+
+
+def test_attackflow_preview_uses_preview_xml_ips_for_docker_chain_and_resolved_inputs(tmp_path, monkeypatch):
+    _install_imported_flow_catalog(monkeypatch)
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f"zz-test-runtime-ips-{uuid.uuid4().hex[:8]}"
+    scenario_norm = app_backend._normalize_scenario_label(scenario)
+
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': '10', 'name': 'docker-5', 'role': 'Docker', 'ip4': '10.1.1.2', 'vulnerabilities': [{'id': 'v1'}]},
+            {'node_id': '7', 'name': 'docker-2', 'role': 'Docker', 'ip4': '10.2.2.2', 'vulnerabilities': [{'id': 'v2'}]},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    saved_chain = [
+        {'id': '10', 'name': 'docker-5', 'type': 'docker'},
+        {'id': '7', 'name': 'docker-2', 'type': 'docker'},
+    ]
+    saved_assignments = [
+        {'node_id': '10', 'id': IMPORTED_FLAG_GENERATOR_ID, 'name': 'G1', 'type': 'flag-generator'},
+        {'node_id': '7', 'id': IMPORTED_FLAG_GENERATOR_ID, 'name': 'G2', 'type': 'flag-generator'},
+    ]
+
+    plan_path, plan_dir = _seed_xml_plan(
+        scenario,
+        full_preview,
+        flow_meta={
+            'scenario': scenario,
+            'length': 2,
+            'chain': saved_chain,
+            'flag_assignments': saved_assignments,
+            'modified_at': '2026-01-06T00:00:00Z',
+        },
+    )
+
+    try:
+        monkeypatch.setattr(
+            app_backend,
+            '_latest_session_xml_for_scenario_norm',
+            lambda norm: plan_path if norm == scenario_norm else None,
+        )
+        monkeypatch.setattr(
+            app_backend,
+            '_build_topology_graph_from_session_xml',
+            lambda _path: (
+                [
+                    {'id': '10', 'name': 'docker-5', 'ipv4s': ['192.168.197.2']},
+                    {'id': '7', 'name': 'docker-2', 'ipv4s': ['10.218.55.2']},
+                ],
+                [],
+                {},
+            ),
+        )
+        monkeypatch.setattr(
+            app_backend,
+            '_build_topology_graph_from_preview_plan',
+            lambda _preview: (
+                [
+                    {'id': '10', 'name': 'docker-5', 'type': 'docker', 'is_vuln': True, 'interfaces': [], 'services': []},
+                    {'id': '7', 'name': 'docker-2', 'type': 'docker', 'is_vuln': True, 'interfaces': [], 'services': []},
+                ],
+                [{'node1': '10', 'node2': '7'}],
+                {'10': {'7'}, '7': {'10'}},
+            ),
+        )
+
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 2,
+            'preview_plan': plan_path,
+        })
+        assert resp.status_code == 200
+        data = resp.get_json() or {}
+        assert data.get('ok') is True
+
+        chain = data.get('chain') or []
+        chain_ip_by_id = {
+            str(c.get('id') or ''): str(c.get('ip4') or '')
+            for c in chain
+            if isinstance(c, dict)
+        }
+        assert chain_ip_by_id.get('10') == '10.1.1.2'
+        assert chain_ip_by_id.get('7') == '10.2.2.2'
+
+        fas = data.get('flag_assignments') or []
+        assignment_ip_by_node = {}
+        for fa in fas:
+            if not isinstance(fa, dict):
+                continue
+            node_id = str(fa.get('node_id') or '')
+            ri = fa.get('resolved_inputs') if isinstance(fa.get('resolved_inputs'), dict) else {}
+            assignment_ip_by_node[node_id] = str(ri.get('Knowledge(ip)') or '')
+        assert assignment_ip_by_node.get('10') == '10.1.1.2'
+        assert assignment_ip_by_node.get('7') == '10.2.2.2'
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def test_attackflow_preview_prefers_runtime_session_ips_for_non_docker_chain_and_resolved_inputs(tmp_path, monkeypatch):
+    _install_imported_flow_catalog(monkeypatch)
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f"zz-test-runtime-ips-host-{uuid.uuid4().hex[:8]}"
+    scenario_norm = app_backend._normalize_scenario_label(scenario)
+
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': '10', 'name': 'host-1', 'role': 'Workstation', 'ip4': '10.1.1.2', 'vulnerabilities': [{'id': 'v1'}]},
+            {'node_id': '7', 'name': 'host-2', 'role': 'Workstation', 'ip4': '10.2.2.2', 'vulnerabilities': [{'id': 'v2'}]},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    saved_chain = [
+        {'id': '10', 'name': 'host-1', 'type': 'host'},
+        {'id': '7', 'name': 'host-2', 'type': 'host'},
+    ]
+    saved_assignments = [
+        {'node_id': '10', 'id': IMPORTED_FLAG_GENERATOR_ID, 'name': 'G1', 'type': 'flag-generator'},
+        {'node_id': '7', 'id': IMPORTED_FLAG_GENERATOR_ID, 'name': 'G2', 'type': 'flag-generator'},
+    ]
+
+    plan_path, plan_dir = _seed_xml_plan(
+        scenario,
+        full_preview,
+        flow_meta={
+            'scenario': scenario,
+            'length': 2,
+            'chain': saved_chain,
+            'flag_assignments': saved_assignments,
+            'modified_at': '2026-01-06T00:00:00Z',
+        },
+    )
+
+    try:
+        monkeypatch.setattr(
+            app_backend,
+            '_latest_session_xml_for_scenario_norm',
+            lambda norm: plan_path if norm == scenario_norm else None,
+        )
+        monkeypatch.setattr(
+            app_backend,
+            '_build_topology_graph_from_session_xml',
+            lambda _path: (
+                [
+                    {'id': '10', 'name': 'host-1', 'ipv4s': ['192.168.197.2']},
+                    {'id': '7', 'name': 'host-2', 'ipv4s': ['10.218.55.2']},
+                ],
+                [],
+                {},
+            ),
+        )
+        monkeypatch.setattr(
+            app_backend,
+            '_build_topology_graph_from_preview_plan',
+            lambda _preview: (
+                [
+                    {'id': '10', 'name': 'host-1', 'type': 'host', 'is_vuln': True, 'interfaces': [], 'services': []},
+                    {'id': '7', 'name': 'host-2', 'type': 'host', 'is_vuln': True, 'interfaces': [], 'services': []},
+                ],
+                [{'node1': '10', 'node2': '7'}],
+                {'10': {'7'}, '7': {'10'}},
+            ),
+        )
+
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 2,
+            'preview_plan': plan_path,
+        })
+        assert resp.status_code == 200
+        data = resp.get_json() or {}
+        assert data.get('ok') is True
+
+        chain = data.get('chain') or []
+        chain_ip_by_id = {
+            str(c.get('id') or ''): str(c.get('ip4') or '')
+            for c in chain
+            if isinstance(c, dict)
+        }
+        assert chain_ip_by_id.get('10') == '192.168.197.2'
+        assert chain_ip_by_id.get('7') == '10.218.55.2'
+
+        fas = data.get('flag_assignments') or []
+        assignment_ip_by_node = {}
+        for fa in fas:
+            if not isinstance(fa, dict):
+                continue
+            node_id = str(fa.get('node_id') or '')
+            ri = fa.get('resolved_inputs') if isinstance(fa.get('resolved_inputs'), dict) else {}
+            assignment_ip_by_node[node_id] = str(ri.get('Knowledge(ip)') or '')
+        assert assignment_ip_by_node.get('10') == '192.168.197.2'
+        assert assignment_ip_by_node.get('7') == '10.218.55.2'
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def test_save_flow_state_disabled_clears_flow_state_and_planpreview_metadata_flow(tmp_path, monkeypatch):
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario_name = 'FlowDisableClearScenario'
+    scenario_norm = app_backend._normalize_scenario_label(scenario_name)
+
+    xml_path = tmp_path / f'{scenario_name}.xml'
+    xml_path.write_text(
+        '<Scenarios>'
+        f'<Scenario name="{scenario_name}"><ScenarioEditor/></Scenario>'
+        '</Scenarios>',
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(
+        app_backend,
+        '_latest_xml_path_for_scenario',
+        lambda norm: str(xml_path) if norm == scenario_norm else None,
+    )
+
+    payload = {
+        'full_preview': {'seed': 7, 'hosts': []},
+        'metadata': {
+            'xml_path': str(xml_path),
+            'scenario': scenario_name,
+            'flow': {
+                'scenario': scenario_name,
+                'length': 2,
+                'chain': [{'id': 'h1'}, {'id': 'h2'}],
+                'flag_assignments': [{'node_id': 'h1', 'id': 'g1'}, {'node_id': 'h2', 'id': 'g2'}],
+            },
+        },
+    }
+    ok, err = app_backend._update_plan_preview_in_xml(str(xml_path), scenario_name, payload)
+    assert ok, err
+
+    flow_state_enabled = {
+        'scenario': scenario_name,
+        'flow_enabled': True,
+        'chain_ids': ['h1', 'h2'],
+        'length': 2,
+        'flag_assignments': [{'node_id': 'h1', 'id': 'g1'}, {'node_id': 'h2', 'id': 'g2'}],
+    }
+    ok2, err2 = app_backend._update_flow_state_in_xml(str(xml_path), scenario_name, flow_state_enabled)
+    assert ok2, err2
+
+    disable_payload = {
+        'scenario': scenario_name,
+        'flow_enabled': False,
+        'chain_ids': ['h1', 'h2'],
+        'length': 2,
+        'flag_assignments': [{'node_id': 'h1', 'id': 'g1'}, {'node_id': 'h2', 'id': 'g2'}],
+    }
+    save_resp = client.post(
+        '/api/flag-sequencing/save_flow_state_to_xml',
+        data=json.dumps({'xml_path': str(xml_path), 'scenario': scenario_name, 'flow_state': disable_payload}),
+        content_type='application/json',
+    )
+    assert save_resp.status_code == 200, save_resp.get_json()
+
+    xml_flow = app_backend._flow_state_from_xml_path(str(xml_path), scenario_name)
+    assert isinstance(xml_flow, dict)
+    assert xml_flow.get('flow_enabled') is False
+    assert (xml_flow.get('chain_ids') or []) == []
+    assert (xml_flow.get('flag_assignments') or []) == []
+
+    plan_after = app_backend._load_plan_preview_from_xml(str(xml_path), scenario_name)
+    assert isinstance(plan_after, dict)
+    meta_after = plan_after.get('metadata') if isinstance(plan_after.get('metadata'), dict) else {}
+    assert isinstance(meta_after, dict)
+    assert 'flow' not in meta_after
+
+
+def test_attackflow_preview_returns_vuln_assignment_with_manifest_inject(tmp_path, monkeypatch):
+    _install_imported_flow_catalog(monkeypatch)
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f"Anatest-{uuid.uuid4().hex[:8]}"
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': 'h2', 'name': 'docker-5', 'role': 'Docker', 'vulnerabilities': ['xstream/CVE-2021-29505']},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    plan_path, plan_dir = _seed_xml_plan(
+        scenario,
+        full_preview,
+        flow_meta={
+            'scenario': scenario,
+            'length': 1,
+            'chain': [{'id': 'h2', 'name': 'docker-5', 'type': 'docker'}],
+            'flag_assignments': [
+                {
+                    'node_id': 'h2',
+                    'id': IMPORTED_FLAG_GENERATOR_ID,
+                    'type': 'flag-generator',
+                    'vulnerabilities': ['xstream/CVE-2021-29505'],
+                    'inject_files': ['File(path)', 'flag.txt -> /tmp'],
+                }
+            ],
+            'modified_at': '2026-03-01T00:00:00Z',
+        },
+    )
+
+    try:
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 5,
+            'preview_plan': plan_path,
+            'prefer_flow': '1',
+        })
+        assert resp.status_code == 200
+        data = resp.get_json() or {}
+        assert data.get('ok') is True
+
+        assignments = data.get('flag_assignments') or []
+        assert isinstance(assignments, list) and assignments
+
+        vuln_rows = []
+        for item in assignments:
+            if not isinstance(item, dict):
+                continue
+            vulns = item.get('vulnerabilities') if isinstance(item.get('vulnerabilities'), list) else []
+            if any(str(v or '').strip() for v in vulns):
+                vuln_rows.append(item)
+
+        assert vuln_rows, 'expected at least one vulnerability assignment row'
+        assert any(
+            [str(x or '').strip() for x in (row.get('inject_files') or [])] == ['File(path)']
+            for row in vuln_rows
+        )
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def test_attackflow_preview_backfills_vuln_assignment_with_manifest_inject(tmp_path, monkeypatch):
+    _install_imported_flow_catalog(monkeypatch)
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f"AnatestBackfill-{uuid.uuid4().hex[:8]}"
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': 'h2', 'name': 'docker-5', 'role': 'Docker', 'vulnerabilities': ['xstream/CVE-2021-29505']},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    plan_path, plan_dir = _seed_xml_plan(
+        scenario,
+        full_preview,
+        flow_meta={
+            'scenario': scenario,
+            'length': 1,
+            'chain': [{'id': 'h2', 'name': 'docker-5', 'type': 'docker'}],
+            'flag_assignments': [
+                {
+                    'node_id': 'h2',
+                    'id': IMPORTED_FLAG_GENERATOR_ID,
+                    'type': 'flag-generator',
+                    'vulnerabilities': ['xstream/CVE-2021-29505'],
+                }
+            ],
+            'modified_at': '2026-03-01T00:00:00Z',
+        },
+    )
+
+    try:
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 5,
+            'preview_plan': plan_path,
+            'prefer_flow': '1',
+        })
+        assert resp.status_code == 200
+        data = resp.get_json() or {}
+        assert data.get('ok') is True
+
+        assignments = data.get('flag_assignments') or []
+        assert isinstance(assignments, list) and assignments
+        assert any(
+            [str(x or '').strip() for x in (item.get('inject_files') or [])] == ['File(path)']
+            for item in assignments if isinstance(item, dict)
+        )
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def test_canonicalize_flow_state_derives_chain_ids_from_chain() -> None:
+    flow_state = {
+        'scenario': 'Anatest',
+        'chain': [
+            {'id': 'h2', 'name': 'docker-5'},
+            {'id': 'h7', 'name': 'docker-9'},
+        ],
+        'flag_assignments': [
+            {'node_id': 'h2', 'id': 'textfile_username_password'},
+            {'node_id': 'h7', 'id': 'nfs_sensitive_file'},
+        ],
+    }
+
+    normalized = app_backend._canonicalize_flow_state_paths(flow_state)
+
+    assert isinstance(normalized, dict)
+    assert normalized.get('chain_ids') == ['h2', 'h7']
+    assert normalized.get('length') == 2
+
+
+def test_flow_state_from_xml_scrubs_duplicate_chain_ids_when_duplicates_not_allowed(tmp_path) -> None:
+    scenario = 'FlowDuplicateScrub'
+    xml_path = tmp_path / 'flow-duplicate-scrub.xml'
+    raw_state = {
+        'scenario': scenario,
+        'chain_ids': ['h5', 'h5', 'h7'],
+        'chain': [{'id': 'h5'}, {'id': 'h5'}, {'id': 'h7'}],
+        'length': 3,
+        'flag_assignments': [
+            {'node_id': 'h5', 'id': 'g1'},
+            {'node_id': 'h5', 'id': 'g2'},
+            {'node_id': 'h7', 'id': 'g3'},
+        ],
+    }
+    xml_path.write_text(
+        '<Scenarios>'
+        f'<Scenario name="{scenario}"><ScenarioEditor><FlagSequencing><FlowState>{json.dumps(raw_state)}</FlowState></FlagSequencing></ScenarioEditor></Scenario>'
+        '</Scenarios>',
+        encoding='utf-8',
+    )
+
+    flow_state = app_backend._flow_state_from_xml_path(str(xml_path), scenario)
+
+    assert isinstance(flow_state, dict)
+    assert flow_state.get('allow_node_duplicates') is False
+    assert (flow_state.get('chain_ids') or []) == []
+    assert (flow_state.get('chain') or []) == []
+    assert (flow_state.get('flag_assignments') or []) == []
+    assert flow_state.get('length') == 0
+    assert any('duplicates are disabled' in str(err).lower() for err in (flow_state.get('flow_errors') or []))
+
+
+def test_save_flow_state_rejects_duplicate_chain_ids_when_duplicates_disabled(tmp_path):
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = 'FlowDuplicateReject'
+    xml_path = tmp_path / 'flow-duplicate-reject.xml'
+    xml_path.write_text(
+        '<Scenarios>'
+        f'<Scenario name="{scenario}"><ScenarioEditor/></Scenario>'
+        '</Scenarios>',
+        encoding='utf-8',
+    )
+
+    resp = client.post(
+        '/api/flag-sequencing/save_flow_state_to_xml',
+        data=json.dumps({
+            'xml_path': str(xml_path),
+            'scenario': scenario,
+            'flow_state': {
+                'scenario': scenario,
+                'chain_ids': ['h5', 'h5'],
+                'length': 2,
+                'allow_node_duplicates': False,
+                'flag_assignments': [
+                    {'node_id': 'h5', 'id': 'g1'},
+                    {'node_id': 'h5', 'id': 'g2'},
+                ],
+            },
+        }),
+        content_type='application/json',
+    )
+
+    assert resp.status_code == 422
+    data = resp.get_json() or {}
+    assert data.get('ok') is False
+    assert 'reuses nodes while duplicates are disabled' in str(data.get('error') or '').lower()
+    assert app_backend._flow_state_from_xml_path(str(xml_path), scenario) is None
+
+
+def test_read_flow_state_from_xml_path_returns_saved_flow_state(tmp_path):
+    scenario = 'FlowReadBackfill'
+    xml_path = tmp_path / 'flow-readback.xml'
+    xml_path.write_text(
+        '<Scenarios>'
+        f'<Scenario name="{scenario}"><ScenarioEditor/></Scenario>'
+        '</Scenarios>',
+        encoding='utf-8',
+    )
+
+    flow_state = {
+        'scenario': scenario,
+        'chain_ids': ['h1'],
+        'chain': [{'id': 'h1', 'name': 'docker-1', 'type': 'flag-generator'}],
+        'length': 1,
+        'flag_assignments': [
+            {
+                'node_id': 'h1',
+                'id': 'textfile_username_password',
+                'inject_source_dir': '/tmp/vulns/flag_generators_runs/flow-demo/01_text/artifacts',
+                'inject_files': ['secrets.txt -> /flow_injects'],
+            }
+        ],
+    }
+
+    ok, err = app_backend._update_flow_state_in_xml(str(xml_path), scenario, flow_state)
+    assert ok, err
+
+    loaded = app_backend._read_flow_state_from_xml_path(str(xml_path), scenario)
+
+    assert isinstance(loaded, dict)
+    assigns = loaded.get('flag_assignments') if isinstance(loaded.get('flag_assignments'), list) else []
+    assert assigns
+    assert assigns[0].get('inject_source_dir') == '/tmp/vulns/flag_generators_runs/flow-demo/01_text/artifacts'
+    assert assigns[0].get('inject_files') == ['secrets.txt -> /flow_injects']
+
+
+def test_read_flow_state_from_xml_path_refreshes_stale_assignment_input_metadata(tmp_path, monkeypatch):
+    scenario = 'FlowReadRefresh'
+    xml_path = tmp_path / 'flow-read-refresh.xml'
+    xml_path.write_text(
+        '<Scenarios>'
+        f'<Scenario name="{scenario}"><ScenarioEditor/></Scenario>'
+        '</Scenarios>',
+        encoding='utf-8',
+    )
+
+    fake_gen = {
+        'id': 'ssh_desktop_creds',
+        'name': 'Sample: SSH Desktop Credentials',
+        'language': 'python',
+        '_source_name': 'installed',
+        'inputs': [
+            {'name': 'seed', 'required': True},
+            {'name': 'node_name', 'required': True},
+            {'name': 'flag_prefix', 'required': False},
+            {'name': 'ssh_port', 'required': False},
+            {'name': 'Credential(user, password)', 'required': True},
+        ],
+        'outputs': [],
+    }
+
+    def fake_flag_generators_from_enabled_sources():
+        return [], []
+
+    def fake_flag_node_generators_from_enabled_sources():
+        return [fake_gen], []
+
+    def fake_enabled_plugin_contracts_by_id():
+        return {
+            'ssh_desktop_creds': {
+                'plugin_id': 'ssh_desktop_creds',
+                'plugin_type': 'flag-node-generator',
+                'version': '1.0',
+                'requires': ['Knowledge(ip)', 'Credential(user, password)'],
+                'produces': [{'artifact': 'Flag(flag_id)'}],
+                'inputs': {},
+            }
+        }
+
+    monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', fake_flag_generators_from_enabled_sources)
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', fake_flag_node_generators_from_enabled_sources)
+    monkeypatch.setattr(app_backend, '_flow_enabled_plugin_contracts_by_id', fake_enabled_plugin_contracts_by_id)
+
+    flow_state = {
+        'scenario': scenario,
+        'chain_ids': ['h1'],
+        'chain': [{'id': 'h1', 'name': 'docker-1', 'type': 'docker'}],
+        'length': 1,
+        'flag_assignments': [
+            {
+                'node_id': 'h1',
+                'id': 'ssh_desktop_creds',
+                'type': 'flag-node-generator',
+                'input_fields': ['Credential(user, password)', 'flag_prefix', 'node_name', 'seed', 'ssh_port'],
+                'input_fields_required': ['node_name', 'seed'],
+                'input_fields_optional': ['Credential(user, password)', 'flag_prefix', 'ssh_port'],
+                'requires': [],
+                'inputs': ['node_name', 'seed'],
+            }
+        ],
+    }
+
+    ok, err = app_backend._update_flow_state_in_xml(str(xml_path), scenario, flow_state)
+    assert ok, err
+
+    loaded = app_backend._read_flow_state_from_xml_path(str(xml_path), scenario)
+
+    assert isinstance(loaded, dict)
+    assigns = loaded.get('flag_assignments') if isinstance(loaded.get('flag_assignments'), list) else []
+    assert assigns
+    assignment = assigns[0]
+    assert 'Credential(user, password)' in (assignment.get('input_fields_required') or [])
+    assert 'Credential(user, password)' not in (assignment.get('input_fields_optional') or [])
+    assert 'Credential(user, password)' in (assignment.get('requires') or [])
+    assert 'Credential(user, password)' in (assignment.get('inputs') or [])
+
+
+def test_attackflow_preview_ignores_saved_duplicate_xml_flow_when_duplicates_disabled(tmp_path, monkeypatch):
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f'FlowDuplicateSavedState-{uuid.uuid4().hex[:8]}'
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': 'h1', 'name': 'docker-1', 'role': 'Docker', 'vulnerabilities': ['v1']},
+            {'node_id': 'h2', 'name': 'docker-2', 'role': 'Docker', 'vulnerabilities': ['v2']},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    plan_path, plan_dir = _seed_xml_plan(scenario, full_preview)
+
+    try:
+        ok, err = app_backend._update_flow_state_in_xml(
+            str(plan_path),
+            scenario,
+            {
+                'scenario': scenario,
+                'chain_ids': ['h1', 'h1'],
+                'chain': [{'id': 'h1'}, {'id': 'h1'}],
+                'length': 2,
+                'allow_node_duplicates': True,
+                'flag_assignments': [
+                    {'node_id': 'h1', 'id': 'g1', 'type': 'flag-generator'},
+                    {'node_id': 'h1', 'id': 'g2', 'type': 'flag-generator'},
+                ],
+            },
+        )
+        assert ok, err
+
+        monkeypatch.setattr(
+            app_backend,
+            '_flow_compute_flag_assignments',
+            lambda _preview, chain, _scenario_label, **kwargs: [
+                {
+                    'node_id': str((node or {}).get('id') or ''),
+                    'id': f'g{i + 1}',
+                    'generator_id': f'g{i + 1}',
+                    'name': f'Generator {i + 1}',
+                    'type': 'flag-generator',
+                }
+                for i, node in enumerate(chain or [])
+            ],
+        )
+        monkeypatch.setattr(app_backend, '_flow_validate_chain_order_by_requires_produces', lambda *args, **kwargs: (True, []))
+
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 2,
+            'preview_plan': str(plan_path),
+        })
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json() or {}
+        assert data.get('ok') is True
+        chain_ids = [str(item.get('id') or '') for item in (data.get('chain') or []) if isinstance(item, dict)]
+        assert len(chain_ids) == 2
+        assert len(set(chain_ids)) == 2
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def test_attackflow_preview_passes_dependency_level_to_assignment_picker(tmp_path, monkeypatch):
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f'FlowDependencyLevel-{uuid.uuid4().hex[:8]}'
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': 'h1', 'name': 'docker-1', 'role': 'Docker', 'vulnerabilities': ['v1']},
+            {'node_id': 'h2', 'name': 'docker-2', 'role': 'Docker', 'vulnerabilities': ['v2']},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+
+    captured_levels = []
+
+    def _fake_flow_compute(_preview, chain, _scenario_label, **kwargs):
+        captured_levels.append(kwargs.get('dependency_level'))
+        return [
+            {
+                'node_id': str((node or {}).get('id') or ''),
+                'id': f'g{idx + 1}',
+                'generator_id': f'g{idx + 1}',
+                'name': f'Generator {idx + 1}',
+                'type': 'flag-generator',
+            }
+            for idx, node in enumerate(chain or [])
+        ]
+
+    plan_path, plan_dir = _seed_xml_plan(scenario, full_preview)
+
+    try:
+        monkeypatch.setattr(app_backend, '_flow_compute_flag_assignments', _fake_flow_compute)
+        monkeypatch.setattr(app_backend, '_flow_validate_chain_order_by_requires_produces', lambda *args, **kwargs: (True, []))
+
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 2,
+            'dependency_level': 5,
+            'force_preview': 1,
+            'preview_plan': str(plan_path),
+        })
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json() or {}
+        assert data.get('ok') is True
+        assert data.get('dependency_level') == 5
+        assert captured_levels
+        assert all(level == 5 for level in captured_levels)
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)

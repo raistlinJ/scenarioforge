@@ -1,0 +1,153 @@
+# Flag Generators: Vocabulary + Chaining
+
+A **flag generator** is a runnable workload (currently `docker-compose`) that produces *information/capability* needed to reach the next node(s) in an Attack Flow.
+
+For AI-assisted authoring templates and scaffolding workflow, start with:
+- [docs/AI_PROMPT_TEMPLATES.md](AI_PROMPT_TEMPLATES.md)
+- [Node-generator starter message](AI_PROMPT_TEMPLATES.md#starter-message-flag-node-generator-copypaste)
+- [docs/GENERATOR_AUTHORING.md](GENERATOR_AUTHORING.md)
+
+The Flow system treats each generator as a small contract:
+
+- **inputs**: runtime config fields defined in `manifest.yaml` (`inputs[]`). These are not artifacts; `required: false` marks them optional.
+- **artifacts.requires** / **artifacts.optional_requires**: artifact keys the generator needs (required vs optional for chaining).
+- **artifacts.produces**: artifact keys the generator provides.
+- **hint_template**: a human-readable hint that tells the user where to go next.
+
+Flow also supports **Initial Facts** and **Goal Facts** to steer sequencing. Initial facts are treated
+as already-known inputs (including synthesized fields like `seed`, `node_name`, `flag_prefix`), while
+Goal facts bias the sequencing algorithm toward outputs that satisfy them. Flag facts (`Flag(...)`) are
+filtered from Initial/Goal facts.
+
+UI note: the Flow Inputs table renders a `*` next to required items. Runtime inputs are required unless
+`required: false` is explicitly set; artifact inputs are required when listed under `artifacts.requires`.
+
+## Standard Key Vocabulary
+
+Use these keys consistently so chains can be validated and composed.
+
+### SSH
+- `Credential(user)`
+- `Credential(user, password)`
+- `Credential(user, hash)`
+
+### HTTP / Web
+- `Credential(user, password)`
+- `Token(service)`
+- `APIKey(service)`
+
+### Progress / Targets
+- `Flag(flag_id)`
+- `PartialFlag(flag_id, part)`
+
+### Filesystem / Files
+- `File(path)` (path to a generated file, typically under `artifacts/...`; store the value relative to `/outputs`, not as `/outputs/...`)
+- `Directory(host, path)`
+
+### Networking
+- `Knowledge(value)` (e.g., an IP address)
+- `PortForward(host, port)`
+- `InternalNetwork(subnet)`
+
+## Hint Templates
+
+Every generator should include a `hint_template`.
+
+Flow will substitute these placeholders (if present):
+- `{{THIS_NODE_NAME}}`, `{{THIS_NODE_ID}}`
+- `{{NEXT_NODE_NAME}}`, `{{NEXT_NODE_ID}}`
+- `{{NEXT_NODE_IP}}` (when available)
+- `{{SCENARIO}}`
+
+Example:
+
+`Next: SSH to {{NEXT_NODE_NAME}} (id={{NEXT_NODE_ID}}) using {{OUTPUT.Credential(user,password)}}.`
+
+Notes:
+- Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known (e.g., `web01 (10.0.0.5)`), even if `{{NEXT_NODE_IP}}` is not explicitly present.
+- For templates that expose files, we recommend including a `hint.txt` in the payload (served over HTTP or mounted into the container) that contains the rendered hint.
+
+## Schemas (Generator Authors)
+
+This repo includes JSON schemas to make generator behavior consistent across both:
+- **flag-generators** (artifacts inserted into existing docker nodes), and
+- **flag-node-generators** (generators that emit a per-node docker-compose environment).
+
+Files:
+- `schemas/generators/generator_manifest_v1.schema.json` — schema for `manifest.yaml` (manifest_version: 1), including canonical input types.
+- `schemas/generators/flag_generator_outputs.schema.json` — schema for the runtime `/outputs/outputs.json` manifest emitted by a generator.
+
+### Output Placeholder Substitution
+
+In addition to `{{THIS_*}}`/`{{NEXT_*}}` placeholders, Flow supports substituting runtime generator outputs into the hint:
+
+- `{{OUTPUT.<key>}}`
+
+Where `<key>` is a key inside `outputs.json` under the `outputs` object.
+
+Example hint template:
+
+`Next: SSH to {{NEXT_NODE_NAME}} using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}`
+
+## Injected artifacts (`injects`)
+
+Some generators need to deliver a file/binary that will be mounted/copied into other containers (or uploaded for remote execution). Use the manifest `injects` allowlist.
+
+Key rules:
+
+- Prefer explicit delivery metadata in `outputs.json.outputs`:
+	- `FlagDelivery(mode)` = `file` | `embedded` | `none` | `unknown`
+	- `FlagFile(path)` when mode is `file`
+- This lets runtime validation distinguish real flag files from embedded-flag artifacts.
+
+Destination directory (optional):
+
+- `injects: ["File(path) -> /opt/bin"]`
+- If unspecified or invalid, files default to `/flow_injects`.
+
+### Non-deterministic injection via `inject_candidate_paths`
+
+To randomize where the injected file lands on each run, add `inject_candidate_paths` alongside `injects`:
+
+```yaml
+injects:
+  - File(path)
+inject_candidate_paths:
+  - /opt/uploads
+  - /var/www/html
+  - /tmp/user_data
+```
+
+On each execution, one path is chosen at random as the destination directory (only applies when `injects` entries have no explicit `->` destination).  Invalid or relative paths are silently ignored.
+
+- `outputs.json.outputs.File(path) = "artifacts/challenge"`
+- Do not emit `outputs.json.outputs.File(path) = "/outputs/artifacts/challenge"`.
+- `manifest.yaml: injects: ["File(path)"]`
+
+The runner will stage only allowlisted items into `<out_dir>/injected/`.
+
+## Authoring guardrails for AI-generated generators
+
+To reduce Test-vs-Execute drift, enforce these constraints when generating code with AI:
+
+- Use **module-level imports** for shared modules (`json`, `sys`, etc.).
+- Avoid function-local imports in scopes that also define nested helper functions.
+- Treat package-manager/network setup as optional best-effort (do not make generator success depend on apt/apk availability).
+- Ensure `outputs.json` and any `injects`-referenced files are deterministic and present before success exit.
+- Validate both:
+	- generator Test endpoint run (local)
+	- generator Test endpoint run (remote CORE VM, when CORE credentials are provided in the UI)
+	- full Execute run (remote CORE path)
+
+## Practical build loop (generator + node-generator)
+
+1. Define manifest inputs/artifacts first.
+2. Generate or update `generator.py` with AI using strict templates.
+3. Verify `outputs.json.outputs` keys exactly match `artifacts.produces`.
+4. Verify `injects` entries resolve to real files (when used).
+5. Validate locally with `scripts/run_flag_generator.py`.
+6. Validate installed-pack Test and Execute parity.
+
+Remote Test note:
+- The Flag Catalog Test flow can run `scripts/run_flag_generator.py` on the CORE VM via SSH.
+- This improves parity with Execute for environment/runtime differences, but it still validates generator runtime/output behavior (not full CORE topology/session startup).

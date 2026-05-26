@@ -1,0 +1,664 @@
+(function (window, document) {
+    const AI_GENERATOR_CANCEL_PROMPT_CHECKPOINTS_MS = [90000, 180000, 240000, 360000];
+    const streamState = {
+        modal: null,
+        outputStarted: false,
+        controller: null,
+        running: false,
+        acceptingEvents: false,
+        autoFollowEvents: true,
+        canRetry: false,
+        retryAction: null,
+        requestId: '',
+        meta: '',
+        status: '',
+        detail: '',
+        outputText: '',
+        events: [],
+        lastActivityAt: 0,
+        startedAt: 0,
+        longWaitPromptTimer: null,
+        longWaitPromptIndex: 0,
+        longWaitPromptActive: false,
+    };
+    const EVENT_COLLAPSE_THRESHOLD = 900;
+    const STREAMING_TAIL_MAX_CHARS = 24000;
+    const STREAMING_TAIL_MAX_LINES = 400;
+    const OUTPUT_TAIL_MAX_CHARS = 180000;
+    const OUTPUT_TAIL_MAX_LINES = 3000;
+    function createRequestId() {
+        try {
+            if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                return window.crypto.randomUUID();
+            }
+        } catch (e) { }
+        return `ai-stream-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function updateButtons() {
+        const cancelBtn = document.getElementById('aiGeneratorStreamCancelBtn');
+        const copyBtn = document.getElementById('aiGeneratorStreamCopyBtn');
+        const downloadBtn = document.getElementById('aiGeneratorStreamDownloadBtn');
+        const retryBtn = document.getElementById('aiGeneratorStreamRetryBtn');
+        const closeBtn = document.getElementById('aiGeneratorStreamCloseBtn');
+        const headerCloseBtn = document.getElementById('aiGeneratorStreamHeaderCloseBtn');
+        if (cancelBtn) cancelBtn.disabled = !streamState.running;
+        if (copyBtn) copyBtn.disabled = !streamState.outputText && !streamState.events.length;
+        if (downloadBtn) downloadBtn.disabled = !streamState.outputText && !streamState.events.length;
+        if (retryBtn) retryBtn.disabled = !!streamState.running || !streamState.canRetry || typeof streamState.retryAction !== 'function';
+        if (closeBtn) closeBtn.disabled = !!streamState.running;
+        if (headerCloseBtn) headerCloseBtn.disabled = !!streamState.running;
+    }
+
+    function stopLongWaitPrompts() {
+        if (streamState.longWaitPromptTimer) {
+            try { clearTimeout(streamState.longWaitPromptTimer); } catch (e) { }
+            streamState.longWaitPromptTimer = null;
+        }
+        streamState.longWaitPromptIndex = 0;
+        streamState.longWaitPromptActive = false;
+        streamState.startedAt = 0;
+    }
+
+    function scheduleNextLongWaitPrompt() {
+        if (!streamState.running) return;
+        const nextIndex = Number(streamState.longWaitPromptIndex || 0);
+        if (nextIndex >= AI_GENERATOR_CANCEL_PROMPT_CHECKPOINTS_MS.length) return;
+        const checkpointMs = AI_GENERATOR_CANCEL_PROMPT_CHECKPOINTS_MS[nextIndex];
+        const startedAt = Number(streamState.startedAt || Date.now());
+        const elapsedMs = Date.now() - startedAt;
+        const delayMs = Math.max(0, checkpointMs - elapsedMs);
+        if (streamState.longWaitPromptTimer) {
+            try { clearTimeout(streamState.longWaitPromptTimer); } catch (e) { }
+        }
+        streamState.longWaitPromptTimer = window.setTimeout(() => {
+            streamState.longWaitPromptTimer = null;
+            void promptForLongWaitCancel(checkpointMs);
+        }, delayMs);
+    }
+
+    async function promptForLongWaitCancel(checkpointMs) {
+        if (!streamState.running) return;
+        const nextIndex = Number(streamState.longWaitPromptIndex || 0);
+        if (nextIndex >= AI_GENERATOR_CANCEL_PROMPT_CHECKPOINTS_MS.length) return;
+        if (AI_GENERATOR_CANCEL_PROMPT_CHECKPOINTS_MS[nextIndex] !== checkpointMs) {
+            scheduleNextLongWaitPrompt();
+            return;
+        }
+        streamState.longWaitPromptIndex = nextIndex + 1;
+        const seconds = Math.round(Number(checkpointMs || 0) / 1000);
+        appendEvent('Still waiting', `Generation is still running after ${seconds}s.`);
+        if (streamState.longWaitPromptActive) {
+            scheduleNextLongWaitPrompt();
+            return;
+        }
+        streamState.longWaitPromptActive = true;
+        let shouldCancel = false;
+        try {
+            if (typeof window.confirmWithModal === 'function') {
+                shouldCancel = await window.confirmWithModal(
+                    'Still Waiting on Model',
+                    `This AI Generator request has been running for ${seconds} seconds.\n\nIf the model is still processing, you can keep waiting.\n\nWould you like to cancel the current generation?`,
+                    'Cancel Generation',
+                    'danger',
+                    { cancelLabel: 'Keep Waiting' }
+                );
+            } else {
+                shouldCancel = window.confirm(
+                    `This AI Generator request has been running for ${seconds} seconds.\n\nPress OK to cancel generation now.\nPress Cancel to keep waiting.`
+                );
+            }
+        } finally {
+            streamState.longWaitPromptActive = false;
+        }
+        if (!streamState.running) return;
+        if (shouldCancel) {
+            await cancelStream({
+                eventTitle: 'Cancel requested',
+                eventBody: `Cancellation requested after waiting ${seconds}s.`,
+                statusText: 'Cancelling generation...',
+                detailText: 'Stopping the in-flight request after your confirmation.',
+            });
+            return;
+        }
+        appendEvent('Continuing to wait', `User chose to keep waiting after ${seconds}s.`);
+        scheduleNextLongWaitPrompt();
+    }
+
+    function startLongWaitPrompts() {
+        stopLongWaitPrompts();
+        streamState.startedAt = Date.now();
+        streamState.longWaitPromptIndex = 0;
+        streamState.longWaitPromptActive = false;
+        scheduleNextLongWaitPrompt();
+    }
+
+    function setRetryAction(retryAction) {
+        streamState.retryAction = typeof retryAction === 'function' ? retryAction : null;
+        updateButtons();
+    }
+
+    async function retryStream() {
+        if (streamState.running || !streamState.canRetry || typeof streamState.retryAction !== 'function') return;
+        try {
+            await streamState.retryAction();
+        } catch (err) {
+            appendEvent('Retry failed', (err && err.message) ? err.message : 'Retry request failed.', 'danger');
+        }
+    }
+
+    function shouldUseRollingTail(options = {}) {
+        const modeKey = (options && options.tailMode) ? String(options.tailMode) : '';
+        if (modeKey === 'thinking') {
+            return true;
+        }
+        return !!(options && options.rollingTail);
+    }
+
+    function buildRollingTailText(text, maxChars = STREAMING_TAIL_MAX_CHARS, maxLines = STREAMING_TAIL_MAX_LINES) {
+        let visible = (text || '').toString();
+        let trimmedByChars = false;
+        let trimmedByLines = false;
+        if (visible.length > maxChars) {
+            visible = visible.slice(visible.length - maxChars);
+            trimmedByChars = true;
+        }
+        const lines = visible.split('\n');
+        if (lines.length > maxLines) {
+            visible = lines.slice(lines.length - maxLines).join('\n');
+            trimmedByLines = true;
+        }
+        return {
+            text: visible,
+            trimmed: trimmedByChars || trimmedByLines,
+        };
+    }
+
+    function renderScrollingTextBlock(parentEl, text, className) {
+        const block = document.createElement('div');
+        block.className = className;
+        block.textContent = text;
+        parentEl.appendChild(block);
+        if (streamState.autoFollowEvents) {
+            block.scrollTop = block.scrollHeight;
+        }
+        return block;
+    }
+
+    function syncAutoFollowToggle() {
+        const toggle = document.getElementById('aiGeneratorStreamAutoFollowInput');
+        if (!toggle) return;
+        toggle.checked = !!streamState.autoFollowEvents;
+    }
+
+    function scheduleActivityAutoFollow() {
+        if (!streamState.autoFollowEvents) return;
+        const run = () => {
+            const eventsEl = document.getElementById('aiGeneratorStreamEvents');
+            if (!eventsEl) return;
+            eventsEl.scrollTop = eventsEl.scrollHeight;
+            eventsEl.querySelectorAll('.ai-generator-stream-event-live-tail, .ai-generator-stream-event-toggle-body').forEach((el) => {
+                try {
+                    el.scrollTop = el.scrollHeight;
+                } catch (e) { }
+            });
+        };
+        try {
+            window.requestAnimationFrame(() => {
+                run();
+                window.setTimeout(run, 0);
+            });
+        } catch (e) {
+            run();
+        }
+    }
+
+    function scrollActivityToBottom() {
+        if (!streamState.autoFollowEvents) return;
+        scheduleActivityAutoFollow();
+    }
+
+    function bindPayloadToggle(detailsEl, summaryEl) {
+        if (!detailsEl || !summaryEl) return;
+        const syncLabel = () => {
+            summaryEl.textContent = detailsEl.open ? 'Collapse payload' : 'Expand payload';
+        };
+        detailsEl.addEventListener('toggle', syncLabel);
+        syncLabel();
+    }
+
+    function renderOutput() {
+        const outputEl = document.getElementById('aiGeneratorStreamOutput');
+        const outputHintEl = document.getElementById('aiGeneratorStreamOutputHint');
+        if (!outputEl) return;
+        const fullText = (streamState.outputText || '').toString();
+        const tail = buildRollingTailText(fullText, OUTPUT_TAIL_MAX_CHARS, OUTPUT_TAIL_MAX_LINES);
+        outputEl.textContent = tail.text;
+        outputEl.scrollTop = outputEl.scrollHeight;
+        if (outputHintEl) {
+            outputHintEl.textContent = tail.trimmed
+                ? 'Showing newest model output lines. Older output remains available via Copy Transcript or Download Transcript.'
+                : '';
+        }
+    }
+
+    function renderEventBody(bodyEl, fullBody, options = {}) {
+        if (!bodyEl) return;
+        const text = (fullBody || '').toString();
+        bodyEl.textContent = '';
+        if (!text) return;
+        const renderedText = shouldUseRollingTail(options)
+            ? buildRollingTailText(
+                text,
+                options.maxChars || STREAMING_TAIL_MAX_CHARS,
+                options.maxLines || STREAMING_TAIL_MAX_LINES,
+            ).text
+            : text;
+        const shouldCollapse = renderedText.length > EVENT_COLLAPSE_THRESHOLD || renderedText.includes('\n');
+        if (!shouldCollapse) {
+            bodyEl.textContent = renderedText;
+            return;
+        }
+        const details = document.createElement('details');
+        details.className = 'ai-generator-stream-event-toggle';
+        details.open = !!options.initialOpen;
+        const summary = document.createElement('summary');
+        const full = document.createElement('div');
+        full.className = shouldUseRollingTail(options)
+            ? 'ai-generator-stream-event-live-tail ai-generator-stream-event-toggle-body'
+            : 'ai-generator-stream-event-toggle-body';
+        full.textContent = renderedText;
+        if (streamState.autoFollowEvents) {
+            full.scrollTop = full.scrollHeight;
+        }
+        details.appendChild(summary);
+        details.appendChild(full);
+        bindPayloadToggle(details, summary);
+        bodyEl.appendChild(details);
+    }
+
+    function ensureModalGuards() {
+        const modalEl = document.getElementById('aiGeneratorStreamModal');
+        if (!modalEl || modalEl.dataset.aiGeneratorGuarded === '1') return;
+        modalEl.addEventListener('hide.bs.modal', (event) => {
+            if (streamState.running) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        });
+        modalEl.addEventListener('shown.bs.modal', () => {
+            scrollActivityToBottom();
+        });
+        const autoFollowInput = document.getElementById('aiGeneratorStreamAutoFollowInput');
+        if (autoFollowInput) {
+            autoFollowInput.addEventListener('change', () => {
+                streamState.autoFollowEvents = !!autoFollowInput.checked;
+                if (streamState.autoFollowEvents) {
+                    scrollActivityToBottom();
+                }
+            });
+            syncAutoFollowToggle();
+        }
+        modalEl.dataset.aiGeneratorGuarded = '1';
+    }
+
+    function getModalInstance() {
+        const modalEl = document.getElementById('aiGeneratorStreamModal');
+        if (!modalEl || !window.bootstrap || !bootstrap.Modal) return null;
+        ensureModalGuards();
+        return bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl, { backdrop: true, keyboard: true });
+    }
+
+    function setStatus(statusText, detailText = '', tone = 'primary') {
+        streamState.lastActivityAt = Date.now();
+        const statusEl = document.getElementById('aiGeneratorStreamStatus');
+        const detailEl = document.getElementById('aiGeneratorStreamDetail');
+        const badgeEl = document.getElementById('aiGeneratorStreamStateBadge');
+        streamState.status = statusText || 'Running...';
+        streamState.detail = detailText || '';
+        if (statusEl) statusEl.textContent = statusText || 'Running...';
+        if (detailEl) detailEl.textContent = detailText || '';
+        if (badgeEl) {
+            badgeEl.className = `badge text-bg-${tone || 'primary'}`;
+            badgeEl.textContent = tone === 'success' ? 'Done' : (tone === 'danger' ? 'Error' : 'Running');
+        }
+    }
+
+    function appendOutput(text, prefix = '') {
+        if (!streamState.acceptingEvents) return;
+        if (!text) return;
+        streamState.lastActivityAt = Date.now();
+        if (!streamState.outputStarted && prefix) {
+            streamState.outputText += `${prefix}`;
+            streamState.outputStarted = true;
+        }
+        streamState.outputText += text;
+        renderOutput();
+        updateButtons();
+    }
+
+    function getOutputText() {
+        return (streamState.outputText || '').toString();
+    }
+
+    function rerenderEventByMergeKey(mergeKey) {
+        const eventsEl = document.getElementById('aiGeneratorStreamEvents');
+        if (!eventsEl || !mergeKey) return;
+        const existingEl = eventsEl.querySelector(`[data-merge-key="${String(mergeKey).replace(/"/g, '&quot;')}"]`);
+        const existingEvent = streamState.events.find((event) => event && event.mergeKey === mergeKey);
+        if (!existingEl || !existingEvent) return;
+        const bodyEl = existingEl.querySelector('.ai-generator-stream-event-body');
+        const detailsEl = bodyEl ? bodyEl.querySelector('.ai-generator-stream-event-toggle') : null;
+        renderEventBody(bodyEl, existingEvent.body || '', {
+            ...(existingEvent.renderOptions || {}),
+            initialOpen: !!(detailsEl && detailsEl.open),
+        });
+        scrollActivityToBottom();
+    }
+
+    function appendEvent(title, body = '', tone = 'default', options = {}) {
+        const force = !!(options && options.force);
+        if (!streamState.acceptingEvents && !force) return;
+        streamState.lastActivityAt = Date.now();
+        const eventsEl = document.getElementById('aiGeneratorStreamEvents');
+        if (!eventsEl) return;
+        const mergeKey = (options && options.mergeKey) ? String(options.mergeKey) : '';
+        const appendBody = !!(options && options.appendBody);
+        if (mergeKey) {
+            const existingEl = eventsEl.querySelector(`[data-merge-key="${mergeKey.replace(/"/g, '&quot;')}"]`);
+            const existingIndex = streamState.events.findIndex((event) => event && event.mergeKey === mergeKey);
+            if (existingEl && existingIndex >= 0) {
+                const bodyEl = existingEl.querySelector('.ai-generator-stream-event-body');
+                const detailsEl = bodyEl ? bodyEl.querySelector('.ai-generator-stream-event-toggle') : null;
+                const currentBody = (streamState.events[existingIndex].body || '').toString();
+                const nextChunk = (body || '').toString();
+                const nextBody = appendBody ? `${currentBody}${nextChunk}` : nextChunk;
+                renderEventBody(bodyEl, nextBody, {
+                    ...(options || {}),
+                    initialOpen: !!(detailsEl && detailsEl.open),
+                });
+                streamState.events[existingIndex] = {
+                    ...streamState.events[existingIndex],
+                    title: title || 'Update',
+                    body: nextBody,
+                    tone: tone || 'default',
+                    mergeKey,
+                    renderOptions: options || {},
+                };
+                scrollActivityToBottom();
+                updateButtons();
+                return;
+            }
+        }
+        const item = document.createElement('div');
+        item.className = 'ai-generator-stream-event';
+        if (mergeKey) item.dataset.mergeKey = mergeKey;
+        if (tone === 'danger') item.classList.add('is-error');
+        if (tone === 'success') item.classList.add('is-success');
+        const titleEl = document.createElement('div');
+        titleEl.className = 'ai-generator-stream-event-title';
+        titleEl.textContent = title || 'Update';
+        const bodyEl = document.createElement('div');
+        bodyEl.className = 'ai-generator-stream-event-body';
+        renderEventBody(bodyEl, body || '', options);
+        item.appendChild(titleEl);
+        item.appendChild(bodyEl);
+        eventsEl.appendChild(item);
+        streamState.events.push({ title: title || 'Update', body: body || '', tone: tone || 'default', mergeKey, renderOptions: options || {} });
+        scrollActivityToBottom();
+        updateButtons();
+    }
+
+    function buildTranscript() {
+        const parts = [];
+        if (streamState.meta) parts.push(streamState.meta);
+        if (streamState.status || streamState.detail) {
+            parts.push(`Status: ${streamState.status || ''}`.trim());
+            if (streamState.detail) parts.push(`Detail: ${streamState.detail}`);
+        }
+        if (streamState.events.length) {
+            parts.push('');
+            parts.push('Activity:');
+            streamState.events.forEach((event) => {
+                const title = (event && event.title) ? String(event.title) : 'Update';
+                const body = (event && event.body) ? String(event.body) : '';
+                parts.push(`- ${title}${body ? `: ${body}` : ''}`);
+            });
+        }
+        if (streamState.outputText) {
+            parts.push('');
+            parts.push('LLM Output:');
+            parts.push(streamState.outputText);
+        }
+        return parts.join('\n');
+    }
+
+    async function copyTranscript() {
+        const text = buildTranscript();
+        if (!text.trim()) return;
+        try {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', 'readonly');
+                textarea.style.position = 'fixed';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+            }
+            appendEvent('Transcript copied', 'Copied the current output and activity to the clipboard.', 'success');
+        } catch (err) {
+            appendEvent('Copy failed', (err && err.message) ? err.message : 'Clipboard write failed.', 'danger');
+        }
+    }
+
+    function ensureDownloadFrame() {
+        let frame = document.getElementById('aiGeneratorTranscriptDownloadFrame');
+        if (frame) return frame;
+        frame = document.createElement('iframe');
+        frame.id = 'aiGeneratorTranscriptDownloadFrame';
+        frame.name = 'aiGeneratorTranscriptDownloadFrame';
+        frame.style.display = 'none';
+        document.body.appendChild(frame);
+        return frame;
+    }
+
+    function downloadTranscript() {
+        const text = buildTranscript();
+        if (!text.trim()) return;
+        try {
+            const safeName = (streamState.meta || 'ai-generator-transcript')
+                .toString()
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '') || 'ai-generator-transcript';
+            const frame = ensureDownloadFrame();
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '/api/ai/download_transcript';
+            form.target = frame.name;
+            form.style.display = 'none';
+
+            const transcriptField = document.createElement('textarea');
+            transcriptField.name = 'transcript';
+            transcriptField.value = text;
+            form.appendChild(transcriptField);
+
+            const filenameField = document.createElement('input');
+            filenameField.type = 'hidden';
+            filenameField.name = 'filename';
+            filenameField.value = safeName;
+            form.appendChild(filenameField);
+
+            document.body.appendChild(form);
+            form.submit();
+            window.setTimeout(() => {
+                try { document.body.removeChild(form); } catch (e) { }
+            }, 1000);
+            appendEvent('Transcript downloaded', 'Downloaded the full output and activity transcript.', 'success');
+        } catch (err) {
+            appendEvent('Download failed', (err && err.message) ? err.message : 'Transcript download failed.', 'danger');
+        }
+    }
+
+    async function cancelStream(options = {}) {
+        if (!streamState.running || !streamState.controller) return;
+        stopLongWaitPrompts();
+        appendEvent(
+            (options && options.eventTitle) ? String(options.eventTitle) : 'Cancel requested',
+            (options && options.eventBody) ? String(options.eventBody) : 'Aborting the active browser request.'
+        );
+        setStatus(
+            (options && options.statusText) ? String(options.statusText) : 'Cancelling generation...',
+            (options && options.detailText) ? String(options.detailText) : 'Waiting for the request to stop.',
+            'danger'
+        );
+        const requestId = streamState.requestId;
+        if (requestId) {
+            try {
+                await fetch('/api/ai/generate_scenario_preview_stream/cancel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ request_id: requestId }),
+                });
+            } catch (e) { }
+        }
+        try { streamState.controller.abort(); } catch (e) { }
+        streamState.controller = null;
+        streamState.running = false;
+        updateButtons();
+    }
+
+    function showModal({ scenarioName = '', provider = '', model = '' } = {}) {
+        streamState.modal = getModalInstance();
+        stopLongWaitPrompts();
+        streamState.outputStarted = false;
+        streamState.controller = null;
+        streamState.running = false;
+        streamState.acceptingEvents = true;
+        streamState.autoFollowEvents = true;
+        streamState.canRetry = false;
+        streamState.requestId = '';
+        streamState.outputText = '';
+        streamState.events = [];
+        streamState.lastActivityAt = Date.now();
+        const metaEl = document.getElementById('aiGeneratorStreamMeta');
+        const outputEl = document.getElementById('aiGeneratorStreamOutput');
+        const eventsEl = document.getElementById('aiGeneratorStreamEvents');
+        if (metaEl) {
+            const bits = [scenarioName, provider, model].map(v => (v || '').toString().trim()).filter(Boolean);
+            streamState.meta = bits.length ? bits.join(' • ') : 'AI generation in progress';
+            metaEl.textContent = streamState.meta;
+        }
+        if (outputEl) outputEl.textContent = '';
+        if (eventsEl) eventsEl.innerHTML = '';
+        syncAutoFollowToggle();
+        renderOutput();
+        setStatus('Preparing request...', 'Connecting to the backend stream.', 'primary');
+        appendEvent('Starting', 'Opening generation stream.', 'default', { force: true });
+        updateButtons();
+        try { streamState.modal?.show(); } catch (e) { }
+        scrollActivityToBottom();
+    }
+
+    function finishModal(success, detailText = '') {
+        stopLongWaitPrompts();
+        streamState.running = false;
+        streamState.acceptingEvents = false;
+        streamState.controller = null;
+        streamState.requestId = '';
+        streamState.canRetry = true;
+        setStatus(
+            success ? 'Generation finished' : 'Generation failed',
+            detailText || (success ? 'Scenario draft and preview are ready.' : 'The request stopped before a valid result was returned.'),
+            success ? 'success' : 'danger'
+        );
+        appendEvent(success ? 'Complete' : 'Error', detailText || '', success ? 'success' : 'danger', { force: true });
+        updateButtons();
+    }
+
+    async function waitForUiSettled({ minQuietMs = 180, maxWaitMs = 2000 } = {}) {
+        const quietMs = Math.max(0, Number(minQuietMs) || 0);
+        const waitMs = Math.max(quietMs, Number(maxWaitMs) || 0);
+        const startedAt = Date.now();
+        while ((Date.now() - startedAt) < waitMs) {
+            const lastActivityAt = Number(streamState.lastActivityAt || 0);
+            const sinceLastActivity = Date.now() - lastActivityAt;
+            if (sinceLastActivity >= quietMs) {
+                break;
+            }
+            const remainingQuiet = Math.max(0, quietMs - sinceLastActivity);
+            const sleepMs = Math.max(16, Math.min(120, remainingQuiet));
+            await new Promise((resolve) => window.setTimeout(resolve, sleepMs));
+        }
+        try {
+            await new Promise((resolve) => {
+                window.requestAnimationFrame(() => {
+                    window.requestAnimationFrame(resolve);
+                });
+            });
+        } catch (e) { }
+    }
+
+    async function consumeNdjsonStream(response, onEvent) {
+        if (!response.body || typeof response.body.getReader !== 'function') {
+            throw new Error('Streaming response body is unavailable in this browser.');
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let newlineIndex = buffer.indexOf('\n');
+            while (newlineIndex >= 0) {
+                const line = buffer.slice(0, newlineIndex).trim();
+                buffer = buffer.slice(newlineIndex + 1);
+                if (line) {
+                    let parsed = null;
+                    try { parsed = JSON.parse(line); } catch (e) { parsed = null; }
+                    if (parsed && typeof parsed === 'object') onEvent(parsed);
+                }
+                newlineIndex = buffer.indexOf('\n');
+            }
+        }
+        buffer += decoder.decode();
+        const lastLine = buffer.trim();
+        if (lastLine) {
+            let parsed = null;
+            try { parsed = JSON.parse(lastLine); } catch (e) { parsed = null; }
+            if (parsed && typeof parsed === 'object') onEvent(parsed);
+        }
+    }
+
+    window.CORETG_AI_GENERATOR_STREAM = {
+        state: streamState,
+        createRequestId,
+        updateButtons,
+        renderEventBody,
+        ensureModalGuards,
+        getModalInstance,
+        setStatus,
+        appendOutput,
+        getOutputText,
+        appendEvent,
+        buildTranscript,
+        copyTranscript,
+        downloadTranscript,
+        cancelStream,
+        retryStream,
+        setRetryAction,
+        startLongWaitPrompts,
+        stopLongWaitPrompts,
+        showModal,
+        finishModal,
+        waitForUiSettled,
+        consumeNdjsonStream,
+    };
+})(window, document);

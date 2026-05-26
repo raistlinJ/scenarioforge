@@ -1,0 +1,2164 @@
+{% extends 'layout.html' %}
+{% block title %}Run Reports{% endblock %}
+{% block active_page %}{% set active_page='reports' %}{% endblock %}
+{% block extra_head %}
+<style>
+  body { padding-bottom: 0; }
+  /* Fill the remaining viewport below the app chrome (header+nav). */
+  #reportsPageWrap { min-height: calc(100vh - 200px); }
+</style>
+{% endblock %}
+{% block nav_right_extra %}
+  <div class="d-flex align-items-center gap-2 small">
+    <label for="refreshInterval" class="form-label mb-0">Every</label>
+    <select id="refreshInterval" class="form-select form-select-sm w-auto" title="Auto-refresh interval">
+      <option value="2000">2s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+      <option value="30000" selected>30s</option>
+      <option value="60000">60s</option>
+    </select>
+    <span id="refreshStatus" class="text-muted">auto</span>
+    <button class="btn btn-sm btn-outline-light text-dark bg-white" id="toggleRefreshBtn" type="button">Pause</button>
+  </div>
+{% endblock %}
+{% block content %}
+<div class="container-fluid mt-3 d-flex flex-column" id="reportsPageWrap">
+  <div class="row flex-grow-1 align-items-stretch">
+    <div class="col-3 d-flex">
+      <div class="card shadow-sm mb-3 flex-fill d-flex flex-column">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span class="fw-bold">Scenarios</span>
+          <button class="btn btn-sm btn-outline-secondary" id="clearScenarioFilter" type="button" title="Clear filter" style="{% if not active_scenario %}display:none{% endif %}">Clear</button>
+        </div>
+        <div class="list-group list-group-flush flex-grow-1 overflow-auto" id="scenarioFilterList" style="min-height:0;">
+          {% if scenarios %}
+            {% for s in scenarios %}
+            <button type="button" class="list-group-item list-group-item-action py-1 {% if active_scenario and active_scenario==s %}active bg-primary text-white{% endif %}" data-scen-name="{{ s }}">{{ s }}</button>
+            {% endfor %}
+          {% else %}
+          <div class="p-2 small text-muted">No scenarios yet</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="col-9 d-flex">
+      <div class="card mb-3 flex-fill d-flex flex-column">
+        <div class="card-header d-flex justify-content-between align-items-center py-2">
+          <strong class="mb-0">Run History</strong>
+          <div class="d-flex align-items-center gap-2">
+            <button class="btn btn-sm btn-outline-danger" id="runsDeleteBtn" type="button" title="Delete Selected" disabled>
+              <i class="bi bi-trash"></i> Selected
+            </button>
+            <small class="text-muted" id="runCount"></small>
+          </div>
+        </div>
+        <div class="table-responsive flex-grow-1" style="overflow:auto;">
+          <table class="table table-sm align-middle mb-0" id="runsTable">
+            <thead class="table-light">
+              <tr>
+                <th style="width:2rem; text-align:center;"><input type="checkbox" id="runsCheckAll"></th>
+                <th style="white-space:nowrap;">Timestamp (Local)</th>
+                <th>Scenario(s)</th>
+                <th>Scenario XML</th>
+                <th>Downloads</th>
+                <th>Summary</th>
+                <th>Session XML</th>
+                <th style="white-space:nowrap;">Run ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in history %}
+              <tr data-scenarios="{{ (r.scenario_names or [])|join('||') }}">
+                <td style="text-align:center;"><input type="checkbox" class="row-select" data-run-id="{{ r.run_id or '' }}"></td>
+                <td>{{ r.timestamp }}</td>
+                <td class="small">{{ (r.scenario_names or [])|join(', ') }}</td>
+                <td>{% if r.scenario_xml_path %}<a href="{{ url_for('download_report', path=r.scenario_xml_path) }}">scenario</a>{% else %}<span class="text-muted">n/a</span>{% endif %}</td>
+                <td>
+                  {% if r.report_path %}
+                  {% set row_scenario = (r.scenario_names[0] if r.scenario_names else '') %}
+                  {% set flow_export_enabled = r.preview_plan_path or r.scenario_xml_path %}
+                  <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                      Download
+                    </button>
+                    <ul class="dropdown-menu">
+                      <li><a class="dropdown-item" href="{{ url_for('download_report', path=r.report_path) }}">Summary Report</a></li>
+                      {% if flow_export_enabled %}
+                      <li><hr class="dropdown-divider"></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="preview-plan-html" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Flow/Preview Plan (html)</a></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="afb" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Flow (afb)</a></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-dot" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Graph (dot)</a></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-json" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Graph (json)</a></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-pdf" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Graph (pdf)</a></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="participant-guide" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Participant Steps Guide (html)</a></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="facilitator-guide" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Facilitator Guide (html)</a></li>
+                      {% endif %}
+                    </ul>
+                  </div>
+                  {% else %}
+                  <span class="text-muted">n/a</span>
+                  {% endif %}
+                </td>
+                <td>{% if r.summary_path %}<a href="{{ url_for('download_report', path=r.summary_path) }}">summary</a>{% elif r.report_path or session_path %}<span class="text-muted d-inline-flex align-items-center gap-1"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>Summarizing, please wait...</span>{% else %}<span class="text-muted">n/a</span>{% endif %}</td>
+                {% set session_path = r.session_xml_path or r.post_xml_path %}
+                <td>{% if session_path %}<a href="{{ url_for('download_report', path=session_path) }}">session</a>{% else %}<span class="text-muted">n/a</span>{% endif %}</td>
+                <td>{{ r.run_id or '-' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% include 'partials/dock.html' %}
+{% endblock %}
+{% block extra_scripts %}
+<script>
+  // Server-injected: scenarioNorm -> hasParticipantUrl
+  let participantUrlFlags = {{ participant_url_flags|tojson }};
+  function normalizeScenarioNorm(raw){
+    return (raw || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+  }
+
+let autoRefresh = true;
+let refreshTimer = null;
+let intervalMs = 30000;
+let refreshInFlight = false;
+let lastManualRefreshAt = 0;
+let lastScenarioChangeAt = 0;
+try {
+  const stored = parseInt(localStorage.getItem('reportsRefreshMs') || '', 10);
+  if ([2000,5000,10000,30000,60000].includes(stored)) intervalMs = stored;
+} catch(e) {}
+const tableBody = document.querySelector('#runsTable tbody');
+const runsCheckAll = document.getElementById('runsCheckAll');
+const runsDeleteBtn = document.getElementById('runsDeleteBtn');
+const selectedRunIds = new Set();
+const reportsDataBaseUrl = "{{ url_for('reports_data') }}";
+const participantDetailsBaseUrl = "{{ url_for('participant_ui_details_api') }}";
+let scenarioNamesCache = {{ (scenarios or [])|tojson }};
+const initialScenarioFilter = {{ (active_scenario or '')|tojson }};
+let activeScenarioFilter = initialScenarioFilter || null;
+const clearScenarioBtn = document.getElementById('clearScenarioFilter');
+if(clearScenarioBtn){ clearScenarioBtn.style.display = activeScenarioFilter ? 'inline-block':'none'; }
+// Tracks whether user explicitly activated select-all across currently visible rows.
+let masterSelectAllActive = false;
+function getVisibleCheckboxes(){ return tableBody.querySelectorAll('tr:not(.d-none) input.row-select'); }
+function updateHeader(){
+  const checkboxes = getVisibleCheckboxes();
+  const total = checkboxes.length;
+  const checkedCount = Array.from(checkboxes).filter(cb=>cb.checked).length;
+  if(runsCheckAll){
+    if (masterSelectAllActive) {
+      runsCheckAll.indeterminate = false;
+      runsCheckAll.checked = true;
+    } else {
+      runsCheckAll.indeterminate = checkedCount>0 && checkedCount<total;
+      runsCheckAll.checked = total>0 && checkedCount===total;
+    }
+  }
+  if(runsDeleteBtn){ runsDeleteBtn.disabled = selectedRunIds.size===0; }
+}
+function escapeHtml(str){ return String(str||'').replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+function firstScenarioName(r){
+  const names = Array.isArray(r && r.scenario_names) ? r.scenario_names : [];
+  const first = names.length ? String(names[0] || '').trim() : '';
+  return first || String(activeScenarioFilter || '').trim();
+}
+function hasFlowDownloads(r){
+  return !!((r && r.preview_plan_path) || (r && r.scenario_xml_path));
+}
+function buildReportDownloadsHtml(r){
+  if (!r || !r.report_path) return '<span class="text-muted">n/a</span>';
+  const scenario = escapeHtml(firstScenarioName(r));
+  const previewPlan = escapeHtml(String((r && r.preview_plan_path) || ''));
+  const xmlPath = escapeHtml(String((r && r.scenario_xml_path) || ''));
+  let items = `<li><a class="dropdown-item" href='/download_report?path=${encodeURIComponent(r.report_path)}'>Summary Report</a></li>`;
+  if (hasFlowDownloads(r)) {
+    const attrs = ` data-scenario="${scenario}" data-preview-plan="${previewPlan}" data-xml-path="${xmlPath}"`;
+    items += `<li><hr class="dropdown-divider"></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="preview-plan-html"${attrs}>Flow/Preview Plan (html)</a></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="afb"${attrs}>Attack Flow (afb)</a></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-dot"${attrs}>Attack Graph (dot)</a></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-json"${attrs}>Attack Graph (json)</a></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-pdf"${attrs}>Attack Graph (pdf)</a></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="participant-guide"${attrs}>Participant Steps Guide (html)</a></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="facilitator-guide"${attrs}>Facilitator Guide (html)</a></li>`;
+  }
+  return `<div class="dropdown"><button class="btn btn-sm btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" aria-expanded="false">Download</button><ul class="dropdown-menu">${items}</ul></div>`;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const guideHtmlBlockRegistry = new Map();
+function registerGuideHtmlBlock(html) {
+  const id = `guide-html-${Math.random().toString(36).slice(2, 12)}-${Date.now().toString(36)}`;
+  guideHtmlBlockRegistry.set(id, String(html || ''));
+  return `<!-- guide-html-block:${id} -->`;
+}
+
+function markdownToHtmlDocument(title, markdown) {
+  const inlineHtml = (value) => escapeHtml(String(value || ''))
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const guidePathMarkerPattern = /<!--\s*guide-path:(container|missing-container)\s*-->/i;
+  const guidePathClassForLine = (row) => {
+    const match = String(row || '').match(guidePathMarkerPattern);
+    if (!match) return '';
+    return String(match[1] || '').toLowerCase() === 'container' ? 'guide-path-container' : 'guide-path-missing-container';
+  };
+  const stripGuidePathMarker = (row) => String(row || '').replace(guidePathMarkerPattern, '');
+  const splitTableRow = (row) => {
+    let text = stripGuidePathMarker(row).trim().replace(/^\|/, '').replace(/\|$/, '');
+    const cells = [];
+    let current = '';
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i];
+      if (ch === '\\' && text[i + 1] === '|') {
+        current += '|';
+        i += 1;
+      } else if (ch === '|') {
+        cells.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    cells.push(current.trim());
+    return cells;
+  };
+  const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || '');
+  const lines = String(markdown || '').split(/\r?\n/);
+  const out = [];
+  let inCode = false;
+  let codeLines = [];
+  let listType = '';
+  const closeList = () => {
+    if (listType) {
+      out.push(`</${listType}>`);
+      listType = '';
+    }
+  };
+  const openList = (type) => {
+    if (listType !== type) {
+      closeList();
+      out.push(`<${type}>`);
+      listType = type;
+    }
+  };
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (inCode) {
+      if (trimmed.startsWith('```')) {
+        out.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+        codeLines = [];
+        inCode = false;
+      } else {
+        codeLines.push(line.replace(/^\s{0,3}/, ''));
+      }
+      continue;
+    }
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+    if (trimmed.startsWith('```')) {
+      closeList();
+      inCode = true;
+      codeLines = [];
+      continue;
+    }
+    const guideHtmlBlockMatch = trimmed.match(/^<!--\s*guide-html-block:([A-Za-z0-9_-]+)\s*-->$/);
+    if (guideHtmlBlockMatch) {
+      closeList();
+      const html = guideHtmlBlockRegistry.get(guideHtmlBlockMatch[1]);
+      if (html) out.push(html);
+      continue;
+    }
+    if (/^<\/?details>$/.test(trimmed)) {
+      closeList();
+      out.push(trimmed);
+      continue;
+    }
+    const summaryMatch = trimmed.match(/^<summary>(.*)<\/summary>$/);
+    if (summaryMatch) {
+      closeList();
+      out.push(`<summary>${inlineHtml(summaryMatch[1])}</summary>`);
+      continue;
+    }
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      closeList();
+      const level = Math.min(6, headingMatch[1].length);
+      out.push(`<h${level}>${inlineHtml(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+    if (trimmed.startsWith('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      closeList();
+      const headers = splitTableRow(trimmed);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        const rowLine = lines[i];
+        rows.push({ cells: splitTableRow(rowLine), rowClass: guidePathClassForLine(rowLine) });
+        i += 1;
+      }
+      i -= 1;
+      out.push('<table><thead><tr>' + headers.map((cell) => `<th>${inlineHtml(cell)}</th>`).join('') + '</tr></thead><tbody>');
+      rows.forEach((row) => {
+        const rowClass = row.rowClass ? ` class="${row.rowClass}"` : '';
+        out.push(`<tr${rowClass}>` + row.cells.map((cell) => `<td>${inlineHtml(cell)}</td>`).join('') + '</tr>');
+      });
+      out.push('</tbody></table>');
+      continue;
+    }
+    const unorderedMatch = trimmed.match(/^-\s+(.+)$/);
+    if (unorderedMatch) {
+      openList('ul');
+      out.push(`<li>${inlineHtml(unorderedMatch[1])}</li>`);
+      continue;
+    }
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (orderedMatch) {
+      openList('ol');
+      out.push(`<li>${inlineHtml(orderedMatch[1])}</li>`);
+      continue;
+    }
+    closeList();
+    out.push(`<p>${inlineHtml(trimmed)}</p>`);
+  }
+  if (inCode) out.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+  closeList();
+  const safeTitle = escapeHtml(title || 'Export');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${safeTitle}</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; margin: 2rem auto; max-width: 1120px; padding: 0 1rem; color: #172033; background: #f8fafc; }
+    h1, h2, h3, h4 { color: #0f172a; line-height: 1.2; margin-top: 1.6rem; }
+    h1 { margin-top: 0; border-bottom: 2px solid #cbd5e1; padding-bottom: .45rem; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; background: #fff; }
+    th, td { border: 1px solid #cbd5e1; padding: .45rem .55rem; text-align: left; vertical-align: top; }
+    th { background: #e2e8f0; }
+    .guide-path-container td { background: #dcfce7; border-color: #86efac; }
+    .guide-path-missing-container td { background: #fef9c3; border-color: #fde68a; }
+    .guide-flow-figure { margin: 1.1rem 0; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: .75rem; }
+    .guide-flow-figure figcaption { font-weight: 700; margin-bottom: .55rem; color: #0f172a; }
+    .guide-flow-scroll { overflow-x: auto; }
+    .guide-flow-figure svg { display: block; min-width: 720px; }
+    code { background: #e2e8f0; border-radius: 4px; padding: .1rem .25rem; }
+    pre { background: #111827; color: #f8fafc; border-radius: 6px; padding: .9rem 1rem; overflow-x: auto; }
+    pre code { background: transparent; color: inherit; padding: 0; }
+    details { background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; margin: .85rem 0; padding: .7rem .9rem; }
+    summary { cursor: pointer; font-weight: 700; }
+    ul, ol { padding-left: 1.5rem; }
+  </style>
+</head>
+<body>
+${out.join('\n')}
+</body>
+</html>`;
+}
+
+function guideFigureFirstNonEmpty(...values) {
+  for (const value of values) {
+    const text = String(value === undefined || value === null ? '' : value).trim();
+    if (text && !['none', 'null', 'n/a', '-'].includes(text.toLowerCase())) return text;
+  }
+  return '';
+}
+
+function guideFigureWrapText(value, maxChars, maxLines) {
+  const words = String(value || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  const lines = [];
+  let current = '';
+  words.forEach((word) => {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= maxChars || !current) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  });
+  if (current) lines.push(current);
+  const limit = Math.max(1, Number(maxLines) || 1);
+  const out = lines.slice(0, limit);
+  if (lines.length > limit && out.length) {
+    out[out.length - 1] = `${out[out.length - 1].slice(0, Math.max(0, maxChars - 3))}...`;
+  }
+  return out.length ? out : [''];
+}
+
+function guideFigureRoman(value) {
+  const num = parseInt(value, 10);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  const map = [
+    [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'],
+    [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'],
+    [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']
+  ];
+  let current = num;
+  let out = '';
+  for (const [amount, label] of map) {
+    while (current >= amount) {
+      out += label;
+      current -= amount;
+    }
+  }
+  return out;
+}
+
+function guideFigureNormalizeFactsOverride(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const artifacts = Array.isArray(raw.artifacts) ? raw.artifacts.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+  const fields = Array.isArray(raw.fields) ? raw.fields.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+  if (!artifacts.length && !fields.length) return null;
+  return { artifacts, fields };
+}
+
+function guideFigureNormalizeFactNames(value, preferredKeys) {
+  const out = [];
+  const seen = new Set();
+  const keys = Array.isArray(preferredKeys) && preferredKeys.length ? preferredKeys : ['artifact', 'name', 'field'];
+  const pushValue = (item) => {
+    if (item === undefined || item === null) return;
+    if (Array.isArray(item)) {
+      item.forEach(pushValue);
+      return;
+    }
+    if (item && typeof item === 'object') {
+      for (const keyName of keys) {
+        const nested = item[keyName];
+        if (nested !== undefined && nested !== null && String(nested).trim()) {
+          pushValue(nested);
+          return;
+        }
+      }
+      return;
+    }
+    const factName = String(item || '').trim();
+    if (!factName || seen.has(factName)) return;
+    seen.add(factName);
+    out.push(factName);
+  };
+  pushValue(value);
+  return out;
+}
+
+function buildGuideFlowDependencyLayout(chain, assignments, initialFactsOverride) {
+  const nodes = Array.isArray(chain) ? chain : [];
+  const assignmentList = Array.isArray(assignments) ? assignments : [];
+  const synthesizedFields = ['seed', 'secret', 'env_name', 'challenge', 'flag_prefix', 'username_prefix', 'key_len', 'node_name'];
+  const synthesizedSet = new Set(synthesizedFields);
+  const initialArtifacts = new Set(['Knowledge(ip)']);
+  const initialFields = new Set(synthesizedFields);
+  const initialEffective = new Set(['Knowledge(ip)'].concat(synthesizedFields));
+  const initialOverride = guideFigureNormalizeFactsOverride(initialFactsOverride);
+  ((initialOverride && initialOverride.artifacts) || []).forEach((factName) => {
+    initialArtifacts.add(factName);
+    initialEffective.add(factName);
+  });
+  ((initialOverride && initialOverride.fields) || []).forEach((factName) => {
+    initialFields.add(factName);
+    initialEffective.add(factName);
+  });
+
+  const lastArtifactProvider = new Map();
+  const lastFieldProvider = new Map();
+  const lastEffectiveProvider = new Map();
+  const stageByIndex = new Array(nodes.length).fill(0);
+  const edges = [];
+  const edgeByKey = new Map();
+
+  const addProvider = (providerFactsByIndex, providerIndex, factName) => {
+    const cleanIndex = Number(providerIndex);
+    if (!Number.isFinite(cleanIndex) || cleanIndex < 0 || cleanIndex >= nodes.length) return;
+    const cleanFact = String(factName || '').trim();
+    if (!providerFactsByIndex.has(cleanIndex)) providerFactsByIndex.set(cleanIndex, []);
+    if (cleanFact && !providerFactsByIndex.get(cleanIndex).includes(cleanFact)) {
+      providerFactsByIndex.get(cleanIndex).push(cleanFact);
+    }
+  };
+
+  const addEdge = (fromIndex, toIndex, facts) => {
+    const from = Number(fromIndex);
+    const to = Number(toIndex);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+    if (from < 0 || to < 0 || from >= nodes.length || to >= nodes.length || from === to) return;
+    const key = `${from}->${to}`;
+    let edge = edgeByKey.get(key);
+    if (!edge) {
+      edge = { from, to, facts: [] };
+      edgeByKey.set(key, edge);
+      edges.push(edge);
+    }
+    const factList = Array.isArray(facts) ? facts : [facts];
+    factList.forEach((factName) => {
+      const cleanFact = String(factName || '').trim();
+      if (cleanFact && !edge.facts.includes(cleanFact)) edge.facts.push(cleanFact);
+    });
+  };
+
+  const requirementsForAssignment = (assignment) => {
+    const item = (assignment && typeof assignment === 'object') ? assignment : {};
+    const rawArtifacts = guideFigureNormalizeFactNames(item.requires, ['artifact', 'name']);
+    const artifacts = rawArtifacts.filter((factName) => factName && !synthesizedSet.has(factName));
+    const fieldBase = Array.isArray(item.input_fields_required)
+      ? guideFigureNormalizeFactNames(item.input_fields_required, ['name', 'field'])
+      : (Array.isArray(item.input_fields) ? guideFigureNormalizeFactNames(item.input_fields, ['name', 'field']) : []);
+    const fields = fieldBase.concat(rawArtifacts.filter((factName) => factName && synthesizedSet.has(factName)));
+    const optionalFields = guideFigureNormalizeFactNames(item.input_fields_optional, ['name', 'field']);
+    const optionalSet = new Set(optionalFields.filter(Boolean));
+    return {
+      artifacts: artifacts.filter((factName) => factName && !optionalSet.has(factName)),
+      fields: fields.filter((factName) => factName && !optionalSet.has(factName)),
+      effective: [],
+    };
+  };
+
+  const outputsForAssignment = (assignment) => {
+    const item = (assignment && typeof assignment === 'object') ? assignment : {};
+    return {
+      artifacts: guideFigureNormalizeFactNames(item.produces, ['artifact', 'name']),
+      fields: guideFigureNormalizeFactNames(item.output_fields, ['name', 'field']),
+      effective: guideFigureNormalizeFactNames(item.outputs, ['name', 'artifact', 'field']),
+    };
+  };
+
+  nodes.forEach((_node, nodeIndex) => {
+    const assignment = assignmentList[nodeIndex] || {};
+    const requirements = requirementsForAssignment(assignment);
+    const providerIndexes = new Set();
+    const providerFactsByIndex = new Map();
+    requirements.artifacts.forEach((factName) => {
+      if (!factName || initialArtifacts.has(factName)) return;
+      if (lastArtifactProvider.has(factName)) {
+        const providerIndex = lastArtifactProvider.get(factName);
+        providerIndexes.add(providerIndex);
+        addProvider(providerFactsByIndex, providerIndex, factName);
+      }
+    });
+    requirements.fields.forEach((factName) => {
+      if (!factName || initialFields.has(factName)) return;
+      if (lastFieldProvider.has(factName)) {
+        const providerIndex = lastFieldProvider.get(factName);
+        providerIndexes.add(providerIndex);
+        addProvider(providerFactsByIndex, providerIndex, factName);
+      }
+    });
+    requirements.effective.forEach((factName) => {
+      if (!factName || initialEffective.has(factName)) return;
+      if (lastEffectiveProvider.has(factName)) {
+        const providerIndex = lastEffectiveProvider.get(factName);
+        providerIndexes.add(providerIndex);
+        addProvider(providerFactsByIndex, providerIndex, factName);
+      }
+    });
+
+    let stage = 0;
+    providerIndexes.forEach((providerIndex) => {
+      if (!Number.isFinite(+providerIndex)) return;
+      stage = Math.max(stage, (stageByIndex[providerIndex] || 0) + 1);
+      addEdge(providerIndex, nodeIndex, providerFactsByIndex.get(providerIndex) || []);
+    });
+    stageByIndex[nodeIndex] = stage;
+
+    const outputs = outputsForAssignment(assignment);
+    outputs.artifacts.forEach((factName) => {
+      if (factName) lastArtifactProvider.set(factName, nodeIndex);
+    });
+    outputs.fields.forEach((factName) => {
+      if (factName) lastFieldProvider.set(factName, nodeIndex);
+    });
+    outputs.effective.forEach((factName) => {
+      if (factName) lastEffectiveProvider.set(factName, nodeIndex);
+    });
+  });
+
+  const stageMap = new Map();
+  stageByIndex.forEach((stage, nodeIndex) => {
+    const stageKey = Number.isFinite(+stage) ? (+stage) : 0;
+    if (!stageMap.has(stageKey)) stageMap.set(stageKey, []);
+    stageMap.get(stageKey).push(nodeIndex);
+  });
+  const stages = Array.from(stageMap.entries())
+    .sort((left, right) => left[0] - right[0])
+    .map(([stage, indices]) => ({ stage, indices }));
+  return { stages, edges };
+}
+
+function guideFigureEdgeLabel(facts) {
+  const values = (Array.isArray(facts) ? facts : [facts])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  if (!values.length) return '';
+  const shown = values.slice(0, 2);
+  if (values.length > shown.length) shown.push(`+${values.length - shown.length}`);
+  return shown.join(', ');
+}
+
+function guideFigureDependencyTooltip(facts) {
+  return (Array.isArray(facts) ? facts : [facts])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
+  const nodes = Array.isArray(chain) ? chain : [];
+  if (!nodes.length) return '';
+  const assignmentList = Array.isArray(assignments) ? assignments : [];
+  const cardWidth = 220;
+  const cardHeight = 104;
+  const columnGap = 92;
+  const rowGap = 24;
+  const marginX = 36;
+  const marginY = 34;
+  const stageLabelHeight = 30;
+  const marginBottom = 30;
+  const liveLayout = (typeof buildFlowDependencyLayout === 'function') ? buildFlowDependencyLayout(nodes, assignmentList) : null;
+  const initialFacts = (typeof flowInitialFactsOverride !== 'undefined') ? flowInitialFactsOverride : null;
+  const fallbackLayout = buildGuideFlowDependencyLayout(nodes, assignmentList, initialFacts);
+  const layout = (liveLayout && Array.isArray(liveLayout.stages)) ? liveLayout : fallbackLayout;
+  const stages = (layout && Array.isArray(layout.stages) && layout.stages.length)
+    ? layout.stages
+    : [{ stage: 0, indices: nodes.map((_node, nodeIndex) => nodeIndex) }];
+  const maxRows = Math.max(1, ...stages.map((stageGroup) => Math.max(1, Array.isArray(stageGroup.indices) ? stageGroup.indices.length : 0)));
+  const width = Math.max(760, (marginX * 2) + (stages.length * cardWidth) + (Math.max(0, stages.length - 1) * columnGap));
+  const height = marginY + stageLabelHeight + (maxRows * cardHeight) + (Math.max(0, maxRows - 1) * rowGap) + marginBottom;
+  const titleId = `guide-flow-title-${Math.random().toString(36).slice(2, 9)}`;
+  const scen = guideFigureFirstNonEmpty(scenarioName, 'Scenario');
+  const positions = new Map();
+  const stageBands = stages.map((stageGroup, stageOrdinal) => {
+    const indices = Array.isArray(stageGroup.indices) ? stageGroup.indices : [];
+    const x = marginX + (stageOrdinal * (cardWidth + columnGap));
+    const stageLabel = indices.length > 1 ? 'Parallel' : 'Step';
+    return `<g class="guide-flow-stage" data-stage="${stageOrdinal + 1}">
+        <rect x="${x - 14}" y="${marginY - 8}" width="${cardWidth + 28}" height="${height - marginY - marginBottom + 2}" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1" />
+        <text x="${x}" y="${marginY + 11}" font-size="12" font-weight="700" fill="#1e3a8a">${escapeHtml(stageLabel)} ${stageOrdinal + 1}</text>
+      </g>`;
+  }).join('\n');
+  const nodeGroups = [];
+  stages.forEach((stageGroup, stageOrdinal) => {
+    const indices = Array.isArray(stageGroup.indices) ? stageGroup.indices : [];
+    const x = marginX + (stageOrdinal * (cardWidth + columnGap));
+    indices.forEach((nodeIndex, rowIndex) => {
+      const y = marginY + stageLabelHeight + (rowIndex * (cardHeight + rowGap));
+      positions.set(nodeIndex, { x, y });
+      const node = nodes[nodeIndex];
+      const row = (node && typeof node === 'object') ? node : {};
+      const assignment = (assignmentList[nodeIndex] && typeof assignmentList[nodeIndex] === 'object') ? assignmentList[nodeIndex] : {};
+      const seq = guideFigureRoman(nodeIndex + 1);
+      const nodeLabel = guideFigureFirstNonEmpty(row.name, row.id, `Step ${nodeIndex + 1}`);
+      const ip = guideFigureFirstNonEmpty(row.ip4, row.ipv4, row.ip, row.address);
+      const generator = guideFigureFirstNonEmpty(assignment.generator_name, assignment.name, assignment.flag_generator, assignment.generator_id, assignment.id, assignment.type);
+      const vulns = Array.isArray(row.vulnerabilities) ? row.vulnerabilities.map((item) => String(item || '').trim()).filter(Boolean).join(', ') : '';
+      const titleLines = guideFigureWrapText(`${seq ? `${seq}. ` : ''}${nodeLabel}`, 22, 2);
+      const generatorLines = guideFigureWrapText(generator || 'No generator assigned', 31, 2);
+      const footer = guideFigureFirstNonEmpty(ip, vulns ? `Vuln: ${vulns}` : '');
+      const footerLines = footer ? guideFigureWrapText(footer, 31, 1) : [];
+      const titleSpans = titleLines.map((line, lineIndex) => `<tspan x="${x + 44}" dy="${lineIndex === 0 ? 0 : 17}">${escapeHtml(line)}</tspan>`).join('');
+      const generatorStartY = y + 54 + (Math.max(0, titleLines.length - 1) * 16);
+      const generatorSpans = generatorLines.map((line, lineIndex) => `<tspan x="${x + 16}" dy="${lineIndex === 0 ? 0 : 15}">${escapeHtml(line)}</tspan>`).join('');
+      const footerSpans = footerLines.map((line) => `<tspan x="${x + 16}" dy="0">${escapeHtml(line)}</tspan>`).join('');
+      nodeGroups.push(`<g class="guide-flow-node" data-step="${nodeIndex + 1}">
+        <rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4" />
+        <circle cx="${x + 22}" cy="${y + 22}" r="12" fill="#dbeafe" stroke="#60a5fa" />
+        <text x="${x + 22}" y="${y + 26}" text-anchor="middle" font-size="11" font-weight="700" fill="#1e3a8a">${nodeIndex + 1}</text>
+        <text x="${x + 44}" y="${y + 23}" font-size="13" font-weight="700" fill="#0f172a">${titleSpans}</text>
+        <text x="${x + 16}" y="${generatorStartY}" font-size="11" fill="#475569">${generatorSpans}</text>
+        ${footerSpans ? `<text x="${x + 16}" y="${y + cardHeight - 15}" font-size="10" fill="#64748b">${footerSpans}</text>` : ''}
+      </g>`);
+    });
+  });
+  const edgeGroups = (Array.isArray(layout && layout.edges) ? layout.edges : []).map((edge, edgeIndex) => {
+    const fromIndex = Number(edge && edge.from);
+    const toIndex = Number(edge && edge.to);
+    const from = positions.get(fromIndex);
+    const to = positions.get(toIndex);
+    if (!from || !to) return '';
+    const startX = from.x + cardWidth + 6;
+    const startY = from.y + (cardHeight / 2);
+    const endX = to.x - 8;
+    const endY = to.y + (cardHeight / 2);
+    const midX = startX + Math.max(36, (endX - startX) / 2);
+    const label = guideFigureEdgeLabel(edge && edge.facts);
+    const tooltip = guideFigureDependencyTooltip(edge && edge.facts);
+    const labelLines = label ? guideFigureWrapText(label, 28, 2) : [];
+    const labelX = (startX + endX) / 2;
+    const labelY = (startY + endY) / 2 - 9;
+    const labelWidth = labelLines.length ? Math.min(190, Math.max(84, Math.max(...labelLines.map((line) => line.length)) * 6.2 + 18)) : 0;
+    const labelHeight = labelLines.length ? (labelLines.length * 13) + 8 : 0;
+    const labelSpans = labelLines.map((line, lineIndex) => `<tspan x="${labelX}" dy="${lineIndex === 0 ? 0 : 13}">${escapeHtml(line)}</tspan>`).join('');
+    return `<g class="guide-flow-edge" data-edge="${edgeIndex + 1}">
+      ${tooltip ? `<title>${escapeHtml(tooltip)}</title>` : ''}
+        <path d="M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}" fill="none" stroke="#2563eb" stroke-width="2.2" marker-end="url(#guide-flow-arrow)" />
+        ${labelLines.length ? `<rect x="${labelX - (labelWidth / 2)}" y="${labelY - 12}" width="${labelWidth}" height="${labelHeight}" rx="5" fill="#ffffff" stroke="#bfdbfe" />
+        <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10" fill="#1e40af">${labelSpans}</text>` : ''}
+      </g>`;
+  }).filter(Boolean).join('\n');
+  return `<figure class="guide-flow-figure" aria-label="Challenge sequence flow">
+  <figcaption>Challenge Sequence / Flow</figcaption>
+  <div class="guide-flow-scroll">
+    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="${titleId}">
+      <title id="${titleId}">Challenge Sequence / Flow - ${escapeHtml(scen)}</title>
+      <defs>
+        <marker id="guide-flow-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L0,6 L9,3 z" fill="#2563eb" />
+        </marker>
+      </defs>
+      <rect x="0" y="0" width="${width}" height="${height}" fill="#f8fafc" rx="10" />
+      ${stageBands}
+      ${edgeGroups}
+      ${nodeGroups.join('\n')}
+    </svg>
+  </div>
+</figure>`;
+}
+
+function appendGuideFlowVisualizerFigure(lines, scenarioName, chain, assignments) {
+  const figureHtml = buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments);
+  if (!figureHtml) return;
+  lines.push('## Challenge Sequence / Flow');
+  lines.push('');
+  lines.push(registerGuideHtmlBlock(figureHtml));
+  lines.push('');
+}
+
+async function fetchJsonOrThrow(url, init) {
+  const res = await fetch(url, init || {});
+  let data = null;
+  try { data = await res.json(); } catch (_) { data = null; }
+  if (!res.ok || !data || data.ok === false) {
+    const msg = data && (data.error || data.message) ? String(data.error || data.message) : `Request failed (${res.status})`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function alignAssignmentsToChainLocal(nodes, assignments) {
+  const chain = Array.isArray(nodes) ? nodes : [];
+  const raw = Array.isArray(assignments) ? assignments : [];
+  if (!chain.length) return [];
+  if (raw.length === chain.length) return raw.slice();
+  const byNodeId = new Map();
+  raw.forEach((entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    const nodeId = String(entry.node_id || '').trim();
+    if (nodeId) byNodeId.set(nodeId, entry);
+  });
+  return chain.map((node, index) => {
+    const nodeId = String((node && node.id) || '').trim();
+    if (nodeId && byNodeId.has(nodeId)) return byNodeId.get(nodeId);
+    return raw[index] || {};
+  });
+}
+
+const _REPORT_OUTPUT_TEMPLATE_PREFIX = '{' + '{OUTPUT.';
+function applyReportHintOutputTemplates(text, assignment) {
+  const t = String(text || '');
+  if (!t || !t.includes(_REPORT_OUTPUT_TEMPLATE_PREFIX)) return t;
+  const ro = (assignment && typeof assignment.resolved_outputs === 'object' && assignment.resolved_outputs && !Array.isArray(assignment.resolved_outputs))
+    ? assignment.resolved_outputs
+    : null;
+  if (!ro) return t;
+  const roLower = new Map();
+  try {
+    Object.keys(ro).forEach((k) => {
+      const key = String(k || '').trim();
+      if (!key) return;
+      roLower.set(key.toLowerCase(), key);
+    });
+  } catch (e) {}
+  const normalizeValue = (val) => {
+    try {
+      if (Array.isArray(val)) return val.map((v) => String(v ?? '').trim()).filter(Boolean).join(', ');
+      if (val && typeof val === 'object') return JSON.stringify(val);
+      if (val === undefined || val === null) return '';
+      return String(val).trim();
+    } catch (e) {
+      return '';
+    }
+  };
+  const applyTransform = (valueText, transform) => {
+    const base = String(valueText || '').trim();
+    const tr = String(transform || '').trim().toLowerCase();
+    if (!base || !tr) return base;
+    try {
+      if (tr === 'last_octet') {
+        const ip = base.split(',')[0].trim().split('/')[0].trim();
+        const parts = ip.split('.');
+        return parts.length === 4 ? (parts[3] || base) : base;
+      }
+      if (tr === 'subnet24') {
+        const ip = base.split(',')[0].trim().split('/')[0].trim();
+        const parts = ip.split('.');
+        return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.0/24` : base;
+      }
+      if (tr === 'basename') {
+        const p = base.split(',')[0].trim();
+        const segs = p.split('/').filter(Boolean);
+        return segs.length ? segs[segs.length - 1] : p;
+      }
+      if (tr === 'dirname') {
+        const p = base.split(',')[0].trim();
+        const idx = p.lastIndexOf('/');
+        return idx > 0 ? p.slice(0, idx) : '';
+      }
+    } catch (e) {}
+    return base;
+  };
+  return t.replace(/\{\{\s*OUTPUT\.([A-Za-z0-9_\-\.:()]+?)(?:\s*:\s*([A-Za-z0-9_\-]+))?\s*\}\}/g, (_m, rawKey, transform) => {
+    const keyText = String(rawKey || '').trim();
+    if (!keyText) return '';
+    let val = ro[keyText];
+    if (val === undefined) {
+      const lookup = roLower.get(keyText.toLowerCase());
+      if (lookup) val = ro[lookup];
+    }
+    const out = normalizeValue(val);
+    if (!out) return '';
+    return applyTransform(out, transform);
+  });
+}
+
+function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const facilitatorMode = !!opts.facilitator;
+  const vulnReadmeEntries = Array.isArray(opts.vulnReadmeEntries) ? opts.vulnReadmeEntries : [];
+  const vulnReadmesByStep = new Map();
+  vulnReadmeEntries.forEach((entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    const step = Number(entry.step || 0);
+    if (!Number.isFinite(step) || step <= 0) return;
+    const list = vulnReadmesByStep.get(step) || [];
+    list.push(entry);
+    vulnReadmesByStep.set(step, list);
+  });
+  const scen = String(scenarioName || 'Scenario').trim() || 'Scenario';
+  const nodes = Array.isArray(chain) ? chain : [];
+  const alignedAssignments = alignAssignmentsToChainLocal(nodes, assignments);
+  const now = new Date().toISOString();
+  const firstHint = (assignment) => {
+    if (!assignment || typeof assignment !== 'object') return '';
+    const direct = String(assignment.hint || '').trim();
+    if (direct) return direct;
+    const hints = Array.isArray(assignment.hints) ? assignment.hints.map((v) => String(v || '').trim()).filter(Boolean) : [];
+    if (hints.length) return hints[0];
+    const descHints = Array.isArray(assignment.description_hints) ? assignment.description_hints.map((v) => String(v || '').trim()).filter(Boolean) : [];
+    return descHints.length ? descHints[0] : '';
+  };
+  const normalizeObjectEntries = (obj) => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+    return Object.entries(obj)
+      .map(([k, v]) => [String(k || '').trim(), String(v || '').trim()])
+      .filter(([k, v]) => !!k && !!v);
+  };
+  const filterGuideEntries = (entries) => {
+    const source = Array.isArray(entries) ? entries : [];
+    const hiddenKeyPattern = /(?:^|[_(])(seed|secret|repo_root|out_dir|config_path|env_name|challenge|username_prefix|key_len|flag_prefix|seed_ts|project|retry)(?:$|[_)])|^knowledge_ip_$|^ip4$|^ipv4$/i;
+    const aliasFor = (key) => {
+      const normalized = String(key || '').trim().toLowerCase();
+      if (!normalized) return { bucket: '', label: '' };
+      if (['target_ip', 'host_ip', 'knowledge_ip_', 'ip4', 'ipv4'].includes(normalized)) return { bucket: 'target_ip', label: 'Target IP' };
+      if (['node_name', 'node'].includes(normalized)) return { bucket: 'node_name', label: 'Node' };
+      if (['file_path_', 'file_path', 'path'].includes(normalized)) return { bucket: 'file_path', label: 'File Path' };
+      if (['flag(flag_id)', 'flag', 'flag_id'].includes(normalized)) return { bucket: 'flag', label: 'Flag' };
+      if (normalized.includes('url')) return { bucket: normalized, label: String(key).replace(/_/g, ' ') };
+      if (normalized.includes('user')) return { bucket: normalized, label: String(key).replace(/_/g, ' ') };
+      if (normalized.includes('pass')) return { bucket: normalized, label: String(key).replace(/_/g, ' ') };
+      if (normalized.includes('port')) return { bucket: normalized, label: String(key).replace(/_/g, ' ') };
+      return { bucket: normalized, label: String(key).replace(/_/g, ' ') };
+    };
+    const seenBuckets = new Set();
+    const seenValues = new Set();
+    return source
+      .filter(([key, value]) => {
+        const k = String(key || '').trim();
+        const v = String(value || '').trim();
+        if (!k || !v) return false;
+        if (hiddenKeyPattern.test(k)) return false;
+        const lowered = k.toLowerCase();
+        const looksRelevant = lowered.includes('ip') || lowered.includes('host') || lowered.includes('url') || lowered.includes('user') || lowered.includes('pass') || lowered.includes('port') || lowered.includes('path') || lowered.includes('file') || lowered.includes('flag') || lowered.includes('node') || lowered.includes('service');
+        if (!looksRelevant) return false;
+        return true;
+      })
+      .map(([key, value]) => {
+        const alias = aliasFor(key);
+        return [alias.bucket, alias.label, String(value || '').trim()];
+      })
+      .filter(([bucket, _label, value]) => {
+        const valueKey = `${bucket}::${value}`;
+        if (!bucket || !value) return false;
+        if (seenBuckets.has(bucket)) return false;
+        if (seenValues.has(valueKey)) return false;
+        seenBuckets.add(bucket);
+        seenValues.add(valueKey);
+        return true;
+      })
+      .map(([_bucket, label, value]) => [label, value]);
+  };
+
+  const guidePathMarkerForStatus = (status) => {
+    const normalized = String(status || '').trim();
+    if (normalized === 'container') return ' <!-- guide-path:container -->';
+    if (normalized === 'missing-container') return ' <!-- guide-path:missing-container -->';
+    return '';
+  };
+  const isGuidePathLikeLabel = (label) => /(?:path|file|directory|dir|artifact)/i.test(String(label || ''));
+  const normalizeGuidePathText = (value) => String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/g, '');
+  const stripGuideLeadingSlash = (value) => String(value || '').replace(/^\/+/, '');
+  const joinGuideContainerPath = (destRoot, relPath) => {
+    const root = normalizeGuidePathText(destRoot || '/flow_injects') || '/flow_injects';
+    const rel = normalizeGuideRelativeArtifactPath(relPath);
+    return rel ? `${root}/${rel}` : root;
+  };
+  const normalizeGuideRelativeArtifactPath = (value) => {
+    let rel = stripGuideLeadingSlash(String(value || '').replace(/^\.\//, '').replace(/\\/g, '/'));
+    while (rel.startsWith('artifacts/')) rel = rel.slice('artifacts/'.length);
+    return rel;
+  };
+  const guidePathBasename = (value) => {
+    const normalized = normalizeGuidePathText(value);
+    const parts = normalized.split('/').filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : normalized;
+  };
+  const isCanonicalGuideContainerPath = (value) => /^(?:\/flow_injects|\/flow_artifacts|\/inputs|\/outputs|\/exports)(?:\/|$)/.test(normalizeGuidePathText(value));
+  const isGuideCoreVmSourcePath = (value) => {
+    const text = normalizeGuidePathText(value).toLowerCase();
+    if (!text.startsWith('/')) return false;
+    return text.includes('/tmp/vulns/flag_generators_runs/')
+      || text.includes('/tmp/vulns/flag_node_generators_runs/')
+      || text.includes('/flag_generators_runs/')
+      || text.includes('/flag_node_generators_runs/');
+  };
+  const guideAssignmentSourceRoots = (assignmentForPath) => {
+    const source = (assignmentForPath && typeof assignmentForPath === 'object') ? assignmentForPath : {};
+    const roots = [];
+    const add = (value) => {
+      const text = normalizeGuidePathText(value);
+      if (text && text.startsWith('/') && !roots.includes(text)) roots.push(text);
+    };
+    add(source.inject_source_dir || source.InjectSourceDir);
+    add(source.artifacts_dir || source.ArtifactsDir);
+    add(source.run_dir || source.RunDir);
+    const resolvedPaths = (source.resolved_paths && typeof source.resolved_paths === 'object' && !Array.isArray(source.resolved_paths)) ? source.resolved_paths : {};
+    ['inject_source_dir', 'artifacts_dir'].forEach((key) => {
+      const entry = resolvedPaths[key];
+      if (entry && typeof entry === 'object') add(entry.path);
+      else add(entry);
+    });
+    return roots.sort((left, right) => right.length - left.length);
+  };
+  const guideRelativeSourcePath = (value, assignmentForPath) => {
+    const text = normalizeGuidePathText(value);
+    if (!text) return '';
+    if (!text.startsWith('/')) {
+      if (text.includes('/') || /\.[A-Za-z0-9]{1,16}$/.test(text)) return normalizeGuideRelativeArtifactPath(text);
+      return '';
+    }
+    const roots = guideAssignmentSourceRoots(assignmentForPath);
+    for (const root of roots) {
+      if (text === root) return guidePathBasename(text);
+      if (text.startsWith(root + '/')) return normalizeGuideRelativeArtifactPath(text.slice(root.length + 1));
+    }
+    for (const marker of ['/artifacts/', '/flow_artifacts/', '/outputs/', '/inputs/']) {
+      const idx = text.indexOf(marker);
+      if (idx >= 0) return normalizeGuideRelativeArtifactPath(text.slice(idx + marker.length));
+    }
+    return '';
+  };
+  const deriveGuideContainerPathFromSource = (value, assignmentForPath, destRoot) => {
+    const text = normalizeGuidePathText(value);
+    if (!text) return '';
+    const root = destRoot ? normalizeGuidePathText(destRoot) : '';
+    if (root && (text === root || text.startsWith(root + '/'))) return text;
+    if (!destRoot && isCanonicalGuideContainerPath(text)) return text;
+    const rel = guideRelativeSourcePath(text, assignmentForPath);
+    if (!rel) return '';
+    return joinGuideContainerPath(destRoot || '/flow_injects', rel);
+  };
+  const guidePathValuesMatch = (value, artifact) => {
+    const left = normalizeGuidePathText(value);
+    if (!left || !artifact) return false;
+    const candidates = [artifact.value, artifact.source, artifact.field]
+      .map((entry) => normalizeGuidePathText(entry))
+      .filter(Boolean);
+    if (candidates.includes(left)) return true;
+    const leftBase = guidePathBasename(left).toLowerCase();
+    if (!leftBase) return false;
+    return candidates.some((candidate) => {
+      const candidateBase = guidePathBasename(candidate).toLowerCase();
+      return candidateBase && candidateBase === leftBase;
+    });
+  };
+  const normalizeGuidePathArtifact = (item, assignmentForPath) => {
+    const row = (item && typeof item === 'object') ? item : {};
+    const clean = (value) => String(value || '').trim();
+    const firstNonEmpty = (...values) => values.map(clean).find(Boolean) || '';
+    const explicitContainer = firstNonEmpty(
+      row.container_path,
+      row.containerPath,
+      row.container_dest_path,
+      row.containerDestPath,
+      row.container_destination,
+      row.containerDestination,
+      row.dest_path,
+      row.destPath,
+      row.destination_path,
+      row.destinationPath,
+      row.dest,
+      row.destination
+    );
+    const pathValue = clean(row.path);
+    const sourceValue = firstNonEmpty(row.resolved, row.source, row.source_path, row.sourcePath, row.host_path, row.hostPath, row.local_path, row.localPath, row.field);
+    const canonicalPathValue = isCanonicalGuideContainerPath(pathValue) && !isGuideCoreVmSourcePath(pathValue) ? pathValue : '';
+    const containerPath = explicitContainer
+      || canonicalPathValue
+      || deriveGuideContainerPathFromSource(pathValue, assignmentForPath, '/flow_injects')
+      || deriveGuideContainerPathFromSource(sourceValue, assignmentForPath, '/flow_injects');
+    if (containerPath) return { value: containerPath, status: 'container', source: sourceValue, field: clean(row.field) };
+    const fallback = sourceValue || pathValue;
+    if (fallback) return { value: fallback, status: 'missing-container', source: sourceValue, field: clean(row.field) };
+    return null;
+  };
+  const normalizeGuideInjectSpecPath = (raw) => {
+    const text = String(raw || '').trim();
+    if (!text) return null;
+    const sep = text.includes('->') ? '->' : (text.includes('=>') ? '=>' : '');
+    if (sep) {
+      const parts = text.split(sep);
+      const source = parts[0].trim();
+      const dest = parts.slice(1).join(sep).trim();
+      if (dest && dest.startsWith('/')) {
+        const value = deriveGuideContainerPathFromSource(source, null, dest) || normalizeGuidePathText(dest);
+        return { value, status: 'container', source, field: source };
+      }
+      return { value: source || text, status: 'missing-container', source, field: source };
+    }
+    const derived = deriveGuideContainerPathFromSource(text, null, '/flow_injects');
+    if (derived) return { value: derived, status: 'container', source: text, field: text };
+    return { value: text, status: 'missing-container', source: text, field: text };
+  };
+  const normalizeGuidePathArtifacts = (assignmentForPath) => {
+    const out = [];
+    const seen = new Set();
+    const add = (entry) => {
+      if (!entry || !entry.value) return;
+      const key = `${entry.status}::${entry.value}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(entry);
+    };
+    if (Array.isArray(assignmentForPath && assignmentForPath.inject_files_detail)) {
+      assignmentForPath.inject_files_detail.forEach((item) => add(normalizeGuidePathArtifact(item, assignmentForPath)));
+    }
+    if (!out.length && Array.isArray(assignmentForPath && assignmentForPath.inject_files)) {
+      assignmentForPath.inject_files.forEach((item) => add(normalizeGuideInjectSpecPath(item)));
+    }
+    return out;
+  };
+  const normalizeGuidePathFact = (label, value, guidePathArtifacts) => {
+    const original = String(value || '').trim();
+    if (!original || !isGuidePathLikeLabel(label)) return { value: original, status: '' };
+    const match = (Array.isArray(guidePathArtifacts) ? guidePathArtifacts : [])
+      .find((artifact) => artifact && artifact.status === 'container' && guidePathValuesMatch(original, artifact));
+    if (match && match.value) return { value: match.value, status: 'container' };
+    if (isCanonicalGuideContainerPath(original)) return { value: original, status: 'container' };
+    return { value: original, status: 'missing-container' };
+  };
+
+  const escapeGuideShellValue = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
+  const normalizeParticipantNetworkSetup = (rawSetup) => {
+    const source = (rawSetup && typeof rawSetup === 'object') ? rawSetup : {};
+    const rawItems = Array.isArray(source.items) ? source.items : (Array.isArray(rawSetup) ? rawSetup : []);
+    const clean = (value) => {
+      const text = String(value || '').trim();
+      return ['', 'none', 'null', 'n/a', '-'].includes(text.toLowerCase()) ? '' : text;
+    };
+    const items = rawItems.map((item) => {
+      const row = (item && typeof item === 'object') ? item : {};
+      return {
+        interfaceName: clean(row.interface || row.iface || row.name || row.participant_interface),
+        addressCidr: clean(row.address_cidr || row.addr || row.cidr || row.participant_ip4_cidr || row.rj45_ip4_cidr),
+        gateway: clean(row.default_gateway || row.gateway || row.gateway_ip4 || row.default_gateway_ip4),
+      };
+    }).filter((item) => item.interfaceName || item.addressCidr || item.gateway);
+    if (!items.length && source && typeof source === 'object') {
+      const item = {
+        interfaceName: clean(source.interface || source.iface || source.name || source.participant_interface),
+        addressCidr: clean(source.address_cidr || source.addr || source.cidr || source.participant_ip4_cidr || source.rj45_ip4_cidr),
+        gateway: clean(source.default_gateway || source.gateway || source.gateway_ip4 || source.default_gateway_ip4),
+      };
+      if (item.interfaceName || item.addressCidr || item.gateway) items.push(item);
+    }
+    return items;
+  };
+  const participantNetworkSetup = normalizeParticipantNetworkSetup(opts.participantNetworkSetup || opts.participant_network_setup || (opts.preview && opts.preview.participant_network_setup));
+
+  const appendParticipantNetworkSetup = (targetLines) => {
+    targetLines.push('## Participant Network Setup');
+    targetLines.push('');
+    targetLines.push(participantNetworkSetup.length
+      ? 'Before starting, configure the participant VM interface with the assigned IP/CIDR and default gateway.'
+      : 'Before starting, configure the participant VM interface with the assigned IP/CIDR and default gateway. The saved plan did not include HITL addressing metadata, so fill in the values for this event.');
+    targetLines.push('');
+    targetLines.push('```bash');
+    const setupItems = participantNetworkSetup.length ? participantNetworkSetup : [{ interfaceName: '<participant-interface>', addressCidr: '<participant-ip>/<prefix>', gateway: '<default-gateway-ip>' }];
+    setupItems.forEach((item, setupIndex) => {
+      if (setupItems.length > 1) {
+        targetLines.push(`# Participant link ${setupIndex + 1}`);
+      }
+      targetLines.push(`IFACE="${escapeGuideShellValue(item.interfaceName || '<participant-interface>')}"`);
+      targetLines.push(`ADDR="${escapeGuideShellValue(item.addressCidr || '<participant-ip>/<prefix>')}"`);
+      targetLines.push(`GW="${escapeGuideShellValue(item.gateway || '<default-gateway-ip>')}"`);
+      targetLines.push('');
+      targetLines.push('sudo ip addr flush dev "$IFACE"');
+      targetLines.push('sudo ip addr add "$ADDR" dev "$IFACE"');
+      targetLines.push('sudo ip link set "$IFACE" up');
+      targetLines.push('sudo ip route replace default via "$GW" dev "$IFACE"');
+      targetLines.push('ip addr show "$IFACE"');
+      targetLines.push('ip route');
+      if (setupIndex < setupItems.length - 1) targetLines.push('');
+    });
+    targetLines.push('```');
+    targetLines.push('');
+  };
+
+  const lines = [];
+  lines.push('# Participant Steps Guide');
+  lines.push('');
+  appendParticipantNetworkSetup(lines);
+  lines.push(`Scenario: ${scen}`);
+  lines.push(`Generated: ${now}`);
+  lines.push(`Total steps: ${nodes.length}`);
+  lines.push('');
+  if (facilitatorMode) appendGuideFlowVisualizerFigure(lines, scen, nodes, alignedAssignments);
+  lines.push('Use this as an operator-friendly chain checklist.');
+  lines.push('');
+  nodes.forEach((node, index) => {
+    const step = index + 1;
+    const assignment = (alignedAssignments[index] && typeof alignedAssignments[index] === 'object') ? alignedAssignments[index] : {};
+    const nodeName = String((node && node.name) ? node.name : `Node ${step}`).trim();
+    const nodeId = String((node && node.id) ? node.id : '').trim();
+    const generatorId = String(assignment.id || assignment.generator_id || '').trim();
+    const generatorLabel = String(assignment.flag_generator || assignment.type || '').trim();
+    const hint = applyReportHintOutputTemplates(firstHint(assignment), assignment);
+    const allHints = Array.isArray(assignment.hints)
+      ? assignment.hints.map((v) => applyReportHintOutputTemplates(String(v || '').trim(), assignment)).map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+    const descHints = Array.isArray(assignment.description_hints)
+      ? assignment.description_hints.map((v) => applyReportHintOutputTemplates(String(v || '').trim(), assignment)).map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+    const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
+    const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
+    const resolvedInjects = normalizeGuidePathArtifacts(assignment);
+    const resolvedInputFacts = resolvedInputs.map(([k, v]) => [k, normalizeGuidePathFact(k, v, resolvedInjects)]);
+    const resolvedOutputFacts = resolvedOutputs.map(([k, v]) => [k, normalizeGuidePathFact(k, v, resolvedInjects)]);
+
+    const _cell = (value) => String(value == null ? '' : value).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
+
+    lines.push(`<details>`);
+    lines.push(`<summary>Step ${step}: ${_cell(nodeName)}</summary>`);
+    lines.push('');
+    lines.push(`Goal: Complete this stage on ${nodeName} and collect the expected artifacts.`);
+    lines.push(`Why it matters: This step unlocks prerequisites for the next link in the chain.`);
+    lines.push('');
+
+    const ipCandidates = [
+      String((node && (node.ip4 || node.ipv4 || node.ip || node.address)) || '').trim(),
+      ...resolvedInputs.filter(([k]) => /ip/i.test(String(k || ''))).map(([, v]) => String(v || '').trim()),
+      ...resolvedOutputs.filter(([k]) => /ip/i.test(String(k || ''))).map(([, v]) => String(v || '').trim()),
+    ].filter(Boolean);
+    const nodeIp = ipCandidates.length ? ipCandidates[0] : 'unknown';
+
+    lines.push('### Critical Access');
+    lines.push('');
+    lines.push('| Key | Value |');
+    lines.push('| --- | --- |');
+    lines.push(`| Node | ${_cell(nodeName)} |`);
+    lines.push(`| IP Address | ${_cell(nodeIp)} |`);
+    if (nodeId) lines.push(`| Node ID | ${_cell(nodeId)} |`);
+    if (generatorLabel || generatorId) lines.push(`| Technique Source | ${_cell([generatorLabel, generatorId].filter(Boolean).join(' / '))} |`);
+    lines.push('');
+
+    const requiredInputsRaw = Array.isArray(assignment.input_fields_required)
+      ? assignment.input_fields_required
+      : [];
+    const optionalInputsRaw = Array.isArray(assignment.input_fields_optional)
+      ? assignment.input_fields_optional
+      : [];
+    const fallbackInputsRaw = Array.isArray(assignment.input_fields)
+      ? assignment.input_fields
+      : [];
+    const requiredInputs = Array.from(new Set(requiredInputsRaw.map((v) => String(v || '').trim()).filter(Boolean)));
+    let optionalInputs = Array.from(new Set(optionalInputsRaw.map((v) => String(v || '').trim()).filter(Boolean)));
+    if (!requiredInputs.length && !optionalInputs.length && fallbackInputsRaw.length) {
+      fallbackInputsRaw
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+        .forEach((v) => requiredInputs.push(v));
+    }
+    optionalInputs = optionalInputs.filter((v) => !requiredInputs.includes(v));
+
+    lines.push('### Input Requirements');
+    lines.push('');
+    lines.push('Required inputs are blocking: participants need them to complete this step.');
+    lines.push('Optional inputs are non-blocking: they can help, but participants can still complete this step without them.');
+    lines.push('');
+    if (!requiredInputs.length && !optionalInputs.length) {
+      lines.push('No explicit input requirements were declared for this step.');
+    } else {
+      lines.push('| Input | Requirement | Needed to complete this step? |');
+      lines.push('| --- | --- | --- |');
+      requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | Required | Yes |`));
+      optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
+    }
+    lines.push('');
+    
+    // Apply access instructions: check generator metadata first, then heuristics
+    const _applyAccessInstructionsLocal = (assign, nodeName) => {
+      if (!assign || typeof assign !== 'object') return false;
+      
+      // Check for explicit access_instructions in assignment metadata (from generator manifest)
+      const accessInstructions = assign.access_instructions;
+      if (accessInstructions && typeof accessInstructions === 'object' && accessInstructions.steps) {
+        lines.push('### Access Instructions');
+        lines.push('');
+        const title = String(accessInstructions.title || 'Access Instructions').trim();
+        lines.push(`**${title}**`);
+        lines.push('');
+        const steps = Array.isArray(accessInstructions.steps) ? accessInstructions.steps : [];
+        steps.forEach((s) => {
+          if (!s || typeof s !== 'object') return;
+          const stepNum = s.step || '';
+          const stepTitle = String(s.title || '').trim();
+          let instructions = String(s.instructions || '').trim();
+          // Resolve variable references like {{PORT}}, {{NODE}}, {{PATH}}, {{USERNAME}}, {{PASSWORD}}
+          const outputs = (assign.resolved_outputs && typeof assign.resolved_outputs === 'object') ? assign.resolved_outputs : {};
+          const outputKeys = Object.keys(outputs);
+          const _findOutputKey = (...needles) => outputKeys.find((k) => {
+            const lower = String(k || '').toLowerCase();
+            return needles.every((needle) => lower.includes(String(needle || '').toLowerCase()));
+          });
+          const _extractCleanPath = (pathStr) => {
+            const p = String(pathStr || '').trim();
+            if (!p) return 'exports';
+            const parts = p.split('/').filter(Boolean);
+            return parts.length > 0 ? parts[parts.length - 1] : 'exports';
+          };
+          const _credentialParts = () => {
+            const key = _findOutputKey('Credential', 'password') || _findOutputKey('Credential', 'user') || _findOutputKey('Credential');
+            const raw = key ? String(outputs[key] || '').trim() : '';
+            const idx = raw.indexOf(':');
+            if (idx < 0) return { user: raw, password: '' };
+            return { user: raw.slice(0, idx), password: raw.slice(idx + 1) };
+          };
+          instructions = instructions
+            .replace(/\{\{PORT\}\}/g, () => {
+              const key = _findOutputKey('PortForward');
+              return key ? String(outputs[key] || '').split(':').pop().trim() : '2049';
+            })
+            .replace(/\{\{MOUNTD_PORT\}\}/g, () => {
+              const key = _findOutputKey('MountdPort');
+              return key ? String(outputs[key] || '').split(':').pop().trim() : '20048';
+            })
+            .replace(/\{\{RPCBIND_PORT\}\}/g, () => {
+              const key = _findOutputKey('RpcbindPort');
+              return key ? String(outputs[key] || '').split(':').pop().trim() : '111';
+            })
+            .replace(/\{\{NODE\}\}/g, nodeName)
+            .replace(/\{\{PATH\}\}/g, () => {
+              const key = _findOutputKey('Directory');
+              return key ? _extractCleanPath(outputs[key]) : 'exports';
+            })
+            .replace(/\{\{FLAG_FILE\}\}/g, () => {
+              const key = _findOutputKey('FlagFile');
+              return key ? String(outputs[key] || '').trim() : 'flag.txt';
+            })
+            .replace(/\{\{KEY_FILE\}\}/g, () => {
+              const key = _findOutputKey('SSHPrivateKey') || _findOutputKey('PrivateKey') || _findOutputKey('KeyFile');
+              return key ? String(outputs[key] || '').trim() : 'id_ed25519';
+            })
+            .replace(/\{\{TIMEOUT_SECONDS\}\}/g, () => {
+              const key = _findOutputKey('TimeoutSeconds') || _findOutputKey('SessionTimeout');
+              return key ? String(outputs[key] || '').trim() : '300';
+            })
+            .replace(/\{\{TOKEN\}\}/g, () => {
+              const key = _findOutputKey('Token');
+              return key ? String(outputs[key] || '').trim() : 'token';
+            })
+            .replace(/\{\{API_KEY\}\}/g, () => {
+              const key = _findOutputKey('APIKey');
+              return key ? String(outputs[key] || '').trim() : 'api_key';
+            })
+            .replace(/\{\{ENDPOINT\}\}/g, () => {
+              const key = _findOutputKey('Endpoint');
+              return key ? String(outputs[key] || '').trim() : '/';
+            })
+            .replace(/\{\{CREDENTIAL\}\}/g, () => {
+              const key = _findOutputKey('Credential');
+              return key ? String(outputs[key] || '').trim() : '';
+            })
+            .replace(/\{\{USERNAME\}\}/g, () => _credentialParts().user || 'user')
+            .replace(/\{\{PASSWORD\}\}/g, () => _credentialParts().password || 'password');
+          if (stepNum && stepTitle) lines.push(`${stepNum}. **${stepTitle}**`);
+          if (instructions) {
+            instructions.split('\n').forEach((line) => {
+              lines.push(`   ${line}`);
+            });
+            lines.push('');
+          }
+        });
+        return true;
+      }
+      
+      // Fallback: heuristics based on artifact patterns
+      const outputs = (assign.resolved_outputs && typeof assign.resolved_outputs === 'object') ? assign.resolved_outputs : {};
+      const hasDir = Object.keys(outputs).some(k => k.includes('Directory'));
+      const hasPort = Object.keys(outputs).some(k => k.includes('PortForward'));
+      const hasCred = Object.keys(outputs).some(k => k.includes('Credential'));
+      
+      if (hasDir && hasPort) {
+        lines.push('### Access Instructions');
+        lines.push('');
+        lines.push('**Access Instructions (inferred from artifacts)**');
+        lines.push('');
+
+        // Likely NFS or mounted service
+        const portKey = Object.keys(outputs).find(k => k.includes('PortForward'));
+        const flagFileKey = Object.keys(outputs).find(k => k.includes('FlagFile'));
+        const port = portKey ? String(outputs[portKey] || '').split(':').pop().trim() : '2049';
+        const flagFile = flagFileKey ? String(outputs[flagFileKey] || '').trim() : 'flag.txt';
+
+        lines.push(`1. **Mount the NFS export** from another container in the scenario:`);
+        lines.push(`   \`\`\`bash`);
+        lines.push(`   apt-get install -y nfs-common`);
+        lines.push(`   mkdir -p /mnt/export`);
+        lines.push(`   mount -t nfs4 -o vers=4,port=${port} ${nodeName}:/exports /mnt/export`);
+        lines.push(`   \`\`\``);
+        lines.push('');
+        lines.push(`2. **List and examine files:**`);
+        lines.push(`   \`\`\`bash`);
+        lines.push(`   ls -la /mnt/export/`);
+        lines.push(`   cat /mnt/export/${flagFile}          # Flag file`);
+        if (hasCred) lines.push(`   cat /mnt/export/creds.txt          # Credentials file`);
+        lines.push(`   \`\`\``);
+        lines.push('');
+        return true;
+      }
+      
+      return false;
+    };
+    
+    // Apply access instructions
+    const hasAccessInstructions = _applyAccessInstructionsLocal(assignment, nodeName);
+    if (!hasAccessInstructions) {
+      lines.push('### Access Instructions');
+      lines.push('');
+      lines.push('No specific access instructions were provided for this step.');
+      lines.push('');
+    }
+
+    const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
+    if (stepVulnReadmes.length) {
+      lines.push('#### Vulnerability README Notes');
+      lines.push('');
+      stepVulnReadmes.forEach((entry) => {
+        const label = String(entry.vulnName || `Vulnerability ${entry.itemId || ''}`).trim();
+        const content = String(entry.content || '').trim();
+        const sourceUrl = String(entry.sourceUrl || '').trim();
+        if (!content) return;
+        lines.push('<details>');
+        lines.push(`<summary>${label}</summary>`);
+        lines.push('');
+        lines.push(content);
+        lines.push('');
+        if (sourceUrl) {
+          lines.push(`Source: ${sourceUrl}`);
+          lines.push('');
+        }
+        lines.push('</details>');
+        lines.push('');
+      });
+    }
+
+    lines.push('### Resolved Facts');
+    lines.push('');
+    const factRows = [];
+    resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push(['Input', k, pathInfo.value, pathInfo.status]));
+    resolvedOutputFacts.forEach(([k, pathInfo]) => factRows.push(['Output', k, pathInfo.value, pathInfo.status]));
+    resolvedInjects.forEach((item, idx) => factRows.push(['File Artifact', `Artifact ${idx + 1}`, item.value, item.status]));
+    if (factRows.length) {
+      lines.push('| Category | Key | Value |');
+      lines.push('| --- | --- | --- |');
+      factRows.forEach(([cat, key, val, pathStatus]) => lines.push(`| ${_cell(cat)} | ${_cell(key)} | ${_cell(val)} |${guidePathMarkerForStatus(pathStatus)}`));
+    } else {
+      lines.push('No resolved inputs, outputs, or file artifacts were captured for this step.');
+    }
+    lines.push('');
+
+    lines.push('- Success evidence:');
+    if (resolvedOutputs.length) lines.push('  - One or more resolved outputs captured for this step.');
+    if (resolvedInjects.length) lines.push('  - One or more resolved file artifacts mapped for this step.');
+    if (assignment.flag_value) lines.push('  - Flag output present for this step.');
+    if (!resolvedOutputs.length && !resolvedInjects.length && !assignment.flag_value) lines.push('  - No resolved values were captured for this step.');
+    if (hint) lines.push(`- Hint: ${hint}`);
+    if (facilitatorMode) {
+      lines.push('- Facilitator details:');
+      if (resolvedInputs.length) {
+        lines.push('  - Resolved inputs:');
+        resolvedInputFacts.forEach(([k, pathInfo]) => lines.push(`    - ${k}: ${pathInfo.value}`));
+      } else {
+        lines.push('  - Resolved inputs: none');
+      }
+      if (resolvedOutputs.length) {
+        lines.push('  - Resolved outputs:');
+        resolvedOutputFacts.forEach(([k, pathInfo]) => lines.push(`    - ${k}: ${pathInfo.value}`));
+      } else {
+        lines.push('  - Resolved outputs: none');
+      }
+      if (allHints.length) {
+        lines.push('  - Full hints:');
+        allHints.forEach((h) => lines.push(`    - ${h}`));
+      }
+      if (descHints.length) {
+        lines.push('  - Description hints:');
+        descHints.forEach((h) => lines.push(`    - ${h}`));
+      }
+      if (assignment.flag_value) lines.push(`  - Flag value: ${String(assignment.flag_value)}`);
+    }
+    lines.push(`- Checklist: [ ] Step ${step} completed`);
+    lines.push('');
+    lines.push('</details>');
+    lines.push('');
+  });
+  if (!nodes.length) {
+    lines.push('No chain is currently generated for this run.');
+    lines.push('');
+  }
+
+  lines.push('## Completion');
+  lines.push('');
+  lines.push('- [ ] All steps completed in order');
+  lines.push('- [ ] All expected artifacts and flags validated');
+  lines.push('');
+  return lines.join('\n');
+}
+
+function _reportGuideNormalizeVulnToken(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function _reportGuideExtractStepVulnNames(node, assignment) {
+  const fromNode = Array.isArray(node && node.vulnerabilities)
+    ? node.vulnerabilities
+    : null;
+  const fromAssign = Array.isArray(assignment && assignment.vulnerabilities)
+    ? assignment.vulnerabilities
+    : [];
+  const source = fromNode !== null ? fromNode : fromAssign;
+  const names = [];
+  source.forEach((value) => {
+    const s = String(value || '').trim();
+    if (s) names.push(s);
+  });
+  return Array.from(new Set(names));
+}
+
+function _reportGuideMatchVulnCatalogItem(vulnName, items) {
+  const vuln = String(vulnName || '').trim();
+  if (!vuln) return null;
+  const vulnNorm = _reportGuideNormalizeVulnToken(vuln);
+  const cveMatch = vuln.match(/CVE-\d{4}-\d+/i);
+  const cve = cveMatch ? String(cveMatch[0]).toLowerCase() : '';
+  const list = Array.isArray(items) ? items : [];
+
+  for (const item of list) {
+    const nm = String((item && item.name) || '').trim();
+    const itemNorm = _reportGuideNormalizeVulnToken(nm);
+    const itemCveMatch = nm.match(/CVE-\d{4}-\d+/i);
+    const itemCve = itemCveMatch ? String(itemCveMatch[0]).toLowerCase() : '';
+    if (cve && itemCve && cve === itemCve) return item;
+    if (vulnNorm && itemNorm && (itemNorm.includes(vulnNorm) || vulnNorm.includes(itemNorm))) return item;
+  }
+  return null;
+}
+
+async function _reportGuideBuildVulnReadmeEntries(chain, assignments) {
+  try {
+    const nodes = Array.isArray(chain) ? chain : [];
+    const alignedAssignments = alignAssignmentsToChainLocal(nodes, assignments);
+    const catalogResp = await fetch('/vuln_catalog_items_data', { credentials: 'same-origin' });
+    if (!catalogResp.ok) return [];
+    const catalogData = await catalogResp.json();
+    const catalogId = String((catalogData && catalogData.active && catalogData.active.id) || '').trim();
+    const items = Array.isArray(catalogData && catalogData.items) ? catalogData.items : [];
+    if (!catalogId || !items.length) return [];
+
+    const readmeCache = new Map();
+    const out = [];
+
+    for (let index = 0; index < nodes.length; index += 1) {
+      const step = index + 1;
+      const node = nodes[index] || {};
+      const assignment = (alignedAssignments[index] && typeof alignedAssignments[index] === 'object')
+        ? alignedAssignments[index]
+        : {};
+      const vulnNames = _reportGuideExtractStepVulnNames(node, assignment);
+      if (!vulnNames.length) continue;
+
+      for (const vulnName of vulnNames) {
+        const matched = _reportGuideMatchVulnCatalogItem(vulnName, items);
+        if (!matched) continue;
+        const itemId = Number(matched.id || 0);
+        if (!Number.isFinite(itemId) || itemId <= 0) continue;
+
+        if (!readmeCache.has(itemId)) {
+          try {
+            const filesResp = await fetch(`/vuln_catalog_packs/item_files/${encodeURIComponent(catalogId)}/${itemId}`, { credentials: 'same-origin' });
+            if (!filesResp.ok) {
+              readmeCache.set(itemId, null);
+            } else {
+              const filesData = await filesResp.json();
+              const files = Array.isArray(filesData && filesData.files) ? filesData.files : [];
+              const readme = files.find((f) => {
+                const name = String((f && f.name) || '').trim().toLowerCase();
+                return /^readme(\.|$)/.test(name) && (name.endsWith('.md') || name.endsWith('.markdown') || name.endsWith('.txt'));
+              });
+              if (!readme || !readme.url) {
+                readmeCache.set(itemId, null);
+              } else {
+                const textResp = await fetch(String(readme.url), { credentials: 'same-origin' });
+                if (!textResp.ok) {
+                  readmeCache.set(itemId, null);
+                } else {
+                  const text = String(await textResp.text() || '').trim();
+                  readmeCache.set(itemId, { content: text, url: String(readme.url) });
+                }
+              }
+            }
+          } catch (_err) {
+            readmeCache.set(itemId, null);
+          }
+        }
+
+        const readmePayload = readmeCache.get(itemId);
+        if (!readmePayload || !readmePayload.content) continue;
+        const anchor = `vuln-readme-step-${step}-item-${itemId}`;
+        out.push({
+          step,
+          vulnName: String(vulnName || '').trim(),
+          itemId,
+          anchor,
+          content: String(readmePayload.content || '').trim(),
+          sourceUrl: String(readmePayload.url || '').trim(),
+        });
+      }
+    }
+
+    return out;
+  } catch (_err) {
+    return [];
+  }
+}
+
+async function fetchReportFlowPreview(scenario, previewPlanPath, xmlPath) {
+  const params = new URLSearchParams();
+  params.set('scenario', String(scenario || '').trim());
+  params.set('prefer_preview', '1');
+  params.set('prefer_flow', '1');
+  if (previewPlanPath) params.set('preview_plan', String(previewPlanPath));
+  if (xmlPath) params.set('xml_path', String(xmlPath));
+  const data = await fetchJsonOrThrow('/api/flag-sequencing/attackflow_preview?' + params.toString());
+  if (!Array.isArray(data.chain) || !data.chain.length) {
+    throw new Error('No saved flow chain found for this run.');
+  }
+  return data;
+}
+
+async function fetchReportFlowExports(scenario, chain) {
+  const data = await fetchJsonOrThrow('/api/flag-sequencing/afb_from_chain', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scenario, chain })
+  });
+  return data;
+}
+
+function markdownCell(value) {
+  return String(value === undefined || value === null || value === '' ? '-' : value)
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, ' ')
+    .trim() || '-';
+}
+
+function formatObjectEntriesForMarkdown(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+  return Object.entries(obj)
+    .map(([key, value]) => [String(key || '').trim(), String(value === undefined || value === null ? '' : value).trim()])
+    .filter(([key, value]) => key && value);
+}
+
+function firstNonEmptyValue(...values) {
+  for (const value of values) {
+    const text = String(value === undefined || value === null ? '' : value).trim();
+    if (text && !['none', 'null', 'n/a', '-'].includes(text.toLowerCase())) return text;
+  }
+  return '';
+}
+
+function reportPreviewPlanAssignmentLabel(assignment) {
+  if (!assignment || typeof assignment !== 'object') return '';
+  return firstNonEmptyValue(assignment.generator_name, assignment.name, assignment.flag_generator, assignment.generator_id, assignment.id, assignment.type);
+}
+
+function normalizeReportParticipantNetworkSetup(rawSetup) {
+  const source = (rawSetup && typeof rawSetup === 'object') ? rawSetup : {};
+  const rawItems = Array.isArray(source.items) ? source.items : (Array.isArray(rawSetup) ? rawSetup : []);
+  const clean = (value) => {
+    const text = String(value || '').trim();
+    return ['', 'none', 'null', 'n/a', '-'].includes(text.toLowerCase()) ? '' : text;
+  };
+  const items = rawItems.map((item) => {
+    const row = (item && typeof item === 'object') ? item : {};
+    return {
+      interfaceName: clean(row.interface || row.iface || row.name || row.participant_interface),
+      addressCidr: clean(row.address_cidr || row.addr || row.cidr || row.participant_ip4_cidr || row.rj45_ip4_cidr),
+      gateway: clean(row.default_gateway || row.gateway || row.gateway_ip4 || row.default_gateway_ip4),
+    };
+  }).filter((item) => item.interfaceName || item.addressCidr || item.gateway);
+  if (!items.length && source && typeof source === 'object') {
+    const item = {
+      interfaceName: clean(source.interface || source.iface || source.name || source.participant_interface),
+      addressCidr: clean(source.address_cidr || source.addr || source.cidr || source.participant_ip4_cidr || source.rj45_ip4_cidr),
+      gateway: clean(source.default_gateway || source.gateway || source.gateway_ip4 || source.default_gateway_ip4),
+    };
+    if (item.interfaceName || item.addressCidr || item.gateway) items.push(item);
+  }
+  return items;
+}
+
+function buildFlowPreviewPlanMarkdown(scenarioName, preview) {
+  const scen = String(scenarioName || (preview && preview.scenario) || 'Scenario').trim() || 'Scenario';
+  const summary = (preview && preview.preview_summary && typeof preview.preview_summary === 'object') ? preview.preview_summary : {};
+  const counts = (summary.counts && typeof summary.counts === 'object') ? summary.counts : {};
+  const setup = normalizeReportParticipantNetworkSetup(preview && preview.participant_network_setup);
+  const chain = Array.isArray(preview && preview.chain) ? preview.chain : [];
+  const assignments = alignAssignmentsToChainLocal(chain, Array.isArray(preview && preview.flag_assignments) ? preview.flag_assignments : []);
+  const lines = [];
+  lines.push('# Flow/Preview Plan');
+  lines.push('');
+  lines.push(`Scenario: ${scen}`);
+  lines.push(`Generated: ${new Date().toISOString()}`);
+  if (preview && preview.preview_plan_path) lines.push(`Source: ${preview.preview_plan_path}`);
+  lines.push('');
+  lines.push('## Topology Summary');
+  lines.push('');
+  lines.push('| Metric | Value |');
+  lines.push('| --- | --- |');
+  [
+    ['Total nodes', counts.total_nodes],
+    ['Hosts', counts.hosts],
+    ['Routers', counts.routers],
+    ['Switches', counts.switches],
+    ['Docker hosts', counts.docker_hosts],
+    ['Vulnerability hosts', counts.vulnerability_hosts],
+    ['Segmentation rules', summary.segmentation_rules],
+    ['IP allocation mode', summary.ip_allocation_mode],
+    ['Seed', summary.seed],
+  ].forEach(([label, value]) => lines.push(`| ${markdownCell(label)} | ${markdownCell(value)} |`));
+  const subnets = Array.isArray(summary.lan_subnets) ? summary.lan_subnets.map(markdownCell).filter((v) => v && v !== '-') : [];
+  if (subnets.length) lines.push(`| LAN subnets | ${subnets.join(', ')} |`);
+  lines.push('');
+  lines.push('## Participant Network Setup');
+  lines.push('');
+  if (setup.length) {
+    lines.push('| Interface | Address/CIDR | Default Gateway |');
+    lines.push('| --- | --- | --- |');
+    setup.forEach((item) => {
+      lines.push(`| ${markdownCell(item.interfaceName)} | ${markdownCell(item.addressCidr)} | ${markdownCell(item.gateway)} |`);
+    });
+  } else {
+    lines.push('No participant HITL network setup was saved with this preview.');
+  }
+  const hitlInterfaces = Array.isArray(summary.hitl_interfaces) ? summary.hitl_interfaces : [];
+  if (hitlInterfaces.length) {
+    lines.push('');
+    lines.push('## HITL Interfaces');
+    lines.push('');
+    lines.push('| Interface | Attachment | Link Network | Participant IP | Existing Router IP | New Router IP |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
+    hitlInterfaces.forEach((iface) => {
+      const row = (iface && typeof iface === 'object') ? iface : {};
+      lines.push(`| ${markdownCell(row.name)} | ${markdownCell(row.attachment)} | ${markdownCell(row.link_network_cidr)} | ${markdownCell(row.rj45_ip4_cidr || row.rj45_ip4)} | ${markdownCell(row.existing_router_ip4)} | ${markdownCell(row.new_router_ip4)} |`);
+    });
+  }
+  lines.push('');
+  lines.push('## Flow Chain');
+  lines.push('');
+  if (chain.length) {
+    lines.push('| Step | Node | Type | IP | Vulnerabilities | Generator |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
+    chain.forEach((node, index) => {
+      const row = (node && typeof node === 'object') ? node : {};
+      const assignment = (assignments[index] && typeof assignments[index] === 'object') ? assignments[index] : {};
+      const nodeLabel = firstNonEmptyValue(row.name, row.id, `Step ${index + 1}`);
+      const vulns = Array.isArray(row.vulnerabilities) ? row.vulnerabilities.join(', ') : '';
+      lines.push(`| ${index + 1} | ${markdownCell(nodeLabel)} | ${markdownCell(row.type || row.role)} | ${markdownCell(row.ip4 || row.ipv4)} | ${markdownCell(vulns)} | ${markdownCell(reportPreviewPlanAssignmentLabel(assignment))} |`);
+    });
+  } else {
+    lines.push('No flow chain was saved with this preview.');
+  }
+  if (assignments.some((assignment) => assignment && typeof assignment === 'object' && (assignment.resolved_inputs || assignment.resolved_outputs))) {
+    lines.push('');
+    lines.push('## Assignment Details');
+    assignments.forEach((assignment, index) => {
+      if (!assignment || typeof assignment !== 'object') return;
+      const inputEntries = formatObjectEntriesForMarkdown(assignment.resolved_inputs);
+      const outputEntries = formatObjectEntriesForMarkdown(assignment.resolved_outputs);
+      if (!inputEntries.length && !outputEntries.length) return;
+      lines.push('');
+      lines.push(`### Step ${index + 1}: ${reportPreviewPlanAssignmentLabel(assignment) || 'Assignment'}`);
+      if (inputEntries.length) {
+        lines.push('');
+        lines.push('| Input | Value |');
+        lines.push('| --- | --- |');
+        inputEntries.forEach(([key, value]) => lines.push(`| ${markdownCell(key)} | ${markdownCell(value)} |`));
+      }
+      if (outputEntries.length) {
+        lines.push('');
+        lines.push('| Output | Value |');
+        lines.push('| --- | --- |');
+        outputEntries.forEach(([key, value]) => lines.push(`| ${markdownCell(key)} | ${markdownCell(value)} |`));
+      }
+    });
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+async function handleReportDownloadAction(link) {
+  const kind = String(link.dataset.kind || '').trim();
+  const scenario = String(link.dataset.scenario || '').trim();
+  const previewPlanPath = String(link.dataset.previewPlan || '').trim();
+  const xmlPath = String(link.dataset.xmlPath || '').trim();
+  if (!kind || !scenario) throw new Error('Missing report export context.');
+  const preview = await fetchReportFlowPreview(scenario, previewPlanPath, xmlPath);
+  const chain = Array.isArray(preview.chain) ? preview.chain : [];
+  const assignments = Array.isArray(preview.flag_assignments) ? preview.flag_assignments : [];
+  const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
+  const len = String(chain.length || 0);
+  if (kind === 'preview-plan-html') {
+    const markdown = buildFlowPreviewPlanMarkdown(scenario, preview);
+    const html = markdownToHtmlDocument(`Flow/Preview Plan - ${scenario}`, markdown);
+    downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), `flow_preview_plan_${norm}_${len}.html`);
+    return;
+  }
+  if (kind === 'participant-guide' || kind === 'facilitator-guide') {
+    const vulnReadmeEntries = await _reportGuideBuildVulnReadmeEntries(chain, assignments);
+    const markdown = buildReportGuideMarkdown(scenario, chain, assignments, { facilitator: kind === 'facilitator-guide', vulnReadmeEntries, participantNetworkSetup: preview.participant_network_setup, preview });
+    const fname = kind === 'facilitator-guide'
+      ? `facilitator_guide_${norm}_${len}.html`
+      : `participant_steps_${norm}_${len}.html`;
+    const html = markdownToHtmlDocument(kind === 'facilitator-guide' ? `Facilitator Guide - ${scenario}` : `Participant Steps Guide - ${scenario}`, markdown);
+    downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), fname);
+    return;
+  }
+  const exportData = await fetchReportFlowExports(scenario, chain);
+  if (kind === 'afb') {
+    if (!exportData.afb) throw new Error('No .afb returned by server.');
+    downloadBlob(new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json' }), `attackflow_builder_${norm}_${len}.afb`);
+    return;
+  }
+  if (kind === 'attack-graph-json') {
+    if (!exportData.attack_graph) throw new Error('No attack graph returned by server.');
+    downloadBlob(new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json' }), `attack_graph_${norm}_${len}.json`);
+    return;
+  }
+  if (kind === 'attack-graph-dot') {
+    const dot = exportData.attack_graph_dot ? String(exportData.attack_graph_dot) : '';
+    if (!dot) throw new Error('No attack graph .dot returned by server.');
+    downloadBlob(new Blob([dot], { type: 'text/vnd.graphviz' }), `attack_graph_${norm}_${len}.dot`);
+    return;
+  }
+  if (kind === 'attack-graph-pdf') {
+    const b64 = exportData.attack_graph_pdf_base64 ? String(exportData.attack_graph_pdf_base64) : '';
+    if (!b64) throw new Error('Attack graph PDF unavailable (Graphviz not installed).');
+    const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    downloadBlob(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${len}.pdf`);
+    return;
+  }
+  throw new Error('Unknown download type.');
+}
+
+function buildRow(r){
+  const scenNames = (r.scenario_names||[]).join(', ');
+  const rid = (r.run_id||'') || [r.timestamp||'', (r.scenario_xml_path||r.xml_path||''), (r.report_path||''), (r.summary_path||''), (r.full_scenario_path||'')].join('|');
+  const sessionPath = r.session_xml_path || r.post_xml_path;
+  return `<tr data-scenarios="${(r.scenario_names||[]).join('||')}">
+    <td style="text-align:center;"><input type="checkbox" class="row-select" data-run-id="${rid}"></td>
+    <td>${escapeHtml(r.timestamp||'')}</td>
+    <td class="small">${escapeHtml(scenNames)}</td>
+    <td>${r.scenario_xml_path?`<a href='/download_report?path=${encodeURIComponent(r.scenario_xml_path)}'>scenario</a>`:'<span class=\"text-muted\">n/a</span>'}</td>
+  <td>${buildReportDownloadsHtml(r)}</td>
+  <td>${r.summary_path?`<a href='/download_report?path=${encodeURIComponent(r.summary_path)}'>summary</a>`:((r.report_path || sessionPath)?'<span class=\"text-muted d-inline-flex align-items-center gap-1\"><span class=\"spinner-border spinner-border-sm\" role=\"status\" aria-hidden=\"true\"></span>Summarizing, please wait...</span>':'<span class=\"text-muted\">n/a</span>')}</td>
+  <td>${sessionPath?`<a href='/download_report?path=${encodeURIComponent(sessionPath)}'>session</a>`:'<span class=\"text-muted\">n/a</span>'}</td>
+    <td>${escapeHtml(r.run_id||'-')}</td>
+  </tr>`;
+}
+function renderRows(history){
+  if(!tableBody) return;
+  tableBody.innerHTML = history.map(buildRow).join('\n');
+  applyScenarioFilter();
+  updateCount();
+  wireSelectionHandlers();
+  if (masterSelectAllActive) {
+    applyMasterSelectAll();
+  }
+  updateHeader();
+}
+
+document.addEventListener('click', async (event) => {
+  const link = event.target && event.target.closest ? event.target.closest('.report-download-action') : null;
+  if (!link) return;
+  event.preventDefault();
+  if (link.dataset.busy === '1') return;
+  const originalText = link.textContent || 'Download';
+  link.dataset.busy = '1';
+  link.classList.add('disabled');
+  link.textContent = 'Preparing…';
+  try {
+    await handleReportDownloadAction(link);
+  } catch (err) {
+    alert(String(err && err.message || err));
+  } finally {
+    delete link.dataset.busy;
+    link.classList.remove('disabled');
+    link.textContent = originalText;
+  }
+});
+
+function defaultScenarioName(){
+  return (Array.isArray(scenarioNamesCache) && scenarioNamesCache.length) ? String(scenarioNamesCache[0]) : null;
+}
+
+function ensureScenarioSelected(){
+  if(activeScenarioFilter) return;
+  const def = defaultScenarioName();
+  if(def) activeScenarioFilter = def;
+}
+
+function buildReportsDataUrl(){
+  ensureScenarioSelected();
+  if(!activeScenarioFilter) return reportsDataBaseUrl;
+  const url = new URL(reportsDataBaseUrl, window.location.origin);
+  url.searchParams.set('scenario', activeScenarioFilter);
+  return url.pathname + url.search;
+}
+function updateScenarioQueryParam(){
+  const url = new URL(window.location.href);
+  if(activeScenarioFilter){
+    url.searchParams.set('scenario', activeScenarioFilter);
+  } else {
+    url.searchParams.delete('scenario');
+  }
+  window.history.replaceState({}, '', url.toString());
+}
+function updateScenarioFilterControls(){
+  if(clearScenarioBtn){
+    const def = defaultScenarioName();
+    const show = !!activeScenarioFilter && !!def && activeScenarioFilter !== def;
+    clearScenarioBtn.style.display = show ? 'inline-block' : 'none';
+  }
+  const list = document.getElementById('scenarioFilterList');
+  if(!list) return;
+  list.querySelectorAll('[data-scen-name]').forEach(btn => {
+    const name = btn.getAttribute('data-scen-name');
+    const isActive = !!activeScenarioFilter && name === activeScenarioFilter;
+    btn.classList.toggle('active', isActive);
+    btn.classList.toggle('bg-primary', isActive);
+    btn.classList.toggle('text-white', isActive);
+  });
+}
+function renderScenarioButtons(){
+  const list = document.getElementById('scenarioFilterList');
+  if(!list) return;
+  list.innerHTML = '';
+  if(!scenarioNamesCache || scenarioNamesCache.length === 0){
+    const empty = document.createElement('div');
+    empty.className = 'p-2 small text-muted';
+    empty.textContent = 'No scenarios yet';
+    list.appendChild(empty);
+    updateScenarioFilterControls();
+    return;
+  }
+  ensureScenarioSelected();
+  scenarioNamesCache.forEach(name => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'list-group-item list-group-item-action py-1';
+    btn.dataset.scenName = name;
+    btn.textContent = name;
+    if(activeScenarioFilter && name === activeScenarioFilter){ btn.classList.add('active','bg-primary','text-white'); }
+    btn.addEventListener('click', async () => {
+      if(activeScenarioFilter === name) return; // never allow "All" by deselecting
+      await setScenarioFilter(name);
+    });
+    list.appendChild(btn);
+  });
+  updateScenarioFilterControls();
+}
+async function setScenarioFilter(value){
+  activeScenarioFilter = value || defaultScenarioName() || null;
+  lastScenarioChangeAt = Date.now();
+  updateScenarioQueryParam();
+  updateScenarioFilterControls();
+  refreshParticipantNavForScenario(activeScenarioFilter);
+  await fetchHistory();
+}
+
+async function refreshParticipantNavForScenario(scenarioName){
+  try {
+    const scen = (scenarioName || '').toString().trim();
+    if (typeof window.CORETG_PATCH_SCENARIO_NAV === 'function') {
+      window.CORETG_PATCH_SCENARIO_NAV(scen);
+    }
+    if (!scen) {
+      if (typeof window.CORETG_SET_PARTICIPANT_NAV_VISIBLE === 'function') {
+        window.CORETG_SET_PARTICIPANT_NAV_VISIBLE(false);
+      }
+      return;
+    }
+
+    // Fast path: decide instantly from server-injected flags.
+    const scenNorm = normalizeScenarioNorm(scen);
+    if (participantUrlFlags && Object.prototype.hasOwnProperty.call(participantUrlFlags, scenNorm)) {
+      const configured = !!participantUrlFlags[scenNorm];
+      if (typeof window.CORETG_SET_PARTICIPANT_NAV_VISIBLE === 'function') {
+        window.CORETG_SET_PARTICIPANT_NAV_VISIBLE(configured);
+      }
+      return;
+    }
+
+    const url = new URL(participantDetailsBaseUrl, window.location.origin);
+    url.searchParams.set('scenario', scen);
+    const res = await fetch(url.pathname + url.search, { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const configured = !!(data && data.scenario && data.scenario.participant_link_configured);
+    if (typeof window.CORETG_SET_PARTICIPANT_NAV_VISIBLE === 'function') {
+      window.CORETG_SET_PARTICIPANT_NAV_VISIBLE(configured);
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+async function fetchHistory(){
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {
+    const url = buildReportsDataUrl();
+    const res = await fetch(url);
+    if(!res.ok) return;
+    const data = await res.json();
+    if (data && data.participant_url_flags && typeof data.participant_url_flags === 'object') {
+      participantUrlFlags = data.participant_url_flags;
+    }
+    const serverScenario = (data.active_scenario || '').trim();
+    if(serverScenario){
+      activeScenarioFilter = serverScenario;
+    } else {
+      // Never allow an implicit "All" state if scenarios exist.
+      if(!activeScenarioFilter){
+        const first = (Array.isArray(data.scenarios) && data.scenarios.length) ? String(data.scenarios[0]) : null;
+        if(first) activeScenarioFilter = first;
+      }
+    }
+    if(Array.isArray(data.history)) renderRows(data.history);
+    if(Array.isArray(data.scenarios)){
+      scenarioNamesCache = data.scenarios;
+      renderScenarioButtons();
+    }
+    updateScenarioQueryParam();
+    updateScenarioFilterControls();
+  } catch(e) {
+    // transient errors ignored
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+async function refreshNow(reason){
+  const status = document.getElementById('refreshStatus');
+  if (!autoRefresh) return;
+  const now = Date.now();
+  // If the user just clicked a scenario filter, don't race it.
+  if (now - lastScenarioChangeAt < 800) return;
+  // Simple throttle for noisy events (click + focus + visibility can stack).
+  if (now - lastManualRefreshAt < 800) return;
+  lastManualRefreshAt = now;
+  if (status) status.textContent = 'refreshing…';
+  await fetchHistory();
+  refreshParticipantNavForScenario(activeScenarioFilter);
+  if (status) status.textContent = 'auto';
+  // Restart the timer so the next refresh is `intervalMs` from now.
+  schedule();
+}
+
+function schedule(){
+  if(refreshTimer) clearTimeout(refreshTimer);
+  if(!autoRefresh) return;
+  refreshTimer = setTimeout(async () => { await fetchHistory(); schedule(); }, intervalMs);
+}
+document.getElementById('toggleRefreshBtn').addEventListener('click', () => {
+  autoRefresh = !autoRefresh;
+  document.getElementById('toggleRefreshBtn').textContent = autoRefresh? 'Pause':'Resume';
+  document.getElementById('refreshStatus').textContent = autoRefresh? 'auto':'paused';
+  schedule();
+});
+
+const sel = document.getElementById('refreshInterval');
+if (sel) {
+  if ([2000,5000,10000,30000,60000].includes(intervalMs)) {
+    sel.value = String(intervalMs);
+  }
+  sel.addEventListener('change', ()=>{
+    const v = parseInt(sel.value, 10);
+    if (!isNaN(v) && v > 0) {
+      intervalMs = v;
+      try { localStorage.setItem('reportsRefreshMs', String(intervalMs)); } catch(e) {}
+      schedule();
+    }
+  });
+}
+
+function applyScenarioFilter(){
+  const rows = tableBody.querySelectorAll('tr');
+  rows.forEach(r => {
+    if(!activeScenarioFilter){ r.classList.remove('d-none'); return; }
+    const scenAttr = r.getAttribute('data-scenarios')||'';
+    const match = scenAttr.split('||').filter(Boolean).includes(activeScenarioFilter);
+    r.classList.toggle('d-none', !match);
+  });
+  updateHeader();
+}
+function updateCount(){
+  const rows = Array.from(tableBody.querySelectorAll('tr'));
+  const visible = rows.filter(r=>!r.classList.contains('d-none')).length;
+  document.getElementById('runCount').textContent = visible + ' run' + (visible===1?'':'s');
+}
+document.getElementById('clearScenarioFilter').addEventListener('click', async () => {
+  const def = defaultScenarioName();
+  if(!def) return;
+  await setScenarioFilter(def);
+});
+renderScenarioButtons();
+applyScenarioFilter();
+updateCount();
+// Bind row + header selection handlers for initial server-rendered rows
+wireSelectionHandlers();
+// Refresh immediately on load, then start polling.
+refreshNow('load');
+
+// Refresh when the user returns attention to the page.
+window.addEventListener('focus', () => { refreshNow('focus'); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshNow('visible');
+});
+// Refresh when the page is clicked (discoverability + quick update), but do not
+// interfere with scenario selection or other controls.
+document.addEventListener('click', (ev) => {
+  try {
+    const target = ev && ev.target ? ev.target : null;
+    if (!target || !(target instanceof Element)) { refreshNow('click'); return; }
+    // Ignore clicks on interactive controls / scenario list / table.
+    if (
+      target.closest('#scenarioFilterList') ||
+      target.closest('#runsTable') ||
+      target.closest('#navRightExtras') ||
+      target.closest('button') ||
+      target.closest('a') ||
+      target.closest('input') ||
+      target.closest('select') ||
+      target.closest('textarea') ||
+      target.closest('label')
+    ) {
+      return;
+    }
+  } catch(e) {}
+  refreshNow('click');
+}, { capture: true });
+
+schedule();
+
+function wireSelectionHandlers(){
+  const checkboxes = tableBody.querySelectorAll('input.row-select');
+  checkboxes.forEach(cb=>{
+    const id = cb.getAttribute('data-run-id')||'';
+    if(id && selectedRunIds.has(id)) cb.checked = true; else cb.checked = false;
+    cb.addEventListener('change', ()=>{
+      const rid = cb.getAttribute('data-run-id')||'';
+      if(!rid) return;
+      if(cb.checked) {
+        selectedRunIds.add(rid);
+      } else {
+        selectedRunIds.delete(rid);
+        if (masterSelectAllActive) masterSelectAllActive = false; // user manually diverged
+      }
+      updateHeader();
+    });
+  });
+  if(runsCheckAll){
+    runsCheckAll.onchange = ()=>{
+      const newVal = !!runsCheckAll.checked;
+      if (newVal) {
+        masterSelectAllActive = true;
+        applyMasterSelectAll();
+      } else {
+        masterSelectAllActive = false;
+        const visibles = getVisibleCheckboxes();
+        visibles.forEach(cb=>{ const rid = cb.getAttribute('data-run-id')||''; if(!rid) return; cb.checked = false; selectedRunIds.delete(rid); });
+        updateHeader();
+      }
+    };
+  }
+  updateHeader();
+}
+
+function applyMasterSelectAll(){
+  const visibles = getVisibleCheckboxes();
+  visibles.forEach(cb=>{ const rid = cb.getAttribute('data-run-id')||''; if(!rid) return; cb.checked = true; selectedRunIds.add(rid); });
+  updateHeader();
+}
+
+async function deleteSelectedRuns(){
+  const ids = Array.from(selectedRunIds).filter(Boolean);
+  if(ids.length===0) return;
+  if(!confirm(`Delete ${ids.length} selected run entr${ids.length===1?'y':'ies'}?\nThis deletes run history entries and artifacts under outputs/ (scenario XMLs, session captures, bundles). Reports under ./reports are preserved.`)) return;
+  try{
+    const res = await fetch('/reports/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_ids: ids }) });
+    if(res.ok){ selectedRunIds.clear(); await fetchHistory(); } else { alert('Delete failed'); }
+  } catch(e){ alert('Delete failed'); }
+}
+document.getElementById('runsDeleteBtn')?.addEventListener('click', deleteSelectedRuns);
+</script>
+{% endblock %}
