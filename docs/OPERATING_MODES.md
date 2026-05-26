@@ -1,19 +1,25 @@
 # ScenarioForge Operating Modes
 
-ScenarioForge can run in VM mode, native mode, and CLI-only workflows. The README is VM-mode first; this page collects the other launch paths and when to use them.
+ScenarioForge can run in VM mode, native/non-VM mode, and CLI-only workflows. The README is VM-mode first; this page collects the other launch paths and when to use them.
+
+Native mode is not a separate "local-only" deployment. It is the default non-VM application mode, and CORE may be on the same machine or on another reachable host. The launcher has `auto`, `local`, and `remote` CORE target selectors; those choose the CORE endpoint, while `CORETG_WEBUI_MODE=native` keeps VM-mode HITL defaults disabled.
 
 ## Mode Summary
 
 | Mode | Best For | CORE Target |
 | --- | --- | --- |
 | VM mode | Proxmox labs with a separate CORE 9.2 VM and participant machine | Remote CORE VM over gRPC and SSH |
-| Native mode | Local development and quick previews | CORE daemon on the same machine |
-| Remote CORE mode | Non-Proxmox remote CORE hosts | Remote CORE host over gRPC and SSH |
+| Native mode, local CORE | Local development and quick previews | Autodetected/default local CORE endpoint |
+| Native mode, remote CORE | Non-Proxmox remote CORE hosts | Explicit remote CORE host over gRPC and SSH |
 | CLI mode | Scripted topology generation and reports | Any reachable CORE endpoint |
 
 ## Native Mode
 
-Native mode assumes ScenarioForge and CORE run on the same host.
+Native mode is the non-VM mode. Use it whenever you are not asking ScenarioForge to pre-seed VM/HITL behavior. CORE can be local or remote.
+
+### Local CORE Autodetect
+
+When CORE 9.2 is running on the same machine and no `CORE_HOST` override is set, the auto/default launch path uses the local CORE endpoint. You can usually leave `CORETG_WEBUI_MODE=native` and avoid setting a remote host.
 
 1. Start CORE 9.2 and ensure `core-daemon` is listening on `127.0.0.1:50051`.
 2. Copy the local env override file if you want persistent defaults:
@@ -57,9 +63,9 @@ You can also use the local helper script:
 bash scripts/run_webui_local.sh --web-port 9090
 ```
 
-## Remote CORE Mode
+### Explicit Remote CORE Target
 
-Remote CORE mode is useful when CORE is on another host but you are not using the full VM-mode Proxmox/HITL workflow.
+Use an explicit remote CORE target when CORE is on another host but you are not using the full VM-mode Proxmox/HITL workflow. This is still native mode unless you set `CORETG_WEBUI_MODE=vm`.
 
 ```bash
 bash scripts/run_webui_remote.sh --core-host 10.0.0.50 --core-port 50051 --web-port 9090
@@ -76,7 +82,7 @@ CORE_SSH_USERNAME=corevm
 CORETG_WEBUI_MODE=native
 ```
 
-Set `CORETG_WEBUI_MODE=vm` when you want the VM-mode UI defaults and HITL workflows described in the README.
+Set `CORETG_WEBUI_MODE=vm` only when you want the VM-mode UI defaults and HITL workflows described in the README.
 
 ## Docker Compose Notes
 
@@ -117,11 +123,13 @@ Useful options:
 
 ## Shared Environment File
 
-Both direct Python launches and Docker Compose read `.scenarioforge.env.example` and optional `.scenarioforge.env` values. Prefer `.scenarioforge.env` for local changes; it is ignored by git.
+Docker Compose reads `.scenarioforge.env.example` and then optional `.scenarioforge.env` values. Direct Python launches read `.scenarioforge.env` when present and otherwise use built-in defaults. Prefer `.scenarioforge.env` for local changes; it is ignored by git.
 
-Configuration precedence is:
+For Compose, configuration precedence is:
 
 1. Real process environment variables
 2. `.scenarioforge.env`
 3. `.scenarioforge.env.example`
 4. Built-in Python defaults
+
+For direct Python, `.scenarioforge.env.example` is documentation and a copy source; copy it to `.scenarioforge.env` when you want file-based runtime overrides.

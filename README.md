@@ -54,7 +54,7 @@ View the WebUI images gallery [`docs/screenshots.md`](docs/screenshots.md).
 
 ScenarioForge supports both **VM mode** and **native mode**. The README focuses on VM mode because it matches the intended Proxmox lab workflow: ScenarioForge runs as the control application, talks to a CORE 9.2 VM over gRPC/SSH, and can prepare participant-facing HITL attachments.
 
-For local/native development, remote CORE without Proxmox, Docker-only notes, and CLI usage, see [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md).
+For native/non-VM operation, including autodetected local CORE, explicit remote CORE targets without Proxmox, Docker-only notes, and CLI usage, see [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md).
 
 ### Recommended Lab Layout
 
@@ -74,7 +74,7 @@ Copy the committed defaults and edit the local override file:
 cp .scenarioforge.env.example .scenarioforge.env
 ```
 
-The local `.scenarioforge.env` file is gitignored. Runtime config precedence is: real environment variables, then `.scenarioforge.env`, then `.scenarioforge.env.example`, then built-in defaults.
+The local `.scenarioforge.env` file is gitignored. Docker Compose loads `.scenarioforge.env.example` first and then `.scenarioforge.env`; direct Python launches read `.scenarioforge.env` when present and otherwise use built-in defaults. Real environment variables take precedence over file-based values.
 
 Key VM-mode variables in [.scenarioforge.env.example](.scenarioforge.env.example):
 
@@ -130,9 +130,9 @@ A ready-to-deploy DeployForge file is coming soon: [docs/DEPLOYFORGE.md](docs/DE
 
 ## Other Operating Modes
 
-Native mode runs ScenarioForge and CORE on the same machine, usually with `CORE_HOST=127.0.0.1` and `CORETG_WEBUI_MODE=native`. It is useful for local development, quick CLI checks, and non-Proxmox labs, but it does not mirror the participant/CORE VM separation used by VM mode.
+Native mode is the non-VM application mode. It can talk to CORE on the same machine or to an explicit remote CORE host; when CORE is local and no `CORE_HOST` override is set, the auto launcher/default config uses the local CORE endpoint so you do not need a separate mode switch. Native mode is useful for local development, quick CLI checks, and non-Proxmox labs, but it does not mirror the participant/CORE VM separation used by VM mode.
 
-See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode, remote CORE mode, direct Python launches, Docker Compose notes, and CLI commands.
+See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with local or remote CORE targets, direct Python launches, Docker Compose notes, and CLI commands.
 
 ## Guides
 - [Operating modes](docs/OPERATING_MODES.md)
