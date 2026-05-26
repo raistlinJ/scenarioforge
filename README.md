@@ -17,17 +17,12 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 - [Contributing](#contributing)
 
 ## Highlights
-- **Single-source planning** – edit scenarios in the browser or any XML editor and reproduce results with the CLI.
-- **VM-mode first** – run ScenarioForge as the control application for a Proxmox-hosted CORE 9.2 VM and participant environment.
-- **Flexible editor state** – the Web UI can intentionally hold zero scenarios while you clear or stage a project; XML is produced only after at least one scenario exists.
-- **Deterministic previews** – optional RNG seed locks in host expansion, router placement, connectivity, services, segmentation, and vulnerability assignment.
-- **Live log dock** – stream run output, filter by level or text/regex, and toggle auto-follow for long runs.
-- **Rich topology policies** – per-routing-item R2R meshes, R2S aggregation, host grouping bounds, and switch re-homing.
-- **Artifacts on disk** – traffic scripts, segmentation rules, docker-compose definitions, Markdown reports, and JSON summaries are written to predictable locations for inspection.
-- **Hardware-in-the-Loop friendly** – manage HITL attachments directly in the editor, apply Proxmox bridge rewiring from the browser, and keep topologies deterministic by constraining attachments and generated devices.
-	- Participant graph renders HITL interface nodes (e.g., `ens19`) as **HITL** with a prominent “YOU ARE HERE” callout and keeps them visually separated from the main topology.
-	- HITL nodes intentionally omit IP labels in the graph to avoid implying that interface/network objects are routable “hosts”.
-	- The graph legend labels docker-based vulnerability targets as **vulnerability** and renders them in bright red.
+- **Scenario creation with real backend assets** – turn an idea into a runnable CORE topology with routers, hosts, Docker-backed vulnerability targets, traffic, segmentation, reports, and downloadable exercise artifacts.
+- **As much or as little specificity as you want** – start from a broad goal, a classroom exercise prompt, or a detailed XML plan; refine node counts, services, routing, vulnerabilities, HITL attachments, and flag sequencing only when you care about those details.
+- **Built for practice and instruction** – use ScenarioForge to train yourself, run classroom labs, rehearse cyber ranges, prototype network-defense scenarios, or experiment with attack/defense workflows without rebuilding the lab by hand each time.
+- **VM-mode first for realistic labs** – run ScenarioForge as the control application for a Proxmox-hosted CORE 9.2 VM and a participant machine such as Kali, with CORE gRPC, SSH validation, and HITL bridge workflows tied into the UI.
+- **Preview before execution** – inspect topology graphs, challenge chains, vulnerability placement, node roles, and generated artifacts before starting the CORE session.
+- **Reproducible runs** – optional RNG seeds, XML scenario files, saved plans, Markdown reports, and JSON summaries make labs repeatable for students, operators, and future experiments.
 
 ## Screenshots
 
