@@ -623,3 +623,75 @@ def test_prepare_remote_cli_context_regenerates_missing_remote_flow_artifacts_fr
     assert 'demo-seed' in run_calls[0]
     assert 'custom_input' in run_calls[0]
     assert 'flow.artifacts.regenerate complete count=1' in log_handle.getvalue()
+
+
+def test_remote_flow_regenerate_script_compiles() -> None:
+    script = backend._remote_flow_regenerate_script(
+        assignment={
+            'config': {'seed': 'demo'},
+            'inject_files': ['/tmp/vulns/flag_generators_runs/flow-demo/01_text/artifacts/secret.txt -> /flow_injects'],
+        },
+        remote_repo='/tmp/scenarioforge',
+        out_dir='/tmp/vulns/flag_generators_runs/flow-demo/01_text',
+        kind='flag-generator',
+        generator_id='text_secret',
+        sudo_password='',
+    )
+
+    compile(script, '<remote-flow-regenerate>', 'exec')
+
+
+def test_remote_flow_regenerate_failure_raises_concise_user_message(tmp_path, monkeypatch):
+    remote_repo = '/remote/repo'
+    remote_run_dir = '/tmp/vulns/flag_generators_runs/flow-demo/01_text'
+    remote_artifact = f'{remote_run_dir}/artifacts/secret.txt'
+    flow_state = {
+        'flag_assignments': [
+            {
+                'id': 'text_secret',
+                'type': 'flag-generator',
+                'node_id': 'docker-1',
+                'run_dir': remote_run_dir,
+                'outputs_manifest': f'{remote_run_dir}/outputs.json',
+                'inject_files': [f'{remote_artifact} -> /flow_injects'],
+                'resolved_inputs': {'seed': 'demo-seed'},
+            }
+        ]
+    }
+    xml_path = tmp_path / 'preview.xml'
+    xml_path.write_text(
+        '\n'.join(
+            [
+                '<Scenarios>',
+                '  <Scenario name="demo">',
+                '    <ScenarioEditor>',
+                '      <FlagSequencing>',
+                f'        <FlowState>{json.dumps(flow_state, separators=(",", ":"))}</FlowState>',
+                '      </FlagSequencing>',
+                '    </ScenarioEditor>',
+                '  </Scenario>',
+                '</Scenarios>',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(
+        backend,
+        '_run_remote_python_json',
+        lambda *_args, **_kwargs: {'ok': False, 'stderr': 'very long internal regenerate failure'},
+    )
+
+    log_handle = io.StringIO()
+    with pytest.raises(RuntimeError, match='Challenges and Flow Data not found on CORE VM') as excinfo:
+        backend._regenerate_missing_remote_flow_artifacts_for_plan(
+            sftp=_FakeSFTP(set()),
+            preview_plan_path=str(xml_path),
+            remote_repo=remote_repo,
+            core_cfg={'ssh_enabled': True, 'ssh_host': 'core.local', 'ssh_username': 'core'},
+            log_handle=log_handle,
+        )
+
+    assert str(excinfo.value) == backend.FLOW_REMOTE_ARTIFACTS_MISSING_MESSAGE
+    assert 'flow.artifacts.regenerate failed details' in log_handle.getvalue()
+    assert 'very long internal regenerate failure' in log_handle.getvalue()

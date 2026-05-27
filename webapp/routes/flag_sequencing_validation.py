@@ -57,6 +57,87 @@ def register(app, *, backend_module: Any) -> None:
         except Exception:
             pass
 
+    def _flow_regeneration_replay_info(assignments: Any, missing_indices: Any) -> dict[str, Any]:
+        unsafe: list[dict[str, Any]] = []
+        indices = sorted({int(i) for i in (missing_indices or []) if isinstance(i, int) or str(i).isdigit()})
+        array = assignments if isinstance(assignments, list) else []
+        for idx in indices:
+            entry = array[idx] if 0 <= idx < len(array) and isinstance(array[idx], dict) else {}
+            cfg = entry.get('config') if isinstance(entry.get('config'), dict) else {}
+            resolved_inputs = entry.get('resolved_inputs') if isinstance(entry.get('resolved_inputs'), dict) else {}
+            if cfg or resolved_inputs:
+                continue
+            unsafe.append(
+                {
+                    'index': idx + 1,
+                    'node_id': str(entry.get('node_id') or ''),
+                    'generator_id': str(entry.get('id') or entry.get('generator_id') or ''),
+                    'reason': 'saved resolved inputs are missing',
+                }
+            )
+        warning = ''
+        if unsafe:
+            names = [str(item.get('generator_id') or item.get('node_id') or item.get('index')) for item in unsafe]
+            warning = (
+                'Regenerating may change Flow resolved values because saved resolved inputs are missing for: '
+                + ', '.join([name for name in names if name][:5])
+            )
+            if len(unsafe) > 5:
+                warning += f', +{len(unsafe) - 5} more'
+        return {
+            'regeneration_required': bool(indices),
+            'regeneration_would_preserve_resolves': not unsafe,
+            'regeneration_warning': warning,
+            'unsafe_regeneration_assignments': unsafe,
+        }
+
+    def _load_flow_artifact_context(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        scenario_label = str(payload.get('scenario') or '').strip()
+        scenario_norm = backend._normalize_scenario_label(scenario_label)
+        if not scenario_norm:
+            return {'ok': False, 'error': 'No scenario specified.'}, 400
+
+        xml_hint = str(payload.get('xml_path') or '').strip()
+        xml_path = ''
+        if xml_hint:
+            try:
+                xml_path = backend.os.path.abspath(xml_hint)
+            except Exception:
+                xml_path = xml_hint
+        if not xml_path:
+            xml_path = backend._latest_xml_path_for_scenario(scenario_norm) or ''
+        if not xml_path or not backend.os.path.exists(xml_path):
+            return {'ok': False, 'error': 'No XML found for this scenario.'}, 404
+
+        flow_state = backend._flow_state_from_xml_path(xml_path, scenario_norm)
+        assigns = []
+        try:
+            if isinstance(flow_state, dict) and isinstance(flow_state.get('flag_assignments'), list):
+                assigns = [item for item in flow_state.get('flag_assignments') if isinstance(item, dict)]
+        except Exception:
+            assigns = []
+        if not assigns:
+            return {'ok': False, 'error': 'No FlowState artifacts to validate. Run Generate and Save XML first.'}, 400
+
+        flow_core_cfg = backend._core_config_from_xml_path(xml_path, scenario_norm, include_password=True)
+        if isinstance(flow_core_cfg, dict):
+            flow_core_cfg = backend._apply_core_secret_to_config(flow_core_cfg, scenario_norm)
+        if not isinstance(flow_core_cfg, dict):
+            return {'ok': False, 'error': 'No CoreConnection configured in XML for this scenario.'}, 404
+        try:
+            flow_core_cfg = backend._require_core_ssh_credentials(flow_core_cfg)
+        except Exception as exc:
+            return {'ok': False, 'error': f'Remote validation requires SSH credentials: {exc}'}, 400
+
+        return {
+            'ok': True,
+            'scenario_norm': scenario_norm,
+            'xml_path': xml_path,
+            'flow_state': flow_state,
+            'assignments': assigns,
+            'flow_core_cfg': flow_core_cfg,
+        }, 200
+
     @app.route('/api/flag-sequencing/test_core_connection', methods=['POST'])
     def api_flow_test_core_connection():
         payload = request.get_json(silent=True) or {}
@@ -322,7 +403,8 @@ def register(app, *, backend_module: Any) -> None:
             if not isinstance(items, list):
                 return jsonify({'ok': False, 'error': 'Remote validation returned no items.'}), 500
 
-            for item in items:
+            missing_assignment_indices: set[int] = set()
+            for item_index, item in enumerate(items):
                 if not isinstance(item, dict):
                     continue
                 miss_out = item.get('outputs_missing') if isinstance(item.get('outputs_missing'), list) else []
@@ -331,6 +413,8 @@ def register(app, *, backend_module: Any) -> None:
                 chk_inj = item.get('inject_checked') if isinstance(item.get('inject_checked'), list) else []
                 miss_container = item.get('container_missing') if isinstance(item.get('container_missing'), list) else []
                 chk_container = item.get('container_checked') if isinstance(item.get('container_checked'), list) else []
+                if miss_out or miss_inj:
+                    missing_assignment_indices.add(item_index)
 
                 miss_set = {str(value) for value in (miss_out + miss_inj) if str(value).strip()}
                 for path in chk_out + chk_inj:
@@ -353,6 +437,8 @@ def register(app, *, backend_module: Any) -> None:
         except Exception as exc:
             return jsonify({'ok': False, 'error': f'Remote validation failed: {exc}'}), 500
 
+        replay_info = _flow_regeneration_replay_info(assigns, missing_assignment_indices)
+
         return jsonify(
             {
                 'ok': True,
@@ -361,7 +447,53 @@ def register(app, *, backend_module: Any) -> None:
                 'container_present': sorted(set(container_present)),
                 'container_missing': sorted(set(container_missing)),
                 'resolved_paths': path_map,
+                **replay_info,
             }
         )
+
+    @app.route('/api/flag-sequencing/regenerate_flow_artifacts', methods=['POST'])
+    def api_flow_regenerate_flow_artifacts():
+        payload = request.get_json(silent=True) or {}
+        ctx, status = _load_flow_artifact_context(payload)
+        if not ctx.get('ok'):
+            return jsonify(ctx), status
+
+        assigns = ctx.get('assignments') if isinstance(ctx.get('assignments'), list) else []
+        client = None
+        sftp = None
+        log_handle = backend.io.StringIO()
+        try:
+            client = backend._open_ssh_client(ctx.get('flow_core_cfg'))
+            sftp = client.open_sftp()
+            remote_repo = backend._remote_static_repo_dir(sftp)
+            missing_indices: list[int] = []
+            for index, assignment in enumerate(assigns):
+                if isinstance(assignment, dict) and backend._flow_assignment_missing_remote_paths(sftp, assignment):
+                    missing_indices.append(index)
+            replay_info = _flow_regeneration_replay_info(assigns, missing_indices)
+            if replay_info.get('regeneration_would_preserve_resolves') is False:
+                return jsonify({'ok': False, **replay_info}), 409
+            backend._regenerate_missing_remote_flow_artifacts_for_plan(
+                sftp=sftp,
+                preview_plan_path=str(ctx.get('xml_path') or ''),
+                remote_repo=remote_repo,
+                core_cfg=ctx.get('flow_core_cfg'),
+                log_handle=log_handle,
+            )
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc), 'log': log_handle.getvalue()[-4000:]}), 500
+        finally:
+            try:
+                if sftp:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+        return jsonify({'ok': True, 'log': log_handle.getvalue()[-4000:]})
 
     mark_routes_registered(app, 'flag_sequencing_validation_routes')

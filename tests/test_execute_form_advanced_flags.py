@@ -53,6 +53,24 @@ def test_execute_dialog_omits_start_core_daemon_checkbox() -> None:
     assert "Would you like ScenarioForge to try to start core-daemon now?" in text
 
 
+def test_execute_preflights_flow_artifacts_and_regenerates_when_safe() -> None:
+    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "async function ensureExecuteFlowArtifactsReady",
+        "'/api/flag-sequencing/revalidate_flow'",
+        "'/api/flag-sequencing/regenerate_flow_artifacts'",
+        "regeneration_would_preserve_resolves === false",
+        "Regenerate & Continue",
+        "const flowReady = await ensureExecuteFlowArtifactsReady({",
+        "if (!flowReady) {",
+        "return false;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing execute Flow artifact preflight wiring: " + "; ".join(missing)
+
+
 def test_execute_summary_uses_validation_unavailable_details() -> None:
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

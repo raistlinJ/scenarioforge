@@ -1754,6 +1754,7 @@ def test_flag_sequencing_validation_register_is_idempotent():
     rules = {rule.rule for rule in app.url_map.iter_rules()}
     assert '/api/flag-sequencing/test_core_connection' in rules
     assert '/api/flag-sequencing/revalidate_flow' in rules
+    assert '/api/flag-sequencing/regenerate_flow_artifacts' in rules
 
 
 def test_flag_sequencing_substitutions_register_is_idempotent():
