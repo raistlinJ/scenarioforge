@@ -9596,7 +9596,6 @@
     }
 
     function scheduleAutoSaveXml(snapshot, coreState, scenarios) {
-        return;
         if (!ALLOW_LOCAL_EDITOR_PERSISTENCE) return;
         if (!snapshot || !Array.isArray(scenarios) || scenarios.length === 0) return;
         if (autoSaveXmlSkipNext) {
