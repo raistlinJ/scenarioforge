@@ -6732,7 +6732,15 @@
     function hasUnsavedChanges() {
         try {
             if (previewState && previewState.dirty === true) return true;
-        } catch (e) { }
+        } catch (e) {
+            const detail = String((e && e.message) || e || 'Flow preflight failed before execute.');
+            appendExecuteDialogLog(`Flow preflight exception: ${detail}`);
+            abortBeforeRunRequest('Flow preflight failed', detail);
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Flow Preflight Failed', detail, 'OK', 'danger');
+            }
+            return false;
+        }
         try {
             const currentSig = buildXmlPreviewSignature();
             if (xmlPreviewSavedSignature && currentSig && xmlPreviewSavedSignature !== currentSig) {
@@ -22999,6 +23007,129 @@
         }
     }
 
+    async function postExecuteFlowJson(url, payload = {}, timeoutMs = 90000) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload || {}),
+                signal: controller.signal,
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data) {
+                const detail = data && (data.error || data.message) ? String(data.error || data.message) : `HTTP ${res.status}`;
+                return { ok: false, error: detail, status: res.status, ...(data || {}) };
+            }
+            return data;
+        } catch (err) {
+            return { ok: false, error: String(err && err.message || err) };
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    function executeFlowMissingList(data) {
+        const missing = data && Array.isArray(data.missing) ? data.missing : [];
+        return missing.map((item) => String(item || '').trim()).filter(Boolean);
+    }
+
+    async function ensureExecuteFlowArtifactsReady({ scenarioName, xmlPath, appendLog, updateStatus, abortRun } = {}) {
+        const scenario = String(scenarioName || '').trim();
+        const planPath = String(xmlPath || '').trim();
+        if (!scenario || !planPath || !planPath.toLowerCase().endsWith('.xml')) {
+            return true;
+        }
+        const log = typeof appendLog === 'function' ? appendLog : () => { };
+        const setStatus = typeof updateStatus === 'function' ? updateStatus : () => { };
+        const abort = typeof abortRun === 'function' ? abortRun : () => { };
+
+        log('Checking Flow challenge files on CORE VM…');
+        setStatus('Checking Flow challenge files…', 'Running Flow Re-Validate before execute.');
+        const payload = { scenario, xml_path: planPath, execute_preflight: true };
+        const check = await postExecuteFlowJson('/api/flag-sequencing/revalidate_flow', payload, 90000);
+        if (!check || check.ok !== true) {
+            const msg = String((check && (check.error || check.message)) || 'Flow Re-Validate failed.');
+            if (/No FlowState|No resolved outputs saved|No FlowState artifacts/i.test(msg)) {
+                log(`Flow challenge preflight skipped: ${msg}`);
+                return true;
+            }
+            log(`Flow challenge preflight failed: ${msg}`);
+            abort('Flow preflight failed', msg);
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Flow Preflight Failed', msg, 'OK', 'danger');
+            }
+            return false;
+        }
+
+        const missing = executeFlowMissingList(check);
+        if (!missing.length) {
+            log('Flow challenge files found on CORE VM.');
+            return true;
+        }
+
+        log(`Flow challenge files missing on CORE VM: ${missing.length}`);
+        missing.slice(0, 5).forEach((path) => log(`Missing Flow file: ${path}`));
+        if (missing.length > 5) log(`Missing Flow files: +${missing.length - 5} more`);
+
+        if (check.regeneration_would_preserve_resolves === false) {
+            const warning = String(check.regeneration_warning || 'Regenerating these Flow artifacts may change resolved Flow values.');
+            const msg = `${warning}\n\nPlease re-run Flow Generator before Execute.`;
+            log('Flow regeneration would change saved resolves; execute aborted.');
+            abort('Flow generator required', 'Re-run Flow Generator before Execute.');
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Flow Generator Required', msg, 'OK', 'warning');
+            }
+            return false;
+        }
+
+        const confirmMsg = `Missing Flow challenge files were detected on the CORE VM (${missing.length}).\n\nRegenerate the missing Flow data now and continue Execute?`;
+        let shouldRegenerate = true;
+        if (typeof window.confirmWithModal === 'function') {
+            shouldRegenerate = await window.confirmWithModal('Missing Flow Data', confirmMsg, 'Regenerate & Continue', 'primary');
+        } else {
+            shouldRegenerate = window.confirm(confirmMsg);
+        }
+        if (!shouldRegenerate) {
+            log('Execute cancelled: missing Flow files were not regenerated.');
+            abort('Execute cancelled', 'Missing Flow files were not regenerated.');
+            return false;
+        }
+
+        log('Regenerating missing Flow challenge files on CORE VM…');
+        setStatus('Regenerating Flow challenge files…', 'Rebuilding missing Flow data before execute.');
+        const regen = await postExecuteFlowJson('/api/flag-sequencing/regenerate_flow_artifacts', payload, 180000);
+        if (!regen || regen.ok !== true) {
+            const msg = String((regen && (regen.error || regen.message)) || 'Challenges and Flow Data not found on CORE VM. Please re-run Flow Generator...');
+            log(`Flow regeneration failed: ${msg}`);
+            abort('Flow regeneration failed', msg);
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Flow Regeneration Failed', msg, 'OK', 'danger');
+            }
+            return false;
+        }
+
+        log('Flow challenge files regenerated; re-validating…');
+        const verify = await postExecuteFlowJson('/api/flag-sequencing/revalidate_flow', payload, 90000);
+        const stillMissing = executeFlowMissingList(verify);
+        if (!verify || verify.ok !== true || stillMissing.length) {
+            const msg = stillMissing.length
+                ? `Flow regeneration completed, but ${stillMissing.length} expected file(s) are still missing. Please re-run Flow Generator.`
+                : String((verify && (verify.error || verify.message)) || 'Flow Re-Validate failed after regeneration.');
+            log(`Flow regeneration verification failed: ${msg}`);
+            abort('Flow regeneration incomplete', msg);
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Flow Regeneration Incomplete', msg, 'OK', 'danger');
+            }
+            return false;
+        }
+
+        log('Flow challenge files regenerated and verified.');
+        return true;
+    }
+
     async function parseResponseJson(response) {
         if (!response || typeof response.clone !== 'function') {
             return null;
@@ -24775,6 +24906,19 @@
                 runProgressLogLine(line);
             }
         };
+        const abortBeforeRunRequest = (status, detail) => {
+            updateRunStatus(status || 'Execute cancelled', detail || 'Run start aborted.');
+            if (executeProgressState.active) {
+                completeExecuteProgressPanel(false, status || 'Execute cancelled', detail || 'Run start aborted.');
+            } else if (showProgressModal) {
+                const bar = document.getElementById('runProgressBar');
+                if (bar) {
+                    bar.classList.remove('progress-bar-animated');
+                    bar.textContent = 'Error';
+                }
+                markRunProgressComplete();
+            }
+        };
         const extractBlockingSessionsMessage = (payload) => {
             try {
                 const summaryErr = payload && payload.validation_summary && payload.validation_summary.error
@@ -25363,6 +25507,18 @@
                         }
                         markRunProgressComplete();
                     }
+                    return false;
+                }
+            }
+            if (!IS_BUILDER_VIEW && rp && rp.endsWith('.xml')) {
+                const flowReady = await ensureExecuteFlowArtifactsReady({
+                    scenarioName,
+                    xmlPath: previewPlanPath || rp,
+                    appendLog: appendExecuteDialogLog,
+                    updateStatus: updateRunStatus,
+                    abortRun: abortBeforeRunRequest,
+                });
+                if (!flowReady) {
                     return false;
                 }
             }

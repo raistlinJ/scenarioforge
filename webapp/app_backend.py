@@ -473,6 +473,7 @@ REMOTE_BASE_DIR_ENV = os.environ.get('CORE_REMOTE_BASE_DIR', '/tmp/scenarioforge
 REMOTE_STATIC_REPO_ENV = os.environ.get('CORE_REMOTE_STATIC_REPO', '/tmp/scenarioforge')
 REMOTE_RUNS_SUBDIR = 'runs'
 REMOTE_LOG_CHUNK_SIZE = 8192
+FLOW_REMOTE_ARTIFACTS_MISSING_MESSAGE = 'Challenges and Flow Data not found on CORE VM. Please re-run Flow Generator...'
 REPO_PUSH_SKIP_IF_UNCHANGED = os.environ.get('CORETG_REPO_SKIP_IF_UNCHANGED', '1')
 REPO_PUSH_METHOD = os.environ.get('CORETG_REPO_PUSH_METHOD', 'auto')
 
@@ -5119,11 +5120,11 @@ try:
             if deps_dir not in sys.path:
                 sys.path.insert(0, deps_dir)
             import yaml  # noqa
-            preflight += '[preflight] installed PyYAML into ' + deps_dir + '\n'
+            preflight += '[preflight] installed PyYAML into ' + deps_dir + '\\n'
             if pip_proc.stderr or pip_proc.stdout:
-                preflight += '[preflight] pip: ' + (pip_proc.stderr or pip_proc.stdout).strip()[-800:] + '\n'
+                preflight += '[preflight] pip: ' + (pip_proc.stderr or pip_proc.stdout).strip()[-800:] + '\\n'
         except Exception as preflight_exc:
-            preflight += '[preflight] PyYAML missing and install failed: ' + str(preflight_exc) + '\n'
+            preflight += '[preflight] PyYAML missing and install failed: ' + str(preflight_exc) + '\\n'
     cmd = [
         sys.executable,
         runner,
@@ -5238,10 +5239,14 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
         detail = '; '.join(failures[:5])
         if len(failures) > 5:
             detail += f"; +{len(failures) - 5} more"
-        raise RuntimeError(
-            'Flow generator artifacts are missing on the CORE host and could not be rebuilt. '
-            f'{detail}. Re-run Generate/Resolve in Flow and execute again if the saved flow state is stale.'
-        )
+        try:
+            log_handle.write(
+                '[remote] flow.artifacts.regenerate failed details: '
+                f'{detail}\n'
+            )
+        except Exception:
+            pass
+        raise RuntimeError(FLOW_REMOTE_ARTIFACTS_MISSING_MESSAGE)
 
 
 def _prepare_remote_cli_context(
@@ -35932,7 +35937,10 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         if tmp_xml and os.path.exists(tmp_xml):
             try: os.remove(tmp_xml)
             except Exception: pass
-        _fail_run(f"Failed to prepare remote CLI context: {exc}", code=1)
+        if str(exc).strip() == FLOW_REMOTE_ARTIFACTS_MISSING_MESSAGE:
+            _fail_run(FLOW_REMOTE_ARTIFACTS_MISSING_MESSAGE, code=1)
+        else:
+            _fail_run(f"Failed to prepare remote CLI context: {exc}", code=1)
         return
     
     if tmp_xml and os.path.exists(tmp_xml):
