@@ -544,7 +544,7 @@ def test_upload_flow_artifacts_resolves_remote_tmp_vulns_to_local_outputs(tmp_pa
     assert f'resolved from {remote_run_dir}' in log_handle.getvalue()
 
 
-def test_prepare_remote_cli_context_regenerates_missing_remote_flow_artifacts(tmp_path, monkeypatch):
+def test_prepare_remote_cli_context_regenerates_missing_remote_flow_artifacts_from_resolved_inputs(tmp_path, monkeypatch):
     remote_repo = '/remote/repo'
     remote_run_dir = '/tmp/vulns/flag_generators_runs/flow-demo/01_text'
     remote_artifact = f'{remote_run_dir}/artifacts/secret.txt'
@@ -559,7 +559,7 @@ def test_prepare_remote_cli_context_regenerates_missing_remote_flow_artifacts(tm
                 'outputs_manifest': f'{remote_run_dir}/outputs.json',
                 'inject_files': [f'{remote_artifact} -> /flow_injects'],
                 'resolved_paths': {'inject_sources': [{'path': remote_artifact}]},
-                'config': {'seed': 'demo-seed'},
+                'resolved_inputs': {'seed': 'demo-seed', 'custom_input': 'kept'},
             }
         ]
     }
@@ -621,4 +621,5 @@ def test_prepare_remote_cli_context_regenerates_missing_remote_flow_artifacts(tm
     assert len(run_calls) == 1
     assert 'text_secret' in run_calls[0]
     assert 'demo-seed' in run_calls[0]
+    assert 'custom_input' in run_calls[0]
     assert 'flow.artifacts.regenerate complete count=1' in log_handle.getvalue()
