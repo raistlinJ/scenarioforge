@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def clean_stale_preview_dirs(
-    prefixes: Iterable[str] = ("core-topo-preview-seg-", "core-topo-preview-traffic-"),
+    prefixes: Iterable[str] = ("scenarioforge-preview-seg-", "scenarioforge-preview-traffic-"),
     max_keep: int = 5,
     max_age_hours: float = 24.0,
     protect: Iterable[str] | None = None,

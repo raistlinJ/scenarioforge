@@ -1,4 +1,4 @@
-/* Core Topology Graph Logic (extracted from core_details.html)
+/* ScenarioForge topology graph logic (extracted from core_details.html)
  * Features:
  * - Force layout (grid mode removed)
  * - Optional clustering by type

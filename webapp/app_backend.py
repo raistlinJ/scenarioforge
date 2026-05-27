@@ -9695,7 +9695,7 @@ except Exception:
     pass
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('FLASK_SECRET', 'coretopogenweb')
+app.secret_key = os.environ.get('FLASK_SECRET', 'scenarioforge-web')
 
 # Used for cache-busting and debugging when users have an old tab open.
 _WEBUI_BUILD_ID = os.environ.get('CORETG_WEBUI_BUILD_ID') or uuid.uuid4().hex

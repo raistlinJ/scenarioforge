@@ -22,7 +22,7 @@ def register(app, *, logger=None) -> None:
         if scope == 'runtime':
             return ('/tmp/traffic' if kind == 'traffic' else '/tmp/segmentation'), None
         if scope == 'preview':
-            pattern = 'core-topo-preview-traffic-*' if kind == 'traffic' else 'core-topo-preview-seg-*'
+            pattern = 'scenarioforge-preview-traffic-*' if kind == 'traffic' else 'scenarioforge-preview-seg-*'
             candidates = sorted(
                 glob.glob(os.path.join(tempfile.gettempdir(), pattern)),
                 key=lambda path: os.path.getmtime(path),
@@ -38,7 +38,7 @@ def register(app, *, logger=None) -> None:
         if error == 'invalid kind':
             return jsonify({'ok': False, 'error': error}), 400
         if scope == 'preview' and not base_dir:
-            pattern = 'core-topo-preview-traffic-*' if kind == 'traffic' else 'core-topo-preview-seg-*'
+            pattern = 'scenarioforge-preview-traffic-*' if kind == 'traffic' else 'scenarioforge-preview-seg-*'
             return jsonify({'ok': False, 'error': 'no preview dir found for kind', 'pattern': pattern}), 404
         if not base_dir or not os.path.isdir(base_dir):
             return jsonify({'ok': False, 'error': 'directory does not exist', 'path': base_dir}), 404
