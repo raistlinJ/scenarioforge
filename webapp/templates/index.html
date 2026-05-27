@@ -7136,11 +7136,6 @@
                         ? 'CORE connection unavailable; running locally.'
                         : (IS_BUILDER_VIEW ? 'Remote CORE backend managed by admin.' : `CORE ${execInfo.host}:${execInfo.port}`)
                 );
-                try {
-                    const showBtn = document.getElementById('dockShowBtn');
-                    if (showBtn && !showBtn.classList.contains('d-none')) showBtn.click();
-                } catch (e) { }
-
                 let launchFailed = false;
                 const result = await runSyncWithModal({
                     showProgressModal: false,
@@ -8890,8 +8885,6 @@
                             ? 'CORE connection unavailable; running locally.'
                             : (IS_BUILDER_VIEW ? 'Remote CORE backend managed by admin.' : `CORE ${execInfo.host}:${execInfo.port}`)
                     );
-                    // Ensure dock visible
-                    try { const showBtn = document.getElementById('dockShowBtn'); if (showBtn && !showBtn.classList.contains('d-none')) showBtn.click(); } catch (e) { }
                     appendLog('--- Execute (Full Preview) start: ' + state.result_path + ' ---', 'info');
                     const result = await runSyncWithModal({
                         showProgressModal: false,
@@ -12795,20 +12788,9 @@
         if (Number.isNaN(sidx) || !state.scenarios?.[sidx]) {
             return { ok: false, message: 'Scenario unavailable' };
         }
-        const revealCoreTestDock = () => {
-            try {
-                const showBtn = document.getElementById('dockShowBtn');
-                if (showBtn && !showBtn.classList.contains('d-none')) {
-                    showBtn.click();
-                }
-            } catch (e) { }
-        };
-        const logCoreTestLine = (message, level = 'INFO', { revealDock = false } = {}) => {
+        const logCoreTestLine = (message, level = 'INFO') => {
             const text = String(message ?? '').trim();
             if (!text) return;
-            if (revealDock) {
-                revealCoreTestDock();
-            }
             const scoped = `[core-test][scenario ${sidx + 1}] ${text}`;
             try {
                 dockLog(scoped, level);
@@ -12892,7 +12874,7 @@
             const message = summary
                 ? `Builder view cannot run a live test. ${summary}.`
                 : 'Builder view cannot run a live test. CORE credentials are managed by an admin.';
-            logCoreTestLine(message, inferredOk ? 'INFO' : 'WARN', { revealDock: !inferredOk });
+            logCoreTestLine(message, inferredOk ? 'INFO' : 'WARN');
 
             if (statusEl) {
                 statusEl.textContent = message;
@@ -12975,7 +12957,7 @@
             const message = WEBUI_VM_MODE
                 ? 'VM mode defaults are incomplete. Check the deployment configuration.'
                 : 'Select a CORE VM before testing the connection.';
-            logCoreTestLine(message, 'ERROR', { revealDock: true });
+            logCoreTestLine(message, 'ERROR');
             try { coreState.validated = false; } catch (e) { }
             if (statusEl) {
                 statusEl.textContent = message;
@@ -13185,10 +13167,10 @@
                     const advLines = _formatAdvancedCheckLines(data?.advanced_checks);
                     advLines.forEach((line) => {
                         const isFailed = /FAILED/.test(line);
-                        logCoreTestLine(line, isFailed ? 'WARN' : 'INFO', { revealDock: isFailed });
+                        logCoreTestLine(line, isFailed ? 'WARN' : 'INFO');
                     });
                 } catch (e) { }
-                warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN', { revealDock: true }));
+                warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN'));
                 if (closeModalOnSuccess && coreConnectionModal && window.bootstrap) {
                     try { bootstrap.Modal.getInstance(coreConnectionModal)?.hide(); } catch (e) { }
                 }
@@ -13239,7 +13221,7 @@
                     try { shouldStart = window.confirm(prompt); } catch (e) { shouldStart = false; }
                 }
                 if (shouldStart) {
-                    logCoreTestLine('core-daemon is not running; retrying test with auto-start enabled.', 'WARN', { revealDock: true });
+                    logCoreTestLine('core-daemon is not running; retrying test with auto-start enabled.', 'WARN');
                     return await validateCoreConnection(sidx, {
                         ...options,
                         workingLabel: 'Starting…',
@@ -13295,9 +13277,9 @@
                     setCoreConnectionHint(message, 'danger');
                 }
             }
-            logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR', { revealDock: true });
+            logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR');
             if (data && data.daemon_conflict && Array.isArray(data.daemon_pids) && data.daemon_pids.length) {
-                logCoreTestLine(`Duplicate core-daemon PIDs: ${data.daemon_pids.join(', ')}`, 'WARN', { revealDock: true });
+                logCoreTestLine(`Duplicate core-daemon PIDs: ${data.daemon_pids.join(', ')}`, 'WARN');
             }
             if (!suppressToasts) {
                 try { showToast(`CORE test failed: ${message}`, { autohide: false }); } catch (e) { }
@@ -13331,7 +13313,7 @@
                     setCoreConnectionHint(message, 'danger');
                 }
             }
-            logCoreTestLine(`FAILED: ${message}`, 'ERROR', { revealDock: true });
+            logCoreTestLine(`FAILED: ${message}`, 'ERROR');
             if (!suppressToasts) {
                 try { showToast(`CORE test failed: ${message}`, { autohide: false }); } catch (e) { }
             }
@@ -24409,11 +24391,6 @@
         evtSrc = new EventSource('/stream/' + runId);
         try { localStorage.setItem('coretg_active_run_id', String(runId || '')); } catch (e) { }
         // keep existing logs; do not auto-clear
-        // Ensure dock is visible so users can see live logs
-        try {
-            const showBtn = document.getElementById('dockShowBtn');
-            if (showBtn && !showBtn.classList.contains('d-none')) { showBtn.click(); }
-        } catch (e) { }
         // Toggle buttons
         try { document.getElementById('runAsyncBtn')?.classList.add('d-none'); } catch (e) { }
         try { document.getElementById('runSyncBtn')?.classList.add('disabled'); } catch (e) { }
@@ -25614,11 +25591,6 @@
             return false;
         }
         try {
-            // Ensure dock is visible
-            try {
-                const showBtn = document.getElementById('dockShowBtn');
-                if (showBtn && !showBtn.classList.contains('d-none')) { showBtn.click(); }
-            } catch (e) { }
             appendExecuteDialogLog('Requesting remote CLI run…');
             appendExecuteDialogLog(`RUN_CLI_URL=${RUN_CLI_URL || '(missing)'}`);
             updateRunStatus('Preparing remote workspace…', 'Submitting run request to CORE host…');
@@ -26091,8 +26063,6 @@
             sendUpdateRemoteFlag = false;
         }
         try {
-            // Show dock logs
-            try { const showBtn = document.getElementById('dockShowBtn'); if (showBtn && !showBtn.classList.contains('d-none')) showBtn.click(); } catch (e) { }
             runProgressLogLine('[ui] Requesting remote CLI run…');
             try { runProgressLogLine('[ui] Remote upload mode: full artifacts_dir'); } catch (e) { }
             const seededStatusEl = document.getElementById('runProgressStatus');

@@ -21,6 +21,8 @@ filtered from Initial/Goal facts.
 
 UI note: the Flow Inputs table renders a `*` next to required items. Runtime inputs are required unless
 `required: false` is explicitly set; artifact inputs are required when listed under `artifacts.requires`.
+For any solver-facing runtime input a participant must use on the first challenge but cannot reasonably discover yet, set
+`flow_supply_when_first: true`; Flow will supply and hint the value for that first challenge.
 
 ## Standard Key Vocabulary
 

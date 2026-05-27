@@ -30,9 +30,10 @@ docker compose up -d --build
 ```
 - Open `https://localhost`.
 - Verify HTTPS health: `curl -k https://localhost/healthz`
+- The backend is also published at `http://localhost:9090`.
 - The Compose web image includes Graphviz, so attack graph PDF export is available without extra host setup.
 - Stop the stack: `docker compose down`
-- Host-network deploy mode keeps nginx on `80/443` while the web backend binds to `127.0.0.1:9090`.
+- Compose publishes nginx on `80/443` and the web backend on `127.0.0.1:9090`.
 - Safety: in Execute → Advanced, `Delete all docker containers` is disabled when the Web UI is running in Docker.
 
 ## Launch the Web UI

@@ -3548,6 +3548,10 @@ components:
         sensitive:
           type: boolean
           default: false
+        flow_supply_when_first:
+          type: boolean
+          default: false
+          description: When true, Flow supplies this solver-facing runtime input on the first chain step and includes it in the first challenge hint.
 
     GeneratorBuilderRequest:
       type: object

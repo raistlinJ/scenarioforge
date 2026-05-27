@@ -108,6 +108,16 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 't', 'yes', 'y', 'on'}
+    return False
+
+
 def _paren_balance(value: Any) -> int:
     text = str(value or '')
     return text.count('(') - text.count(')')
@@ -229,6 +239,15 @@ def _norm_inputs(inputs: Any) -> list[dict[str, Any]]:
             rec['sensitive'] = bool(item.get('sensitive'))
         if 'description' in item:
             rec['description'] = str(item.get('description') or '')
+        flow_meta = item.get('flow') if isinstance(item.get('flow'), dict) else {}
+        if (
+            _truthy_flag(item.get('flow_supply_when_first'))
+            or _truthy_flag(item.get('chain_supplied_when_first'))
+            or _truthy_flag(item.get('flow_required_when_first'))
+            or _truthy_flag(flow_meta.get('supply_when_first'))
+            or _truthy_flag(flow_meta.get('required_when_first'))
+        ):
+            rec['flow_supply_when_first'] = True
         out.append(rec)
     return out
 

@@ -72,7 +72,11 @@
           "required": {"type": "boolean"},
           "default": {},
           "sensitive": {"type": "boolean"},
-          "description": {"type": "string"}
+          "description": {"type": "string"},
+          "flow_supply_when_first": {
+            "type": "boolean",
+            "description": "When true, Flow treats this input as required on the first sequence step, supplies a deterministic value, and includes it in the first challenge hint."
+          }
         }
       }
     },

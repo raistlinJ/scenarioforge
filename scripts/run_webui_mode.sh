@@ -177,7 +177,7 @@ echo "[webui:$MODE] log_level=${WEBAPP_LOG_LEVEL}"
 if [[ "$DETACH" == "1" ]]; then
   mkdir -p outputs/logs
   log_file="outputs/logs/webui-${MODE}-${WEB_PORT_ARG}.log"
-  nohup "$PY_CMD" -u -m main >"$log_file" 2>&1 &
+  nohup "$PY_CMD" -u -m webapp.app_backend >"$log_file" 2>&1 &
   pid="$!"
   echo "[webui:$MODE] started pid=$pid"
   echo "$pid" > server.pid
@@ -185,4 +185,4 @@ if [[ "$DETACH" == "1" ]]; then
   exit 0
 fi
 
-exec "$PY_CMD" -u -m main
+exec "$PY_CMD" -u -m webapp.app_backend

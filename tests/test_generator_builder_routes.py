@@ -287,7 +287,7 @@ def test_generator_prompt_intent_preview_returns_structured_sections(monkeypatch
         'plugin_type': 'flag-generator',
         'prompt': (
             'Build a flag-generator that derives deterministic SSH credentials and a hint from seed and secret.\n'
-            'Runtime inputs: seed (required), token (required, sensitive).\n'
+            'Runtime inputs: seed (required), token (required, sensitive, flow_supply_when_first).\n'
             'Artifact outputs: Flag(flag_id), Credential(user,password), File(path).\n'
             'Include inject_files with File(path).\n'
             'Inject destination: /opt/bootstrap.\n'
@@ -305,6 +305,7 @@ def test_generator_prompt_intent_preview_returns_structured_sections(monkeypatch
     merged = payload.get('merged') or {}
     assert merged.get('inject_files') == ['File(path) -> /opt/bootstrap']
     assert merged.get('hint_templates') == ['Next: SSH using {{OUTPUT.Credential(user,password)}}.']
+    assert {'name': 'token', 'type': 'string', 'required': True, 'sensitive': True, 'flow_supply_when_first': True} in (merged.get('runtime_inputs') or [])
 
 
 def test_generator_prompt_intent_preview_applies_manual_overrides(monkeypatch):
@@ -435,6 +436,7 @@ def test_build_generator_scaffold_accepts_runtime_inputs_and_generator_override(
             {'name': 'seed', 'type': 'string', 'required': True},
             {'name': 'node_name', 'type': 'string', 'required': True},
             {'name': 'flag_prefix', 'type': 'string', 'required': False},
+            {'name': 'unlock_code', 'type': 'string', 'required': True, 'sensitive': True, 'flow_supply_when_first': True},
         ],
         'generator_py_text': 'print("hello from override")\n',
     })
@@ -443,6 +445,7 @@ def test_build_generator_scaffold_accepts_runtime_inputs_and_generator_override(
     assert 'name: seed' in manifest_yaml
     assert 'name: node_name' in manifest_yaml
     assert 'required: false' in manifest_yaml
+    assert 'flow_supply_when_first: true' in manifest_yaml
     assert '    - File(path)' in manifest_yaml
     assert scaffold_files['flag_node_generators/py_token_gate/generator.py'] == 'print("hello from override")\n'
 

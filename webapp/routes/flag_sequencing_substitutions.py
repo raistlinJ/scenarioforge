@@ -399,6 +399,16 @@ def register(app, *, backend_module: Any) -> None:
             except Exception:
                 pass
 
+            try:
+                assignment = backend._flow_apply_first_step_chain_supplied_inputs(
+                    assignment,
+                    generator,
+                    scenario_label=(scenario_label or scenario_norm),
+                    position=index,
+                )
+            except Exception:
+                pass
+
             out_assignments.append(assignment)
 
         try:

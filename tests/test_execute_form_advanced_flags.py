@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "index.html"
+DOCK_PARTIAL_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "partials" / "dock.html"
 
 
 def test_build_run_form_data_includes_advanced_flags() -> None:
@@ -103,6 +104,27 @@ def test_execute_preflights_custom_services_and_prompts_before_run_request() -> 
     services_preflight_idx = text.index("const servicesReady = await ensureExecuteCustomServicesReady({")
     run_request_idx = text.index("appendExecuteDialogLog('Requesting remote CLI run…');")
     assert services_preflight_idx < run_request_idx
+
+
+def test_dock_only_opens_from_manual_show_hide_controls() -> None:
+    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    dock_text = DOCK_PARTIAL_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    forbidden_snippets = [
+        "showBtn.click(",
+        "revealCoreTestDock",
+        "revealDock",
+        "Ensure dock is visible",
+        "Ensure dock visible",
+        "Show dock logs",
+    ]
+
+    present = [snippet for snippet in forbidden_snippets if snippet in text]
+    assert not present, "Unexpected automatic dock reveal behavior in index template: " + "; ".join(present)
+
+    assert "hideBtn.addEventListener('click', () => applyHidden(true));" in dock_text
+    assert "showBtn.addEventListener('click', () => applyHidden(false));" in dock_text
+    assert "showBtn.click(" not in dock_text
 
 
 def test_execute_summary_uses_validation_unavailable_details() -> None:

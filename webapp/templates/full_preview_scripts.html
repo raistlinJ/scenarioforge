@@ -222,7 +222,7 @@
           addRow('flag', '-');
         }
 
-        // Hints (prefer rendered runtime hints; fall back to static description hints).
+        // Next-step hints (prefer rendered runtime hints; fall back to static description hints).
         const hints = [];
         try {
           matches.forEach((fa) => {
@@ -241,11 +241,11 @@
             ol.appendChild(li);
           });
           wrap.appendChild(ol);
-          addRow('hints', wrap);
+          addRow('next-step hints', wrap);
         } else if (hintsUniq.length === 1) {
-          addRow('hints', hintsUniq[0]);
+          addRow('next-step hint', hintsUniq[0]);
         } else {
-          addRow('hints', '-');
+          addRow('next-step hint', '-');
         }
 
         // Runtime flag value (only if present in the loaded data).
@@ -398,7 +398,7 @@
       tbl.className = 'table table-sm table-bordered small align-middle mb-0';
       const thead = document.createElement('thead');
       thead.className = 'table-light';
-      thead.innerHTML = '<tr><th style="width:96px;">Sequence</th><th>Node</th><th style="width:260px;">Flag</th><th>Hints</th><th style="width:220px;">Flag value</th></tr>';
+      thead.innerHTML = '<tr><th style="width:96px;">Sequence</th><th>Node</th><th style="width:260px;">Flag</th><th>Next-Step Hint</th><th style="width:220px;">Flag value</th></tr>';
       const tbody = document.createElement('tbody');
 
       const faByNodeId = new Map();

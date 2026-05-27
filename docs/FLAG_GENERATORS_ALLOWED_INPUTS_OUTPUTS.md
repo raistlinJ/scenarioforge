@@ -143,10 +143,11 @@ inputs:
     type: string
     required: true
     description: Target IP
-  - name: Credential(user,password)
+  - name: unlock_code
     type: string
-    required: false
+    required: true
     sensitive: true
+    flow_supply_when_first: true
   - name: File(path)
     type: file
     required: false

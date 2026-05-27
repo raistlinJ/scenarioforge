@@ -27,6 +27,8 @@ Runtime contract (strict):
 Manifest alignment (strict):
 - outputs.json.outputs keys must exactly match artifacts.produces
 - optional runtime inputs must be marked required: false
+- solver-facing runtime inputs participants must use on the first challenge but cannot reasonably discover yet must include flow_supply_when_first: true
+- purely internal entropy/config inputs should not use flow_supply_when_first
 - injects (if present) must resolve to real output files
 - if File(path) is present, its value must be relative to /outputs (for example artifacts/<name> or docker-compose.yml), not absolute /outputs/...
 - inject_candidate_paths (if present) must contain absolute paths only and must not contain .. segments
