@@ -6732,15 +6732,7 @@
     function hasUnsavedChanges() {
         try {
             if (previewState && previewState.dirty === true) return true;
-        } catch (e) {
-            const detail = String((e && e.message) || e || 'Flow preflight failed before execute.');
-            appendExecuteDialogLog(`Flow preflight exception: ${detail}`);
-            abortBeforeRunRequest('Flow preflight failed', detail);
-            if (typeof window.alertWithModal === 'function') {
-                await window.alertWithModal('Flow Preflight Failed', detail, 'OK', 'danger');
-            }
-            return false;
-        }
+        } catch (e) { }
         try {
             const currentSig = buildXmlPreviewSignature();
             if (xmlPreviewSavedSignature && currentSig && xmlPreviewSavedSignature !== currentSig) {
@@ -25522,7 +25514,15 @@
                     return false;
                 }
             }
-        } catch (e) { }
+        } catch (e) {
+            const detail = String((e && e.message) || e || 'Flow preflight failed before execute.');
+            appendExecuteDialogLog(`Flow preflight exception: ${detail}`);
+            abortBeforeRunRequest('Flow preflight failed', detail);
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Flow Preflight Failed', detail, 'OK', 'danger');
+            }
+            return false;
+        }
         try {
             // Ensure dock is visible
             try {
