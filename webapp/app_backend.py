@@ -5156,10 +5156,14 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
     remote_repo: str,
     core_cfg: Optional[Dict[str, Any]],
     log_handle: Any,
+    assignments_override: Optional[List[Dict[str, Any]]] = None,
+    verify_after: bool = True,
 ) -> None:
     if not core_cfg:
         return
-    assignments = _extract_flow_assignments_from_plan(preview_plan_path)
+    assignments = assignments_override if isinstance(assignments_override, list) else None
+    if assignments is None:
+        assignments = _extract_flow_assignments_from_plan(preview_plan_path)
     if not assignments:
         return
 
@@ -5218,10 +5222,11 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
                 detail = str(result or '')[:600]
             failures.append(f"assignment {index} ({generator_id}) regenerate failed: {detail}")
             continue
-        missing_after = _flow_assignment_missing_remote_paths(sftp, assignment)
-        if missing_after:
-            failures.append(f"assignment {index} ({generator_id}) still missing {missing_after[:6]}")
-            continue
+        if verify_after:
+            missing_after = _flow_assignment_missing_remote_paths(sftp, assignment)
+            if missing_after:
+                failures.append(f"assignment {index} ({generator_id}) still missing {missing_after[:6]}")
+                continue
         regenerated += 1
         try:
             log_handle.write(
@@ -7572,6 +7577,43 @@ def _local_custom_service_files() -> list[str]:
         return []
     out.sort(key=lambda p: os.path.basename(p).lower())
     return out
+
+
+def _local_custom_service_names() -> list[str]:
+    names: set[str] = set()
+    for path in _local_custom_service_files():
+        module_name = os.path.splitext(os.path.basename(path))[0]
+        found = False
+        try:
+            with open(path, 'r', encoding='utf-8') as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                for stmt in node.body:
+                    target_names: list[str] = []
+                    value_node: Any = None
+                    if isinstance(stmt, ast.AnnAssign):
+                        value_node = stmt.value
+                        if isinstance(stmt.target, ast.Name):
+                            target_names.append(stmt.target.id)
+                    elif isinstance(stmt, ast.Assign):
+                        value_node = stmt.value
+                        for target in stmt.targets:
+                            if isinstance(target, ast.Name):
+                                target_names.append(target.id)
+                    if 'name' not in target_names:
+                        continue
+                    if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
+                        service_name = value_node.value.strip()
+                        if service_name:
+                            names.add(service_name)
+                            found = True
+        except Exception:
+            found = False
+        if not found and module_name:
+            names.add(module_name)
+    return sorted(names, key=str.lower)
 
 
 def _install_custom_services_to_core_vm(
@@ -35766,8 +35808,8 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         return
 
     try:
-        required_custom_services = {"DockerDefaultRoute", "CoreTGPrereqs"}
-        install_custom_services_on_execute = bool(core_cfg.get('install_custom_services', True))
+        required_custom_services = set(_local_custom_service_names() or ["DockerDefaultRoute", "CoreTGPrereqs"])
+        install_custom_services_on_execute = bool(core_cfg.get('install_custom_services', False))
         discovered = _remote_core_service_names(remote_client, core_cfg=core_cfg)
         missing = sorted([name for name in required_custom_services if name not in discovered])
         if install_custom_services_on_execute:
@@ -35817,7 +35859,8 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         if missing:
             _fail_run(
                 f"Required custom CORE service(s) missing on remote host: {', '.join(missing)}. "
-                "Open CORE Connection, enable 'Install custom services', then re-run Execute.",
+                "Use the Execute preflight prompt to install them, or open CORE Connection, enable "
+                "'Install custom services', then re-run Execute.",
                 code=1,
                 extra={'error_code': 'missing_custom_services', 'missing_services': missing},
             )
@@ -36180,6 +36223,26 @@ try:
 except Exception:
     try:
         app.logger.exception('Failed to register core_remote_repo routes.')
+    except Exception:
+        pass
+
+
+try:
+    from webapp.routes import core_custom_services as _core_custom_services_routes
+
+    _core_custom_services_routes.register(
+        app,
+        merge_core_configs=lambda *args, **kwargs: _merge_core_configs(*args, **kwargs),
+        apply_core_secret_to_config=lambda *args, **kwargs: _apply_core_secret_to_config(*args, **kwargs),
+        require_core_ssh_credentials=lambda core_cfg: _require_core_ssh_credentials(core_cfg),
+        open_ssh_client=lambda core_cfg: _open_ssh_client(core_cfg),
+        remote_core_service_names=lambda *args, **kwargs: _remote_core_service_names(*args, **kwargs),
+        install_custom_services_to_core_vm=lambda *args, **kwargs: _install_custom_services_to_core_vm(*args, **kwargs),
+        local_custom_service_names=lambda: _local_custom_service_names(),
+    )
+except Exception:
+    try:
+        app.logger.exception('Failed to register core_custom_services routes.')
     except Exception:
         pass
 

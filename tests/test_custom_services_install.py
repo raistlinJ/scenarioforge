@@ -139,6 +139,21 @@ def test_install_custom_services_to_core_vm_copies_and_verifies(tmp_path, monkey
     assert any(("SERVICESCHECK" in cmd or "coretg-services-verify" in cmd) for cmd in client.commands)
 
 
+def test_local_custom_service_names_reads_declared_service_names(tmp_path, monkeypatch):
+    service_file = tmp_path / "CustomModule.py"
+    service_file.write_text(
+        "class CustomService:\n"
+        "    name: str = 'CustomDeclaredName'\n",
+        encoding="utf-8",
+    )
+    fallback_file = tmp_path / "FallbackModule.py"
+    fallback_file.write_text("class FallbackService:\n    pass\n", encoding="utf-8")
+
+    monkeypatch.setattr(backend, "_local_custom_service_files", lambda: [str(service_file), str(fallback_file)])
+
+    assert backend._local_custom_service_names() == ["CustomDeclaredName", "FallbackModule"]
+
+
 def test_install_custom_services_requires_sudo_password(tmp_path, monkeypatch):
     p = tmp_path / "TrafficService.py"
     p.write_text("# test\n")
