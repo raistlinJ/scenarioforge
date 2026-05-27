@@ -18,6 +18,7 @@ class _FakeSFTP:
         remote_path = str(remotepath)
         self.put_calls.append((str(local_path), remote_path))
         self.uploaded_bytes[remote_path] = local_path.read_bytes()
+        self._existing_paths.add(remote_path)
 
     def stat(self, path):
         if str(path) not in self._existing_paths:
@@ -480,3 +481,144 @@ def test_prepare_remote_cli_context_rewrites_and_uploads_flaggen_run_artifacts(t
     assert fake_sftp.uploaded_bytes[f'{remote_artifact_root}/artifacts/ops_logs.tar'] == b'tar-bytes'
     assert 'rewrote ' in log_handle.getvalue()
     assert f'flow.artifacts.uploaded dir={run_dir} -> {remote_artifact_root}' in log_handle.getvalue()
+
+
+def test_upload_flow_artifacts_resolves_remote_tmp_vulns_to_local_outputs(tmp_path, monkeypatch):
+    repo_root = tmp_path / 'repo'
+    local_run_dir = repo_root / 'outputs' / 'flag_generators_runs' / 'flow-demo' / '01_text'
+    artifacts_dir = local_run_dir / 'artifacts'
+    artifacts_dir.mkdir(parents=True)
+    manifest_path = local_run_dir / 'outputs.json'
+    manifest_path.write_text(json.dumps({'outputs': {'File(path)': 'artifacts/secret.txt'}}), encoding='utf-8')
+    artifact_path = artifacts_dir / 'secret.txt'
+    artifact_path.write_text('secret\n', encoding='utf-8')
+
+    remote_run_dir = '/tmp/vulns/flag_generators_runs/flow-demo/01_text'
+    flow_state = {
+        'flag_assignments': [
+            {
+                'id': 'text_secret',
+                'type': 'flag-generator',
+                'node_id': 'docker-1',
+                'run_dir': remote_run_dir,
+                'artifacts_dir': remote_run_dir,
+                'outputs_manifest': f'{remote_run_dir}/outputs.json',
+                'inject_files': [f'{remote_run_dir}/artifacts/secret.txt -> /flow_injects'],
+            }
+        ]
+    }
+    xml_path = tmp_path / 'preview.xml'
+    xml_path.write_text(
+        '\n'.join(
+            [
+                '<Scenarios>',
+                '  <Scenario name="demo">',
+                '    <ScenarioEditor>',
+                '      <FlagSequencing>',
+                f'        <FlowState>{json.dumps(flow_state, separators=(",", ":"))}</FlowState>',
+                '      </FlagSequencing>',
+                '    </ScenarioEditor>',
+                '  </Scenario>',
+                '</Scenarios>',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    fake_sftp = _FakeSFTP(set())
+    client = _FakeSSHClient(fake_sftp)
+
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda *_args, **_kwargs: None)
+
+    log_handle = io.StringIO()
+    backend._upload_flow_artifacts_for_plan_to_remote(
+        client=client,
+        sftp=fake_sftp,
+        preview_plan_path=str(xml_path),
+        log_handle=log_handle,
+    )
+
+    assert fake_sftp.uploaded_bytes[f'{remote_run_dir}/outputs.json'] == manifest_path.read_bytes()
+    assert fake_sftp.uploaded_bytes[f'{remote_run_dir}/artifacts/secret.txt'] == b'secret\n'
+    assert f'resolved from {remote_run_dir}' in log_handle.getvalue()
+
+
+def test_prepare_remote_cli_context_regenerates_missing_remote_flow_artifacts(tmp_path, monkeypatch):
+    remote_repo = '/remote/repo'
+    remote_run_dir = '/tmp/vulns/flag_generators_runs/flow-demo/01_text'
+    remote_artifact = f'{remote_run_dir}/artifacts/secret.txt'
+    flow_state = {
+        'flag_assignments': [
+            {
+                'id': 'text_secret',
+                'type': 'flag-generator',
+                'node_id': 'docker-1',
+                'run_dir': remote_run_dir,
+                'artifacts_dir': remote_run_dir,
+                'outputs_manifest': f'{remote_run_dir}/outputs.json',
+                'inject_files': [f'{remote_artifact} -> /flow_injects'],
+                'resolved_paths': {'inject_sources': [{'path': remote_artifact}]},
+                'config': {'seed': 'demo-seed'},
+            }
+        ]
+    }
+    xml_path = tmp_path / 'preview.xml'
+    xml_path.write_text(
+        '\n'.join(
+            [
+                '<Scenarios>',
+                '  <Scenario name="demo">',
+                '    <ScenarioEditor>',
+                '      <FlagSequencing>',
+                f'        <FlowState>{json.dumps(flow_state, separators=(",", ":"))}</FlowState>',
+                '      </FlagSequencing>',
+                '    </ScenarioEditor>',
+                '  </Scenario>',
+                '</Scenarios>',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    fake_sftp = _FakeSFTP(
+        {
+            remote_repo,
+            f'{remote_repo}/scenarioforge',
+            f'{remote_repo}/scenarioforge/__init__.py',
+        }
+    )
+    client = _FakeSSHClient(fake_sftp)
+    run_calls = []
+
+    def fake_run_remote_python_json(_core_cfg, script, **_kwargs):
+        run_calls.append(script)
+        fake_sftp._existing_paths.update(
+            {
+                remote_run_dir,
+                f'{remote_run_dir}/outputs.json',
+                remote_artifact,
+            }
+        )
+        return {'ok': True, 'out_dir': remote_run_dir, 'manifest_exists': True}
+
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _sftp: remote_repo)
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(tmp_path / 'empty-repo'))
+    monkeypatch.setattr(backend, '_run_remote_python_json', fake_run_remote_python_json)
+
+    log_handle = io.StringIO()
+    backend._prepare_remote_cli_context(
+        client=client,
+        run_id='run-regenerate',
+        xml_path=str(xml_path),
+        preview_plan_path=str(xml_path),
+        log_handle=log_handle,
+        core_cfg={'ssh_enabled': True, 'ssh_host': 'core.local', 'ssh_username': 'core', 'ssh_password': 'pw'},
+    )
+
+    assert len(run_calls) == 1
+    assert 'text_secret' in run_calls[0]
+    assert 'demo-seed' in run_calls[0]
+    assert 'flow.artifacts.regenerate complete count=1' in log_handle.getvalue()

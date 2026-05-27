@@ -4573,6 +4573,67 @@ def _remote_flow_artifact_dir_for_local(local_dir: str) -> str:
     return ''
 
 
+def _local_flow_artifact_candidates_for_remote(path_value: str) -> List[str]:
+    raw = str(path_value or '').strip()
+    if not raw:
+        return []
+    norm = raw.replace('\\', '/')
+    candidates: List[str] = [raw]
+    outputs_root = _outputs_dir()
+    markers = (
+        ('/tmp/vulns/flag_generators_runs/', 'flag_generators_runs'),
+        ('/tmp/vulns/flag_node_generators_runs/', 'flag_node_generators_runs'),
+    )
+    for marker, local_subdir in markers:
+        if not norm.startswith(marker):
+            continue
+        suffix = norm.split(marker, 1)[1].strip('/')
+        if not suffix:
+            continue
+        candidates.extend([
+            os.path.join(outputs_root, local_subdir, *suffix.split('/')),
+            os.path.join(outputs_root, 'vulns', local_subdir, *suffix.split('/')),
+        ])
+        break
+
+    seen: set[str] = set()
+    out: List[str] = []
+    for candidate in candidates:
+        text = str(candidate or '').strip()
+        if not text:
+            continue
+        try:
+            text = os.path.abspath(text) if not text.startswith('/tmp/vulns/') else text
+        except Exception:
+            pass
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _first_existing_local_flow_artifact_dir(path_value: str) -> str:
+    for candidate in _local_flow_artifact_candidates_for_remote(path_value):
+        try:
+            if os.path.isdir(candidate):
+                return candidate
+        except Exception:
+            continue
+    return ''
+
+
+def _remote_path_exists(sftp: Any, path_value: str) -> bool:
+    raw = str(path_value or '').strip()
+    if not raw:
+        return False
+    try:
+        sftp.stat(raw)
+        return True
+    except Exception:
+        return False
+
+
 def _rewrite_flow_artifact_path_refs(value: Any, path_map: dict[str, str]) -> tuple[Any, int]:
     if not path_map:
         return value, 0
@@ -4646,14 +4707,15 @@ def _upload_flow_artifacts_for_plan_to_remote(
         os.path.join(outputs_root, 'tmp-exec-'),
         os.path.join(outputs_root, 'scenarios-'),
     )
-    upload_pairs: list[tuple[str, str]] = []
+    upload_pairs: list[tuple[str, str, str]] = []
     skipped: list[str] = []
     for artifact_dir in artifact_dirs:
         remote_dir = _remote_flow_artifact_dir_for_local(artifact_dir)
         if not remote_dir and any(artifact_dir == p or artifact_dir.startswith(p + '/') for p in allowed_prefixes):
             remote_dir = artifact_dir
         if remote_dir:
-            upload_pairs.append((artifact_dir, remote_dir))
+            local_dir = _first_existing_local_flow_artifact_dir(artifact_dir) or artifact_dir
+            upload_pairs.append((artifact_dir, local_dir, remote_dir))
         else:
             skipped.append(artifact_dir)
     if skipped:
@@ -4667,10 +4729,18 @@ def _upload_flow_artifacts_for_plan_to_remote(
     made_dirs: set[str] = set()
     copied_files = 0
     copied_bytes = 0
-    for local_dir, remote_dir in upload_pairs:
+    for original_dir, local_dir, remote_dir in upload_pairs:
         if not os.path.isdir(local_dir):
+            if _remote_path_exists(sftp, remote_dir):
+                try:
+                    log_handle.write(f"[remote] flow.artifacts.upload skip (already remote): {remote_dir}\n")
+                except Exception:
+                    pass
+                continue
             try:
-                log_handle.write(f"[remote] flow.artifacts.upload skip (missing): {local_dir}\n")
+                candidates = _local_flow_artifact_candidates_for_remote(original_dir)
+                suffix = f" candidates={candidates}" if len(candidates) > 1 else ''
+                log_handle.write(f"[remote] flow.artifacts.upload skip (missing): {original_dir}{suffix}\n")
             except Exception:
                 pass
             continue
@@ -4715,7 +4785,13 @@ def _upload_flow_artifacts_for_plan_to_remote(
                         pass
 
         try:
-            log_handle.write(f"[remote] flow.artifacts.uploaded dir={local_dir} -> {remote_dir}\n")
+            if original_dir != local_dir:
+                log_handle.write(
+                    f"[remote] flow.artifacts.uploaded dir={local_dir} "
+                    f"(resolved from {original_dir}) -> {remote_dir}\n"
+                )
+            else:
+                log_handle.write(f"[remote] flow.artifacts.uploaded dir={local_dir} -> {remote_dir}\n")
         except Exception:
             pass
 
@@ -4723,6 +4799,327 @@ def _upload_flow_artifacts_for_plan_to_remote(
         log_handle.write(f"[remote] flow.artifacts.upload complete files={copied_files} bytes={copied_bytes}\n")
     except Exception:
         pass
+
+
+def _extract_flow_assignments_from_plan(preview_plan_path: str) -> List[dict[str, Any]]:
+    payload = None
+    try:
+        if str(preview_plan_path).lower().endswith('.xml'):
+            payload = _load_plan_preview_from_xml(preview_plan_path, None)
+    except Exception:
+        payload = None
+
+    seen: set[tuple[str, str, str]] = set()
+    out: List[dict[str, Any]] = []
+
+    def _add_assignments(value: Any) -> None:
+        if not isinstance(value, list):
+            return
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            generator_id = str(item.get('id') or item.get('generator_id') or '').strip()
+            run_dir = str(item.get('run_dir') or item.get('artifacts_dir') or '').strip()
+            if not generator_id and not run_dir:
+                continue
+            key = (
+                generator_id,
+                str(item.get('node_id') or '').strip(),
+                run_dir,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+
+    def _walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if str(key or '') in {'flag_assignments', 'assignments'}:
+                    _add_assignments(value)
+                _walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    if isinstance(payload, dict):
+        _walk(payload)
+    if str(preview_plan_path).lower().endswith('.xml'):
+        try:
+            flow_state = _flow_state_from_xml_path(preview_plan_path, None)
+            if isinstance(flow_state, dict):
+                _walk(flow_state)
+        except Exception:
+            pass
+    return out
+
+
+def _remote_flow_assignment_out_dir(assignment: dict[str, Any]) -> str:
+    for key in ('run_dir', 'artifacts_dir', 'inject_source_dir'):
+        raw = str((assignment or {}).get(key) or '').strip()
+        if raw.startswith('/tmp/vulns/flag_generators_runs/') or raw.startswith('/tmp/vulns/flag_node_generators_runs/'):
+            if key == 'inject_source_dir':
+                parent = posixpath.dirname(raw.rstrip('/'))
+                return parent or raw
+            return raw
+    raw_manifest = str((assignment or {}).get('outputs_manifest') or '').strip()
+    if raw_manifest.startswith('/tmp/vulns/flag_generators_runs/') or raw_manifest.startswith('/tmp/vulns/flag_node_generators_runs/'):
+        return posixpath.dirname(raw_manifest.rstrip('/')) or raw_manifest
+    return ''
+
+
+def _remote_flow_assignment_kind(assignment: dict[str, Any], out_dir: str) -> str:
+    raw = str((assignment or {}).get('type') or (assignment or {}).get('assignment_type') or '').strip().lower()
+    raw = raw.replace('_', '-').replace(' ', '-')
+    if raw == 'flag-node-generator' or '/flag_node_generators_runs/' in str(out_dir or ''):
+        return 'flag-node-generator'
+    return 'flag-generator'
+
+
+def _split_flow_inject_source(raw: Any) -> str:
+    text = str(raw or '').strip()
+    if not text:
+        return ''
+    for sep in ('->', '=>'):
+        if sep in text:
+            return text.split(sep, 1)[0].strip()
+    return text
+
+
+def _remote_flow_assignment_expected_paths(assignment: dict[str, Any]) -> List[str]:
+    out_dir = _remote_flow_assignment_out_dir(assignment)
+    paths: List[str] = []
+    manifest = str((assignment or {}).get('outputs_manifest') or '').strip()
+    if manifest.startswith('/tmp/vulns/'):
+        paths.append(manifest)
+    elif out_dir:
+        paths.append(_remote_path_join(out_dir, 'outputs.json'))
+
+    raw_injects = (assignment or {}).get('inject_files')
+    if isinstance(raw_injects, list):
+        for item in raw_injects:
+            source = _split_flow_inject_source(item)
+            if source.startswith('/tmp/vulns/'):
+                paths.append(source)
+
+    resolved_paths = (assignment or {}).get('resolved_paths')
+    if isinstance(resolved_paths, dict):
+        for key in ('inject_sources', 'resolved_outputs'):
+            value = resolved_paths.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    source = _split_flow_inject_source(item)
+                    if source.startswith('/tmp/vulns/'):
+                        paths.append(source)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    source = _split_flow_inject_source(item)
+                    if source.startswith('/tmp/vulns/'):
+                        paths.append(source)
+
+    seen: set[str] = set()
+    out: List[str] = []
+    for path in paths:
+        text = str(path or '').strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _flow_assignment_missing_remote_paths(sftp: Any, assignment: dict[str, Any]) -> List[str]:
+    missing: List[str] = []
+    for path in _remote_flow_assignment_expected_paths(assignment):
+        if not _remote_path_exists(sftp, path):
+            missing.append(path)
+    return missing
+
+
+def _remote_flow_regenerate_script(
+    *,
+    assignment: dict[str, Any],
+    remote_repo: str,
+    out_dir: str,
+    kind: str,
+    generator_id: str,
+    sudo_password: str,
+) -> str:
+    config = (assignment or {}).get('config') if isinstance((assignment or {}).get('config'), dict) else {}
+    inject_files = (assignment or {}).get('inject_files') if isinstance((assignment or {}).get('inject_files'), list) else []
+    return f"""
+import json, os, shutil, subprocess, sys, traceback
+
+repo = {json.dumps(remote_repo)}
+out_dir = {json.dumps(out_dir)}
+kind = {json.dumps(kind)}
+generator_id = {json.dumps(generator_id)}
+config = {json.dumps(config, ensure_ascii=False)}
+inject_files = {json.dumps(inject_files or [], ensure_ascii=False)}
+sudo_password = {json.dumps(sudo_password or '')}
+safe_roots = ('/tmp/vulns/flag_generators_runs/', '/tmp/vulns/flag_node_generators_runs/')
+
+def _fail(message, **extra):
+    payload = {{'ok': False, 'error': str(message)}}
+    payload.update(extra)
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+try:
+    out_norm = os.path.normpath(out_dir)
+    if not any(out_norm.startswith(root) for root in safe_roots):
+        _fail('refusing unsafe flow output directory', out_dir=out_dir)
+    runner = os.path.join(repo, 'scripts', 'run_flag_generator.py')
+    if not os.path.exists(runner):
+        _fail('remote generator runner missing', runner=runner)
+    if os.path.isdir(out_norm):
+        shutil.rmtree(out_norm, ignore_errors=True)
+    os.makedirs(out_norm, exist_ok=True)
+    env = os.environ.copy()
+    env['CORETG_DOCKER_USE_SUDO'] = '1'
+    env['CORETG_DOCKER_HOST_NETWORK'] = '1'
+    if sudo_password:
+        env['CORETG_DOCKER_SUDO_PASSWORD'] = sudo_password
+    if inject_files:
+        env['CORETG_INJECT_FILES_JSON'] = json.dumps(inject_files)
+    preflight = ''
+    deps_dir = '/tmp/coretg_pydeps'
+    try:
+        import yaml  # noqa
+    except Exception:
+        try:
+            os.makedirs(deps_dir, exist_ok=True)
+            pip_cmd = [sys.executable, '-m', 'pip', 'install', '-q', '--disable-pip-version-check', '--no-input', '-t', deps_dir, 'PyYAML==6.0.2']
+            pip_proc = subprocess.run(pip_cmd, cwd=repo, check=False, capture_output=True, text=True)
+            if pip_proc.returncode != 0:
+                try:
+                    subprocess.run([sys.executable, '-m', 'ensurepip', '--upgrade'], cwd=repo, check=False, capture_output=True, text=True)
+                except Exception:
+                    pass
+                pip_proc = subprocess.run(pip_cmd, cwd=repo, check=False, capture_output=True, text=True)
+            if deps_dir not in sys.path:
+                sys.path.insert(0, deps_dir)
+            import yaml  # noqa
+            preflight += '[preflight] installed PyYAML into ' + deps_dir + '\n'
+            if pip_proc.stderr or pip_proc.stdout:
+                preflight += '[preflight] pip: ' + (pip_proc.stderr or pip_proc.stdout).strip()[-800:] + '\n'
+        except Exception as preflight_exc:
+            preflight += '[preflight] PyYAML missing and install failed: ' + str(preflight_exc) + '\n'
+    cmd = [
+        sys.executable,
+        runner,
+        '--kind', kind,
+        '--generator-id', generator_id,
+        '--out-dir', out_norm,
+        '--config', json.dumps(config, ensure_ascii=False),
+        '--repo-root', repo,
+    ]
+    proc = subprocess.run(cmd, cwd=repo, env=env, text=True, capture_output=True, timeout=900)
+    manifest = os.path.join(out_norm, 'outputs.json')
+    print(json.dumps({{
+        'ok': proc.returncode == 0 and os.path.exists(manifest),
+        'returncode': proc.returncode,
+        'manifest_exists': os.path.exists(manifest),
+        'out_dir': out_norm,
+        'stdout': (preflight + (proc.stdout or ''))[-4000:],
+        'stderr': (proc.stderr or '')[-4000:],
+    }}))
+except Exception as exc:
+    print(json.dumps({{'ok': False, 'error': str(exc), 'traceback': traceback.format_exc()[-4000:]}}))
+""".strip()
+
+
+def _regenerate_missing_remote_flow_artifacts_for_plan(
+    *,
+    sftp: Any,
+    preview_plan_path: str,
+    remote_repo: str,
+    core_cfg: Optional[Dict[str, Any]],
+    log_handle: Any,
+) -> None:
+    if not core_cfg:
+        return
+    assignments = _extract_flow_assignments_from_plan(preview_plan_path)
+    if not assignments:
+        return
+
+    regenerated = 0
+    failures: List[str] = []
+    for index, assignment in enumerate(assignments, start=1):
+        if not isinstance(assignment, dict):
+            continue
+        out_dir = _remote_flow_assignment_out_dir(assignment)
+        if not out_dir:
+            continue
+        missing_before = _flow_assignment_missing_remote_paths(sftp, assignment)
+        if not missing_before:
+            continue
+        config = assignment.get('config') if isinstance(assignment.get('config'), dict) else None
+        generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+        if not generator_id or not isinstance(config, dict) or not config:
+            failures.append(
+                f"assignment {index} ({generator_id or 'unknown'}) missing remote artifacts and saved generator config"
+            )
+            continue
+        kind = _remote_flow_assignment_kind(assignment, out_dir)
+        try:
+            log_handle.write(
+                f"[remote] flow.artifacts.regenerate start index={index} generator={generator_id} "
+                f"kind={kind} out_dir={out_dir} missing={missing_before[:4]}\n"
+            )
+        except Exception:
+            pass
+        script = _remote_flow_regenerate_script(
+            assignment=assignment,
+            remote_repo=remote_repo,
+            out_dir=out_dir,
+            kind=kind,
+            generator_id=generator_id,
+            sudo_password=str((core_cfg or {}).get('ssh_password') or ''),
+        )
+        try:
+            result = _run_remote_python_json(
+                core_cfg,
+                script,
+                logger=app.logger,
+                label=f'flow-artifacts-regenerate-{index}',
+                timeout=960.0,
+            )
+        except Exception as exc:
+            failures.append(f"assignment {index} ({generator_id}) regenerate failed: {exc}")
+            continue
+        if not isinstance(result, dict) or result.get('ok') is not True:
+            try:
+                detail = _summarize_for_log(json.dumps(result, ensure_ascii=False), limit=600)
+            except Exception:
+                detail = str(result or '')[:600]
+            failures.append(f"assignment {index} ({generator_id}) regenerate failed: {detail}")
+            continue
+        missing_after = _flow_assignment_missing_remote_paths(sftp, assignment)
+        if missing_after:
+            failures.append(f"assignment {index} ({generator_id}) still missing {missing_after[:6]}")
+            continue
+        regenerated += 1
+        try:
+            log_handle.write(
+                f"[remote] flow.artifacts.regenerate complete index={index} generator={generator_id} out_dir={out_dir}\n"
+            )
+        except Exception:
+            pass
+
+    if regenerated:
+        try:
+            log_handle.write(f"[remote] flow.artifacts.regenerate complete count={regenerated}\n")
+        except Exception:
+            pass
+    if failures:
+        detail = '; '.join(failures[:5])
+        if len(failures) > 5:
+            detail += f"; +{len(failures) - 5} more"
+        raise RuntimeError(
+            'Flow generator artifacts are missing on the CORE host and could not be rebuilt. '
+            f'{detail}. Re-run Generate/Resolve in Flow and execute again if the saved flow state is stale.'
+        )
 
 
 def _prepare_remote_cli_context(
@@ -4733,6 +5130,7 @@ def _prepare_remote_cli_context(
     preview_plan_path: str | None,
     log_handle: Any,
     upload_only_injected_artifacts: bool = False,
+    core_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Upload required artifacts before starting the remote CLI."""
 
@@ -5174,6 +5572,13 @@ def _prepare_remote_cli_context(
                 log_handle=log_handle,
                 upload_only_injected_artifacts=bool(upload_only_injected_artifacts),
             )
+            _regenerate_missing_remote_flow_artifacts_for_plan(
+                sftp=sftp,
+                preview_plan_path=preview_plan_path,
+                remote_repo=repo_dir,
+                core_cfg=core_cfg,
+                log_handle=log_handle,
+            )
         context = {
             'base_dir': base_dir,
             'run_dir': run_dir,
@@ -5189,6 +5594,13 @@ def _prepare_remote_cli_context(
                     preview_plan_path=xml_path,
                     log_handle=log_handle,
                     upload_only_injected_artifacts=bool(upload_only_injected_artifacts),
+                )
+                _regenerate_missing_remote_flow_artifacts_for_plan(
+                    sftp=sftp,
+                    preview_plan_path=xml_path,
+                    remote_repo=repo_dir,
+                    core_cfg=core_cfg,
+                    log_handle=log_handle,
                 )
             except Exception:
                 pass
@@ -35373,6 +35785,7 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
                      preview_plan_path=preview_plan_path,
                      log_handle=log_f,
                      upload_only_injected_artifacts=upload_only_injected_artifacts,
+                     core_cfg=core_cfg,
                 )
                 last_prepare_exc = None
                 break

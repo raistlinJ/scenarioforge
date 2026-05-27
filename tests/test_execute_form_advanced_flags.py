@@ -39,6 +39,20 @@ def test_execute_dialog_defaults_enable_deep_and_all_container_cleanup() -> None
     assert not missing, "Missing enabled execute cleanup defaults: " + "; ".join(missing)
 
 
+def test_execute_dialog_omits_start_core_daemon_checkbox() -> None:
+    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    forbidden_snippets = [
+        'id="executeAdvStartCoreDaemon"',
+        'for="executeAdvStartCoreDaemon"',
+        'Start core-daemon\n                                    if stopped',
+    ]
+    present = [snippet for snippet in forbidden_snippets if snippet in text]
+    assert not present, "Execute dialog should prompt for stopped core-daemon instead of showing a start checkbox: " + "; ".join(present)
+
+    assert "Would you like ScenarioForge to try to start core-daemon now?" in text
+
+
 def test_execute_summary_uses_validation_unavailable_details() -> None:
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
