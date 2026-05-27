@@ -357,8 +357,16 @@ def register(
                                 app.logger.warning('[core] %s (pids=%s)', msg, daemon_pids)
                                 return jsonify({'ok': False, 'error': msg, 'daemon_conflict': True}), 502
                     else:
-                        if not daemon_pids:
+                        if not daemon_pids and not (adv_start_core_daemon or adv_restart_core_daemon):
                             app.logger.warning('[core] No core-daemon process detected during validation.')
+                            return jsonify({
+                                'ok': False,
+                                'error': 'core-daemon is not running on the CORE VM.',
+                                'code': 'core_daemon_not_running',
+                                'daemon_not_running': True,
+                                'daemon_pids': [],
+                                'can_start_daemon': True,
+                            }), 409
                 except Exception as conn_exc:
                     app.logger.warning('[core] core-daemon SSH inspection failed: %s', conn_exc)
                 finally:

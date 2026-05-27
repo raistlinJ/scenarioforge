@@ -12795,6 +12795,7 @@
             advAutoKillSessions = true,
             preferStoredConfig = false,
             _daemonConflictPrompted = false,
+            _daemonStartPrompted = false,
             showSummaryOnSuccess = false,
         } = options;
         if (Number.isNaN(sidx) || !state.scenarios?.[sidx]) {
@@ -13225,6 +13226,33 @@
                             _daemonConflictPrompted: true,
                         });
                     }
+                }
+            }
+
+            if (
+                data &&
+                data.code === 'core_daemon_not_running' &&
+                !_daemonStartPrompted &&
+                !autoStartDaemon &&
+                !advStartCoreDaemon
+            ) {
+                const message = data.error || 'core-daemon is not running on the CORE VM.';
+                const prompt = `${message}\n\nWould you like ScenarioForge to try to start core-daemon now?`;
+                let shouldStart = false;
+                if (typeof window.confirmWithModal === 'function') {
+                    shouldStart = await window.confirmWithModal('Start core-daemon?', prompt, 'Start core-daemon', 'primary');
+                } else {
+                    try { shouldStart = window.confirm(prompt); } catch (e) { shouldStart = false; }
+                }
+                if (shouldStart) {
+                    logCoreTestLine('core-daemon is not running; retrying test with auto-start enabled.', 'WARN', { revealDock: true });
+                    return await validateCoreConnection(sidx, {
+                        ...options,
+                        workingLabel: 'Starting…',
+                        hintOnStart: 'Starting core-daemon and retrying CORE connection…',
+                        autoStartDaemon: true,
+                        _daemonStartPrompted: true,
+                    });
                 }
             }
 

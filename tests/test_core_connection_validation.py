@@ -860,6 +860,73 @@ def test_test_core_daemon_conflict_can_be_auto_stopped(client, monkeypatch):
     assert stop_calls[0]['pids'] == [18263, 78479]
 
 
+def test_test_core_daemon_not_running_prompts_for_start(client, monkeypatch):
+    # Force the handler down the non-pytest path so SSH daemon inspection runs.
+    monkeypatch.delenv('PYTEST_CURRENT_TEST', raising=False)
+    monkeypatch.delitem(backend.sys.modules, 'pytest', raising=False)
+
+    monkeypatch.setattr(backend, '_core_connection', _fake_core_connection)
+    monkeypatch.setattr(backend.socket, 'socket', _FakeSocket)
+    monkeypatch.setattr(backend, '_load_core_credentials', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_ensure_core_daemon_listening', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_ensure_paramiko_available', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_collect_remote_core_daemon_pids', lambda *_args, **_kwargs: [])
+
+    def _fail_save(_payload):  # pragma: no cover - should not be called
+        raise AssertionError('Should not persist credentials when core-daemon is not running')
+
+    monkeypatch.setattr(backend, '_save_core_credentials', _fail_save)
+
+    class _FakeSSH:
+        def set_missing_host_key_policy(self, *_args, **_kwargs):
+            return None
+
+        def connect(self, **_kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeParamiko:
+        @staticmethod
+        def SSHClient():
+            return _FakeSSH()
+
+        @staticmethod
+        def AutoAddPolicy():
+            return object()
+
+    monkeypatch.setattr(backend, 'paramiko', _FakeParamiko())
+
+    payload = {
+        'core': {
+            'host': 'core-host',
+            'port': 50051,
+            'ssh_host': 'core-host',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        },
+        'scenario_name': 'Scenario Daemon Down',
+        'scenario_index': 0,
+        'hitl_core': {
+            'vm_key': 'pve1::101',
+            'vm_node': 'pve1',
+            'vm_name': 'CORE VM',
+            'vmid': 101,
+        },
+    }
+
+    resp = client.post('/test_core', json=payload)
+    assert resp.status_code == 409
+    data = resp.get_json()
+    assert data['ok'] is False
+    assert data.get('code') == 'core_daemon_not_running'
+    assert data.get('daemon_not_running') is True
+    assert data.get('daemon_pids') == []
+    assert data.get('can_start_daemon') is True
+
+
 def test_test_core_advanced_checks_fail_as_warning(client, monkeypatch):
     # Force the handler down the non-pytest code path so we exercise warning behavior.
     # (The backend intentionally skips remote checks during pytest.)
