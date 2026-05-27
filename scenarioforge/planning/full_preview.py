@@ -1189,7 +1189,7 @@ def build_full_preview(
 
             # Invoke real segmentation planner (dry-run style) writing into temp dir
             from ..utils.segmentation import plan_and_apply_segmentation  # type: ignore
-            seg_tmp = os.path.join(tempfile.gettempdir(), f"core-topo-preview-seg-{seed}")
+            seg_tmp = os.path.join(tempfile.gettempdir(), f"scenarioforge-preview-seg-{seed}")
             summary = plan_and_apply_segmentation(
                 stub_session,
                 routers=router_infos,
@@ -1265,7 +1265,7 @@ def build_full_preview(
                 if h.ip4:
                     ninfos.append(NodeInfo(node_id=h.node_id, ip4=h.ip4, role=h.role))
             # Use deterministic per-seed preview temp dir; don't pollute final /tmp/traffic until execution.
-            preview_dir = os.path.join(tempfile.gettempdir(), f"core-topo-preview-traffic-{seed}")
+            preview_dir = os.path.join(tempfile.gettempdir(), f"scenarioforge-preview-traffic-{seed}")
             os.makedirs(preview_dir, exist_ok=True)
             script_map = generate_traffic_scripts(ninfos, density_est, t_items, out_dir=preview_dir) or {}
             # Summarize

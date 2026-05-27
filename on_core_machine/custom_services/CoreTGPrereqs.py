@@ -95,7 +95,7 @@ maybe_install() {
 
 log "node id(${node.id}) name(${node.name}) starting prereq check"
 
-# Ensure /bin/bash exists because other CORE TG services use it.
+# Ensure /bin/bash exists because other ScenarioForge CORE services use it.
 if [ ! -x /bin/bash ]; then
   log "/bin/bash missing; attempting to install bash"
   maybe_install bash

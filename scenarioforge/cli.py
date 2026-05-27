@@ -549,7 +549,7 @@ def _maybe_seed_docker_sudo_password_from_stdin() -> None:
     """Best-effort read a sudo password from stdin into CORETG_DOCKER_SUDO_PASSWORD.
 
     The Web UI's remote runner can supply the SSH password on stdin (so it isn't placed
-    on the command line). CORE topo-gen also spawns subprocesses (e.g.
+    on the command line). ScenarioForge also spawns subprocesses (e.g.
     `scripts/run_flag_generator.py`) that only read the password from the environment.
 
     This function bridges that gap for remote SSH runs.

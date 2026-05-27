@@ -6,7 +6,7 @@ UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'xml'}
 
 app = Flask(__name__)
-app.secret_key = 'coretopogenweb'
+app.secret_key = 'scenarioforge-web'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 if not os.path.exists(UPLOAD_FOLDER):
