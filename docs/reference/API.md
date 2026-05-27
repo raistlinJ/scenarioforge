@@ -446,7 +446,9 @@ Example request:
 	"runtime_inputs": [
 		{"name": "seed", "type": "string", "required": true},
 		{"name": "secret", "type": "string", "required": true, "sensitive": true},
-		{"name": "flag_prefix", "type": "string", "required": false}
+		{"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true},
+		{"name": "flag_prefix", "type": "string", "required": false},
+		{"name": "Credential(user, password)", "type": "string", "required": false, "sensitive": true}
 	],
 	"hint_templates": ["Next: SSH using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"],
 	"inject_files": ["File(path)"],
@@ -475,6 +477,7 @@ Example request:
 Notes:
 - `requires` accepts either a list of strings or a list of objects `{ artifact, optional }`; items with `optional: true` are written into `artifacts.optional_requires` in the manifest.
 - `runtime_inputs` is the preferred way to define manifest runtime inputs. The older `inputs` boolean flag map still works for standard fields such as `seed`, `secret`, `node_name`, and `flag_prefix`.
+- `runtime_inputs[].flow_supply_when_first` marks solver-facing first-step values that Flow should deterministically supply and include in the first challenge hint when participants cannot reasonably discover them yet.
 - `inject_files` is optional; when present it is written into `manifest.yaml` as `injects`.
 - `inject_candidate_paths` is optional; when present it is written into `manifest.yaml` and must contain absolute destination paths without `..` segments.
 - `access_instructions` is optional but recommended for interactive generators; when present it is written into `manifest.yaml` and rendered in participant/facilitator guides.

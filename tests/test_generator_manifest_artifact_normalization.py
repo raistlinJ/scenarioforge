@@ -17,7 +17,7 @@ name: HTTP Login Staff Portal
 runtime: {type: docker-compose, compose_file: docker-compose.yml, service: generator}
 inputs:
   - {name: seed, type: string, required: true}
-  - {name: Credential(user, password), type: string, required: true}
+  - {name: Credential(user, password), type: string, required: false, sensitive: true, flow_supply_when_first: true}
 artifacts:
   requires: [Knowledge(ip), Credential(user, password)]
   optional_requires: [Directory(host, path)]
@@ -40,6 +40,9 @@ injects: [Credential(user, password)]
     output_names = {item.get("name") for item in generator.get("outputs", [])}
 
     assert "Credential(user, password)" in input_names
+    credential_input = next(item for item in generator.get("inputs", []) if item.get("name") == "Credential(user, password)")
+    assert credential_input.get("flow_supply_when_first") is True
+    assert credential_input.get("sensitive") is True
     assert "Credential(user, password)" in output_names
     assert "PortForward(host, port)" in output_names
     assert "Directory(host, path)" in output_names
@@ -47,6 +50,7 @@ injects: [Credential(user, password)]
     assert generator.get("inject_files") == ["Credential(user, password)"]
 
     plugin = plugins_by_id["http_login_staff_portal"]
+    assert plugin.get("inputs", {}).get("Credential(user, password)", {}).get("flow_supply_when_first") is True
     assert plugin.get("requires") == ["Knowledge(ip)", "Credential(user, password)"]
     assert plugin.get("optional_requires") == ["Directory(host, path)"]
     assert [item.get("artifact") for item in plugin.get("produces", [])] == [

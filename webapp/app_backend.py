@@ -38,10 +38,32 @@ from collections import deque
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Iterator, TextIO, Iterable
 
+if __package__ in (None, ''):
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+
 from webapp.env_loader import load_runtime_env_files
 
 
 load_runtime_env_files(include_example=False)
+
+
+def _env_truthy_early(name: str) -> bool:
+    return str(os.environ.get(name) or '').strip().lower() in {'1', 'true', 't', 'yes', 'y', 'on'}
+
+
+def _apply_docker_bridge_core_defaults() -> None:
+    if not _env_truthy_early('CORETG_DOCKER_BRIDGE'):
+        return
+    if _env_truthy_early('CORETG_KEEP_CONTAINER_LOCAL_CORE'):
+        return
+    core_host = str(os.environ.get('CORE_HOST') or '').strip().lower()
+    if core_host in {'', 'localhost', '127.0.0.1', '::1'}:
+        os.environ['CORE_HOST'] = 'host.docker.internal'
+
+
+_apply_docker_bridge_core_defaults()
 
 from scenarioforge.utils.flow_seed import flow_generator_seed as _flow_generator_seed_impl
 try:
@@ -14595,6 +14617,7 @@ _LOGIN_EXEMPT_ENDPOINTS = {
     'login',
     'static',
     'healthz',
+    'diagnostics_health.healthz',
     # Core details links are often opened directly from local run artifacts.
     'core_data',
     'core_details',
@@ -18286,7 +18309,7 @@ def _flow_compute_flag_assignments(
         if vuln_names and not inject_files:
             inject_files.append('flag.txt -> /tmp')
 
-        out.append({
+        assignment_out = {
             'node_id': str(cid),
             'id': str(gen.get('id') or ''),
             'name': str(gen.get('name') or ''),
@@ -18315,7 +18338,14 @@ def _flow_compute_flag_assignments(
             'hints': rendered_hints,
             'next_node_id': str(next_id),
             'next_node_name': str(id_to_name.get(str(next_id)) or ''),
-        })
+        }
+        assignment_out = _flow_apply_first_step_chain_supplied_inputs(
+            assignment_out,
+            gen,
+            scenario_label=scenario_label,
+            position=i,
+        )
+        out.append(assignment_out)
     return out
 
 
@@ -18344,6 +18374,390 @@ def _flow_synthesized_inputs() -> set[str]:
         'ip4',
         'ipv4',
     }
+
+
+def _flow_looks_like_fact_ref(raw: Any) -> bool:
+    text = str(raw or '').strip()
+    if not text or '(' not in text or not text.endswith(')'):
+        return False
+    head, _tail = text.split('(', 1)
+    return bool(head.strip())
+
+
+def _flow_truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 't', 'yes', 'y', 'on'}
+    return False
+
+
+def _flow_input_supply_when_first(input_item: dict[str, Any]) -> bool:
+    if not isinstance(input_item, dict):
+        return False
+    flow_meta = input_item.get('flow') if isinstance(input_item.get('flow'), dict) else {}
+    return bool(
+        _flow_truthy_flag(input_item.get('flow_supply_when_first'))
+        or _flow_truthy_flag(input_item.get('chain_supplied_when_first'))
+        or _flow_truthy_flag(input_item.get('flow_required_when_first'))
+        or _flow_truthy_flag(flow_meta.get('supply_when_first'))
+        or _flow_truthy_flag(flow_meta.get('required_when_first'))
+    )
+
+
+def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any] | None) -> list[str]:
+    """Return inputs explicitly marked for first-step Flow supply."""
+    if not isinstance(gen_or_assignment, dict):
+        return []
+
+    input_defs = gen_or_assignment.get('inputs')
+    if not isinstance(input_defs, list):
+        input_defs = gen_or_assignment.get('input_defs')
+    names_from_defs: list[str] = []
+    if isinstance(input_defs, list):
+        for item in input_defs:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip()
+            if not name or not _flow_input_supply_when_first(item):
+                continue
+            names_from_defs.append(name)
+
+    if not names_from_defs:
+        existing = gen_or_assignment.get('chain_supplied_inputs')
+        if isinstance(existing, list):
+            names_from_defs = [
+                str(x or '').strip()
+                for x in existing
+                if str(x or '').strip()
+            ]
+
+    if not names_from_defs:
+        return []
+
+    names: list[str] = []
+    for name in names_from_defs:
+        if not name:
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _flow_chain_supplied_user_password_pair(*, scenario_label: str, node_id: str, gen_id: str) -> tuple[str, str]:
+    seed_text = f"{scenario_label}|{node_id}|{gen_id}|first-step-credential"
+    digest = hashlib.sha256(seed_text.encode('utf-8', errors='ignore')).hexdigest()
+    return f"user_{digest[:6]}", f"pass_{digest[6:18]}"
+
+
+def _flow_chain_supplied_value_for_input(
+    name: str,
+    *,
+    scenario_label: str,
+    node_id: str,
+    gen_id: str,
+    username: str,
+    password: str,
+    input_type: Any = 'string',
+) -> Any:
+    lowered = str(name or '').lower().strip()
+    compact = re.sub(r'[^a-z0-9]+', '', lowered)
+    if lowered.startswith('credential('):
+        inner = lowered.split('(', 1)[1].rstrip(')')
+        if 'password' in inner or 'pass' in inner:
+            if 'user' in inner or 'login' in inner:
+                return f"{username}:{password}"
+            return password
+        if 'user' in inner or 'login' in inner:
+            return username
+        return f"{username}:{password}"
+    if compact in {'user', 'username', 'login', 'loginuser', 'sshuser', 'sshusername'} or compact.endswith('username'):
+        return username
+    if compact in {'password', 'pass', 'passwd', 'passphrase', 'sshpassword'} or compact.endswith('password') or compact.endswith('passphrase'):
+        return password
+    seed_text = f"{scenario_label}|{node_id}|{gen_id}|{name}|first-step-input"
+    digest = hashlib.sha256(seed_text.encode('utf-8', errors='ignore')).hexdigest()
+    input_type_text = str(input_type or 'string').strip().lower()
+    if 'apikey' in compact or compact.endswith('api_key') or compact.startswith('apikey'):
+        return f"api_{digest[:20]}"
+    if 'token' in compact:
+        return f"tok_{digest[:20]}"
+    if 'secret' in compact:
+        return f"secret_{digest[:16]}"
+    if 'key' in compact:
+        return f"key_{digest[:16]}"
+    if 'code' in compact:
+        return f"code_{digest[:10]}"
+    if input_type_text in {'int', 'integer'}:
+        return 100000 + (int(digest[:8], 16) % 900000)
+    if input_type_text in {'float', 'number', 'numeric'}:
+        return round(10 + ((int(digest[:8], 16) % 900000) / 1000), 3)
+    if input_type_text in {'boolean', 'bool'}:
+        return bool(int(digest[:2], 16) % 2)
+    if input_type_text in {'json', 'object', 'dict', 'map'}:
+        return {'value': f"value_{digest[:16]}"}
+    if input_type_text in {'file', 'filepath', 'file_path', 'path', 'pathname'}:
+        return f"/tmp/flow_{digest[:12]}.txt"
+    if input_type_text in {'string_list', 'strings'} or input_type_text.endswith('[]'):
+        return [f"value_{digest[:16]}"]
+    if input_type_text in {'file_list', 'files'}:
+        return [f"/tmp/flow_{digest[:12]}.txt"]
+    return f"value_{digest[:16]}"
+
+
+def _flow_chain_supplied_input_hint(values: dict[str, Any]) -> str:
+    if not isinstance(values, dict) or not values:
+        return ''
+    display_parts: list[str] = []
+    for key in sorted(values.keys()):
+        value = values.get(key)
+        if value is None:
+            continue
+        value_text = str(value).strip()
+        if not value_text:
+            continue
+        key_text = str(key or '').strip()
+        if ':' in value_text and key_text.lower().startswith('credential('):
+            user_part, pass_part = value_text.split(':', 1)
+            display_value = f"{user_part} / {pass_part}"
+        elif isinstance(value, (dict, list)):
+            try:
+                display_value = json.dumps(value, sort_keys=True)
+            except Exception:
+                display_value = value_text
+        else:
+            display_value = value_text
+        display_parts.append(f"{key_text}={display_value}" if key_text else display_value)
+    if not display_parts:
+        return ''
+    joined = '; '.join(display_parts)
+    label = 'input' if len(display_parts) == 1 else 'inputs'
+    return f"First challenge supplied {label}: {joined}."
+
+
+def _flow_clear_chain_supplied_inputs(assignment: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(assignment, dict):
+        return assignment
+    names = [str(x or '').strip() for x in (assignment.get('chain_supplied_inputs') or []) if str(x or '').strip()] if isinstance(assignment.get('chain_supplied_inputs'), list) else []
+    values = assignment.get('chain_supplied_input_values') if isinstance(assignment.get('chain_supplied_input_values'), dict) else {}
+    hints = [str(x or '').strip() for x in (assignment.get('chain_supplied_input_hints') or []) if str(x or '').strip()] if isinstance(assignment.get('chain_supplied_input_hints'), list) else []
+
+    if hints:
+        try:
+            current_hints = [str(x or '').strip() for x in (assignment.get('hints') or []) if str(x or '').strip()] if isinstance(assignment.get('hints'), list) else []
+            current_hints = [hint for hint in current_hints if hint not in set(hints)]
+            if current_hints:
+                assignment['hints'] = current_hints
+                if str(assignment.get('hint') or '').strip() in set(hints):
+                    assignment['hint'] = current_hints[0]
+            elif isinstance(assignment.get('hints'), list):
+                assignment.pop('hints', None)
+                if str(assignment.get('hint') or '').strip() in set(hints):
+                    assignment.pop('hint', None)
+        except Exception:
+            pass
+
+    for map_key in ('config_overrides', 'resolved_inputs'):
+        try:
+            current = assignment.get(map_key)
+            if not isinstance(current, dict):
+                continue
+            updated = dict(current)
+            for name in names:
+                if name in updated and str(updated.get(name) or '') == str((values or {}).get(name) or ''):
+                    updated.pop(name, None)
+            if updated:
+                assignment[map_key] = updated
+            else:
+                assignment.pop(map_key, None)
+        except Exception:
+            pass
+
+    try:
+        original_optional = [str(x or '').strip() for x in (assignment.get('chain_supplied_original_optional_inputs') or []) if str(x or '').strip()] if isinstance(assignment.get('chain_supplied_original_optional_inputs'), list) else []
+        if original_optional:
+            required = [str(x or '').strip() for x in (assignment.get('input_fields_required') or []) if str(x or '').strip()] if isinstance(assignment.get('input_fields_required'), list) else []
+            optional = [str(x or '').strip() for x in (assignment.get('input_fields_optional') or []) if str(x or '').strip()] if isinstance(assignment.get('input_fields_optional'), list) else []
+            required = [name for name in required if name not in set(original_optional)]
+            for name in original_optional:
+                if name and name not in optional:
+                    optional.append(name)
+            assignment['input_fields_required'] = sorted(required)
+            assignment['input_fields_optional'] = sorted(optional)
+    except Exception:
+        pass
+
+    for key in ('chain_supplied_inputs', 'chain_supplied_input_values', 'chain_supplied_input_hints', 'chain_supplied_original_optional_inputs'):
+        assignment.pop(key, None)
+    return assignment
+
+
+def _flow_apply_first_step_chain_supplied_inputs(
+    assignment: dict[str, Any],
+    gen_def: dict[str, Any] | None = None,
+    *,
+    scenario_label: str,
+    position: int = 0,
+) -> dict[str, Any]:
+    if not isinstance(assignment, dict):
+        return assignment
+    if int(position or 0) != 0:
+        return _flow_clear_chain_supplied_inputs(assignment)
+
+    source = gen_def if isinstance(gen_def, dict) else assignment
+    names = _flow_first_step_chain_supplied_input_names(source)
+    if not names and source is not assignment:
+        names = _flow_first_step_chain_supplied_input_names(assignment)
+    if not names:
+        return _flow_clear_chain_supplied_inputs(assignment)
+
+    node_id = str(assignment.get('node_id') or '').strip()
+    gen_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+    username, password = _flow_chain_supplied_user_password_pair(
+        scenario_label=str(scenario_label or ''),
+        node_id=node_id,
+        gen_id=gen_id,
+    )
+
+    existing_config = assignment.get('config_overrides') if isinstance(assignment.get('config_overrides'), dict) else {}
+    existing_inputs = assignment.get('resolved_inputs') if isinstance(assignment.get('resolved_inputs'), dict) else {}
+    config_overrides = dict(existing_config or {})
+    resolved_inputs = dict(existing_inputs or {})
+    supplied_values: dict[str, Any] = {}
+    input_meta_by_name: dict[str, dict[str, Any]] = {}
+    try:
+        raw_input_defs = source.get('inputs') if isinstance(source.get('inputs'), list) else source.get('input_defs')
+        if isinstance(raw_input_defs, list):
+            for item in raw_input_defs:
+                if not isinstance(item, dict):
+                    continue
+                input_name = str(item.get('name') or '').strip()
+                if input_name:
+                    input_meta_by_name[input_name] = item
+    except Exception:
+        input_meta_by_name = {}
+    for name in names:
+        current = config_overrides.get(name)
+        if current is None or (isinstance(current, str) and not current.strip()):
+            current = resolved_inputs.get(name)
+        if current is None or (isinstance(current, str) and not current.strip()):
+            input_meta = input_meta_by_name.get(name) if isinstance(input_meta_by_name.get(name), dict) else {}
+            current = _flow_chain_supplied_value_for_input(
+                name,
+                scenario_label=str(scenario_label or ''),
+                node_id=node_id,
+                gen_id=gen_id,
+                username=username,
+                password=password,
+                input_type=(input_meta or {}).get('type'),
+            )
+        config_overrides[name] = current
+        resolved_inputs[name] = current
+        supplied_values[name] = current
+
+    assignment['config_overrides'] = config_overrides
+    assignment['resolved_inputs'] = resolved_inputs
+    assignment['chain_supplied_inputs'] = list(names)
+    assignment['chain_supplied_input_values'] = dict(supplied_values)
+
+    try:
+        input_fields = [str(x or '').strip() for x in (assignment.get('input_fields') or []) if str(x or '').strip()] if isinstance(assignment.get('input_fields'), list) else []
+        required = [str(x or '').strip() for x in (assignment.get('input_fields_required') or []) if str(x or '').strip()] if isinstance(assignment.get('input_fields_required'), list) else []
+        optional = [str(x or '').strip() for x in (assignment.get('input_fields_optional') or []) if str(x or '').strip()] if isinstance(assignment.get('input_fields_optional'), list) else []
+        original_optional = [name for name in names if name in optional]
+        for name in names:
+            if name not in input_fields:
+                input_fields.append(name)
+            if name not in required:
+                required.append(name)
+        optional = [name for name in optional if name not in set(names)]
+        assignment['input_fields'] = sorted(input_fields)
+        assignment['input_fields_required'] = sorted(required)
+        assignment['input_fields_optional'] = sorted(optional)
+        if original_optional:
+            assignment['chain_supplied_original_optional_inputs'] = sorted(original_optional)
+    except Exception:
+        pass
+
+    try:
+        input_defs = assignment.get('input_defs') if isinstance(assignment.get('input_defs'), list) else None
+        if input_defs is None and isinstance(gen_def, dict) and isinstance(gen_def.get('inputs'), list):
+            input_defs = list(gen_def.get('inputs') or [])
+        if isinstance(input_defs, list):
+            updated_defs: list[Any] = []
+            for item in input_defs:
+                if not isinstance(item, dict):
+                    updated_defs.append(item)
+                    continue
+                item2 = dict(item)
+                if str(item2.get('name') or '').strip() in set(names):
+                    item2['required'] = True
+                updated_defs.append(item2)
+            assignment['input_defs'] = updated_defs
+    except Exception:
+        pass
+
+    try:
+        inputs_effective = [str(x or '').strip() for x in (assignment.get('inputs') or []) if str(x or '').strip()] if isinstance(assignment.get('inputs'), list) else []
+        requires_effective = [str(x or '').strip() for x in (assignment.get('requires') or []) if str(x or '').strip()] if isinstance(assignment.get('requires'), list) else []
+        for name in names:
+            if name not in inputs_effective:
+                inputs_effective.append(name)
+            if _flow_looks_like_fact_ref(name) and name not in requires_effective:
+                requires_effective.append(name)
+        assignment['inputs'] = sorted(inputs_effective)
+        assignment['requires'] = sorted(requires_effective)
+    except Exception:
+        pass
+
+    hint_text = _flow_chain_supplied_input_hint(supplied_values)
+    if hint_text:
+        try:
+            previous_hints = [str(x or '').strip() for x in (assignment.get('chain_supplied_input_hints') or []) if str(x or '').strip()] if isinstance(assignment.get('chain_supplied_input_hints'), list) else []
+            current_hints = [str(x or '').strip() for x in (assignment.get('hints') or []) if str(x or '').strip()] if isinstance(assignment.get('hints'), list) else []
+            if previous_hints:
+                current_hints = [hint for hint in current_hints if hint not in set(previous_hints)]
+            if hint_text not in current_hints:
+                current_hints.append(hint_text)
+            assignment['hints'] = current_hints
+            if not str(assignment.get('hint') or '').strip() and current_hints:
+                assignment['hint'] = current_hints[0]
+            assignment['chain_supplied_input_hints'] = [hint_text]
+        except Exception:
+            pass
+    return assignment
+
+
+def _flow_apply_first_step_chain_supplied_inputs_to_assignments(
+    flag_assignments: list[dict[str, Any]],
+    chain_nodes: list[dict[str, Any]],
+    *,
+    scenario_label: str,
+    gen_defs_by_id: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(flag_assignments, list):
+        return flag_assignments
+    out: list[dict[str, Any]] = []
+    for index, assignment in enumerate(flag_assignments or []):
+        if not isinstance(assignment, dict):
+            out.append(assignment)
+            continue
+        gen_def = None
+        try:
+            gen_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+            if gen_id and isinstance(gen_defs_by_id, dict):
+                gen_def = gen_defs_by_id.get(gen_id)
+        except Exception:
+            gen_def = None
+        out.append(_flow_apply_first_step_chain_supplied_inputs(
+            assignment,
+            gen_def if isinstance(gen_def, dict) else None,
+            scenario_label=scenario_label,
+            position=index,
+        ))
+    return out
 
 
 def _flow_normalize_dependency_level(raw: Any) -> int:
@@ -18675,6 +19089,16 @@ def _flow_enrich_saved_flag_assignments(
 
         try:
             _refresh_assignment_io_metadata(a2, gen_def)
+        except Exception:
+            pass
+
+        try:
+            a2 = _flow_apply_first_step_chain_supplied_inputs(
+                a2,
+                gen_def,
+                scenario_label=scenario_label,
+                position=i,
+            )
         except Exception:
             pass
 
@@ -19584,6 +20008,17 @@ def _flow_validate_chain_order_by_requires_produces(
         pass
 
     available: set[str] = set(_flow_synthesized_inputs())
+    try:
+        if chain_ids:
+            first_assignment = assign_by_node.get(chain_ids[0]) or {}
+            first_plugin_id = str(first_assignment.get('id') or first_assignment.get('generator_id') or '').strip()
+            supplied = first_assignment.get('chain_supplied_inputs') if isinstance(first_assignment.get('chain_supplied_inputs'), list) else []
+            available |= {str(x).strip() for x in (supplied or []) if str(x).strip()}
+            if first_plugin_id:
+                first_gen = gen_defs_by_id.get(first_plugin_id)
+                available |= set(_flow_first_step_chain_supplied_input_names(first_gen if isinstance(first_gen, dict) else first_assignment))
+    except Exception:
+        pass
 
     for cid in chain_ids:
         a = assign_by_node.get(cid) or {}
@@ -19756,6 +20191,16 @@ def _flow_reorder_chain_by_generator_dag(
             return chain_nodes, flag_assignments, None
 
         initial_artifacts = set(_flow_synthesized_inputs())
+        try:
+            first_assignment_for_initial = assign_by_node.get(chain_ids[0]) if chain_ids else None
+            if isinstance(first_assignment_for_initial, dict):
+                initial_artifacts |= {
+                    str(x).strip()
+                    for x in (first_assignment_for_initial.get('chain_supplied_inputs') or [])
+                    if str(x).strip()
+                }
+        except Exception:
+            pass
 
         def _assignment_fact_list(assignment: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
             facts: set[str] = set()
@@ -19854,6 +20299,15 @@ def _flow_reorder_chain_by_generator_dag(
                     rendered = [_render_hint(t, this_id=this_id, next_id=str(next_id)) for t in (hint_templates or [tpl])]
                     assignment['hint'] = rendered[0] if rendered else _render_hint(tpl, this_id=this_id, next_id=str(next_id))
                     assignment['hints'] = rendered
+                    try:
+                        _flow_apply_first_step_chain_supplied_inputs(
+                            assignment,
+                            assignment,
+                            scenario_label=scenario_label,
+                            position=idx,
+                        )
+                    except Exception:
+                        pass
                 except Exception:
                     continue
             return ordered_nodes, ordered_assignments
@@ -20463,6 +20917,13 @@ def _flow_inject_uploads_dir() -> str:
                 out_a['hint_overrides'] = list(hint_overrides)
                 out_a['hints'] = list(hint_overrides)
                 out_a['hint'] = hint_overrides[0] if hint_overrides else ''
+
+        out_a = _flow_apply_first_step_chain_supplied_inputs(
+            out_a,
+            gen,
+            scenario_label=(scenario_label or scenario_norm),
+            position=i,
+        )
 
         if flag_override_present:
             if clear_flag_override:
@@ -37789,6 +38250,8 @@ def _normalize_runtime_inputs(raw_inputs: Any, *, plugin_type: str) -> list[dict
             }
             if item.get('sensitive') is True:
                 record['sensitive'] = True
+            if _flow_truthy_flag(item.get('flow_supply_when_first')):
+                record['flow_supply_when_first'] = True
             normalized.append(record)
         return normalized
 
@@ -37806,6 +38269,8 @@ def _normalize_runtime_inputs(raw_inputs: Any, *, plugin_type: str) -> list[dict
         }
         if (meta or {}).get('sensitive') is True:
             record['sensitive'] = True
+        if _flow_truthy_flag((meta or {}).get('flow_supply_when_first')):
+            record['flow_supply_when_first'] = True
         normalized.append(record)
     return normalized
 
@@ -37877,6 +38342,8 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
                     manifest_yaml += f"    required: {'true' if bool(inp.get('required')) else 'false'}\n"
                 if inp.get('sensitive') is True:
                     manifest_yaml += "    sensitive: true\n"
+                if inp.get('flow_supply_when_first') is True:
+                    manifest_yaml += "    flow_supply_when_first: true\n"
             except Exception:
                 continue
 

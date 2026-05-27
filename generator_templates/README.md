@@ -32,6 +32,7 @@ When asking AI to author from these templates, include:
 - current `manifest.yaml`
 - scaffolded `generator.py`
 - exact required vs optional inputs
+- any solver-facing first-step runtime inputs that need `flow_supply_when_first: true`
 - exact `artifacts.produces` keys
 
 Ask AI to output only the target file(s), then run local + installed-pack parity tests.

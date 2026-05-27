@@ -14,7 +14,8 @@ services:
       - path: ./.scenarioforge.env
         required: false
     environment:
-      - CORETG_HOST=127.0.0.1
+      - CORETG_DOCKER_BRIDGE=1
+      - CORETG_HOST=0.0.0.0
       - CORETG_PORT=9090
       - CORETG_SECRETS_DIR=/root/.scenarioforge/secrets
     extra_hosts:
@@ -29,7 +30,10 @@ services:
       # Mount the host-side secret store so saved VM/Access credentials survive
       # container rebuilds and remain available to the web app.
       - ${HOME}/.scenarioforge:/root/.scenarioforge
-    network_mode: host
+    ports:
+      - "${CORETG_PUBLISH_HOST:-127.0.0.1}:${CORETG_WEB_PORT:-9090}:9090"
+    networks:
+      - app_net
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/healthz', timeout=3)"]
       interval: 10s
@@ -50,7 +54,11 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/certs:/etc/nginx/certs
-    network_mode: host
+    ports:
+      - "${CORETG_PUBLISH_HOST:-127.0.0.1}:${CORETG_HTTP_PORT:-80}:80"
+      - "${CORETG_PUBLISH_HOST:-127.0.0.1}:${CORETG_HTTPS_PORT:-443}:443"
+    networks:
+      - app_net
     environment:
       - CERT_DAYS=${CERT_DAYS:-365}
       - CERT_SUBJECT=${CERT_SUBJECT:-/CN=localhost}

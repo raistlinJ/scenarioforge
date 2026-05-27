@@ -1443,7 +1443,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     if (resolvedInjects.length) lines.push('  - One or more resolved file artifacts mapped for this step.');
     if (assignment.flag_value) lines.push('  - Flag output present for this step.');
     if (!resolvedOutputs.length && !resolvedInjects.length && !assignment.flag_value) lines.push('  - No resolved values were captured for this step.');
-    if (hint) lines.push(`- Hint: ${hint}`);
+    if (hint) lines.push(`- Next-Step Hint: ${hint}`);
     if (facilitatorMode) {
       lines.push('- Facilitator details:');
       if (resolvedInputs.length) {
@@ -1459,7 +1459,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
         lines.push('  - Resolved outputs: none');
       }
       if (allHints.length) {
-        lines.push('  - Full hints:');
+        lines.push('  - All next-step hints:');
         allHints.forEach((h) => lines.push(`    - ${h}`));
       }
       if (descHints.length) {

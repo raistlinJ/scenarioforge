@@ -215,8 +215,20 @@ def _coerce_runtime_inputs(value: Any) -> list[dict[str, Any]]:
         }
         if item.get('sensitive') is True:
             record['sensitive'] = True
+        if _truthy_flag(item.get('flow_supply_when_first')):
+            record['flow_supply_when_first'] = True
         normalized.append(record)
     return normalized
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 't', 'yes', 'y', 'on'}
+    return False
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -513,6 +525,7 @@ def _build_builder_auto_heal_prompt(original_prompt: str, validation_errors: lis
         '- Do not return the prior scaffold unchanged; make concrete edits to the relevant scaffold files.',
         '- Any runtime input that generator.py treats as required in /inputs/config.json must be declared in runtime_inputs so manifest inputs stay in sync.',
         '- If a required runtime input is sensitive, mark it sensitive in runtime_inputs.',
+        '- If a runtime input is solver-facing, needed on the first challenge, and not reasonably discoverable by participants yet, mark it flow_supply_when_first.',
         '- Keep outputs.json, produces, inject_files, and actual created files aligned.',
         '',
         'Original user request:',
@@ -530,6 +543,7 @@ def _build_builder_scaffold_repair_prompt(original_prompt: str, scaffold_errors:
         'Requirements for the repaired scaffold:',
         '- Do not return the prior scaffold unchanged; make concrete edits that resolve the reported issue.',
         '- Reply with exactly one JSON object matching the Builder scaffold schema.',
+        '- Mark solver-facing first-step runtime inputs with flow_supply_when_first when participants cannot reasonably discover them before solving.',
         '- Include complete generator_py_text and keep manifest-facing fields internally consistent.',
         '- Ensure the response can be normalized into a scaffold and persisted without manual edits.',
         '',
@@ -914,6 +928,8 @@ def _build_generator_grounding_lines(plugin_type: str, *, compact: bool = False,
         '- Preserve test-vs-execute parity; do not rely on incidental environment state.',
         '- Keep docker-compose startup commands simple and non-fragile across local test and remote execute paths.',
         '- Keep the implementation deterministic for the same inputs.',
+        '- Mark runtime inputs with `flow_supply_when_first` when participants must use the value on the first challenge and cannot reasonably discover it yet.',
+        '- Do not use `flow_supply_when_first` for purely internal entropy/config fields that participants never need, such as ordinary seeds.',
         '- Optionally include `access_instructions` in manifest to guide participants on artifact usage/exploitation.',
         '',
     ]
@@ -999,6 +1015,7 @@ def _build_targeted_failure_guidance(last_test_result: dict[str, Any] | None) ->
             'Observed failure to fix first: generator.py requires runtime config keys that manifest inputs do not declare.',
             '- Every key that generator.py treats as required from /inputs/config.json must appear in runtime_inputs so manifest.yaml inputs stay aligned.',
             '- If the required key is sensitive, mark it sensitive in runtime_inputs.',
+            '- If a runtime input is solver-facing, needed on the first challenge, and not reasonably discoverable by participants yet, mark it flow_supply_when_first.',
             '- If the extra key is not truly required, remove the hard failure path from generator.py instead of leaving manifest/code drift.',
             '',
         ])
@@ -1136,6 +1153,15 @@ def _parse_runtime_input_spec(text: str) -> list[dict[str, Any]]:
             record['required'] = False
         if 'sensitive' in meta:
             record['sensitive'] = True
+        if (
+            'flow_supply_when_first' in meta
+            or 'supply_when_first' in meta
+            or 'chain_supplied_when_first' in meta
+            or 'first-step supplied' in meta
+            or 'first step supplied' in meta
+            or 'flow supplied' in meta
+        ):
+            record['flow_supply_when_first'] = True
         result.append(record)
     return _coerce_runtime_inputs(result)
 
@@ -1218,6 +1244,8 @@ def _format_runtime_input_spec(inputs: list[dict[str, Any]]) -> str:
         flags = ['required' if item.get('required') is not False else 'optional']
         if item.get('sensitive') is True:
             flags.append('sensitive')
+        if item.get('flow_supply_when_first') is True:
+            flags.append('flow_supply_when_first')
         lines.append(f"{name} ({', '.join(flags)})")
     return '\n'.join(lines)
 
@@ -1684,6 +1712,8 @@ def _build_prompt_intent_guidance(prompt: str, plugin_type: str, overrides_paylo
                 parts = ['required' if item.get('required') is not False else 'optional']
                 if item.get('sensitive') is True:
                     parts.append('sensitive')
+                if item.get('flow_supply_when_first') is True:
+                    parts.append('flow_supply_when_first')
                 labels.append(f"{item.get('name')} ({', '.join(parts)})")
             if labels:
                 lines.append(f"- Respect these Builder override runtime inputs: {', '.join(labels)}.")
@@ -1720,6 +1750,8 @@ def _build_prompt_intent_guidance(prompt: str, plugin_type: str, overrides_paylo
                     parts.append('required')
                 if item.get('sensitive') is True:
                     parts.append('sensitive')
+                if item.get('flow_supply_when_first') is True:
+                    parts.append('flow_supply_when_first')
                 labels.append(f"{item.get('name')} ({', '.join(parts)})")
             if labels:
                 lines.append(f"- Respect these user-specified runtime inputs: {', '.join(labels)}.")
@@ -1751,6 +1783,8 @@ def _build_prompt_intent_guidance(prompt: str, plugin_type: str, overrides_paylo
                     parts.append('required')
                 if item.get('sensitive') is True:
                     parts.append('sensitive')
+                if item.get('flow_supply_when_first') is True:
+                    parts.append('flow_supply_when_first')
                 labels.append(f"{item.get('name')} ({', '.join(parts)})")
             if labels:
                 lines.append(f"- Suggested runtime inputs: {', '.join(labels)}.")
@@ -1802,6 +1836,8 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '- Return JSON only. Do not wrap in markdown fences.',
         '- Any /inputs/config.json key that generator.py requires must be declared in runtime_inputs so manifest inputs match the code.',
         '- If a required runtime input is secret-like (for example secret, token, api_key, password), mark it sensitive in runtime_inputs.',
+        '- For solver-facing runtime inputs that participants must use on the first chain step but cannot reasonably know yet, set flow_supply_when_first true so Flow supplies and hints them.',
+        '- Do not set flow_supply_when_first for purely internal entropy/config fields that participants never need, such as ordinary seeds.',
         '- outputs.json.outputs keys must exactly match produces and must reference artifacts that actually exist by the time the generator exits successfully.',
         '- If you declare inject_files, every inject entry must resolve to a real generated file path, not just an ontology key name.',
         '- If injected artifacts should land in one of several plausible target directories, include inject_candidate_paths as absolute paths; do not include relative paths or paths containing `..`.',
@@ -1859,7 +1895,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '  "requires": [{"artifact": "Knowledge(ip)", "optional": false}],',
         '  "optional_requires": ["Knowledge(hostname)"],',
         '  "produces": ["Flag(flag_id)", "Credential(user,password)"],',
-        '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true}],',
+        '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true}, {"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true}],',
         '  "hint_templates": ["Next: use {{OUTPUT.Credential(user,password)}}"],',
         '  "inject_files": ["File(path)"],',
         '  "inject_candidate_paths": ["/opt/uploads", "/var/www/html"],',
@@ -1899,7 +1935,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         'Response contract:',
         '- Reply with exactly one JSON object.',
         '- Use requires as a list of {artifact, optional}.',
-        '- Use runtime_inputs as a list of {name, type, required, sensitive?}.',
+        '- Use runtime_inputs as a list of {name, type, required, sensitive?, flow_supply_when_first?}.',
         '- Include full generator_py_text.',
         '- Include compose_text when the default scaffold would be insufficient.',
         '- Keep manifest-facing artifact keys and outputs.json keys aligned.',

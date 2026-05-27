@@ -78,6 +78,8 @@ Global rules:
 - Ensure outputs.json.outputs keys exactly match artifacts.produces.
 - Use Python standard library only unless I explicitly allow more.
 - Keep imports at module scope.
+- For solver-facing runtime inputs participants must use on the first challenge but cannot reasonably discover yet, set `flow_supply_when_first: true` in manifest/runtime_inputs.
+- Do not mark purely internal entropy/config fields with `flow_supply_when_first`.
 
 Output format for this turn:
 - Reply with ONLY full generator.py content.
@@ -168,6 +170,7 @@ Tell the AI these are strict requirements:
 - Outputs should be **deterministic** for the same inputs.
 - `outputs.json.outputs` must always include `Flag(flag_id)` (required by schema).
 - `hint.txt` is optional. Prefer `hint_templates` in the catalog; only write `/outputs/hint.txt` if you explicitly need a standalone hint file.
+- Mark runtime inputs with `flow_supply_when_first: true` only when participants must use that value on the first challenge and cannot reasonably infer or find it before solving.
 - Treat Flow-synthesized values as **inputs**, not artifacts:
   - Never put `seed`, `secret`, `node_name`, `flag_prefix` into artifact inputs (aka `requires`).
 - Input descriptors default to `required: true` when omitted. Set `required: false` for optional runtime inputs.
@@ -308,6 +311,7 @@ Hard requirements (do not violate):
 - Do NOT write /outputs/hint.txt unless I explicitly ask; prefer hint_templates in the catalog.
 - Deterministic outputs: same (seed, secret, flag_prefix) => same outputs.
 - Inputs (NOT artifacts): seed (required), secret (required), flag_prefix (optional).
+- Mark any solver-facing runtime input the participant must use but cannot reasonably discover before the first solve with flow_supply_when_first.
 - Keep implementation minimal and deterministic unless I explicitly ask for extras.
 
 If this generator outputs a file/binary:
@@ -370,6 +374,7 @@ Hard requirements (do not violate):
   - Do not assume the installed numeric ID is stable; using SOURCE_ID is acceptable.
 - Deterministic outputs: same (seed, node_name, flag_prefix) => same outputs and compose.
 - Inputs (NOT artifacts): seed (required), node_name (required), flag_prefix (optional).
+- Mark any solver-facing runtime input the participant must use but cannot reasonably discover before the first solve with flow_supply_when_first.
 - Keep implementation minimal and deterministic unless I explicitly ask for extras.
 
 CORE docker-node constraints:

@@ -45,7 +45,10 @@
           "required": { "type": "boolean", "default": false },
           "default": {},
           "values": { "type": "array", "items": {} },
-          "artifact_ref": { "type": "boolean", "default": false }
+          "artifact_ref": { "type": "boolean", "default": false },
+          "sensitive": { "type": "boolean", "default": false },
+          "description": { "type": "string" },
+          "flow_supply_when_first": { "type": "boolean", "default": false }
         },
         "additionalProperties": false
       }

@@ -1198,6 +1198,7 @@ def refresh_hints_for_current_chain(
         if not isinstance(raw, dict):
             continue
         assignment = dict(raw)
+        gen_def_local: dict[str, Any] | None = None
         this_id = str(assignment.get('node_id') or '').strip() or (chain_ids_local[idx] if idx < len(chain_ids_local) else '')
         next_id = chain_ids_local[idx + 1] if (idx + 1) < len(chain_ids_local) else ''
         assignment['node_id'] = this_id
@@ -1233,6 +1234,14 @@ def refresh_hints_for_current_chain(
                     templates = backend._flow_hint_templates_from_generator(gen_def_local)
             except Exception:
                 templates = []
+        if gen_def_local is None:
+            try:
+                generator_id = str(assignment.get('id') or '').strip()
+                candidate = gen_by_id.get(generator_id) if generator_id else None
+                if isinstance(candidate, dict):
+                    gen_def_local = candidate
+            except Exception:
+                gen_def_local = None
         if not templates:
             templates = ['Next: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}']
 
@@ -1275,6 +1284,17 @@ def refresh_hints_for_current_chain(
         assignment['hint_template'] = str(normalized_templates[0] or '') if normalized_templates else ''
         assignment['hints'] = rendered
         assignment['hint'] = rendered[0] if rendered else ''
+        try:
+            apply_first = getattr(backend, '_flow_apply_first_step_chain_supplied_inputs', None)
+            if callable(apply_first):
+                assignment = apply_first(
+                    assignment,
+                    gen_def_local if isinstance(gen_def_local, dict) else None,
+                    scenario_label=(scenario_label or scenario_norm),
+                    position=idx,
+                )
+        except Exception:
+            pass
         out_local.append(assignment)
 
     return out_local
@@ -1951,6 +1971,19 @@ def build_generator_run_config(
         node_name_val = str(host.get('name') or '').strip()
         if node_name_val:
             cfg_full['node_name'] = node_name_val
+    except Exception:
+        pass
+
+    try:
+        chain_supplied = assignment.get('chain_supplied_input_values') if isinstance(assignment.get('chain_supplied_input_values'), dict) else None
+        if isinstance(chain_supplied, dict):
+            for key, value in (chain_supplied or {}).items():
+                key_text = str(key or '').strip()
+                if not key_text:
+                    continue
+                current = cfg_full.get(key_text)
+                if current is None or (isinstance(current, str) and not current.strip()):
+                    cfg_full[key_text] = value
     except Exception:
         pass
 
@@ -2941,6 +2974,10 @@ def materialize_hint_file(
             inject_list = assignment.get('inject_files') if isinstance(assignment, dict) else None
             if isinstance(inject_list, list) and inject_list:
                 allow_hint = False
+                chain_supplied_hint = bool(
+                    isinstance(assignment.get('chain_supplied_input_hints'), list)
+                    and any(str(x or '').strip() for x in (assignment.get('chain_supplied_input_hints') or []))
+                )
                 for raw in inject_list:
                     source = str(raw or '').strip().replace('\\', '/')
                     for sep in ('->', '=>'):
@@ -2952,6 +2989,8 @@ def materialize_hint_file(
                     if source == 'hint.txt' or source.endswith('/hint.txt'):
                         allow_hint = True
                         break
+                if chain_supplied_hint:
+                    allow_hint = True
                 if not allow_hint:
                     allow_hint_file = False
         except Exception:

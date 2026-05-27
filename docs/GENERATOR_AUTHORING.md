@@ -18,6 +18,7 @@ If you are using AI to create generators, use this minimal handoff packet:
 - scaffolded `generator.py`
 - expected artifact keys (`requires`, `optional_requires`, `produces`)
 - explicit statement of required vs optional runtime inputs
+- mark solver-facing first-step runtime inputs with `flow_supply_when_first: true` when participants must use the value and cannot reasonably discover it yet
 - `access_instructions` when participants need concrete mount/connect/read/exploit steps
 - `inject_candidate_paths` when injected artifacts should be copied into one of several plausible absolute destinations
 
@@ -93,6 +94,11 @@ inputs:
     type: string
     required: true
     sensitive: true
+  - name: unlock_code
+    type: string
+    required: true
+    sensitive: true
+    flow_supply_when_first: true
 
 artifacts:
   requires: []
@@ -117,6 +123,7 @@ env:
 Notes:
 - `kind` must be `flag-generator` or `flag-node-generator`.
 - `inputs` is a list of input descriptors (used by UI forms and Flow). If `required` is omitted, it defaults to `true`.
+- For any solver-facing runtime input a participant must use on the first challenge but cannot reasonably discover yet, set `flow_supply_when_first: true`; Flow supplies a deterministic value and writes it into the first challenge hint.
 - `artifacts.requires` / `artifacts.optional_requires` / `artifacts.produces` drive Flow dependency chaining.
 
 ### Input types (mandatory convention)
@@ -419,7 +426,7 @@ Use this checklist before shipping a generator pack:
 
 If you use AI to scaffold a generator, include this in your prompt:
 
-> Generate a manifest-based generator that is parity-safe between local Test and remote Execute. Use module-level imports only (no function-local `import json/sys` in enclosing scopes with nested helpers), avoid hard dependency on internet/package-manager availability, write deterministic `/outputs/outputs.json`, and ensure `injects` paths resolve to real files. Include a quick local run command and an installed-pack verification checklist.
+> Generate a manifest-based generator that is parity-safe between local Test and remote Execute. Use module-level imports only (no function-local `import json/sys` in enclosing scopes with nested helpers), avoid hard dependency on internet/package-manager availability, write deterministic `/outputs/outputs.json`, and ensure `injects` paths resolve to real files. Mark solver-facing runtime inputs with `flow_supply_when_first: true` when participants must use the value on the first challenge and cannot reasonably discover it yet; do not mark purely internal entropy/config fields. Include a quick local run command and an installed-pack verification checklist.
 
 ---
 

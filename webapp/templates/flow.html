@@ -3491,6 +3491,8 @@
       const artifacts = normalizeFactList(o.artifacts);
       const fields = normalizeFactList(o.fields);
       const hints = normalizeFactList(o.hints);
+      const hintLabel = String(o.hintLabel || 'Hint').trim() || 'Hint';
+      const hintListLabel = String(o.hintListLabel || `${hintLabel}s`).trim() || `${hintLabel}s`;
       const holdKey = String(o.holdKey || '').trim();
       const canOverride = typeof o.onValueOverride === 'function';
 
@@ -3624,7 +3626,7 @@
         const wrap = document.createElement('div');
         const labelEl = document.createElement('div');
         labelEl.className = 'text-muted';
-        labelEl.textContent = 'Hints:';
+        labelEl.textContent = hintListLabel + ':';
         const ul = document.createElement('ol');
         ul.className = 'mb-0 ps-3';
         hints.forEach((ht) => {
@@ -3640,7 +3642,7 @@
         wrap.className = 'd-flex align-items-baseline gap-2';
         const labelEl = document.createElement('span');
         labelEl.className = 'text-muted';
-        labelEl.textContent = 'Hint:';
+        labelEl.textContent = hintLabel + ':';
         const textEl = document.createElement('span');
         textEl.textContent = hints[0];
         wrap.appendChild(labelEl);
@@ -3905,12 +3907,38 @@
           if (uniq.length) firstIp = uniq.join(', ');
         } catch (e) { }
         if (!firstIp && firstName && _hintNodeIpMap && _hintNodeIpMap.get(firstName)) firstIp = _hintNodeIpMap.get(firstName);
+        const firstHintDetails = [];
+        try {
+          const genId = (faFirst && (faFirst.id || faFirst.generator_id)) ? String(faFirst.id || faFirst.generator_id).trim() : '';
+          const genName = (faFirst && faFirst.name) ? String(faFirst.name).trim() : '';
+          const genDisplay = (genName && genName !== genId) ? (genId ? (genId + ' | ' + genName) : genName) : genId;
+          if (genDisplay) firstHintDetails.push('generator: ' + genDisplay);
+        } catch (e) { }
+        try {
+          const genType = (faFirst && faFirst.type) ? String(faFirst.type).trim() : '';
+          if (genType) firstHintDetails.push('type: ' + genType);
+        } catch (e) { }
+        try {
+          let vulnNames = (faFirst && Array.isArray(faFirst.vulnerabilities)) ? faFirst.vulnerabilities.map(String).map(s => s.trim()).filter(Boolean) : [];
+          if (!vulnNames.length && firstNode && Array.isArray(firstNode.vulnerabilities)) {
+            vulnNames = firstNode.vulnerabilities.map(String).map(s => s.trim()).filter(Boolean);
+          }
+          if (vulnNames.length) firstHintDetails.push('target: ' + Array.from(new Set(vulnNames)).join(', '));
+        } catch (e) { }
         if (firstName) {
           const suffix = firstIp ? (' @ ' + firstIp) : '';
-          initHints = [`Start: ${firstName}${suffix}`];
+          initHints = [`Start: ${firstName}${suffix}${firstHintDetails.length ? ('; ' + firstHintDetails.join('; ')) : ''}`];
         } else {
           initHints = [];
         }
+        try {
+          const suppliedHints = (faFirst && Array.isArray(faFirst.chain_supplied_input_hints))
+            ? faFirst.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)
+            : [];
+          suppliedHints.forEach((text) => {
+            if (text && !initHints.includes(text)) initHints.push(text);
+          });
+        } catch (e) { }
         const ri = (faFirst && typeof faFirst.resolved_inputs === 'object' && faFirst.resolved_inputs && !Array.isArray(faFirst.resolved_inputs))
           ? faFirst.resolved_inputs
           : null;
@@ -3950,6 +3978,8 @@
         fields: initOverride ? initOverride.fields : initFields,
         hideArtifactsFields: true,
         hints: initHints,
+        hintLabel: 'Start Hint',
+        hintListLabel: 'Start Hints',
         onValueOverride: () => openFactsDialog('initial'),
         holdKey: 'initial',
       });
@@ -4332,11 +4362,11 @@
           ul.appendChild(li);
         });
         wrap.appendChild(ul);
-        addRow('Hints', wrap);
+        addRow('Next-Step Hints', wrap);
       } else {
         const hintTextRaw = hintList.length ? hintList[0] : (fa && fa.hint ? _applyHintOutputTemplates(String(fa.hint), fa) : '');
         const hintText = _applyHintNodeIps(hintTextRaw, _hintNodeIpMap);
-        addRow('Hint', hintText || '-');
+        addRow('Next-Step Hint', hintText || '-');
       }
 
       const feas = chainFeasibility(currentFlagAssignments);
@@ -11271,7 +11301,7 @@ ${out.join('\n')}
       if (!resolvedOutputs.length && !resolvedInjects.length && !assignment.flag_value) {
         lines.push('  - No resolved values were captured for this step.');
       }
-      if (hint) lines.push(`- Hint: ${hint}`);
+      if (hint) lines.push(`- Next-Step Hint: ${hint}`);
       if (facilitatorMode) {
         lines.push('- Facilitator details:');
         if (resolvedInputs.length) {
@@ -11287,7 +11317,7 @@ ${out.join('\n')}
           lines.push('  - Resolved outputs: none');
         }
         if (allHints.length) {
-          lines.push('  - Full hints:');
+          lines.push('  - All next-step hints:');
           allHints.forEach((h) => lines.push(`    - ${h}`));
         }
         if (descHints.length) {

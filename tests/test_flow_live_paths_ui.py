@@ -92,6 +92,22 @@ def test_flow_hint_node_ip_rewrites_stale_ip_values() -> None:
     assert not missing, "Missing stale hint IP rewrite wiring in flow template: " + "; ".join(missing)
 
 
+def test_flow_initial_facts_start_hint_includes_first_step_context() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const firstHintDetails = [];",
+        "firstHintDetails.push('generator: ' + genDisplay);",
+        "firstHintDetails.push('type: ' + genType);",
+        "firstHintDetails.push('target: ' + Array.from(new Set(vulnNames)).join(', '));",
+        "faFirst.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)",
+        "hintLabel: 'Start Hint',",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing enriched Initial Facts start hint wiring: " + "; ".join(missing)
+
+
 def test_flow_visualization_groups_parallel_dependency_layers() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
