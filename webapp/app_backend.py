@@ -4936,6 +4936,125 @@ def _flow_assignment_missing_remote_paths(sftp: Any, assignment: dict[str, Any])
     return missing
 
 
+def _flow_regeneration_plan_context(preview_plan_path: str) -> tuple[Any, str]:
+    seed_val: Any = None
+    scenario_norm = ''
+    payload = None
+    try:
+        if str(preview_plan_path).lower().endswith('.xml'):
+            payload = _load_plan_preview_from_xml(preview_plan_path, None)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        try:
+            full_preview = payload.get('full_preview') if isinstance(payload.get('full_preview'), dict) else {}
+            seed_val = full_preview.get('seed')
+        except Exception:
+            seed_val = None
+        try:
+            metadata = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
+            if seed_val in (None, ''):
+                seed_val = metadata.get('seed')
+            flow_meta = metadata.get('flow') if isinstance(metadata.get('flow'), dict) else {}
+            scenario_norm = _normalize_scenario_label(flow_meta.get('scenario') or metadata.get('scenario') or '')
+        except Exception:
+            pass
+    if not scenario_norm and str(preview_plan_path).lower().endswith('.xml'):
+        try:
+            flow_state = _flow_state_from_xml_path(preview_plan_path, None)
+            if isinstance(flow_state, dict):
+                scenario_norm = _normalize_scenario_label(flow_state.get('scenario') or '')
+        except Exception:
+            pass
+    if not scenario_norm:
+        try:
+            names = _scenario_names_from_xml(preview_plan_path)
+            if names:
+                scenario_norm = _normalize_scenario_label(names[0])
+        except Exception:
+            scenario_norm = ''
+    return seed_val, scenario_norm or 'scenario'
+
+
+def _flow_assignment_synthesized_regeneration_config(
+    assignment: dict[str, Any],
+    *,
+    preview_plan_path: str,
+    occurrence_idx: int,
+) -> dict[str, Any]:
+    seed_val, scenario_norm = _flow_regeneration_plan_context(preview_plan_path)
+    node_id = str((assignment or {}).get('node_id') or '').strip()
+    generator_id = str((assignment or {}).get('id') or (assignment or {}).get('generator_id') or '').strip()
+    base_seed = str(seed_val if seed_val not in (None, '') else '0')
+    flag_seed = '0'
+    try:
+        resolved_inputs = (assignment or {}).get('resolved_inputs') if isinstance((assignment or {}).get('resolved_inputs'), dict) else {}
+        flag_seed = str(resolved_inputs.get('flag_seed') or (assignment or {}).get('flag_seed') or '0')
+    except Exception:
+        flag_seed = '0'
+    try:
+        base_seed = f"{base_seed}:{flag_seed}"
+    except Exception:
+        pass
+    return {
+        'seed': _flow_generator_seed(
+            base_seed=base_seed,
+            scenario_norm=scenario_norm,
+            node_id=node_id,
+            gen_id=generator_id,
+            occurrence_idx=int(occurrence_idx or 0),
+        ),
+        'flag_prefix': 'FLAG',
+        'flag_seed': f"{flag_seed}",
+        'secret': f"FLOWSECRET_{base_seed}_{scenario_norm}_{node_id}_{flag_seed}",
+        'env_name': f"env_{scenario_norm}_{node_id}",
+        'challenge': f"challenge_{scenario_norm}_{node_id}",
+        'username_prefix': 'user',
+        'key_len': 16,
+    }
+
+
+def _flow_assignment_regeneration_config(
+    assignment: dict[str, Any],
+    *,
+    preview_plan_path: str,
+    occurrence_idx: int,
+) -> dict[str, Any]:
+    cfg = _flow_assignment_synthesized_regeneration_config(
+        assignment,
+        preview_plan_path=preview_plan_path,
+        occurrence_idx=occurrence_idx,
+    )
+    for source_key in ('resolved_inputs', 'config'):
+        try:
+            source = (assignment or {}).get(source_key)
+            if isinstance(source, dict):
+                for key, value in source.items():
+                    key_text = str(key or '').strip()
+                    if key_text:
+                        cfg[key_text] = value
+        except Exception:
+            continue
+    for source_key in ('config_overrides', 'inputs_overrides', 'input_overrides'):
+        try:
+            source = (assignment or {}).get(source_key)
+            if isinstance(source, dict):
+                for key, value in source.items():
+                    key_text = str(key or '').strip()
+                    if key_text:
+                        cfg[key_text] = value
+        except Exception:
+            continue
+    try:
+        flag_override = str((assignment or {}).get('flag_override') or '').strip()
+        if flag_override:
+            cfg.setdefault('flag', flag_override)
+            cfg.setdefault('Flag(flag_id)', flag_override)
+    except Exception:
+        pass
+    return cfg
+
+
 def _remote_flow_regenerate_script(
     *,
     assignment: dict[str, Any],
@@ -5054,23 +5173,26 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
         missing_before = _flow_assignment_missing_remote_paths(sftp, assignment)
         if not missing_before:
             continue
-        config = assignment.get('config') if isinstance(assignment.get('config'), dict) else None
         generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
-        if not generator_id or not isinstance(config, dict) or not config:
-            failures.append(
-                f"assignment {index} ({generator_id or 'unknown'}) missing remote artifacts and saved generator config"
-            )
+        if not generator_id:
+            failures.append(f"assignment {index} missing generator id")
             continue
+        config = _flow_assignment_regeneration_config(
+            assignment,
+            preview_plan_path=preview_plan_path,
+            occurrence_idx=index - 1,
+        )
         kind = _remote_flow_assignment_kind(assignment, out_dir)
         try:
             log_handle.write(
                 f"[remote] flow.artifacts.regenerate start index={index} generator={generator_id} "
-                f"kind={kind} out_dir={out_dir} missing={missing_before[:4]}\n"
+                f"kind={kind} out_dir={out_dir} missing={missing_before[:4]} "
+                f"config_keys={sorted(config.keys())[:12]}\n"
             )
         except Exception:
             pass
         script = _remote_flow_regenerate_script(
-            assignment=assignment,
+            assignment={**assignment, 'config': config},
             remote_repo=remote_repo,
             out_dir=out_dir,
             kind=kind,
