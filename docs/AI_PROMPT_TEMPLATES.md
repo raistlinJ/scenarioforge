@@ -140,7 +140,7 @@ For best results, paste:
 - Your target **generator type**: `flag-generator` or `flag-node-generator`
 - Your intended generator **source id** (the `id` in `manifest.yaml`)
 - Your intended artifact **inputs/outputs** (Generator Builder labels these as “Inputs (artifacts)” and “Outputs (artifacts)”; underlying schemas may call them `requires`/`produces`)
-- Your `manifest.yaml` (or at least the relevant fields: `id`, `kind`, `runtime`, `inputs`, `artifacts`, `hint_templates`, `injects`)
+- Your `manifest.yaml` (or at least the relevant fields: `id`, `kind`, `runtime`, `inputs`, `artifacts`, `hint_templates`, `hint_levels`, `injects`)
 - Any `access_instructions` and `inject_candidate_paths` expectations
 - The current scaffolded `generator.py` (and optionally your `docker-compose.yml` / README)
 - A short description of the generator behavior you want
@@ -169,7 +169,8 @@ Tell the AI these are strict requirements:
   - Generator Packs: the Web UI assigns a *new numeric installed ID* at install time, so don’t hardcode the installed ID into your generator; using your source manifest `id` is acceptable.
 - Outputs should be **deterministic** for the same inputs.
 - `outputs.json.outputs` must always include `Flag(flag_id)` (required by schema).
-- `hint.txt` is optional. Prefer `hint_templates` in the catalog; only write `/outputs/hint.txt` if you explicitly need a standalone hint file.
+- `hint.txt` is optional. Prefer `hint_levels` plus legacy `hint_templates` in the catalog; only write `/outputs/hint.txt` if you explicitly need a standalone hint file.
+- Include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`: low can reveal an IP/node, medium can reveal a port/service/file/artifact, and high can point to access instructions or README guidance.
 - Mark runtime inputs with `flow_supply_when_first: true` only when participants must use that value on the first challenge and cannot reasonably infer or find it before solving.
 - Treat Flow-synthesized values as **inputs**, not artifacts:
   - Never put `seed`, `secret`, `node_name`, `flag_prefix` into artifact inputs (aka `requires`).
@@ -308,7 +309,8 @@ Hard requirements (do not violate):
   }
 - generator_id requirements:
   - Do not assume the installed numeric ID is stable; using SOURCE_ID is acceptable.
-- Do NOT write /outputs/hint.txt unless I explicitly ask; prefer hint_templates in the catalog.
+- Do NOT write /outputs/hint.txt unless I explicitly ask; prefer hint_levels plus legacy hint_templates in the catalog.
+- Include low/medium/high hint_levels: IP or node, service/port/file/artifact, then access instructions or README guidance.
 - Deterministic outputs: same (seed, secret, flag_prefix) => same outputs.
 - Inputs (NOT artifacts): seed (required), secret (required), flag_prefix (optional).
 - Mark any solver-facing runtime input the participant must use but cannot reasonably discover before the first solve with flow_supply_when_first.

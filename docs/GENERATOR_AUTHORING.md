@@ -14,7 +14,7 @@ AI prompt templates (copy/paste):
 
 If you are using AI to create generators, use this minimal handoff packet:
 
-- `manifest.yaml` (or at least `id`, `kind`, `runtime`, `inputs`, `artifacts`, `injects`, `hint_templates`)
+- `manifest.yaml` (or at least `id`, `kind`, `runtime`, `inputs`, `artifacts`, `injects`, `hint_templates`, `hint_levels`)
 - scaffolded `generator.py`
 - expected artifact keys (`requires`, `optional_requires`, `produces`)
 - explicit statement of required vs optional runtime inputs
@@ -110,6 +110,14 @@ artifacts:
 
 hint_templates:
   - "Next: use {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"
+
+hint_levels:
+  low:
+    - "Target: {{NEXT_NODE_IP}}"
+  medium:
+    - "Credential: {{OUTPUT.Credential(user,password)}}"
+  high:
+    - "Use the access instructions and README.md for the complete workflow."
 
 # If you produce files/binaries that should be safe to mount into other containers.
 injects:
@@ -280,6 +288,9 @@ Manifests can declare:
 
 - `hint_template` (single string)
 - `hint_templates` (list of strings; typically least → most revealing)
+- `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` (lists of strings shown as collapsible guide sections labeled `Hint Low`, `Hint Medium`, and `Hint High`)
+
+Use levels consistently: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should point to access instructions or a README link. Legacy `hint_templates` still works and is treated as low-level hints when `hint_levels` is missing.
 
 Flow substitutions include:
 

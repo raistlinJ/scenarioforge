@@ -1359,6 +1359,8 @@
       const requires = (curA && Array.isArray(curA.requires)) ? curA.requires.map(String).filter(Boolean) : undefined;
       const hintVal = (curA && typeof curA.hint === 'string' && curA.hint.trim()) ? String(curA.hint).trim() : undefined;
       const hintsVal = (curA && Array.isArray(curA.hints)) ? curA.hints.map(String).filter(Boolean) : undefined;
+      const hintLevelsVal = (curA && curA.hint_levels && typeof curA.hint_levels === 'object' && !Array.isArray(curA.hint_levels)) ? curA.hint_levels : undefined;
+      const hintLevelTemplatesVal = (curA && curA.hint_level_templates && typeof curA.hint_level_templates === 'object' && !Array.isArray(curA.hint_level_templates)) ? curA.hint_level_templates : undefined;
       const descHints = (curA && Array.isArray(curA.description_hints)) ? curA.description_hints.map(String).filter(Boolean) : undefined;
 
       if (ovr !== undefined) out.config_overrides = ovr;
@@ -1386,6 +1388,8 @@
       if (requires !== undefined) out.requires = requires;
       if (hintVal !== undefined) out.hint = hintVal;
       if (hintsVal !== undefined) out.hints = hintsVal;
+      if (hintLevelsVal !== undefined) out.hint_levels = hintLevelsVal;
+      if (hintLevelTemplatesVal !== undefined) out.hint_level_templates = hintLevelTemplatesVal;
       if (descHints !== undefined) out.description_hints = descHints;
       try {
         if (curA && typeof curA.resolved_inputs === 'object' && !Array.isArray(curA.resolved_inputs)) {
@@ -1710,6 +1714,8 @@
         if (savedA.output_defs && !Array.isArray(curA.output_defs)) curA.output_defs = savedA.output_defs;
         if (savedA.hints && !Array.isArray(curA.hints)) curA.hints = savedA.hints;
         if (savedA.hint_templates && !Array.isArray(curA.hint_templates)) curA.hint_templates = savedA.hint_templates;
+        if (savedA.hint_levels && (!curA.hint_levels || typeof curA.hint_levels !== 'object' || Array.isArray(curA.hint_levels))) curA.hint_levels = savedA.hint_levels;
+        if (savedA.hint_level_templates && (!curA.hint_level_templates || typeof curA.hint_level_templates !== 'object' || Array.isArray(curA.hint_level_templates))) curA.hint_level_templates = savedA.hint_level_templates;
         if (savedA.description_hints && !Array.isArray(curA.description_hints)) curA.description_hints = savedA.description_hints;
         if (savedA.resolved_inputs && (!hasInputs)) curA.resolved_inputs = savedA.resolved_inputs;
         if (savedA.resolved_outputs && (!hasOutputs)) curA.resolved_outputs = savedA.resolved_outputs;
@@ -1766,6 +1772,8 @@
         }
         if (savedA.hint && (!curA.hint || !String(curA.hint).trim())) curA.hint = savedA.hint;
         if (savedA.hints && !Array.isArray(curA.hints)) curA.hints = savedA.hints;
+        if (savedA.hint_levels && (!curA.hint_levels || typeof curA.hint_levels !== 'object' || Array.isArray(curA.hint_levels))) curA.hint_levels = savedA.hint_levels;
+        if (savedA.hint_level_templates && (!curA.hint_level_templates || typeof curA.hint_level_templates !== 'object' || Array.isArray(curA.hint_level_templates))) curA.hint_level_templates = savedA.hint_level_templates;
         if (savedA.description_hints && !Array.isArray(curA.description_hints)) curA.description_hints = savedA.description_hints;
         nextAssignments[i] = curA;
       }
@@ -3209,6 +3217,47 @@
     });
   }
 
+  const FLOW_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
+
+  function normalizeFlowHintLevels(assignment, options) {
+    const opts = (options && typeof options === 'object') ? options : {};
+    const source = assignment && typeof assignment === 'object' ? assignment : {};
+    const raw = (source.hint_levels && typeof source.hint_levels === 'object' && !Array.isArray(source.hint_levels)) ? source.hint_levels : null;
+    const out = {};
+    const seen = new Set();
+    const add = (level, value) => {
+      const key = String(level || '').trim().toLowerCase();
+      if (!FLOW_HINT_LEVEL_ORDER.includes(key)) return;
+      const text = _applyHintOutputTemplates(String(value || '').trim(), source).trim();
+      if (!text) return;
+      const sig = `${key}::${text}`;
+      if (seen.has(sig)) return;
+      seen.add(sig);
+      if (!Array.isArray(out[key])) out[key] = [];
+      out[key].push(text);
+    };
+    if (raw) {
+      FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+        const values = raw[level];
+        if (Array.isArray(values)) values.forEach((value) => add(level, value));
+        else if (typeof values === 'string') add(level, values);
+      });
+    }
+    if (!Object.keys(out).length && Array.isArray(source.hints)) {
+      source.hints.forEach((value) => add('low', value));
+    }
+    if (!Object.keys(out).length && source.hint) add('low', source.hint);
+    const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
+    const hasReadmeHint = Array.isArray(out.high) && out.high.some((item) => String(item || '').trim().toLowerCase().startsWith('readme:'));
+    if (opts.includeReadme !== false && readmeRef && !hasReadmeHint) add('high', `README: ${readmeRef}`);
+    return out;
+  }
+
+  function hintLevelTitle(level) {
+    const key = String(level || '').trim().toLowerCase();
+    return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : 'Hint';
+  }
+
   function renderChainEditor() {
     const wrap = document.getElementById('flowChainList');
     if (!wrap) return;
@@ -4345,29 +4394,30 @@
         addRow('Description Hints', descList[0]);
       }
 
-      const hintList = (fa && Array.isArray(fa.hints) && fa.hints.length)
-        ? fa.hints
-          .map(x => _applyHintOutputTemplates(String(x || '').trim(), fa))
-          .map(x => String(x || '').trim())
-          .filter(Boolean)
-        : [];
-      const hintListWithIp = hintList.map(h => _applyHintNodeIps(h, _hintNodeIpMap));
-      if (hintList.length > 1) {
-        const wrap = document.createElement('div');
-        const ul = document.createElement('ol');
-        ul.className = 'mb-0 ps-3';
-        hintListWithIp.forEach((ht) => {
-          const li = document.createElement('li');
-          li.textContent = ht;
-          ul.appendChild(li);
-        });
-        wrap.appendChild(ul);
-        addRow('Next-Step Hints', wrap);
-      } else {
-        const hintTextRaw = hintList.length ? hintList[0] : (fa && fa.hint ? _applyHintOutputTemplates(String(fa.hint), fa) : '');
-        const hintText = _applyHintNodeIps(hintTextRaw, _hintNodeIpMap);
-        addRow('Next-Step Hint', hintText || '-');
-      }
+      const hintLevels = normalizeFlowHintLevels(fa);
+      let renderedAnyHintLevel = false;
+      FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+        const values = Array.isArray(hintLevels[level])
+          ? hintLevels[level].map(h => _applyHintNodeIps(h, _hintNodeIpMap)).map(h => String(h || '').trim()).filter(Boolean)
+          : [];
+        if (!values.length) return;
+        renderedAnyHintLevel = true;
+        if (values.length > 1) {
+          const wrap = document.createElement('div');
+          const ul = document.createElement('ol');
+          ul.className = 'mb-0 ps-3';
+          values.forEach((ht) => {
+            const li = document.createElement('li');
+            li.textContent = ht;
+            ul.appendChild(li);
+          });
+          wrap.appendChild(ul);
+          addRow(`Hint ${hintLevelTitle(level)}`, wrap);
+        } else {
+          addRow(`Hint ${hintLevelTitle(level)}`, values[0]);
+        }
+      });
+      if (!renderedAnyHintLevel) addRow('Hint Low', '-');
 
       const feas = chainFeasibility(currentFlagAssignments);
       const step = feas && feas[idx] ? feas[idx] : null;
@@ -8683,6 +8733,8 @@
       const _hasObjectValues = (obj) => !!(obj && typeof obj === 'object' && !Array.isArray(obj) && Object.keys(obj).length);
       const _hasArrayValues = (arr) => !!(Array.isArray(arr) && arr.length);
       const _containsOutputTemplate = (text) => String(text || '').includes(_OUTPUT_TEMPLATE_PREFIX);
+      const _hintLevelsHaveValues = (levels) => !!(levels && typeof levels === 'object' && !Array.isArray(levels) && FLOW_HINT_LEVEL_ORDER.some((level) => Array.isArray(levels[level]) && levels[level].length));
+      const _hintLevelsHaveTemplates = (levels) => !!(levels && typeof levels === 'object' && !Array.isArray(levels) && FLOW_HINT_LEVEL_ORDER.some((level) => Array.isArray(levels[level]) && levels[level].some(_containsOutputTemplate)));
 
       nextAssignments = nextAssignments.map((next, idx) => {
         const cur = (next && typeof next === 'object') ? { ...next } : {};
@@ -8718,6 +8770,12 @@
         const prevHintResolved = prevHints.some((h) => h && !_containsOutputTemplate(h));
         if ((nextHintHasTemplates || !nextHints.length) && prevHintResolved) {
           cur.hints = prevHints;
+        }
+        if ((!_hintLevelsHaveValues(cur.hint_levels) || _hintLevelsHaveTemplates(cur.hint_levels)) && _hintLevelsHaveValues(prev.hint_levels) && !_hintLevelsHaveTemplates(prev.hint_levels)) {
+          cur.hint_levels = prev.hint_levels;
+        }
+        if (!_hintLevelsHaveValues(cur.hint_level_templates) && _hintLevelsHaveValues(prev.hint_level_templates)) {
+          cur.hint_level_templates = prev.hint_level_templates;
         }
         const nextHint = String(cur.hint || '').trim();
         const prevHint = String(prev.hint || '').trim();
@@ -10714,8 +10772,35 @@ ${out.join('\n')}
     const alignedAssignments = alignAssignmentsToChain(nodes, Array.isArray(assignments) ? assignments : []);
     const now = new Date().toISOString();
 
+    const normalizeGuideHintLevels = (assignment) => {
+      const levels = normalizeFlowHintLevels(assignment);
+      const out = {};
+      FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+        const values = Array.isArray(levels[level])
+          ? levels[level].map((v) => String(v || '').trim()).filter(Boolean)
+          : [];
+        if (values.length) out[level] = values;
+      });
+      return out;
+    };
+
+    const formatGuideHintLine = (text) => {
+      const value = String(text || '').trim();
+      const readmeMatch = value.match(/^README:\s*(.+)$/i);
+      if (readmeMatch) {
+        const rawPath = String(readmeMatch[1] || '').trim();
+        if (rawPath) {
+          const target = rawPath.replace(/\s/g, '%20').replace(/\)/g, '%29');
+          return `README: [${rawPath}](${target})`;
+        }
+      }
+      return value;
+    };
+
     const firstHint = (assignment) => {
       if (!assignment || typeof assignment !== 'object') return '';
+      const levels = normalizeGuideHintLevels(assignment);
+      if (Array.isArray(levels.low) && levels.low.length) return levels.low[0];
       const direct = String(assignment.hint || '').trim();
       if (direct) return direct;
       const hints = Array.isArray(assignment.hints)
@@ -11040,6 +11125,7 @@ ${out.join('\n')}
           .map((v) => String(v || '').trim())
           .filter(Boolean)
         : [];
+      const structuredHintLevels = normalizeGuideHintLevels(assignment);
       const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
       const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
       const resolvedInjects = normalizeGuidePathArtifacts(assignment);
@@ -11248,6 +11334,30 @@ ${out.join('\n')}
         lines.push('');
         lines.push('No specific access instructions were provided for this step.');
         lines.push('');
+      }
+
+      const hasStructuredHintLevels = FLOW_HINT_LEVEL_ORDER.some((level) => Array.isArray(structuredHintLevels[level]) && structuredHintLevels[level].length);
+      if (hasStructuredHintLevels) {
+        lines.push('### Hints');
+        lines.push('');
+        FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+          const values = Array.isArray(structuredHintLevels[level])
+            ? structuredHintLevels[level].map(formatGuideHintLine).filter(Boolean)
+            : [];
+          if (!values.length) return;
+          const firstValue = values[0];
+          lines.push('<details>');
+          lines.push(`<summary>Hint ${hintLevelTitle(level)}: ${firstValue}</summary>`);
+          lines.push('');
+          if (values.length === 1) {
+            lines.push(firstValue);
+          } else {
+            values.forEach((value) => lines.push(`- ${value}`));
+          }
+          lines.push('');
+          lines.push('</details>');
+          lines.push('');
+        });
       }
 
       const stepVulnReadmes = vulnReadmesByStep.get(step) || [];

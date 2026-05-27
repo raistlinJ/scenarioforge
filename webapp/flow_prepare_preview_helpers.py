@@ -1242,6 +1242,19 @@ def refresh_hints_for_current_chain(
                     gen_def_local = candidate
             except Exception:
                 gen_def_local = None
+        hint_level_templates: dict[str, list[str]] = {}
+        try:
+            hint_level_templates = backend._flow_normalize_hint_levels(assignment.get('hint_level_templates'))
+        except Exception:
+            hint_level_templates = {}
+        try:
+            if not hint_level_templates and isinstance(gen_def_local, dict):
+                hint_level_templates = backend._flow_hint_level_templates_from_generator(gen_def_local)
+        except Exception:
+            pass
+        structured_hint_templates_active = bool(hint_level_templates)
+        if hint_level_templates and not templates:
+            templates = hint_level_templates.get('low') or []
         if not templates:
             templates = ['Next: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}']
 
@@ -1250,11 +1263,14 @@ def refresh_hints_for_current_chain(
             text = str(template or '').strip()
             if not text:
                 continue
-            if ('{{NEXT_NODE_' not in text) and ('{{THIS_NODE_' not in text):
+            if (not structured_hint_templates_active) and ('{{NEXT_NODE_' not in text) and ('{{THIS_NODE_' not in text) and ('{{OUTPUT.' not in text):
                 text = 'Next: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}'
             normalized_templates.append(text)
         if not normalized_templates:
             normalized_templates = ['Next: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}']
+
+        if not hint_level_templates:
+            hint_level_templates = {'low': normalized_templates}
 
         rendered = [
             backend._flow_render_hint_template(
@@ -1280,10 +1296,36 @@ def refresh_hints_for_current_chain(
                 )
             ]
 
+        try:
+            rendered_hint_levels = backend._flow_render_hint_level_templates(
+                hint_level_templates,
+                scenario_label=(scenario_label or scenario_norm),
+                id_to_name=id_to_name_local,
+                id_to_ip=id_to_ip_local,
+                this_id=str(this_id),
+                next_id=str(next_id),
+            )
+            readme_ref = str(assignment.get('readme_rel_path') or assignment.get('readme_path') or '').strip()
+            if not readme_ref and isinstance(gen_def_local, dict):
+                readme_ref = str(gen_def_local.get('readme_rel_path') or gen_def_local.get('readme_path') or '').strip()
+                if gen_def_local.get('readme_path'):
+                    assignment['readme_path'] = str(gen_def_local.get('readme_path') or '')
+                if gen_def_local.get('readme_rel_path'):
+                    assignment['readme_rel_path'] = str(gen_def_local.get('readme_rel_path') or '')
+            if readme_ref:
+                readme_hint = 'README: ' + readme_ref
+                rendered_hint_levels.setdefault('high', [])
+                if readme_hint not in rendered_hint_levels['high'] and not any(str(item or '').strip().lower().startswith('readme:') for item in rendered_hint_levels['high']):
+                    rendered_hint_levels['high'].append(readme_hint)
+        except Exception:
+            rendered_hint_levels = {}
+
         assignment['hint_templates'] = normalized_templates
         assignment['hint_template'] = str(normalized_templates[0] or '') if normalized_templates else ''
-        assignment['hints'] = rendered
-        assignment['hint'] = rendered[0] if rendered else ''
+        assignment['hint_level_templates'] = hint_level_templates
+        assignment['hint_levels'] = rendered_hint_levels
+        assignment['hints'] = rendered_hint_levels.get('low') or rendered
+        assignment['hint'] = (rendered_hint_levels.get('low') or rendered or [''])[0] if (rendered_hint_levels.get('low') or rendered) else ''
         try:
             apply_first = getattr(backend, '_flow_apply_first_step_chain_supplied_inputs', None)
             if callable(apply_first):
@@ -2583,6 +2625,32 @@ def process_generator_outputs(
             hint_final = apply_node_placeholders(str(hint_final), node_ip4=preview_ip4)
             if hint_final and hint_final != str(assignment.get('hint') or ''):
                 assignment['hint'] = hint_final
+    except Exception:
+        pass
+
+    try:
+        raw_levels = assignment.get('hint_levels')
+        if isinstance(raw_levels, dict):
+            next_levels = {}
+            for level in ('low', 'medium', 'high'):
+                raw_items = raw_levels.get(level)
+                if isinstance(raw_items, str):
+                    raw_items = [raw_items]
+                if not isinstance(raw_items, list):
+                    continue
+                values = []
+                for text in raw_items:
+                    rendered = apply_outputs_to_hint_text(str(text or ''), outputs)
+                    rendered = apply_node_placeholders(str(rendered), node_ip4=preview_ip4)
+                    if str(rendered or '').strip():
+                        values.append(str(rendered))
+                if values:
+                    next_levels[level] = values
+            if next_levels:
+                assignment['hint_levels'] = next_levels
+                if next_levels.get('low'):
+                    assignment['hints'] = next_levels.get('low') or assignment.get('hints')
+                    assignment['hint'] = str((next_levels.get('low') or [''])[0] or assignment.get('hint') or '')
     except Exception:
         pass
 

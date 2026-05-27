@@ -103,6 +103,17 @@ def _coerce_string_list(value: Any) -> list[str]:
     return result
 
 
+def _coerce_hint_levels(value: Any) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    if not isinstance(value, dict):
+        return result
+    for level in ('low', 'medium', 'high'):
+        items = _coerce_string_list(value.get(level))
+        if items:
+            result[level] = items
+    return result
+
+
 def _coerce_inject_candidate_paths(value: Any) -> list[str]:
     if value is None:
         return []
@@ -1873,6 +1884,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
             '- outputs.json must include generator_id and Flag(flag_id).',
             '- Keep outputs deterministic and ensure all declared outputs exist.',
             '- Include access_instructions for interactive service/file/credential artifacts.',
+            '- Include hint_levels with low, medium, and high arrays: low should reveal a target IP/name, medium should reveal a port/service/file/artifact, and high should point to access instructions or README guidance.',
         ]
         if plugin_type == 'flag-node-generator':
             kind_requirements.extend([
@@ -1897,6 +1909,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '  "produces": ["Flag(flag_id)", "Credential(user,password)"],',
         '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true}, {"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true}],',
         '  "hint_templates": ["Next: use {{OUTPUT.Credential(user,password)}}"],',
+        '  "hint_levels": {"low": ["Target: {{NEXT_NODE_IP}}"], "medium": ["Service/artifact: {{OUTPUT.File(path):basename}}"], "high": ["Use the access instructions and README.md for the complete workflow."]},',
         '  "inject_files": ["File(path)"],',
         '  "inject_candidate_paths": ["/opt/uploads", "/var/www/html"],',
         '  "access_instructions": {"title": "How to Access", "steps": [{"step": 1, "title": "Connect", "instructions": "Use {{NODE}} and {{PORT}}.", "vars": {"NODE": "node_name", "PORT": "PortForward(host, port)"}}]},',
@@ -1908,11 +1921,11 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
     ]
     if ultra_compact_prompt:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_templates":[],"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_templates":[],"hint_levels":{"low":[],"medium":[],"high":[]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
         ]
     elif compact_grounding:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true}],"hint_templates":["Next: use {{OUTPUT.Flag(flag_id)}}"],"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true}],"hint_templates":["Next: use {{OUTPUT.Flag(flag_id)}}"],"hint_levels":{"low":["Target: {{NEXT_NODE_IP}}"],"medium":["Artifact: {{OUTPUT.Flag(flag_id)}}"],"high":["Use the access instructions and README.md."]},"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
         ]
 
     current_scaffold = payload.get('current_scaffold_request') if isinstance(payload.get('current_scaffold_request'), dict) else None
@@ -2068,6 +2081,7 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
     requires, _optional_requires = _coerce_requires(ai_payload.get('requires'), ai_payload.get('optional_requires'))
     runtime_inputs = _coerce_runtime_inputs(ai_payload.get('runtime_inputs') or ai_payload.get('inputs'))
     hint_templates = _coerce_string_list(ai_payload.get('hint_templates'))
+    hint_levels = _coerce_hint_levels(ai_payload.get('hint_levels'))
     inject_files = _coerce_string_list(ai_payload.get('inject_files'))
     inject_candidate_paths = _coerce_inject_candidate_paths(ai_payload.get('inject_candidate_paths'))
     access_instructions = _coerce_access_instructions(ai_payload.get('access_instructions'))
@@ -2115,6 +2129,8 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
         hint_templates = _coerce_string_list(explicit.get('hint_templates'))
     elif not hint_templates and merged_defaults.get('hint_templates'):
         hint_templates = _coerce_string_list(merged_defaults.get('hint_templates'))
+    if not hint_levels and hint_templates:
+        hint_levels = {'low': hint_templates}
 
     compose_text = str(ai_payload.get('compose_text') or '').strip('\n')
     readme_text = str(ai_payload.get('readme_text') or '').strip('\n')
@@ -2136,6 +2152,7 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
         'produces': produces,
         'runtime_inputs': runtime_inputs,
         'hint_templates': hint_templates,
+        'hint_levels': hint_levels,
         'inject_files': inject_files,
         'inject_candidate_paths': inject_candidate_paths,
         'access_instructions': access_instructions,

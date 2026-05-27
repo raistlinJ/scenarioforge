@@ -171,6 +171,11 @@
               </div>
             </div>
 
+            <div id="participantFirstHintBlock" class="border border-secondary rounded p-2 mt-3 d-none">
+              <div class="text-secondary small text-uppercase">First Hint</div>
+              <ul id="participantFirstHintList" class="mb-0 ps-3 small text-white"></ul>
+            </div>
+
             <div id="topologyGraphCard" style="display:none;">
               <hr class="border-secondary my-3" />
               <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
@@ -267,6 +272,8 @@
   const vulnIpsDetails = document.getElementById('participantVulnIpsDetails');
   const vulnIpsSummary = document.getElementById('participantVulnIpsSummary');
   const vulnIpsList = document.getElementById('participantVulnIpsList');
+  const firstHintBlock = document.getElementById('participantFirstHintBlock');
+  const firstHintList = document.getElementById('participantFirstHintList');
   const topologyGraphCard = document.getElementById('topologyGraphCard');
   const topologyGraph = document.getElementById('topologyGraph');
   const topologyStatus = document.getElementById('participantTopologyStatus');
@@ -322,6 +329,56 @@
     } catch(e){
       return String(ts);
     }
+  };
+
+  const cleanHintList = (values) => {
+    const raw = Array.isArray(values) ? values : (typeof values === 'string' ? [values] : []);
+    const out = [];
+    raw.forEach((value) => {
+      const text = String(value || '').trim();
+      if(text && !out.includes(text)) out.push(text);
+    });
+    return out;
+  };
+
+  const initialHintsFromFlow = (flow) => {
+    const out = [];
+    const add = (values) => {
+      cleanHintList(values).forEach((hint) => {
+        if(!out.includes(hint)) out.push(hint);
+      });
+    };
+    if(!flow || typeof flow !== 'object') return out;
+    add(flow.first_hints);
+    add(flow.first_hint);
+    if(out.length) return out;
+
+    const assignments = Array.isArray(flow.flag_assignments) ? flow.flag_assignments : [];
+    const first = assignments.length ? assignments[0] : null;
+    if(first && typeof first === 'object'){
+      const levels = (first.hint_levels && typeof first.hint_levels === 'object' && !Array.isArray(first.hint_levels)) ? first.hint_levels : null;
+      if(levels) add(levels.low);
+      add(first.chain_supplied_input_hints);
+      if(!out.length) add(first.hints);
+      if(!out.length) add(first.hint);
+    }
+    return out;
+  };
+
+  const renderFirstHint = (payload) => {
+    if(!firstHintBlock || !firstHintList) return;
+    const hints = initialHintsFromFlow(payload && payload.flow);
+    firstHintList.innerHTML = '';
+    if(!currentNorm || hints.length === 0){
+      firstHintBlock.classList.add('d-none');
+      return;
+    }
+    hints.forEach((hint) => {
+      const li = document.createElement('li');
+      li.textContent = hint;
+      firstHintList.appendChild(li);
+    });
+    firstHintBlock.classList.remove('d-none');
   };
 
   const renderSubnetworks = (items) => {
@@ -1064,9 +1121,11 @@
 
     const topo = await fetchScenarioTopology(currentNorm);
     if(topo) {
+      renderFirstHint(topo);
       renderTopologyGraph(topo);
       renderTopologyDetails(topo);
     } else {
+      renderFirstHint(null);
       if(topologyGraphCard && currentNorm) topologyGraphCard.style.display = '';
       if(topologyGraph && currentNorm) topologyGraph.innerHTML = `<div class="p-3 text-muted small">Loading topology…</div>`;
       if(topologyStatus && currentNorm) topologyStatus.textContent = '';
@@ -1135,6 +1194,7 @@
     updateOpenButton(resolvedHref);
     persistSelectionInQuery(currentNorm);
     persistSelectionInLocalStorage(currentNorm);
+    renderFirstHint(null);
     refreshStats();
   };
 
