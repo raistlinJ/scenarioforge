@@ -12,6 +12,13 @@ def test_index_disables_local_editor_snapshot_mode() -> None:
     assert "const ALLOW_LOCAL_EDITOR_PERSISTENCE = false;" in text
 
 
+def test_index_autosave_scheduler_has_no_unreachable_guard() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    block = text.split("function scheduleAutoSaveXml(snapshot, coreState, scenarios) {", 1)[1].split("function", 1)[0]
+    assert "return;\n        if (!ALLOW_LOCAL_EDITOR_PERSISTENCE) return;" not in block
+    assert "if (!ALLOW_LOCAL_EDITOR_PERSISTENCE) return;" in block
+
+
 def test_flow_restore_has_no_local_fallback() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
     forbidden = [
