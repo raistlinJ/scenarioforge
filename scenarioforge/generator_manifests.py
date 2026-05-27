@@ -30,6 +30,8 @@ CANONICAL_INPUT_TYPES: set[str] = {
     'file_list',
 }
 
+HINT_LEVELS: tuple[str, ...] = ('low', 'medium', 'high')
+
 
 def normalize_artifact_name(name: Any) -> str:
     raw = str(name or '').strip()
@@ -249,6 +251,32 @@ def _norm_inputs(inputs: Any) -> list[dict[str, Any]]:
         ):
             rec['flow_supply_when_first'] = True
         out.append(rec)
+    return out
+
+
+def _norm_string_list(value: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        candidates = []
+    for item in candidates:
+        text = str(item or '').strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _norm_hint_levels(value: Any) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    if not isinstance(value, dict):
+        return out
+    for level in HINT_LEVELS:
+        values = _norm_string_list(value.get(level))
+        if values:
+            out[level] = values
     return out
 
 
@@ -480,10 +508,22 @@ def discover_generator_manifests(
                 '_flow_kind': plugin_type,
                 '_flow_catalog': flow_catalog,
                 'description_hints': list(doc.get('description_hints') or []) if isinstance(doc.get('description_hints'), list) else [],
+                'hint_levels': _norm_hint_levels(doc.get('hint_levels')),
                 'hint_templates': list(doc.get('hint_templates') or []) if isinstance(doc.get('hint_templates'), list) else [],
                 'hint_template': str(doc.get('hint_template') or ''),
                 'env': dict(doc.get('env') or {}) if isinstance(doc.get('env'), dict) else {},
             }
+
+            try:
+                readme_path = child / 'README.md'
+                if readme_path.is_file():
+                    gen['readme_path'] = str(readme_path)
+                    try:
+                        gen['readme_rel_path'] = str(readme_path.relative_to(repo_root_p)).replace('\\', '/')
+                    except Exception:
+                        gen['readme_rel_path'] = str(readme_path)
+            except Exception:
+                pass
 
             # Include access instructions if present in manifest
             if isinstance(doc.get('access_instructions'), dict) and doc.get('access_instructions').get('steps'):

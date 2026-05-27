@@ -249,6 +249,20 @@ def test_chain_supplied_input_hint_materializes_with_inject_files(tmp_path):
     assert hint in hint_path.read_text(encoding="utf-8")
 
 
+def test_flow_first_hints_include_low_hint_and_chain_supplied_input_hint():
+    assignment = {
+        "hint_levels": {"low": ["Target: 10.0.0.2"], "medium": [], "high": []},
+        "chain_supplied_input_hints": ["First challenge supplied input: unlock_code=code_demo."],
+        "hints": ["Target: 10.0.0.2"],
+        "hint": "Target: 10.0.0.2",
+    }
+
+    assert app_backend._flow_first_hints_from_assignments([assignment]) == [
+        "Target: 10.0.0.2",
+        "First challenge supplied input: unlock_code=code_demo.",
+    ]
+
+
 def test_chain_supplied_credential_reaches_generator_run_config():
     assignment = {
         "id": "git-deploy-key-repo",

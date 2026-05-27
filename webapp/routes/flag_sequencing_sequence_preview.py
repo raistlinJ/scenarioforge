@@ -315,6 +315,7 @@ def register(app, *, backend_module: Any) -> None:
 
         try:
             metadata = payload.get('metadata') if isinstance(payload, dict) else {}
+            first_hints = backend._flow_first_hints_from_assignments(flag_assignments)
             flow_meta = {
                 'source_preview_plan_path': backend._abs_path_or_original(preview_plan_path),
                 'scenario': scenario_label or scenario_norm,
@@ -329,6 +330,9 @@ def register(app, *, backend_module: Any) -> None:
                 'flow_errors': list(flow_errors or []),
                 'modified_at': backend._iso_now(),
             }
+            if first_hints:
+                flow_meta['first_hint'] = first_hints[0]
+                flow_meta['first_hints'] = list(first_hints)
             if initial_facts_override:
                 flow_meta['initial_facts'] = initial_facts_override
             if goal_facts_override:

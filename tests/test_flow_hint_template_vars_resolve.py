@@ -188,6 +188,38 @@ def test_flow_hint_renderer_still_adds_ip_for_plain_node_name():
     assert hint == "Inspect the export before moving to docker-12 (10.230.11.14)."
 
 
+def test_flow_hint_levels_render_low_medium_high():
+    levels = app_backend._flow_render_hint_level_templates(
+        {
+            "low": ["Target: {{NEXT_NODE_IP}}"],
+            "medium": ["Service: {{OUTPUT.PortForward(host,port)}}"],
+            "high": ["README: README.md"],
+        },
+        scenario_label="demo",
+        id_to_name={"n1": "alpha", "n2": "beta"},
+        id_to_ip={"n1": "10.0.0.5", "n2": "10.0.0.6"},
+        this_id="n1",
+        next_id="n2",
+    )
+
+    assert levels["low"] == ["Target: 10.0.0.6"]
+    assert levels["medium"] == ["Service: {{OUTPUT.PortForward(host,port)}}"]
+    assert levels["high"] == ["README: README.md"]
+
+
+def test_flow_hint_renderer_preserves_non_next_hints_on_final_step():
+    hint = app_backend._flow_render_hint_template(
+        "README: README.md",
+        scenario_label="demo",
+        id_to_name={"n1": "alpha"},
+        id_to_ip={"n1": "10.0.0.5"},
+        this_id="n1",
+        next_id="",
+    )
+
+    assert hint == "README: README.md"
+
+
 def test_flow_strip_ids_from_hint_removes_rendered_duplicate_ip_forms():
     assert app_backend._flow_strip_ids_from_hint(
         "Next docker-12 @ 10.230.11.14 (10.230.11.14)."

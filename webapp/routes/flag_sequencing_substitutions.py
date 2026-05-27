@@ -153,12 +153,16 @@ def register(app, *, backend_module: Any) -> None:
             plugins_by_id = {}
 
         id_to_name: dict[str, str] = {}
+        id_to_ip: dict[str, str] = {}
         for node in chain_nodes:
             try:
                 node_id = str(node.get('id') or '').strip()
                 node_name = str(node.get('name') or '').strip()
                 if node_id:
                     id_to_name[node_id] = node_name or node_id
+                    ip_value = str(node.get('ip4') or node.get('ipv4') or node.get('ip') or node.get('address') or '').strip()
+                    if ip_value:
+                        id_to_ip[node_id] = ip_value
             except Exception:
                 pass
 
@@ -290,9 +294,11 @@ def register(app, *, backend_module: Any) -> None:
             assignment['generator_catalog'] = str(generator.get('_flow_catalog') or assignment.get('generator_catalog') or 'flag_generators')
             assignment['language'] = str(generator.get('language') or '')
 
-            hint_templates = backend._flow_hint_templates_from_generator(generator)
+            hint_level_templates = backend._flow_hint_level_templates_from_generator(generator)
+            hint_templates = hint_level_templates.get('low') or backend._flow_hint_templates_from_generator(generator)
             assignment['hint_templates'] = hint_templates
             assignment['hint_template'] = str((hint_templates[0] if hint_templates else '') or '')
+            assignment['hint_level_templates'] = hint_level_templates
 
             # Include access instructions if present in generator manifest
             if isinstance(generator.get('access_instructions'), dict) and generator.get('access_instructions').get('steps'):
@@ -304,6 +310,33 @@ def register(app, *, backend_module: Any) -> None:
                 next_id = ''
             assignment['next_node_id'] = str(next_id)
             assignment['next_node_name'] = str(id_to_name.get(str(next_id)) or '')
+            assignment['hint_levels'] = backend._flow_render_hint_level_templates(
+                hint_level_templates,
+                scenario_label=(scenario_label or scenario_norm),
+                id_to_name=id_to_name,
+                id_to_ip=id_to_ip,
+                this_id=str(chain_id),
+                next_id=str(next_id),
+            )
+            if assignment.get('hint_levels') and isinstance(assignment.get('hint_levels'), dict):
+                low_hints = assignment['hint_levels'].get('low') if isinstance(assignment['hint_levels'].get('low'), list) else []
+                if low_hints:
+                    assignment['hints'] = low_hints
+                    assignment['hint'] = str(low_hints[0] or '')
+            try:
+                if generator.get('readme_path'):
+                    assignment['readme_path'] = str(generator.get('readme_path') or '')
+                if generator.get('readme_rel_path'):
+                    assignment['readme_rel_path'] = str(generator.get('readme_rel_path') or '')
+                readme_ref = str(generator.get('readme_rel_path') or generator.get('readme_path') or '').strip()
+                if readme_ref:
+                    readme_hint = 'README: ' + readme_ref
+                    assignment.setdefault('hint_levels', {})
+                    assignment['hint_levels'].setdefault('high', [])
+                    if readme_hint not in assignment['hint_levels']['high'] and not any(str(item or '').strip().lower().startswith('readme:') for item in assignment['hint_levels']['high']):
+                        assignment['hint_levels']['high'].append(readme_hint)
+            except Exception:
+                pass
 
             requires_artifacts = sorted(list(_artifact_requires_of(generator)))
             produces_artifacts = sorted(list(_artifact_produces_of(generator)))

@@ -451,6 +451,11 @@ Example request:
 		{"name": "Credential(user, password)", "type": "string", "required": false, "sensitive": true}
 	],
 	"hint_templates": ["Next: SSH using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"],
+	"hint_levels": {
+		"low": ["Target: {{NEXT_NODE_IP}}"],
+		"medium": ["Credential: {{OUTPUT.Credential(user,password)}}"],
+		"high": ["Use the access instructions and README.md."]
+	},
 	"inject_files": ["File(path)"],
 	"inject_candidate_paths": ["/opt/uploads", "/var/www/html"],
 	"access_instructions": {

@@ -795,6 +795,7 @@ function alignAssignmentsToChainLocal(nodes, assignments) {
 }
 
 const _REPORT_OUTPUT_TEMPLATE_PREFIX = '{' + '{OUTPUT.';
+const REPORT_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
 function applyReportHintOutputTemplates(text, assignment) {
   const t = String(text || '');
   if (!t || !t.includes(_REPORT_OUTPUT_TEMPLATE_PREFIX)) return t;
@@ -862,6 +863,43 @@ function applyReportHintOutputTemplates(text, assignment) {
   });
 }
 
+function normalizeReportHintLevels(assignment, options) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const source = assignment && typeof assignment === 'object' ? assignment : {};
+  const raw = (source.hint_levels && typeof source.hint_levels === 'object' && !Array.isArray(source.hint_levels)) ? source.hint_levels : null;
+  const out = {};
+  const seen = new Set();
+  const add = (level, value) => {
+    const key = String(level || '').trim().toLowerCase();
+    if (!REPORT_HINT_LEVEL_ORDER.includes(key)) return;
+    const text = applyReportHintOutputTemplates(String(value || '').trim(), source).trim();
+    if (!text) return;
+    const sig = `${key}::${text}`;
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    if (!Array.isArray(out[key])) out[key] = [];
+    out[key].push(text);
+  };
+  if (raw) {
+    REPORT_HINT_LEVEL_ORDER.forEach((level) => {
+      const values = raw[level];
+      if (Array.isArray(values)) values.forEach((value) => add(level, value));
+      else if (typeof values === 'string') add(level, values);
+    });
+  }
+  if (!Object.keys(out).length && Array.isArray(source.hints)) source.hints.forEach((value) => add('low', value));
+  if (!Object.keys(out).length && source.hint) add('low', source.hint);
+  const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
+  const hasReadmeHint = Array.isArray(out.high) && out.high.some((item) => String(item || '').trim().toLowerCase().startsWith('readme:'));
+  if (opts.includeReadme !== false && readmeRef && !hasReadmeHint) add('high', `README: ${readmeRef}`);
+  return out;
+}
+
+function reportHintLevelTitle(level) {
+  const key = String(level || '').trim().toLowerCase();
+  return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : 'Hint';
+}
+
 function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const opts = (options && typeof options === 'object') ? options : {};
   const facilitatorMode = !!opts.facilitator;
@@ -879,8 +917,22 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const nodes = Array.isArray(chain) ? chain : [];
   const alignedAssignments = alignAssignmentsToChainLocal(nodes, assignments);
   const now = new Date().toISOString();
+  const formatGuideHintLine = (text) => {
+    const value = String(text || '').trim();
+    const readmeMatch = value.match(/^README:\s*(.+)$/i);
+    if (readmeMatch) {
+      const rawPath = String(readmeMatch[1] || '').trim();
+      if (rawPath) {
+        const target = rawPath.replace(/\s/g, '%20').replace(/\)/g, '%29');
+        return `README: [${rawPath}](${target})`;
+      }
+    }
+    return value;
+  };
   const firstHint = (assignment) => {
     if (!assignment || typeof assignment !== 'object') return '';
+    const levels = normalizeReportHintLevels(assignment);
+    if (Array.isArray(levels.low) && levels.low.length) return levels.low[0];
     const direct = String(assignment.hint || '').trim();
     if (direct) return direct;
     const hints = Array.isArray(assignment.hints) ? assignment.hints.map((v) => String(v || '').trim()).filter(Boolean) : [];
@@ -1190,6 +1242,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     const descHints = Array.isArray(assignment.description_hints)
       ? assignment.description_hints.map((v) => applyReportHintOutputTemplates(String(v || '').trim(), assignment)).map((v) => String(v || '').trim()).filter(Boolean)
       : [];
+    const structuredHintLevels = normalizeReportHintLevels(assignment);
     const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
     const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
     const resolvedInjects = normalizeGuidePathArtifacts(assignment);
@@ -1398,6 +1451,30 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       lines.push('');
       lines.push('No specific access instructions were provided for this step.');
       lines.push('');
+    }
+
+    const hasStructuredHintLevels = REPORT_HINT_LEVEL_ORDER.some((level) => Array.isArray(structuredHintLevels[level]) && structuredHintLevels[level].length);
+    if (hasStructuredHintLevels) {
+      lines.push('### Hints');
+      lines.push('');
+      REPORT_HINT_LEVEL_ORDER.forEach((level) => {
+        const values = Array.isArray(structuredHintLevels[level])
+          ? structuredHintLevels[level].map(formatGuideHintLine).filter(Boolean)
+          : [];
+        if (!values.length) return;
+        const firstValue = values[0];
+        lines.push('<details>');
+        lines.push(`<summary>Hint ${reportHintLevelTitle(level)}: ${firstValue}</summary>`);
+        lines.push('');
+        if (values.length === 1) {
+          lines.push(firstValue);
+        } else {
+          values.forEach((value) => lines.push(`- ${value}`));
+        }
+        lines.push('');
+        lines.push('</details>');
+        lines.push('');
+      });
     }
 
     const stepVulnReadmes = vulnReadmesByStep.get(step) || [];

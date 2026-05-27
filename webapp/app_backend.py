@@ -16261,7 +16261,7 @@ def _flow_render_hint_template(
         except Exception:
             next_ip_val = ''
             this_ip_val = ''
-        if not next_id_val:
+        if (not next_id_val) and ('{{NEXT_NODE_' in raw_tpl):
             return "You've completed this sequence of challenges!"
         if not next_name_val:
             next_name_val = next_id_val
@@ -16331,6 +16331,89 @@ def _flow_hint_templates_from_generator(gen: dict[str, Any]) -> list[str]:
     if not out:
         out = ['Next: {{NEXT_NODE_NAME}}']
     return out
+
+
+_FLOW_HINT_LEVELS = ('low', 'medium', 'high')
+
+
+def _flow_norm_string_list(value: Any) -> list[str]:
+    out: list[str] = []
+    try:
+        values = value
+        if isinstance(value, str):
+            values = value.splitlines()
+        if isinstance(values, (list, tuple, set)):
+            for item in values:
+                text = str(item or '').strip()
+                if text:
+                    stripped = _flow_strip_ids_from_hint(text)
+                    if stripped:
+                        out.append(stripped)
+        else:
+            text = str(value or '').strip()
+            if text:
+                stripped = _flow_strip_ids_from_hint(text)
+                if stripped:
+                    out.append(stripped)
+    except Exception:
+        return []
+    return out
+
+
+def _flow_normalize_hint_levels(value: Any) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {level: [] for level in _FLOW_HINT_LEVELS}
+    if not isinstance(value, dict):
+        return out
+    for level in _FLOW_HINT_LEVELS:
+        out[level] = _flow_norm_string_list(value.get(level))
+    return out
+
+
+def _flow_hint_level_templates_from_generator(gen: dict[str, Any]) -> dict[str, list[str]]:
+    raw_levels: Any = None
+    try:
+        raw_levels = gen.get('hint_levels')
+        if not isinstance(raw_levels, dict):
+            raw_levels = gen.get('hint_level_templates')
+    except Exception:
+        raw_levels = None
+
+    levels = _flow_normalize_hint_levels(raw_levels)
+    if any(levels.get(level) for level in _FLOW_HINT_LEVELS):
+        return levels
+
+    return {
+        'low': _flow_hint_templates_from_generator(gen),
+        'medium': [],
+        'high': [],
+    }
+
+
+def _flow_render_hint_level_templates(
+    hint_levels: Any,
+    *,
+    scenario_label: str,
+    id_to_name: dict[str, str],
+    id_to_ip: dict[str, str] | None = None,
+    this_id: str,
+    next_id: str,
+) -> dict[str, list[str]]:
+    levels = _flow_normalize_hint_levels(hint_levels)
+    rendered: dict[str, list[str]] = {level: [] for level in _FLOW_HINT_LEVELS}
+    for level in _FLOW_HINT_LEVELS:
+        for template in levels.get(level) or []:
+            text = _flow_render_hint_template(
+                template,
+                scenario_label=scenario_label,
+                id_to_name=id_to_name,
+                id_to_ip=id_to_ip,
+                this_id=this_id,
+                next_id=next_id,
+            )
+            text = str(text or '').strip()
+            if text:
+                rendered[level].append(text)
+    return rendered
 
 
 def _flow_preset_steps(preset: str) -> list[dict[str, str]]:
@@ -18407,6 +18490,20 @@ def _flow_input_supply_when_first(input_item: dict[str, Any]) -> bool:
     )
 
 
+def _flow_credential_like_input_name(name: str) -> bool:
+    lowered = str(name or '').lower().strip()
+    compact = re.sub(r'[^a-z0-9]+', '', lowered)
+    if not compact:
+        return False
+    if lowered.startswith('credential(') or compact in {'credential', 'credentials', 'creds'}:
+        return True
+    if 'credential' in compact or 'creds' in compact:
+        return True
+    user_like = compact in {'user', 'username', 'login', 'loginuser', 'sshuser', 'sshusername'} or compact.endswith('username')
+    pass_like = compact in {'password', 'pass', 'passwd', 'passphrase', 'sshpassword'} or compact.endswith('password') or compact.endswith('passphrase')
+    return bool(user_like or pass_like)
+
+
 def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any] | None) -> list[str]:
     """Return inputs explicitly marked for first-step Flow supply."""
     if not isinstance(gen_or_assignment, dict):
@@ -18424,6 +18521,7 @@ def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any
             if not name or not _flow_input_supply_when_first(item):
                 continue
             names_from_defs.append(name)
+    names_explicit_from_defs = bool(names_from_defs)
 
     if not names_from_defs:
         existing = gen_or_assignment.get('chain_supplied_inputs')
@@ -18431,22 +18529,56 @@ def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any
             names_from_defs = [
                 str(x or '').strip()
                 for x in existing
-                if str(x or '').strip()
+                if str(x or '').strip() and _flow_credential_like_input_name(str(x or '').strip())
             ]
 
     if not names_from_defs:
         return []
 
-    names: list[str] = []
+    try:
+        synthesized = set(_flow_synthesized_inputs())
+    except Exception:
+        synthesized = set()
+
+    if names_explicit_from_defs:
+        names: list[str] = []
+        for name in names_from_defs:
+            if name and name not in synthesized and name not in names:
+                names.append(name)
+        return names
+
+    def _norm(value: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
+
+    direct: list[str] = []
+    user_like: list[str] = []
+    pass_like: list[str] = []
     for name in names_from_defs:
-        if not name:
+        if not name or name in synthesized:
             continue
+        lowered = name.lower().strip()
+        compact = _norm(name)
+        if lowered.startswith('credential(') or compact in {'credential', 'credentials', 'creds'} or 'credential' in compact or 'creds' in compact:
+            direct.append(name)
+            continue
+        if compact in {'user', 'username', 'login', 'loginuser', 'sshuser', 'sshusername'} or compact.endswith('username'):
+            user_like.append(name)
+            continue
+        if compact in {'password', 'pass', 'passwd', 'passphrase', 'sshpassword'} or compact.endswith('password') or compact.endswith('passphrase'):
+            pass_like.append(name)
+
+    names: list[str] = []
+    for name in direct:
         if name not in names:
             names.append(name)
+    if pass_like and user_like:
+        for name in user_like + pass_like:
+            if name not in names:
+                names.append(name)
     return names
 
 
-def _flow_chain_supplied_user_password_pair(*, scenario_label: str, node_id: str, gen_id: str) -> tuple[str, str]:
+def _flow_chain_supplied_credential_pair(*, scenario_label: str, node_id: str, gen_id: str) -> tuple[str, str]:
     seed_text = f"{scenario_label}|{node_id}|{gen_id}|first-step-credential"
     digest = hashlib.sha256(seed_text.encode('utf-8', errors='ignore')).hexdigest()
     return f"user_{digest[:6]}", f"pass_{digest[6:18]}"
@@ -18615,7 +18747,7 @@ def _flow_apply_first_step_chain_supplied_inputs(
 
     node_id = str(assignment.get('node_id') or '').strip()
     gen_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
-    username, password = _flow_chain_supplied_user_password_pair(
+    username, password = _flow_chain_supplied_credential_pair(
         scenario_label=str(scenario_label or ''),
         node_id=node_id,
         gen_id=gen_id,
@@ -18833,6 +18965,39 @@ def _flow_strip_runtime_sensitive_fields(flag_assignments: list[dict[str, Any]])
         # Effective generator config may include secrets and should not be persisted.
         a2.pop('config', None)
         out.append(a2)
+    return out
+
+
+def _flow_first_hints_from_assignments(flag_assignments: list[dict[str, Any]] | Any) -> list[str]:
+    """Return participant-facing hints for the first Flow assignment."""
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return []
+    first = flag_assignments[0]
+    if not isinstance(first, dict):
+        return []
+
+    out: list[str] = []
+
+    def _add_many(values: Any) -> None:
+        if isinstance(values, str):
+            candidates = [values]
+        elif isinstance(values, (list, tuple, set)):
+            candidates = list(values)
+        else:
+            candidates = []
+        for item in candidates:
+            text = str(item or '').strip()
+            if text and text not in out:
+                out.append(text)
+
+    levels = first.get('hint_levels') if isinstance(first.get('hint_levels'), dict) else {}
+    if isinstance(levels, dict):
+        _add_many(levels.get('low'))
+    _add_many(first.get('chain_supplied_input_hints'))
+    if not out:
+        _add_many(first.get('hints'))
+    if not out:
+        _add_many(first.get('hint'))
     return out
 
 

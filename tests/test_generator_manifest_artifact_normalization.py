@@ -64,3 +64,47 @@ injects: [Credential(user, password)]
     fragmented = {"Credential(user", "password)", "PortForward(host", "port)", "Directory(host", "path)"}
     assert not (fragmented & input_names)
     assert not (fragmented & output_names)
+
+
+def test_manifest_loader_preserves_structured_hint_levels_and_readme(tmp_path: Path):
+    manifest_dir = tmp_path / "flag_generators" / "web" / "basic_auth"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "README.md").write_text("# Basic Auth\n", encoding="utf-8")
+    (manifest_dir / "manifest.yaml").write_text(
+        """
+manifest_version: 1
+id: web_basic_auth
+kind: flag-generator
+name: Web Basic Auth
+runtime: {type: docker-compose, compose_file: docker-compose.yml, service: generator}
+artifacts:
+  requires: [Knowledge(ip)]
+  produces: [Flag(flag_id), PortForward(host, port)]
+hint_templates:
+  - "Next: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}"
+hint_levels:
+  low:
+    - "Target: {{NEXT_NODE_IP}}"
+  medium:
+    - "Port: {{OUTPUT.PortForward(host,port)}}"
+  high:
+    - "README: README.md"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    generators, _plugins_by_id, errors = discover_generator_manifests(
+        repo_root=tmp_path,
+        kind="flag-generator",
+    )
+
+    assert errors == []
+    assert len(generators) == 1
+    generator = generators[0]
+    assert generator.get("hint_levels") == {
+        "low": ["Target: {{NEXT_NODE_IP}}"],
+        "medium": ["Port: {{OUTPUT.PortForward(host,port)}}"],
+        "high": ["README: README.md"],
+    }
+    assert generator.get("readme_path", "").endswith("README.md")
+    assert generator.get("readme_rel_path") == "flag_generators/web/basic_auth/README.md"
