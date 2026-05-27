@@ -70,6 +70,18 @@ def test_execute_preflights_flow_artifacts_and_regenerates_when_safe() -> None:
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing execute Flow artifact preflight wiring: " + "; ".join(missing)
 
+    has_unsaved_block = text.split("function hasUnsavedChanges()", 1)[1].split("function showUnsavedChangesModal", 1)[0]
+    assert "await window.alertWithModal" not in has_unsaved_block
+    assert "Flow preflight exception" not in has_unsaved_block
+
+    preferred_scenario_block = text.split("const resolvePreferredScenarioNameOnLoad = () =>", 1)[1].split("const preferredScenarioName", 1)[0]
+    assert "await window.alertWithModal" not in preferred_scenario_block
+    assert "Flow preflight exception" not in preferred_scenario_block
+
+    execute_preflight_block = text.split("const flowReady = await ensureExecuteFlowArtifactsReady({", 1)[1].split("appendExecuteDialogLog('Requesting remote CLI run…');", 1)[0]
+    assert "Flow preflight exception" in execute_preflight_block
+    assert "await window.alertWithModal('Flow Preflight Failed', detail, 'OK', 'danger');" in execute_preflight_block
+
 
 def test_execute_summary_uses_validation_unavailable_details() -> None:
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
