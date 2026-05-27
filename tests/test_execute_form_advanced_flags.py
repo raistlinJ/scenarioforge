@@ -83,6 +83,28 @@ def test_execute_preflights_flow_artifacts_and_regenerates_when_safe() -> None:
     assert "await window.alertWithModal('Flow Preflight Failed', detail, 'OK', 'danger');" in execute_preflight_block
 
 
+def test_execute_preflights_custom_services_and_prompts_before_run_request() -> None:
+    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "async function ensureExecuteCustomServicesReady",
+        "'/core/custom_services/check'",
+        "Install Custom Services?",
+        "Install & Continue",
+        "on_core_machine/custom_services",
+        "const servicesReady = await ensureExecuteCustomServicesReady({",
+        "if (!servicesReady) {",
+        "return false;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing execute custom services preflight wiring: " + "; ".join(missing)
+
+    services_preflight_idx = text.index("const servicesReady = await ensureExecuteCustomServicesReady({")
+    run_request_idx = text.index("appendExecuteDialogLog('Requesting remote CLI run…');")
+    assert services_preflight_idx < run_request_idx
+
+
 def test_execute_summary_uses_validation_unavailable_details() -> None:
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

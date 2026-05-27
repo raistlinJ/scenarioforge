@@ -91,6 +91,51 @@ def register(app, *, backend_module: Any) -> None:
             'unsafe_regeneration_assignments': unsafe,
         }
 
+    def _flow_has_resolved_outputs(assignments: Any) -> bool:
+        try:
+            array = assignments if isinstance(assignments, list) else []
+            for entry in array:
+                if not isinstance(entry, dict):
+                    continue
+                resolved_outputs = entry.get('resolved_outputs')
+                if isinstance(resolved_outputs, dict) and resolved_outputs:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _flow_assignments_from_state(flow_state: Any) -> list[dict[str, Any]]:
+        try:
+            if isinstance(flow_state, dict) and isinstance(flow_state.get('flag_assignments'), list):
+                return [item for item in flow_state.get('flag_assignments') if isinstance(item, dict)]
+        except Exception:
+            pass
+        return []
+
+    def _flow_assignments_from_payload(payload: Any) -> list[dict[str, Any]]:
+        try:
+            raw_req_assigns = payload.get('flag_assignments') if isinstance(payload, dict) else None
+            if isinstance(raw_req_assigns, list):
+                return [item for item in raw_req_assigns if isinstance(item, dict)]
+        except Exception:
+            pass
+        return []
+
+    def _flow_select_assignments(flow_state: Any, payload: Any, *, validation: bool) -> tuple[list[dict[str, Any]], str]:
+        xml_assigns = _flow_assignments_from_state(flow_state)
+        request_assigns = _flow_assignments_from_payload(payload)
+        if _flow_has_resolved_outputs(xml_assigns):
+            return xml_assigns, 'xml'
+        if _flow_has_resolved_outputs(request_assigns):
+            return request_assigns, 'request'
+        if validation:
+            return [], 'unresolved'
+        if xml_assigns:
+            return xml_assigns, 'xml'
+        if request_assigns:
+            return request_assigns, 'request'
+        return [], 'none'
+
     def _load_flow_artifact_context(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         scenario_label = str(payload.get('scenario') or '').strip()
         scenario_norm = backend._normalize_scenario_label(scenario_label)
@@ -110,12 +155,7 @@ def register(app, *, backend_module: Any) -> None:
             return {'ok': False, 'error': 'No XML found for this scenario.'}, 404
 
         flow_state = backend._flow_state_from_xml_path(xml_path, scenario_norm)
-        assigns = []
-        try:
-            if isinstance(flow_state, dict) and isinstance(flow_state.get('flag_assignments'), list):
-                assigns = [item for item in flow_state.get('flag_assignments') if isinstance(item, dict)]
-        except Exception:
-            assigns = []
+        assigns, assigns_source = _flow_select_assignments(flow_state, payload, validation=False)
         if not assigns:
             return {'ok': False, 'error': 'No FlowState artifacts to validate. Run Generate and Save XML first.'}, 400
 
@@ -135,6 +175,7 @@ def register(app, *, backend_module: Any) -> None:
             'xml_path': xml_path,
             'flow_state': flow_state,
             'assignments': assigns,
+            'assignments_source': assigns_source,
             'flow_core_cfg': flow_core_cfg,
         }, 200
 
@@ -303,41 +344,10 @@ def register(app, *, backend_module: Any) -> None:
 
         flow_state = backend._flow_state_from_xml_path(xml_path, scenario_norm)
 
-        def _has_resolved_outputs(assignments: Any) -> bool:
-            try:
-                array = assignments if isinstance(assignments, list) else []
-                for entry in array:
-                    if not isinstance(entry, dict):
-                        continue
-                    resolved_outputs = entry.get('resolved_outputs')
-                    if isinstance(resolved_outputs, dict) and resolved_outputs:
-                        return True
-                return False
-            except Exception:
-                return False
-
-        xml_assigns: list[dict[str, Any]] = []
-        try:
-            if isinstance(flow_state, dict) and isinstance(flow_state.get('flag_assignments'), list):
-                xml_assigns = [item for item in flow_state.get('flag_assignments') if isinstance(item, dict)]
-        except Exception:
-            xml_assigns = []
-
-        request_assigns: list[dict[str, Any]] = []
-        try:
-            raw_req_assigns = payload.get('flag_assignments')
-            if isinstance(raw_req_assigns, list):
-                request_assigns = [item for item in raw_req_assigns if isinstance(item, dict)]
-        except Exception:
-            request_assigns = []
-
-        if _has_resolved_outputs(xml_assigns):
-            assigns = xml_assigns
-        elif _has_resolved_outputs(request_assigns):
-            assigns = request_assigns
-        elif isinstance(flow_state, dict):
+        assigns, assigns_source = _flow_select_assignments(flow_state, payload, validation=True)
+        if assigns_source == 'unresolved' and isinstance(flow_state, dict):
             return jsonify({'ok': False, 'error': 'No resolved outputs saved in XML. Run Generate and Save XML first.'}), 400
-        else:
+        if assigns_source == 'none':
             return jsonify({'ok': False, 'error': 'No FlowState found in XML. Generate (or Save XML) first.'}), 400
 
         if not assigns:
@@ -447,6 +457,7 @@ def register(app, *, backend_module: Any) -> None:
                 'container_present': sorted(set(container_present)),
                 'container_missing': sorted(set(container_missing)),
                 'resolved_paths': path_map,
+                'assignments_source': assigns_source,
                 **replay_info,
             }
         )
@@ -479,6 +490,8 @@ def register(app, *, backend_module: Any) -> None:
                 remote_repo=remote_repo,
                 core_cfg=ctx.get('flow_core_cfg'),
                 log_handle=log_handle,
+                assignments_override=assigns,
+                verify_after=False,
             )
         except Exception as exc:
             return jsonify({'ok': False, 'error': str(exc), 'log': log_handle.getvalue()[-4000:]}), 500

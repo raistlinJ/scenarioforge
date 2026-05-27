@@ -23121,6 +23121,81 @@
         return true;
     }
 
+    function executeMissingServicesList(data) {
+        const missing = data && Array.isArray(data.missing_services) ? data.missing_services : [];
+        return missing.map((item) => String(item || '').trim()).filter(Boolean);
+    }
+
+    async function ensureExecuteCustomServicesReady({ scenarioName, coreConfig, appendLog, updateStatus, abortRun } = {}) {
+        const core = (coreConfig && typeof coreConfig === 'object') ? coreConfig : null;
+        if (!core) {
+            return true;
+        }
+        const log = typeof appendLog === 'function' ? appendLog : () => { };
+        const setStatus = typeof updateStatus === 'function' ? updateStatus : () => { };
+        const abort = typeof abortRun === 'function' ? abortRun : () => { };
+        const payload = {
+            core,
+            scenario_name: String(scenarioName || '').trim(),
+        };
+
+        log('Checking custom CORE services on CORE VM…');
+        setStatus('Checking custom CORE services…', 'Verifying ScenarioForge service modules are installed.');
+        const check = await postExecuteFlowJson('/core/custom_services/check', payload, 90000);
+        if (!check || check.ok !== true) {
+            const msg = String((check && (check.error || check.message)) || 'Custom CORE service check failed.');
+            log(`Custom CORE service check failed: ${msg}`);
+            abort('Custom service check failed', msg);
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Custom Services Check Failed', msg, 'OK', 'danger');
+            }
+            return false;
+        }
+
+        const missing = executeMissingServicesList(check);
+        if (!missing.length) {
+            log('Custom CORE services are installed on CORE VM.');
+            return true;
+        }
+
+        const required = Array.isArray(check.required_services) ? check.required_services.map(v => String(v || '').trim()).filter(Boolean) : [];
+        log(`Custom CORE services missing on CORE VM: ${missing.join(', ')}`);
+        const requiredText = required.length ? `\n\nRequired services: ${required.join(', ')}` : '';
+        const confirmMsg = `ScenarioForge custom CORE services are missing on the CORE VM:\n\n${missing.join(', ')}${requiredText}\n\nCopy/setup these services from on_core_machine/custom_services now and continue Execute?`;
+        let shouldInstall = true;
+        if (typeof window.confirmWithModal === 'function') {
+            shouldInstall = await window.confirmWithModal('Install Custom Services?', confirmMsg, 'Install & Continue', 'primary');
+        } else {
+            shouldInstall = window.confirm(confirmMsg);
+        }
+        if (!shouldInstall) {
+            log('Execute cancelled: custom CORE services were not installed.');
+            abort('Execute cancelled', 'Custom CORE services were not installed.');
+            return false;
+        }
+
+        log('Installing custom CORE services on CORE VM…');
+        setStatus('Installing custom CORE services…', 'Copying service modules and restarting core-daemon.');
+        const install = await postExecuteFlowJson('/core/custom_services/check', { ...payload, install: true }, 180000);
+        if (!install || install.ok !== true || executeMissingServicesList(install).length) {
+            const stillMissing = executeMissingServicesList(install);
+            const msg = stillMissing.length
+                ? `Custom CORE services are still missing after install: ${stillMissing.join(', ')}`
+                : String((install && (install.error || install.message)) || 'Custom CORE service install failed.');
+            log(`Custom CORE service install failed: ${msg}`);
+            abort('Custom service install failed', msg);
+            if (typeof window.alertWithModal === 'function') {
+                await window.alertWithModal('Custom Services Install Failed', msg, 'OK', 'danger');
+            }
+            return false;
+        }
+
+        const meta = (install.install_custom_services && typeof install.install_custom_services === 'object') ? install.install_custom_services : null;
+        const modules = meta && Array.isArray(meta.modules) ? meta.modules.map(v => String(v || '').trim()).filter(Boolean) : [];
+        log(`Custom CORE services installed${modules.length ? `: ${modules.join(', ')}` : '.'}`);
+        return true;
+    }
+
     async function parseResponseJson(response) {
         if (!response || typeof response.clone !== 'function') {
             return null;
@@ -25315,6 +25390,22 @@
                     }
                     markRunProgressComplete();
                 }
+                return false;
+            }
+        }
+        {
+            const activeScenario = getScenarioByIndex(scenarioIndexForRun);
+            const scenarioName = (activeScenario && typeof activeScenario.name === 'string')
+                ? activeScenario.name
+                : activeScenarioCtx.name;
+            const servicesReady = await ensureExecuteCustomServicesReady({
+                scenarioName,
+                coreConfig: getRunCoreConfig(true, scenarioIndexForRun),
+                appendLog: appendExecuteDialogLog,
+                updateStatus: updateRunStatus,
+                abortRun: abortBeforeRunRequest,
+            });
+            if (!servicesReady) {
                 return false;
             }
         }
