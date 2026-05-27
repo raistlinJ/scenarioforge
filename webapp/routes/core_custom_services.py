@@ -58,7 +58,10 @@ def register(
         install_meta = None
         try:
             client = open_ssh_client(core_cfg or {})
-            discovered = sorted(remote_core_service_names(client, core_cfg=core_cfg), key=str.lower)
+            discovered = sorted(
+                remote_core_service_names(client, core_cfg=core_cfg, require_custom_services_dir=True),
+                key=str.lower,
+            )
             missing = sorted([name for name in required if name not in set(discovered)], key=str.lower)
             if install_requested and missing:
                 install_meta = install_custom_services_to_core_vm(
@@ -67,7 +70,10 @@ def register(
                     logger=app.logger,
                     core_cfg=core_cfg,
                 )
-                discovered = sorted(remote_core_service_names(client, core_cfg=core_cfg), key=str.lower)
+                discovered = sorted(
+                    remote_core_service_names(client, core_cfg=core_cfg, require_custom_services_dir=True),
+                    key=str.lower,
+                )
                 missing = sorted([name for name in required if name not in set(discovered)], key=str.lower)
             if install_requested and missing:
                 return jsonify(

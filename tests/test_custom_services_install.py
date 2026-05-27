@@ -55,6 +55,7 @@ class _FakeSSHClient:
         core_conf_custom_dir: str | None = None,
         core_conf_custom_lines: list[str] | None = None,
         core_conf_path: str = "/opt/core/etc/core.conf",
+        core_conf_exists_without_custom: bool = False,
     ):
         self.commands = []
         self.sftp = _FakeSFTP()
@@ -62,6 +63,7 @@ class _FakeSSHClient:
         self.core_conf_custom_dir = core_conf_custom_dir
         self.core_conf_custom_lines = list(core_conf_custom_lines or [])
         self.core_conf_path = core_conf_path
+        self.core_conf_exists_without_custom = core_conf_exists_without_custom
 
     def open_sftp(self):
         return self.sftp
@@ -84,6 +86,9 @@ class _FakeSSHClient:
                 "__CORECONF_READABLE__=1",
                 f"custom_services_dir = {self.core_conf_custom_dir}",
             ]
+            stdout_data = ("\n".join(lines) + "\n").encode("utf-8")
+        elif "core.conf" in cmd and "custom_services" in cmd and self.core_conf_exists_without_custom:
+            lines = [f"__CORECONF_PATH__={self.core_conf_path}", "__CORECONF_READABLE__=1"]
             stdout_data = ("\n".join(lines) + "\n").encode("utf-8")
         elif "::SERVICESCHECK::" in cmd or "SERVICESCHECK" in cmd or "coretg-services-verify" in cmd:
             # Simulate successful discovery/scan on the remote VM.
@@ -152,6 +157,31 @@ def test_local_custom_service_names_reads_declared_service_names(tmp_path, monke
     monkeypatch.setattr(backend, "_local_custom_service_files", lambda: [str(service_file), str(fallback_file)])
 
     assert backend._local_custom_service_names() == ["CustomDeclaredName", "FallbackModule"]
+
+
+def test_candidate_remote_python_interpreters_include_nested_core_venv():
+    candidates = backend._candidate_remote_python_interpreters({})
+
+    assert "/opt/core/venv/python3.11/bin/python3" in candidates
+
+
+def test_install_custom_services_configures_core_conf_when_missing_custom_dir(tmp_path, monkeypatch):
+    p = tmp_path / "DockerDefaultRoute.py"
+    p.write_text("# test\n", encoding="utf-8")
+    monkeypatch.setattr(backend, "_local_custom_service_files", lambda: [str(p)])
+
+    client = _FakeSSHClient(core_conf_exists_without_custom=True)
+    meta = backend._install_custom_services_to_core_vm(
+        client,
+        sudo_password="pw",
+        logger=types.SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
+    )
+
+    assert meta.get("core_conf_custom_services_configured") is True
+    assert "/opt/core/custom_services" in (meta.get("core_conf_custom_services_dirs") or [])
+    assert "/opt/core/custom_services" in (meta.get("services_dirs") or [])
+    assert any("custom_services_dir = /opt/core/custom_services" in cmd for cmd in client.commands)
+    assert any(("install -m 0644" in cmd and "/opt/core/custom_services" in cmd) for cmd in client.commands)
 
 
 def test_install_custom_services_requires_sudo_password(tmp_path, monkeypatch):

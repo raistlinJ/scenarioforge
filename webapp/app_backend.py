@@ -5792,7 +5792,11 @@ def _candidate_remote_python_interpreters(core_cfg: Dict[str, Any]) -> List[str]
                 # venv_bin is expected to be a bin directory.
                 for exe_name in ('python3', 'python', 'core-python'):
                     candidates.append(posixpath.join(sanitized, exe_name))
-    candidates.extend(['core-python', 'python3', 'python'])
+    for version in ('3.13', '3.12', '3.11', '3.10', '3.9', '3.8'):
+        nested_bin = f'/opt/core/venv/python{version}/bin'
+        candidates.append(f'{nested_bin}/python3')
+        candidates.append(f'{nested_bin}/python')
+    candidates.extend(['/opt/core/venv/bin/python3', '/opt/core/venv/bin/python', 'core-python', 'python3', 'python'])
     ordered: List[str] = []
     seen: set[str] = set()
     for entry in candidates:
@@ -7694,6 +7698,8 @@ def _install_custom_services_to_core_vm(
     services_dirs: list[str] = []
     core_conf_custom_services_dirs: list[str] = []
     core_conf_custom_services_lines: list[str] = []
+    core_conf_custom_services_configured = False
+    managed_custom_services_dir = '/opt/core/custom_services'
     core_conf_readable: Optional[bool] = None
     core_conf_path: Optional[str] = None
 
@@ -7799,6 +7805,25 @@ def _install_custom_services_to_core_vm(
             logger.debug('[core] core.conf custom_services probe non-fatal: %s', (conf_err or conf_out).strip())
     except Exception:
         pass
+
+    if core_conf_path and not core_conf_custom_services_dirs:
+        try:
+            line = f'custom_services_dir = {managed_custom_services_dir}'
+            configure_cmd = (
+                f"mkdir -p {shlex.quote(managed_custom_services_dir)} && "
+                f"printf '\n{line}\n' >> {shlex.quote(core_conf_path)}"
+            )
+            code, out, err = _sudo(configure_cmd, timeout=30.0)
+            if code != 0:
+                raise RuntimeError((err or out or '').strip() or f'exit={code}')
+            core_conf_custom_services_configured = True
+            core_conf_custom_services_dirs.append(managed_custom_services_dir)
+            core_conf_custom_services_lines.append(line)
+            if managed_custom_services_dir not in services_dirs:
+                services_dirs.append(managed_custom_services_dir)
+            logger.info('[core] Added core.conf custom_services_dir: %s', managed_custom_services_dir)
+        except Exception as exc:
+            logger.warning('[core] Failed configuring core.conf custom_services_dir: %s', exc)
 
     # Also include the active core-daemon runtime services path when available.
     try:
@@ -7995,6 +8020,7 @@ def _install_custom_services_to_core_vm(
         'services_dirs': services_dirs,
         'core_conf_path': core_conf_path,
         'core_conf_readable': core_conf_readable,
+        'core_conf_custom_services_configured': core_conf_custom_services_configured,
         'core_conf_custom_services_dirs': core_conf_custom_services_dirs,
         'core_conf_custom_services_lines': core_conf_custom_services_lines,
         'modules': module_names,
@@ -8008,28 +8034,31 @@ def _remote_core_service_names(
     *,
     timeout: float = 25.0,
     core_cfg: Optional[Dict[str, Any]] = None,
+    require_custom_services_dir: bool = False,
 ) -> set[str]:
     """Best-effort discovery of CORE service names available on a remote host."""
+    require_custom_literal = 'True' if require_custom_services_dir else 'False'
     script = textwrap.dedent(
-        """
+        r"""
         import importlib
+        import importlib.util
         import inspect
         import json
+        import os
         import pkgutil
-        import core.services
+        import re
+
+        require_custom_services_dir = __REQUIRE_CUSTOM_SERVICES_DIR__
+
         try:
+            import core.services
             from core.services.base import CoreService  # type: ignore
         except Exception:
+            import core.services
             from core.services.coreservices import CoreService  # type: ignore
-        names = set()
-        for m in pkgutil.iter_modules(core.services.__path__):
-            n = getattr(m, 'name', None)
-            if not n:
-                continue
-            try:
-                mod = importlib.import_module(f"core.services.{n}")
-            except Exception:
-                continue
+
+        def service_names_from_module(mod):
+            found = set()
             for _name, obj in inspect.getmembers(mod, inspect.isclass):
                 try:
                     ok = issubclass(obj, CoreService) and obj is not CoreService
@@ -8039,10 +8068,87 @@ def _remote_core_service_names(
                     continue
                 svc = getattr(obj, 'name', None)
                 if isinstance(svc, str) and svc.strip():
-                    names.add(svc.strip())
-        print('::SERVICENAMES::' + json.dumps(sorted(names)))
+                    found.add(svc.strip())
+            return found
+
+        def parse_custom_dirs(raw_text):
+            dirs = []
+            for line in str(raw_text or '').splitlines():
+                text = line.strip()
+                if not text or text.startswith('#'):
+                    continue
+                if not re.match(r'^(custom_services|custom_services_dir|custom_service_dir|custom_services_dirs)\s*=', text, re.I):
+                    continue
+                rhs = text.split('=', 1)[1].strip().strip('"').strip("'")
+                if rhs.startswith('[') and rhs.endswith(']'):
+                    rhs = rhs[1:-1].strip()
+                for part in re.split(r'[,;:]', rhs):
+                    value = part.strip().strip('"').strip("'")
+                    if value and value not in dirs:
+                        dirs.append(value)
+            return dirs
+
+        package_names = set()
+        for m in pkgutil.iter_modules(core.services.__path__):
+            n = getattr(m, 'name', None)
+            if not n:
+                continue
+            try:
+                mod = importlib.import_module(f"core.services.{{n}}")
+            except Exception:
+                continue
+            package_names.update(service_names_from_module(mod))
+
+        conf_path = None
+        custom_dirs = []
+        for candidate in ('/opt/core/etc/core.conf', '/etc/core/core.conf'):
+            try:
+                if os.path.isfile(candidate):
+                    conf_path = candidate
+                    with open(candidate, 'r', encoding='utf-8', errors='ignore') as handle:
+                        custom_dirs = parse_custom_dirs(handle.read())
+                    break
+            except Exception:
+                continue
+
+        custom_dir_names = set()
+        custom_dir_errors = []
+        for raw_dir in custom_dirs:
+            directory = os.path.expandvars(os.path.expanduser(str(raw_dir or '').strip()))
+            if not directory or not os.path.isdir(directory):
+                custom_dir_errors.append({'dir': raw_dir, 'error': 'not found'})
+                continue
+            try:
+                filenames = sorted([name for name in os.listdir(directory) if name.endswith('.py') and not name.startswith('.')])
+            except Exception as exc:
+                custom_dir_errors.append({'dir': raw_dir, 'error': repr(exc)})
+                continue
+            for index, filename in enumerate(filenames):
+                path = os.path.join(directory, filename)
+                module_name = '_coretg_custom_service_%s_%s' % (index, re.sub(r'\W+', '_', filename))
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, path)
+                    if spec is None or spec.loader is None:
+                        raise RuntimeError('spec unavailable')
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    custom_dir_names.update(service_names_from_module(mod))
+                except Exception as exc:
+                    custom_dir_errors.append({'file': path, 'error': repr(exc)})
+
+        names = custom_dir_names if require_custom_services_dir else (package_names | custom_dir_names)
+        payload = {
+            'names': sorted(names),
+            'package_service_names': sorted(package_names),
+            'custom_service_names': sorted(custom_dir_names),
+            'custom_services_dir_required': require_custom_services_dir,
+            'core_conf_path': conf_path,
+            'core_conf_custom_services_dirs': custom_dirs,
+            'custom_dir_errors': custom_dir_errors,
+        }
+        print('::SERVICENAMES::' + json.dumps(payload, sort_keys=True))
         """
-    ).strip()
+    ).strip().replace('__REQUIRE_CUSTOM_SERVICES_DIR__', require_custom_literal)
     script_b64 = base64.b64encode(script.encode('utf-8')).decode('ascii')
     exec_b64 = (
         "import base64; "
@@ -8083,9 +8189,13 @@ def _remote_core_service_names(
     if not payload:
         return set()
     try:
-        arr = json.loads(payload)
+        decoded = json.loads(payload)
     except Exception:
         return set()
+    if isinstance(decoded, dict):
+        arr = decoded.get('names') or []
+    else:
+        arr = decoded
     return {str(x).strip() for x in (arr or []) if str(x).strip()}
 
 
@@ -35810,7 +35920,7 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
     try:
         required_custom_services = set(_local_custom_service_names() or ["DockerDefaultRoute", "CoreTGPrereqs"])
         install_custom_services_on_execute = bool(core_cfg.get('install_custom_services', False))
-        discovered = _remote_core_service_names(remote_client, core_cfg=core_cfg)
+        discovered = _remote_core_service_names(remote_client, core_cfg=core_cfg, require_custom_services_dir=True)
         missing = sorted([name for name in required_custom_services if name not in discovered])
         if install_custom_services_on_execute:
             try:
@@ -35854,7 +35964,7 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
                     log_f.write(f"{log_prefix}core.conf matching entries: none found\n")
             except Exception:
                 pass
-            discovered = _remote_core_service_names(remote_client, core_cfg=core_cfg)
+            discovered = _remote_core_service_names(remote_client, core_cfg=core_cfg, require_custom_services_dir=True)
             missing = sorted([name for name in required_custom_services if name not in discovered])
         if missing:
             _fail_run(
