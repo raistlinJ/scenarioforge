@@ -69,23 +69,32 @@
             </thead>
             <tbody>
               {% for r in history %}
+              {% set session_path = r.session_xml_path or r.post_xml_path %}
+              {% set row_scenario = (r.scenario_names[0] if r.scenario_names else '') %}
+              {% set flow_export_enabled = r.preview_plan_path or r.scenario_xml_path %}
+              {% set downloads_enabled = r.report_path or r.full_scenario_path or flow_export_enabled %}
               <tr data-scenarios="{{ (r.scenario_names or [])|join('||') }}">
                 <td style="text-align:center;"><input type="checkbox" class="row-select" data-run-id="{{ r.run_id or '' }}"></td>
                 <td>{{ r.timestamp }}</td>
                 <td class="small">{{ (r.scenario_names or [])|join(', ') }}</td>
                 <td>{% if r.scenario_xml_path %}<a href="{{ url_for('download_report', path=r.scenario_xml_path) }}">scenario</a>{% else %}<span class="text-muted">n/a</span>{% endif %}</td>
                 <td>
-                  {% if r.report_path %}
-                  {% set row_scenario = (r.scenario_names[0] if r.scenario_names else '') %}
-                  {% set flow_export_enabled = r.preview_plan_path or r.scenario_xml_path %}
+                  {% if downloads_enabled %}
                   <div class="dropdown">
                     <button class="btn btn-sm btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" aria-expanded="false">
                       Download
                     </button>
                     <ul class="dropdown-menu">
+                      {% if r.report_path %}
                       <li><a class="dropdown-item" href="{{ url_for('download_report', path=r.report_path) }}">Summary Report</a></li>
+                      {% endif %}
+                      {% if r.full_scenario_path %}
+                      <li><a class="dropdown-item" href="{{ url_for('download_report', path=r.full_scenario_path) }}">Full Scenario Bundle</a></li>
+                      {% endif %}
                       {% if flow_export_enabled %}
+                      {% if r.report_path or r.full_scenario_path %}
                       <li><hr class="dropdown-divider"></li>
+                      {% endif %}
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="preview-plan-html" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Flow/Preview Plan (html)</a></li>
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="afb" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Flow (afb)</a></li>
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-dot" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Graph (dot)</a></li>
@@ -100,8 +109,7 @@
                   <span class="text-muted">n/a</span>
                   {% endif %}
                 </td>
-                <td>{% if r.summary_path %}<a href="{{ url_for('download_report', path=r.summary_path) }}">summary</a>{% elif r.report_path or session_path %}<span class="text-muted d-inline-flex align-items-center gap-1"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>Summarizing, please wait...</span>{% else %}<span class="text-muted">n/a</span>{% endif %}</td>
-                {% set session_path = r.session_xml_path or r.post_xml_path %}
+                <td>{% if r.summary_path %}<a href="{{ url_for('download_report', path=r.summary_path) }}">summary</a>{% else %}<span class="text-muted">n/a</span>{% endif %}</td>
                 <td>{% if session_path %}<a href="{{ url_for('download_report', path=session_path) }}">session</a>{% else %}<span class="text-muted">n/a</span>{% endif %}</td>
                 <td>{{ r.run_id or '-' }}</td>
               </tr>
@@ -172,14 +180,21 @@ function hasFlowDownloads(r){
   return !!((r && r.preview_plan_path) || (r && r.scenario_xml_path));
 }
 function buildReportDownloadsHtml(r){
-  if (!r || !r.report_path) return '<span class="text-muted">n/a</span>';
+  if (!r || !(r.report_path || r.full_scenario_path || hasFlowDownloads(r))) return '<span class="text-muted">n/a</span>';
   const scenario = escapeHtml(firstScenarioName(r));
   const previewPlan = escapeHtml(String((r && r.preview_plan_path) || ''));
   const xmlPath = escapeHtml(String((r && r.scenario_xml_path) || ''));
-  let items = `<li><a class="dropdown-item" href='/download_report?path=${encodeURIComponent(r.report_path)}'>Summary Report</a></li>`;
+  const artifactItems = [];
+  if (r.report_path) {
+    artifactItems.push(`<li><a class="dropdown-item" href='/download_report?path=${encodeURIComponent(r.report_path)}'>Summary Report</a></li>`);
+  }
+  if (r.full_scenario_path) {
+    artifactItems.push(`<li><a class="dropdown-item" href='/download_report?path=${encodeURIComponent(r.full_scenario_path)}'>Full Scenario Bundle</a></li>`);
+  }
+  let items = artifactItems.join('');
   if (hasFlowDownloads(r)) {
     const attrs = ` data-scenario="${scenario}" data-preview-plan="${previewPlan}" data-xml-path="${xmlPath}"`;
-    items += `<li><hr class="dropdown-divider"></li>`;
+    if (artifactItems.length) items += `<li><hr class="dropdown-divider"></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="preview-plan-html"${attrs}>Flow/Preview Plan (html)</a></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="afb"${attrs}>Attack Flow (afb)</a></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-dot"${attrs}>Attack Graph (dot)</a></li>`;
@@ -189,6 +204,13 @@ function buildReportDownloadsHtml(r){
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="facilitator-guide"${attrs}>Facilitator Guide (html)</a></li>`;
   }
   return `<div class="dropdown"><button class="btn btn-sm btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" aria-expanded="false">Download</button><ul class="dropdown-menu">${items}</ul></div>`;
+}
+
+function buildSummaryDownloadHtml(r){
+  if (r && r.summary_path) {
+    return `<a href='/download_report?path=${encodeURIComponent(r.summary_path)}'>summary</a>`;
+  }
+  return '<span class="text-muted">n/a</span>';
 }
 
 function downloadBlob(blob, filename) {
@@ -1820,7 +1842,7 @@ function buildRow(r){
     <td class="small">${escapeHtml(scenNames)}</td>
     <td>${r.scenario_xml_path?`<a href='/download_report?path=${encodeURIComponent(r.scenario_xml_path)}'>scenario</a>`:'<span class=\"text-muted\">n/a</span>'}</td>
   <td>${buildReportDownloadsHtml(r)}</td>
-  <td>${r.summary_path?`<a href='/download_report?path=${encodeURIComponent(r.summary_path)}'>summary</a>`:((r.report_path || sessionPath)?'<span class=\"text-muted d-inline-flex align-items-center gap-1\"><span class=\"spinner-border spinner-border-sm\" role=\"status\" aria-hidden=\"true\"></span>Summarizing, please wait...</span>':'<span class=\"text-muted\">n/a</span>')}</td>
+    <td>${buildSummaryDownloadHtml(r)}</td>
   <td>${sessionPath?`<a href='/download_report?path=${encodeURIComponent(sessionPath)}'>session</a>`:'<span class=\"text-muted\">n/a</span>'}</td>
     <td>${escapeHtml(r.run_id||'-')}</td>
   </tr>`;

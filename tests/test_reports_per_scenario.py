@@ -172,3 +172,49 @@ def test_reports_data_backfills_preview_plan_from_flow_validation_signal(tmp_pat
     data = resp.get_json()
     entry = data['history'][0]
     assert entry.get('preview_plan_path') == str(xml_path)
+
+
+def test_reports_page_completed_run_without_report_has_downloads_and_no_summary_spinner(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    from webapp import app_backend as backend
+
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+    run_history_path = outdir / 'run_history.json'
+    xml_path = outdir / 'scenario.xml'
+    session_path = outdir / 'core-post' / 'session.xml'
+    bundle_path = outdir / 'scenario_bundle.zip'
+    xml_path.write_text('<Scenarios><Scenario name="Alpha"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text('<session />', encoding='utf-8')
+    bundle_path.write_bytes(b'PK\x05\x06' + (b'\x00' * 18))
+    run_history_path.write_text(
+        json.dumps([
+            {
+                'timestamp': '2026-05-26T00:00:00Z',
+                'mode': 'async',
+                'scenario_name': 'Alpha',
+                'scenario_names': ['Alpha'],
+                'xml_path': str(xml_path),
+                'scenario_xml_path': str(xml_path),
+                'session_xml_path': str(session_path),
+                'post_xml_path': str(session_path),
+                'full_scenario_path': str(bundle_path),
+                'report_path': None,
+                'summary_path': None,
+                'returncode': 0,
+            }
+        ]),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    monkeypatch.setattr(backend, 'RUN_HISTORY_PATH', str(run_history_path))
+
+    resp = client.get('/reports')
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert 'Full Scenario Bundle' in body
+    assert 'Summarizing, please wait' not in body

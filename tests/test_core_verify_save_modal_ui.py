@@ -86,6 +86,22 @@ def test_validate_core_connection_logs_failures_to_dock() -> None:
     assert not missing, "Missing CORE connection dock-log snippets: " + "; ".join(missing)
 
 
+def test_validate_core_connection_prompts_to_start_missing_daemon() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "_daemonStartPrompted = false,",
+        "data.code === 'core_daemon_not_running'",
+        "Would you like ScenarioForge to try to start core-daemon now?",
+        "window.confirmWithModal('Start core-daemon?', prompt, 'Start core-daemon', 'primary')",
+        "autoStartDaemon: true,",
+        "_daemonStartPrompted: true,",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing missing-daemon start prompt snippets: " + "; ".join(missing)
+
+
 def test_execute_progress_modal_unlocks_on_early_failures() -> None:
     text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
