@@ -196,6 +196,19 @@ def test_flow_inject_path_view_defaults_to_container_when_unset() -> None:
     assert not missing, "Inject path view should default to Container when unset: " + "; ".join(missing)
 
 
+def test_flow_chain_variable_tables_dedupe_artifact_field_names() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "if (defArtifactSet.has(n)) return;",
+        "if (artifactNameSet.has(n)) return;",
+        "if (outArtifactSet.has(n)) return;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow chain variable tables should not duplicate artifact/input-field names: " + "; ".join(missing)
+
+
 def test_flow_restore_prefers_xml_authoritative_state() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

@@ -4696,6 +4696,7 @@
             Array.from(fieldNameSet).sort().forEach((name) => {
               const n = String(name || '').trim();
               if (!n) return;
+              if (defArtifactSet.has(n)) return;
               rows.push({
                 name: n,
                 kind: 'Field',
@@ -7630,6 +7631,7 @@
         Array.from(fieldNameSet).sort().forEach((name) => {
           const n = String(name || '').trim();
           if (!n || isFlagFactName(n)) return;
+          if (artifactNameSet.has(n)) return;
           rows.push({
             name: n,
             resolved: ri ? ri[n] : undefined,
