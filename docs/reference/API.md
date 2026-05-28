@@ -507,7 +507,7 @@ Example request:
 Notes:
 - `requires` accepts either a list of strings or a list of objects `{ artifact, optional }`; items with `optional: true` are written into `artifacts.optional_requires` in the manifest.
 - `runtime_inputs` is the preferred way to define manifest runtime inputs. The older `inputs` boolean flag map still works for standard fields such as `seed`, `secret`, `node_name`, and `flag_prefix`.
-- `runtime_inputs[].flow_supply_when_first` marks solver-facing first-step values that Flow should deterministically supply and include in the first challenge hint when participants cannot reasonably discover them yet.
+- `runtime_inputs[].flow_supply_when_first` marks solver-facing start-step values that Flow should deterministically supply and include in the sequence 1 or parallel-branch start hint when participants cannot reasonably discover them yet.
 - `inject_files` is optional; when present it is written into `manifest.yaml` as `injects`.
 - `inject_candidate_paths` is optional; when present it is written into `manifest.yaml` and must contain absolute destination paths without `..` segments.
 - `access_instructions` is optional but recommended for interactive generators; when present it is written into `manifest.yaml` and rendered in participant/facilitator guides.

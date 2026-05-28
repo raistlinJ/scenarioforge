@@ -3591,7 +3591,7 @@ components:
         flow_supply_when_first:
           type: boolean
           default: false
-          description: When true, Flow supplies this solver-facing runtime input on the first chain step and includes it in the first challenge hint.
+          description: When true, Flow supplies this solver-facing runtime input on sequence 1 or a parallel branch starter and includes it in the matching start hint.
 
     GeneratorBuilderRequest:
       type: object

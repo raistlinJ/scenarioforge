@@ -78,7 +78,7 @@ Global rules:
 - Ensure outputs.json.outputs keys exactly match artifacts.produces.
 - Use Python standard library only unless I explicitly allow more.
 - Keep imports at module scope.
-- For solver-facing runtime inputs participants must use on the first challenge but cannot reasonably discover yet, set `flow_supply_when_first: true` in manifest/runtime_inputs.
+- For solver-facing runtime inputs participants must use on sequence 1 or the first step of a parallel branch but cannot reasonably discover yet, set `flow_supply_when_first: true` in manifest/runtime_inputs.
 - Do not mark purely internal entropy/config fields with `flow_supply_when_first`.
 
 Output format for this turn:
@@ -182,8 +182,8 @@ Tell the AI these are strict requirements:
 - `outputs.json.outputs` must always include `Flag(flag_id)` (required by schema).
 - `hint.txt` is optional. Prefer `hint_levels` in the catalog; only write `/outputs/hint.txt` if you explicitly need a standalone hint file.
 - Include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`, with at least one non-empty hint in each level: low can reveal an IP/node, medium can reveal a port/service/file/artifact, and high can point to access instructions or README guidance.
-- Mark runtime inputs with `flow_supply_when_first: true` only when participants must use that value on the first challenge and cannot reasonably infer or find it before solving.
-- Flow labels `flow_supply_when_first` values as `Seq 1 required` Initial Facts, marks them in Participant/Facilitator guide fact tables, and includes them in the first participant hints.
+- Mark runtime inputs with `flow_supply_when_first: true` only when participants must use that value on sequence 1 or the first step of a parallel branch and cannot reasonably infer or find it before solving.
+- Flow labels `flow_supply_when_first` values as `Seq N required` Initial Facts, marks them in Participant/Facilitator guide fact tables, and includes them in the matching start participant hints.
 - Treat Flow-synthesized values as **inputs**, not artifacts:
   - Never put `seed`, `secret`, `node_name`, `flag_prefix` into artifact inputs (aka `requires`).
 - Input descriptors default to `required: true` when omitted. Set `required: false` for optional runtime inputs.

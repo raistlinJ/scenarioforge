@@ -21,8 +21,8 @@ filtered from Initial/Goal facts.
 
 UI note: the Flow Inputs table renders a `*` next to required items. Runtime inputs are required unless
 `required: false` is explicitly set; artifact inputs are required when listed under `artifacts.requires`.
-For any solver-facing runtime input a participant must use on the first challenge but cannot reasonably discover yet, set
-`flow_supply_when_first: true`; Flow will supply and hint the value for that first challenge.
+For any solver-facing runtime input a participant must use on sequence 1 or the first step of a parallel branch but cannot reasonably discover yet, set
+`flow_supply_when_first: true`; Flow will supply and hint the value for that start sequence.
 
 ## Standard Key Vocabulary
 
@@ -128,7 +128,7 @@ inject_candidate_paths:
   - /tmp/user_data
 ```
 
-On each execution, one path is chosen at random as the destination directory (only applies when `injects` entries have no explicit `->` destination).  Invalid or relative paths are silently ignored.
+On each execution, one path is chosen at random as the destination directory (only applies when `injects` entries have no explicit `->` destination). Invalid or relative paths are silently ignored. Flow shows these candidates in the Injects override editor; leave the destination blank to keep random selection, or pick/type a destination to make that step explicit.
 
 - `outputs.json.outputs.File(path) = "artifacts/challenge"`
 - Do not emit `outputs.json.outputs.File(path) = "/outputs/artifacts/challenge"`.

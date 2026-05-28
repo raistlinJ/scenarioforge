@@ -76,6 +76,22 @@ def test_flow_inject_override_editor_lists_generator_inject_choices() -> None:
     assert not missing, "Missing listed inject dropdown wiring in inject override editor: " + "; ".join(missing)
 
 
+def test_flow_inject_candidate_paths_are_visible_and_selectable() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "inject_candidate_paths",
+        "out.inject_candidate_paths = injectCandidatePaths;",
+        "Candidate destinations: ",
+        "function destinationDirsFor(destValue)",
+        "Pick candidate destination...",
+        "destPicker.addEventListener('change'",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing inject candidate path UI wiring: " + "; ".join(missing)
+
+
 def test_flow_hint_node_ip_rewrites_stale_ip_values() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -100,9 +116,10 @@ def test_flow_initial_facts_start_hint_includes_first_step_context() -> None:
         "firstHintDetails.push('generator: ' + genDisplay);",
         "firstHintDetails.push('type: ' + genType);",
         "firstHintDetails.push('target: ' + Array.from(new Set(vulnNames)).join(', '));",
-        "faFirst.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)",
-        "sourceBadge: required ? { text: 'Seq 1 required', className: 'badge text-bg-warning' } : null,",
-        "requiredTitle: 'Required by sequence 1',",
+        "startAssignmentEntries.forEach((entry) => {",
+        "entry.assignment.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)",
+        "sequenceRequiredByName.set(text,",
+        "sourceBadge: requiredInfo ? { text: requiredInfo.label, className: 'badge text-bg-warning' } : null,",
         "hintLabel: 'Start Hint',",
     ]
 

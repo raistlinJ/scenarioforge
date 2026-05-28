@@ -354,11 +354,18 @@
     if(out.length) return out;
 
     const assignments = Array.isArray(flow.flag_assignments) ? flow.flag_assignments : [];
+    assignments.forEach((assignment, index) => {
+      if(!assignment || typeof assignment !== 'object') return;
+      const hasStartSupply = index === 0
+        || assignment.chain_supplied_parallel_start === true
+        || (Array.isArray(assignment.chain_supplied_input_hints) && assignment.chain_supplied_input_hints.length > 0);
+      if(!hasStartSupply) return;
+      const levels = (assignment.hint_levels && typeof assignment.hint_levels === 'object' && !Array.isArray(assignment.hint_levels)) ? assignment.hint_levels : null;
+      if(levels) add(levels.low);
+      add(assignment.chain_supplied_input_hints);
+    });
     const first = assignments.length ? assignments[0] : null;
     if(first && typeof first === 'object'){
-      const levels = (first.hint_levels && typeof first.hint_levels === 'object' && !Array.isArray(first.hint_levels)) ? first.hint_levels : null;
-      if(levels) add(levels.low);
-      add(first.chain_supplied_input_hints);
       if(!out.length) add(first.hints);
       if(!out.length) add(first.hint);
     }

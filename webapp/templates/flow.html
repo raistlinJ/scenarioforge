@@ -1059,6 +1059,7 @@
         'resolved_outputs_detail',
         'inject_files',
         'inject_files_detail',
+        'inject_candidate_paths',
         'artifacts_dir',
         'mount_dir',
         'resolved_paths',
@@ -1283,6 +1284,9 @@
       const injectFilesRaw = (curA && Array.isArray(curA.inject_files))
         ? curA.inject_files.map(String).filter(Boolean)
         : [];
+      const injectCandidatePaths = (curA && Array.isArray(curA.inject_candidate_paths))
+        ? Array.from(new Set(curA.inject_candidate_paths.map(x => String(x || '').trim().replace(/\/+$/g, '') || '/').filter(x => x.startsWith('/'))))
+        : undefined;
       const injectFiles = _normalizeInjectFilesForPersist(injectFilesRaw, curA && curA.resolved_outputs);
       let injectFilesDetail = _injectDetailsForPersist(injectFilesRaw, curA && curA.resolved_outputs, nid);
       const resolvedInputs = (curA && typeof curA.resolved_inputs === 'object' && curA.resolved_inputs && !Array.isArray(curA.resolved_inputs))
@@ -1368,6 +1372,7 @@
       if (injOvr !== undefined) out.inject_files_override = injOvr;
       if (injectFiles !== undefined) out.inject_files = injectFiles;
       if (injectFilesDetail.length) out.inject_files_detail = injectFilesDetail;
+      if (injectCandidatePaths !== undefined && injectCandidatePaths.length) out.inject_candidate_paths = injectCandidatePaths;
       if (artifactsDir !== undefined) out.artifacts_dir = artifactsDir;
       if (mountDir !== undefined) out.mount_dir = mountDir;
       if (runDir !== undefined) out.run_dir = runDir;
@@ -1722,6 +1727,9 @@
         if (savedA.inject_files && (!Array.isArray(curA.inject_files) || !curA.inject_files.length)) {
           curA.inject_files = savedA.inject_files;
         }
+        if (savedA.inject_candidate_paths && (!Array.isArray(curA.inject_candidate_paths) || !curA.inject_candidate_paths.length)) {
+          curA.inject_candidate_paths = savedA.inject_candidate_paths;
+        }
         if ((!curA.inject_path_view || !String(curA.inject_path_view).trim()) && savedA.inject_path_view && String(savedA.inject_path_view).trim()) {
           curA.inject_path_view = String(savedA.inject_path_view).trim().toLowerCase();
         }
@@ -1767,6 +1775,7 @@
         if (savedA.produces && !Array.isArray(curA.produces)) curA.produces = savedA.produces;
         if (savedA.requires && !Array.isArray(curA.requires)) curA.requires = savedA.requires;
         if (savedA.inject_files && !Array.isArray(curA.inject_files)) curA.inject_files = savedA.inject_files;
+        if (savedA.inject_candidate_paths && !Array.isArray(curA.inject_candidate_paths)) curA.inject_candidate_paths = savedA.inject_candidate_paths;
         if ((!curA.inject_path_view || !String(curA.inject_path_view).trim()) && savedA.inject_path_view && String(savedA.inject_path_view).trim()) {
           curA.inject_path_view = String(savedA.inject_path_view).trim().toLowerCase();
         }
@@ -3202,17 +3211,25 @@
       return base;
     };
 
-    return t.replace(/\{\{\s*OUTPUT\.([A-Za-z0-9_\-\.:()]+?)(?:\s*:\s*([A-Za-z0-9_\-]+))?\s*\}\}/g, (_m, rawKey, transform) => {
-      const keyText = String(rawKey || '').trim();
+    const lookupOutput = (expr) => {
+      const token = String(expr || '').trim();
+      if (!token) return '';
+      const direct = ro[token];
+      if (direct !== undefined && direct !== null) return normalizeValue(direct);
+      const key = roLower.get(token.toLowerCase());
+      if (key) return normalizeValue(ro[key]);
+      return '';
+    };
+
+    return t.replace(/\{\{\s*OUTPUT\.([^}]+?)\s*\}\}/g, (full, inner) => {
+      const raw = String(inner || '').trim();
+      if (!raw) return full;
+      const colon = raw.indexOf(':');
+      const keyText = colon >= 0 ? raw.slice(0, colon).trim() : raw;
+      const transform = colon >= 0 ? raw.slice(colon + 1).trim() : '';
       if (!keyText) return '';
-      const direct = ro[keyText];
-      let val = direct;
-      if (val === undefined) {
-        const lookup = roLower.get(keyText.toLowerCase());
-        if (lookup) val = ro[lookup];
-      }
-      const out = normalizeValue(val);
-      if (!out) return '';
+      const out = lookupOutput(keyText);
+      if (!out) return full;
       return applyTransform(out, transform);
     });
   }
@@ -3243,6 +3260,14 @@
         else if (typeof values === 'string') add(level, values);
       });
     }
+    const templates = (source.hint_level_templates && typeof source.hint_level_templates === 'object' && !Array.isArray(source.hint_level_templates)) ? source.hint_level_templates : null;
+    if (templates) {
+      FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+        const values = templates[level];
+        if (Array.isArray(values)) values.forEach((value) => add(level, value));
+        else if (typeof values === 'string') add(level, values);
+      });
+    }
     if (!Object.keys(out).length && Array.isArray(source.hints)) {
       source.hints.forEach((value) => add('low', value));
     }
@@ -3256,6 +3281,101 @@
   function hintLevelTitle(level) {
     const key = String(level || '').trim().toLowerCase();
     return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : 'Hint';
+  }
+
+  function resolveFlowGuideTemplateText(text, assignment, context) {
+    let out = _applyHintOutputTemplates(String(text || ''), assignment);
+    if (!out || !out.includes('{{')) return out;
+    const source = assignment && typeof assignment === 'object' ? assignment : {};
+    const ctx = context && typeof context === 'object' ? context : {};
+    const values = new Map();
+    const normalizeValue = (value) => {
+      try {
+        if (Array.isArray(value)) return value.map((item) => String(item ?? '').trim()).filter(Boolean).join(', ');
+        if (value && typeof value === 'object') return JSON.stringify(value);
+        if (value === undefined || value === null) return '';
+        return String(value).trim();
+      } catch (e) {
+        return '';
+      }
+    };
+    const add = (key, value) => {
+      const rawKey = String(key || '').trim();
+      const normalizedValue = normalizeValue(value);
+      if (!rawKey || !normalizedValue) return;
+      const variants = [rawKey, rawKey.replace(/[^A-Za-z0-9]+/g, '_'), rawKey.replace(/[^A-Za-z0-9]+/g, '')];
+      variants.forEach((variant) => {
+        const normalizedKey = String(variant || '').trim().toLowerCase();
+        if (normalizedKey && !values.has(normalizedKey)) values.set(normalizedKey, normalizedValue);
+      });
+    };
+    const addObject = (obj) => {
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+      Object.entries(obj).forEach(([key, value]) => add(key, value));
+    };
+    const nodeName = String(ctx.nodeName || source.node_name || source.node || source.name || source.node_id || '').trim();
+    const nodeIp = String(ctx.nodeIp || source.node_ip || source.node_ip4 || source.ip4 || source.ipv4 || source.ip || source.address || '').trim();
+    const nodeId = String(ctx.nodeId || source.node_id || source.id || '').trim();
+    add('node', nodeName);
+    add('node_name', nodeName);
+    add('NODE', nodeName);
+    add('NODE_NAME', nodeName);
+    add('THIS_NODE_NAME', nodeName);
+    add('NEXT_NODE_NAME', nodeName);
+    add('node_ip', nodeIp);
+    add('node_ip4', nodeIp);
+    add('NODE_IP', nodeIp);
+    add('NODE_IP4', nodeIp);
+    add('THIS_NODE_IP', nodeIp);
+    add('THIS_NODE_IP4', nodeIp);
+    add('NEXT_NODE_IP', nodeIp);
+    add('NEXT_NODE_IP4', nodeIp);
+    add('ip', nodeIp);
+    add('ip4', nodeIp);
+    add('ipv4', nodeIp);
+    add('node_id', nodeId);
+    add('NODE_ID', nodeId);
+    add('THIS_NODE_ID', nodeId);
+    addObject(source.resolved_inputs);
+    addObject(source.resolved_outputs);
+    addObject(source.config_overrides);
+    addObject(source.output_overrides);
+    return out.replace(/\{\{\s*([A-Za-z0-9_.:(),\-\s]+?)\s*\}\}/g, (full, rawKey) => {
+      let key = String(rawKey || '').trim();
+      if (!key) return '';
+      key = key.replace(/^(?:INPUT|CONFIG|VALUE|VAR)\./i, '').trim();
+      if (/^OUTPUT\./i.test(key)) return '';
+      const candidates = [key, key.replace(/[^A-Za-z0-9]+/g, '_'), key.replace(/[^A-Za-z0-9]+/g, '')];
+      for (const candidate of candidates) {
+        const normalizedKey = String(candidate || '').trim().toLowerCase();
+        if (normalizedKey && values.has(normalizedKey)) return values.get(normalizedKey);
+      }
+      return '';
+    }).replace(/\s+([,.])/g, '$1').replace(/[ \t]{2,}/g, ' ').trim();
+  }
+
+  function ensureFlowGuideHintLevelCoverage(levels, assignment, context) {
+    const out = {};
+    FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+      const values = Array.isArray(levels && levels[level]) ? levels[level].map((item) => String(item || '').trim()).filter(Boolean) : [];
+      if (values.length) out[level] = values.slice();
+    });
+    const source = assignment && typeof assignment === 'object' ? assignment : {};
+    const ctx = context && typeof context === 'object' ? context : {};
+    const nodeName = String(ctx.nodeName || source.node_name || source.node_id || 'target node').trim();
+    const nodeIp = String(ctx.nodeIp || source.node_ip || source.ip4 || source.ipv4 || source.ip || '').trim();
+    const addDefault = (level, value) => {
+      if (Array.isArray(out[level]) && out[level].length) return;
+      const rendered = resolveFlowGuideTemplateText(value, source, ctx);
+      if (rendered) out[level] = [rendered];
+    };
+    addDefault('low', `Target: ${nodeIp ? `${nodeName} @ ${nodeIp}` : nodeName}`);
+    const outputs = (source.resolved_outputs && typeof source.resolved_outputs === 'object' && !Array.isArray(source.resolved_outputs)) ? source.resolved_outputs : {};
+    const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
+    addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the access instructions and resolved facts for this step.');
+    const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
+    addDefault('high', readmeRef ? `README: ${readmeRef}` : 'Use the access instructions for the complete workflow.');
+    return out;
   }
 
   function renderChainEditor() {
@@ -3958,6 +4078,22 @@
       try {
         const faFirst = (Array.isArray(currentFlagAssignments) && currentFlagAssignments[0]) ? currentFlagAssignments[0] : null;
         const firstNode = (Array.isArray(currentChain) && currentChain.length) ? currentChain[0] : null;
+        const startAssignmentEntries = [];
+        try {
+          const assignments = Array.isArray(currentFlagAssignments) ? currentFlagAssignments : [];
+          assignments.forEach((assignment, assignmentIndex) => {
+            if (!assignment || typeof assignment !== 'object') return;
+            const hasSuppliedInputs = Array.isArray(assignment.chain_supplied_inputs) && assignment.chain_supplied_inputs.some(x => String(x || '').trim());
+            const hasSuppliedHints = Array.isArray(assignment.chain_supplied_input_hints) && assignment.chain_supplied_input_hints.some(x => String(x || '').trim());
+            if (assignmentIndex !== 0 && !hasSuppliedInputs && !hasSuppliedHints && assignment.chain_supplied_parallel_start !== true) return;
+            startAssignmentEntries.push({
+              assignment,
+              assignmentIndex,
+              node: (Array.isArray(currentChain) && currentChain[assignmentIndex]) ? currentChain[assignmentIndex] : null,
+            });
+          });
+        } catch (e) { }
+        if (!startAssignmentEntries.length && faFirst) startAssignmentEntries.push({ assignment: faFirst, assignmentIndex: 0, node: firstNode });
         const firstName = (firstNode && firstNode.name) ? String(firstNode.name).trim() : '';
         let firstIp = '';
         try {
@@ -4004,62 +4140,132 @@
           initHints = [];
         }
         try {
-          const suppliedHints = (faFirst && Array.isArray(faFirst.chain_supplied_input_hints))
-            ? faFirst.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)
-            : [];
-          suppliedHints.forEach((text) => {
+          const nodeIpForStart = (node) => {
+            const ips = [];
+            const pushIps = (val) => {
+              if (!val) return;
+              if (Array.isArray(val)) { val.forEach(v => pushIps(v)); return; }
+              const s = String(val || '').trim();
+              if (!s) return;
+              s.split(',').forEach(part => { const p = String(part || '').trim(); if (p) ips.push(p); });
+            };
+            try {
+              pushIps(node && (node.ip4 || node.ipv4 || node.ip || node.address));
+              pushIps(node && node.ips);
+              pushIps(node && node.addresses);
+              pushIps(node && node.ipv4s);
+              const ifaces = node && Array.isArray(node.interfaces) ? node.interfaces : [];
+              ifaces.forEach(iface => { if (iface && typeof iface === 'object') pushIps(iface.ip4 || iface.ipv4 || iface.ip || iface.address); });
+            } catch (e) { }
+            const uniq = Array.from(new Set(ips));
+            return uniq.length ? uniq.join(', ') : '';
+          };
+          startAssignmentEntries.slice(1).forEach((entry) => {
+            const node = entry.node || {};
+            const assignment = entry.assignment || {};
+            const nodeName = String((node && node.name) || assignment.node_name || assignment.node_id || '').trim();
+            if (!nodeName) return;
+            const nodeIp = nodeIpForStart(node) || (_hintNodeIpMap && _hintNodeIpMap.get(nodeName)) || '';
+            const details = [];
+            const genId = String(assignment.id || assignment.generator_id || '').trim();
+            const genName = String(assignment.name || '').trim();
+            const genDisplay = (genName && genName !== genId) ? (genId ? (genId + ' | ' + genName) : genName) : genId;
+            if (genDisplay) details.push('generator: ' + genDisplay);
+            if (assignment.type) details.push('type: ' + String(assignment.type).trim());
+            const prefix = String(assignment.chain_supplied_requirement_label || ('Seq ' + (entry.assignmentIndex + 1) + ' required')).trim();
+            const suffix = nodeIp ? (' @ ' + nodeIp) : '';
+            const text = `${prefix} start: ${nodeName}${suffix}${details.length ? ('; ' + details.join('; ')) : ''}`;
             if (text && !initHints.includes(text)) initHints.push(text);
           });
         } catch (e) { }
-        const seqOneRequiredNames = new Set();
         try {
-          const addRequired = (value) => {
+          startAssignmentEntries.forEach((entry) => {
+            const suppliedHints = (entry.assignment && Array.isArray(entry.assignment.chain_supplied_input_hints))
+              ? entry.assignment.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)
+              : [];
+            suppliedHints.forEach((text) => {
+              if (text && !initHints.includes(text)) initHints.push(text);
+            });
+          });
+        } catch (e) { }
+        const sequenceRequiredByName = new Map();
+        try {
+          const addRequired = (value, label, title) => {
             const text = String(value || '').trim();
-            if (text && !isFlagFactName(text)) seqOneRequiredNames.add(text);
+            if (!text || isFlagFactName(text)) return;
+            if (!sequenceRequiredByName.has(text)) {
+              sequenceRequiredByName.set(text, {
+                label: String(label || 'Seq 1 required').trim() || 'Seq 1 required',
+                title: String(title || 'Required by sequence 1').trim() || 'Required by sequence 1',
+              });
+            }
           };
-          const reqArt = (faFirst && Array.isArray(faFirst.requires)) ? faFirst.requires : [];
-          reqArt.forEach(addRequired);
-          const inReq = (faFirst && Array.isArray(faFirst.input_fields_required)) ? faFirst.input_fields_required : [];
-          const inOpt = (faFirst && Array.isArray(faFirst.input_fields_optional)) ? faFirst.input_fields_optional : [];
-          const inAll = (faFirst && Array.isArray(faFirst.input_fields)) ? faFirst.input_fields : [];
-          if (inReq.length || inOpt.length) inReq.forEach(addRequired);
-          else inAll.forEach(addRequired);
-          const supplied = (faFirst && Array.isArray(faFirst.chain_supplied_inputs)) ? faFirst.chain_supplied_inputs : [];
-          supplied.forEach(addRequired);
-          initArtifacts.forEach(addRequired);
-          initFields.forEach(addRequired);
+          startAssignmentEntries.forEach((entry) => {
+            const assignment = entry.assignment || {};
+            const label = String(assignment.chain_supplied_requirement_label || ('Seq ' + (entry.assignmentIndex + 1) + ' required')).trim();
+            const title = String(assignment.chain_supplied_required_title || ('Required by sequence ' + (entry.assignmentIndex + 1))).trim();
+            const reqArt = Array.isArray(assignment.requires) ? assignment.requires : [];
+            reqArt.forEach(value => addRequired(value, label, title));
+            const inReq = Array.isArray(assignment.input_fields_required) ? assignment.input_fields_required : [];
+            const inOpt = Array.isArray(assignment.input_fields_optional) ? assignment.input_fields_optional : [];
+            const inAll = Array.isArray(assignment.input_fields) ? assignment.input_fields : [];
+            if (inReq.length || inOpt.length) inReq.forEach(value => addRequired(value, label, title));
+            else inAll.forEach(value => addRequired(value, label, title));
+            const supplied = Array.isArray(assignment.chain_supplied_inputs) ? assignment.chain_supplied_inputs : [];
+            supplied.forEach(value => addRequired(value, label, title));
+          });
+          initArtifacts.forEach(value => addRequired(value, 'Seq 1 required', 'Required by sequence 1'));
+          initFields.forEach(value => addRequired(value, 'Seq 1 required', 'Required by sequence 1'));
         } catch (e) { }
         const makeInitialOutputRow = (name, resolved) => {
           const clean = String(name || '').trim();
-          const required = seqOneRequiredNames.has(clean);
+          const requiredInfo = sequenceRequiredByName.get(clean) || null;
+          const required = !!requiredInfo;
           return {
             name: clean,
             resolved,
             toChain: true,
             required,
-            requiredTitle: 'Required by sequence 1',
-            sourceBadge: required ? { text: 'Seq 1 required', className: 'badge text-bg-warning' } : null,
+            requiredTitle: requiredInfo ? requiredInfo.title : '',
+            sourceBadge: requiredInfo ? { text: requiredInfo.label, className: 'badge text-bg-warning' } : null,
           };
         };
         const ri = (faFirst && typeof faFirst.resolved_inputs === 'object' && faFirst.resolved_inputs && !Array.isArray(faFirst.resolved_inputs))
           ? faFirst.resolved_inputs
           : null;
-        if (ri) {
-          const keys = Object.keys(ri).sort((a, b) => String(a).localeCompare(String(b)));
-          initOutputs = keys.map((k) => makeInitialOutputRow(k, ri[k])).filter(x => x && x.name && !isFlagFactName(x.name));
-        }
+        try {
+          const rowsByName = new Map();
+          startAssignmentEntries.forEach((entry) => {
+            const assignment = entry.assignment || {};
+            const resolvedInputs = (assignment && typeof assignment.resolved_inputs === 'object' && assignment.resolved_inputs && !Array.isArray(assignment.resolved_inputs))
+              ? assignment.resolved_inputs
+              : null;
+            if (!resolvedInputs) return;
+            Object.keys(resolvedInputs).sort((a, b) => String(a).localeCompare(String(b))).forEach((k) => {
+              const row = makeInitialOutputRow(k, resolvedInputs[k]);
+              if (row && row.name && !isFlagFactName(row.name) && !rowsByName.has(row.name)) rowsByName.set(row.name, row);
+            });
+          });
+          initOutputs = Array.from(rowsByName.values());
+        } catch (e) { }
         if (!initOutputs.length) {
           const names = new Set();
           try {
-            const reqArt = (faFirst && Array.isArray(faFirst.requires)) ? faFirst.requires.map(String).filter(Boolean) : [];
-            reqArt.forEach(n => { const s = String(n || '').trim(); if (s) names.add(s); });
+            startAssignmentEntries.forEach((entry) => {
+              const assignment = entry.assignment || {};
+              const reqArt = Array.isArray(assignment.requires) ? assignment.requires.map(String).filter(Boolean) : [];
+              reqArt.forEach(n => { const s = String(n || '').trim(); if (s) names.add(s); });
+            });
           } catch (e) { }
           try {
-            const inReq = (faFirst && Array.isArray(faFirst.input_fields_required)) ? faFirst.input_fields_required.map(String).filter(Boolean) : [];
-            const inOpt = (faFirst && Array.isArray(faFirst.input_fields_optional)) ? faFirst.input_fields_optional.map(String).filter(Boolean) : [];
-            const inAll = (faFirst && Array.isArray(faFirst.input_fields)) ? faFirst.input_fields.map(String).filter(Boolean) : [];
-            const fields = (inReq.length || inOpt.length) ? inReq.concat(inOpt) : inAll;
-            fields.forEach(n => { const s = String(n || '').trim(); if (s) names.add(s); });
+            startAssignmentEntries.forEach((entry) => {
+              const assignment = entry.assignment || {};
+              const inReq = Array.isArray(assignment.input_fields_required) ? assignment.input_fields_required.map(String).filter(Boolean) : [];
+              const inOpt = Array.isArray(assignment.input_fields_optional) ? assignment.input_fields_optional.map(String).filter(Boolean) : [];
+              const inAll = Array.isArray(assignment.input_fields) ? assignment.input_fields.map(String).filter(Boolean) : [];
+              const fields = (inReq.length || inOpt.length) ? inReq.concat(inOpt) : inAll;
+              fields.forEach(n => { const s = String(n || '').trim(); if (s) names.add(s); });
+            });
           } catch (e) { }
           initOutputs = Array.from(names).sort().filter(k => !isFlagFactName(k)).map((k) => makeInitialOutputRow(k, ri ? ri[k] : undefined));
         }
@@ -4968,6 +5174,9 @@
           const tbody2 = document.createElement('tbody');
           let pathView = (fa && String(fa.inject_path_view || '').trim().toLowerCase() === 'core-vm') ? 'core-vm' : 'container';
           const rows = Array.isArray(files) ? files : [];
+          const injectCandidatePaths = (fa && Array.isArray(fa.inject_candidate_paths))
+            ? Array.from(new Set(fa.inject_candidate_paths.map(x => String(x || '').trim().replace(/\/+$/g, '') || '/').filter(x => x.startsWith('/'))))
+            : [];
           const resolvedInjectSources = (fa && fa.resolved_paths && Array.isArray(fa.resolved_paths.inject_sources))
             ? fa.resolved_paths.inject_sources.filter(x => x && typeof x === 'object')
             : [];
@@ -5064,6 +5273,13 @@
               return s.replace(/\/+$/g, '') || '/flow_injects';
             }
 
+            function destinationDirsFor(destValue) {
+              const raw = String(destValue || '').trim();
+              if (raw && raw.startsWith('/')) return [normalizeDestDir(raw)];
+              if (injectCandidatePaths.length) return injectCandidatePaths.slice();
+              return ['/flow_injects'];
+            }
+
             function resolvedTargetsFor(src) {
               if (!resolvedMap) return [];
               const raw = String(src || '').trim();
@@ -5140,7 +5356,7 @@
               const likelySymbolicToken = !displaySrc.includes('/')
                 && !displaySrc.startsWith('artifacts/')
                 && !/\.[A-Za-z0-9]{1,16}$/.test(displaySrc);
-              const destDir = normalizeDestDir(dest);
+              const destDirs = destinationDirsFor(dest);
 
               const entries = resolvedTargets.length ? resolvedTargets : [''];
               entries.forEach((resolvedVal, idx) => {
@@ -5168,7 +5384,8 @@
                 const tdResolved = document.createElement('td');
                 tdResolved.className = 'small text-muted';
                 const resolvedBase = basenameFrom(resolvedVal ? resolvedVal : displaySrc);
-                const destPath = resolvedBase ? `${destDir}/${resolvedBase}` : destDir;
+                const destPaths = destDirs.map((destDir) => resolvedBase ? `${destDir}/${resolvedBase}` : destDir).filter(Boolean);
+                const destPath = destPaths.length ? destPaths[0] : '-';
                 const resolvedMatches = resolvedPathsForCandidate(displaySrc, resolvedVal);
 
                 let coreVmText = '';
@@ -5186,7 +5403,7 @@
                   coreVmText = destPath || '-';
                 }
 
-                const containerText = destPath || '-';
+                const containerText = destPaths.length > 1 ? destPaths.join('; ') : (destPath || '-');
                 tdResolved.textContent = pathView === 'container' ? containerText : coreVmText;
 
                 tr.appendChild(tdName);
@@ -5202,10 +5419,15 @@
           legend.className = 'text-muted small mt-1';
           legend.textContent = '◆ flag embedded in this artifact';
 
+          const candidateLegend = document.createElement('div');
+          candidateLegend.className = 'text-muted small mt-1';
+          candidateLegend.textContent = injectCandidatePaths.length ? ('Candidate destinations: ' + injectCandidatePaths.join(', ')) : '';
+
           function _renderInjectTable() {
             viewToggle.textContent = _currentViewLabel();
             const hasFlagStar = _renderInjectRows();
             legend.style.display = hasFlagStar ? '' : 'none';
+            candidateLegend.style.display = injectCandidatePaths.length ? '' : 'none';
           }
 
           viewToggle.addEventListener('click', () => {
@@ -5220,6 +5442,7 @@
           tbl.appendChild(tbody2);
           wrap.appendChild(tbl);
           wrap.appendChild(legend);
+          wrap.appendChild(candidateLegend);
           return wrap;
         }
 
@@ -6433,6 +6656,11 @@
         injHelp2.textContent = 'Example: variable=File(path), dest=/opt/bin (saved as File(path) -> /opt/bin).';
         injWrap.appendChild(injHelp2);
 
+        const injCandidateHelp = document.createElement('div');
+        injCandidateHelp.className = 'small text-muted';
+        injCandidateHelp.style.display = 'none';
+        injWrap.appendChild(injCandidateHelp);
+
         const toggleRow = document.createElement('div');
         toggleRow.className = 'd-flex align-items-center justify-content-between gap-2 mt-2';
         const resetBtn = document.createElement('button');
@@ -6493,6 +6721,13 @@
           return null;
         }
         const generatedInjectSpecs = getGeneratedInjectsFromAssignment();
+        const injectCandidatePaths = (fa && Array.isArray(fa.inject_candidate_paths))
+          ? Array.from(new Set(fa.inject_candidate_paths.map(x => String(x || '').trim().replace(/\/+$/g, '') || '/').filter(x => x.startsWith('/'))))
+          : [];
+        if (injectCandidatePaths.length) {
+          injCandidateHelp.textContent = 'Candidate destinations: ' + injectCandidatePaths.join(', ');
+          injCandidateHelp.style.display = '';
+        }
         let injectsResolvedPathView = (fa && String(fa.inject_path_view || '').trim().toLowerCase() === 'core-vm') ? 'core-vm' : 'container';
 
         function renderInjectList(files) {
@@ -6509,6 +6744,13 @@
             const s = String(d || '').trim();
             if (!s || !s.startsWith('/')) return '/flow_injects';
             return s.replace(/\/+$/g, '') || '/flow_injects';
+          }
+
+          function destinationDirsFor(destValue) {
+            const raw = String(destValue || '').trim();
+            if (raw && raw.startsWith('/')) return [normalizeDestDir(raw)];
+            if (injectCandidatePaths.length) return injectCandidatePaths.slice();
+            return ['/flow_injects'];
           }
 
           function resolvedPathsForCandidate(srcValue, resolvedValue) {
@@ -6703,6 +6945,26 @@
             destInp.placeholder = '/flow_injects (default)';
             destInp.value = String(parsed.dest ?? '');
 
+            const destWrap = document.createElement('div');
+            destWrap.className = 'd-flex flex-column gap-1';
+            destWrap.appendChild(destInp);
+            let destPicker = null;
+            if (injectCandidatePaths.length) {
+              destPicker = document.createElement('select');
+              destPicker.className = 'form-select form-select-sm font-monospace';
+              const emptyDest = document.createElement('option');
+              emptyDest.value = '';
+              emptyDest.textContent = 'Pick candidate destination...';
+              destPicker.appendChild(emptyDest);
+              injectCandidatePaths.forEach((candidatePath) => {
+                const opt = document.createElement('option');
+                opt.value = candidatePath;
+                opt.textContent = candidatePath;
+                destPicker.appendChild(opt);
+              });
+              destWrap.appendChild(destPicker);
+            }
+
             const picker = buildVarPicker();
 
             const uploadBtn = document.createElement('button');
@@ -6781,19 +7043,23 @@
             function currentInjectsPathViewLabel() {
               return injectsResolvedPathView === 'container' ? 'Container' : 'CORE VM';
             }
-            function toContainerDestPaths(targetValues, fallbackDisplaySrc, destDir) {
+            function toContainerDestPaths(targetValues, fallbackDisplaySrc, destDirs) {
               const vals = Array.isArray(targetValues) ? targetValues : [];
+              const dirs = (Array.isArray(destDirs) && destDirs.length) ? destDirs : ['/flow_injects'];
               const computed = [];
               if (vals.length) {
                 vals.forEach((value) => {
                   const base = basenameFromPath(value);
-                  if (base) computed.push(`${destDir}/${base}`);
+                  if (!base) return;
+                  dirs.forEach((destDir) => computed.push(`${destDir}/${base}`));
                 });
               }
               if (!computed.length && fallbackDisplaySrc) {
                 const resolvedBase = basenameFromPath(fallbackDisplaySrc);
-                const fallbackDest = resolvedBase ? `${destDir}/${resolvedBase}` : destDir;
-                if (fallbackDest) computed.push(fallbackDest);
+                dirs.forEach((destDir) => {
+                  const fallbackDest = resolvedBase ? `${destDir}/${resolvedBase}` : destDir;
+                  if (fallbackDest) computed.push(fallbackDest);
+                });
               }
               return computed;
             }
@@ -6816,7 +7082,7 @@
               const likelySymbolicToken = !displaySrc.includes('/')
                 && !displaySrc.startsWith('artifacts/')
                 && !/\.[A-Za-z0-9]{1,16}$/.test(displaySrc);
-              const destDir = normalizeDestDir(destInp.value);
+              const destDirs = destinationDirsFor(destInp.value);
               pathViewToggleBtn.textContent = currentInjectsPathViewLabel();
 
               if (!targets.length) {
@@ -6824,12 +7090,11 @@
                   resolvedHint.textContent = '-';
                   resolvedHint.classList.add('text-muted');
                 } else {
-                  const resolvedBase = basenameFromPath(displaySrc);
-                  const destPath = resolvedBase ? `${destDir}/${resolvedBase}` : destDir;
                   if (injectsResolvedPathView === 'container') {
-                    resolvedHint.textContent = destPath || '-';
+                    resolvedHint.textContent = summarizeValues(toContainerDestPaths([], displaySrc, destDirs));
                   } else {
-                    resolvedHint.textContent = (tokenLike || likelySymbolicToken) ? '<unresolved>' : (destPath || '-');
+                    const coreFallback = toContainerDestPaths([], displaySrc, destDirs);
+                    resolvedHint.textContent = (tokenLike || likelySymbolicToken) ? '<unresolved>' : summarizeValues(coreFallback);
                   }
                   resolvedHint.classList.add('text-muted');
                 }
@@ -6842,7 +7107,7 @@
                     .map((value) => String(value || '').trim())
                     .filter(Boolean);
                 if (injectsResolvedPathView === 'container') {
-                  const anticipatedContainer = toContainerDestPaths(anticipatedCoreVm, displaySrc, destDir);
+                  const anticipatedContainer = toContainerDestPaths(anticipatedCoreVm, displaySrc, destDirs);
                   resolvedHint.textContent = summarizeValues(anticipatedContainer);
                 } else {
                   resolvedHint.textContent = summarizeValues(anticipatedCoreVm);
@@ -6856,7 +7121,7 @@
 
             row.appendChild(srcInp);
             row.appendChild(resolvedHint);
-            row.appendChild(destInp);
+            row.appendChild(destWrap);
             row.appendChild(pickWrap);
             row.appendChild(del);
             stack.appendChild(row);
@@ -6870,6 +7135,16 @@
               injectsTouched = true;
               try { refreshPathHints(); } catch (e) { }
             });
+            if (destPicker) {
+              destPicker.addEventListener('change', () => {
+                const v = String(destPicker.value || '').trim();
+                if (!v) return;
+                destInp.value = v;
+                injectsTouched = true;
+                try { destPicker.value = ''; } catch (e) { }
+                try { refreshPathHints(); } catch (e) { }
+              });
+            }
             picker.addEventListener('change', () => {
               const v = String(picker.value || '').trim();
               if (!v) return;
@@ -11157,24 +11432,26 @@ ${out.join('\n')}
       const nodeId = String((node && node.id) ? node.id : '').trim();
       const generatorId = String(assignment.id || assignment.generator_id || '').trim();
       const generatorLabel = String(assignment.flag_generator || assignment.type || '').trim();
-      const hint = _applyHintOutputTemplates(firstHint(assignment), assignment);
-      const allHints = Array.isArray(assignment.hints)
+      let hint = _applyHintOutputTemplates(firstHint(assignment), assignment);
+      let allHints = Array.isArray(assignment.hints)
         ? assignment.hints
           .map((v) => _applyHintOutputTemplates(String(v || '').trim(), assignment))
           .map((v) => String(v || '').trim())
           .filter(Boolean)
         : [];
-      const descHints = Array.isArray(assignment.description_hints)
+      let descHints = Array.isArray(assignment.description_hints)
         ? assignment.description_hints
           .map((v) => _applyHintOutputTemplates(String(v || '').trim(), assignment))
           .map((v) => String(v || '').trim())
           .filter(Boolean)
         : [];
-      const structuredHintLevels = normalizeGuideHintLevels(assignment);
-      const seqOneRequiredInputs = (step === 1 && Array.isArray(assignment.chain_supplied_inputs))
+      let structuredHintLevels = normalizeGuideHintLevels(assignment);
+      const suppliedRequiredLabel = String(assignment.chain_supplied_requirement_label || `Seq ${step} required`).trim() || `Seq ${step} required`;
+      const suppliedRequiredInputCategory = `Input (${suppliedRequiredLabel})`;
+      const seqOneRequiredInputs = (Array.isArray(assignment.chain_supplied_inputs))
         ? new Set(assignment.chain_supplied_inputs.map((value) => String(value || '').trim()).filter(Boolean))
         : new Set();
-      const sequenceOneRequiredHintLines = (step === 1 && Array.isArray(assignment.chain_supplied_input_hints))
+      const sequenceOneRequiredHintLines = (Array.isArray(assignment.chain_supplied_input_hints))
         ? assignment.chain_supplied_input_hints
           .map((value) => _applyHintOutputTemplates(String(value || '').trim(), assignment))
           .map((value) => String(value || '').trim())
@@ -11207,6 +11484,11 @@ ${out.join('\n')}
         ...resolvedOutputs.filter(([k]) => /ip/i.test(String(k || ''))).map(([, v]) => String(v || '').trim()),
       ].filter(Boolean);
       const nodeIp = ipCandidates.length ? ipCandidates[0] : 'unknown';
+      const guideContext = { nodeName, nodeIp, nodeId };
+      hint = resolveFlowGuideTemplateText(hint, assignment, guideContext);
+      allHints = allHints.map((value) => resolveFlowGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
+      descHints = descHints.map((value) => resolveFlowGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
+      structuredHintLevels = ensureFlowGuideHintLevelCoverage(structuredHintLevels, assignment, guideContext);
 
       lines.push('### Critical Access');
       lines.push('');
@@ -11247,13 +11529,13 @@ ${out.join('\n')}
       } else {
         lines.push('| Input | Requirement | Needed to complete this step? |');
         lines.push('| --- | --- | --- |');
-        requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | ${seqOneRequiredInputs.has(name) ? 'Seq 1 required' : 'Required'} | Yes |`));
+        requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | ${seqOneRequiredInputs.has(name) ? suppliedRequiredLabel : 'Required'} | Yes |`));
         optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
       }
       lines.push('');
       
       // Apply access instructions: check generator metadata first, then heuristics
-      const _applyAccessInstructions = (assign, nodeName) => {
+      const _applyAccessInstructions = (assign, nodeName, nodeIp, nodeId) => {
         if (!assign || typeof assign !== 'object') return false;
         
         // Check for explicit access_instructions in assignment metadata (from generator manifest)
@@ -11261,14 +11543,15 @@ ${out.join('\n')}
         if (accessInstructions && typeof accessInstructions === 'object' && accessInstructions.steps) {
           lines.push('### Access Instructions');
           lines.push('');
-          const title = String(accessInstructions.title || 'Access Instructions').trim();
+          const accessContext = { nodeName, nodeIp, nodeId };
+          const title = resolveFlowGuideTemplateText(String(accessInstructions.title || 'Access Instructions').trim(), assign, accessContext) || 'Access Instructions';
           lines.push(`**${title}**`);
           lines.push('');
           const steps = Array.isArray(accessInstructions.steps) ? accessInstructions.steps : [];
-          steps.forEach((s) => {
+          steps.forEach((s, accessIndex) => {
             if (!s || typeof s !== 'object') return;
-            const stepNum = s.step || '';
-            const stepTitle = String(s.title || '').trim();
+            const stepNum = accessIndex + 1;
+            const stepTitle = resolveFlowGuideTemplateText(String(s.title || `Step ${stepNum}`).trim(), assign, accessContext) || `Step ${stepNum}`;
             let instructions = String(s.instructions || '').trim();
             // Resolve variable references like {{PORT}}, {{NODE}}, {{PATH}}, {{USERNAME}}, {{PASSWORD}}
             const outputs = (assign.resolved_outputs && typeof assign.resolved_outputs === 'object') ? assign.resolved_outputs : {};
@@ -11338,7 +11621,8 @@ ${out.join('\n')}
               })
               .replace(/\{\{USERNAME\}\}/g, () => _credentialParts().user || 'user')
               .replace(/\{\{PASSWORD\}\}/g, () => _credentialParts().password || 'password');
-            if (stepNum && stepTitle) lines.push(`${stepNum}. **${stepTitle}**`);
+            instructions = resolveFlowGuideTemplateText(instructions, assign, accessContext);
+            lines.push(`${stepNum}. **${stepTitle}**`);
             if (instructions) {
               instructions.split('\n').forEach((line) => {
                 lines.push(`   ${line}`);
@@ -11388,7 +11672,7 @@ ${out.join('\n')}
       };
       
       // Apply access instructions
-      const hasAccessInstructions = _applyAccessInstructions(assignment, nodeName);
+      const hasAccessInstructions = _applyAccessInstructions(assignment, nodeName, nodeIp, nodeId);
       if (!hasAccessInstructions) {
         lines.push('### Access Instructions');
         lines.push('');
@@ -11402,7 +11686,7 @@ ${out.join('\n')}
         lines.push('');
         FLOW_HINT_LEVEL_ORDER.forEach((level) => {
           const values = Array.isArray(structuredHintLevels[level])
-            ? structuredHintLevels[level].map(formatGuideHintLine).filter(Boolean)
+            ? structuredHintLevels[level].map((value) => formatGuideHintLine(resolveFlowGuideTemplateText(value, assignment, guideContext))).filter(Boolean)
             : [];
           if (!values.length) return;
           const firstValue = values[0];
@@ -11446,7 +11730,7 @@ ${out.join('\n')}
       lines.push('### Resolved Facts');
       lines.push('');
       const factRows = [];
-      resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push([seqOneRequiredInputs.has(k) ? 'Input (Seq 1 required)' : 'Input', k, pathInfo.value, pathInfo.status]));
+      resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push([seqOneRequiredInputs.has(k) ? suppliedRequiredInputCategory : 'Input', k, pathInfo.value, pathInfo.status]));
       resolvedOutputFacts.forEach(([k, pathInfo]) => factRows.push(['Output', k, pathInfo.value, pathInfo.status]));
       resolvedInjects.forEach((item, idx) => factRows.push(['File Artifact', `Artifact ${idx + 1}`, item.value, item.status]));
       if (factRows.length) {

@@ -29,6 +29,30 @@ def test_repo_generator_manifests_have_low_medium_high_hints():
   assert not missing, "Generator manifests must include at least one low, medium, and high hint:\n" + "\n".join(missing)
 
 
+def test_injected_generator_manifests_have_candidate_destinations():
+  roots = [Path("generator_templates"), Path("outputs/installed_generators")]
+  manifests: list[Path] = []
+  for root in roots:
+    if root.exists():
+      manifests.extend(sorted(root.rglob("manifest.yaml")))
+      manifests.extend(sorted(root.rglob("manifest.yml")))
+
+  missing: list[str] = []
+  for manifest_path in manifests:
+    doc = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    injects = doc.get("injects") if isinstance(doc, dict) else None
+    inject_values = [str(item or "").strip() for item in (injects if isinstance(injects, list) else []) if str(item or "").strip()]
+    if not inject_values:
+      continue
+    candidates = doc.get("inject_candidate_paths") if isinstance(doc, dict) else None
+    candidate_values = [str(item or "").strip() for item in (candidates if isinstance(candidates, list) else []) if str(item or "").strip()]
+    valid_candidates = [item for item in candidate_values if item.startswith("/") and ".." not in item.split("/")]
+    if len(valid_candidates) < 3:
+      missing.append(f"{manifest_path}: injects set but fewer than 3 valid inject_candidate_paths")
+
+  assert not missing, "Injected generator manifests must include several valid candidate destinations:\n" + "\n".join(missing)
+
+
 def test_unquoted_flow_style_fact_names_are_repaired(tmp_path: Path):
     manifest_dir = tmp_path / "flag_node_generators" / "http" / "login_staff_portal"
     manifest_dir.mkdir(parents=True)

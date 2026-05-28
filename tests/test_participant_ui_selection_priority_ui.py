@@ -28,7 +28,8 @@ def test_participant_ui_surfaces_first_flow_hint() -> None:
         "participantFirstHintList",
         "const initialHintsFromFlow = (flow) => {",
         "add(flow.first_hints);",
-        "add(first.chain_supplied_input_hints);",
+        "assignment.chain_supplied_parallel_start === true",
+        "add(assignment.chain_supplied_input_hints);",
         "renderFirstHint(topo);",
     ]
 

@@ -127,7 +127,7 @@ def test_flow_first_marked_non_credential_input_is_chain_supplied(monkeypatch: p
     assert ok, errors
 
 
-def test_flow_optional_credential_after_first_stays_optional(monkeypatch: pytest.MonkeyPatch):
+def test_flow_parallel_start_optional_credential_is_chain_supplied(monkeypatch: pytest.MonkeyPatch):
     fake_gen = {
         "id": "git-deploy-key-repo",
         "name": "Git Deploy Key Repo",
@@ -175,9 +175,55 @@ def test_flow_optional_credential_after_first_stays_optional(monkeypatch: pytest
     first, second = fas
     assert "Credential(user, password)" in (first.get("input_fields_required") or [])
     assert "Credential(user, password)" in (first.get("chain_supplied_inputs") or [])
+    assert "Credential(user, password)" in (second.get("input_fields_required") or [])
+    assert "Credential(user, password)" in (second.get("chain_supplied_inputs") or [])
+    assert second.get("chain_supplied_sequence_index") == 2
+    assert second.get("chain_supplied_requirement_label") == "Seq 2 required"
+    assert any("Sequence 2 required supplied input" in str(hint) for hint in (second.get("hints") or []))
+
+
+def test_flow_dependent_non_start_optional_credential_stays_optional():
+    gen_defs = {
+        "producer": {
+            "id": "producer",
+            "inputs": [],
+        },
+        "git-deploy-key-repo": {
+            "id": "git-deploy-key-repo",
+            "inputs": [
+                {"name": "Credential(user, password)", "required": False, "flow_supply_when_first": True},
+            ],
+        },
+    }
+    assignments = [
+        {
+            "node_id": "h1",
+            "id": "producer",
+            "produces": ["Token(service)"],
+            "outputs": ["Token(service)"],
+        },
+        {
+            "node_id": "h2",
+            "id": "git-deploy-key-repo",
+            "requires": ["Token(service)"],
+            "inputs": ["Token(service)"],
+            "input_fields": ["Credential(user, password)"],
+            "input_fields_optional": ["Credential(user, password)"],
+            "input_fields_required": [],
+        },
+    ]
+
+    enriched = app_backend._flow_apply_first_step_chain_supplied_inputs_to_assignments(
+        assignments,
+        [{"id": "h1"}, {"id": "h2"}],
+        scenario_label="zz-test",
+        gen_defs_by_id=gen_defs,
+    )
+
+    second = enriched[1]
     assert "Credential(user, password)" in (second.get("input_fields_optional") or [])
-    assert "Credential(user, password)" not in (second.get("inputs") or [])
-    assert not second.get("chain_supplied_inputs")
+    assert "Credential(user, password)" not in (second.get("chain_supplied_inputs") or [])
+    assert not second.get("chain_supplied_input_hints")
 
 
 def test_flow_non_deploy_key_optional_credential_stays_optional(monkeypatch: pytest.MonkeyPatch):
