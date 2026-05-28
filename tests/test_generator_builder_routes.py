@@ -277,6 +277,24 @@ def test_generator_scaffold_meta_surfaces_validation_errors(monkeypatch):
     assert 'secret' in str(payload['validation_errors'][0])
 
 
+def test_builder_scaffold_validation_requires_low_medium_high_hints():
+    errors = backend._validate_builder_scaffold_runtime_contract({
+        'flag_generators/py_demo/manifest.yaml': (
+            'manifest_version: 1\n'
+            'id: demo\n'
+            'kind: flag-generator\n'
+            'inputs:\n'
+            '  - name: seed\n'
+            'hint_levels:\n'
+            '  low:\n'
+            '    - "Target: {{NEXT_NODE_IP}}"\n'
+        ),
+        'flag_generators/py_demo/generator.py': 'def main():\n    return None\n',
+    })
+
+    assert any('hint_levels.low, hint_levels.medium, and hint_levels.high' in str(item) for item in errors)
+
+
 def test_generator_prompt_intent_preview_returns_structured_sections(monkeypatch):
     client = app.test_client()
     _login(client)
@@ -291,7 +309,9 @@ def test_generator_prompt_intent_preview_returns_structured_sections(monkeypatch
             'Artifact outputs: Flag(flag_id), Credential(user,password), File(path).\n'
             'Include inject_files with File(path).\n'
             'Inject destination: /opt/bootstrap.\n'
-            'Hint levels: low: Target: {{NEXT_NODE_IP}}; medium: Credential: {{OUTPUT.Credential(user,password)}}.\n'
+            'Hint levels:\n'
+            'low: Target: {{NEXT_NODE_IP}}\n'
+            'medium: Credential: {{OUTPUT.Credential(user,password)}}.\n'
             'README should mention determinism and parity testing.'
         ),
     })
@@ -1675,6 +1695,7 @@ def test_normalize_ai_scaffold_payload_applies_hint_levels_and_inject_destinatio
     assert payload['hint_levels'] == {
         'low': ['Target: {{NEXT_NODE_IP}}'],
         'medium': ['Credential: {{OUTPUT.Credential(user,password)}}.'],
+        'high': ['Use the access instructions and README.md for the complete workflow.'],
     }
 
 
@@ -1714,6 +1735,7 @@ def test_normalize_ai_scaffold_payload_prioritizes_manual_overrides_over_prompt_
     assert payload['hint_levels'] == {
         'low': ['Target: {{NEXT_NODE_IP}}'],
         'medium': ['Credential: {{OUTPUT.Credential(user)}}'],
+        'high': ['Use the access instructions and README.md for the complete workflow.'],
     }
 
 

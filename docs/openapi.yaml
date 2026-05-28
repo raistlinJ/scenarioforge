@@ -114,6 +114,46 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/generators/prompt_intent_preview:
+    post:
+      tags:
+        - Generator Builder
+      summary: Preview Builder prompt intent and manual overrides
+      description: >-
+        Parses a Generator Builder prompt plus optional text overrides into structured
+        runtime inputs, artifact requirements/outputs, injected files, hint_levels, and README notes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratorPromptIntentPreviewRequest'
+      responses:
+        '200':
+          description: Parsed prompt intent preview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneratorPromptIntentPreviewResponse'
+        '400':
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Login required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Builder/admin role required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/generators/builder_test:
     post:
       tags:
@@ -3601,7 +3641,7 @@ components:
         hint_levels:
           type: object
           nullable: true
-          description: Structured participant hint levels rendered as collapsible guide sections.
+          description: Structured participant hint levels rendered as collapsible guide sections; generator manifests should provide at least one non-empty low, medium, and high hint.
           properties:
             low:
               type: array
@@ -3666,6 +3706,106 @@ components:
           nullable: true
           description: Optional full generator.py override used in the scaffold.
 
+    GeneratorIntentOverrides:
+      type: object
+      description: Text fields from the Generator Builder manual override panel.
+      additionalProperties: false
+      properties:
+        runtime_inputs:
+          type: string
+          nullable: true
+          description: Newline-separated runtime input specs, e.g. "seed (required)".
+        requires:
+          type: string
+          nullable: true
+          description: Newline-separated artifact requirements; append "(optional)" for optional artifacts.
+        produces:
+          type: string
+          nullable: true
+          description: Newline-separated artifact output keys.
+        inject_files:
+          type: string
+          nullable: true
+          description: Newline-separated injected output keys or file entries.
+        inject_destination:
+          type: string
+          nullable: true
+          description: Optional destination applied to inject_files entries without an explicit arrow.
+        hint_levels:
+          oneOf:
+            - type: string
+              description: >-
+                Text form such as "low: Target: {{NEXT_NODE_IP}}\nmedium: Artifact: {{OUTPUT.File(path)}}\nhigh: Use README.md".
+            - type: object
+              properties:
+                low:
+                  type: array
+                  items:
+                    type: string
+                medium:
+                  type: array
+                  items:
+                    type: string
+                high:
+                  type: array
+                  items:
+                    type: string
+          nullable: true
+        readme_mentions:
+          type: string
+          nullable: true
+          description: Comma-separated README topics the AI should include.
+        write_file_under_outputs_artifacts:
+          type: boolean
+          nullable: true
+        needs_hint_levels:
+          type: boolean
+          nullable: true
+
+    GeneratorPromptIntentPreviewRequest:
+      type: object
+      required:
+        - plugin_type
+        - prompt
+      properties:
+        plugin_type:
+          type: string
+          enum: ['flag-generator', 'flag-node-generator']
+        prompt:
+          type: string
+        intent_overrides:
+          allOf:
+            - $ref: '#/components/schemas/GeneratorIntentOverrides'
+          nullable: true
+
+    GeneratorPromptIntentPreviewResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        plugin_type:
+          type: string
+        sections:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        editable:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+        merged:
+          type: object
+          nullable: true
+          additionalProperties: true
+        notes:
+          type: object
+          nullable: true
+          additionalProperties: true
+
     GeneratorAiScaffoldRequest:
       type: object
       required:
@@ -3698,6 +3838,11 @@ components:
         enforce_ssl:
           type: boolean
           default: true
+        intent_overrides:
+          allOf:
+            - $ref: '#/components/schemas/GeneratorIntentOverrides'
+          nullable: true
+          description: Optional Builder text overrides applied before AI scaffold normalization.
         current_scaffold_request:
           allOf:
             - $ref: '#/components/schemas/GeneratorBuilderRequest'

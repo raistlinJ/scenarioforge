@@ -12,4 +12,6 @@ hint_levels:
     - "Use the access instructions and README.md for the complete workflow."
 ```
 
+Each level must contain at least one non-empty hint.
+
 Do not add older single-hint fields to new manifests.

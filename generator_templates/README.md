@@ -11,7 +11,7 @@ How to use:
 	- `flag_generators/<your_generator_dir>/...` or
 	- `flag_node_generators/<your_generator_dir>/...`
 2. Edit `generator.py`, `docker-compose.yml`, and the included `manifest.yaml`.
-3. Keep `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` in the manifest; do not add older single-hint fields.
+3. Keep at least one non-empty hint in `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`; do not add older single-hint fields.
 4. Pack install via Web UI:
 	- Create a ZIP containing `flag_generators/<your_generator_dir>/...` and/or `flag_node_generators/<your_generator_dir>/...`.
 	- Upload/import it from the Flag Catalog page (Generator Packs).

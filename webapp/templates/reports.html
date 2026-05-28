@@ -1243,6 +1243,21 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       ? assignment.description_hints.map((v) => applyReportHintOutputTemplates(String(v || '').trim(), assignment)).map((v) => String(v || '').trim()).filter(Boolean)
       : [];
     const structuredHintLevels = normalizeReportHintLevels(assignment);
+    const seqOneRequiredInputs = (step === 1 && Array.isArray(assignment.chain_supplied_inputs))
+      ? new Set(assignment.chain_supplied_inputs.map((value) => String(value || '').trim()).filter(Boolean))
+      : new Set();
+    const sequenceOneRequiredHintLines = (step === 1 && Array.isArray(assignment.chain_supplied_input_hints))
+      ? assignment.chain_supplied_input_hints
+        .map((value) => applyReportHintOutputTemplates(String(value || '').trim(), assignment))
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+      : [];
+    if (sequenceOneRequiredHintLines.length) {
+      if (!Array.isArray(structuredHintLevels.low)) structuredHintLevels.low = [];
+      sequenceOneRequiredHintLines.forEach((value) => {
+        if (!structuredHintLevels.low.includes(value)) structuredHintLevels.low.push(value);
+      });
+    }
     const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
     const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
     const resolvedInjects = normalizeGuidePathArtifacts(assignment);
@@ -1304,7 +1319,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     } else {
       lines.push('| Input | Requirement | Needed to complete this step? |');
       lines.push('| --- | --- | --- |');
-      requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | Required | Yes |`));
+      requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | ${seqOneRequiredInputs.has(name) ? 'Seq 1 required' : 'Required'} | Yes |`));
       optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
     }
     lines.push('');
@@ -1503,7 +1518,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     lines.push('### Resolved Facts');
     lines.push('');
     const factRows = [];
-    resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push(['Input', k, pathInfo.value, pathInfo.status]));
+    resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push([seqOneRequiredInputs.has(k) ? 'Input (Seq 1 required)' : 'Input', k, pathInfo.value, pathInfo.status]));
     resolvedOutputFacts.forEach(([k, pathInfo]) => factRows.push(['Output', k, pathInfo.value, pathInfo.status]));
     resolvedInjects.forEach((item, idx) => factRows.push(['File Artifact', `Artifact ${idx + 1}`, item.value, item.status]));
     if (factRows.length) {

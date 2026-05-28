@@ -2,7 +2,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from scenarioforge.generator_manifests import discover_generator_manifests
+
+
+def test_repo_generator_manifests_have_low_medium_high_hints():
+  roots = [Path("generator_templates"), Path("outputs/installed_generators")]
+  manifests: list[Path] = []
+  for root in roots:
+    if root.exists():
+      manifests.extend(sorted(root.rglob("manifest.yaml")))
+      manifests.extend(sorted(root.rglob("manifest.yml")))
+
+  assert manifests, "No generator manifests found to validate hint level coverage."
+
+  missing: list[str] = []
+  for manifest_path in manifests:
+    doc = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    levels = doc.get("hint_levels") if isinstance(doc, dict) else None
+    for level in ("low", "medium", "high"):
+      values = (levels or {}).get(level) if isinstance(levels, dict) else None
+      if not isinstance(values, list) or not any(str(item or "").strip() for item in values):
+        missing.append(f"{manifest_path}: missing hint_levels.{level}")
+
+  assert not missing, "Generator manifests must include at least one low, medium, and high hint:\n" + "\n".join(missing)
 
 
 def test_unquoted_flow_style_fact_names_are_repaired(tmp_path: Path):
