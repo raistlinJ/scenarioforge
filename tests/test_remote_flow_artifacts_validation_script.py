@@ -360,12 +360,12 @@ def test_remote_validator_maps_numeric_node_id_to_docker_alias():
     assert "target_container = f\"docker-{node_id}\"" in script
 
 
-def test_remote_validator_defaults_container_probe_to_flow_injects_only():
+def test_remote_validator_does_not_add_generic_container_probe_fallback():
     script = backend._remote_flow_artifacts_validation_script([
         {'node_id': '4', 'generator_id': 'binary_embed_text'}
     ], scenario_label='LiveTopologySmoke')
 
-    assert "container_dest_paths.append('/flow_injects')" in script
+    assert "container_dest_paths.append('/flow_injects')" not in script
     assert "container_dest_paths.append('/flow_artifacts')" not in script
 
 

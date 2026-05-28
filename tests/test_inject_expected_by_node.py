@@ -299,6 +299,46 @@ def test_extract_inject_expected_by_node_resolved_sources_override_detail(monkey
     assert out['docker-5'] == ['/exports']
 
 
+def test_extract_inject_expected_by_node_preserves_explicit_inject_destinations(monkeypatch):
+    run_dir = '/tmp/vulns/flag_node_generators_runs/run123'
+    monkeypatch.setattr(
+        backend,
+        '_flow_state_from_xml_path',
+        lambda *a, **k: {
+            'flag_assignments': [
+                {
+                    'node_id': '6',
+                    'id': 'git_deploy_key_repo',
+                    'type': 'flag-node-generator',
+                    'inject_source_dir': run_dir,
+                    'inject_files': [
+                        f'{run_dir}/service/private/deploy.key -> /srv/git/deploy.git',
+                        f'{run_dir}/reports/summary.txt -> /opt/executive/reports',
+                    ],
+                    'resolved_paths': {
+                        'inject_sources': [
+                            {'path': f'{run_dir}/service/private/deploy.key', 'is_remote': True},
+                            {'path': f'{run_dir}/reports/summary.txt', 'is_remote': True},
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {6: {'name': 'docker-1'}},
+    )
+
+    out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'NewScenario1')
+
+    assert out['docker-1'] == [
+        '/srv/git/deploy.git/deploy.key',
+        '/opt/executive/reports/summary.txt',
+    ]
+
+
 def test_extract_inject_expected_by_node_ignores_resolved_sources_without_inject_intent(monkeypatch):
     monkeypatch.setattr(
         backend,

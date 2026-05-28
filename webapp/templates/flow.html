@@ -6824,8 +6824,38 @@
           header.appendChild(h5);
           stack.appendChild(header);
 
-          const availableInputs = Array.isArray(inAll) ? inAll.map(String).filter(Boolean) : [];
-          const availableOutputs = Array.isArray(outFields) ? outFields.map(String).filter(Boolean) : [];
+          function updateInjectSourceAvailability() {
+            const rows = Array.isArray(injectOverrideInputs) ? injectOverrideInputs.filter(Boolean) : [];
+            const used = new Set();
+            rows.forEach((entry) => {
+              const sel = entry && entry.srcEl ? entry.srcEl : null;
+              const value = String((sel && sel.value) || '').trim();
+              if (!sel || !value) return;
+              if (!used.has(value)) {
+                used.add(value);
+                return;
+              }
+              const replacement = Array.from(sel.options || []).find((opt) => {
+                const optValue = String((opt && opt.value) || '').trim();
+                return optValue && !used.has(optValue);
+              });
+              if (replacement) {
+                sel.value = String(replacement.value || '').trim();
+                used.add(sel.value);
+              }
+            });
+
+            rows.forEach((entry) => {
+              const sel = entry && entry.srcEl ? entry.srcEl : null;
+              if (!sel) return;
+              const current = String(sel.value || '').trim();
+              Array.from(sel.options || []).forEach((opt) => {
+                const optValue = String((opt && opt.value) || '').trim();
+                opt.disabled = !!(optValue && optValue !== current && used.has(optValue));
+              });
+            });
+          }
+
           const listedInjectDefaults = new Map();
           const availableListedInjects = [];
           try {
@@ -6838,13 +6868,6 @@
               if (!listedInjectDefaults.has(src) && dest) listedInjectDefaults.set(src, dest);
             });
           } catch (e) { }
-          let availableResolvedOutputs = [];
-          try {
-            if (resolvedOutputs && typeof resolvedOutputs === 'object' && !Array.isArray(resolvedOutputs)) {
-              availableResolvedOutputs = Object.keys(resolvedOutputs || {}).map(String).filter(Boolean);
-            }
-          } catch (e) { availableResolvedOutputs = []; }
-
           function resolvedTargetsFor(srcKey) {
             if (!resolvedOutputs || typeof resolvedOutputs !== 'object' || Array.isArray(resolvedOutputs)) return [];
             const raw = String(srcKey || '').trim();
@@ -6887,131 +6910,83 @@
             return [];
           }
 
-          function buildVarPicker() {
-            const sel = document.createElement('select');
-            sel.className = 'form-select form-select-sm font-monospace';
-            const empty = document.createElement('option');
-            empty.value = '';
-            empty.textContent = 'Pick listed inject/input/output…';
-            sel.appendChild(empty);
-
-            function addGroup(label, items) {
-              if (!items || !items.length) return;
-              const grp = document.createElement('optgroup');
-              grp.label = label;
-              items.forEach((k) => {
-                const opt = document.createElement('option');
-                opt.value = k;
-                opt.textContent = k;
-                grp.appendChild(opt);
-              });
-              sel.appendChild(grp);
-            }
-
-            addGroup('Listed injects', Array.from(new Set(availableListedInjects)));
-            addGroup('Inputs', Array.from(new Set(availableInputs)));
-            addGroup('Outputs', Array.from(new Set(availableOutputs)));
-            addGroup('Resolved outputs', Array.from(new Set(availableResolvedOutputs)));
-            return sel;
-          }
-
           function addRow(value) {
             const parsed = splitInjectSpec(value);
             const row = document.createElement('div');
             row.className = 'd-grid gap-2 align-items-center';
             row.style.gridTemplateColumns = '1fr 1fr 160px 260px 90px';
-
-            const srcInp = document.createElement('input');
-            srcInp.type = 'text';
-            srcInp.className = 'form-control form-control-sm font-monospace';
-            srcInp.placeholder = 'e.g., hint.txt or File(path)';
-            {
-              let rawSrc = String(parsed.src ?? '');
-              if (_isHostLocalSyntheticPath(rawSrc)) {
-                rawSrc = basenameFromPath(rawSrc);
-              }
+            const initialSrc = (() => {
+              let rawSrc = String(parsed.src ?? '').trim();
+              if (_isHostLocalSyntheticPath(rawSrc)) rawSrc = basenameFromPath(rawSrc);
               if (rawSrc.startsWith('upload:')) {
                 const base = basenameFromPath(rawSrc.slice('upload:'.length));
-                srcInp.dataset.uploadToken = rawSrc;
-                srcInp.value = base ? `artifacts/${base}` : '';
-              } else {
-                srcInp.value = rawSrc;
+                return base ? `artifacts/${base}` : '';
               }
+              return rawSrc;
+            })();
+            const sourceOptions = (() => {
+              const seen = new Set();
+              const out = [];
+              (Array.isArray(availableListedInjects) ? availableListedInjects : []).forEach((rawSrc) => {
+                const s = String(rawSrc || '').trim();
+                if (!s || seen.has(s)) return;
+                seen.add(s);
+                out.push(s);
+              });
+              if (initialSrc && !seen.has(initialSrc)) {
+                seen.add(initialSrc);
+                out.push(initialSrc);
+              }
+              return out;
+            })();
+            const srcSelect = document.createElement('select');
+            srcSelect.className = 'form-select form-select-sm font-monospace';
+            sourceOptions.forEach((sourcePath) => {
+              const opt = document.createElement('option');
+              opt.value = sourcePath;
+              opt.textContent = sourcePath;
+              srcSelect.appendChild(opt);
+            });
+            if (initialSrc && sourceOptions.includes(initialSrc)) {
+              srcSelect.value = initialSrc;
             }
-
-            const destInp = document.createElement('input');
-            destInp.type = 'text';
-            destInp.className = 'form-control form-control-sm font-monospace';
-            destInp.placeholder = '/flow_injects (default)';
-            destInp.value = String(parsed.dest ?? '');
 
             const destWrap = document.createElement('div');
             destWrap.className = 'd-flex flex-column gap-1';
-            destWrap.appendChild(destInp);
-            let destPicker = null;
-            if (injectCandidatePaths.length) {
-              destPicker = document.createElement('select');
-              destPicker.className = 'form-select form-select-sm font-monospace';
-              const emptyDest = document.createElement('option');
-              emptyDest.value = '';
-              emptyDest.textContent = 'Pick candidate destination...';
-              destPicker.appendChild(emptyDest);
-              injectCandidatePaths.forEach((candidatePath) => {
-                const opt = document.createElement('option');
-                opt.value = candidatePath;
-                opt.textContent = candidatePath;
-                destPicker.appendChild(opt);
+            const initialDest = String(parsed.dest ?? '').trim();
+            const candidateDestOptions = (() => {
+              const seen = new Set();
+              const out = [];
+              (Array.isArray(injectCandidatePaths) ? injectCandidatePaths : []).forEach((rawPath) => {
+                const p = String(rawPath || '').trim();
+                if (!p || !p.startsWith('/') || seen.has(p)) return;
+                seen.add(p);
+                out.push(p);
               });
-              destWrap.appendChild(destPicker);
-            }
-
-            const picker = buildVarPicker();
-
-            const uploadBtn = document.createElement('button');
-            uploadBtn.type = 'button';
-            uploadBtn.className = 'btn btn-sm btn-outline-primary';
-            uploadBtn.textContent = 'Upload';
-
-            const uploadInput = document.createElement('input');
-            uploadInput.type = 'file';
-            uploadInput.className = 'd-none';
-
-            uploadBtn.addEventListener('click', () => { try { uploadInput.click(); } catch (e) { } });
-            uploadInput.addEventListener('change', async () => {
-              const fileObj = (uploadInput.files && uploadInput.files.length) ? uploadInput.files[0] : null;
-              if (!fileObj) return;
-              uploadBtn.disabled = true;
-              const prev = uploadBtn.textContent;
-              uploadBtn.textContent = 'Uploading…';
-              try {
-                const scen = (scenarioEl && scenarioEl.value) ? String(scenarioEl.value).trim() : '';
-                const fd = new FormData();
-                fd.append('scenario', scen);
-                fd.append('step_index', String(i));
-                fd.append('generator_id', String(generatorIdForDialog || ''));
-                fd.append('file', fileObj, (fileObj && fileObj.name) ? fileObj.name : 'upload');
-                const resp = await fetch('/api/flag-sequencing/upload_flow_inject_file', { method: 'POST', body: fd });
-                let data = null;
-                try { data = await resp.json(); } catch (e) { data = null; }
-                if (!resp.ok || !data || !data.ok) {
-                  const msg = (data && data.error) ? String(data.error) : `Upload failed (HTTP ${resp.status})`;
-                  throw new Error(msg);
-                }
-                try { srcInp.dataset.uploadToken = String(data.inject_value || data.stored_path || ''); } catch (e) { }
-                const base = basenameFromPath(String(data.stored_filename || ''));
-                srcInp.value = base ? `artifacts/${base}` : String(data.stored_filename || data.original_filename || '') || 'artifacts/upload';
-                injectsTouched = true;
-                try { refreshPathHints(); } catch (e) { }
-              } catch (err) {
-                alert(String((err && err.message) || err || 'Upload failed'));
-              } finally {
-                uploadBtn.disabled = false;
-                uploadBtn.textContent = prev;
-                try { uploadInput.value = ''; } catch (e) { }
+              if (initialDest && initialDest.startsWith('/') && !seen.has(initialDest)) {
+                seen.add(initialDest);
+                out.push(initialDest);
               }
-            });
+              return out;
+            })();
 
-            const rowObj = { srcEl: srcInp, destEl: destInp };
+            const effectiveDestOptions = candidateDestOptions.length
+              ? candidateDestOptions.slice()
+              : [initialDest || '/flow_injects'];
+            const destSelect = document.createElement('select');
+            destSelect.className = 'form-select form-select-sm font-monospace';
+            effectiveDestOptions.forEach((candidatePath) => {
+              const opt = document.createElement('option');
+              opt.value = candidatePath;
+              opt.textContent = candidatePath;
+              destSelect.appendChild(opt);
+            });
+            if (initialDest && effectiveDestOptions.includes(initialDest)) {
+              destSelect.value = initialDest;
+            }
+            destWrap.appendChild(destSelect);
+
+            const rowObj = { srcEl: srcSelect, destEl: destSelect };
 
             const del = document.createElement('button');
             del.type = 'button';
@@ -7020,19 +6995,21 @@
             del.addEventListener('click', () => {
               try { row.remove(); } catch (e) { }
               injectOverrideInputs = injectOverrideInputs.filter(x => x !== rowObj);
+              try { updateInjectSourceAvailability(); } catch (e) { }
               injectsTouched = true;
             });
 
             injectOverrideInputs.push(rowObj);
             const pickWrap = document.createElement('div');
-            pickWrap.className = 'd-flex align-items-center gap-2';
-            pickWrap.appendChild(picker);
-            pickWrap.appendChild(uploadBtn);
-            pickWrap.appendChild(uploadInput);
+            pickWrap.className = 'small text-muted';
+            pickWrap.textContent = 'Generator manifest inject path';
 
             const resolvedHint = document.createElement('div');
             resolvedHint.className = 'small text-muted';
             resolvedHint.textContent = '-';
+            function getCurrentDestValue() {
+              return String(destSelect.value || '').trim();
+            }
             function summarizeValues(values) {
               const cleaned = Array.from(new Set((Array.isArray(values) ? values : []).map(v => String(v || '').trim()).filter(Boolean)));
               if (!cleaned.length) return '-';
@@ -7065,24 +7042,14 @@
             }
 
             function refreshPathHints() {
-              let key = String((srcInp && srcInp.value) ?? '').trim();
-              try {
-                if (srcInp && srcInp.dataset && srcInp.dataset.uploadToken) {
-                  key = String(srcInp.dataset.uploadToken || '').trim() || key;
-                }
-              } catch (e) { }
-              const displaySrc = key.startsWith('upload:')
-                ? ((() => {
-                  const base = basenameFromPath(key.slice('upload:'.length));
-                  return base ? `artifacts/${base}` : key;
-                })())
-                : key;
+              const key = String((srcSelect && srcSelect.value) ?? '').trim();
+              const displaySrc = key;
               const targets = resolvedTargetsFor(key);
               const tokenLike = !displaySrc.includes('/') && /^[A-Za-z_][A-Za-z0-9_]*\(.+\)$/.test(displaySrc);
               const likelySymbolicToken = !displaySrc.includes('/')
                 && !displaySrc.startsWith('artifacts/')
                 && !/\.[A-Za-z0-9]{1,16}$/.test(displaySrc);
-              const destDirs = destinationDirsFor(destInp.value);
+              const destDirs = destinationDirsFor(getCurrentDestValue());
               pathViewToggleBtn.textContent = currentInjectsPathViewLabel();
 
               if (!targets.length) {
@@ -7119,43 +7086,37 @@
 
             try { refreshPathHints(); } catch (e) { }
 
-            row.appendChild(srcInp);
+            row.appendChild(srcSelect);
             row.appendChild(resolvedHint);
             row.appendChild(destWrap);
             row.appendChild(pickWrap);
             row.appendChild(del);
             stack.appendChild(row);
 
-            srcInp.addEventListener('input', () => {
+            srcSelect.addEventListener('change', () => {
               injectsTouched = true;
-              try { delete srcInp.dataset.uploadToken; } catch (e) { }
+              try { updateInjectSourceAvailability(); } catch (e) { }
               try { refreshPathHints(); } catch (e) { }
             });
-            destInp.addEventListener('input', () => {
+            destSelect.addEventListener('change', () => {
               injectsTouched = true;
               try { refreshPathHints(); } catch (e) { }
             });
-            if (destPicker) {
-              destPicker.addEventListener('change', () => {
-                const v = String(destPicker.value || '').trim();
-                if (!v) return;
-                destInp.value = v;
-                injectsTouched = true;
-                try { destPicker.value = ''; } catch (e) { }
-                try { refreshPathHints(); } catch (e) { }
-              });
-            }
-            picker.addEventListener('change', () => {
-              const v = String(picker.value || '').trim();
-              if (!v) return;
-              srcInp.value = v;
+            srcSelect.addEventListener('change', () => {
+              const v = String(srcSelect.value || '').trim();
               const listedDefaultDest = String(listedInjectDefaults.get(v) || '').trim();
-              if (listedDefaultDest && !String(destInp.value || '').trim()) {
-                destInp.value = listedDefaultDest;
+              if (listedDefaultDest) {
+                const exists = Array.from(destSelect.options || []).some((opt) => String(opt.value || '').trim() === listedDefaultDest);
+                if (!exists) {
+                  const opt = document.createElement('option');
+                  opt.value = listedDefaultDest;
+                  opt.textContent = listedDefaultDest;
+                  destSelect.appendChild(opt);
+                }
+                destSelect.value = listedDefaultDest;
               }
               injectsTouched = true;
-              try { delete srcInp.dataset.uploadToken; } catch (e) { }
-              try { picker.value = ''; } catch (e) { }
+              try { updateInjectSourceAvailability(); } catch (e) { }
               try { refreshPathHints(); } catch (e) { }
             });
           }
@@ -7174,14 +7135,9 @@
 
           (Array.isArray(files) ? files : []).forEach(addRow);
 
-          const addBtn = document.createElement('button');
-          addBtn.type = 'button';
-          addBtn.className = 'btn btn-sm btn-outline-primary';
-          addBtn.textContent = 'Add inject file';
-          addBtn.addEventListener('click', () => { injectsTouched = true; addRow(''); });
+          try { updateInjectSourceAvailability(); } catch (e) { }
 
           listWrap.appendChild(stack);
-          listWrap.appendChild(addBtn);
         }
 
         const existingOverride = getOverrideInjectsFromAssignment();

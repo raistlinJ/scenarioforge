@@ -149,6 +149,274 @@ def test_validate_injects_missing_respects_per_node_expectations(monkeypatch):
     assert summary.get('injects_missing') == []
 
 
+def test_validate_injects_checks_custom_destination_directories(monkeypatch):
+    monkeypatch.setattr(backend, '_expected_from_plan_preview', lambda *a, **k: {13: {'name': 'docker-13'}})
+    monkeypatch.setattr(backend, '_parse_session_xml_for_compare', lambda *a, **k: {}, raising=False)
+    monkeypatch.setattr(backend, '_extract_inject_specs_from_flow_state', lambda *a, **k: [])
+    monkeypatch.setattr(
+        backend,
+        '_extract_inject_expected_by_node',
+        lambda *a, **k: {
+            'docker-13': [
+                '/srv/git/deploy.git/deploy.key',
+                '/opt/executive/reports/summary.txt',
+            ]
+        },
+    )
+    monkeypatch.setattr(backend, '_extract_inject_dirs_from_plan_xml', lambda *a, **k: ['/flow_injects'])
+    monkeypatch.setattr(
+        backend,
+        '_extract_inject_files_from_plan_xml',
+        lambda *a, **k: ['/srv/git/deploy.git/deploy.key', '/opt/executive/reports/summary.txt'],
+    )
+    monkeypatch.setattr(backend, '_extract_expected_docker_and_vuln_nodes_from_plan_xml', lambda *a, **k: ([], []))
+    monkeypatch.setattr(backend, '_session_docker_nodes_from_xml', lambda *a, **k: ['docker-13'])
+    monkeypatch.setattr(backend, '_extract_inject_node_ids_from_flow_state', lambda *a, **k: {13})
+    monkeypatch.setattr(backend, '_flow_state_from_xml_path', lambda *a, **k: {'flag_assignments': []})
+
+    captured = {}
+
+    def _fake_remote_json(_cfg, script, logger=None, label='', timeout=0):
+        if label == 'docker.exec.injects_status':
+            captured['script'] = script
+            return {
+                'items': [
+                    {
+                        'container': 'docker-13',
+                        'exists': True,
+                        'running': True,
+                        'inject_count': 2,
+                        'inject_samples': [
+                            '/srv/git/deploy.git/deploy.key',
+                            '/opt/executive/reports/summary.txt',
+                        ],
+                        'inject_dirs_found': ['/srv/git/deploy.git', '/opt/executive/reports'],
+                        'expected_present': [
+                            '/srv/git/deploy.git/deploy.key',
+                            '/opt/executive/reports/summary.txt',
+                        ],
+                        'expected_missing': [],
+                        'debug_logs': [],
+                    }
+                ]
+            }
+        if label == 'docker.compose.assignments':
+            return {'nodes': []}
+        if label == 'flow.artifacts.validate':
+            return {'items': []}
+        return {'items': []}
+
+    monkeypatch.setattr(backend, '_run_remote_python_json', _fake_remote_json)
+
+    summary = backend._validate_session_nodes_and_injects(
+        scenario_xml_path='/tmp/scenario.xml',
+        session_xml_path='/tmp/session.xml',
+        core_cfg={'ssh_enabled': True},
+        preview_plan_path=None,
+        scenario_label='NewScenario1',
+    )
+
+    script = str(captured.get('script') or '')
+    assert 'INJECT_DIRS = ["/opt/executive/reports", "/srv/git/deploy.git"]' in script
+    assert 'INJECT_DIRS = ["/flow_injects", "/flow_artifacts"]' not in script
+    assert summary.get('injects_missing') == []
+
+
+def test_validate_injects_checks_only_chain_designated_dirs_across_nodes(monkeypatch):
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {13: {'name': 'docker-13'}, 16: {'name': 'docker-16'}},
+    )
+    monkeypatch.setattr(backend, '_parse_session_xml_for_compare', lambda *a, **k: {}, raising=False)
+    monkeypatch.setattr(backend, '_extract_inject_specs_from_flow_state', lambda *a, **k: [])
+    monkeypatch.setattr(
+        backend,
+        '_extract_inject_expected_by_node',
+        lambda *a, **k: {
+            'docker-13': [
+                '/srv/git/deploy.git/deploy.key',
+                '/opt/executive/reports/summary.txt',
+            ],
+            'docker-16': [
+                '/var/lib/redis/acl/acl.conf',
+                '/opt/executive/reports/recon.log',
+            ],
+        },
+    )
+    monkeypatch.setattr(backend, '_extract_inject_dirs_from_plan_xml', lambda *a, **k: ['/flow_injects'])
+    monkeypatch.setattr(
+        backend,
+        '_extract_inject_files_from_plan_xml',
+        lambda *a, **k: [
+            '/srv/git/deploy.git/deploy.key',
+            '/opt/executive/reports/summary.txt',
+            '/var/lib/redis/acl/acl.conf',
+            '/opt/executive/reports/recon.log',
+        ],
+    )
+    monkeypatch.setattr(backend, '_extract_expected_docker_and_vuln_nodes_from_plan_xml', lambda *a, **k: ([], []))
+    monkeypatch.setattr(backend, '_session_docker_nodes_from_xml', lambda *a, **k: ['docker-13', 'docker-16'])
+    monkeypatch.setattr(backend, '_extract_inject_node_ids_from_flow_state', lambda *a, **k: {13, 16})
+    monkeypatch.setattr(backend, '_flow_state_from_xml_path', lambda *a, **k: {'flag_assignments': []})
+
+    captured = {}
+
+    def _fake_remote_json(_cfg, script, logger=None, label='', timeout=0):
+        if label == 'docker.exec.injects_status':
+            captured['script'] = script
+            return {
+                'items': [
+                    {
+                        'container': 'docker-13',
+                        'exists': True,
+                        'running': True,
+                        'inject_count': 2,
+                        'inject_samples': [
+                            '/srv/git/deploy.git/deploy.key',
+                            '/opt/executive/reports/summary.txt',
+                        ],
+                        'inject_dirs_found': ['/srv/git/deploy.git', '/opt/executive/reports'],
+                        'expected_present': [
+                            '/srv/git/deploy.git/deploy.key',
+                            '/opt/executive/reports/summary.txt',
+                        ],
+                        'expected_missing': [],
+                        'debug_logs': [],
+                    },
+                    {
+                        'container': 'docker-16',
+                        'exists': True,
+                        'running': True,
+                        'inject_count': 2,
+                        'inject_samples': [
+                            '/var/lib/redis/acl/acl.conf',
+                            '/opt/executive/reports/recon.log',
+                        ],
+                        'inject_dirs_found': ['/var/lib/redis/acl', '/opt/executive/reports'],
+                        'expected_present': [
+                            '/var/lib/redis/acl/acl.conf',
+                            '/opt/executive/reports/recon.log',
+                        ],
+                        'expected_missing': [],
+                        'debug_logs': [],
+                    },
+                ]
+            }
+        if label == 'docker.compose.assignments':
+            return {'nodes': []}
+        if label == 'flow.artifacts.validate':
+            return {'items': []}
+        return {'items': []}
+
+    monkeypatch.setattr(backend, '_run_remote_python_json', _fake_remote_json)
+
+    summary = backend._validate_session_nodes_and_injects(
+        scenario_xml_path='/tmp/scenario.xml',
+        session_xml_path='/tmp/session.xml',
+        core_cfg={'ssh_enabled': True},
+        preview_plan_path=None,
+        scenario_label='NewScenario1',
+    )
+
+    script = str(captured.get('script') or '')
+    assert 'INJECT_DIRS = ["/opt/executive/reports", "/srv/git/deploy.git", "/var/lib/redis/acl"]' in script
+    assert 'INJECT_DIRS = ["/flow_injects", "/flow_artifacts"]' not in script
+    assert summary.get('injects_missing') == []
+
+
+def test_validate_injects_probe_dirs_ignore_nodes_without_expectations(monkeypatch):
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {13: {'name': 'docker-13'}, 99: {'name': 'docker-99'}},
+    )
+    monkeypatch.setattr(backend, '_parse_session_xml_for_compare', lambda *a, **k: {}, raising=False)
+    monkeypatch.setattr(backend, '_extract_inject_specs_from_flow_state', lambda *a, **k: [])
+    monkeypatch.setattr(
+        backend,
+        '_extract_inject_expected_by_node',
+        lambda *a, **k: {
+            'docker-13': [
+                '/srv/git/deploy.git/deploy.key',
+                '/opt/executive/reports/summary.txt',
+            ],
+        },
+    )
+    monkeypatch.setattr(backend, '_extract_inject_dirs_from_plan_xml', lambda *a, **k: ['/flow_injects'])
+    monkeypatch.setattr(
+        backend,
+        '_extract_inject_files_from_plan_xml',
+        lambda *a, **k: [
+            '/srv/git/deploy.git/deploy.key',
+            '/opt/executive/reports/summary.txt',
+        ],
+    )
+    monkeypatch.setattr(backend, '_extract_expected_docker_and_vuln_nodes_from_plan_xml', lambda *a, **k: ([], []))
+    monkeypatch.setattr(backend, '_session_docker_nodes_from_xml', lambda *a, **k: ['docker-13', 'docker-99'])
+    monkeypatch.setattr(backend, '_extract_inject_node_ids_from_flow_state', lambda *a, **k: {13, 99})
+    monkeypatch.setattr(backend, '_flow_state_from_xml_path', lambda *a, **k: {'flag_assignments': []})
+
+    captured = {}
+
+    def _fake_remote_json(_cfg, script, logger=None, label='', timeout=0):
+        if label == 'docker.exec.injects_status':
+            captured['script'] = script
+            return {
+                'items': [
+                    {
+                        'container': 'docker-13',
+                        'exists': True,
+                        'running': True,
+                        'inject_count': 2,
+                        'inject_samples': [
+                            '/srv/git/deploy.git/deploy.key',
+                            '/opt/executive/reports/summary.txt',
+                        ],
+                        'inject_dirs_found': ['/srv/git/deploy.git', '/opt/executive/reports'],
+                        'expected_present': [
+                            '/srv/git/deploy.git/deploy.key',
+                            '/opt/executive/reports/summary.txt',
+                        ],
+                        'expected_missing': [],
+                        'debug_logs': [],
+                    },
+                    {
+                        'container': 'docker-99',
+                        'exists': True,
+                        'running': True,
+                        'inject_count': 0,
+                        'inject_samples': [],
+                        'inject_dirs_found': [],
+                        'expected_present': [],
+                        'expected_missing': [],
+                        'debug_logs': [],
+                    },
+                ]
+            }
+        if label == 'docker.compose.assignments':
+            return {'nodes': []}
+        if label == 'flow.artifacts.validate':
+            return {'items': []}
+        return {'items': []}
+
+    monkeypatch.setattr(backend, '_run_remote_python_json', _fake_remote_json)
+
+    summary = backend._validate_session_nodes_and_injects(
+        scenario_xml_path='/tmp/scenario.xml',
+        session_xml_path='/tmp/session.xml',
+        core_cfg={'ssh_enabled': True},
+        preview_plan_path=None,
+        scenario_label='NewScenario1',
+    )
+
+    script = str(captured.get('script') or '')
+    assert 'INJECT_DIRS = ["/opt/executive/reports", "/srv/git/deploy.git"]' in script
+    assert '/docker-99' not in script
+    assert 'INJECT_DIRS = ["/flow_injects", "/flow_artifacts"]' not in script
+    assert summary.get('injects_missing') == []
+
+
 def test_validate_non_running_container_not_counted_as_missing_inject(monkeypatch):
     monkeypatch.setattr(backend, '_expected_from_plan_preview', lambda *a, **k: {3: {'name': 'docker-3'}})
     monkeypatch.setattr(backend, '_parse_session_xml_for_compare', lambda *a, **k: {}, raising=False)
