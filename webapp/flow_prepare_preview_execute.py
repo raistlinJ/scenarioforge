@@ -1382,7 +1382,17 @@ def _finalize_prepare_preview_response(
     warning: str | None,
     backend: Any,
     flow_errors_detail: Any,
+    phase_timings: dict[str, float] | None,
+    finalize_started_at: float | None,
 ) -> tuple[Any, int]:
+    phase_timings_out: dict[str, float] = dict(phase_timings or {})
+    if isinstance(finalize_started_at, (int, float)):
+        try:
+            phase_timings_out['finalize_response_s'] = round(max(0.0, float(time.monotonic() - float(finalize_started_at))), 3)
+        except Exception:
+            pass
+    phase_timings_out['total_elapsed_s'] = round(max(0.0, float(time.monotonic() - started_at)), 3)
+
     try:
         try:
             normalized_flow_state = deps._enrich_flow_state_with_artifacts({'flag_assignments': flag_assignments})
@@ -1523,6 +1533,7 @@ def _finalize_prepare_preview_response(
         failed_run_dirs=failed_run_dirs,
         cleanup_generated_artifacts=bool(cleanup_generated_artifacts),
         cleanup_deleted_run_dirs=cleanup_deleted_run_dirs,
+        phase_timings=phase_timings_out,
         debug_dag=bool(debug_dag),
         dag_debug=dag_debug,
         warning=warning,
@@ -1609,6 +1620,12 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
 
 def execute_impl(*, backend: Any):
     deps = _backend_dependencies(backend)
+    phase_timings: dict[str, float] = {}
+
+    def _mark_phase(name: str, started: float) -> float:
+        elapsed = max(0.0, float(time.monotonic() - started))
+        phase_timings[str(name)] = round(elapsed, 3)
+        return elapsed
 
     # Stub for early progress calls; overridden later if generator runs occur.
     def _flow_progress(msg: str) -> None:
@@ -1649,6 +1666,8 @@ def execute_impl(*, backend: Any):
     flow_state_for_prepare = request_context['flow_state_for_prepare']
     preview = request_context['preview']
 
+    _flow_progress('Phase: Solving chain and assignments...')
+    phase_started = time.monotonic()
     prepared_chain = _prepare_chain_and_assignments(
         deps=deps,
         backend=backend,
@@ -1670,6 +1689,8 @@ def execute_impl(*, backend: Any):
         goal_facts_override=goal_facts_override,
         base_plan_path=base_plan_path,
     )
+    solve_elapsed = _mark_phase('solve_chain_and_assignments_s', phase_started)
+    _flow_progress(f'Phase complete: Solving chain and assignments ({solve_elapsed:.2f}s).')
     response = prepared_chain.get('response')
     if response is not None:
         return response
@@ -1690,6 +1711,9 @@ def execute_impl(*, backend: Any):
 
     _gen_by_id: dict[str, dict[str, Any]] = {}
 
+    if run_generators:
+        _flow_progress('Phase: Preparing generator runtime...')
+    phase_started = time.monotonic()
     remote_prepare = _prepare_remote_generator_execution(
         deps,
         run_generators=run_generators,
@@ -1699,6 +1723,9 @@ def execute_impl(*, backend: Any):
         flag_assignments=flag_assignments,
         flow_progress=_flow_progress,
     )
+    remote_elapsed = _mark_phase('prepare_remote_runtime_s', phase_started)
+    if run_generators:
+        _flow_progress(f'Phase complete: Preparing generator runtime ({remote_elapsed:.2f}s).')
     response = remote_prepare.get('response')
     if response is not None:
         return response
@@ -1706,6 +1733,7 @@ def execute_impl(*, backend: Any):
     flow_core_cfg = remote_prepare.get('flow_core_cfg') if isinstance(remote_prepare.get('flow_core_cfg'), dict) else flow_core_cfg
     flow_remote_repo_dir = str(remote_prepare.get('flow_remote_repo_dir') or '') or None
 
+    phase_started = time.monotonic()
     generator_runtime_state = _prepare_generator_runtime_state(
         deps=deps,
         backend=backend,
@@ -1720,6 +1748,9 @@ def execute_impl(*, backend: Any):
         scenario_norm=scenario_norm,
         base_plan_path=base_plan_path,
     )
+    runtime_state_elapsed = _mark_phase('prepare_generator_state_s', phase_started)
+    if run_generators:
+        _flow_progress(f'Phase complete: Preparing generator state ({runtime_state_elapsed:.2f}s).')
     response = generator_runtime_state.get('response')
     if response is not None:
         return response
@@ -1737,6 +1768,9 @@ def execute_impl(*, backend: Any):
 
     host_by_id = generator_runtime_state['host_by_id']
 
+    if run_generators:
+        _flow_progress('Phase: Running generators...')
+    phase_started = time.monotonic()
     execution_state = _execute_or_prepare_assignments(
         deps=deps,
         helpers=_flow_prepare_preview_helpers,
@@ -1765,6 +1799,9 @@ def execute_impl(*, backend: Any):
         redact_kv_for_ui=runtime_adapters['redact_kv_for_ui'],
         flow_stage_file_inputs_for_generator=runtime_adapters['flow_stage_file_inputs_for_generator'],
     )
+    execute_elapsed = _mark_phase('run_generators_or_prepare_assignments_s', phase_started)
+    if run_generators:
+        _flow_progress(f'Phase complete: Running generators ({execute_elapsed:.2f}s).')
     response = execution_state.get('response')
     if response is not None:
         return response
@@ -1776,6 +1813,8 @@ def execute_impl(*, backend: Any):
     generation_failures = execution_state['generation_failures']
     generation_skipped = execution_state['generation_skipped']
     generator_runs = execution_state['generator_runs']
+    _flow_progress('Phase: Finalizing preview payload...')
+    finalize_started_at = time.monotonic()
     return _finalize_prepare_preview_response(
         deps=deps,
         helpers=_flow_prepare_preview_helpers,
@@ -1811,6 +1850,8 @@ def execute_impl(*, backend: Any):
         warning=warning,
         backend=backend,
         flow_errors_detail=flow_errors_detail,
+        phase_timings=phase_timings,
+        finalize_started_at=finalize_started_at,
     )
 
 

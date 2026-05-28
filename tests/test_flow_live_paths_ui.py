@@ -17,6 +17,24 @@ def test_flow_assignment_persists_resolved_paths() -> None:
     assert not missing, "Missing resolved_paths persistence snippets in flow template: " + "; ".join(missing)
 
 
+def test_flow_generator_output_shows_phase_timings() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function _renderGeneratorOutputTable(runs, progressLog, phaseTimings)",
+        "const timings = (phaseTimings && typeof phaseTimings === 'object'",
+        "['solve_chain_and_assignments_s', 'Solve chain']",
+        "['run_generators_or_prepare_assignments_s', 'Run generators']",
+        "<div class=\"small text-muted mb-2\">Phase Timing</div>",
+        "const phaseTimings = (prepData && prepData.phase_timings",
+        "_renderGeneratorOutputTable(runs, progressLog, phaseTimings)",
+        "_renderGeneratorOutputTable(lastResolvePayload.generator_runs, lastResolvePayload.progress_log || [], lastResolvePayload.phase_timings || {})",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing phase timing display wiring in flow template: " + "; ".join(missing)
+
+
 def test_flow_chain_editor_hides_resolved_paths_row() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
