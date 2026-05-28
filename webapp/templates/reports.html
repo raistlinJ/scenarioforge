@@ -794,7 +794,9 @@ function alignAssignmentsToChainLocal(nodes, assignments) {
   });
 }
 
-const _REPORT_OUTPUT_TEMPLATE_PREFIX = '{' + '{OUTPUT.';
+const _REPORT_TEMPLATE_OPEN = '\u007b\u007b';
+const _REPORT_TEMPLATE_CLOSE = '\u007d\u007d';
+const _REPORT_OUTPUT_TEMPLATE_PREFIX = _REPORT_TEMPLATE_OPEN + 'OUTPUT.';
 const REPORT_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
 function applyReportHintOutputTemplates(text, assignment) {
   const t = String(text || '');
@@ -859,7 +861,7 @@ function applyReportHintOutputTemplates(text, assignment) {
     return '';
   };
 
-  return t.replace(/\{\{\s*OUTPUT\.([^}]+?)\s*\}\}/g, (full, inner) => {
+  return t.replace(/\u007b\u007b\s*OUTPUT\.([^}]+?)\s*\u007d\u007d/g, (full, inner) => {
     const raw = String(inner || '').trim();
     if (!raw) return full;
     const colon = raw.indexOf(':');
@@ -874,7 +876,7 @@ function applyReportHintOutputTemplates(text, assignment) {
 
 function resolveReportGuideTemplateText(text, assignment, context) {
   let out = applyReportHintOutputTemplates(String(text || ''), assignment);
-  if (!out || !out.includes('{{')) return out;
+  if (!out || !out.includes(_REPORT_TEMPLATE_OPEN)) return out;
   const source = assignment && typeof assignment === 'object' ? assignment : {};
   const ctx = context && typeof context === 'object' ? context : {};
   const values = new Map();
@@ -929,7 +931,7 @@ function resolveReportGuideTemplateText(text, assignment, context) {
   addObject(source.resolved_outputs);
   addObject(source.config_overrides);
   addObject(source.output_overrides);
-  return out.replace(/\{\{\s*([A-Za-z0-9_.:(),\-\s]+?)\s*\}\}/g, (full, rawKey) => {
+  return out.replace(/\u007b\u007b\s*([A-Za-z0-9_.:(),\-\s]+?)\s*\u007d\u007d/g, (full, rawKey) => {
     let key = String(rawKey || '').trim();
     if (!key) return '';
     key = key.replace(/^(?:INPUT|CONFIG|VALUE|VAR)\./i, '').trim();

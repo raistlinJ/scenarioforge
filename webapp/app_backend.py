@@ -4320,6 +4320,21 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
 
         injects = entry.get('inject_files') if isinstance(entry.get('inject_files'), list) else []
         has_inject_intent = any(str(raw or '').strip() for raw in injects)
+        has_explicit_inject_dest = False
+        for raw in injects:
+            text = str(raw or '').strip()
+            if not text:
+                continue
+            sep = '->' if '->' in text else '=>' if '=>' in text else ''
+            if not sep:
+                continue
+            try:
+                _src, _dest = text.split(sep, 1)
+            except Exception:
+                continue
+            if str(_dest or '').strip().startswith('/'):
+                has_explicit_inject_dest = True
+                break
         consumed_resolved_sources = False
 
         per_node: List[str] = []
@@ -4334,7 +4349,7 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
         ).strip()
         resolved_paths = entry.get('resolved_paths') if isinstance(entry.get('resolved_paths'), dict) else {}
         resolved_sources = resolved_paths.get('inject_sources') if isinstance(resolved_paths.get('inject_sources'), list) else []
-        if resolved_sources and has_inject_intent:
+        if resolved_sources and has_inject_intent and not has_explicit_inject_dest:
             consumed_resolved_sources = True
             for src in resolved_sources:
                 if not isinstance(src, dict):
@@ -16569,7 +16584,16 @@ def _flow_compute_flag_assignments_for_preset(
         if not isinstance(gen, dict):
             return [], f'generator not found/enabled: {gen_id}'
 
-        hint_templates = _flow_hint_templates_from_generator(gen)
+        hint_level_templates = _flow_hint_level_templates_from_generator(gen)
+        rendered_hint_levels = _flow_render_hint_level_templates(
+            hint_level_templates,
+            scenario_label=scenario_label,
+            id_to_name=id_to_name,
+            id_to_ip=id_to_ip,
+            this_id=str(cid),
+            next_id=str(next_id),
+        )
+        hint_templates = [str(x or '').strip() for x in (hint_level_templates.get('low') or []) if str(x or '').strip()]
         hint_tpl = hint_templates[0] if hint_templates else 'Next: {{NEXT_NODE_NAME}}'
 
         # Runtime IO (generator input/output fields).
@@ -16624,17 +16648,19 @@ def _flow_compute_flag_assignments_for_preset(
         outputs_effective = sorted(set(produces_artifacts) | set(output_fields))
         output_fields = sorted(set(output_fields) | set(produces_artifacts))
 
-        rendered_hints = [
-            _flow_render_hint_template(
-                t,
-                scenario_label=scenario_label,
-                id_to_name=id_to_name,
-                id_to_ip=id_to_ip,
-                this_id=str(cid),
-                next_id=str(next_id),
-            )
-            for t in (hint_templates or [])
-        ]
+        rendered_hints = [str(x or '').strip() for x in (rendered_hint_levels.get('low') or []) if str(x or '').strip()]
+        if not rendered_hints:
+            rendered_hints = [
+                _flow_render_hint_template(
+                    t,
+                    scenario_label=scenario_label,
+                    id_to_name=id_to_name,
+                    id_to_ip=id_to_ip,
+                    this_id=str(cid),
+                    next_id=str(next_id),
+                )
+                for t in (hint_templates or [])
+            ]
         out.append({
             'node_id': str(cid),
             'id': gen_id,
@@ -16658,6 +16684,8 @@ def _flow_compute_flag_assignments_for_preset(
             'input_fields_required': input_fields_required,
             'input_fields_optional': input_fields_optional,
             'output_fields': output_fields,
+            'hint_level_templates': hint_level_templates,
+            'hint_levels': rendered_hint_levels,
             'hint_template': hint_tpl,
             'hint_templates': hint_templates,
             'hint': rendered_hints[0] if rendered_hints else _flow_render_hint_template(
@@ -18322,12 +18350,23 @@ def _flow_compute_flag_assignments(
             pass
 
         next_id = chain_ids[i + 1] if (i + 1) < len(chain_ids) else ''
-        hint_templates = _flow_hint_templates_from_generator(gen)
+        hint_level_templates = _flow_hint_level_templates_from_generator(gen)
+        rendered_hint_levels = _flow_render_hint_level_templates(
+            hint_level_templates,
+            scenario_label=scenario_label,
+            id_to_name=id_to_name,
+            id_to_ip=id_to_ip,
+            this_id=str(cid),
+            next_id=str(next_id),
+        )
+        hint_templates = [str(x or '').strip() for x in (hint_level_templates.get('low') or []) if str(x or '').strip()]
         hint_tpl = hint_templates[0] if hint_templates else 'Next: {{NEXT_NODE_NAME}}'
-        rendered_hints = [
-            _render_hint(t, this_id=str(cid), next_id=str(next_id))
-            for t in (hint_templates or [])
-        ]
+        rendered_hints = [str(x or '').strip() for x in (rendered_hint_levels.get('low') or []) if str(x or '').strip()]
+        if not rendered_hints:
+            rendered_hints = [
+                _render_hint(t, this_id=str(cid), next_id=str(next_id))
+                for t in (hint_templates or [])
+            ]
 
         requires_artifacts = sorted(list(_artifact_requires_of(gen)))
         produces_artifacts = sorted(list(_artifact_produces_of(gen)))
@@ -18400,6 +18439,8 @@ def _flow_compute_flag_assignments(
             'input_fields_required': input_fields_required,
             'input_fields_optional': input_fields_optional,
             'output_fields': output_fields,
+            'hint_level_templates': hint_level_templates,
+            'hint_levels': rendered_hint_levels,
             'hint_template': hint_tpl,
             'hint_templates': hint_templates,
             'hint': rendered_hints[0] if rendered_hints else _render_hint(hint_tpl, this_id=str(cid), next_id=str(next_id)),
@@ -21031,12 +21072,23 @@ def _flow_inject_uploads_dir() -> str:
                 return jsonify({'ok': False, 'error': f'Generator {gen_id} is not compatible with node {node_id} (flag-generator requires vulnerability node).'}), 422
 
         next_id = chain_ids[i + 1] if (i + 1) < len(chain_ids) else ''
-        hint_templates = _flow_hint_templates_from_generator(gen)
+        hint_level_templates = _flow_hint_level_templates_from_generator(gen)
+        rendered_hint_levels = _flow_render_hint_level_templates(
+            hint_level_templates,
+            scenario_label=(scenario_label or scenario_norm),
+            id_to_name=id_to_name,
+            id_to_ip=id_to_ip,
+            this_id=str(node_id),
+            next_id=str(next_id),
+        )
+        hint_templates = [str(x or '').strip() for x in (hint_level_templates.get('low') or []) if str(x or '').strip()]
         hint_tpl = hint_templates[0] if hint_templates else 'Next: {{NEXT_NODE_NAME}}'
-        rendered_hints = [
-            _flow_render_hint_template(t, scenario_label=(scenario_label or scenario_norm), id_to_name=id_to_name, this_id=str(node_id), next_id=str(next_id))
-            for t in (hint_templates or [])
-        ]
+        rendered_hints = [str(x or '').strip() for x in (rendered_hint_levels.get('low') or []) if str(x or '').strip()]
+        if not rendered_hints:
+            rendered_hints = [
+                _flow_render_hint_template(t, scenario_label=(scenario_label or scenario_norm), id_to_name=id_to_name, id_to_ip=id_to_ip, this_id=str(node_id), next_id=str(next_id))
+                for t in (hint_templates or [])
+            ]
 
         # Optional user overrides for hint text. Contract:
         # - If key is absent: use generated hints.
@@ -21199,6 +21251,8 @@ def _flow_inject_uploads_dir() -> str:
             'output_fields': output_fields,
             'input_defs': list(gen.get('inputs') or []) if isinstance(gen.get('inputs'), list) else [],
             'output_defs': list(gen.get('outputs') or []) if isinstance(gen.get('outputs'), list) else [],
+            'hint_level_templates': hint_level_templates,
+            'hint_levels': rendered_hint_levels,
             'hint_template': hint_tpl,
             'hint_templates': hint_templates,
             'hint': rendered_hints[0] if rendered_hints else _flow_render_hint_template(hint_tpl, scenario_label=(scenario_label or scenario_norm), id_to_name=id_to_name, this_id=str(node_id), next_id=str(next_id)),
@@ -33346,7 +33400,7 @@ def _remote_docker_injects_status_script(
     containers_literal = json.dumps([str(x) for x in (containers or [])])
     sudo_password_literal = json.dumps(str(sudo_password) if sudo_password else "")
     max_find_literal = json.dumps(int(max_find))
-    inject_dirs_literal = json.dumps([str(d) for d in (inject_dirs or ['/flow_injects', '/flow_artifacts'])])
+    inject_dirs_literal = json.dumps([str(d) for d in (inject_dirs or [])])
     expected_by_node_literal = json.dumps(expected_by_node or {})
     return (
         r"""
@@ -34059,9 +34113,6 @@ def main():
             dst_txt = str(right or '').strip()
             if dst_txt.startswith('/'):
                 container_dest_paths.append(dst_txt)
-
-        # Canonical in-container destinations used by native inject delivery.
-        container_dest_paths.append('/flow_injects')
 
         # De-dupe container destination paths while preserving order.
         seen_container_paths = set()

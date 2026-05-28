@@ -68,7 +68,8 @@ def test_flow_inject_override_editor_lists_generator_inject_choices() -> None:
         "const generatedInjectSpecs = getGeneratedInjectsFromAssignment();",
         "const listedInjectDefaults = new Map();",
         "const availableListedInjects = [];",
-        "addGroup('Listed injects', Array.from(new Set(availableListedInjects)));",
+        "const sourceOptions = (() => {",
+        "const srcSelect = document.createElement('select');",
         "const listedDefaultDest = String(listedInjectDefaults.get(v) || '').trim();",
     ]
 
@@ -84,12 +85,88 @@ def test_flow_inject_candidate_paths_are_visible_and_selectable() -> None:
         "out.inject_candidate_paths = injectCandidatePaths;",
         "Candidate destinations: ",
         "function destinationDirsFor(destValue)",
-        "Pick candidate destination...",
-        "destPicker.addEventListener('change'",
+        "const effectiveDestOptions = candidateDestOptions.length",
+        "destSelect = document.createElement('select');",
+        "destSelect.addEventListener('change'",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing inject candidate path UI wiring: " + "; ".join(missing)
+
+
+def test_flow_inject_destination_dropdown_selection_is_serialized() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const rowObj = { srcEl: srcSelect, destEl: destSelect };",
+        "const destEl = el && el.destEl ? el.destEl : null;",
+        "const dest = String((destEl && destEl.value) ?? '').trim();",
+        "files.push(`${src} -> ${dest}`);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing inject destination serialization wiring for dropdown selections: " + "; ".join(missing)
+
+
+def test_flow_inject_destination_disallows_manual_or_blank_input() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const effectiveDestOptions = candidateDestOptions.length",
+        ": [initialDest || '/flow_injects'];",
+        "destWrap.appendChild(destSelect);",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing dropdown-only inject destination enforcement: " + "; ".join(missing)
+
+    removed_snippets = [
+        "destInp = document.createElement('input');",
+        "destInp.placeholder = '/flow_injects (default)';",
+        "if (destInp) {",
+    ]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not present, "Manual/blank inject destination input should not remain in flow template: " + "; ".join(present)
+
+
+def test_flow_inject_source_disallows_manual_picker_or_upload() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const sourceOptions = (() => {",
+        "const srcSelect = document.createElement('select');",
+        "row.appendChild(srcSelect);",
+        "pickWrap.textContent = 'Generator manifest inject path';",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing manifest-constrained inject source selection wiring: " + "; ".join(missing)
+
+    removed_snippets = [
+        "function buildVarPicker() {",
+        "const srcInp = document.createElement('input');",
+        "uploadBtn.textContent = 'Upload';",
+        "fetch('/api/flag-sequencing/upload_flow_inject_file'",
+        "addGroup('Inputs', Array.from(new Set(availableInputs)));",
+        "addGroup('Outputs', Array.from(new Set(availableOutputs)));",
+        "addGroup('Resolved outputs', Array.from(new Set(availableResolvedOutputs)));",
+        "addBtn.textContent = 'Add inject file';",
+    ]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not present, "Manual/upload inject source controls should not remain in flow template: " + "; ".join(present)
+
+
+def test_flow_inject_source_selection_disallows_duplicates() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function updateInjectSourceAvailability() {",
+        "if (!used.has(value)) {",
+        "const replacement = Array.from(sel.options || []).find((opt) => {",
+        "opt.disabled = !!(optValue && optValue !== current && used.has(optValue));",
+        "try { updateInjectSourceAvailability(); } catch (e) { }",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing duplicate-prevention wiring for inject source selections: " + "; ".join(missing)
 
 
 def test_flow_hint_node_ip_rewrites_stale_ip_values() -> None:
