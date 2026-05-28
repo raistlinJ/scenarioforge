@@ -3305,10 +3305,14 @@
     });
   }
 
+  const FLOW_TEMPLATE_OPEN = '{' + '{';
+  const FLOW_TEMPLATE_CLOSE = '}' + '}';
+  const flowTemplateToken = (name) => `${FLOW_TEMPLATE_OPEN}${name}${FLOW_TEMPLATE_CLOSE}`;
+
   function _applyHintNodeTemplateVars(text, assignment) {
     try {
       let out = String(text || '');
-      if (!out || !out.includes('{{')) return out;
+      if (!out || !out.includes(FLOW_TEMPLATE_OPEN)) return out;
       const source = assignment && typeof assignment === 'object' ? assignment : {};
       const resolvedInputs = (source.resolved_inputs && typeof source.resolved_inputs === 'object' && !Array.isArray(source.resolved_inputs)) ? source.resolved_inputs : {};
       const thisName = String(source.node_name || source.node || source.name || source.node_id || '').trim();
@@ -3317,13 +3321,13 @@
       const nextIp = String(source.next_node_ip || source.next_node_ip4 || source.next_ip || source.next_ip4 || '').trim();
       const scenarioName = String(source.scenario || source.scenario_label || '').trim();
       const repl = {
-        '{{SCENARIO}}': scenarioName,
-        '{{THIS_NODE_ID}}': String(source.node_id || '').trim(),
-        '{{THIS_NODE_NAME}}': thisName,
-        '{{THIS_NODE_IP}}': thisIp,
-        '{{NEXT_NODE_ID}}': String(source.next_node_id || '').trim(),
-        '{{NEXT_NODE_NAME}}': nextName,
-        '{{NEXT_NODE_IP}}': nextIp,
+        [flowTemplateToken('SCENARIO')]: scenarioName,
+        [flowTemplateToken('THIS_NODE_ID')]: String(source.node_id || '').trim(),
+        [flowTemplateToken('THIS_NODE_NAME')]: thisName,
+        [flowTemplateToken('THIS_NODE_IP')]: thisIp,
+        [flowTemplateToken('NEXT_NODE_ID')]: String(source.next_node_id || '').trim(),
+        [flowTemplateToken('NEXT_NODE_NAME')]: nextName,
+        [flowTemplateToken('NEXT_NODE_IP')]: nextIp,
       };
       Object.entries(repl).forEach(([key, value]) => {
         out = out.split(key).join(String(value || ''));
@@ -3347,7 +3351,7 @@
       if (!FLOW_HINT_LEVEL_ORDER.includes(key)) return;
       let text = _applyHintOutputTemplates(String(value || '').trim(), source);
       text = _applyHintNodeTemplateVars(text, source).trim();
-      if (text.includes('{{') || text.includes('}}')) return;
+      if (text.includes(FLOW_TEMPLATE_OPEN) || text.includes(FLOW_TEMPLATE_CLOSE)) return;
       if (!text) return;
       const sig = `${key}::${text}`;
       if (seen.has(sig)) return;
@@ -4732,7 +4736,7 @@
           .map(x => _applyHintOutputTemplates(String(x || '').trim(), fa))
           .map(x => _applyHintNodeTemplateVars(String(x || '').trim(), fa))
           .map(x => String(x || '').trim())
-          .filter(x => !(x.includes('{{') || x.includes('}}')))
+          .filter(x => !(x.includes(FLOW_TEMPLATE_OPEN) || x.includes(FLOW_TEMPLATE_CLOSE)))
           .filter(Boolean)
         : [];
       if (descList.length > 1) {
@@ -11681,7 +11685,7 @@ ${out.join('\n')}
             const stepNum = accessIndex + 1;
             const stepTitle = resolveFlowGuideTemplateText(String(s.title || `Step ${stepNum}`).trim(), assign, accessContext) || `Step ${stepNum}`;
             let instructions = String(s.instructions || '').trim();
-            // Resolve variable references like {{PORT}}, {{NODE}}, {{PATH}}, {{USERNAME}}, {{PASSWORD}}
+            // Resolve variable references like PORT, NODE, PATH, USERNAME, PASSWORD tokens.
             const outputs = (assign.resolved_outputs && typeof assign.resolved_outputs === 'object') ? assign.resolved_outputs : {};
             const outputKeys = Object.keys(outputs);
             const _findOutputKey = (...needles) => outputKeys.find((k) => {

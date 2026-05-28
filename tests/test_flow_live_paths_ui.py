@@ -42,13 +42,20 @@ def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
         "function _fallbackOutputTemplateText(expr)",
         "return 'generated credential';",
         "function _applyHintNodeTemplateVars(text, assignment)",
-        "if (text.includes('{{') || text.includes('}}')) return;",
+        "const FLOW_TEMPLATE_OPEN = '{' + '{';",
+        "if (text.includes(FLOW_TEMPLATE_OPEN) || text.includes(FLOW_TEMPLATE_CLOSE)) return;",
         "if (Array.isArray(out[level]) && out[level].length) return;",
         ".map(x => _applyHintNodeTemplateVars(String(x || '').trim(), fa))",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing unresolved hint template cleanup wiring in flow template: " + "; ".join(missing)
+
+
+def test_flow_template_compiles_with_hint_placeholders() -> None:
+    from webapp.app_backend import app
+
+    app.jinja_env.get_template("flow.html")
 
 
 def test_flow_chain_editor_hides_resolved_paths_row() -> None:
