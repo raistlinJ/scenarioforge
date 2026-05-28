@@ -293,3 +293,38 @@ def test_symbolic_file_inject_expands_from_current_outputs_not_prior_compose(tmp
 
     assert assignment["inject_files"] == ["service-profile.json"]
     assert "docker-compose.yml" not in json.dumps(assignment)
+
+
+def test_finalize_generator_assignment_prefers_inject_override_over_detail(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    assignment = {
+        "inject_files": ["File(path)"],
+        "inject_files_override": ["service -> /home/git/repositories/deploy.git"],
+        "inject_files_detail": [
+            {"path": str(run_dir / "service"), "resolved": "service"},
+        ],
+    }
+    meta_host = {}
+
+    helpers.finalize_generator_assignment_metadata(
+        assignment,
+        meta_host,
+        flow_out_dir=str(run_dir),
+        flow_run_remote=False,
+        generator_catalog="repo",
+        generator_id="git_deploy_repo",
+        assignment_type="flag-node-generator",
+        cfg={},
+        declared_output_keys=[],
+        actual_output_keys=[],
+        mismatch={},
+        inputs_mismatch={},
+        manifest_path="",
+        ok_run=True,
+        note="ok",
+        backend=_Backend(),
+    )
+
+    assert assignment["inject_files"] == ["service -> /home/git/repositories/deploy.git"]
+    assert meta_host["flow_flag"]["inject_files"] == ["service -> /home/git/repositories/deploy.git"]

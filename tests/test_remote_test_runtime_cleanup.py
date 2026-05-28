@@ -78,7 +78,9 @@ def test_cleanup_remote_workspace_runs_shared_remote_cleanup(monkeypatch):
 def test_remote_docker_remove_all_containers_script_removes_images():
     script = backend._remote_docker_remove_all_containers_script('secret')
 
+    compile(script, '<remote_docker_remove_all_containers_script>', 'exec')
     assert "['inspect', '-f', '{{.Image}}', cid]" in script
     assert "['image', 'rm', '-f'] + list(chunk)" in script
+    assert 'input=str(SUDO_PASSWORD) + "\\n"' in script
     assert "'removed_attempted': images_removed_attempted" in script
     assert "'skipped': False" in script

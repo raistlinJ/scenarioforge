@@ -64,6 +64,8 @@ def test_prepare_core_sessions_cleanup_active(monkeypatch):
         if label == 'docker.status(test prepare cleanup)':
             return {'items': [{'name': 'docker-1'}]}
         if label == 'docker.cleanup(test prepare cleanup)':
+            compile(script, '<docker.cleanup(test prepare cleanup)>', 'exec')
+            assert 'input=str(SUDO_PASSWORD) + "\\n"' in script
             return {'results': [{'name': 'docker-1', 'ok': True}]}
         if label == 'docker.wrapper_images.cleanup(test prepare cleanup)':
             return {'removed': ['coretg/foo:iproute2']}
