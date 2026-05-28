@@ -1040,7 +1040,7 @@
     intentProduces: document.getElementById('gbIntentProduces'),
     intentInjectFiles: document.getElementById('gbIntentInjectFiles'),
     intentInjectDestination: document.getElementById('gbIntentInjectDestination'),
-    intentHintTemplates: document.getElementById('gbIntentHintTemplates'),
+    intentHintLevels: document.getElementById('gbIntentHintLevels'),
     intentReadmeNotes: document.getElementById('gbIntentReadmeNotes'),
     intentApplySuggestedBtn: document.getElementById('gbIntentApplySuggestedBtn'),
     intentClearBtn: document.getElementById('gbIntentClearBtn'),
@@ -3272,14 +3272,14 @@
     const produces = String(elements.intentProduces && elements.intentProduces.value || '').trim();
     const injectFiles = String(elements.intentInjectFiles && elements.intentInjectFiles.value || '').trim();
     const injectDestination = String(elements.intentInjectDestination && elements.intentInjectDestination.value || '').trim();
-    const hintTemplates = String(elements.intentHintTemplates && elements.intentHintTemplates.value || '').trim();
+    const hintLevels = String(elements.intentHintLevels && elements.intentHintLevels.value || '').trim();
     const readmeNotes = String(elements.intentReadmeNotes && elements.intentReadmeNotes.value || '').trim();
     if (runtimeInputs) payload.runtime_inputs = runtimeInputs;
     if (requires) payload.requires = requires;
     if (produces) payload.produces = produces;
     if (injectFiles) payload.inject_files = injectFiles;
     if (injectDestination) payload.inject_destination = injectDestination;
-    if (hintTemplates) payload.hint_templates = hintTemplates;
+    if (hintLevels) payload.hint_levels = hintLevels;
     if (readmeNotes) payload.readme_mentions = readmeNotes;
     return Object.keys(payload).length ? payload : null;
   }
@@ -3291,7 +3291,7 @@
     if (elements.intentProduces) elements.intentProduces.value = String(source.produces || '');
     if (elements.intentInjectFiles) elements.intentInjectFiles.value = String(source.inject_files || '');
     if (elements.intentInjectDestination) elements.intentInjectDestination.value = String(source.inject_destination || '');
-    if (elements.intentHintTemplates) elements.intentHintTemplates.value = String(source.hint_templates || '');
+    if (elements.intentHintLevels) elements.intentHintLevels.value = String(source.hint_levels || '');
     if (elements.intentReadmeNotes) elements.intentReadmeNotes.value = String(source.readme_mentions || '');
     if (refresh) {
       queuePromptIntentPreview();
@@ -3322,7 +3322,7 @@
       produces: elements.intentProduces,
       inject_files: elements.intentInjectFiles,
       inject_destination: elements.intentInjectDestination,
-      hint_templates: elements.intentHintTemplates,
+      hint_levels: elements.intentHintLevels,
       readme_mentions: elements.intentReadmeNotes,
     };
     const field = fieldMap[key];
@@ -3468,7 +3468,9 @@
       ['Required artifacts', requiredArtifacts.join(', ') || '(none)'],
       ['Optional artifacts', optionalArtifacts.join(', ') || '(none)'],
       ['Produces', produces.join(', ') || '(none)'],
-      ['Hint templates', Array.isArray(req.hint_templates) ? String(req.hint_templates.length) : '0'],
+      ['Hint levels', req.hint_levels && typeof req.hint_levels === 'object'
+        ? String(['low', 'medium', 'high'].reduce((total, level) => total + (Array.isArray(req.hint_levels[level]) ? req.hint_levels[level].length : 0), 0))
+        : '0'],
     ];
     elements.summaryGrid.innerHTML = items.map(([label, value]) => (
       `<div class="gb-summary-item"><small>${label}</small><strong>${value || '(none)'}</strong></div>`
@@ -3802,7 +3804,7 @@
         'Outputs must include Flag(flag_id) and File(path)=docker-compose.yml.',
         'The compose should run a single HTTP service that checks a static bearer token before revealing a flag page.',
         'Do not use ${...} in docker-compose.yml. Use explicit working_dir or absolute paths.',
-        'Add a hint template that points the participant toward the token-based web endpoint.',
+        'Add hint levels: low: Target: {% raw %}{{NEXT_NODE_IP}}{% endraw %}; medium: HTTP token endpoint; high: Use the README access steps.',
         'README should include local scripts/run_flag_generator.py usage.',
       ].join('\n');
       queuePromptIntentPreview();
@@ -3816,7 +3818,7 @@
       'Artifact requirements: require Knowledge(ip). Optionally accept Knowledge(hostname).',
       'Artifact outputs: Flag(flag_id), Credential(user), Credential(user,password), File(path).',
       'Write a creds file under /outputs/artifacts/ and expose it through File(path).',
-      'Include inject_files with File(path) and a hint template that references the credential outputs.',
+      'Include inject_files with File(path) and hint levels: low: Target: {% raw %}{{NEXT_NODE_IP}}{% endraw %}; medium: Credential: {% raw %}{{OUTPUT.Credential(user,password)}}{% endraw %}; high: Use the README access steps.',
       'README should mention determinism and local runner testing.',
     ].join('\n');
     queuePromptIntentPreview();
@@ -4025,7 +4027,7 @@
     elements.intentProduces,
     elements.intentInjectFiles,
     elements.intentInjectDestination,
-    elements.intentHintTemplates,
+    elements.intentHintLevels,
     elements.intentReadmeNotes,
   ].forEach((field) => {
     if (!field) return;

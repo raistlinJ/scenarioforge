@@ -16291,46 +16291,15 @@ def _flow_render_hint_template(
 
 
 def _flow_hint_templates_from_generator(gen: dict[str, Any]) -> list[str]:
-    """Return ordered hint templates from a generator view.
-
-    Accepts:
-    - gen['hint_templates']: list[str]
-    - gen['hint_template']: str or list[str] (legacy / permissive)
-    """
-    out: list[str] = []
+    """Return low-level hint templates from structured hint_levels only."""
     try:
-        ht = gen.get('hint_templates')
-        if isinstance(ht, list):
-            for x in ht:
-                s = str(x or '').strip()
-                if s:
-                    s2 = _flow_strip_ids_from_hint(s)
-                    if s2:
-                        out.append(s2)
+        levels = _flow_normalize_hint_levels(gen.get('hint_levels'))
     except Exception:
-        pass
+        levels = {}
+    out = [str(x or '').strip() for x in (levels.get('low') or []) if str(x or '').strip()]
     if out:
         return out
-    try:
-        ht1 = gen.get('hint_template')
-        if isinstance(ht1, list):
-            for x in ht1:
-                s = str(x or '').strip()
-                if s:
-                    s2 = _flow_strip_ids_from_hint(s)
-                    if s2:
-                        out.append(s2)
-        else:
-            s = str(ht1 or '').strip()
-            if s:
-                s2 = _flow_strip_ids_from_hint(s)
-                if s2:
-                    out.append(s2)
-    except Exception:
-        pass
-    if not out:
-        out = ['Next: {{NEXT_NODE_NAME}}']
-    return out
+    return ['Next: {{NEXT_NODE_NAME}}']
 
 
 _FLOW_HINT_LEVELS = ('low', 'medium', 'high')
@@ -16373,20 +16342,11 @@ def _flow_hint_level_templates_from_generator(gen: dict[str, Any]) -> dict[str, 
     raw_levels: Any = None
     try:
         raw_levels = gen.get('hint_levels')
-        if not isinstance(raw_levels, dict):
-            raw_levels = gen.get('hint_level_templates')
     except Exception:
         raw_levels = None
 
     levels = _flow_normalize_hint_levels(raw_levels)
-    if any(levels.get(level) for level in _FLOW_HINT_LEVELS):
-        return levels
-
-    return {
-        'low': _flow_hint_templates_from_generator(gen),
-        'medium': [],
-        'high': [],
-    }
+    return levels
 
 
 def _flow_render_hint_level_templates(
@@ -38318,6 +38278,23 @@ def _normalize_access_instructions(value: Any) -> dict[str, Any]:
     return {'title': title, 'steps': normalized_steps}
 
 
+def _normalize_scaffold_hint_levels(value: Any) -> dict[str, list[str]]:
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            parsed = None
+        value = parsed
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, list[str]] = {}
+    for level in ('low', 'medium', 'high'):
+        entries = _split_lines(value.get(level))
+        if entries:
+            normalized[level] = entries
+    return normalized
+
+
 def _manifest_yaml_block(value: Any) -> str:
     try:
         import yaml  # type: ignore
@@ -38459,7 +38436,7 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
 
     requires, optional_requires = _normalize_requires_with_optional(payload)
     produces = _split_artifact_list(payload.get('produces'))
-    hint_templates = _split_lines(payload.get('hint_templates'))
+    hint_levels = _normalize_scaffold_hint_levels(payload.get('hint_levels'))
     inject_files_raw = payload.get('inject_files')
     inject_files = []
     if isinstance(inject_files_raw, list):
@@ -38534,14 +38511,15 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
             manifest_yaml += f"    - {s}\n"
 
     # Hints
-    if hint_templates:
-        manifest_yaml += "\nhint_templates:\n"
-        for t in hint_templates:
-            s = str(t or '').strip()
-            if not s:
+    if hint_levels:
+        manifest_yaml += "\nhint_levels:\n"
+        for level in ('low', 'medium', 'high'):
+            values = hint_levels.get(level) or []
+            if not values:
                 continue
-            s2 = s.replace('"', '\\"')
-            manifest_yaml += f"  - \"{s2}\"\n"
+            manifest_yaml += f"  {level}:\n"
+            for value in values:
+                manifest_yaml += f"    - {json.dumps(str(value))}\n"
 
     # Injected artifacts allowlist for safe mounting.
     if inject_files:
@@ -38638,8 +38616,7 @@ def main() -> None:
     }}
 
     (out_dir / 'outputs.json').write_text(json.dumps(outputs, indent=2) + '\n', encoding='utf-8')
-    # Optional: write /outputs/hint.txt if you need a standalone hint file.
-    # Prefer hint_templates in the catalog for Flow.
+    # Prefer hint_levels in the manifest/catalog for Flow participant hints.
 
 
 if __name__ == '__main__':

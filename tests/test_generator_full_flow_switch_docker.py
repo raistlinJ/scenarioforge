@@ -58,7 +58,7 @@ def test_generator_test_traverses_basic_switch_plus_docker_scenario(monkeypatch)
         'language': 'python',
         'inputs': [],
         'outputs': [{'name': 'File(path)'}],
-        'hint_templates': ['Copy from {{node_id}}'],
+        'hint_levels': {'low': ['Copy from {{node_id}}']},
         '_source_name': 'test-fixture',
     }
 

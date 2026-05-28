@@ -509,8 +509,6 @@ def discover_generator_manifests(
                 '_flow_catalog': flow_catalog,
                 'description_hints': list(doc.get('description_hints') or []) if isinstance(doc.get('description_hints'), list) else [],
                 'hint_levels': _norm_hint_levels(doc.get('hint_levels')),
-                'hint_templates': list(doc.get('hint_templates') or []) if isinstance(doc.get('hint_templates'), list) else [],
-                'hint_template': str(doc.get('hint_template') or ''),
                 'env': dict(doc.get('env') or {}) if isinstance(doc.get('env'), dict) else {},
             }
 

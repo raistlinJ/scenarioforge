@@ -295,9 +295,6 @@ def register(app, *, backend_module: Any) -> None:
             assignment['language'] = str(generator.get('language') or '')
 
             hint_level_templates = backend._flow_hint_level_templates_from_generator(generator)
-            hint_templates = hint_level_templates.get('low') or backend._flow_hint_templates_from_generator(generator)
-            assignment['hint_templates'] = hint_templates
-            assignment['hint_template'] = str((hint_templates[0] if hint_templates else '') or '')
             assignment['hint_level_templates'] = hint_level_templates
 
             # Include access instructions if present in generator manifest

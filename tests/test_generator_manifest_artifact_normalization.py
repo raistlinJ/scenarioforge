@@ -80,8 +80,6 @@ runtime: {type: docker-compose, compose_file: docker-compose.yml, service: gener
 artifacts:
   requires: [Knowledge(ip)]
   produces: [Flag(flag_id), PortForward(host, port)]
-hint_templates:
-  - "Next: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}"
 hint_levels:
   low:
     - "Target: {{NEXT_NODE_IP}}"

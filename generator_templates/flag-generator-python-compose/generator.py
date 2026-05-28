@@ -41,7 +41,6 @@ def main() -> None:
     out_dir = Path("/outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "outputs.json").write_text(json.dumps(outputs, indent=2) + "\n", encoding="utf-8")
-    (out_dir / "hint.txt").write_text("TODO: write a next-step hint here\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

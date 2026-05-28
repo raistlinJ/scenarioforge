@@ -1,0 +1,33 @@
+manifest_version: 1
+id: CHANGE_ME_PLUGIN_ID
+kind: flag-generator
+name: TODO
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+inputs:
+  - name: seed
+    type: string
+    required: true
+  - name: secret
+    type: string
+    required: true
+    sensitive: true
+  - name: flag_prefix
+    type: string
+    required: false
+artifacts:
+  requires: []
+  optional_requires: []
+  produces:
+    - Flag(flag_id)
+    - FlagDelivery(mode)
+    - example
+hint_levels:
+  low:
+    - "Target: {{NEXT_NODE_IP}}"
+  medium:
+    - "Artifact: {{OUTPUT.example}}"
+  high:
+    - "Use the access instructions and README.md for the complete workflow."

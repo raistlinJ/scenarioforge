@@ -1226,16 +1226,43 @@ def _parse_artifact_outputs_spec(text: str) -> list[str]:
     return [item for item in outputs if item]
 
 
-def _parse_hint_templates_spec(text: str) -> list[str]:
+def _parse_hint_levels_spec(text: str) -> dict[str, list[str]]:
     raw = str(text or '').strip()
     if not raw:
-        return []
-    if '\n' in raw:
-        return [part.strip() for part in raw.splitlines() if part.strip()]
-    if ';' in raw:
-        parts = [part.strip() for part in raw.split(';') if part.strip()]
-        return parts
-    return [raw]
+        return {}
+    result: dict[str, list[str]] = {}
+    parts = [part.strip() for part in re.split(r'[\n;]+', raw) if part.strip()]
+    for part in parts:
+        match = re.match(r'^(low|medium|high)\s*[:=]\s*(.+)$', part, flags=re.IGNORECASE)
+        if match:
+            level = str(match.group(1) or '').strip().lower()
+            value = str(match.group(2) or '').strip()
+        else:
+            level = 'low'
+            value = part
+        if value:
+            result.setdefault(level, [])
+            result[level].append(value)
+    return _coerce_hint_levels(result)
+
+
+def _format_hint_levels_spec(levels: Any) -> str:
+    normalized = _coerce_hint_levels(levels)
+    lines: list[str] = []
+    for level in ('low', 'medium', 'high'):
+        for item in normalized.get(level) or []:
+            lines.append(f'{level}: {item}')
+    return '\n'.join(lines)
+
+
+def _hint_levels_summary(levels: Any) -> str:
+    normalized = _coerce_hint_levels(levels)
+    parts: list[str] = []
+    for level in ('low', 'medium', 'high'):
+        values = normalized.get(level) or []
+        if values:
+            parts.append(f'{level}: ' + '; '.join(str(item) for item in values))
+    return ', '.join(parts)
 
 
 def _parse_readme_mentions_spec(text: str) -> list[str]:
@@ -1295,7 +1322,7 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
     inferred: dict[str, Any] = {}
     notes: dict[str, Any] = {
         'write_file_under_outputs_artifacts': False,
-        'needs_hint_template': False,
+        'needs_hint_levels': False,
         'readme_mentions': [],
         'inject_destination': '',
     }
@@ -1324,18 +1351,18 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         if inject_items:
             explicit['inject_files'] = inject_items
 
-    hint_match = re.search(r'Hint templates?:\s*(.+)', text, flags=re.IGNORECASE)
+    hint_match = re.search(r'Hint levels?:\s*(.+)', text, flags=re.IGNORECASE)
     if hint_match:
-        hint_templates = _parse_hint_templates_spec(hint_match.group(1))
-        if hint_templates:
-            explicit['hint_templates'] = hint_templates
+        hint_levels = _parse_hint_levels_spec(hint_match.group(1))
+        if hint_levels:
+            explicit['hint_levels'] = hint_levels
 
     inject_dest_match = re.search(r'Inject destination:\s*(.+?)(?:\.|$)', text, flags=re.IGNORECASE)
     if inject_dest_match:
         notes['inject_destination'] = str(inject_dest_match.group(1) or '').strip()
 
-    if re.search(r'hint template', text, flags=re.IGNORECASE):
-        notes['needs_hint_template'] = True
+    if re.search(r'hint levels?', text, flags=re.IGNORECASE):
+        notes['needs_hint_levels'] = True
 
     readme_match = re.search(r'README should mention\s+(.+?)(?:\.|$)', text, flags=re.IGNORECASE)
     if readme_match:
@@ -1363,7 +1390,11 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         ]
         inferred['produces'] = ['Flag(flag_id)', 'Credential(user)', 'Credential(user,password)', 'File(path)']
         inferred['inject_files'] = ['File(path)']
-        inferred['hint_templates'] = ['Next: SSH to {{NEXT_NODE_NAME}} using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}']
+        inferred['hint_levels'] = {
+            'low': ['Target: {{NEXT_NODE_IP}}'],
+            'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
+            'high': ['Use the access instructions and README.md for the complete workflow.'],
+        }
         notes['write_file_under_outputs_artifacts'] = True
         notes['readme_mentions'] = list(dict.fromkeys(notes['readme_mentions'] + ['determinism', 'local runner testing']))
 
@@ -1374,7 +1405,11 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
             {'name': 'flag_prefix', 'type': 'string', 'required': False},
         ])
         inferred.setdefault('produces', ['Flag(flag_id)', 'Credential(user)', 'Credential(user,password)', 'File(path)'])
-        inferred.setdefault('hint_templates', ['Next: browse to the service and authenticate with {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}'])
+        inferred.setdefault('hint_levels', {
+            'low': ['Target: {{NEXT_NODE_IP}}'],
+            'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
+            'high': ['Use the access instructions and README.md for the complete workflow.'],
+        })
         notes['write_file_under_outputs_artifacts'] = True
 
     if mentions_ssh_key and plugin_type == 'flag-generator':
@@ -1397,7 +1432,7 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         notes['write_file_under_outputs_artifacts'] = True
 
     if mentions_hint:
-        notes['needs_hint_template'] = True
+        notes['needs_hint_levels'] = True
     if mentions_deterministic:
         notes['readme_mentions'] = list(dict.fromkeys(notes['readme_mentions'] + ['determinism', 'local runner testing']))
 
@@ -1452,12 +1487,19 @@ def _parse_prompt_intent_overrides(overrides_payload: Any) -> dict[str, Any]:
     if manual.get('inject_files'):
         manual['inject_files'] = _apply_inject_destination(manual.get('inject_files') or [], inject_destination)
 
-    hint_text = str(overrides_payload.get('hint_templates') or '').strip()
-    if hint_text:
-        raw['hint_templates'] = hint_text
-        hint_templates = _parse_hint_templates_spec(hint_text)
-        if hint_templates:
-            manual['hint_templates'] = hint_templates
+    hint_raw = overrides_payload.get('hint_levels')
+    if isinstance(hint_raw, dict):
+        hint_levels = _coerce_hint_levels(hint_raw)
+        if hint_levels:
+            raw['hint_levels'] = _format_hint_levels_spec(hint_levels)
+            manual['hint_levels'] = hint_levels
+    else:
+        hint_text = str(hint_raw or '').strip()
+        if hint_text:
+            raw['hint_levels'] = hint_text
+            hint_levels = _parse_hint_levels_spec(hint_text)
+            if hint_levels:
+                manual['hint_levels'] = hint_levels
 
     readme_text = str(overrides_payload.get('readme_mentions') or '').strip()
     if readme_text:
@@ -1466,8 +1508,8 @@ def _parse_prompt_intent_overrides(overrides_payload: Any) -> dict[str, Any]:
 
     if 'write_file_under_outputs_artifacts' in overrides_payload:
         notes['write_file_under_outputs_artifacts'] = bool(overrides_payload.get('write_file_under_outputs_artifacts'))
-    if 'needs_hint_template' in overrides_payload:
-        notes['needs_hint_template'] = bool(overrides_payload.get('needs_hint_template'))
+    if 'needs_hint_levels' in overrides_payload:
+        notes['needs_hint_levels'] = bool(overrides_payload.get('needs_hint_levels'))
 
     return {'manual': manual, 'notes': notes, 'raw': raw}
 
@@ -1483,7 +1525,7 @@ def _resolve_prompt_intent(prompt: str, plugin_type: str, overrides_payload: Any
     notes = {**base_notes, **manual_notes}
 
     merged: dict[str, Any] = {}
-    for key in ('runtime_inputs', 'requires', 'produces', 'inject_files', 'hint_templates'):
+    for key in ('runtime_inputs', 'requires', 'produces', 'inject_files', 'hint_levels'):
         if manual.get(key):
             merged[key] = manual.get(key)
             continue
@@ -1503,7 +1545,7 @@ def _resolve_prompt_intent(prompt: str, plugin_type: str, overrides_payload: Any
         'produces': _format_string_list_spec(merged.get('produces') or []),
         'inject_files': _format_string_list_spec(merged.get('inject_files') or []),
         'inject_destination': inject_destination,
-        'hint_templates': _format_string_list_spec(merged.get('hint_templates') or []),
+        'hint_levels': _format_hint_levels_spec(merged.get('hint_levels') or {}),
         'readme_mentions': ', '.join(str(item).strip() for item in (notes.get('readme_mentions') or []) if str(item).strip()),
     }
 
@@ -1550,8 +1592,8 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
             items.append('Artifact outputs: ' + ', '.join(str(item) for item in manual.get('produces') or []))
         if manual.get('inject_files'):
             items.append('Inject files: ' + ', '.join(str(item) for item in manual.get('inject_files') or []))
-        if manual.get('hint_templates'):
-            items.append('Hint templates: ' + '; '.join(str(item) for item in manual.get('hint_templates') or []))
+        if manual.get('hint_levels'):
+            items.append('Hint levels: ' + _hint_levels_summary(manual.get('hint_levels')))
         manual_readme_mentions = [str(item).strip() for item in (manual_notes.get('readme_mentions') or []) if str(item).strip()]
         if manual_readme_mentions:
             items.append('README notes: ' + ', '.join(manual_readme_mentions))
@@ -1567,8 +1609,8 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
             items.append('Artifact outputs: ' + ', '.join(str(item) for item in explicit.get('produces') or []))
         if explicit.get('inject_files'):
             items.append('Inject files: ' + ', '.join(str(item) for item in explicit.get('inject_files') or []))
-        if explicit.get('hint_templates'):
-            items.append('Hint templates: ' + '; '.join(str(item) for item in explicit.get('hint_templates') or []))
+        if explicit.get('hint_levels'):
+            items.append('Hint levels: ' + _hint_levels_summary(explicit.get('hint_levels')))
         sections.append({'title': 'User-Specified', 'tone': 'primary', 'items': items})
 
     inferred_items: list[str] = []
@@ -1580,16 +1622,16 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
         inferred_items.append('Artifact outputs: ' + ', '.join(str(item) for item in merged.get('produces') or []))
     if not manual.get('inject_files') and not explicit.get('inject_files') and merged.get('inject_files'):
         inferred_items.append('Inject files: ' + ', '.join(str(item) for item in merged.get('inject_files') or []))
-    if not manual.get('hint_templates') and not explicit.get('hint_templates') and merged.get('hint_templates'):
-        inferred_items.append('Hint templates: ' + '; '.join(str(item) for item in merged.get('hint_templates') or []))
+    if not manual.get('hint_levels') and not explicit.get('hint_levels') and merged.get('hint_levels'):
+        inferred_items.append('Hint levels: ' + _hint_levels_summary(merged.get('hint_levels')))
     if inferred_items:
         sections.append({'title': 'Inferred Defaults', 'tone': 'secondary', 'items': inferred_items})
 
     note_items: list[str] = []
     if notes.get('write_file_under_outputs_artifacts'):
         note_items.append('Write generated file artifacts under /outputs/artifacts/ when File(path) is used.')
-    if notes.get('needs_hint_template'):
-        note_items.append('Include a hint template only if referenced outputs are actually produced.')
+    if notes.get('needs_hint_levels'):
+        note_items.append('Include low, medium, and high hint levels only when referenced outputs are actually produced.')
     if notes.get('inject_destination'):
         note_items.append(f'Inject destination: {notes.get("inject_destination")}')
     readme_mentions = [str(item).strip() for item in (notes.get('readme_mentions') or []) if str(item).strip()]
@@ -1604,7 +1646,7 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
         'manual': manual,
         'explicit': explicit,
         'inferred': inferred,
-        'merged': {k: v for k, v in merged.items() if k in {'runtime_inputs', 'requires', 'produces', 'inject_files', 'hint_templates'}},
+        'merged': {k: v for k, v in merged.items() if k in {'runtime_inputs', 'requires', 'produces', 'inject_files', 'hint_levels'}},
         'notes': notes,
         'sections': sections,
         'editable': resolved.get('editable') if isinstance(resolved.get('editable'), dict) else {},
@@ -1641,8 +1683,8 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
             items.append('Artifact outputs: ' + ', '.join(str(item) for item in manual.get('produces') or []))
         if manual.get('inject_files'):
             items.append('Inject files: ' + ', '.join(str(item) for item in manual.get('inject_files') or []))
-        if manual.get('hint_templates'):
-            items.append('Hint templates: ' + '; '.join(str(item) for item in manual.get('hint_templates') or []))
+        if manual.get('hint_levels'):
+            items.append('Hint levels: ' + _hint_levels_summary(manual.get('hint_levels')))
         manual_readme_mentions = [str(item).strip() for item in (resolved.get('manual_notes') or {}).get('readme_mentions', []) if str(item).strip()]
         if manual_readme_mentions:
             items.append('README notes: ' + ', '.join(manual_readme_mentions))
@@ -1658,8 +1700,8 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
             items.append('Artifact outputs: ' + ', '.join(str(item) for item in explicit.get('produces') or []))
         if explicit.get('inject_files'):
             items.append('Inject files: ' + ', '.join(str(item) for item in explicit.get('inject_files') or []))
-        if explicit.get('hint_templates'):
-            items.append('Hint templates: ' + '; '.join(str(item) for item in explicit.get('hint_templates') or []))
+        if explicit.get('hint_levels'):
+            items.append('Hint levels: ' + _hint_levels_summary(explicit.get('hint_levels')))
         sections.append({'title': 'User-Specified', 'tone': 'primary', 'items': items})
 
     inferred_items: list[str] = []
@@ -1671,16 +1713,16 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
         inferred_items.append('Artifact outputs: ' + ', '.join(str(item) for item in merged.get('produces') or []))
     if not explicit.get('inject_files') and merged.get('inject_files'):
         inferred_items.append('Inject files: ' + ', '.join(str(item) for item in merged.get('inject_files') or []))
-    if not explicit.get('hint_templates') and merged.get('hint_templates'):
-        inferred_items.append('Hint templates: ' + '; '.join(str(item) for item in merged.get('hint_templates') or []))
+    if not explicit.get('hint_levels') and merged.get('hint_levels'):
+        inferred_items.append('Hint levels: ' + _hint_levels_summary(merged.get('hint_levels')))
     if inferred_items:
         sections.append({'title': 'Inferred Defaults', 'tone': 'secondary', 'items': inferred_items})
 
     note_items: list[str] = []
     if notes.get('write_file_under_outputs_artifacts'):
         note_items.append('Write generated file artifacts under /outputs/artifacts/ when File(path) is used.')
-    if notes.get('needs_hint_template'):
-        note_items.append('Include a hint template only if referenced outputs are actually produced.')
+    if notes.get('needs_hint_levels'):
+        note_items.append('Include low, medium, and high hint levels only when referenced outputs are actually produced.')
     if notes.get('inject_destination'):
         note_items.append(f'Inject destination: {notes.get("inject_destination")}')
     readme_mentions = [str(item).strip() for item in (notes.get('readme_mentions') or []) if str(item).strip()]
@@ -1695,7 +1737,7 @@ def _build_prompt_intent_preview(payload: dict[str, Any]) -> dict[str, Any]:
         'manual': manual,
         'explicit': explicit,
         'inferred': inferred,
-        'merged': {k: v for k, v in merged.items() if k in {'runtime_inputs', 'requires', 'produces', 'inject_files', 'hint_templates'}},
+        'merged': {k: v for k, v in merged.items() if k in {'runtime_inputs', 'requires', 'produces', 'inject_files', 'hint_levels'}},
         'notes': notes,
         'sections': sections,
         'editable': resolved.get('editable') if isinstance(resolved.get('editable'), dict) else {},
@@ -1740,8 +1782,8 @@ def _build_prompt_intent_guidance(prompt: str, plugin_type: str, overrides_paylo
             lines.append(f"- Respect these Builder override artifact outputs: {', '.join(str(x) for x in (manual.get('produces') or []))}.")
         if manual.get('inject_files'):
             lines.append(f"- Respect these Builder override inject_files entries: {', '.join(str(x) for x in (manual.get('inject_files') or []))}. Every one must resolve to a created output file.")
-        if manual.get('hint_templates'):
-            lines.append(f"- Respect these Builder override hint templates: {'; '.join(str(x) for x in (manual.get('hint_templates') or []))}.")
+        if manual.get('hint_levels'):
+            lines.append(f"- Respect these Builder override hint levels: {_hint_levels_summary(manual.get('hint_levels'))}.")
         manual_readme_mentions = [str(item).strip() for item in (manual_notes.get('readme_mentions') or []) if str(item).strip()]
         if manual_readme_mentions:
             lines.append(f"- Respect these Builder override README notes: {', '.join(manual_readme_mentions)}.")
@@ -1811,14 +1853,14 @@ def _build_prompt_intent_guidance(prompt: str, plugin_type: str, overrides_paylo
             lines.append(f"- Suggested artifact outputs: {', '.join(str(x) for x in (inferred.get('produces') or []))}.")
         if inferred.get('inject_files'):
             lines.append(f"- Suggested inject_files entries: {', '.join(str(x) for x in (inferred.get('inject_files') or []))}. Only keep them if the file artifacts are actually produced.")
-        if inferred.get('hint_templates'):
-            lines.append(f"- Suggested hint template shape: {str((inferred.get('hint_templates') or [''])[0])}.")
+        if inferred.get('hint_levels'):
+            lines.append(f"- Suggested hint levels: {_hint_levels_summary(inferred.get('hint_levels'))}.")
         lines.append('')
 
     if notes.get('write_file_under_outputs_artifacts'):
         lines.append('- Prompt-derived authoring hint: if the prompt asks for a generated file artifact, write it under /outputs/artifacts/ and expose it through outputs.json.')
-    if notes.get('needs_hint_template'):
-        lines.append('- Prompt-derived authoring hint: include a hint template only if the resulting outputs referenced by the template are actually produced.')
+    if notes.get('needs_hint_levels'):
+        lines.append('- Prompt-derived authoring hint: include low, medium, and high hint_levels only if the referenced outputs are actually produced.')
     readme_mentions = [str(item).strip() for item in (notes.get('readme_mentions') or []) if str(item).strip()]
     if readme_mentions:
         lines.append(f"- Prompt-derived authoring hint: README should mention {', '.join(readme_mentions)}.")
@@ -1908,7 +1950,6 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '  "optional_requires": ["Knowledge(hostname)"],',
         '  "produces": ["Flag(flag_id)", "Credential(user,password)"],',
         '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true}, {"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true}],',
-        '  "hint_templates": ["Next: use {{OUTPUT.Credential(user,password)}}"],',
         '  "hint_levels": {"low": ["Target: {{NEXT_NODE_IP}}"], "medium": ["Service/artifact: {{OUTPUT.File(path):basename}}"], "high": ["Use the access instructions and README.md for the complete workflow."]},',
         '  "inject_files": ["File(path)"],',
         '  "inject_candidate_paths": ["/opt/uploads", "/var/www/html"],',
@@ -1921,11 +1962,11 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
     ]
     if ultra_compact_prompt:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_templates":[],"hint_levels":{"low":[],"medium":[],"high":[]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_levels":{"low":[],"medium":[],"high":[]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
         ]
     elif compact_grounding:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true}],"hint_templates":["Next: use {{OUTPUT.Flag(flag_id)}}"],"hint_levels":{"low":["Target: {{NEXT_NODE_IP}}"],"medium":["Artifact: {{OUTPUT.Flag(flag_id)}}"],"high":["Use the access instructions and README.md."]},"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true}],"hint_levels":{"low":["Target: {{NEXT_NODE_IP}}"],"medium":["Artifact: {{OUTPUT.Flag(flag_id)}}"],"high":["Use the access instructions and README.md."]},"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
         ]
 
     current_scaffold = payload.get('current_scaffold_request') if isinstance(payload.get('current_scaffold_request'), dict) else None
@@ -2080,7 +2121,6 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
     folder_name = str(ai_payload.get('folder_name') or '').strip() or f'py_{plugin_id}'
     requires, _optional_requires = _coerce_requires(ai_payload.get('requires'), ai_payload.get('optional_requires'))
     runtime_inputs = _coerce_runtime_inputs(ai_payload.get('runtime_inputs') or ai_payload.get('inputs'))
-    hint_templates = _coerce_string_list(ai_payload.get('hint_templates'))
     hint_levels = _coerce_hint_levels(ai_payload.get('hint_levels'))
     inject_files = _coerce_string_list(ai_payload.get('inject_files'))
     inject_candidate_paths = _coerce_inject_candidate_paths(ai_payload.get('inject_candidate_paths'))
@@ -2123,14 +2163,12 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
 
     inject_files = _apply_inject_destination(inject_files, inject_destination)
 
-    if manual.get('hint_templates'):
-        hint_templates = _coerce_string_list(manual.get('hint_templates'))
-    elif explicit.get('hint_templates'):
-        hint_templates = _coerce_string_list(explicit.get('hint_templates'))
-    elif not hint_templates and merged_defaults.get('hint_templates'):
-        hint_templates = _coerce_string_list(merged_defaults.get('hint_templates'))
-    if not hint_levels and hint_templates:
-        hint_levels = {'low': hint_templates}
+    if manual.get('hint_levels'):
+        hint_levels = _coerce_hint_levels(manual.get('hint_levels'))
+    elif explicit.get('hint_levels'):
+        hint_levels = _coerce_hint_levels(explicit.get('hint_levels'))
+    elif not hint_levels and merged_defaults.get('hint_levels'):
+        hint_levels = _coerce_hint_levels(merged_defaults.get('hint_levels'))
 
     compose_text = str(ai_payload.get('compose_text') or '').strip('\n')
     readme_text = str(ai_payload.get('readme_text') or '').strip('\n')
@@ -2151,7 +2189,6 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
         'requires': requires,
         'produces': produces,
         'runtime_inputs': runtime_inputs,
-        'hint_templates': hint_templates,
         'hint_levels': hint_levels,
         'inject_files': inject_files,
         'inject_candidate_paths': inject_candidate_paths,

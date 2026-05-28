@@ -1212,28 +1212,6 @@ def refresh_hints_for_current_chain(
                 templates = [str(x or '').strip() for x in overrides if str(x or '').strip()]
         except Exception:
             templates = []
-        try:
-            if not templates:
-                hint_templates = assignment.get('hint_templates') if isinstance(assignment.get('hint_templates'), list) else None
-                if isinstance(hint_templates, list) and hint_templates:
-                    templates = [str(x or '').strip() for x in hint_templates if str(x or '').strip()]
-        except Exception:
-            pass
-        try:
-            if not templates:
-                single_tpl = str(assignment.get('hint_template') or '').strip()
-                if single_tpl:
-                    templates = [single_tpl]
-        except Exception:
-            pass
-        if not templates:
-            try:
-                generator_id = str(assignment.get('id') or '').strip()
-                gen_def_local = gen_by_id.get(generator_id) if generator_id else None
-                if isinstance(gen_def_local, dict):
-                    templates = backend._flow_hint_templates_from_generator(gen_def_local)
-            except Exception:
-                templates = []
         if gen_def_local is None:
             try:
                 generator_id = str(assignment.get('id') or '').strip()
@@ -1320,8 +1298,6 @@ def refresh_hints_for_current_chain(
         except Exception:
             rendered_hint_levels = {}
 
-        assignment['hint_templates'] = normalized_templates
-        assignment['hint_template'] = str(normalized_templates[0] or '') if normalized_templates else ''
         assignment['hint_level_templates'] = hint_level_templates
         assignment['hint_levels'] = rendered_hint_levels
         assignment['hints'] = rendered_hint_levels.get('low') or rendered

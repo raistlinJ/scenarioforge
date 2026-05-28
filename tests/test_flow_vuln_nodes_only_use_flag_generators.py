@@ -25,7 +25,7 @@ def test_flow_vuln_nodes_only_use_flag_generators(monkeypatch: pytest.MonkeyPatc
         "name": "FlagGen",
         "inputs": [],
         "outputs": [{"name": "Flag(flag_id)", "required": False}],
-        "hint_template": "Next: {{NEXT_NODE_ID}}",
+        "hint_levels": {"low": ["Next: {{NEXT_NODE_ID}}"]},
         "language": "python",
         "_source_name": "test",
     }
@@ -34,7 +34,7 @@ def test_flow_vuln_nodes_only_use_flag_generators(monkeypatch: pytest.MonkeyPatc
         "name": "NodeGen",
         "inputs": [],
         "outputs": [],
-        "hint_template": "Next: {{NEXT_NODE_ID}}",
+        "hint_levels": {"low": ["Next: {{NEXT_NODE_ID}}"]},
         "language": "python",
         "_source_name": "test",
     }
@@ -81,7 +81,7 @@ def test_attackflow_preview_docker_only_uses_flag_node_generators(monkeypatch: p
         "name": "NodeGen",
         "inputs": [],
         "outputs": [],
-        "hint_template": "Next: {{NEXT_NODE_ID}}",
+        "hint_levels": {"low": ["Next: {{NEXT_NODE_ID}}"]},
         "language": "python",
         "_source_name": "test",
     }
@@ -440,7 +440,7 @@ def test_prepare_preview_for_execute_preserves_docker_only_chain(monkeypatch: py
         'name': 'NFS Test',
         'inputs': [],
         'outputs': [{'name': 'Flag(flag_id)'}],
-        'hint_template': 'Next: {{NEXT_NODE_ID}}',
+        'hint_levels': {'low': ['Next: {{NEXT_NODE_ID}}']},
         'language': 'python',
         '_source_name': 'test',
     }
