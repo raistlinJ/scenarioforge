@@ -39,6 +39,11 @@ def test_flow_injects_table_shows_resolved_path_column() -> None:
         "viewToggle.title = 'Toggle path view (CORE VM or Container)';",
         "const resolvedInjectSources = (fa && fa.resolved_paths && Array.isArray(fa.resolved_paths.inject_sources))",
         "function resolvedPathsForCandidate(srcValue, resolvedValue)",
+        "const destinationOptionValues = destinationOptions();",
+        "controlLabel.textContent = 'Destination:';",
+        "destSelect = document.createElement('select');",
+        "destSelect.value = '/flow_injects';",
+        "applyInjectDestinationOverridesFromTable();",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
