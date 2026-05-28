@@ -1958,7 +1958,7 @@
         pre.textContent = msg;
         composeBodyEl.appendChild(pre);
       }
-      if (composeStatusEl) composeStatusEl.textContent = 'Running generators…';
+      if (composeStatusEl) composeStatusEl.textContent = 'Solving chain…';
       setComposeProgressState('Working…', { width: '100%', animated: true });
       if (composeCloseBtnEl) composeCloseBtnEl.disabled = true;
       if (composeSpinnerEl) composeSpinnerEl.classList.remove('d-none');
@@ -1987,11 +1987,33 @@
     return pre;
   }
 
-  function _renderGeneratorOutputTable(runs, progressLog) {
+  function _renderGeneratorOutputTable(runs, progressLog, phaseTimings) {
     try {
       const rows = Array.isArray(runs) ? runs : [];
       const progress = Array.isArray(progressLog) ? progressLog : [];
+      const timings = (phaseTimings && typeof phaseTimings === 'object' && !Array.isArray(phaseTimings)) ? phaseTimings : {};
       const esc = (s) => escapeHtml(String(s || ''));
+      const formatTiming = (value) => {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds) || seconds < 0) return '';
+        return seconds >= 10 ? `${seconds.toFixed(1)}s` : `${seconds.toFixed(2)}s`;
+      };
+      const timingSpecs = [
+        ['solve_chain_and_assignments_s', 'Solve chain'],
+        ['prepare_remote_runtime_s', 'Prepare runtime'],
+        ['prepare_generator_state_s', 'Prepare generator state'],
+        ['run_generators_or_prepare_assignments_s', 'Run generators'],
+        ['finalize_response_s', 'Finalize'],
+        ['total_elapsed_s', 'Total'],
+      ];
+      const timingRows = timingSpecs.map(([key, label]) => {
+        const value = formatTiming(timings[key]);
+        if (!value) return '';
+        return `<li class="d-flex align-items-center justify-content-between gap-3"><span>${esc(label)}</span><span class="fw-semibold">${esc(value)}</span></li>`;
+      }).filter(Boolean).join('');
+      const timingHtml = timingRows
+        ? `<div class="small text-muted mb-2">Phase Timing</div><ul class="small mb-3" style="list-style: none; padding-left: 0; max-width: 32rem;">${timingRows}</ul>`
+        : '';
       const renderCheckbox = (r) => {
         const ok = r && r.ok ? true : false;
         const checked = ok ? 'checked' : '';
@@ -2027,6 +2049,7 @@
         return `# ${gid}${node ? ` @ ${node}` : ''}\n${parts.join('\n\n')}`;
       }).filter(Boolean).join('\n\n');
       return `
+        ${timingHtml}
         ${progressHtml}
         <div class="small text-muted mb-2">Summary</div>
         <ul class="small mb-3" style="list-style: none; padding-left: 0;">
@@ -2104,6 +2127,30 @@
     } catch (e) { }
   }
 
+  function _composeStatusFromProgressLine(line) {
+    try {
+      const s = String(line || '').toLowerCase();
+      if (!s) return '';
+      if (s.includes('phase: solving chain and assignments')) return 'Solving chain…';
+      if (s.includes('phase complete: solving chain and assignments')) return 'Chain solved. Preparing runtime…';
+      if (s.includes('phase: preparing generator runtime')) return 'Preparing generator runtime…';
+      if (s.includes('phase complete: preparing generator runtime')) return 'Preparing generator state…';
+      if (s.includes('phase complete: preparing generator state')) return 'Generator state prepared. Running generators…';
+      if (s.includes('phase: running generators')) return 'Running generators…';
+      if (s.includes('running generator ')) return 'Running generators…';
+      if (s.includes('completed generator ')) {
+        const m = s.match(/completed generator\s+(\d+)\/(\d+)/i);
+        if (m) return `Running generators (${m[1]}/${m[2]})…`;
+        return 'Running generators…';
+      }
+      if (s.includes('phase complete: running generators')) return 'Generators complete. Finalizing…';
+      if (s.includes('phase: finalizing preview payload')) return 'Finalizing preview…';
+      return '';
+    } catch (e) {
+      return '';
+    }
+  }
+
   function startFlowProgressPoll() {
     let cancelled = false;
     const seen = new Set();
@@ -2119,6 +2166,8 @@
           if (!s || seen.has(s)) return;
           seen.add(s);
           newLines.push(s);
+          const status = _composeStatusFromProgressLine(s);
+          if (status && composeStatusEl) composeStatusEl.textContent = status;
         });
         if (newLines.length) appendComposeLines(newLines);
       } catch (e) { }
@@ -2682,7 +2731,13 @@
   }
 
   async function postSequencePreviewPlan(payload, opts) {
-    const data = await postJson('/api/flag-sequencing/sequence_preview_plan', payload, opts);
+    const requestOpts = Object.assign({}, opts || {});
+    const timeoutFloorMs = 180000;
+    const requestedTimeoutMs = Number(requestOpts.timeoutMs);
+    if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs < timeoutFloorMs) {
+      requestOpts.timeoutMs = timeoutFloorMs;
+    }
+    const data = await postJson('/api/flag-sequencing/sequence_preview_plan', payload, requestOpts);
     if (data && data.ok === false) {
       const err = new Error((data.error || data.message || 'Sequence preview failed').toString());
       err.payload = data;
@@ -10082,7 +10137,7 @@
             setLoadingSteps(progressSteps, 4);
             appendLoadingLog('Resolving values via prepare_preview_for_execute');
             try {
-              showComposeDialog('Generator Output', 'Running generators…');
+              showComposeDialog('Generator Output', 'Solving chain and assignments…');
             } catch (e) { }
             const stopProgressPoll = startFlowProgressPoll();
             const chain_ids = currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean);
@@ -10109,6 +10164,7 @@
             try {
               const runs = (prepData && Array.isArray(prepData.generator_runs)) ? prepData.generator_runs : [];
               const progressLog = (prepData && Array.isArray(prepData.progress_log)) ? prepData.progress_log : [];
+              const phaseTimings = (prepData && prepData.phase_timings && typeof prepData.phase_timings === 'object') ? prepData.phase_timings : {};
               if (runs.length) {
                 appendLoadingLog(`Generator runs (${runs.length}):`);
                 runs.forEach((r) => {
@@ -10120,7 +10176,7 @@
                 });
               }
 
-              const html = _renderGeneratorOutputTable(runs, progressLog);
+              const html = _renderGeneratorOutputTable(runs, progressLog, phaseTimings);
               updateComposeDialog({ html });
             } catch (e) { }
             setFlowValidityFromPayload(prepData);
@@ -10378,7 +10434,7 @@
       if (resolveOnGenerate && lastResolvePayload && Array.isArray(lastResolvePayload.generator_runs)) {
         resultsHtml += '<div class="fw-semibold mb-2">Generator Output</div>';
         // Reuse the existing table renderer which includes details/logs
-        resultsHtml += _renderGeneratorOutputTable(lastResolvePayload.generator_runs, lastResolvePayload.progress_log || []);
+        resultsHtml += _renderGeneratorOutputTable(lastResolvePayload.generator_runs, lastResolvePayload.progress_log || [], lastResolvePayload.phase_timings || {});
       }
 
       updateComposeDialog({

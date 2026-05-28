@@ -3371,6 +3371,7 @@ def build_prepare_preview_success_payload(
     failed_run_dirs: list[Any],
     cleanup_generated_artifacts: bool,
     cleanup_deleted_run_dirs: list[str],
+    phase_timings: dict[str, Any],
     debug_dag: bool,
     dag_debug: Any,
     warning: str | None,
@@ -3417,6 +3418,7 @@ def build_prepare_preview_success_payload(
         'failed_run_dirs': failed_run_dirs,
         'cleanup_generated_artifacts': bool(cleanup_generated_artifacts),
         'cleanup_deleted_run_dirs': cleanup_deleted_run_dirs,
+        'phase_timings': dict(phase_timings or {}),
     }
     if flow_errors_detail:
         payload['flow_errors_detail'] = flow_errors_detail
