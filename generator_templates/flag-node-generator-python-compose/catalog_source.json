@@ -27,8 +27,11 @@
       "source": {"type": "local-path", "path": "flag_node_generators/CHANGE_ME_FOLDER"},
       "compose": {"file": "docker-compose.yml", "service": "generator"},
       "description_hints": ["TODO"],
-      "hint_templates": ["Next: ..."],
-      "hint_template": "Next: ..."
+      "hint_levels": {
+        "low": ["Target: {{NEXT_NODE_IP}}"],
+        "medium": ["Generated compose: {{OUTPUT.File(path)}}"],
+        "high": ["Use the access instructions and README.md for the complete workflow."]
+      }
     }
   ]
 }

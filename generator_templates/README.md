@@ -10,8 +10,8 @@ How to use:
 1. Copy a template folder into a scratch working directory and rename it using the Generator Pack layout:
 	- `flag_generators/<your_generator_dir>/...` or
 	- `flag_node_generators/<your_generator_dir>/...`
-2. Edit `generator.py` and `docker-compose.yml`.
-3. Add a `manifest.yaml` in the generator directory (required by the Web UI / installed workflow).
+2. Edit `generator.py`, `docker-compose.yml`, and the included `manifest.yaml`.
+3. Keep `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` in the manifest; do not add older single-hint fields.
 4. Pack install via Web UI:
 	- Create a ZIP containing `flag_generators/<your_generator_dir>/...` and/or `flag_node_generators/<your_generator_dir>/...`.
 	- Upload/import it from the Flag Catalog page (Generator Packs).
@@ -34,6 +34,7 @@ When asking AI to author from these templates, include:
 - exact required vs optional inputs
 - any solver-facing first-step runtime inputs that need `flow_supply_when_first: true`
 - exact `artifacts.produces` keys
+- low/medium/high `hint_levels`
 
 Ask AI to output only the target file(s), then run local + installed-pack parity tests.
 

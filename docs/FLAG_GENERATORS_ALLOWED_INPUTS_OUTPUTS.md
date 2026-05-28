@@ -170,7 +170,13 @@ artifacts:
     - File(path)
     - Knowledge(value)
 
-hint_template: Next: move to {{NEXT_NODE_NAME}} using {{OUTPUT.Credential(user,password)}}
+hint_levels:
+  low:
+    - "Target: {{NEXT_NODE_IP}}"
+  medium:
+    - "Credential: {{OUTPUT.Credential(user,password)}}"
+  high:
+    - "Use the access instructions and README.md for the complete workflow."
 injects:
   - File(path)
 ```
@@ -209,7 +215,13 @@ artifacts:
     - File(path)
     - Endpoint(path)
 
-hint_template: Next: access {{NEXT_NODE_NAME}} at {{NEXT_NODE_IP}}
+hint_levels:
+  low:
+    - "Target: {{NEXT_NODE_IP}}"
+  medium:
+    - "Service: {{NEXT_NODE_NAME}}"
+  high:
+    - "Use the access instructions and README.md for the complete workflow."
 injects:
   - File(path) -> /flow_injects
 ```
@@ -235,4 +247,4 @@ injects:
 
 - Keep output file paths relative to `/outputs` conventions used by the runner.
 - Prefer ontology-defined fact keys for best compatibility with sequencing and validation.
-- `hint_template` placeholders (for example `{{NEXT_NODE_NAME}}`, `{{OUTPUT.Key}}`) are supported by Flow rendering.
+- `hint_levels` placeholders (for example `{{NEXT_NODE_NAME}}`, `{{OUTPUT.Key}}`) are supported by Flow rendering.

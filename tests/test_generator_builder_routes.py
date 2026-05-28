@@ -291,7 +291,7 @@ def test_generator_prompt_intent_preview_returns_structured_sections(monkeypatch
             'Artifact outputs: Flag(flag_id), Credential(user,password), File(path).\n'
             'Include inject_files with File(path).\n'
             'Inject destination: /opt/bootstrap.\n'
-            'Hint templates: Next: SSH using {{OUTPUT.Credential(user,password)}}.\n'
+            'Hint levels: low: Target: {{NEXT_NODE_IP}}; medium: Credential: {{OUTPUT.Credential(user,password)}}.\n'
             'README should mention determinism and parity testing.'
         ),
     })
@@ -304,7 +304,10 @@ def test_generator_prompt_intent_preview_returns_structured_sections(monkeypatch
     assert 'Notes' in titles
     merged = payload.get('merged') or {}
     assert merged.get('inject_files') == ['File(path) -> /opt/bootstrap']
-    assert merged.get('hint_templates') == ['Next: SSH using {{OUTPUT.Credential(user,password)}}.']
+    assert merged.get('hint_levels') == {
+        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'medium': ['Credential: {{OUTPUT.Credential(user,password)}}.'],
+    }
     assert {'name': 'token', 'type': 'string', 'required': True, 'sensitive': True, 'flow_supply_when_first': True} in (merged.get('runtime_inputs') or [])
 
 
@@ -517,7 +520,11 @@ def test_generator_ai_scaffold_normalizes_model_output(monkeypatch):
             {'name': 'seed', 'type': 'string', 'required': True},
             {'name': 'secret', 'type': 'string', 'required': True, 'sensitive': True},
         ],
-        'hint_templates': ['Next: use {{OUTPUT.Credential(user,password)}}'],
+        'hint_levels': {
+            'low': ['Target: {{NEXT_NODE_IP}}'],
+            'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
+            'high': ['Use the README access steps.'],
+        },
         'inject_files': ['File(path)'],
         'inject_candidate_paths': ['/opt/uploads', '/var/www/html'],
         'access_instructions': {
@@ -569,6 +576,7 @@ def test_generator_ai_scaffold_normalizes_model_output(monkeypatch):
         {'artifact': 'Knowledge(hostname)', 'optional': True},
     ]
     assert payload['scaffold_request']['runtime_inputs'][1]['sensitive'] is True
+    assert payload['scaffold_request']['hint_levels']['medium'] == ['Credential: {{OUTPUT.Credential(user,password)}}']
     assert payload['scaffold_request']['inject_candidate_paths'] == ['/opt/uploads', '/var/www/html']
     assert payload['scaffold_request']['access_instructions']['title'] == 'SSH Access'
     assert captured['url'] == 'http://127.0.0.1:11434/api/generate'
@@ -580,6 +588,8 @@ def test_generator_ai_scaffold_normalizes_model_output(monkeypatch):
     assert 'flag_generators/py_ssh_creds_drop/generator.py' in payload['files']
     assert payload['files']['flag_generators/py_ssh_creds_drop/generator.py'] == 'print("ai")\n'
     assert 'Credential(user,password)' in payload['manifest_yaml']
+    assert 'hint_levels:' in payload['manifest_yaml']
+    assert ('hint_' + 'templates:') not in payload['manifest_yaml']
     assert 'inject_candidate_paths:' in payload['manifest_yaml']
     assert 'access_instructions:' in payload['manifest_yaml']
 
@@ -1535,7 +1545,7 @@ def test_generator_builder_ai_messages_add_prompt_derived_ssh_credential_default
     assert 'Suggested artifact requirements: Knowledge(ip), Knowledge(hostname) (optional).' in user_content
     assert 'Suggested artifact outputs: Flag(flag_id), Credential(user), Credential(user,password), File(path).' in user_content
     assert 'Suggested inject_files entries: File(path).' in user_content
-    assert 'Suggested hint template shape: Next: SSH to {{NEXT_NODE_NAME}} using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}.' in user_content
+    assert 'Suggested hint levels: low: Target: {{NEXT_NODE_IP}}, medium: Credential: {{OUTPUT.Credential(user,password)}}, high: Use the access instructions and README.md for the complete workflow.' in user_content
     assert 'README should mention determinism, local runner testing.' in user_content
 
 
@@ -1567,7 +1577,7 @@ def test_generator_builder_ai_messages_builder_overrides_take_precedence_in_guid
         'intent_overrides': {
             'runtime_inputs': 'seed (required)\nnode_name (required)',
             'produces': 'Flag(flag_id)\nCredential(user)',
-            'hint_templates': 'Next: use {{OUTPUT.Credential(user)}}',
+            'hint_levels': 'low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user)}}',
         },
     })
 
@@ -1575,7 +1585,7 @@ def test_generator_builder_ai_messages_builder_overrides_take_precedence_in_guid
     assert 'Builder preview overrides are set. These take precedence over both prompt-derived explicit requirements and heuristics:' in user_content
     assert 'Respect these Builder override runtime inputs: seed (required), node_name (required).' in user_content
     assert 'Respect these Builder override artifact outputs: Flag(flag_id), Credential(user).' in user_content
-    assert 'Respect these Builder override hint templates: Next: use {{OUTPUT.Credential(user)}}.' in user_content
+    assert 'Respect these Builder override hint levels: low: Target: {{NEXT_NODE_IP}}, medium: Credential: {{OUTPUT.Credential(user)}}.' in user_content
 
 
 def test_normalize_ai_scaffold_payload_uses_prompt_intent_defaults_when_ai_omits_fields():
@@ -1603,7 +1613,11 @@ def test_normalize_ai_scaffold_payload_uses_prompt_intent_defaults_when_ai_omits
     ]
     assert payload['produces'] == ['Flag(flag_id)', 'Credential(user)', 'Credential(user,password)', 'File(path)']
     assert payload['inject_files'] == ['File(path)']
-    assert payload['hint_templates'] == ['Next: SSH to {{NEXT_NODE_NAME}} using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}']
+    assert payload['hint_levels'] == {
+        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
+        'high': ['Use the access instructions and README.md for the complete workflow.'],
+    }
 
 
 def test_normalize_ai_scaffold_payload_prioritizes_explicit_prompt_specs_over_inferred_defaults():
@@ -1637,7 +1651,7 @@ def test_normalize_ai_scaffold_payload_prioritizes_explicit_prompt_specs_over_in
     assert payload['inject_files'] == ['Credential(user)']
 
 
-def test_normalize_ai_scaffold_payload_applies_hint_templates_and_inject_destination_from_prompt():
+def test_normalize_ai_scaffold_payload_applies_hint_levels_and_inject_destination_from_prompt():
     payload = generator_builder_routes._normalize_ai_scaffold_payload(
         {
             'plugin_id': 'hint_demo',
@@ -1652,13 +1666,16 @@ def test_normalize_ai_scaffold_payload_applies_hint_templates_and_inject_destina
                 'Artifact outputs: Flag(flag_id), Credential(user,password), File(path).\n'
                 'Include inject_files with File(path).\n'
                 'Inject destination: /opt/bootstrap.\n'
-                'Hint templates: Next: SSH using {{OUTPUT.Credential(user,password)}}.'
+                'Hint levels: low: Target: {{NEXT_NODE_IP}}; medium: Credential: {{OUTPUT.Credential(user,password)}}.'
             ),
         },
     )
 
     assert payload['inject_files'] == ['File(path) -> /opt/bootstrap']
-    assert payload['hint_templates'] == ['Next: SSH using {{OUTPUT.Credential(user,password)}}.']
+    assert payload['hint_levels'] == {
+        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'medium': ['Credential: {{OUTPUT.Credential(user,password)}}.'],
+    }
 
 
 def test_normalize_ai_scaffold_payload_prioritizes_manual_overrides_over_prompt_intent():
@@ -1676,13 +1693,13 @@ def test_normalize_ai_scaffold_payload_prioritizes_manual_overrides_over_prompt_
                 'Runtime inputs: seed (required), token (required, sensitive).\n'
                 'Artifact outputs: Flag(flag_id), Credential(user,password), File(path).\n'
                 'Include inject_files with File(path).\n'
-                'Hint templates: Next: SSH using {{OUTPUT.Credential(user,password)}}.'
+                'Hint levels: low: Target: {{NEXT_NODE_IP}}; medium: Credential: {{OUTPUT.Credential(user,password)}}.'
             ),
             'intent_overrides': {
                 'runtime_inputs': 'seed (required)\nnode_name (required)',
                 'produces': 'Flag(flag_id)\nCredential(user)',
                 'inject_files': 'Credential(user)',
-                'hint_templates': 'Next: use {{OUTPUT.Credential(user)}}',
+                'hint_levels': 'low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user)}}',
                 'readme_mentions': 'custom docs',
             },
         },
@@ -1694,7 +1711,10 @@ def test_normalize_ai_scaffold_payload_prioritizes_manual_overrides_over_prompt_
     ]
     assert payload['produces'] == ['Flag(flag_id)', 'Credential(user)']
     assert payload['inject_files'] == ['Credential(user)']
-    assert payload['hint_templates'] == ['Next: use {{OUTPUT.Credential(user)}}']
+    assert payload['hint_levels'] == {
+        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'medium': ['Credential: {{OUTPUT.Credential(user)}}'],
+    }
 
 
 def test_generator_builder_test_runs_remote_core_vm(monkeypatch):

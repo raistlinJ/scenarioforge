@@ -382,7 +382,7 @@ def test_generate_validate_execute_flow_copy_for_both_generator_kinds(monkeypatc
         'language': 'python',
         'inputs': [],
         'outputs': [{'name': 'Flag(flag_id)'}, {'name': 'File(path)'}],
-        'hint_templates': ['hint'],
+        'hint_levels': {'low': ['hint']},
         '_source_name': 'test',
     }
     fng_def = {
@@ -391,7 +391,7 @@ def test_generate_validate_execute_flow_copy_for_both_generator_kinds(monkeypatc
         'language': 'python',
         'inputs': [],
         'outputs': [{'name': 'Flag(flag_id)'}, {'name': 'File(path)'}],
-        'hint_templates': ['hint'],
+        'hint_levels': {'low': ['hint']},
         '_source_name': 'test',
     }
 

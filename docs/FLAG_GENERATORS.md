@@ -12,7 +12,7 @@ The Flow system treats each generator as a small contract:
 - **inputs**: runtime config fields defined in `manifest.yaml` (`inputs[]`). These are not artifacts; `required: false` marks them optional.
 - **artifacts.requires** / **artifacts.optional_requires**: artifact keys the generator needs (required vs optional for chaining).
 - **artifacts.produces**: artifact keys the generator provides.
-- **hint_template**: a human-readable hint that tells the user where to go next.
+- **hint_levels**: low, medium, and high human-readable hints that tell the user where to go next.
 
 Flow also supports **Initial Facts** and **Goal Facts** to steer sequencing. Initial facts are treated
 as already-known inputs (including synthesized fields like `seed`, `node_name`, `flag_prefix`), while
@@ -51,9 +51,9 @@ Use these keys consistently so chains can be validated and composed.
 - `PortForward(host, port)`
 - `InternalNetwork(subnet)`
 
-## Hint Templates
+## Hint Levels
 
-Every generator should include a `hint_template`.
+Every generator should include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` arrays.
 
 Flow will substitute these placeholders (if present):
 - `{{THIS_NODE_NAME}}`, `{{THIS_NODE_ID}}`
@@ -63,11 +63,19 @@ Flow will substitute these placeholders (if present):
 
 Example:
 
-`Next: SSH to {{NEXT_NODE_NAME}} (id={{NEXT_NODE_ID}}) using {{OUTPUT.Credential(user,password)}}.`
+```yaml
+hint_levels:
+	low:
+		- "Target: {{NEXT_NODE_IP}}"
+	medium:
+		- "Credential: {{OUTPUT.Credential(user,password)}}"
+	high:
+		- "Use the access instructions and README.md for the complete workflow."
+```
 
 Notes:
 - Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known (e.g., `web01 (10.0.0.5)`), even if `{{NEXT_NODE_IP}}` is not explicitly present.
-- For templates that expose files, we recommend including a `hint.txt` in the payload (served over HTTP or mounted into the container) that contains the rendered hint.
+- For payload-specific files, you may still emit a `hint.txt` as challenge content, but Flow generator manifests should declare participant guidance with `hint_levels`.
 
 ## Schemas (Generator Authors)
 

@@ -73,10 +73,12 @@ def test_prepare_preview_resolves_chain_and_output_template_vars(monkeypatch):
         "name": "ZZ Vars Hint",
         "language": "python",
         "description": "test",
-        "hint_templates": [
-            "Scenario={{SCENARIO}} next={{NEXT_NODE_NAME}} ip={{OUTPUT.Knowledge(ip)}}",
-            "subnet={{OUTPUT.Knowledge(ip):subnet24}} last={{OUTPUT.Knowledge(ip):last_octet}} port={{OUTPUT.https_port}}",
-        ],
+        "hint_levels": {
+            "low": [
+                "Scenario={{SCENARIO}} next={{NEXT_NODE_NAME}} ip={{OUTPUT.Knowledge(ip)}}",
+                "subnet={{OUTPUT.Knowledge(ip):subnet24}} last={{OUTPUT.Knowledge(ip):last_octet}} port={{OUTPUT.https_port}}",
+            ],
+        },
         "inputs": [],
         "outputs": [],
     }
