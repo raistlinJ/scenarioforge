@@ -32,8 +32,8 @@ Manifest alignment (strict):
 - hint_levels.medium should reveal a useful service, port, file, or artifact such as {{OUTPUT.File(path)}}
 - hint_levels.high should point to access_instructions or README guidance
 - optional runtime inputs must be marked required: false
-- solver-facing runtime inputs participants must use on the first challenge but cannot reasonably discover yet must include flow_supply_when_first: true
-- flow_supply_when_first values are shown to participants as Sequence 1 required supplied inputs and labeled in Participant/Facilitator guide fact tables
+- solver-facing runtime inputs participants must use on sequence 1 or the first step of a parallel branch but cannot reasonably discover yet must include flow_supply_when_first: true
+- flow_supply_when_first values are shown to participants as Sequence N required supplied inputs and labeled in Participant/Facilitator guide fact tables
 - purely internal entropy/config inputs should not use flow_supply_when_first
 - injects (if present) must resolve to real output files
 - if File(path) is present, its value must be relative to /outputs (for example artifacts/<name> or docker-compose.yml), not absolute /outputs/...

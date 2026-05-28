@@ -18,8 +18,8 @@ If you are using AI to create generators, use this minimal handoff packet:
 - scaffolded `generator.py`
 - expected artifact keys (`requires`, `optional_requires`, `produces`)
 - explicit statement of required vs optional runtime inputs
-- mark solver-facing first-step runtime inputs with `flow_supply_when_first: true` when participants must use the value and cannot reasonably discover it yet
-- first-step supplied values are shown as `Seq 1 required` Initial Facts in Flow, in Participant/Facilitator guide fact tables, and as Sequence 1 required supplied-input hints for participants
+- mark solver-facing start-step runtime inputs with `flow_supply_when_first: true` when participants must use the value before solving sequence 1 or the first step of a parallel branch
+- supplied start-step values are shown as `Seq N required` Initial Facts in Flow, in Participant/Facilitator guide fact tables, and as Sequence N required supplied-input hints for participants
 - `access_instructions` when participants need concrete mount/connect/read/exploit steps
 - `inject_candidate_paths` when injected artifacts should be copied into one of several plausible absolute destinations
 
@@ -129,7 +129,7 @@ env:
 Notes:
 - `kind` must be `flag-generator` or `flag-node-generator`.
 - `inputs` is a list of input descriptors (used by UI forms and Flow). If `required` is omitted, it defaults to `true`.
-- For any solver-facing runtime input a participant must use on the first challenge but cannot reasonably discover yet, set `flow_supply_when_first: true`; Flow supplies a deterministic value and writes it into the first challenge hint.
+- For any solver-facing runtime input a participant must use on sequence 1 or on the first step of a parallel branch but cannot reasonably discover yet, set `flow_supply_when_first: true`; Flow supplies a deterministic value and writes it into the matching start hint.
 - `artifacts.requires` / `artifacts.optional_requires` / `artifacts.produces` drive Flow dependency chaining.
 
 ### Input types (mandatory convention)
@@ -241,6 +241,7 @@ Rules:
 - Each path must be an absolute path starting with `/`. Relative or `..`-containing entries are ignored.
 - When `inject_candidate_paths` is set and non-empty, one path is chosen at random **per execution** as the inject destination (overrides the `/flow_injects` default).
 - An explicit `->` destination in `injects` still takes priority over candidate paths (candidates only apply when no explicit destination is given).
+- In the Flow Injects override editor, candidate paths appear as destination choices. Leaving the destination blank preserves random selection; choosing a candidate saves that path as an explicit destination for the step.
 - The chosen path is reflected in the `inject_copy` init-container that copies files into the target container's named volume.
 
 Example manifest fragment:
@@ -439,7 +440,7 @@ Use this checklist before shipping a generator pack:
 
 If you use AI to scaffold a generator, include this in your prompt:
 
-> Generate a manifest-based generator that is parity-safe between local Test and remote Execute. Use module-level imports only (no function-local `import json/sys` in enclosing scopes with nested helpers), avoid hard dependency on internet/package-manager availability, write deterministic `/outputs/outputs.json`, and ensure `injects` paths resolve to real files. Mark solver-facing runtime inputs with `flow_supply_when_first: true` when participants must use the value on the first challenge and cannot reasonably discover it yet; do not mark purely internal entropy/config fields. Include a quick local run command and an installed-pack verification checklist.
+> Generate a manifest-based generator that is parity-safe between local Test and remote Execute. Use module-level imports only (no function-local `import json/sys` in enclosing scopes with nested helpers), avoid hard dependency on internet/package-manager availability, write deterministic `/outputs/outputs.json`, and ensure `injects` paths resolve to real files. Mark solver-facing runtime inputs with `flow_supply_when_first: true` when participants must use the value on sequence 1 or on the first step of a parallel branch and cannot reasonably discover it yet; do not mark purely internal entropy/config fields. Include a quick local run command and an installed-pack verification checklist.
 
 ---
 

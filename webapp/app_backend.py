@@ -11422,6 +11422,7 @@ def _backfill_flow_state_inject_files_from_catalog(flow_state: dict[str, Any]) -
         return flow_state
 
     gen_injects: dict[str, list[str]] = {}
+    gen_candidate_paths: dict[str, list[str]] = {}
     try:
         gens, _errs = _flag_generators_from_enabled_sources()
     except Exception:
@@ -11440,6 +11441,9 @@ def _backfill_flow_state_inject_files_from_catalog(flow_state: dict[str, Any]) -
         cleaned = [str(x or '').strip() for x in inj if str(x or '').strip()]
         if cleaned:
             gen_injects[gid] = cleaned
+        candidates = _normalize_inject_candidate_paths(g.get('inject_candidate_paths'))
+        if candidates:
+            gen_candidate_paths[gid] = candidates
 
     def _default_vuln_injects(entry: dict[str, Any]) -> list[str]:
         try:
@@ -11486,6 +11490,10 @@ def _backfill_flow_state_inject_files_from_catalog(flow_state: dict[str, Any]) -
         merged_injects = _merge_vuln_injects(existing, gen_injects.get(gid, []), fallback)
         if merged_injects:
             a2['inject_files'] = merged_injects
+        if gid and not _normalize_inject_candidate_paths(a2.get('inject_candidate_paths')):
+            candidates = gen_candidate_paths.get(gid, [])
+            if candidates:
+                a2['inject_candidate_paths'] = list(candidates)
         out_assigns.append(a2)
     out['flag_assignments'] = out_assigns
     return out
@@ -16536,6 +16544,10 @@ def _flow_compute_flag_assignments_for_preset(
         plugins_by_id = _flow_enabled_plugin_contracts_by_id()
     except Exception:
         plugins_by_id = {}
+    try:
+        start_positions = _flow_parallel_start_assignment_indexes(flag_assignments, gen_defs_by_id=by_id)
+    except Exception:
+        start_positions = {0} if flag_assignments else set()
 
     out: list[dict[str, Any]] = []
     for i, step in enumerate(steps):
@@ -18283,6 +18295,17 @@ def _flow_compute_flag_assignments(
 
             gen = _choose_candidate(candidates, state_known, i)
 
+        try:
+            chain_produced_before = set(chain_produced)
+        except Exception:
+            chain_produced_before = set()
+        try:
+            supplied_names_for_start = set(_flow_first_step_chain_supplied_input_names(gen))
+            required_for_start = set(_required_inputs_of(gen)) - set(initial_facts) - supplied_names_for_start
+            supply_on_start = bool(i == 0 or not (required_for_start & chain_produced_before))
+        except Exception:
+            supply_on_start = bool(i == 0)
+
         # Update outputs for the next hop.
         try:
             produced = _provides_cached(gen)
@@ -18351,6 +18374,7 @@ def _flow_compute_flag_assignments(
         inject_files = [x for x in inject_files if x]
         if vuln_names and not inject_files:
             inject_files.append('flag.txt -> /tmp')
+        inject_candidate_paths = _normalize_inject_candidate_paths(gen.get('inject_candidate_paths'))
 
         assignment_out = {
             'node_id': str(cid),
@@ -18364,6 +18388,7 @@ def _flow_compute_flag_assignments(
             'vulnerabilities': vuln_names,
             'description_hints': list(gen.get('description_hints') or []) if isinstance(gen.get('description_hints'), list) else [],
             'inject_files': inject_files,
+            'inject_candidate_paths': inject_candidate_paths,
             # Effective union (used for chaining feasibility / ordering validation).
             'inputs': sorted(list(_required_inputs_of(gen))),
             'outputs': sorted(list(_provides_of(gen))),
@@ -18387,6 +18412,7 @@ def _flow_compute_flag_assignments(
             gen,
             scenario_label=scenario_label,
             position=i,
+            supply_on_start=supply_on_start,
         )
         out.append(assignment_out)
     return out
@@ -18538,6 +18564,89 @@ def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any
     return names
 
 
+def _flow_enabled_generator_defs_by_id() -> dict[str, dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    try:
+        gens, _ = _flag_generators_from_enabled_sources()
+        for gen in (gens or []):
+            if not isinstance(gen, dict):
+                continue
+            gen_id = str(gen.get('id') or '').strip()
+            if gen_id and gen_id not in by_id:
+                by_id[gen_id] = gen
+    except Exception:
+        pass
+    try:
+        node_gens, _ = _flag_node_generators_from_enabled_sources()
+        for gen in (node_gens or []):
+            if not isinstance(gen, dict):
+                continue
+            gen_id = str(gen.get('id') or '').strip()
+            if gen_id and gen_id not in by_id:
+                by_id[gen_id] = gen
+    except Exception:
+        pass
+    return by_id
+
+
+def _flow_assignment_fact_names(assignment: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
+    facts: set[str] = set()
+    if not isinstance(assignment, dict):
+        return facts
+    for key in keys:
+        raw = assignment.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if isinstance(item, dict):
+                for nested_key in ('artifact', 'name', 'field'):
+                    nested_value = str(item.get(nested_key) or '').strip()
+                    if nested_value:
+                        facts.add(nested_value)
+                        break
+                continue
+            text = str(item or '').strip()
+            if text:
+                facts.add(text)
+    return facts
+
+
+def _flow_parallel_start_assignment_indexes(
+    flag_assignments: list[dict[str, Any]] | Any,
+    *,
+    initial_facts: set[str] | None = None,
+    gen_defs_by_id: dict[str, dict[str, Any]] | None = None,
+) -> set[int]:
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return set()
+    try:
+        available_initial = set(_flow_synthesized_inputs())
+    except Exception:
+        available_initial = set()
+    if isinstance(initial_facts, set):
+        available_initial |= set(initial_facts)
+
+    starts: set[int] = set()
+    provided_so_far: set[str] = set()
+    for index, assignment in enumerate(flag_assignments or []):
+        if not isinstance(assignment, dict):
+            continue
+        gen_def = None
+        try:
+            gen_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+            if gen_id and isinstance(gen_defs_by_id, dict):
+                gen_def = gen_defs_by_id.get(gen_id)
+        except Exception:
+            gen_def = None
+        supplied_names = set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else assignment))
+        required = _flow_assignment_fact_names(assignment, ('requires', 'input_fields_required', 'inputs'))
+        required = {name for name in required if name and name not in available_initial and name not in supplied_names}
+        if not (required & provided_so_far):
+            starts.add(index)
+        provided_so_far |= _flow_assignment_fact_names(assignment, ('produces', 'output_fields', 'outputs'))
+    return starts
+
+
 def _flow_chain_supplied_credential_pair(*, scenario_label: str, node_id: str, gen_id: str) -> tuple[str, str]:
     seed_text = f"{scenario_label}|{node_id}|{gen_id}|first-step-credential"
     digest = hashlib.sha256(seed_text.encode('utf-8', errors='ignore')).hexdigest()
@@ -18599,7 +18708,7 @@ def _flow_chain_supplied_value_for_input(
     return f"value_{digest[:16]}"
 
 
-def _flow_chain_supplied_input_hint(values: dict[str, Any]) -> str:
+def _flow_chain_supplied_input_hint(values: dict[str, Any], *, sequence_label: str = 'Sequence 1') -> str:
     if not isinstance(values, dict) or not values:
         return ''
     display_parts: list[str] = []
@@ -18626,7 +18735,8 @@ def _flow_chain_supplied_input_hint(values: dict[str, Any]) -> str:
         return ''
     joined = '; '.join(display_parts)
     label = 'input' if len(display_parts) == 1 else 'inputs'
-    return f"Sequence 1 required supplied {label}: {joined}."
+    prefix = str(sequence_label or 'Sequence 1').strip() or 'Sequence 1'
+    return f"{prefix} required supplied {label}: {joined}."
 
 
 def _flow_clear_chain_supplied_inputs(assignment: dict[str, Any]) -> dict[str, Any]:
@@ -18681,7 +18791,7 @@ def _flow_clear_chain_supplied_inputs(assignment: dict[str, Any]) -> dict[str, A
     except Exception:
         pass
 
-    for key in ('chain_supplied_inputs', 'chain_supplied_input_values', 'chain_supplied_input_hints', 'chain_supplied_original_optional_inputs'):
+    for key in ('chain_supplied_inputs', 'chain_supplied_input_values', 'chain_supplied_input_hints', 'chain_supplied_original_optional_inputs', 'chain_supplied_sequence_index', 'chain_supplied_requirement_label', 'chain_supplied_required_title', 'chain_supplied_parallel_start'):
         assignment.pop(key, None)
     return assignment
 
@@ -18692,10 +18802,16 @@ def _flow_apply_first_step_chain_supplied_inputs(
     *,
     scenario_label: str,
     position: int = 0,
+    supply_on_start: bool | None = None,
 ) -> dict[str, Any]:
     if not isinstance(assignment, dict):
         return assignment
-    if int(position or 0) != 0:
+    try:
+        position_int = int(position or 0)
+    except Exception:
+        position_int = 0
+    is_start = bool(supply_on_start) if supply_on_start is not None else (position_int == 0)
+    if not is_start:
         return _flow_clear_chain_supplied_inputs(assignment)
 
     source = gen_def if isinstance(gen_def, dict) else assignment
@@ -18753,6 +18869,11 @@ def _flow_apply_first_step_chain_supplied_inputs(
     assignment['resolved_inputs'] = resolved_inputs
     assignment['chain_supplied_inputs'] = list(names)
     assignment['chain_supplied_input_values'] = dict(supplied_values)
+    sequence_number = max(1, position_int + 1)
+    assignment['chain_supplied_sequence_index'] = sequence_number
+    assignment['chain_supplied_requirement_label'] = f"Seq {sequence_number} required"
+    assignment['chain_supplied_required_title'] = f"Required by sequence {sequence_number}"
+    assignment['chain_supplied_parallel_start'] = bool(position_int > 0)
 
     try:
         input_fields = [str(x or '').strip() for x in (assignment.get('input_fields') or []) if str(x or '').strip()] if isinstance(assignment.get('input_fields'), list) else []
@@ -18804,7 +18925,7 @@ def _flow_apply_first_step_chain_supplied_inputs(
     except Exception:
         pass
 
-    hint_text = _flow_chain_supplied_input_hint(supplied_values)
+    hint_text = _flow_chain_supplied_input_hint(supplied_values, sequence_label=f"Sequence {sequence_number}")
     if hint_text:
         try:
             previous_hints = [str(x or '').strip() for x in (assignment.get('chain_supplied_input_hints') or []) if str(x or '').strip()] if isinstance(assignment.get('chain_supplied_input_hints'), list) else []
@@ -18831,6 +18952,10 @@ def _flow_apply_first_step_chain_supplied_inputs_to_assignments(
 ) -> list[dict[str, Any]]:
     if not isinstance(flag_assignments, list):
         return flag_assignments
+    try:
+        start_positions = _flow_parallel_start_assignment_indexes(flag_assignments, gen_defs_by_id=gen_defs_by_id)
+    except Exception:
+        start_positions = {0} if flag_assignments else set()
     out: list[dict[str, Any]] = []
     for index, assignment in enumerate(flag_assignments or []):
         if not isinstance(assignment, dict):
@@ -18848,6 +18973,7 @@ def _flow_apply_first_step_chain_supplied_inputs_to_assignments(
             gen_def if isinstance(gen_def, dict) else None,
             scenario_label=scenario_label,
             position=index,
+            supply_on_start=(index in start_positions),
         ))
     return out
 
@@ -18929,11 +19055,8 @@ def _flow_strip_runtime_sensitive_fields(flag_assignments: list[dict[str, Any]])
 
 
 def _flow_first_hints_from_assignments(flag_assignments: list[dict[str, Any]] | Any) -> list[str]:
-    """Return participant-facing hints for the first Flow assignment."""
+    """Return participant-facing hints for Flow assignments that can start immediately."""
     if not isinstance(flag_assignments, list) or not flag_assignments:
-        return []
-    first = flag_assignments[0]
-    if not isinstance(first, dict):
         return []
 
     out: list[str] = []
@@ -18950,13 +19073,32 @@ def _flow_first_hints_from_assignments(flag_assignments: list[dict[str, Any]] | 
             if text and text not in out:
                 out.append(text)
 
-    levels = first.get('hint_levels') if isinstance(first.get('hint_levels'), dict) else {}
-    if isinstance(levels, dict):
-        _add_many(levels.get('low'))
-    _add_many(first.get('chain_supplied_input_hints'))
+    try:
+        start_positions = _flow_parallel_start_assignment_indexes(
+            flag_assignments,
+            gen_defs_by_id=_flow_enabled_generator_defs_by_id(),
+        )
+    except Exception:
+        start_positions = {0}
+    for index in sorted(start_positions or {0}):
+        if index < 0 or index >= len(flag_assignments):
+            continue
+        assignment = flag_assignments[index]
+        if not isinstance(assignment, dict):
+            continue
+        levels = assignment.get('hint_levels') if isinstance(assignment.get('hint_levels'), dict) else {}
+        if isinstance(levels, dict):
+            _add_many(levels.get('low'))
+        _add_many(assignment.get('chain_supplied_input_hints'))
     if not out:
+        first = flag_assignments[0]
+        if not isinstance(first, dict):
+            return []
         _add_many(first.get('hints'))
     if not out:
+        first = flag_assignments[0]
+        if not isinstance(first, dict):
+            return []
         _add_many(first.get('hint'))
     return out
 
@@ -19223,6 +19365,7 @@ def _flow_enrich_saved_flag_assignments(
                 gen_def,
                 scenario_label=scenario_label,
                 position=i,
+                supply_on_start=(i in start_positions),
             )
         except Exception:
             pass
@@ -19253,6 +19396,14 @@ def _flow_enrich_saved_flag_assignments(
             merged_injects = _merge_vuln_injects(existing_injects, catalog_injects, fallback)
             if merged_injects:
                 a2['inject_files'] = merged_injects
+        except Exception:
+            pass
+
+        try:
+            if isinstance(gen_def, dict) and not _normalize_inject_candidate_paths(a2.get('inject_candidate_paths')):
+                candidates = _normalize_inject_candidate_paths(gen_def.get('inject_candidate_paths'))
+                if candidates:
+                    a2['inject_candidate_paths'] = list(candidates)
         except Exception:
             pass
 
@@ -20110,38 +20261,22 @@ def _flow_validate_chain_order_by_requires_produces(
 
     # Best-effort: load enabled generator definitions so we can infer optional
     # input fields even if the assignment payload doesn't include them.
-    gen_defs_by_id: dict[str, dict[str, Any]] = {}
-    try:
-        gens, _ = _flag_generators_from_enabled_sources()
-        for g in (gens or []):
-            if not isinstance(g, dict):
-                continue
-            gid = str(g.get('id') or '').strip()
-            if gid and gid not in gen_defs_by_id:
-                gen_defs_by_id[gid] = g
-    except Exception:
-        pass
-    try:
-        node_gens, _ = _flag_node_generators_from_enabled_sources()
-        for g in (node_gens or []):
-            if not isinstance(g, dict):
-                continue
-            gid = str(g.get('id') or '').strip()
-            if gid and gid not in gen_defs_by_id:
-                gen_defs_by_id[gid] = g
-    except Exception:
-        pass
+    gen_defs_by_id: dict[str, dict[str, Any]] = _flow_enabled_generator_defs_by_id()
 
     available: set[str] = set(_flow_synthesized_inputs())
     try:
-        if chain_ids:
-            first_assignment = assign_by_node.get(chain_ids[0]) or {}
-            first_plugin_id = str(first_assignment.get('id') or first_assignment.get('generator_id') or '').strip()
-            supplied = first_assignment.get('chain_supplied_inputs') if isinstance(first_assignment.get('chain_supplied_inputs'), list) else []
+        ordered_assignments = [assign_by_node.get(cid) or {} for cid in chain_ids]
+        start_positions = _flow_parallel_start_assignment_indexes(ordered_assignments, gen_defs_by_id=gen_defs_by_id)
+        for start_index in sorted(start_positions):
+            if start_index < 0 or start_index >= len(ordered_assignments):
+                continue
+            start_assignment = ordered_assignments[start_index]
+            start_plugin_id = str(start_assignment.get('id') or start_assignment.get('generator_id') or '').strip()
+            supplied = start_assignment.get('chain_supplied_inputs') if isinstance(start_assignment.get('chain_supplied_inputs'), list) else []
             available |= {str(x).strip() for x in (supplied or []) if str(x).strip()}
-            if first_plugin_id:
-                first_gen = gen_defs_by_id.get(first_plugin_id)
-                available |= set(_flow_first_step_chain_supplied_input_names(first_gen if isinstance(first_gen, dict) else first_assignment))
+            if start_plugin_id:
+                start_gen = gen_defs_by_id.get(start_plugin_id)
+                available |= set(_flow_first_step_chain_supplied_input_names(start_gen if isinstance(start_gen, dict) else start_assignment))
     except Exception:
         pass
 
@@ -20317,13 +20452,26 @@ def _flow_reorder_chain_by_generator_dag(
 
         initial_artifacts = set(_flow_synthesized_inputs())
         try:
-            first_assignment_for_initial = assign_by_node.get(chain_ids[0]) if chain_ids else None
-            if isinstance(first_assignment_for_initial, dict):
+            gen_defs_by_id_for_initial = _flow_enabled_generator_defs_by_id()
+            ordered_for_initial = [assign_by_node.get(cid) or {} for cid in chain_ids]
+            start_positions_for_initial = _flow_parallel_start_assignment_indexes(
+                ordered_for_initial,
+                gen_defs_by_id=gen_defs_by_id_for_initial,
+            )
+            for start_index in sorted(start_positions_for_initial):
+                if start_index < 0 or start_index >= len(ordered_for_initial):
+                    continue
+                start_assignment_for_initial = ordered_for_initial[start_index]
+                if not isinstance(start_assignment_for_initial, dict):
+                    continue
                 initial_artifacts |= {
                     str(x).strip()
-                    for x in (first_assignment_for_initial.get('chain_supplied_inputs') or [])
+                    for x in (start_assignment_for_initial.get('chain_supplied_inputs') or [])
                     if str(x).strip()
                 }
+                gen_id = str(start_assignment_for_initial.get('id') or start_assignment_for_initial.get('generator_id') or '').strip()
+                gen_def = gen_defs_by_id_for_initial.get(gen_id) if gen_id else None
+                initial_artifacts |= set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else start_assignment_for_initial))
         except Exception:
             pass
 
@@ -20405,6 +20553,14 @@ def _flow_reorder_chain_by_generator_dag(
                 except Exception:
                     return ''
 
+            try:
+                start_positions = _flow_parallel_start_assignment_indexes(
+                    ordered_assignments,
+                    gen_defs_by_id=_flow_enabled_generator_defs_by_id(),
+                )
+            except Exception:
+                start_positions = {0} if ordered_assignments else set()
+
             for idx, assignment in enumerate(ordered_assignments):
                 try:
                     this_id = str(assignment.get('node_id') or '').strip()
@@ -20430,6 +20586,7 @@ def _flow_reorder_chain_by_generator_dag(
                             assignment,
                             scenario_label=scenario_label,
                             position=idx,
+                            supply_on_start=(idx in start_positions),
                         )
                     except Exception:
                         pass
@@ -20714,6 +20871,14 @@ def _flow_reorder_chain_by_generator_dag(
             except Exception:
                 return ''
 
+        try:
+            dag_start_positions = _flow_parallel_start_assignment_indexes(
+                new_assignments,
+                gen_defs_by_id=_flow_enabled_generator_defs_by_id(),
+            )
+        except Exception:
+            dag_start_positions = {0} if new_assignments else set()
+
         for i, a in enumerate(new_assignments):
             try:
                 this_id = str(a.get('node_id') or '').strip()
@@ -20731,6 +20896,13 @@ def _flow_reorder_chain_by_generator_dag(
                 rendered = [_render_hint(t, this_id=this_id, next_id=str(next_id)) for t in (hint_templates or [tpl])]
                 a['hint'] = rendered[0] if rendered else _render_hint(tpl, this_id=this_id, next_id=str(next_id))
                 a['hints'] = rendered
+                _flow_apply_first_step_chain_supplied_inputs(
+                    a,
+                    a,
+                    scenario_label=scenario_label,
+                    position=i,
+                    supply_on_start=(i in dag_start_positions),
+                )
             except Exception:
                 continue
 
@@ -21015,6 +21187,7 @@ def _flow_inject_uploads_dir() -> str:
             'generator_catalog': str(gen.get('_flow_catalog') or 'flag_generators'),
             'language': str(gen.get('language') or ''),
             'description_hints': list(gen.get('description_hints') or []) if isinstance(gen.get('description_hints'), list) else [],
+            'inject_candidate_paths': _normalize_inject_candidate_paths(gen.get('inject_candidate_paths')),
             'config_overrides': dict(config_overrides),
             'inputs': inputs_effective,
             'outputs': outputs_effective,

@@ -630,6 +630,14 @@ def register(app, *, backend_module: Any) -> None:
                 inject_files = gen_def.get('inject_files')
                 if isinstance(inject_files, list) and inject_files:
                     assignment['inject_files'] = [str(x or '').strip() for x in inject_files if str(x or '').strip()]
+                if not assignment.get('inject_candidate_paths'):
+                    candidate_paths = gen_def.get('inject_candidate_paths')
+                    if isinstance(candidate_paths, list) and candidate_paths:
+                        assignment['inject_candidate_paths'] = [
+                            str(x or '').strip().rstrip('/') or '/'
+                            for x in candidate_paths
+                            if str(x or '').strip().startswith('/')
+                        ]
         except Exception:
             pass
 

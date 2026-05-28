@@ -1193,6 +1193,12 @@ def refresh_hints_for_current_chain(
     except Exception:
         pass
 
+    try:
+        get_start_positions = getattr(backend, '_flow_parallel_start_assignment_indexes', None)
+        start_positions = get_start_positions(assignments, gen_defs_by_id=gen_by_id) if callable(get_start_positions) else ({0} if assignments else set())
+    except Exception:
+        start_positions = {0} if assignments else set()
+
     out_local: list[dict[str, Any]] = []
     for idx, raw in enumerate(assignments or []):
         if not isinstance(raw, dict):
@@ -1310,6 +1316,7 @@ def refresh_hints_for_current_chain(
                     gen_def_local if isinstance(gen_def_local, dict) else None,
                     scenario_label=(scenario_label or scenario_norm),
                     position=idx,
+                    supply_on_start=(idx in start_positions),
                 )
         except Exception:
             pass

@@ -849,18 +849,122 @@ function applyReportHintOutputTemplates(text, assignment) {
     } catch (e) {}
     return base;
   };
-  return t.replace(/\{\{\s*OUTPUT\.([A-Za-z0-9_\-\.:()]+?)(?:\s*:\s*([A-Za-z0-9_\-]+))?\s*\}\}/g, (_m, rawKey, transform) => {
-    const keyText = String(rawKey || '').trim();
+  const lookupOutput = (expr) => {
+    const token = String(expr || '').trim();
+    if (!token) return '';
+    const direct = ro[token];
+    if (direct !== undefined && direct !== null) return normalizeValue(direct);
+    const key = roLower.get(token.toLowerCase());
+    if (key) return normalizeValue(ro[key]);
+    return '';
+  };
+
+  return t.replace(/\{\{\s*OUTPUT\.([^}]+?)\s*\}\}/g, (full, inner) => {
+    const raw = String(inner || '').trim();
+    if (!raw) return full;
+    const colon = raw.indexOf(':');
+    const keyText = colon >= 0 ? raw.slice(0, colon).trim() : raw;
+    const transform = colon >= 0 ? raw.slice(colon + 1).trim() : '';
     if (!keyText) return '';
-    let val = ro[keyText];
-    if (val === undefined) {
-      const lookup = roLower.get(keyText.toLowerCase());
-      if (lookup) val = ro[lookup];
-    }
-    const out = normalizeValue(val);
-    if (!out) return '';
+    const out = lookupOutput(keyText);
+    if (!out) return full;
     return applyTransform(out, transform);
   });
+}
+
+function resolveReportGuideTemplateText(text, assignment, context) {
+  let out = applyReportHintOutputTemplates(String(text || ''), assignment);
+  if (!out || !out.includes('{{')) return out;
+  const source = assignment && typeof assignment === 'object' ? assignment : {};
+  const ctx = context && typeof context === 'object' ? context : {};
+  const values = new Map();
+  const normalizeValue = (value) => {
+    try {
+      if (Array.isArray(value)) return value.map((item) => String(item ?? '').trim()).filter(Boolean).join(', ');
+      if (value && typeof value === 'object') return JSON.stringify(value);
+      if (value === undefined || value === null) return '';
+      return String(value).trim();
+    } catch (e) {
+      return '';
+    }
+  };
+  const add = (key, value) => {
+    const rawKey = String(key || '').trim();
+    const normalizedValue = normalizeValue(value);
+    if (!rawKey || !normalizedValue) return;
+    const variants = [rawKey, rawKey.replace(/[^A-Za-z0-9]+/g, '_'), rawKey.replace(/[^A-Za-z0-9]+/g, '')];
+    variants.forEach((variant) => {
+      const normalizedKey = String(variant || '').trim().toLowerCase();
+      if (normalizedKey && !values.has(normalizedKey)) values.set(normalizedKey, normalizedValue);
+    });
+  };
+  const addObject = (obj) => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+    Object.entries(obj).forEach(([key, value]) => add(key, value));
+  };
+  const nodeName = String(ctx.nodeName || source.node_name || source.node || source.name || source.node_id || '').trim();
+  const nodeIp = String(ctx.nodeIp || source.node_ip || source.node_ip4 || source.ip4 || source.ipv4 || source.ip || source.address || '').trim();
+  const nodeId = String(ctx.nodeId || source.node_id || source.id || '').trim();
+  add('node', nodeName);
+  add('node_name', nodeName);
+  add('NODE', nodeName);
+  add('NODE_NAME', nodeName);
+  add('THIS_NODE_NAME', nodeName);
+  add('NEXT_NODE_NAME', nodeName);
+  add('node_ip', nodeIp);
+  add('node_ip4', nodeIp);
+  add('NODE_IP', nodeIp);
+  add('NODE_IP4', nodeIp);
+  add('THIS_NODE_IP', nodeIp);
+  add('THIS_NODE_IP4', nodeIp);
+  add('NEXT_NODE_IP', nodeIp);
+  add('NEXT_NODE_IP4', nodeIp);
+  add('ip', nodeIp);
+  add('ip4', nodeIp);
+  add('ipv4', nodeIp);
+  add('node_id', nodeId);
+  add('NODE_ID', nodeId);
+  add('THIS_NODE_ID', nodeId);
+  addObject(source.resolved_inputs);
+  addObject(source.resolved_outputs);
+  addObject(source.config_overrides);
+  addObject(source.output_overrides);
+  return out.replace(/\{\{\s*([A-Za-z0-9_.:(),\-\s]+?)\s*\}\}/g, (full, rawKey) => {
+    let key = String(rawKey || '').trim();
+    if (!key) return '';
+    key = key.replace(/^(?:INPUT|CONFIG|VALUE|VAR)\./i, '').trim();
+    if (/^OUTPUT\./i.test(key)) return '';
+    const candidates = [key, key.replace(/[^A-Za-z0-9]+/g, '_'), key.replace(/[^A-Za-z0-9]+/g, '')];
+    for (const candidate of candidates) {
+      const normalizedKey = String(candidate || '').trim().toLowerCase();
+      if (normalizedKey && values.has(normalizedKey)) return values.get(normalizedKey);
+    }
+    return '';
+  }).replace(/\s+([,.])/g, '$1').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+function ensureReportGuideHintLevelCoverage(levels, assignment, context) {
+  const out = {};
+  REPORT_HINT_LEVEL_ORDER.forEach((level) => {
+    const values = Array.isArray(levels && levels[level]) ? levels[level].map((item) => String(item || '').trim()).filter(Boolean) : [];
+    if (values.length) out[level] = values.slice();
+  });
+  const source = assignment && typeof assignment === 'object' ? assignment : {};
+  const ctx = context && typeof context === 'object' ? context : {};
+  const nodeName = String(ctx.nodeName || source.node_name || source.node_id || 'target node').trim();
+  const nodeIp = String(ctx.nodeIp || source.node_ip || source.ip4 || source.ipv4 || source.ip || '').trim();
+  const addDefault = (level, value) => {
+    if (Array.isArray(out[level]) && out[level].length) return;
+    const rendered = resolveReportGuideTemplateText(value, source, ctx);
+    if (rendered) out[level] = [rendered];
+  };
+  addDefault('low', `Target: ${nodeIp ? `${nodeName} @ ${nodeIp}` : nodeName}`);
+  const outputs = (source.resolved_outputs && typeof source.resolved_outputs === 'object' && !Array.isArray(source.resolved_outputs)) ? source.resolved_outputs : {};
+  const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
+  addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the access instructions and resolved facts for this step.');
+  const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
+  addDefault('high', readmeRef ? `README: ${readmeRef}` : 'Use the access instructions for the complete workflow.');
+  return out;
 }
 
 function normalizeReportHintLevels(assignment, options) {
@@ -883,6 +987,14 @@ function normalizeReportHintLevels(assignment, options) {
   if (raw) {
     REPORT_HINT_LEVEL_ORDER.forEach((level) => {
       const values = raw[level];
+      if (Array.isArray(values)) values.forEach((value) => add(level, value));
+      else if (typeof values === 'string') add(level, values);
+    });
+  }
+  const templates = (source.hint_level_templates && typeof source.hint_level_templates === 'object' && !Array.isArray(source.hint_level_templates)) ? source.hint_level_templates : null;
+  if (templates) {
+    REPORT_HINT_LEVEL_ORDER.forEach((level) => {
+      const values = templates[level];
       if (Array.isArray(values)) values.forEach((value) => add(level, value));
       else if (typeof values === 'string') add(level, values);
     });
@@ -1235,18 +1347,20 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     const nodeId = String((node && node.id) ? node.id : '').trim();
     const generatorId = String(assignment.id || assignment.generator_id || '').trim();
     const generatorLabel = String(assignment.flag_generator || assignment.type || '').trim();
-    const hint = applyReportHintOutputTemplates(firstHint(assignment), assignment);
-    const allHints = Array.isArray(assignment.hints)
+    let hint = applyReportHintOutputTemplates(firstHint(assignment), assignment);
+    let allHints = Array.isArray(assignment.hints)
       ? assignment.hints.map((v) => applyReportHintOutputTemplates(String(v || '').trim(), assignment)).map((v) => String(v || '').trim()).filter(Boolean)
       : [];
-    const descHints = Array.isArray(assignment.description_hints)
+    let descHints = Array.isArray(assignment.description_hints)
       ? assignment.description_hints.map((v) => applyReportHintOutputTemplates(String(v || '').trim(), assignment)).map((v) => String(v || '').trim()).filter(Boolean)
       : [];
-    const structuredHintLevels = normalizeReportHintLevels(assignment);
-    const seqOneRequiredInputs = (step === 1 && Array.isArray(assignment.chain_supplied_inputs))
+    let structuredHintLevels = normalizeReportHintLevels(assignment);
+    const suppliedRequiredLabel = String(assignment.chain_supplied_requirement_label || `Seq ${step} required`).trim() || `Seq ${step} required`;
+    const suppliedRequiredInputCategory = `Input (${suppliedRequiredLabel})`;
+    const seqOneRequiredInputs = (Array.isArray(assignment.chain_supplied_inputs))
       ? new Set(assignment.chain_supplied_inputs.map((value) => String(value || '').trim()).filter(Boolean))
       : new Set();
-    const sequenceOneRequiredHintLines = (step === 1 && Array.isArray(assignment.chain_supplied_input_hints))
+    const sequenceOneRequiredHintLines = (Array.isArray(assignment.chain_supplied_input_hints))
       ? assignment.chain_supplied_input_hints
         .map((value) => applyReportHintOutputTemplates(String(value || '').trim(), assignment))
         .map((value) => String(value || '').trim())
@@ -1279,6 +1393,11 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       ...resolvedOutputs.filter(([k]) => /ip/i.test(String(k || ''))).map(([, v]) => String(v || '').trim()),
     ].filter(Boolean);
     const nodeIp = ipCandidates.length ? ipCandidates[0] : 'unknown';
+    const guideContext = { nodeName, nodeIp, nodeId };
+    hint = resolveReportGuideTemplateText(hint, assignment, guideContext);
+    allHints = allHints.map((value) => resolveReportGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
+    descHints = descHints.map((value) => resolveReportGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
+    structuredHintLevels = ensureReportGuideHintLevelCoverage(structuredHintLevels, assignment, guideContext);
 
     lines.push('### Critical Access');
     lines.push('');
@@ -1319,13 +1438,13 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     } else {
       lines.push('| Input | Requirement | Needed to complete this step? |');
       lines.push('| --- | --- | --- |');
-      requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | ${seqOneRequiredInputs.has(name) ? 'Seq 1 required' : 'Required'} | Yes |`));
+      requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | ${seqOneRequiredInputs.has(name) ? suppliedRequiredLabel : 'Required'} | Yes |`));
       optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
     }
     lines.push('');
     
     // Apply access instructions: check generator metadata first, then heuristics
-    const _applyAccessInstructionsLocal = (assign, nodeName) => {
+    const _applyAccessInstructionsLocal = (assign, nodeName, nodeIp, nodeId) => {
       if (!assign || typeof assign !== 'object') return false;
       
       // Check for explicit access_instructions in assignment metadata (from generator manifest)
@@ -1333,14 +1452,15 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       if (accessInstructions && typeof accessInstructions === 'object' && accessInstructions.steps) {
         lines.push('### Access Instructions');
         lines.push('');
-        const title = String(accessInstructions.title || 'Access Instructions').trim();
+        const accessContext = { nodeName, nodeIp, nodeId };
+        const title = resolveReportGuideTemplateText(String(accessInstructions.title || 'Access Instructions').trim(), assign, accessContext) || 'Access Instructions';
         lines.push(`**${title}**`);
         lines.push('');
         const steps = Array.isArray(accessInstructions.steps) ? accessInstructions.steps : [];
-        steps.forEach((s) => {
+        steps.forEach((s, accessIndex) => {
           if (!s || typeof s !== 'object') return;
-          const stepNum = s.step || '';
-          const stepTitle = String(s.title || '').trim();
+          const stepNum = accessIndex + 1;
+          const stepTitle = resolveReportGuideTemplateText(String(s.title || `Step ${stepNum}`).trim(), assign, accessContext) || `Step ${stepNum}`;
           let instructions = String(s.instructions || '').trim();
           // Resolve variable references like {{PORT}}, {{NODE}}, {{PATH}}, {{USERNAME}}, {{PASSWORD}}
           const outputs = (assign.resolved_outputs && typeof assign.resolved_outputs === 'object') ? assign.resolved_outputs : {};
@@ -1410,7 +1530,8 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
             })
             .replace(/\{\{USERNAME\}\}/g, () => _credentialParts().user || 'user')
             .replace(/\{\{PASSWORD\}\}/g, () => _credentialParts().password || 'password');
-          if (stepNum && stepTitle) lines.push(`${stepNum}. **${stepTitle}**`);
+          instructions = resolveReportGuideTemplateText(instructions, assign, accessContext);
+          lines.push(`${stepNum}. **${stepTitle}**`);
           if (instructions) {
             instructions.split('\n').forEach((line) => {
               lines.push(`   ${line}`);
@@ -1460,7 +1581,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     };
     
     // Apply access instructions
-    const hasAccessInstructions = _applyAccessInstructionsLocal(assignment, nodeName);
+    const hasAccessInstructions = _applyAccessInstructionsLocal(assignment, nodeName, nodeIp, nodeId);
     if (!hasAccessInstructions) {
       lines.push('### Access Instructions');
       lines.push('');
@@ -1474,7 +1595,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       lines.push('');
       REPORT_HINT_LEVEL_ORDER.forEach((level) => {
         const values = Array.isArray(structuredHintLevels[level])
-          ? structuredHintLevels[level].map(formatGuideHintLine).filter(Boolean)
+          ? structuredHintLevels[level].map((value) => formatGuideHintLine(resolveReportGuideTemplateText(value, assignment, guideContext))).filter(Boolean)
           : [];
         if (!values.length) return;
         const firstValue = values[0];
@@ -1518,7 +1639,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     lines.push('### Resolved Facts');
     lines.push('');
     const factRows = [];
-    resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push([seqOneRequiredInputs.has(k) ? 'Input (Seq 1 required)' : 'Input', k, pathInfo.value, pathInfo.status]));
+    resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push([seqOneRequiredInputs.has(k) ? suppliedRequiredInputCategory : 'Input', k, pathInfo.value, pathInfo.status]));
     resolvedOutputFacts.forEach(([k, pathInfo]) => factRows.push(['Output', k, pathInfo.value, pathInfo.status]));
     resolvedInjects.forEach((item, idx) => factRows.push(['File Artifact', `Artifact ${idx + 1}`, item.value, item.status]));
     if (factRows.length) {
