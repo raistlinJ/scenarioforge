@@ -119,6 +119,30 @@ def test_vm_mode_backend_defaults_do_not_require_vm_identity_metadata(monkeypatc
     assert merged["vmid"] == ""
 
 
+def test_docker_bridge_preserves_loopback_core_host_in_vm_mode(monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_DOCKER_BRIDGE", "1")
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
+    monkeypatch.delenv("CORETG_RUNTIME_MODE", raising=False)
+    monkeypatch.delenv("CORETG_KEEP_CONTAINER_LOCAL_CORE", raising=False)
+    monkeypatch.setenv("CORE_HOST", "127.0.0.1")
+
+    app_backend._apply_docker_bridge_core_defaults()
+
+    assert os.environ["CORE_HOST"] == "127.0.0.1"
+
+
+def test_docker_bridge_rewrites_loopback_core_host_in_native_mode(monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_DOCKER_BRIDGE", "1")
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "native")
+    monkeypatch.delenv("CORETG_RUNTIME_MODE", raising=False)
+    monkeypatch.delenv("CORETG_KEEP_CONTAINER_LOCAL_CORE", raising=False)
+    monkeypatch.setenv("CORE_HOST", "127.0.0.1")
+
+    app_backend._apply_docker_bridge_core_defaults()
+
+    assert os.environ["CORE_HOST"] == "host.docker.internal"
+
+
 def test_vm_mode_backend_defaults_leave_hitl_ifnames_blank_until_configured(monkeypatch) -> None:
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT", raising=False)

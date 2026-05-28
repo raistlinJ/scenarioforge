@@ -97,7 +97,7 @@ docker compose up -d --build
 - The backend is also published at `http://localhost:9090`.
 - Stop the stack with `docker compose down`.
 - Compose reads `.scenarioforge.env.example` first and `.scenarioforge.env` as optional local overrides.
-- Compose publishes nginx on `80/443` and the backend on `127.0.0.1:9090`. In Docker bridge mode, container-local CORE targets such as `127.0.0.1` are treated as `host.docker.internal`; set `CORETG_KEEP_CONTAINER_LOCAL_CORE=1` only when CORE really runs inside the web container.
+- Compose publishes nginx on `80/443` and the backend on `127.0.0.1:9090`. In native Docker bridge mode, container-local CORE targets such as `127.0.0.1` are treated as `host.docker.internal`; in VM mode, `127.0.0.1` is preserved because it means core-daemon on the remote CORE host reached over SSH. Set `CORETG_KEEP_CONTAINER_LOCAL_CORE=1` only when CORE really runs inside the web container.
 - The image includes Graphviz, so attack graph PDF export works without installing Graphviz on the application host.
 
 ## CLI Mode

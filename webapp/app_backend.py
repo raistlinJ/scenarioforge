@@ -56,6 +56,13 @@ def _env_truthy_early(name: str) -> bool:
 def _apply_docker_bridge_core_defaults() -> None:
     if not _env_truthy_early('CORETG_DOCKER_BRIDGE'):
         return
+    runtime_mode = str(
+        os.environ.get('CORETG_WEBUI_MODE')
+        or os.environ.get('CORETG_RUNTIME_MODE')
+        or ''
+    ).strip().lower()
+    if runtime_mode == 'vm':
+        return
     if _env_truthy_early('CORETG_KEEP_CONTAINER_LOCAL_CORE'):
         return
     core_host = str(os.environ.get('CORE_HOST') or '').strip().lower()
@@ -4230,6 +4237,23 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
             text = text[2:]
         return text.lstrip('/')
 
+    def _normalize_inject_rel_for_expected(path: str) -> str:
+        text = _strip_relative_path_prefix(path).strip('/')
+        if text.startswith('flow_artifacts/'):
+            text = text[len('flow_artifacts/'):]
+        if text.startswith('artifacts/'):
+            text = text[len('artifacts/'):]
+        text = text.strip('/')
+        if not text:
+            return ''
+        try:
+            parts = [p for p in text.split('/') if p]
+            if any(p == '..' for p in parts):
+                return ''
+        except Exception:
+            return ''
+        return text
+
     def _normalize_expected_runtime_path(path_value: str, source_dir: str = '', assignment_type: str = '') -> str:
         flow_default_dest = str(os.getenv('CORETG_FLOW_INJECTS_DIR') or '').strip() or '/flow_injects'
         p = str(path_value or '').strip()
@@ -4301,6 +4325,93 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
             return f"{flow_default_dest.rstrip('/')}/{base}"
         return flow_default_dest
 
+    def _explicit_dest_runtime_rel(path_value: str, source_dir: str = '', assignment_type: str = '') -> str:
+        p = str(path_value or '').strip()
+        if not p:
+            return ''
+        if not p.startswith('/'):
+            return _normalize_inject_rel_for_expected(p)
+        p_norm = p.replace('\\', '/')
+        source_norm = str(source_dir or '').strip().replace('\\', '/')
+        try:
+            assignment_norm = str(assignment_type or '').strip().lower()
+        except Exception:
+            assignment_norm = ''
+        effective_source_norm = source_norm
+        if assignment_norm == 'flag-generator' and source_norm:
+            try:
+                src_clean = source_norm.rstrip('/')
+                if src_clean and _basename(src_clean) != 'artifacts':
+                    artifacts_source = f"{src_clean}/artifacts"
+                    if p_norm == artifacts_source or p_norm.startswith(artifacts_source + '/'):
+                        effective_source_norm = artifacts_source
+            except Exception:
+                effective_source_norm = source_norm
+        try:
+            if effective_source_norm and os.path.isabs(effective_source_norm):
+                path_abs = os.path.abspath(p_norm)
+                source_abs = os.path.abspath(effective_source_norm)
+                if path_abs != source_abs and os.path.commonpath([path_abs, source_abs]) == source_abs:
+                    return _normalize_inject_rel_for_expected(os.path.relpath(path_abs, source_abs))
+        except Exception:
+            pass
+        if effective_source_norm:
+            for marker in ('/flag_node_generators_runs/', '/flag_generators_runs/'):
+                if marker not in p_norm or marker not in effective_source_norm:
+                    continue
+                path_tail = p_norm.split(marker, 1)[1].strip('/')
+                source_tail = effective_source_norm.split(marker, 1)[1].strip('/')
+                if not path_tail or not source_tail or path_tail == source_tail:
+                    continue
+                if path_tail.startswith(source_tail.rstrip('/') + '/'):
+                    return _normalize_inject_rel_for_expected(path_tail[len(source_tail.rstrip('/')) + 1:])
+        return _basename(p_norm)
+
+    def _effective_injects_for_assignment(entry: Dict[str, Any]) -> List[str]:
+        for key in ('inject_files_override', 'inject_files'):
+            vals = entry.get(key)
+            if isinstance(vals, list):
+                return [str(item or '').strip() for item in vals if str(item or '').strip()]
+            if isinstance(vals, str) and vals.strip():
+                return [vals.strip()]
+        return []
+
+    def _resolved_source_for_inject(src_text: str, resolved_sources: List[Any], detail_list: List[Any]) -> str:
+        src = str(src_text or '').strip()
+        if not src:
+            return ''
+        candidates = {src, _basename(src)}
+        candidates = {c for c in candidates if c}
+        resolved_values: List[str] = []
+        for item in resolved_sources or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get('path') or '').strip()
+            if path:
+                resolved_values.append(path)
+        for item in detail_list or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ('resolved', 'path'):
+                path = str(item.get(key) or '').strip()
+                if path:
+                    resolved_values.append(path)
+        for path in resolved_values:
+            base = _basename(path)
+            if path in candidates or base in candidates:
+                return path
+        if _looks_like_output_key(src) or _looks_like_output_key(_basename(src)):
+            unique = []
+            seen_paths: set[str] = set()
+            for path in resolved_values:
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                unique.append(path)
+            if len(unique) == 1:
+                return unique[0]
+        return ''
+
     for entry in assigns or []:
         if not isinstance(entry, dict):
             continue
@@ -4318,7 +4429,7 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
             node_name = None
         node_key = node_name or f"node-{nid_raw}"
 
-        injects = entry.get('inject_files') if isinstance(entry.get('inject_files'), list) else []
+        injects = _effective_injects_for_assignment(entry)
         has_inject_intent = any(str(raw or '').strip() for raw in injects)
         has_explicit_inject_dest = False
         for raw in injects:
@@ -4349,6 +4460,40 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
         ).strip()
         resolved_paths = entry.get('resolved_paths') if isinstance(entry.get('resolved_paths'), dict) else {}
         resolved_sources = resolved_paths.get('inject_sources') if isinstance(resolved_paths.get('inject_sources'), list) else []
+        detail_list = entry.get('inject_files_detail') if isinstance(entry.get('inject_files_detail'), list) else []
+        if has_explicit_inject_dest:
+            for raw in injects:
+                text = str(raw or '').strip()
+                if not text:
+                    continue
+                sep = '->' if '->' in text else '=>' if '=>' in text else ''
+                if not sep:
+                    continue
+                try:
+                    src, dest = text.split(sep, 1)
+                except Exception:
+                    continue
+                src = str(src or '').strip()
+                dest = str(dest or '').strip()
+                if not src or not dest.startswith('/'):
+                    continue
+                dest_dir = dest.rstrip('/') or '/'
+                rel = ''
+                if src.startswith('/'):
+                    rel = _basename(src)
+                elif _looks_like_output_key(src) or _looks_like_output_key(_basename(src)):
+                    resolved_src = _resolved_source_for_inject(src, resolved_sources, detail_list)
+                    rel = _explicit_dest_runtime_rel(resolved_src, source_dir, assignment_type) if resolved_src else ''
+                else:
+                    rel = _normalize_inject_rel_for_expected(src)
+                if not rel:
+                    resolved_src = _resolved_source_for_inject(src, resolved_sources, detail_list)
+                    if resolved_src:
+                        rel = _explicit_dest_runtime_rel(resolved_src, source_dir, assignment_type)
+                if rel and not _looks_like_output_key(_basename(rel)):
+                    per_node.append(f"{dest_dir.rstrip('/')}/{rel}")
+                elif dest_dir:
+                    per_node.append(dest_dir)
         if resolved_sources and has_inject_intent and not has_explicit_inject_dest:
             consumed_resolved_sources = True
             for src in resolved_sources:
@@ -4360,8 +4505,7 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
                     if assignment_type == 'flag-node-generator' and pnorm in ('/exports', '/outputs', '/inputs'):
                         continue
                     per_node.append(pnorm)
-        else:
-            detail_list = entry.get('inject_files_detail') if isinstance(entry.get('inject_files_detail'), list) else []
+        elif not per_node:
             if detail_list:
                 for item in detail_list:
                     if not isinstance(item, dict):
@@ -29159,7 +29303,7 @@ def _run_sudo(cmd, timeout=20):
         if SUDO_PASSWORD:
             return subprocess.run(
                 ['sudo', '-S', '-k', '-p', ''] + list(cmd),
-                input=str(SUDO_PASSWORD) + "\n",
+                input=str(SUDO_PASSWORD) + "\\n",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -29372,7 +29516,7 @@ def _run_docker(cmd, timeout=60):
         if SUDO_PASSWORD:
             return subprocess.run(
                 ['sudo', '-S', '-k', '-p', '', 'docker'] + list(cmd),
-                input=str(SUDO_PASSWORD) + "\n",
+                input=str(SUDO_PASSWORD) + "\\n",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

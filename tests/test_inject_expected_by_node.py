@@ -339,6 +339,81 @@ def test_extract_inject_expected_by_node_preserves_explicit_inject_destinations(
     ]
 
 
+def test_extract_inject_expected_by_node_honors_inject_destination_override(monkeypatch):
+    run_dir = '/tmp/vulns/flag_node_generators_runs/run123'
+    monkeypatch.setattr(
+        backend,
+        '_flow_state_from_xml_path',
+        lambda *a, **k: {
+            'flag_assignments': [
+                {
+                    'node_id': '17',
+                    'id': 'git_deploy_repo',
+                    'type': 'flag-node-generator',
+                    'inject_source_dir': run_dir,
+                    'inject_files': ['service'],
+                    'inject_files_override': ['service -> /home/git/repositories/deploy.git'],
+                    'inject_files_detail': [
+                        {'path': f'{run_dir}/service', 'resolved': 'service'},
+                    ],
+                    'resolved_paths': {
+                        'inject_sources': [
+                            {'path': f'{run_dir}/service', 'is_remote': True},
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {17: {'name': 'docker-17'}},
+    )
+
+    out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'NewScenario1')
+
+    assert out['docker-17'] == ['/home/git/repositories/deploy.git/service']
+    assert '/flow_injects/service' not in out['docker-17']
+
+
+def test_extract_inject_expected_by_node_maps_output_key_override_to_resolved_artifact(monkeypatch):
+    run_dir = '/tmp/vulns/flag_generators_runs/flow-scenario1/03_shadow_fragment_docker-14'
+    artifact_path = f'{run_dir}/artifacts/shadow.fragment'
+    monkeypatch.setattr(
+        backend,
+        '_flow_state_from_xml_path',
+        lambda *a, **k: {
+            'flag_assignments': [
+                {
+                    'node_id': '14',
+                    'id': 'text_shadow_fragment',
+                    'type': 'flag-generator',
+                    'inject_source_dir': run_dir,
+                    'artifacts_dir': run_dir,
+                    'inject_files': ['File(path)'],
+                    'inject_files_override': ['File(path) -> /flow_injects'],
+                    'resolved_paths': {
+                        'inject_sources': [
+                            {'path': artifact_path, 'is_remote': True},
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {14: {'name': 'docker-14'}},
+    )
+
+    out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'Scenario1')
+
+    assert out['docker-14'] == ['/flow_injects/shadow.fragment']
+    assert '/flow_injects/artifacts/shadow.fragment' not in out['docker-14']
+
+
 def test_extract_inject_expected_by_node_ignores_resolved_sources_without_inject_intent(monkeypatch):
     monkeypatch.setattr(
         backend,

@@ -2704,9 +2704,20 @@ def finalize_generator_assignment_metadata(
         except Exception:
             inject_source_dir = str(flow_out_dir or '')
 
+    inject_override_raw = assignment.get('inject_files_override')
     inject_detail_raw = assignment.get('inject_files_detail')
     inject_from_detail = inject_files_for_copy_from_detail(inject_detail_raw, inject_source_dir)
-    if isinstance(inject_detail_raw, list):
+    if isinstance(inject_override_raw, list):
+        normalized_inject_files = [
+            item
+            for item in (
+                normalize_inject_spec_for_copy(raw, inject_source_dir)
+                for raw in (inject_override_raw or [])
+                if raw is not None
+            )
+            if item
+        ]
+    elif isinstance(inject_detail_raw, list):
         normalized_inject_files = inject_from_detail
     else:
         normalized_inject_files = (

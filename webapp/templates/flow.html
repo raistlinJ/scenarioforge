@@ -3208,21 +3208,37 @@
 
   const _OUTPUT_TEMPLATE_PREFIX = '{' + '{OUTPUT.';
 
+  function _fallbackOutputTemplateText(expr) {
+    try {
+      const key = String(expr || '').trim().toLowerCase();
+      if (!key) return 'generated output';
+      if (key.includes('credential')) return 'generated credential';
+      if (key.includes('file') || key.includes('path')) return 'generated file';
+      if (key.includes('flag')) return 'generated flag';
+      if (key.includes('port')) return 'generated port';
+      if (key.includes('endpoint') || key.includes('url')) return 'generated endpoint';
+      return 'generated output';
+    } catch (e) {
+      return 'generated output';
+    }
+  }
+
   function _applyHintOutputTemplates(text, assignment) {
     const t = String(text || '');
     if (!t || !t.includes(_OUTPUT_TEMPLATE_PREFIX)) return t;
     const ro = (assignment && typeof assignment.resolved_outputs === 'object' && assignment.resolved_outputs && !Array.isArray(assignment.resolved_outputs))
       ? assignment.resolved_outputs
       : null;
-    if (!ro) return t;
 
     const roLower = new Map();
     try {
-      Object.keys(ro).forEach((k) => {
-        const key = String(k || '').trim();
-        if (!key) return;
-        roLower.set(key.toLowerCase(), key);
-      });
+      if (ro) {
+        Object.keys(ro).forEach((k) => {
+          const key = String(k || '').trim();
+          if (!key) return;
+          roLower.set(key.toLowerCase(), key);
+        });
+      }
     } catch (e) { }
 
     const normalizeValue = (val) => {
@@ -3284,9 +3300,38 @@
       const transform = colon >= 0 ? raw.slice(colon + 1).trim() : '';
       if (!keyText) return '';
       const out = lookupOutput(keyText);
-      if (!out) return full;
+      if (!out) return _fallbackOutputTemplateText(keyText);
       return applyTransform(out, transform);
     });
+  }
+
+  function _applyHintNodeTemplateVars(text, assignment) {
+    try {
+      let out = String(text || '');
+      if (!out || !out.includes('{{')) return out;
+      const source = assignment && typeof assignment === 'object' ? assignment : {};
+      const resolvedInputs = (source.resolved_inputs && typeof source.resolved_inputs === 'object' && !Array.isArray(source.resolved_inputs)) ? source.resolved_inputs : {};
+      const thisName = String(source.node_name || source.node || source.name || source.node_id || '').trim();
+      const thisIp = String(source.node_ip || source.node_ip4 || source.ip4 || source.ipv4 || source.ip || resolvedInputs['Knowledge(ip)'] || '').trim();
+      const nextName = String(source.next_node_name || source.next_node || '').trim();
+      const nextIp = String(source.next_node_ip || source.next_node_ip4 || source.next_ip || source.next_ip4 || '').trim();
+      const scenarioName = String(source.scenario || source.scenario_label || '').trim();
+      const repl = {
+        '{{SCENARIO}}': scenarioName,
+        '{{THIS_NODE_ID}}': String(source.node_id || '').trim(),
+        '{{THIS_NODE_NAME}}': thisName,
+        '{{THIS_NODE_IP}}': thisIp,
+        '{{NEXT_NODE_ID}}': String(source.next_node_id || '').trim(),
+        '{{NEXT_NODE_NAME}}': nextName,
+        '{{NEXT_NODE_IP}}': nextIp,
+      };
+      Object.entries(repl).forEach(([key, value]) => {
+        out = out.split(key).join(String(value || ''));
+      });
+      return out.replace(/\s+([,.])/g, '$1').replace(/[ \t]{2,}/g, ' ').replace(/\s*@\s*([,.]|$)/g, '$1').trim();
+    } catch (e) {
+      return String(text || '');
+    }
   }
 
   const FLOW_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
@@ -3300,7 +3345,9 @@
     const add = (level, value) => {
       const key = String(level || '').trim().toLowerCase();
       if (!FLOW_HINT_LEVEL_ORDER.includes(key)) return;
-      const text = _applyHintOutputTemplates(String(value || '').trim(), source).trim();
+      let text = _applyHintOutputTemplates(String(value || '').trim(), source);
+      text = _applyHintNodeTemplateVars(text, source).trim();
+      if (text.includes('{{') || text.includes('}}')) return;
       if (!text) return;
       const sig = `${key}::${text}`;
       if (seen.has(sig)) return;
@@ -3318,6 +3365,7 @@
     const templates = (source.hint_level_templates && typeof source.hint_level_templates === 'object' && !Array.isArray(source.hint_level_templates)) ? source.hint_level_templates : null;
     if (templates) {
       FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+        if (Array.isArray(out[level]) && out[level].length) return;
         const values = templates[level];
         if (Array.isArray(values)) values.forEach((value) => add(level, value));
         else if (typeof values === 'string') add(level, values);
@@ -4682,7 +4730,9 @@
       const descList = (fa && Array.isArray(fa.description_hints) && fa.description_hints.length)
         ? fa.description_hints
           .map(x => _applyHintOutputTemplates(String(x || '').trim(), fa))
+          .map(x => _applyHintNodeTemplateVars(String(x || '').trim(), fa))
           .map(x => String(x || '').trim())
+          .filter(x => !(x.includes('{{') || x.includes('}}')))
           .filter(Boolean)
         : [];
       if (descList.length > 1) {
@@ -5554,16 +5604,11 @@
           legend.className = 'text-muted small mt-1';
           legend.textContent = '◆ flag embedded in this artifact';
 
-          const candidateLegend = document.createElement('div');
-          candidateLegend.className = 'text-muted small mt-1';
-          candidateLegend.textContent = injectCandidatePaths.length ? ('Candidate destinations: ' + injectCandidatePaths.join(', ')) : '';
-
           function _renderInjectTable() {
             applyInjectDestinationOverridesFromTable();
             viewToggle.textContent = _currentViewLabel();
             const hasFlagStar = _renderInjectRows();
             legend.style.display = hasFlagStar ? '' : 'none';
-            candidateLegend.style.display = injectCandidatePaths.length ? '' : 'none';
           }
 
           viewToggle.addEventListener('click', () => {
@@ -5578,7 +5623,6 @@
           tbl.appendChild(tbody2);
           wrap.appendChild(tbl);
           wrap.appendChild(legend);
-          wrap.appendChild(candidateLegend);
           return wrap;
         }
 
@@ -6792,11 +6836,6 @@
         injHelp2.textContent = 'Example: variable=File(path), dest=/opt/bin (saved as File(path) -> /opt/bin).';
         injWrap.appendChild(injHelp2);
 
-        const injCandidateHelp = document.createElement('div');
-        injCandidateHelp.className = 'small text-muted';
-        injCandidateHelp.style.display = 'none';
-        injWrap.appendChild(injCandidateHelp);
-
         const toggleRow = document.createElement('div');
         toggleRow.className = 'd-flex align-items-center justify-content-between gap-2 mt-2';
         const resetBtn = document.createElement('button');
@@ -6860,10 +6899,6 @@
         const injectCandidatePaths = (fa && Array.isArray(fa.inject_candidate_paths))
           ? Array.from(new Set(fa.inject_candidate_paths.map(x => String(x || '').trim().replace(/\/+$/g, '') || '/').filter(x => x.startsWith('/'))))
           : [];
-        if (injectCandidatePaths.length) {
-          injCandidateHelp.textContent = 'Candidate destinations: ' + injectCandidatePaths.join(', ');
-          injCandidateHelp.style.display = '';
-        }
         let injectsResolvedPathView = (fa && String(fa.inject_path_view || '').trim().toLowerCase() === 'core-vm') ? 'core-vm' : 'container';
 
         function renderInjectList(files) {

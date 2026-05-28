@@ -35,6 +35,22 @@ def test_flow_generator_output_shows_phase_timings() -> None:
     assert not missing, "Missing phase timing display wiring in flow template: " + "; ".join(missing)
 
 
+def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function _fallbackOutputTemplateText(expr)",
+        "return 'generated credential';",
+        "function _applyHintNodeTemplateVars(text, assignment)",
+        "if (text.includes('{{') || text.includes('}}')) return;",
+        "if (Array.isArray(out[level]) && out[level].length) return;",
+        ".map(x => _applyHintNodeTemplateVars(String(x || '').trim(), fa))",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing unresolved hint template cleanup wiring in flow template: " + "; ".join(missing)
+
+
 def test_flow_chain_editor_hides_resolved_paths_row() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -106,7 +122,6 @@ def test_flow_inject_candidate_paths_are_visible_and_selectable() -> None:
     expected_snippets = [
         "inject_candidate_paths",
         "out.inject_candidate_paths = injectCandidatePaths;",
-        "Candidate destinations: ",
         "function destinationDirsFor(destValue)",
         "const effectiveDestOptions = candidateDestOptions.length",
         "destSelect = document.createElement('select');",
@@ -115,6 +130,14 @@ def test_flow_inject_candidate_paths_are_visible_and_selectable() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing inject candidate path UI wiring: " + "; ".join(missing)
+
+    removed_snippets = [
+        "Candidate destinations: ",
+        "candidateLegend.textContent",
+        "injCandidateHelp.textContent",
+    ]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not present, "Candidate destination labels should not be rendered in flow chains: " + "; ".join(present)
 
 
 def test_flow_inject_destination_dropdown_selection_is_serialized() -> None:
