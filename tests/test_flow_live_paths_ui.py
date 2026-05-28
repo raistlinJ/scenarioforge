@@ -101,6 +101,8 @@ def test_flow_initial_facts_start_hint_includes_first_step_context() -> None:
         "firstHintDetails.push('type: ' + genType);",
         "firstHintDetails.push('target: ' + Array.from(new Set(vulnNames)).join(', '));",
         "faFirst.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)",
+        "sourceBadge: required ? { text: 'Seq 1 required', className: 'badge text-bg-warning' } : null,",
+        "requiredTitle: 'Required by sequence 1',",
         "hintLabel: 'Start Hint',",
     ]
 

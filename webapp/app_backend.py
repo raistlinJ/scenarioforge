@@ -18626,7 +18626,7 @@ def _flow_chain_supplied_input_hint(values: dict[str, Any]) -> str:
         return ''
     joined = '; '.join(display_parts)
     label = 'input' if len(display_parts) == 1 else 'inputs'
-    return f"First challenge supplied {label}: {joined}."
+    return f"Sequence 1 required supplied {label}: {joined}."
 
 
 def _flow_clear_chain_supplied_inputs(assignment: dict[str, Any]) -> dict[str, Any]:
@@ -38295,6 +38295,54 @@ def _normalize_scaffold_hint_levels(value: Any) -> dict[str, list[str]]:
     return normalized
 
 
+def _default_scaffold_hint_levels(produces: list[str]) -> dict[str, list[str]]:
+    artifacts = [str(item or '').strip() for item in (produces or []) if str(item or '').strip()]
+
+    def _compact(value: str) -> str:
+        return re.sub(r'\s+', '', str(value or '')).lower()
+
+    priority = (
+        'File(path)',
+        'Credential(user,password)',
+        'Credential(user, password)',
+        'Credential(user)',
+        'Token(service)',
+        'APIKey(service)',
+        'PortForward(host,port)',
+        'PortForward(host, port)',
+        'Endpoint(path)',
+        'Knowledge(value)',
+    )
+    by_compact = {_compact(item): item for item in artifacts}
+    chosen = ''
+    for wanted in priority:
+        chosen = by_compact.get(_compact(wanted), '')
+        if chosen:
+            break
+    if not chosen:
+        chosen = next((item for item in artifacts if _compact(item) != _compact('Flag(flag_id)')), '')
+
+    if chosen:
+        medium = f"Artifact or service: {{{{OUTPUT.{chosen}}}}}"
+    else:
+        medium = 'Inspect the target service or generated artifact for the next clue.'
+
+    return {
+        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'medium': [medium],
+        'high': ['Use the access instructions and README.md for the complete workflow.'],
+    }
+
+
+def _ensure_scaffold_hint_levels(value: Any, produces: list[str]) -> dict[str, list[str]]:
+    normalized = _normalize_scaffold_hint_levels(value)
+    defaults = _default_scaffold_hint_levels(produces)
+    for level in ('low', 'medium', 'high'):
+        if not normalized.get(level):
+            normalized[level] = list(defaults.get(level) or [])
+    return normalized
+
+
 def _manifest_yaml_block(value: Any) -> str:
     try:
         import yaml  # type: ignore
@@ -38451,6 +38499,7 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
         produces = ['Flag(flag_id)'] + produces
     if plugin_type == 'flag-node-generator' and 'File(path)' not in produces:
         produces.append('File(path)')
+    hint_levels = _ensure_scaffold_hint_levels(hint_levels, produces)
 
     runtime_inputs_raw = payload.get('runtime_inputs')
     if runtime_inputs_raw is None:
@@ -38719,10 +38768,13 @@ def _validate_builder_scaffold_runtime_contract(scaffold_files: dict[str, str]) 
         return []
 
     declared_inputs: set[str] = set()
+    manifest_doc: dict[str, Any] = {}
     try:
         import yaml  # type: ignore
 
         manifest_doc = yaml.safe_load(manifest_text) or {}
+        if not isinstance(manifest_doc, dict):
+            manifest_doc = {}
         manifest_inputs = manifest_doc.get('inputs')
         if isinstance(manifest_inputs, list):
             for item in manifest_inputs:
@@ -38766,6 +38818,19 @@ def _validate_builder_scaffold_runtime_contract(scaffold_files: dict[str, str]) 
             'Generated scaffold is inconsistent: '
             f'{generator_path} requires runtime input(s) {joined} via /inputs/config.json, '
             f'but {manifest_path} does not declare them under inputs.'
+        )
+
+    levels = manifest_doc.get('hint_levels') if isinstance(manifest_doc, dict) else None
+    missing_hint_levels: list[str] = []
+    for level in ('low', 'medium', 'high'):
+        values = (levels or {}).get(level) if isinstance(levels, dict) else None
+        if not isinstance(values, list) or not any(str(item or '').strip() for item in values):
+            missing_hint_levels.append(level)
+    if missing_hint_levels:
+        errors.append(
+            'Generated scaffold is inconsistent: '
+            f'{manifest_path} must define hint_levels.low, hint_levels.medium, and hint_levels.high '
+            'with at least one non-empty hint each.'
         )
 
     return errors

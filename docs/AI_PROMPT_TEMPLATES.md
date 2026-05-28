@@ -146,6 +146,17 @@ For best results, paste:
 - A short description of the generator behavior you want
 - Whether you want a minimal MVP or a richer implementation
 
+When using Generator Builder intent overrides or natural-language prompt specs, express participant hints as structured levels:
+
+```text
+Hint levels:
+low: Target: {{NEXT_NODE_IP}}
+medium: Artifact or service: {{OUTPUT.File(path)}}
+high: Use the access instructions and README.md for the complete workflow.
+```
+
+The compact one-line form is also accepted: `Hint levels: low: Target: {{NEXT_NODE_IP}}; medium: Artifact: {{OUTPUT.File(path)}}; high: Use README.md.`
+
 ---
 
 ## Non‑negotiable runtime contract
@@ -170,8 +181,9 @@ Tell the AI these are strict requirements:
 - Outputs should be **deterministic** for the same inputs.
 - `outputs.json.outputs` must always include `Flag(flag_id)` (required by schema).
 - `hint.txt` is optional. Prefer `hint_levels` in the catalog; only write `/outputs/hint.txt` if you explicitly need a standalone hint file.
-- Include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`: low can reveal an IP/node, medium can reveal a port/service/file/artifact, and high can point to access instructions or README guidance.
+- Include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`, with at least one non-empty hint in each level: low can reveal an IP/node, medium can reveal a port/service/file/artifact, and high can point to access instructions or README guidance.
 - Mark runtime inputs with `flow_supply_when_first: true` only when participants must use that value on the first challenge and cannot reasonably infer or find it before solving.
+- Flow labels `flow_supply_when_first` values as `Seq 1 required` Initial Facts, marks them in Participant/Facilitator guide fact tables, and includes them in the first participant hints.
 - Treat Flow-synthesized values as **inputs**, not artifacts:
   - Never put `seed`, `secret`, `node_name`, `flag_prefix` into artifact inputs (aka `requires`).
 - Input descriptors default to `required: true` when omitted. Set `required: false` for optional runtime inputs.
@@ -310,7 +322,7 @@ Hard requirements (do not violate):
 - generator_id requirements:
   - Do not assume the installed numeric ID is stable; using SOURCE_ID is acceptable.
 - Do NOT write /outputs/hint.txt unless I explicitly ask; prefer hint_levels in the catalog.
-- Include low/medium/high hint_levels: IP or node, service/port/file/artifact, then access instructions or README guidance.
+- Include low/medium/high hint_levels in manifest.yaml, with at least one non-empty hint in each level: IP or node, service/port/file/artifact, then access instructions or README guidance.
 - Deterministic outputs: same (seed, secret, flag_prefix) => same outputs.
 - Inputs (NOT artifacts): seed (required), secret (required), flag_prefix (optional).
 - Mark any solver-facing runtime input the participant must use but cannot reasonably discover before the first solve with flow_supply_when_first.

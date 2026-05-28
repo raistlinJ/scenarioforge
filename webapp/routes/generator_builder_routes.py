@@ -114,6 +114,49 @@ def _coerce_hint_levels(value: Any) -> dict[str, list[str]]:
     return result
 
 
+def _default_hint_levels_for_outputs(produces: Any) -> dict[str, list[str]]:
+    artifacts = _coerce_string_list(produces)
+
+    def _compact(value: str) -> str:
+        return re.sub(r'\s+', '', str(value or '')).lower()
+
+    priority = (
+        'File(path)',
+        'Credential(user,password)',
+        'Credential(user, password)',
+        'Credential(user)',
+        'Token(service)',
+        'APIKey(service)',
+        'PortForward(host,port)',
+        'PortForward(host, port)',
+        'Endpoint(path)',
+        'Knowledge(value)',
+    )
+    by_compact = {_compact(item): item for item in artifacts}
+    chosen = ''
+    for wanted in priority:
+        chosen = by_compact.get(_compact(wanted), '')
+        if chosen:
+            break
+    if not chosen:
+        chosen = next((item for item in artifacts if _compact(item) != _compact('Flag(flag_id)')), '')
+    medium = f"Artifact or service: {{{{OUTPUT.{chosen}}}}}" if chosen else 'Inspect the target service or generated artifact for the next clue.'
+    return {
+        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'medium': [medium],
+        'high': ['Use the access instructions and README.md for the complete workflow.'],
+    }
+
+
+def _ensure_hint_levels(value: Any, produces: Any) -> dict[str, list[str]]:
+    normalized = _coerce_hint_levels(value)
+    defaults = _default_hint_levels_for_outputs(produces)
+    for level in ('low', 'medium', 'high'):
+        if not normalized.get(level):
+            normalized[level] = list(defaults.get(level) or [])
+    return normalized
+
+
 def _coerce_inject_candidate_paths(value: Any) -> list[str]:
     if value is None:
         return []
@@ -537,6 +580,7 @@ def _build_builder_auto_heal_prompt(original_prompt: str, validation_errors: lis
         '- Any runtime input that generator.py treats as required in /inputs/config.json must be declared in runtime_inputs so manifest inputs stay in sync.',
         '- If a required runtime input is sensitive, mark it sensitive in runtime_inputs.',
         '- If a runtime input is solver-facing, needed on the first challenge, and not reasonably discoverable by participants yet, mark it flow_supply_when_first.',
+        '- Include hint_levels.low, hint_levels.medium, and hint_levels.high with at least one non-empty hint each.',
         '- Keep outputs.json, produces, inject_files, and actual created files aligned.',
         '',
         'Original user request:',
@@ -555,6 +599,7 @@ def _build_builder_scaffold_repair_prompt(original_prompt: str, scaffold_errors:
         '- Do not return the prior scaffold unchanged; make concrete edits that resolve the reported issue.',
         '- Reply with exactly one JSON object matching the Builder scaffold schema.',
         '- Mark solver-facing first-step runtime inputs with flow_supply_when_first when participants cannot reasonably discover them before solving.',
+        '- Include hint_levels.low, hint_levels.medium, and hint_levels.high with at least one non-empty hint each.',
         '- Include complete generator_py_text and keep manifest-facing fields internally consistent.',
         '- Ensure the response can be normalized into a scaffold and persisted without manual edits.',
         '',
@@ -1265,6 +1310,46 @@ def _hint_levels_summary(levels: Any) -> str:
     return ', '.join(parts)
 
 
+def _merge_hint_levels(target: dict[str, list[str]], source: Any) -> None:
+    for level, values in _coerce_hint_levels(source).items():
+        if not values:
+            continue
+        target.setdefault(level, [])
+        for value in values:
+            if value not in target[level]:
+                target[level].append(value)
+
+
+def _parse_prompt_hint_levels(text: str) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    collecting_block = False
+    for raw_line in str(text or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        block_match = re.match(r'^Hint\s+levels?\s*:\s*(.*)$', line, flags=re.IGNORECASE)
+        if block_match:
+            tail = str(block_match.group(1) or '').strip()
+            if tail:
+                _merge_hint_levels(result, _parse_hint_levels_spec(tail))
+                collecting_block = False
+            else:
+                collecting_block = True
+            continue
+        level_match = re.match(r'^(?:Hint\s+)?(low|medium|high)(?:\s+hint)?\s*[:=]\s*(.+)$', line, flags=re.IGNORECASE)
+        if level_match:
+            level = str(level_match.group(1) or '').strip().lower()
+            value = str(level_match.group(2) or '').strip()
+            if value:
+                result.setdefault(level, [])
+                if value not in result[level]:
+                    result[level].append(value)
+            continue
+        if collecting_block:
+            collecting_block = False
+    return _coerce_hint_levels(result)
+
+
 def _parse_readme_mentions_spec(text: str) -> list[str]:
     raw = str(text or '').strip()
     if not raw:
@@ -1351,11 +1436,9 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         if inject_items:
             explicit['inject_files'] = inject_items
 
-    hint_match = re.search(r'Hint levels?:\s*(.+)', text, flags=re.IGNORECASE)
-    if hint_match:
-        hint_levels = _parse_hint_levels_spec(hint_match.group(1))
-        if hint_levels:
-            explicit['hint_levels'] = hint_levels
+    hint_levels = _parse_prompt_hint_levels(text)
+    if hint_levels:
+        explicit['hint_levels'] = hint_levels
 
     inject_dest_match = re.search(r'Inject destination:\s*(.+?)(?:\.|$)', text, flags=re.IGNORECASE)
     if inject_dest_match:
@@ -1962,7 +2045,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
     ]
     if ultra_compact_prompt:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_levels":{"low":[],"medium":[],"high":[]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_levels":{"low":["Target: {{NEXT_NODE_IP}}"],"medium":["Artifact or service: {{OUTPUT.File(path)}}"],"high":["Use the access instructions and README.md for the complete workflow."]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
         ]
     elif compact_grounding:
         schema_lines = [
@@ -2179,6 +2262,13 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
     if notes.get('write_file_under_outputs_artifacts') and 'File(path)' in produces and not any(str(item).startswith('File(path)') for item in inject_files):
         if explicit.get('inject_files') or merged_defaults.get('inject_files'):
             inject_files = _apply_inject_destination(_coerce_string_list(explicit.get('inject_files') or merged_defaults.get('inject_files')), inject_destination)
+
+    produces_for_hints = list(produces or [])
+    if plugin_type == 'flag-node-generator' and 'File(path)' not in produces_for_hints:
+        produces_for_hints.append('File(path)')
+    if not produces_for_hints:
+        produces_for_hints.append('Flag(flag_id)')
+    hint_levels = _ensure_hint_levels(hint_levels, produces_for_hints)
 
     return {
         'plugin_type': plugin_type,

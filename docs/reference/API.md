@@ -327,6 +327,28 @@ This endpoint supports both:
 - initial scaffold creation
 - iterative refinement by passing the current scaffold/files and latest test result back into the prompt context
 
+`POST /api/generators/prompt_intent_preview`
+: Parses a Generator Builder prompt plus optional manual overrides before calling the AI provider. The preview shows normalized runtime inputs, artifact requirements/outputs, injected files, `hint_levels`, and README notes that will guide `/api/generators/ai_scaffold`.
+
+Example request:
+
+```json
+{
+	"plugin_type": "flag-generator",
+	"prompt": "Build deterministic SSH credentials. Hint levels:\nlow: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use README.md.",
+	"intent_overrides": {
+		"runtime_inputs": "seed (required)\nsecret (required, sensitive)",
+		"hint_levels": "low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
+	}
+}
+```
+
+Response shape:
+- `ok`
+- `sections`: UI-ready preview groups for manual overrides, user-specified requirements, inferred defaults, and notes
+- `merged`: normalized values that will fill gaps in the AI scaffold request
+- `editable`: text fields that can be applied back to the Builder override panel
+
 Example request:
 
 ```json
@@ -335,6 +357,9 @@ Example request:
 	"source_id_hint": "ssh_creds_drop",
 	"name_hint": "SSH Credentials Drop",
 	"prompt": "Build a deterministic SSH credential generator with Knowledge(ip) as required input.",
+	"intent_overrides": {
+		"hint_levels": "low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
+	},
 	"provider": "ollama",
 	"base_url": "http://127.0.0.1:11434",
 	"model": "qwen2.5:7b",
@@ -352,6 +377,7 @@ Response shape:
 - `folder_path`, `manifest_yaml`, `scaffold_paths`, `files`
 
 Optional iterative request fields:
+- `intent_overrides`: optional Builder-normalized text overrides for `runtime_inputs`, `requires`, `produces`, `inject_files`, `inject_destination`, `hint_levels`, and `readme_mentions`
 - `current_scaffold_request`: the current normalized scaffold request
 - `current_files`: current scaffold files keyed by relative path
 - `last_test_result`: latest `/api/generators/builder_test` response payload (or a subset)

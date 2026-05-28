@@ -19,6 +19,7 @@ If you are using AI to create generators, use this minimal handoff packet:
 - expected artifact keys (`requires`, `optional_requires`, `produces`)
 - explicit statement of required vs optional runtime inputs
 - mark solver-facing first-step runtime inputs with `flow_supply_when_first: true` when participants must use the value and cannot reasonably discover it yet
+- first-step supplied values are shown as `Seq 1 required` Initial Facts in Flow, in Participant/Facilitator guide fact tables, and as Sequence 1 required supplied-input hints for participants
 - `access_instructions` when participants need concrete mount/connect/read/exploit steps
 - `inject_candidate_paths` when injected artifacts should be copied into one of several plausible absolute destinations
 
@@ -279,13 +280,13 @@ Author generators assuming transforms can happen, and make startup robust to the
 
 ---
 
-## 5) Hint templates and substitution
+## 5) Hint levels and substitution
 
 Manifests declare structured hints via:
 
 - `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` (lists of strings shown as collapsible guide sections labeled `Hint Low`, `Hint Medium`, and `Hint High`)
 
-Use levels consistently: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should point to access instructions or a README link.
+Use levels consistently and keep at least one non-empty entry in each level: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should point to access instructions or a README link.
 
 Flow substitutions include:
 
@@ -297,8 +298,14 @@ Flow substitutions include:
 
 Example:
 
-```
-Next: SSH to {{NEXT_NODE_NAME}} using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}
+```yaml
+hint_levels:
+  low:
+    - "Target: {{NEXT_NODE_IP}}"
+  medium:
+    - "Credential: {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"
+  high:
+    - "Use the access instructions and README.md for the complete workflow."
 ```
 
 Note:

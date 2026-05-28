@@ -95,9 +95,9 @@ In addition to `{{THIS_*}}`/`{{NEXT_*}}` placeholders, Flow supports substitutin
 
 Where `<key>` is a key inside `outputs.json` under the `outputs` object.
 
-Example hint template:
+Example hint level entry:
 
-`Next: SSH to {{NEXT_NODE_NAME}} using {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}`
+`Credential: {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}`
 
 ## Injected artifacts (`injects`)
 

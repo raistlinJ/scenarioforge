@@ -3849,6 +3849,9 @@
               name,
               resolved: entry.resolved,
               toChain: (entry.toChain !== undefined) ? !!entry.toChain : true,
+              required: !!entry.required,
+              requiredTitle: String(entry.requiredTitle || '').trim(),
+              sourceBadge: entry.sourceBadge,
             });
             return;
           }
@@ -3879,7 +3882,27 @@
           const code = document.createElement('code');
           code.className = 'font-monospace';
           code.textContent = String(row.name || '-');
-          tdVar.appendChild(code);
+          if (row.required || (row.sourceBadge && row.sourceBadge.text)) {
+            const wrap = document.createElement('div');
+            wrap.className = 'd-flex align-items-center gap-2';
+            wrap.appendChild(code);
+            if (row.required) {
+              const reqMark = document.createElement('span');
+              reqMark.className = 'text-danger fw-semibold';
+              reqMark.textContent = '*';
+              reqMark.title = row.requiredTitle || 'Required fact';
+              wrap.appendChild(reqMark);
+            }
+            if (row.sourceBadge && row.sourceBadge.text) {
+              const badge = document.createElement('span');
+              badge.className = row.sourceBadge.className || 'badge text-bg-secondary';
+              badge.textContent = String(row.sourceBadge.text || '').trim();
+              wrap.appendChild(badge);
+            }
+            tdVar.appendChild(wrap);
+          } else {
+            tdVar.appendChild(code);
+          }
 
           const tdRes = document.createElement('td');
           tdRes.className = 'small';
@@ -3988,16 +4011,42 @@
             if (text && !initHints.includes(text)) initHints.push(text);
           });
         } catch (e) { }
+        const seqOneRequiredNames = new Set();
+        try {
+          const addRequired = (value) => {
+            const text = String(value || '').trim();
+            if (text && !isFlagFactName(text)) seqOneRequiredNames.add(text);
+          };
+          const reqArt = (faFirst && Array.isArray(faFirst.requires)) ? faFirst.requires : [];
+          reqArt.forEach(addRequired);
+          const inReq = (faFirst && Array.isArray(faFirst.input_fields_required)) ? faFirst.input_fields_required : [];
+          const inOpt = (faFirst && Array.isArray(faFirst.input_fields_optional)) ? faFirst.input_fields_optional : [];
+          const inAll = (faFirst && Array.isArray(faFirst.input_fields)) ? faFirst.input_fields : [];
+          if (inReq.length || inOpt.length) inReq.forEach(addRequired);
+          else inAll.forEach(addRequired);
+          const supplied = (faFirst && Array.isArray(faFirst.chain_supplied_inputs)) ? faFirst.chain_supplied_inputs : [];
+          supplied.forEach(addRequired);
+          initArtifacts.forEach(addRequired);
+          initFields.forEach(addRequired);
+        } catch (e) { }
+        const makeInitialOutputRow = (name, resolved) => {
+          const clean = String(name || '').trim();
+          const required = seqOneRequiredNames.has(clean);
+          return {
+            name: clean,
+            resolved,
+            toChain: true,
+            required,
+            requiredTitle: 'Required by sequence 1',
+            sourceBadge: required ? { text: 'Seq 1 required', className: 'badge text-bg-warning' } : null,
+          };
+        };
         const ri = (faFirst && typeof faFirst.resolved_inputs === 'object' && faFirst.resolved_inputs && !Array.isArray(faFirst.resolved_inputs))
           ? faFirst.resolved_inputs
           : null;
         if (ri) {
           const keys = Object.keys(ri).sort((a, b) => String(a).localeCompare(String(b)));
-          initOutputs = keys.map((k) => ({
-            name: String(k || '').trim(),
-            resolved: ri[k],
-            toChain: true,
-          })).filter(x => x && x.name && !isFlagFactName(x.name));
+          initOutputs = keys.map((k) => makeInitialOutputRow(k, ri[k])).filter(x => x && x.name && !isFlagFactName(x.name));
         }
         if (!initOutputs.length) {
           const names = new Set();
@@ -4012,11 +4061,7 @@
             const fields = (inReq.length || inOpt.length) ? inReq.concat(inOpt) : inAll;
             fields.forEach(n => { const s = String(n || '').trim(); if (s) names.add(s); });
           } catch (e) { }
-          initOutputs = Array.from(names).sort().filter(k => !isFlagFactName(k)).map((k) => ({
-            name: k,
-            resolved: ri ? ri[k] : undefined,
-            toChain: true,
-          }));
+          initOutputs = Array.from(names).sort().filter(k => !isFlagFactName(k)).map((k) => makeInitialOutputRow(k, ri ? ri[k] : undefined));
         }
       } catch (e) { initHints = []; }
       renderFactSummaryRow({
@@ -11126,6 +11171,21 @@ ${out.join('\n')}
           .filter(Boolean)
         : [];
       const structuredHintLevels = normalizeGuideHintLevels(assignment);
+      const seqOneRequiredInputs = (step === 1 && Array.isArray(assignment.chain_supplied_inputs))
+        ? new Set(assignment.chain_supplied_inputs.map((value) => String(value || '').trim()).filter(Boolean))
+        : new Set();
+      const sequenceOneRequiredHintLines = (step === 1 && Array.isArray(assignment.chain_supplied_input_hints))
+        ? assignment.chain_supplied_input_hints
+          .map((value) => _applyHintOutputTemplates(String(value || '').trim(), assignment))
+          .map((value) => String(value || '').trim())
+          .filter(Boolean)
+        : [];
+      if (sequenceOneRequiredHintLines.length) {
+        if (!Array.isArray(structuredHintLevels.low)) structuredHintLevels.low = [];
+        sequenceOneRequiredHintLines.forEach((value) => {
+          if (!structuredHintLevels.low.includes(value)) structuredHintLevels.low.push(value);
+        });
+      }
       const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
       const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
       const resolvedInjects = normalizeGuidePathArtifacts(assignment);
@@ -11187,7 +11247,7 @@ ${out.join('\n')}
       } else {
         lines.push('| Input | Requirement | Needed to complete this step? |');
         lines.push('| --- | --- | --- |');
-        requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | Required | Yes |`));
+        requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | ${seqOneRequiredInputs.has(name) ? 'Seq 1 required' : 'Required'} | Yes |`));
         optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
       }
       lines.push('');
@@ -11386,7 +11446,7 @@ ${out.join('\n')}
       lines.push('### Resolved Facts');
       lines.push('');
       const factRows = [];
-      resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push(['Input', k, pathInfo.value, pathInfo.status]));
+      resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push([seqOneRequiredInputs.has(k) ? 'Input (Seq 1 required)' : 'Input', k, pathInfo.value, pathInfo.status]));
       resolvedOutputFacts.forEach(([k, pathInfo]) => factRows.push(['Output', k, pathInfo.value, pathInfo.status]));
       resolvedInjects.forEach((item, idx) => factRows.push(['File Artifact', `Artifact ${idx + 1}`, item.value, item.status]));
       if (factRows.length) {
