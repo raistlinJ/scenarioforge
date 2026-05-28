@@ -5174,6 +5174,19 @@
           const tbody2 = document.createElement('tbody');
           let pathView = (fa && String(fa.inject_path_view || '').trim().toLowerCase() === 'core-vm') ? 'core-vm' : 'container';
           const rows = Array.isArray(files) ? files : [];
+          const injectRows = rows.map((entry) => {
+            const parsed = parseInjectSpec(entry);
+            let srcRaw = String(parsed.src || '').trim();
+            if (_isHostLocalSyntheticPath(srcRaw)) srcRaw = _basenameOnly(srcRaw);
+            let srcPersist = String(parsed.src || '').trim();
+            if (_isHostLocalSyntheticPath(srcPersist)) srcPersist = _basenameOnly(srcPersist);
+            return {
+              entry,
+              srcRaw,
+              srcPersist,
+              parsedDest: String(parsed.dest || '').trim(),
+            };
+          });
           const injectCandidatePaths = (fa && Array.isArray(fa.inject_candidate_paths))
             ? Array.from(new Set(fa.inject_candidate_paths.map(x => String(x || '').trim().replace(/\/+$/g, '') || '/').filter(x => x.startsWith('/'))))
             : [];
@@ -5188,6 +5201,54 @@
           const generatorIdForEmbed = String((fa && (fa.id || fa.generator_id)) || '').trim().toLowerCase();
           const hasEmbeddedFlag = embeddedDeliveryMode === 'embedded' || generatorIdForEmbed === 'binary_embed_text';
           const resolvedFilePath = String((resolvedMap && resolvedMap['File(path)']) || '').trim();
+          const selectedDestBySrc = new Map();
+
+          function normalizeDestDir(d) {
+            const s = String(d || '').trim();
+            if (!s || !s.startsWith('/')) return '/flow_injects';
+            return s.replace(/\/+$/g, '') || '/flow_injects';
+          }
+
+          function destinationOptions() {
+            const out = ['/flow_injects'];
+            const seen = new Set(out);
+            (Array.isArray(injectCandidatePaths) ? injectCandidatePaths : []).forEach((rawPath) => {
+              const p = normalizeDestDir(rawPath);
+              if (!p || seen.has(p)) return;
+              seen.add(p);
+              out.push(p);
+            });
+            return out;
+          }
+
+          const destinationOptionValues = destinationOptions();
+          injectRows.forEach((row) => {
+            const key = String(row && row.srcRaw || '').trim();
+            if (!key || selectedDestBySrc.has(key)) return;
+            const parsedDest = normalizeDestDir(row && row.parsedDest);
+            selectedDestBySrc.set(key, parsedDest || '/flow_injects');
+          });
+
+          function selectedDestFor(srcRaw) {
+            const key = String(srcRaw || '').trim();
+            if (!key) return '/flow_injects';
+            const val = selectedDestBySrc.get(key);
+            return normalizeDestDir(val || '/flow_injects');
+          }
+
+          function applyInjectDestinationOverridesFromTable() {
+            try {
+              if (!fa || typeof fa !== 'object') return;
+              const override = [];
+              injectRows.forEach((row) => {
+                if (!row || !String(row.srcPersist || '').trim()) return;
+                const src = String(row.srcPersist || '').trim();
+                const dest = selectedDestFor(row.srcRaw);
+                override.push(`${src} -> ${dest}`);
+              });
+              fa.inject_files_override = override;
+            } catch (e) { }
+          }
 
           function _basenameOnly(p) {
             const s = String(p || '').replace('\\', '/');
@@ -5267,17 +5328,8 @@
               return hasFlagStar;
             }
 
-            function normalizeDestDir(d) {
-              const s = String(d || '').trim();
-              if (!s || !s.startsWith('/')) return '/flow_injects';
-              return s.replace(/\/+$/g, '') || '/flow_injects';
-            }
-
             function destinationDirsFor(destValue) {
-              const raw = String(destValue || '').trim();
-              if (raw && raw.startsWith('/')) return [normalizeDestDir(raw)];
-              if (injectCandidatePaths.length) return injectCandidatePaths.slice();
-              return ['/flow_injects'];
+              return [normalizeDestDir(destValue || '/flow_injects')];
             }
 
             function resolvedTargetsFor(src) {
@@ -5331,14 +5383,9 @@
               return parts.length ? parts[parts.length - 1] : s;
             }
 
-            rows.forEach((entry) => {
-              const parsed = parseInjectSpec(entry);
-              let srcRaw = String(parsed.src || '');
-              const dest = parsed.dest || '';
-
-              if (_isHostLocalSyntheticPath(srcRaw)) {
-                srcRaw = _basenameOnly(srcRaw);
-              }
+            injectRows.forEach((injectRow) => {
+              const srcRaw = String((injectRow && injectRow.srcRaw) || '').trim();
+              const selectedDest = selectedDestFor(srcRaw);
 
               let displaySrc = srcRaw;
               let resolvedTargets = [];
@@ -5356,7 +5403,7 @@
               const likelySymbolicToken = !displaySrc.includes('/')
                 && !displaySrc.startsWith('artifacts/')
                 && !/\.[A-Za-z0-9]{1,16}$/.test(displaySrc);
-              const destDirs = destinationDirsFor(dest);
+              const destDirs = destinationDirsFor(selectedDest);
 
               const entries = resolvedTargets.length ? resolvedTargets : [''];
               entries.forEach((resolvedVal, idx) => {
@@ -5404,7 +5451,40 @@
                 }
 
                 const containerText = destPaths.length > 1 ? destPaths.join('; ') : (destPath || '-');
-                tdResolved.textContent = pathView === 'container' ? containerText : coreVmText;
+                if (idx === 0) {
+                  const controlWrap = document.createElement('div');
+                  controlWrap.className = 'd-flex align-items-center gap-2 mb-1';
+                  const controlLabel = document.createElement('span');
+                  controlLabel.className = 'small text-muted';
+                  controlLabel.textContent = 'Destination:';
+                  const destSelect = document.createElement('select');
+                  destSelect.className = 'form-select form-select-sm font-monospace';
+                  destinationOptionValues.forEach((destOption) => {
+                    const opt = document.createElement('option');
+                    opt.value = destOption;
+                    opt.textContent = destOption;
+                    destSelect.appendChild(opt);
+                  });
+                  if (selectedDest && destinationOptionValues.includes(selectedDest)) {
+                    destSelect.value = selectedDest;
+                  } else {
+                    destSelect.value = '/flow_injects';
+                  }
+                  destSelect.addEventListener('change', () => {
+                    selectedDestBySrc.set(srcRaw, normalizeDestDir(destSelect.value || '/flow_injects'));
+                    applyInjectDestinationOverridesFromTable();
+                    try { persistFlowStateAndXmlBestEffort(); } catch (e) { }
+                    _renderInjectTable();
+                  });
+                  controlWrap.appendChild(controlLabel);
+                  controlWrap.appendChild(destSelect);
+                  tdResolved.appendChild(controlWrap);
+                  const pathLine = document.createElement('div');
+                  pathLine.textContent = pathView === 'container' ? containerText : coreVmText;
+                  tdResolved.appendChild(pathLine);
+                } else {
+                  tdResolved.textContent = pathView === 'container' ? containerText : coreVmText;
+                }
 
                 tr.appendChild(tdName);
                 tr.appendChild(tdResolved);
@@ -5424,6 +5504,7 @@
           candidateLegend.textContent = injectCandidatePaths.length ? ('Candidate destinations: ' + injectCandidatePaths.join(', ')) : '';
 
           function _renderInjectTable() {
+            applyInjectDestinationOverridesFromTable();
             viewToggle.textContent = _currentViewLabel();
             const hasFlagStar = _renderInjectRows();
             legend.style.display = hasFlagStar ? '' : 'none';
