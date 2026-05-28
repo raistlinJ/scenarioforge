@@ -3285,7 +3285,7 @@
 
   function resolveFlowGuideTemplateText(text, assignment, context) {
     let out = _applyHintOutputTemplates(String(text || ''), assignment);
-    if (!out || !out.includes('{{')) return out;
+    if (!out || !out.includes('\u007b\u007b')) return out;
     const source = assignment && typeof assignment === 'object' ? assignment : {};
     const ctx = context && typeof context === 'object' ? context : {};
     const values = new Map();
