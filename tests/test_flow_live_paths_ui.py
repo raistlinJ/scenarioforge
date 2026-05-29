@@ -58,6 +58,26 @@ def test_flow_template_compiles_with_hint_placeholders() -> None:
     app.jinja_env.get_template("flow.html")
 
 
+def test_flow_guide_downloads_show_preparation_progress() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function waitForFlowUiPaint()",
+        "let guideDownloadInProgress = false;",
+        "function setGuideDownloadLinksBusy(busy)",
+        "async function prepareAndDownloadGuide(options)",
+        "showLoading(`Preparing ${guideLabel}",
+        "setLoadingSteps(guideSteps, 0);",
+        "await waitForFlowUiPaint();",
+        "startHtmlDownload(html, fname);",
+        "await prepareAndDownloadGuide({ facilitator: false });",
+        "await prepareAndDownloadGuide({ facilitator: true });",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Guide downloads should show preparation progress before starting: " + "; ".join(missing)
+
+
 def test_flow_chain_editor_hides_resolved_paths_row() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
