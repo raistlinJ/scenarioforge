@@ -373,7 +373,7 @@
     <ul id="flowLoadingSteps" class="small mt-1 mb-0 d-none"></ul>
     <div class="small text-muted mt-2 d-none" id="flowLoadingLogLabel">Details</div>
     <ul id="flowLoadingLog" class="small text-muted mt-1 mb-0 d-none"></ul>
-    <div class="small text-muted mt-2">This can take a few seconds while preview plans and sequencing run.</div>
+    <div class="small text-muted mt-2">This can take a few seconds while ScenarioForge prepares the latest data.</div>
   </div>
 </div>
 
@@ -1823,6 +1823,19 @@
       }
       if (loadingOverlayEl) loadingOverlayEl.classList.remove('d-none');
     } catch (e) { }
+  }
+
+  function waitForFlowUiPaint() {
+    return new Promise((resolve) => {
+      try {
+        const raf = window.requestAnimationFrame
+          ? (cb) => window.requestAnimationFrame(cb)
+          : (cb) => window.setTimeout(cb, 0);
+        raf(() => raf(resolve));
+      } catch (e) {
+        window.setTimeout(resolve, 0);
+      }
+    });
   }
 
   function escapeHtml(text) {
@@ -3461,10 +3474,23 @@
     }).replace(/\s+([,.])/g, '$1').replace(/[ \t]{2,}/g, ' ').trim();
   }
 
+  function isGuideHintLineInformative(text) {
+    const value = String(text || '').trim();
+    if (!value) return false;
+    if (value.includes(FLOW_TEMPLATE_OPEN) || value.includes(FLOW_TEMPLATE_CLOSE)) return false;
+    if (/^[A-Za-z][A-Za-z0-9_ ()/.,-]{0,96}:\s*$/.test(value)) return false;
+    return true;
+  }
+
   function ensureFlowGuideHintLevelCoverage(levels, assignment, context) {
     const out = {};
     FLOW_HINT_LEVEL_ORDER.forEach((level) => {
-      const values = Array.isArray(levels && levels[level]) ? levels[level].map((item) => String(item || '').trim()).filter(Boolean) : [];
+      const values = Array.isArray(levels && levels[level])
+        ? levels[level]
+          .map((item) => resolveFlowGuideTemplateText(String(item || '').trim(), assignment, context))
+          .map((item) => String(item || '').trim())
+          .filter((item) => isGuideHintLineInformative(item))
+        : [];
       if (values.length) out[level] = values.slice();
     });
     const source = assignment && typeof assignment === 'object' ? assignment : {};
@@ -3474,7 +3500,7 @@
     const addDefault = (level, value) => {
       if (Array.isArray(out[level]) && out[level].length) return;
       const rendered = resolveFlowGuideTemplateText(value, source, ctx);
-      if (rendered) out[level] = [rendered];
+      if (isGuideHintLineInformative(rendered)) out[level] = [rendered];
     };
     addDefault('low', `Target: ${nodeIp ? `${nodeName} @ ${nodeIp}` : nodeName}`);
     const outputs = (source.resolved_outputs && typeof source.resolved_outputs === 'object' && !Array.isArray(source.resolved_outputs)) ? source.resolved_outputs : {};
@@ -11238,6 +11264,7 @@ ${out.join('\n')}
 
     const formatGuideHintLine = (text) => {
       const value = String(text || '').trim();
+      if (!isGuideHintLineInformative(value)) return '';
       const readmeMatch = value.match(/^README:\s*(.+)$/i);
       if (readmeMatch) {
         const rawPath = String(readmeMatch[1] || '').trim();
@@ -11248,6 +11275,8 @@ ${out.join('\n')}
       }
       return value;
     };
+
+    const renderGuideHintLine = (text, assignment, context) => formatGuideHintLine(resolveFlowGuideTemplateText(text, assignment, context));
 
     const firstHint = (assignment) => {
       if (!assignment || typeof assignment !== 'object') return '';
@@ -11329,6 +11358,7 @@ ${out.join('\n')}
     const joinGuideContainerPath = (destRoot, relPath) => {
       const root = normalizeGuidePathText(destRoot || '/flow_injects') || '/flow_injects';
       const rel = normalizeGuideRelativeArtifactPath(relPath);
+      if (rel && root.endsWith('/' + rel)) return root;
       return rel ? `${root}/${rel}` : root;
     };
     const normalizeGuideRelativeArtifactPath = (value) => {
@@ -11341,6 +11371,7 @@ ${out.join('\n')}
       const parts = normalized.split('/').filter(Boolean);
       return parts.length ? parts[parts.length - 1] : normalized;
     };
+    const isGuideOutputKeyToken = (value) => /^[A-Za-z_][A-Za-z0-9_]*\(.+\)$/.test(String(value || '').trim());
     const isCanonicalGuideContainerPath = (value) => /^(?:\/flow_injects|\/flow_artifacts|\/inputs|\/outputs|\/exports)(?:\/|$)/.test(normalizeGuidePathText(value));
     const isGuideCoreVmSourcePath = (value) => {
       const text = normalizeGuidePathText(value).toLowerCase();
@@ -11384,6 +11415,44 @@ ${out.join('\n')}
         const idx = text.indexOf(marker);
         if (idx >= 0) return normalizeGuideRelativeArtifactPath(text.slice(idx + marker.length));
       }
+      return '';
+    };
+    const guideResolvedSourceForInjectSpec = (source, assignmentForPath) => {
+      const src = String(source || '').trim();
+      const assignmentSource = (assignmentForPath && typeof assignmentForPath === 'object') ? assignmentForPath : {};
+      if (!src || !assignmentSource) return '';
+      const srcNorm = normalizeGuidePathText(src);
+      const srcBase = guidePathBasename(srcNorm).toLowerCase();
+      const sourceIsToken = isGuideOutputKeyToken(srcNorm) || isGuideOutputKeyToken(guidePathBasename(srcNorm));
+      const candidates = [];
+      const addCandidate = (value) => {
+        const text = normalizeGuidePathText(value);
+        if (text && !candidates.includes(text)) candidates.push(text);
+      };
+      if (Array.isArray(assignmentSource.inject_files_detail)) {
+        assignmentSource.inject_files_detail.forEach((item) => {
+          if (!item || typeof item !== 'object') return;
+          addCandidate(item.resolved);
+          addCandidate(item.path);
+          addCandidate(item.source);
+          addCandidate(item.source_path);
+          addCandidate(item.sourcePath);
+          addCandidate(item.field);
+        });
+      }
+      const resolvedPaths = (assignmentSource.resolved_paths && typeof assignmentSource.resolved_paths === 'object' && !Array.isArray(assignmentSource.resolved_paths)) ? assignmentSource.resolved_paths : {};
+      const resolvedSources = Array.isArray(resolvedPaths.inject_sources) ? resolvedPaths.inject_sources : [];
+      resolvedSources.forEach((item) => {
+        if (!item || typeof item !== 'object') return;
+        addCandidate(item.path);
+        addCandidate(item.resolved);
+      });
+      for (const candidate of candidates) {
+        const candidateBase = guidePathBasename(candidate).toLowerCase();
+        if (candidate === srcNorm || (srcBase && candidateBase === srcBase)) return candidate;
+        if (srcNorm && candidate.endsWith('/' + srcNorm.replace(/^\/+/, ''))) return candidate;
+      }
+      if (sourceIsToken && candidates.length === 1) return candidates[0];
       return '';
     };
     const deriveGuideContainerPathFromSource = (value, assignmentForPath, destRoot) => {
@@ -11441,7 +11510,9 @@ ${out.join('\n')}
       return null;
     };
     const normalizeGuideInjectSpecPath = (raw) => {
-      const text = String(raw || '').trim();
+      const opts = (raw && typeof raw === 'object') ? raw : { text: raw };
+      const assignmentForPath = (opts.assignmentForPath && typeof opts.assignmentForPath === 'object') ? opts.assignmentForPath : null;
+      const text = String(opts.text || '').trim();
       if (!text) return null;
       const sep = text.includes('->') ? '->' : (text.includes('=>') ? '=>' : '');
       if (sep) {
@@ -11449,12 +11520,16 @@ ${out.join('\n')}
         const source = parts[0].trim();
         const dest = parts.slice(1).join(sep).trim();
         if (dest && dest.startsWith('/')) {
-          const value = deriveGuideContainerPathFromSource(source, null, dest) || normalizeGuidePathText(dest);
+          const resolvedSource = guideResolvedSourceForInjectSpec(source, assignmentForPath);
+          const rel = guideRelativeSourcePath(resolvedSource || source, assignmentForPath)
+            || (!isGuideOutputKeyToken(source) ? normalizeGuideRelativeArtifactPath(source) : '');
+          const value = deriveGuideContainerPathFromSource(resolvedSource || source, assignmentForPath, dest)
+            || (rel ? joinGuideContainerPath(dest, rel) : normalizeGuidePathText(dest));
           return { value, status: 'container', source, field: source };
         }
         return { value: source || text, status: 'missing-container', source, field: source };
       }
-      const derived = deriveGuideContainerPathFromSource(text, null, '/flow_injects');
+      const derived = deriveGuideContainerPathFromSource(text, assignmentForPath, '/flow_injects');
       if (derived) return { value: derived, status: 'container', source: text, field: text };
       return { value: text, status: 'missing-container', source: text, field: text };
     };
@@ -11468,11 +11543,27 @@ ${out.join('\n')}
         seen.add(key);
         out.push(entry);
       };
-      if (Array.isArray(assignmentForPath && assignmentForPath.inject_files_detail)) {
+      const injectOverrides = Array.isArray(assignmentForPath && assignmentForPath.inject_files_override)
+        ? assignmentForPath.inject_files_override.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+      const injectSpecs = injectOverrides.length
+        ? injectOverrides
+        : (Array.isArray(assignmentForPath && assignmentForPath.inject_files) ? assignmentForPath.inject_files.map((item) => String(item || '').trim()).filter(Boolean) : []);
+      const hasExplicitInjectDest = injectSpecs.some((item) => {
+        const text = String(item || '').trim();
+        const sep = text.includes('->') ? '->' : (text.includes('=>') ? '=>' : '');
+        if (!sep) return false;
+        const dest = text.split(sep).slice(1).join(sep).trim();
+        return dest.startsWith('/');
+      });
+      if (hasExplicitInjectDest) {
+        injectSpecs.forEach((item) => add(normalizeGuideInjectSpecPath({ text: item, assignmentForPath })));
+      }
+      if (!out.length && Array.isArray(assignmentForPath && assignmentForPath.inject_files_detail)) {
         assignmentForPath.inject_files_detail.forEach((item) => add(normalizeGuidePathArtifact(item, assignmentForPath)));
       }
-      if (!out.length && Array.isArray(assignmentForPath && assignmentForPath.inject_files)) {
-        assignmentForPath.inject_files.forEach((item) => add(normalizeGuideInjectSpecPath(item)));
+      if (!out.length && injectSpecs.length) {
+        injectSpecs.forEach((item) => add(normalizeGuideInjectSpecPath({ text: item, assignmentForPath })));
       }
       return out;
     };
@@ -11617,9 +11708,9 @@ ${out.join('\n')}
       ].filter(Boolean);
       const nodeIp = ipCandidates.length ? ipCandidates[0] : 'unknown';
       const guideContext = { nodeName, nodeIp, nodeId };
-      hint = resolveFlowGuideTemplateText(hint, assignment, guideContext);
-      allHints = allHints.map((value) => resolveFlowGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
-      descHints = descHints.map((value) => resolveFlowGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
+      hint = renderGuideHintLine(hint, assignment, guideContext);
+      allHints = allHints.map((value) => renderGuideHintLine(value, assignment, guideContext)).filter(Boolean);
+      descHints = descHints.map((value) => renderGuideHintLine(value, assignment, guideContext)).filter(Boolean);
       structuredHintLevels = ensureFlowGuideHintLevelCoverage(structuredHintLevels, assignment, guideContext);
 
       lines.push('### Critical Access');
@@ -11818,7 +11909,7 @@ ${out.join('\n')}
         lines.push('');
         FLOW_HINT_LEVEL_ORDER.forEach((level) => {
           const values = Array.isArray(structuredHintLevels[level])
-            ? structuredHintLevels[level].map((value) => formatGuideHintLine(resolveFlowGuideTemplateText(value, assignment, guideContext))).filter(Boolean)
+            ? structuredHintLevels[level].map((value) => formatGuideHintLine(value)).filter(Boolean)
             : [];
           if (!values.length) return;
           const firstValue = values[0];
@@ -11934,75 +12025,102 @@ ${out.join('\n')}
     return lines.join('\n');
   }
 
+  let guideDownloadInProgress = false;
+
+  function setGuideDownloadLinksBusy(busy) {
+    try {
+      [downloadParticipantGuideLink, downloadFacilitatorGuideLink].forEach((link) => {
+        if (!link) return;
+        link.classList.toggle('disabled', !!busy);
+        if (busy) link.setAttribute('aria-disabled', 'true');
+        else link.removeAttribute('aria-disabled');
+      });
+    } catch (e) { }
+  }
+
+  function startHtmlDownload(html, filename) {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function prepareAndDownloadGuide(options) {
+    if (guideDownloadInProgress) return;
+    const facilitator = !!(options && options.facilitator);
+    const guideLabel = facilitator ? 'Facilitator guide' : 'Participant steps guide';
+    const guideSteps = [
+      'Refreshing chain assignments',
+      'Collecting vulnerability notes',
+      'Collecting participant network setup',
+      'Building guide HTML',
+      'Starting download',
+    ];
+
+    try {
+      if (!Array.isArray(currentChain) || currentChain.length === 0) {
+        setStatus('Nothing to download yet (generate first).', true);
+        return;
+      }
+
+      guideDownloadInProgress = true;
+      setGuideDownloadLinksBusy(true);
+      setStatus(`Preparing ${guideLabel.toLowerCase()}…`, false);
+      showLoading(`Preparing ${guideLabel}…`);
+      setLoadingSteps(guideSteps, 0);
+      await waitForFlowUiPaint();
+
+      try { await refreshAssignmentsFromChain(); } catch (err) { }
+      const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
+      const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
+      const count = String(Array.isArray(currentChain) ? currentChain.length : 0);
+      const fname = facilitator
+        ? 'facilitator_guide_' + norm + '_' + count + '.html'
+        : 'participant_steps_' + norm + '_' + count + '.html';
+
+      setLoadingSteps(guideSteps, 1);
+      await waitForFlowUiPaint();
+      const vulnReadmeEntries = await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments);
+
+      setLoadingSteps(guideSteps, 2);
+      await waitForFlowUiPaint();
+      const participantNetworkSetup = await loadParticipantNetworkSetupForGuide(scenario);
+
+      setLoadingSteps(guideSteps, 3);
+      await waitForFlowUiPaint();
+      const markdown = buildParticipantGuideMarkdown(scenario, currentChain, currentFlagAssignments, { facilitator, vulnReadmeEntries, participantNetworkSetup });
+      const title = facilitator ? `Facilitator Guide - ${scenario}` : `Participant Steps Guide - ${scenario}`;
+      const html = markdownToHtmlDocument(title, markdown);
+
+      setLoadingSteps(guideSteps, 4);
+      await waitForFlowUiPaint();
+      startHtmlDownload(html, fname);
+      setStatus(`${guideLabel} download started.`, false);
+    } catch (err) {
+      setStatus(String(err && err.message || err), true);
+    } finally {
+      guideDownloadInProgress = false;
+      setGuideDownloadLinksBusy(false);
+      hideLoading();
+    }
+  }
+
   if (downloadParticipantGuideLink) {
     downloadParticipantGuideLink.addEventListener('click', async (e) => {
-      try {
-        e.preventDefault();
-        if (!Array.isArray(currentChain) || currentChain.length === 0) {
-          setStatus('Nothing to download yet (generate first).', true);
-          return;
-        }
-
-        // Keep UI validity state in sync before exporting.
-        try { await refreshAssignmentsFromChain(); } catch (err) { }
-
-        const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
-        const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
-        const fname = 'participant_steps_' + norm + '_' + String(Array.isArray(currentChain) ? currentChain.length : 0) + '.html';
-        const vulnReadmeEntries = await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments);
-        const participantNetworkSetup = await loadParticipantNetworkSetupForGuide(scenario);
-        const markdown = buildParticipantGuideMarkdown(scenario, currentChain, currentFlagAssignments, { vulnReadmeEntries, participantNetworkSetup });
-        const html = markdownToHtmlDocument(`Participant Steps Guide - ${scenario}`, markdown);
-
-        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setStatus('Ready.', false);
-      } catch (err) {
-        setStatus(String(err && err.message || err), true);
-      }
+      e.preventDefault();
+      await prepareAndDownloadGuide({ facilitator: false });
     });
   }
 
   if (downloadFacilitatorGuideLink) {
     downloadFacilitatorGuideLink.addEventListener('click', async (e) => {
-      try {
-        e.preventDefault();
-        if (!Array.isArray(currentChain) || currentChain.length === 0) {
-          setStatus('Nothing to download yet (generate first).', true);
-          return;
-        }
-
-        // Keep UI validity state in sync before exporting.
-        try { await refreshAssignmentsFromChain(); } catch (err) { }
-
-        const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
-        const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
-        const fname = 'facilitator_guide_' + norm + '_' + String(Array.isArray(currentChain) ? currentChain.length : 0) + '.html';
-        const vulnReadmeEntries = await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments);
-        const participantNetworkSetup = await loadParticipantNetworkSetupForGuide(scenario);
-        const markdown = buildParticipantGuideMarkdown(scenario, currentChain, currentFlagAssignments, { facilitator: true, vulnReadmeEntries, participantNetworkSetup });
-        const html = markdownToHtmlDocument(`Facilitator Guide - ${scenario}`, markdown);
-
-        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setStatus('Ready.', false);
-      } catch (err) {
-        setStatus(String(err && err.message || err), true);
-      }
+      e.preventDefault();
+      await prepareAndDownloadGuide({ facilitator: true });
     });
   }
   /* Shared verification logic */
