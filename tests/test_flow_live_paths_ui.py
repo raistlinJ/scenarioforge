@@ -43,6 +43,7 @@ def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
         "return 'generated credential';",
         "function _applyHintNodeTemplateVars(text, assignment)",
         "const FLOW_TEMPLATE_OPEN = '{' + '{';",
+        ": {};\n\n    const roLower = new Map();",
         "if (text.includes(FLOW_TEMPLATE_OPEN) || text.includes(FLOW_TEMPLATE_CLOSE)) return;",
         "if (Array.isArray(out[level]) && out[level].length) return;",
         ".map(x => _applyHintNodeTemplateVars(String(x || '').trim(), fa))",
