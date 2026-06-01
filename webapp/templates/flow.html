@@ -3241,7 +3241,7 @@
     if (!t || !t.includes(_OUTPUT_TEMPLATE_PREFIX)) return t;
     const ro = (assignment && typeof assignment.resolved_outputs === 'object' && assignment.resolved_outputs && !Array.isArray(assignment.resolved_outputs))
       ? assignment.resolved_outputs
-      : null;
+      : {};
 
     const roLower = new Map();
     try {
