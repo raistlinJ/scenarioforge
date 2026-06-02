@@ -1014,6 +1014,71 @@ function reportHintLevelTitle(level) {
   return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : 'Hint';
 }
 
+function reportGuideFirstIpFromNode(node) {
+  try {
+    if (!node || typeof node !== 'object') return '';
+    const ips = [];
+    const pushIps = (value) => {
+      if (!value) return;
+      if (Array.isArray(value)) { value.forEach((item) => pushIps(item)); return; }
+      const text = String(value || '').trim();
+      if (!text) return;
+      text.split(',').forEach((part) => {
+        const clean = String(part || '').trim().split('/', 1)[0].trim();
+        if (clean) ips.push(clean);
+      });
+    };
+    pushIps(node.ip4 || node.ipv4 || node.ip || node.address);
+    pushIps(node.ips || node.addresses || node.ipv4s);
+    const ifaces = Array.isArray(node.interfaces) ? node.interfaces : [];
+    ifaces.forEach((iface) => {
+      if (!iface || typeof iface !== 'object') return;
+      pushIps(iface.ip4 || iface.ipv4 || iface.ip || iface.address);
+    });
+    const unique = Array.from(new Set(ips)).filter(Boolean);
+    return unique.length ? unique[0] : '';
+  } catch (_err) {
+    return '';
+  }
+}
+
+function applyReportGuideHintNodeIps(text, nameToIp) {
+  const original = String(text || '');
+  if (!original || !(nameToIp && nameToIp.size)) return original;
+  let out = original;
+  const ipv4Pattern = '(?:\\d{1,3}\\.){3}\\d{1,3}';
+  const dedupeRenderedIps = (value) => {
+    let cleaned = String(value || '');
+    try {
+      cleaned = cleaned.replace(new RegExp(`(@\\s*(${ipv4Pattern}))\\s*\\(\\s*\\2\\s*\\)`, 'g'), '$1');
+      cleaned = cleaned.replace(new RegExp(`(@\\s*(${ipv4Pattern}))\\s+@\\s*\\2\\b`, 'g'), '$1');
+      cleaned = cleaned.replace(new RegExp(`\\b(${ipv4Pattern})\\s*\\(\\s*\\1\\s*\\)`, 'g'), '$1');
+    } catch (_err) { }
+    return cleaned;
+  };
+  const entries = Array.from(nameToIp.entries())
+    .filter(([name, ip]) => name && ip)
+    .sort((left, right) => right[0].length - left[0].length);
+  entries.forEach(([name, ip]) => {
+    if (!name || !ip) return;
+    const needle = String(name);
+    if (!out.includes(needle)) return;
+    const escapedName = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const staleIpPattern = new RegExp(`${escapedName}\\s*@\\s*(${ipv4Pattern})`, 'g');
+    if (staleIpPattern.test(out)) {
+      out = out.replace(staleIpPattern, `${needle} @ ${ip}`);
+      return;
+    }
+    const parentheticalIpPattern = new RegExp(`${escapedName}\\s*\\(\\s*(${ipv4Pattern})\\s*\\)`, 'g');
+    if (parentheticalIpPattern.test(out)) {
+      out = out.replace(parentheticalIpPattern, `${needle} @ ${ip}`);
+      return;
+    }
+    out = out.split(needle).join(`${needle} @ ${ip}`);
+  });
+  return dedupeRenderedIps(out);
+}
+
 function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const opts = (options && typeof options === 'object') ? options : {};
   const facilitatorMode = !!opts.facilitator;
@@ -1031,6 +1096,20 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const nodes = Array.isArray(chain) ? chain : [];
   const alignedAssignments = alignAssignmentsToChainLocal(nodes, assignments);
   const now = new Date().toISOString();
+  const guideHintNodeIpMap = new Map();
+  const addGuideHintNodeIp = (name, ip) => {
+    const cleanName = String(name || '').trim();
+    const cleanIp = String(ip || '').trim();
+    if (cleanName && cleanIp && !guideHintNodeIpMap.has(cleanName)) guideHintNodeIpMap.set(cleanName, cleanIp);
+  };
+  nodes.forEach((node) => {
+    if (!node || typeof node !== 'object') return;
+    const ip = reportGuideFirstIpFromNode(node);
+    if (!ip) return;
+    addGuideHintNodeIp(node.name, ip);
+    addGuideHintNodeIp(node.label, ip);
+  });
+  const applyGuideHintIps = (value) => applyReportGuideHintNodeIps(value, guideHintNodeIpMap);
   const formatGuideHintLine = (text) => {
     const value = String(text || '').trim();
     const readmeMatch = value.match(/^README:\s*(.+)$/i);
@@ -1396,10 +1475,17 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     ].filter(Boolean);
     const nodeIp = ipCandidates.length ? ipCandidates[0] : 'unknown';
     const guideContext = { nodeName, nodeIp, nodeId };
-    hint = resolveReportGuideTemplateText(hint, assignment, guideContext);
-    allHints = allHints.map((value) => resolveReportGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
-    descHints = descHints.map((value) => resolveReportGuideTemplateText(value, assignment, guideContext)).filter(Boolean);
+    hint = applyGuideHintIps(resolveReportGuideTemplateText(hint, assignment, guideContext));
+    allHints = allHints.map((value) => applyGuideHintIps(resolveReportGuideTemplateText(value, assignment, guideContext))).filter(Boolean);
+    descHints = descHints.map((value) => applyGuideHintIps(resolveReportGuideTemplateText(value, assignment, guideContext))).filter(Boolean);
     structuredHintLevels = ensureReportGuideHintLevelCoverage(structuredHintLevels, assignment, guideContext);
+    REPORT_HINT_LEVEL_ORDER.forEach((level) => {
+      if (!Array.isArray(structuredHintLevels[level])) return;
+      structuredHintLevels[level] = structuredHintLevels[level]
+        .map((value) => applyGuideHintIps(value))
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+    });
 
     lines.push('### Critical Access');
     lines.push('');

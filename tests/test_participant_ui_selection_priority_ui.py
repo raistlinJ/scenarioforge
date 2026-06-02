@@ -35,3 +35,18 @@ def test_participant_ui_surfaces_first_flow_hint() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing participant UI first-hint snippets: " + "; ".join(missing)
+
+
+def test_participant_ui_rewrites_stale_first_hint_ips() -> None:
+    text = PARTICIPANT_UI_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const participantHintNodeIpMap = (payload) => {",
+        "const applyParticipantHintNodeIps = (text, nameToIp) => {",
+        "const staleIpPattern = new RegExp(`${escapedName}\\\\s*@\\\\s*(${ipv4Pattern})`, 'g');",
+        "const parentheticalIpPattern = new RegExp(`${escapedName}\\\\s*\\\\(\\\\s*(${ipv4Pattern})\\\\s*\\\\)`, 'g');",
+        ".map((hint) => applyParticipantHintNodeIps(hint, nameToIp))",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing participant UI stale first-hint IP rewrite snippets: " + "; ".join(missing)
