@@ -1619,7 +1619,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
             .replace(/\{\{USERNAME\}\}/g, () => _credentialParts().user || 'user')
             .replace(/\{\{PASSWORD\}\}/g, () => _credentialParts().password || 'password');
           instructions = resolveReportGuideTemplateText(instructions, assign, accessContext);
-          lines.push(`${stepNum}. **${stepTitle}**`);
+          lines.push(`Step ${stepNum}: **${stepTitle}**`);
           if (instructions) {
             instructions.split('\n').forEach((line) => {
               lines.push(`   ${line}`);
@@ -1648,14 +1648,14 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
         const port = portKey ? String(outputs[portKey] || '').split(':').pop().trim() : '2049';
         const flagFile = flagFileKey ? String(outputs[flagFileKey] || '').trim() : 'flag.txt';
 
-        lines.push(`1. **Mount the NFS export** from another container in the scenario:`);
+        lines.push(`Step 1: **Mount the NFS export** from another container in the scenario:`);
         lines.push(`   \`\`\`bash`);
         lines.push(`   apt-get install -y nfs-common`);
         lines.push(`   mkdir -p /mnt/export`);
         lines.push(`   mount -t nfs4 -o vers=4,port=${port} ${nodeName}:/exports /mnt/export`);
         lines.push(`   \`\`\``);
         lines.push('');
-        lines.push(`2. **List and examine files:**`);
+        lines.push(`Step 2: **List and examine files:**`);
         lines.push(`   \`\`\`bash`);
         lines.push(`   ls -la /mnt/export/`);
         lines.push(`   cat /mnt/export/${flagFile}          # Flag file`);
