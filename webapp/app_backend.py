@@ -11525,6 +11525,13 @@ def _refresh_loaded_flow_state_assignments(
 
     out = dict(flow_state)
     out['flag_assignments'] = enriched
+    try:
+        first_hints = _flow_first_hints_from_assignments(enriched)
+        if first_hints:
+            out['first_hint'] = first_hints[0]
+            out['first_hints'] = list(first_hints)
+    except Exception:
+        pass
     return out
 
 
@@ -19345,7 +19352,8 @@ def _flow_enrich_saved_flag_assignments(
         nm = str(n.get('name') or '').strip()
         id_to_name[nid] = nm or nid
         try:
-            ip_val = resolved_ip_by_id.get(nid) or _first_valid_ipv4(n.get('ip4') or n.get('ipv4') or n.get('ip') or '')
+            node_ip_val = _first_valid_ipv4(n.get('ip4') or n.get('ipv4') or n.get('ip') or '')
+            ip_val = node_ip_val or resolved_ip_by_id.get(nid)
             if ip_val:
                 id_to_ip[nid] = ip_val
         except Exception:
@@ -19626,6 +19634,55 @@ def _flow_enrich_saved_flag_assignments(
         except Exception:
             pass
 
+        def _apply_ip_to_hint_text(s: str) -> str:
+            try:
+                if not s:
+                    return s
+                out_s = str(s)
+                ipv4_pat = r"(?:\d{1,3}\.){3}\d{1,3}"
+                entries = sorted(
+                    list((id_to_name or {}).items()),
+                    key=lambda item: len(str(item[1] or '')),
+                    reverse=True,
+                )
+                for nid_key, nm_val in entries:
+                    name_val = str(nm_val or '').strip()
+                    ip_val = str(id_to_ip.get(nid_key) or '').strip()
+                    if not name_val or not ip_val or name_val not in out_s:
+                        continue
+                    escaped_name = re.escape(name_val)
+                    stale_at = rf"{escaped_name}\s*@\s*{ipv4_pat}"
+                    if re.search(stale_at, out_s):
+                        out_s = re.sub(stale_at, f"{name_val} @ {ip_val}", out_s)
+                        continue
+                    stale_paren = rf"{escaped_name}\s*\(\s*{ipv4_pat}\s*\)"
+                    if re.search(stale_paren, out_s):
+                        out_s = re.sub(stale_paren, f"{name_val} @ {ip_val}", out_s)
+                        continue
+                    if not _flow_text_contains_ipv4(out_s, ip_val):
+                        out_s = out_s.replace(name_val, f"{name_val} @ {ip_val}")
+                return _flow_strip_ids_from_hint(out_s)
+            except Exception:
+                return s
+
+        def _apply_ip_to_hint_levels(levels: Any) -> dict[str, list[str]]:
+            out_levels: dict[str, list[str]] = {level: [] for level in _FLOW_HINT_LEVELS}
+            if not isinstance(levels, dict):
+                return out_levels
+            for level in _FLOW_HINT_LEVELS:
+                raw_values = levels.get(level)
+                if isinstance(raw_values, str):
+                    raw_iter = [raw_values]
+                elif isinstance(raw_values, (list, tuple, set)):
+                    raw_iter = list(raw_values)
+                else:
+                    raw_iter = []
+                for raw_value in raw_iter:
+                    text = _apply_ip_to_hint_text(str(raw_value or '').strip())
+                    if text and text not in out_levels[level]:
+                        out_levels[level].append(text)
+            return out_levels
+
         # If hint overrides exist, treat them as authoritative.
         try:
             if 'hint_overrides' in a2:
@@ -19634,9 +19691,12 @@ def _flow_enrich_saved_flag_assignments(
                 elif isinstance(a2.get('hint_overrides'), list):
                     ovr = [str(x or '').strip() for x in (a2.get('hint_overrides') or [])]
                     ovr = [x for x in ovr if x]
+                    ovr = [_apply_ip_to_hint_text(x) for x in ovr]
+                    ovr = [x for x in ovr if x]
                     a2['hint_overrides'] = ovr
                     a2['hints'] = ovr
                     a2['hint'] = ovr[0] if ovr else ''
+                    a2['hint_levels'] = {'low': list(ovr), 'medium': [], 'high': []}
         except Exception:
             pass
 
@@ -19733,6 +19793,40 @@ def _flow_enrich_saved_flag_assignments(
         except Exception:
             pass
 
+        try:
+            applied_rendered_levels = False
+            if isinstance(a2.get('hint_level_templates'), dict):
+                level_templates = a2.get('hint_level_templates')
+                rendered_levels = _flow_render_hint_level_templates(
+                    level_templates,
+                    scenario_label=scenario_label,
+                    id_to_name=id_to_name,
+                    id_to_ip=id_to_ip,
+                    this_id=str(this_id),
+                    next_id=str(next_id),
+                )
+                if any(rendered_levels.get(level) for level in _FLOW_HINT_LEVELS):
+                    a2['hint_levels'] = rendered_levels
+                    applied_rendered_levels = True
+            elif isinstance(gen_def, dict):
+                level_templates = _flow_hint_level_templates_from_generator(gen_def)
+                rendered_levels = _flow_render_hint_level_templates(
+                    level_templates,
+                    scenario_label=scenario_label,
+                    id_to_name=id_to_name,
+                    id_to_ip=id_to_ip,
+                    this_id=str(this_id),
+                    next_id=str(next_id),
+                )
+                if any(rendered_levels.get(level) for level in _FLOW_HINT_LEVELS):
+                    a2['hint_level_templates'] = level_templates
+                    a2['hint_levels'] = rendered_levels
+                    applied_rendered_levels = True
+            if (not applied_rendered_levels) and isinstance(a2.get('hint_levels'), dict):
+                a2['hint_levels'] = _apply_ip_to_hint_levels(a2.get('hint_levels'))
+        except Exception:
+            pass
+
         if hint_templates_effective:
             try:
                 hint_tpl = hint_templates_effective[0] if hint_templates_effective else 'Next: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}'
@@ -19757,23 +19851,6 @@ def _flow_enrich_saved_flag_assignments(
                     continue
             except Exception:
                 pass
-
-        def _apply_ip_to_hint_text(s: str) -> str:
-            try:
-                if not s:
-                    return s
-                out_s = str(s)
-                for nid_key, nm_val in (id_to_name or {}).items():
-                    if not nm_val:
-                        continue
-                    ip_val = id_to_ip.get(nid_key)
-                    if not ip_val:
-                        continue
-                    if nm_val in out_s and (f"{nm_val} @" not in out_s):
-                        out_s = out_s.replace(nm_val, f"{nm_val} @ {ip_val}")
-                return out_s
-            except Exception:
-                return s
 
         if has_hints:
             try:

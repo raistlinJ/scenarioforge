@@ -169,3 +169,121 @@ def test_prepare_preview_rerenders_next_hint_ip_from_current_chain(monkeypatch, 
         assert m, f'expected an @ip token in hint: {text}'
         assert m.group(1) == expected_next_ip
         assert stale_ip not in text
+
+
+def test_loaded_flow_state_refreshes_first_hints_with_current_chain_ips(monkeypatch):
+    stale_ip = '192.0.2.99'
+
+    monkeypatch.setattr(
+        app_backend,
+        '_flag_generators_from_enabled_sources',
+        lambda: (
+            [
+                {
+                    'id': 'fake_gen',
+                    'name': 'Fake Generator',
+                    'plugin_type': 'flag-generator',
+                    'inputs': [],
+                    'outputs': [],
+                    'hint_levels': {
+                        'low': ['Target: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}'],
+                        'medium': ['Use {{NEXT_NODE_NAME}} ({{NEXT_NODE_IP}})'],
+                        'high': ['Done'],
+                    },
+                }
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([], []))
+    monkeypatch.setattr(app_backend, '_flow_enabled_plugin_contracts_by_id', lambda: {})
+
+    flow_state = {
+        'scenario': 'zz-test',
+        'length': 2,
+        'chain': [
+            {'id': 'n1', 'name': 'node-1', 'type': 'docker', 'ip4': '10.0.1.2'},
+            {'id': 'n2', 'name': 'node-2', 'type': 'docker', 'ip4': '10.0.2.2'},
+        ],
+        'first_hint': f'Target: node-2 @ {stale_ip}',
+        'first_hints': [f'Target: node-2 @ {stale_ip}'],
+        'flag_assignments': [
+            {
+                'node_id': 'n1',
+                'id': 'fake_gen',
+                'name': 'Fake Generator',
+                'type': 'flag-generator',
+                'hint_level_templates': {
+                    'low': ['Target: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}'],
+                    'medium': ['Use {{NEXT_NODE_NAME}} ({{NEXT_NODE_IP}})'],
+                    'high': ['Done'],
+                },
+                'hint_levels': {'low': [f'Target: node-2 @ {stale_ip}']},
+                'hint': f'Target: node-2 @ {stale_ip}',
+                'hints': [f'Target: node-2 @ {stale_ip}'],
+            },
+            {
+                'node_id': 'n2',
+                'id': 'fake_gen',
+                'name': 'Fake Generator',
+                'type': 'flag-generator',
+                'resolved_inputs': {'Knowledge(ip)': stale_ip},
+                'hint_level_templates': {
+                    'low': ['Target: {{NEXT_NODE_NAME}} @ {{NEXT_NODE_IP}}'],
+                    'medium': ['Done'],
+                    'high': ['Done'],
+                },
+            },
+        ],
+    }
+
+    refreshed = app_backend._refresh_loaded_flow_state_assignments(flow_state, scenario_label='zz-test')
+
+    assert isinstance(refreshed, dict)
+    first = refreshed['flag_assignments'][0]
+    assert first['hint'] == 'Target: node-2 @ 10.0.2.2'
+    assert first['hint_levels']['low'] == ['Target: node-2 @ 10.0.2.2']
+    assert first['hint_levels']['medium'] == ['Use node-2 (10.0.2.2)']
+    assert refreshed['first_hint'] == 'Target: node-2 @ 10.0.2.2'
+    assert refreshed['first_hints'][0] == 'Target: node-2 @ 10.0.2.2'
+    assert all(stale_ip not in hint for hint in refreshed['first_hints'])
+
+
+def test_loaded_flow_state_rewrites_persisted_hint_levels_without_catalog_templates(monkeypatch):
+    stale_ip = '192.0.2.99'
+
+    monkeypatch.setattr(
+        app_backend,
+        '_flag_generators_from_enabled_sources',
+        lambda: ([{'id': 'fake_gen', 'name': 'Fake Generator', 'inputs': [], 'outputs': []}], []),
+    )
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([], []))
+    monkeypatch.setattr(app_backend, '_flow_enabled_plugin_contracts_by_id', lambda: {})
+
+    flow_state = {
+        'scenario': 'zz-test',
+        'length': 2,
+        'chain': [
+            {'id': 'n1', 'name': 'node-1', 'type': 'docker', 'ip4': '10.0.1.2'},
+            {'id': 'n2', 'name': 'node-2', 'type': 'docker', 'ip4': '10.0.2.2'},
+        ],
+        'flag_assignments': [
+            {
+                'node_id': 'n1',
+                'id': 'fake_gen',
+                'name': 'Fake Generator',
+                'type': 'flag-generator',
+                'hint_levels': {'low': [f'Target: node-2 @ {stale_ip}']},
+                'hint': f'Target: node-2 @ {stale_ip}',
+                'hints': [f'Target: node-2 @ {stale_ip}'],
+            },
+            {'node_id': 'n2', 'id': 'fake_gen', 'name': 'Fake Generator', 'type': 'flag-generator'},
+        ],
+    }
+
+    refreshed = app_backend._refresh_loaded_flow_state_assignments(flow_state, scenario_label='zz-test')
+
+    first = refreshed['flag_assignments'][0]
+    assert first['hint_levels']['low'] == ['Target: node-2 @ 10.0.2.2']
+    assert refreshed['first_hint'] == 'Target: node-2 @ 10.0.2.2'
+    assert stale_ip not in ' '.join(refreshed['first_hints'])
