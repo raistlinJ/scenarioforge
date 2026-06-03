@@ -56,7 +56,7 @@ def _pivot_info_from_element(element: ET.Element, *, default_name: str, default_
         target_protocols=_first_attr(element, "target_protocols", "protocols", "protocol", "proto", "target_proto", "pivot_protocols", "pivot_target_protocols"),
         exposure=(_first_attr(element, "target_exposure", "exposure", "SegmentationExposure", "pivot_exposure") or "pivot-only"),
         source_scope=(_first_attr(element, "source_scope", "pivot_scope") or "host"),
-        access_provider=(_first_attr(element, "access_provider", "provider", "pivot_provider") or "auto"),
+        access_provider=(_first_attr(element, "access_provider", "provider", "pivot_provider") or "random"),
         entry_ports=_first_attr(element, "entry_ports", "entry_port", "pivot_ports", "pivot_port"),
         produces=_first_attr(element, "produces", "produces_artifacts"),
         requires=_first_attr(element, "requires", "requires_artifacts"),

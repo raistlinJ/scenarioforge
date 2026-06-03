@@ -33,6 +33,7 @@ def _backend_dependencies(backend: Any) -> Any:
         '_flow_compose_docker_stats',
         '_flow_compute_flag_assignments_for_preset',
         '_flow_compute_flag_assignments',
+        '_flow_apply_pivot_context_to_assignments',
         '_flow_reorder_chain_by_generator_dag',
         '_flag_generators_from_enabled_sources',
         '_flag_node_generators_from_enabled_sources',
@@ -463,6 +464,7 @@ def _load_prepare_preview_request_context(*, deps, flow_progress) -> dict[str, A
         'meta': meta,
         'flow_state_for_prepare': flow_state_for_prepare,
         'preview': preview,
+        'preview_payload': payload,
     }
 
 
@@ -487,6 +489,7 @@ def _prepare_chain_and_assignments(
     initial_facts_override: dict[str, list[str]] | None,
     goal_facts_override: dict[str, list[str]] | None,
     base_plan_path: str,
+    pivot_context: Any | None = None,
 ) -> dict[str, Any]:
     warning: str | None = None
     try:
@@ -605,7 +608,13 @@ def _prepare_chain_and_assignments(
 
     if not flag_assignments:
         if preset_steps:
-            preset_assignments, preset_err = deps._flow_compute_flag_assignments_for_preset(preview, chain_nodes, scenario_label or scenario_norm, preset)
+            preset_assignments, preset_err = deps._flow_compute_flag_assignments_for_preset(
+                preview,
+                chain_nodes,
+                scenario_label or scenario_norm,
+                preset,
+                pivot_context=pivot_context,
+            )
             if preset_err:
                 return {
                     'response': (jsonify({'ok': False, 'error': f'Error: {preset_err}', 'stats': stats}), 422),
@@ -619,7 +628,19 @@ def _prepare_chain_and_assignments(
                 initial_facts_override=initial_facts_override,
                 goal_facts_override=goal_facts_override,
                 dependency_level=dependency_level,
+                pivot_context=pivot_context,
             )
+
+    try:
+        flag_assignments = deps._flow_apply_pivot_context_to_assignments(
+            flag_assignments,
+            chain_nodes,
+            preview=preview,
+            pivot_context=pivot_context,
+            scenario_label=(scenario_label or scenario_norm),
+        )
+    except Exception:
+        pass
 
     try:
         hint_refresh_triggers = {'preview', 'resolve', 'resolve_hints', 'hint', 'hint_only'}
@@ -662,6 +683,17 @@ def _prepare_chain_and_assignments(
     else:
         debug_dag = bool(j.get('debug_dag'))
         dag_debug = None
+
+    try:
+        flag_assignments = deps._flow_apply_pivot_context_to_assignments(
+            flag_assignments,
+            chain_nodes,
+            preview=preview,
+            pivot_context=pivot_context,
+            scenario_label=(scenario_label or scenario_norm),
+        )
+    except Exception:
+        pass
 
     has_assignment_ids = False
     try:
@@ -1665,6 +1697,7 @@ def execute_impl(*, backend: Any):
     meta = request_context['meta'] if isinstance(request_context['meta'], dict) else request_context['meta']
     flow_state_for_prepare = request_context['flow_state_for_prepare']
     preview = request_context['preview']
+    preview_payload = request_context.get('preview_payload') if isinstance(request_context.get('preview_payload'), dict) else None
 
     _flow_progress('Phase: Solving chain and assignments...')
     phase_started = time.monotonic()
@@ -1688,6 +1721,7 @@ def execute_impl(*, backend: Any):
         initial_facts_override=initial_facts_override,
         goal_facts_override=goal_facts_override,
         base_plan_path=base_plan_path,
+        pivot_context=preview_payload,
     )
     solve_elapsed = _mark_phase('solve_chain_and_assignments_s', phase_started)
     _flow_progress(f'Phase complete: Solving chain and assignments ({solve_elapsed:.2f}s).')

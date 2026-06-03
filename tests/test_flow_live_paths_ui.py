@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 FLOW_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "flow.html"
+REPORTS_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "reports.html"
 
 
 def test_flow_assignment_persists_resolved_paths() -> None:
@@ -33,6 +34,21 @@ def test_flow_generator_output_shows_phase_timings() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing phase timing display wiring in flow template: " + "; ".join(missing)
+
+
+def test_report_guides_include_chain_io_and_pivot_sections() -> None:
+    text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "### Chain Inputs / Outputs",
+        "### Pivot Path",
+        "const pivotEntries = Array.isArray(assignment.pivot)",
+        "...normalizeChainFacts(assignment.requires)",
+        "...normalizeChainFacts(assignment.produces)",
+        "entry.provider_label || entry.provider",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing pivot/chain IO guide rendering snippets: " + "; ".join(missing)
 
 
 def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:

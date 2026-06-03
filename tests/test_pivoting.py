@@ -2,6 +2,8 @@ import json
 
 from scenarioforge.cli import _apply_pivoting_to_docker_nodes
 from scenarioforge.parsers.pivoting import parse_pivoting_info
+from scenarioforge.sequencer.chain import validate_chain_doc, validate_linear_chain
+from scenarioforge.sequencer.dag import build_dag
 from scenarioforge.types import NodeInfo, PivotInfo
 from scenarioforge.utils.vuln_process import extract_compose_ports, prepare_compose_for_assignments
 from scenarioforge.utils.segmentation import write_allow_rules_for_compose_ports
@@ -37,6 +39,42 @@ class _DummySession:
         return self.nodes.get(node_id)
 
 
+def _pivot_summary_to_chain_doc(summary):
+    rules = summary.get("rules") or []
+    pivot_names = []
+    for entry in rules:
+        for pivot_name in entry.get("pivot_nodes") or []:
+            if pivot_name not in pivot_names:
+                pivot_names.append(pivot_name)
+    challenges = []
+    for pivot_name in pivot_names:
+        pivot_rule = next(entry for entry in rules if pivot_name in (entry.get("pivot_nodes") or []))
+        challenges.append({
+            "challenge_id": f"pivot-{pivot_name}",
+            "kind": "flag-generator",
+            "requires": [{"artifact": artifact} for artifact in (pivot_rule.get("requires") or [])],
+            "produces": [
+                {"name": artifact, "artifact": artifact}
+                for artifact in (pivot_rule.get("produces") or [])
+                if artifact.startswith("Pivot(") or artifact.startswith("Shell(")
+            ],
+            "plugin": f"provider-{pivot_name}",
+        })
+    for entry in rules:
+        pivot_name = (entry.get("pivot_nodes") or [""])[0]
+        challenges.append({
+            "challenge_id": f"target-{entry.get('target_node')}",
+            "kind": "flag-node-generator",
+            "requires": [
+                {"artifact": artifact, "source": f"pivot-{pivot_name}"}
+                for artifact in (entry.get("target_requires") or [])
+            ],
+            "produces": [],
+            "plugin": f"target-{entry.get('target_node')}",
+        })
+    return {"challenges": challenges}
+
+
 def test_parse_pivoting_info_accepts_pivot_contract(tmp_path):
     xml_path = tmp_path / "scenario.xml"
     xml_path.write_text(
@@ -68,31 +106,31 @@ def test_parse_pivoting_info_accepts_pivot_contract(tmp_path):
 
 
 def test_parse_pivoting_info_synthesizes_segmentation_shortcut(tmp_path):
-        xml_path = tmp_path / "scenario.xml"
-        xml_path.write_text(
-                """
+    xml_path = tmp_path / "scenario.xml"
+    xml_path.write_text(
+        """
 <Scenarios>
     <Scenario name="Pivot Demo">
         <ScenarioEditor>
             <section name="Segmentation" density="1.0">
-                <item selected="Firewall" factor="1.0" pivot_enabled="true" pivot_provider="ssh-fallback" pivot_node="jump-web" target_node="internal-db" target_ports="5432" target_protocols="tcp" target_exposure="pivot-only" source_scope="host" />
+                <item selected="Firewall" factor="1.0" pivot_enabled="true" pivot_provider="random" />
             </section>
         </ScenarioEditor>
     </Scenario>
 </Scenarios>
 """.strip(),
-                encoding="utf-8",
-        )
+        encoding="utf-8",
+    )
 
-        density, items = parse_pivoting_info(str(xml_path), "Pivot Demo")
+    density, items = parse_pivoting_info(str(xml_path), "Pivot Demo")
 
-        assert density == 1.0
-        assert len(items) == 1
-        assert items[0].name == "Firewall"
-        assert items[0].pivot_node == "jump-web"
-        assert items[0].target_node == "internal-db"
-        assert items[0].target_ports == "5432"
-        assert items[0].access_provider == "ssh-fallback"
+    assert density == 1.0
+    assert len(items) == 1
+    assert items[0].name == "Firewall"
+    assert items[0].pivot_node == ""
+    assert items[0].target_node == ""
+    assert items[0].target_ports == ""
+    assert items[0].access_provider == "random"
 
 
 def test_apply_pivoting_to_docker_nodes_marks_target_exposure():
@@ -134,6 +172,8 @@ def test_apply_pivoting_to_docker_nodes_marks_target_exposure():
     assert docker_nodes["internal-db"]["SegmentationSources"] == ["10.0.0.10"]
     assert docker_nodes["internal-db"]["SegmentationPorts"] == ["5432"]
     assert docker_nodes["internal-db"]["SegmentationProtocols"] == ["tcp"]
+    assert docker_nodes["internal-db"]["PivotRequires"] == ["Pivot(jump-web)"]
+    assert summary["rules"][0]["target_requires"] == ["Pivot(jump-web)"]
 
 
 def test_apply_pivoting_ssh_fallback_assigns_docker_ssh_container():
@@ -183,6 +223,76 @@ def test_apply_pivoting_ssh_fallback_assigns_docker_ssh_container():
     assert docker_nodes["jump-web"]["Vector"] == "pivot-ssh-fallback"
     assert docker_nodes["jump-web"]["compose_ports"] == [{"service": "pivot_ssh", "protocol": "tcp", "port": 2222}]
     assert docker_nodes["internal-db"]["PivotAccessProvider"] == "ssh-fallback"
+    assert docker_nodes["jump-web"]["PivotProduces"] == ["Shell(jump-web)", "Pivot(jump-web)"]
+    assert docker_nodes["internal-db"]["PivotRequires"] == ["Pivot(jump-web)"]
+
+
+def test_apply_pivoting_random_provider_infers_source_and_targets():
+    session = _DummySession([
+        _DummyNode(1, "jump-web"),
+        _DummyNode(2, "internal-db"),
+        _DummyNode(3, "internal-api"),
+    ])
+    hosts = [
+        NodeInfo(node_id=1, ip4="10.0.0.10/24", role="Docker"),
+        NodeInfo(node_id=2, ip4="10.0.1.20/24", role="Docker"),
+        NodeInfo(node_id=3, ip4="10.0.1.30/24", role="Docker"),
+    ]
+    docker_nodes = {
+        "jump-web": {
+            "Name": "standard-ubuntu-docker-core",
+            "Type": "docker-compose",
+            "Path": "/tmp/standard.yml",
+            "Vector": "standard",
+        },
+        "internal-db": {
+            "Name": "Internal DB",
+            "Type": "docker-compose",
+            "Path": "/tmp/internal-db.yml",
+        },
+        "internal-api": {
+            "Name": "Internal API",
+            "Type": "docker-compose",
+            "Path": "/tmp/internal-api.yml",
+        },
+    }
+
+    summary = _apply_pivoting_to_docker_nodes(
+        session=session,
+        hosts=hosts,
+        docker_nodes=docker_nodes,
+        pivot_items=[PivotInfo(name="Firewall", access_provider="random")],
+    )
+
+    assert summary["warnings"] == []
+    assert summary["ssh_fallback_nodes"] == ["jump-web"]
+    assert summary["nodes"] == ["internal-api", "internal-db"]
+    assert docker_nodes["jump-web"]["Name"] == "pivot-ssh-container"
+    assert docker_nodes["jump-web"]["PivotProduces"] == ["Shell(jump-web)", "Pivot(jump-web)"]
+    for target_name in ("internal-db", "internal-api"):
+        assert docker_nodes[target_name]["SegmentationExposure"] == "pivot-only"
+        assert docker_nodes[target_name]["SegmentationSources"] == ["10.0.0.10"]
+        assert docker_nodes[target_name]["PivotAccessProvider"] == "ssh-fallback"
+        assert docker_nodes[target_name]["PivotRequires"] == ["Pivot(jump-web)"]
+
+    chain_doc = _pivot_summary_to_chain_doc(summary)
+    ok, errors, norm = validate_chain_doc(chain_doc)
+    assert ok, errors
+    ok_linear, linear_errors = validate_linear_chain(norm)
+    assert ok_linear, linear_errors
+
+    plugins_by_id = {}
+    for challenge in chain_doc["challenges"]:
+        plugins_by_id[challenge["plugin"]] = {
+            "requires": [req["artifact"] for req in (challenge.get("requires") or [])],
+            "produces": list(challenge.get("produces") or []),
+        }
+    dag, dag_errors = build_dag(chain_doc["challenges"], plugins_by_id=plugins_by_id)
+    assert dag_errors == []
+    assert dag is not None
+    assert dag.order[0] == "pivot-jump-web"
+    assert set(dag.order[1:]) == {"target-internal-api", "target-internal-db"}
+    assert {edge.artifact for edge in dag.edges} == {"Pivot(jump-web)"}
 
 
 def test_docker_ssh_fallback_compose_prepares_and_exposes_ssh_port(tmp_path):

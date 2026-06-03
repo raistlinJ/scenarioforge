@@ -16560,6 +16560,8 @@ def _flow_compute_flag_assignments_for_preset(
     chain_nodes: list[dict[str, Any]],
     scenario_label: str,
     preset: str,
+    *,
+    pivot_context: Any | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     steps = _flow_preset_steps(preset)
     if not steps:
@@ -16852,7 +16854,13 @@ def _flow_compute_flag_assignments_for_preset(
             'next_node_name': str(id_to_name.get(str(next_id)) or ''),
         })
 
-    return out, None
+    return _flow_apply_pivot_context_to_assignments(
+        out,
+        chain_nodes,
+        preview=preview,
+        pivot_context=pivot_context,
+        scenario_label=scenario_label,
+    ), None
 
 
 @app.before_request
@@ -17837,6 +17845,7 @@ def _flow_compute_flag_assignments(
     seed_override: int | None = None,
     disallow_generator_reuse: bool = False,
     dependency_level: int | None = None,
+    pivot_context: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return a per-position list of flag assignments aligned to chain_ids.
 
@@ -18607,7 +18616,13 @@ def _flow_compute_flag_assignments(
             supply_on_start=supply_on_start,
         )
         out.append(assignment_out)
-    return out
+    return _flow_apply_pivot_context_to_assignments(
+        out,
+        chain_nodes,
+        preview=preview,
+        pivot_context=pivot_context,
+        scenario_label=scenario_label,
+    )
 
 
 def _flow_synthesized_inputs() -> set[str]:
@@ -19167,6 +19182,557 @@ def _flow_apply_first_step_chain_supplied_inputs_to_assignments(
             position=index,
             supply_on_start=(index in start_positions),
         ))
+    return out
+
+
+def _flow_split_top_level_list(value: Any) -> list[str]:
+    """Return strings from a list or comma text, ignoring commas inside facts."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                for key in ('artifact', 'name', 'field', 'value'):
+                    text = str(item.get(key) or '').strip()
+                    if text:
+                        out.append(text)
+                        break
+                continue
+            out.extend(_flow_split_top_level_list(item))
+        return list(dict.fromkeys([item for item in out if item]))
+    text = str(value or '').strip()
+    if not text:
+        return []
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text.replace(';', ',').replace('\n', ','):
+        if ch == '(':
+            depth += 1
+        elif ch == ')' and depth > 0:
+            depth -= 1
+        if ch == ',' and depth == 0:
+            part = ''.join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            continue
+        buf.append(ch)
+    part = ''.join(buf).strip()
+    if part:
+        parts.append(part)
+    return list(dict.fromkeys(parts))
+
+
+def _flow_append_unique_values(record: dict[str, Any], key: str, values: Any) -> None:
+    if not isinstance(record, dict):
+        return
+    additions = _flow_split_top_level_list(values)
+    if not additions:
+        return
+    existing = _flow_split_top_level_list(record.get(key))
+    merged = list(dict.fromkeys([*existing, *additions]))
+    record[key] = merged
+
+
+def _flow_pivot_provider_label(value: Any) -> str:
+    provider = str(value or '').strip().lower().replace('_', '-') or 'random'
+    aliases = {
+        'auto': 'random',
+        'random': 'random',
+        'vuln': 'vulnerability',
+        'flag-node': 'flag-node-generator',
+        'flagnode': 'flag-node-generator',
+        'flag-nodegen': 'flag-node-generator',
+        'ssh': 'ssh-fallback',
+        'ssh-server': 'ssh-fallback',
+        'fallback-ssh': 'ssh-fallback',
+    }
+    provider = aliases.get(provider, provider)
+    labels = {
+        'random': 'Random',
+        'auto': 'Random',
+        'vulnerability': 'Vulnerability',
+        'flag-node-generator': 'flag-node-generator',
+        'ssh-fallback': 'Docker SSH',
+        'manual': 'Manual',
+        'none': 'Manual',
+    }
+    return labels.get(provider, provider or 'Random')
+
+
+def _flow_pivot_context_sources(pivot_context: Any, preview: Any) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, dict) and value not in sources:
+            sources.append(value)
+
+    _add(pivot_context)
+    _add(preview)
+    if isinstance(pivot_context, dict):
+        _add(pivot_context.get('full_preview'))
+        plan = pivot_context.get('plan')
+        _add(plan)
+        if isinstance(plan, dict):
+            _add(plan.get('breakdowns'))
+            _add(plan.get('pivoting_plan'))
+        meta = pivot_context.get('metadata')
+        _add(meta)
+        if isinstance(meta, dict):
+            _add(meta.get('generation_meta'))
+            _add(meta.get('flow'))
+    return sources
+
+
+def _flow_node_lookup_for_pivot(
+    preview: Any,
+    chain_nodes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    nodes: list[dict[str, Any]] = []
+    try:
+        if isinstance(preview, dict):
+            graph_nodes, _links, _adj = _build_topology_graph_from_preview_plan(preview)
+            if isinstance(graph_nodes, list):
+                nodes.extend([dict(n) for n in graph_nodes if isinstance(n, dict)])
+    except Exception:
+        nodes = []
+    try:
+        existing_ids = {str(n.get('id') or '').strip() for n in nodes if isinstance(n, dict)}
+        for node in (chain_nodes or []):
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get('id') or '').strip()
+            if not node_id:
+                continue
+            if node_id in existing_ids:
+                for existing in nodes:
+                    if str(existing.get('id') or '').strip() == node_id:
+                        existing.update({k: v for k, v in node.items() if v not in (None, '', [])})
+                        break
+            else:
+                nodes.append(dict(node))
+                existing_ids.add(node_id)
+    except Exception:
+        pass
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        for raw_key in (
+            node.get('id'),
+            node.get('node_id'),
+            node.get('name'),
+            node.get('label'),
+        ):
+            key = str(raw_key or '').strip()
+            if key:
+                by_key.setdefault(key.lower(), node)
+    return nodes, by_key
+
+
+def _flow_pivot_node_name(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ''
+    return str(node.get('name') or node.get('label') or node.get('id') or node.get('node_id') or '').strip()
+
+
+def _flow_pivot_node_id(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ''
+    return str(node.get('id') or node.get('node_id') or node.get('name') or '').strip()
+
+
+def _flow_pivot_match_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    node_selector: Any = '',
+    role_selector: Any = '',
+) -> list[dict[str, Any]]:
+    node_tokens = _flow_split_top_level_list(node_selector)
+    role_tokens = [item.lower() for item in _flow_split_top_level_list(role_selector)]
+    if not node_tokens and not role_tokens:
+        return []
+    out: list[dict[str, Any]] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        node_values = [
+            str(node.get('id') or '').strip(),
+            str(node.get('node_id') or '').strip(),
+            str(node.get('name') or '').strip(),
+            str(node.get('label') or '').strip(),
+            str(node.get('role') or '').strip(),
+            str(node.get('type') or '').strip(),
+        ]
+        lowered_values = [value.lower() for value in node_values if value]
+        if node_tokens:
+            matched = False
+            for token in node_tokens:
+                token_low = token.lower()
+                if token_low in lowered_values:
+                    matched = True
+                    break
+                if any(fnmatch.fnmatchcase(value, token_low) for value in lowered_values):
+                    matched = True
+                    break
+            if not matched:
+                continue
+        if role_tokens:
+            role_value = str(node.get('role') or node.get('type') or '').strip().lower()
+            if role_value not in role_tokens:
+                continue
+        out.append(node)
+    return out
+
+
+def _flow_pivot_provider_for_node(node: dict[str, Any]) -> str:
+    if _flow_node_is_vuln(node):
+        return 'vulnerability'
+    if _flow_node_is_docker_role(node):
+        return 'ssh-fallback'
+    return 'manual'
+
+
+def _flow_pivot_requested_provider(value: Any) -> str:
+    provider = str(value or 'random').strip().lower().replace('_', '-') or 'random'
+    aliases = {
+        'auto': 'random',
+        'vuln': 'vulnerability',
+        'flag-node': 'flag-node-generator',
+        'flagnode': 'flag-node-generator',
+        'flag-nodegen': 'flag-node-generator',
+        'ssh': 'ssh-fallback',
+        'ssh-server': 'ssh-fallback',
+        'fallback-ssh': 'ssh-fallback',
+    }
+    return aliases.get(provider, provider)
+
+
+def _flow_infer_pivot_sources(
+    nodes: list[dict[str, Any]],
+    *,
+    provider: str,
+    excluded_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    excluded = set(excluded_ids or set())
+    candidates: list[tuple[int, str, dict[str, Any]]] = []
+    provider = _flow_pivot_requested_provider(provider)
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = _flow_pivot_node_id(node)
+        if not node_id or node_id in excluded:
+            continue
+        is_docker = _flow_node_is_docker_role(node)
+        is_vuln = _flow_node_is_vuln(node)
+        if provider == 'vulnerability' and not is_vuln:
+            continue
+        if provider in {'flag-node-generator', 'ssh-fallback'} and not (is_docker and not is_vuln):
+            continue
+        if provider in {'random', 'auto'} and not (is_vuln or is_docker):
+            continue
+        effective = _flow_pivot_provider_for_node(node)
+        if provider == 'flag-node-generator' and is_docker and not is_vuln:
+            effective = 'flag-node-generator'
+        priority_order = {'vulnerability': 0, 'flag-node-generator': 1, 'ssh-fallback': 2, 'manual': 9}
+        candidates.append((priority_order.get(effective, 5), _flow_pivot_node_name(node).lower(), node))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [candidates[0][2]] if candidates else []
+
+
+def _flow_pivot_rules_for_chain(
+    preview: Any,
+    chain_nodes: list[dict[str, Any]],
+    *,
+    pivot_context: Any | None = None,
+) -> list[dict[str, Any]]:
+    nodes, by_key = _flow_node_lookup_for_pivot(preview, chain_nodes)
+    if not nodes:
+        return []
+
+    rules: list[dict[str, Any]] = []
+
+    def _node_for_name(name: Any) -> dict[str, Any] | None:
+        text = str(name or '').strip()
+        if not text:
+            return None
+        return by_key.get(text.lower())
+
+    def _add_rule(
+        *,
+        name: str,
+        source_node: dict[str, Any],
+        target_node: dict[str, Any],
+        provider: Any,
+        produces: Any = None,
+        target_requires: Any = None,
+        target_ports: Any = None,
+        target_protocols: Any = None,
+        exposure: Any = 'pivot-only',
+    ) -> None:
+        source_name = _flow_pivot_node_name(source_node)
+        target_name = _flow_pivot_node_name(target_node)
+        source_id = _flow_pivot_node_id(source_node)
+        target_id = _flow_pivot_node_id(target_node)
+        if not source_name or not target_name or not source_id or not target_id or source_id == target_id:
+            return
+        prod = _flow_split_top_level_list(produces) or [f'Shell({source_name})', f'Pivot({source_name})']
+        req = _flow_split_top_level_list(target_requires) or [f'Pivot({source_name})']
+        rule = {
+            'name': str(name or 'Pivot').strip() or 'Pivot',
+            'source_id': source_id,
+            'source_name': source_name,
+            'target_id': target_id,
+            'target_name': target_name,
+            'target_ip': _first_valid_ipv4(target_node.get('ip4') or target_node.get('ipv4') or target_node.get('ip') or ''),
+            'provider': _flow_pivot_requested_provider(provider),
+            'provider_label': _flow_pivot_provider_label(provider),
+            'produces': prod,
+            'target_requires': req,
+            'target_ports': _flow_split_top_level_list(target_ports),
+            'target_protocols': _flow_split_top_level_list(target_protocols),
+            'exposure': str(exposure or 'pivot-only').strip() or 'pivot-only',
+        }
+        key = (rule['source_id'], rule['target_id'], tuple(rule['produces']), tuple(rule['target_requires']))
+        for existing in rules:
+            existing_key = (
+                existing.get('source_id'),
+                existing.get('target_id'),
+                tuple(existing.get('produces') or []),
+                tuple(existing.get('target_requires') or []),
+            )
+            if existing_key == key:
+                return
+        rules.append(rule)
+
+    for source in _flow_pivot_context_sources(pivot_context, preview):
+        pivot_meta = source.get('pivoting') if isinstance(source.get('pivoting'), dict) else None
+        if isinstance(pivot_meta, dict):
+            for raw_rule in (pivot_meta.get('rules') or []):
+                if not isinstance(raw_rule, dict):
+                    continue
+                target_node = _node_for_name(raw_rule.get('target_node'))
+                if not isinstance(target_node, dict):
+                    continue
+                pivot_nodes = raw_rule.get('pivot_nodes') if isinstance(raw_rule.get('pivot_nodes'), list) else []
+                for pivot_name in pivot_nodes:
+                    source_node = _node_for_name(pivot_name)
+                    if not isinstance(source_node, dict):
+                        continue
+                    _add_rule(
+                        name=str(raw_rule.get('name') or 'Pivot'),
+                        source_node=source_node,
+                        target_node=target_node,
+                        provider=raw_rule.get('access_provider') or raw_rule.get('provider') or raw_rule.get('requested_access_provider'),
+                        produces=raw_rule.get('produces'),
+                        target_requires=raw_rule.get('target_requires'),
+                        target_ports=raw_rule.get('target_ports'),
+                        target_protocols=raw_rule.get('target_protocols'),
+                        exposure=raw_rule.get('exposure'),
+                    )
+
+    if rules:
+        return rules
+
+    pivot_items: list[dict[str, Any]] = []
+    for source in _flow_pivot_context_sources(pivot_context, preview):
+        candidates: list[Any] = []
+        for key in ('pivoting_plan', 'pivoting'):
+            candidate = source.get(key) if isinstance(source.get(key), dict) else None
+            if isinstance(candidate, dict):
+                candidates.append(candidate)
+        breakdowns = source.get('breakdowns') if isinstance(source.get('breakdowns'), dict) else None
+        if isinstance(breakdowns, dict):
+            pivot_breakdown = breakdowns.get('pivoting') if isinstance(breakdowns.get('pivoting'), dict) else None
+            if isinstance(pivot_breakdown, dict):
+                candidates.append(pivot_breakdown)
+        for candidate in candidates:
+            raw_items = candidate.get('raw_items_serialized') if isinstance(candidate.get('raw_items_serialized'), list) else []
+            for item in raw_items:
+                if isinstance(item, dict):
+                    pivot_items.append(item)
+
+    seen_item_keys: set[str] = set()
+    for item in pivot_items:
+        item_key = json.dumps(item, sort_keys=True, default=str)
+        if item_key in seen_item_keys:
+            continue
+        seen_item_keys.add(item_key)
+        provider = _flow_pivot_requested_provider(item.get('access_provider') or item.get('provider') or 'random')
+        explicit_targets = _flow_pivot_match_nodes(
+            nodes,
+            node_selector=item.get('target_node') or item.get('target'),
+            role_selector=item.get('target_role'),
+        )
+        explicit_target_ids = {_flow_pivot_node_id(node) for node in explicit_targets if isinstance(node, dict)}
+        source_nodes = _flow_pivot_match_nodes(
+            nodes,
+            node_selector=item.get('pivot_node') or item.get('source_node') or item.get('source'),
+            role_selector=item.get('pivot_role') or item.get('source_role'),
+        )
+        if not source_nodes:
+            source_nodes = _flow_infer_pivot_sources(nodes, provider=provider, excluded_ids=explicit_target_ids)
+        if not source_nodes:
+            continue
+        source_ids = {_flow_pivot_node_id(node) for node in source_nodes if isinstance(node, dict)}
+        target_nodes = explicit_targets
+        if not target_nodes:
+            target_nodes = [
+                node for node in nodes
+                if isinstance(node, dict)
+                and _flow_node_is_docker_role(node)
+                and _flow_pivot_node_id(node) not in source_ids
+            ]
+        for source_node in source_nodes:
+            for target_node in target_nodes:
+                _add_rule(
+                    name=str(item.get('selected') or item.get('name') or 'Pivot'),
+                    source_node=source_node,
+                    target_node=target_node,
+                    provider=provider,
+                    produces=item.get('produces'),
+                    target_requires=item.get('target_requires') or item.get('requires_target'),
+                    target_ports=item.get('target_ports') or item.get('ports'),
+                    target_protocols=item.get('target_protocols') or item.get('protocols'),
+                    exposure=item.get('exposure') or item.get('target_exposure') or 'pivot-only',
+                )
+    return rules
+
+
+def _flow_add_assignment_hint(assignment: dict[str, Any], hint_text: str) -> None:
+    text = _flow_strip_ids_from_hint(str(hint_text or '').strip())
+    if not isinstance(assignment, dict) or not text:
+        return
+    for key in ('pivot_hints', 'hints'):
+        existing = [str(x or '').strip() for x in (assignment.get(key) or []) if str(x or '').strip()] if isinstance(assignment.get(key), list) else []
+        if text not in existing:
+            existing.append(text)
+        assignment[key] = existing
+    levels = assignment.get('hint_levels') if isinstance(assignment.get('hint_levels'), dict) else {}
+    levels = dict(levels or {})
+    low_values = [str(x or '').strip() for x in (levels.get('low') or []) if str(x or '').strip()] if isinstance(levels.get('low'), list) else []
+    if text not in low_values:
+        low_values.append(text)
+    levels['low'] = low_values
+    assignment['hint_levels'] = levels
+    if not str(assignment.get('hint') or '').strip():
+        assignment['hint'] = text
+
+
+def _flow_apply_pivot_context_to_assignments(
+    flag_assignments: list[dict[str, Any]],
+    chain_nodes: list[dict[str, Any]],
+    *,
+    preview: Any = None,
+    pivot_context: Any | None = None,
+    scenario_label: str = '',
+) -> list[dict[str, Any]]:
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return flag_assignments
+    if not isinstance(chain_nodes, list) or not chain_nodes:
+        return flag_assignments
+
+    try:
+        rules = _flow_pivot_rules_for_chain(preview, chain_nodes, pivot_context=pivot_context)
+    except Exception:
+        rules = []
+    if not rules:
+        return flag_assignments
+
+    node_by_id: dict[str, dict[str, Any]] = {}
+    for node in chain_nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = _flow_pivot_node_id(node)
+        if node_id:
+            node_by_id[node_id] = node
+
+    out: list[dict[str, Any]] = []
+    for index, assignment in enumerate(flag_assignments):
+        if not isinstance(assignment, dict):
+            out.append(assignment)
+            continue
+        a2 = dict(assignment)
+        node_id = str(a2.get('node_id') or '').strip()
+        if not node_id and index < len(chain_nodes):
+            node_id = _flow_pivot_node_id(chain_nodes[index])
+            if node_id:
+                a2['node_id'] = node_id
+        node = node_by_id.get(node_id) if node_id else None
+        node_name = _flow_pivot_node_name(node) if isinstance(node, dict) else node_id
+        pivot_entries: list[dict[str, Any]] = [entry for entry in (a2.get('pivot') or []) if isinstance(entry, dict)] if isinstance(a2.get('pivot'), list) else []
+
+        for rule in rules:
+            source_id = str(rule.get('source_id') or '').strip()
+            target_id = str(rule.get('target_id') or '').strip()
+            if node_id and source_id and node_id == source_id:
+                produces = _flow_split_top_level_list(rule.get('produces'))
+                _flow_append_unique_values(a2, 'produces', produces)
+                _flow_append_unique_values(a2, 'outputs', produces)
+                source_targets = str(rule.get('target_name') or rule.get('target_id') or '').strip()
+                provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
+                hint = (
+                    f"Pivot source: establish access on {node_name or source_id} "
+                    f"using {provider_label} to unlock pivot-only target {source_targets}. "
+                    f"Produces: {', '.join(produces)}."
+                )
+                _flow_add_assignment_hint(a2, hint)
+                pivot_entries.append({
+                    'role': 'source',
+                    'provider': rule.get('provider'),
+                    'provider_label': provider_label,
+                    'source': rule.get('source_name') or source_id,
+                    'target': rule.get('target_name') or target_id,
+                    'produces': produces,
+                    'requires': [],
+                })
+            if node_id and target_id and node_id == target_id:
+                requires = _flow_split_top_level_list(rule.get('target_requires'))
+                _flow_append_unique_values(a2, 'requires', requires)
+                _flow_append_unique_values(a2, 'inputs', requires)
+                provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
+                source_name = str(rule.get('source_name') or rule.get('source_id') or '').strip()
+                ports = _flow_split_top_level_list(rule.get('target_ports'))
+                port_text = f" Ports: {', '.join(ports)}." if ports else ''
+                hint = (
+                    f"Pivot required: reach {node_name or target_id} through {source_name} "
+                    f"after the pivot source is solved. Required fact: {', '.join(requires)}.{port_text}"
+                )
+                _flow_add_assignment_hint(a2, hint)
+                pivot_entries.append({
+                    'role': 'target',
+                    'provider': rule.get('provider'),
+                    'provider_label': provider_label,
+                    'source': source_name,
+                    'target': rule.get('target_name') or target_id,
+                    'requires': requires,
+                    'produces': [],
+                    'target_ports': ports,
+                    'target_protocols': _flow_split_top_level_list(rule.get('target_protocols')),
+                    'exposure': rule.get('exposure') or 'pivot-only',
+                })
+
+        if pivot_entries:
+            deduped: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for entry in pivot_entries:
+                key = json.dumps(entry, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(entry)
+            a2['pivot'] = deduped
+            a2['pivot_summary'] = [
+                f"{entry.get('role')}: {entry.get('source')} -> {entry.get('target')}"
+                for entry in deduped
+                if entry.get('source') or entry.get('target')
+            ]
+            a2['pivot_inputs'] = sorted(set(_flow_split_top_level_list(a2.get('requires'))) & {fact for rule in rules for fact in _flow_split_top_level_list(rule.get('target_requires'))})
+            a2['pivot_outputs'] = sorted(set(_flow_split_top_level_list(a2.get('produces'))) & {fact for rule in rules for fact in _flow_split_top_level_list(rule.get('produces'))})
+        out.append(a2)
     return out
 
 
@@ -20840,8 +21406,26 @@ def _flow_reorder_chain_by_generator_dag(
                     assignment['next_node_id'] = str(next_id)
                     assignment['next_node_name'] = str(id_to_name.get(str(next_id)) or '')
                     rendered = [_render_hint(t, this_id=this_id, next_id=str(next_id)) for t in (hint_templates or [tpl])]
+                    pivot_hints = [
+                        str(x or '').strip()
+                        for x in (assignment.get('pivot_hints') or [])
+                        if str(x or '').strip()
+                    ] if isinstance(assignment.get('pivot_hints'), list) else []
+                    rendered = [str(x or '').strip() for x in (rendered or []) if str(x or '').strip()]
+                    for pivot_hint in pivot_hints:
+                        if pivot_hint not in rendered:
+                            rendered.append(pivot_hint)
                     assignment['hint'] = rendered[0] if rendered else _render_hint(tpl, this_id=this_id, next_id=str(next_id))
                     assignment['hints'] = rendered
+                    if pivot_hints:
+                        levels = assignment.get('hint_levels') if isinstance(assignment.get('hint_levels'), dict) else {}
+                        levels = dict(levels or {})
+                        low_values = [str(x or '').strip() for x in (levels.get('low') or []) if str(x or '').strip()] if isinstance(levels.get('low'), list) else []
+                        for pivot_hint in pivot_hints:
+                            if pivot_hint not in low_values:
+                                low_values.append(pivot_hint)
+                        levels['low'] = low_values
+                        assignment['hint_levels'] = levels
                     try:
                         _flow_apply_first_step_chain_supplied_inputs(
                             assignment,
@@ -26986,8 +27570,9 @@ def _normalize_scenario_section_semantics(scenario_payload: Any) -> Dict[str, An
             raw_item['selected'] = normalized_selected
         if _coerce_bool(raw_item.get('pivot_enabled')):
             raw_item['pivot_enabled'] = True
-            provider = str(raw_item.get('pivot_provider') or raw_item.get('access_provider') or 'auto').strip().lower().replace('_', '-')
+            provider = str(raw_item.get('pivot_provider') or raw_item.get('access_provider') or 'random').strip().lower().replace('_', '-')
             provider_aliases = {
+                'auto': 'random',
                 'ssh': 'ssh-fallback',
                 'ssh-server': 'ssh-fallback',
                 'fallback-ssh': 'ssh-fallback',
@@ -26995,11 +27580,7 @@ def _normalize_scenario_section_semantics(scenario_payload: Any) -> Dict[str, An
                 'flag-nodegen': 'flag-node-generator',
                 'vuln': 'vulnerability',
             }
-            raw_item['pivot_provider'] = provider_aliases.get(provider, provider or 'auto')
-            exposure = str(raw_item.get('target_exposure') or raw_item.get('exposure') or 'pivot-only').strip().lower().replace('_', '-')
-            raw_item['target_exposure'] = exposure or 'pivot-only'
-            source_scope = str(raw_item.get('source_scope') or raw_item.get('pivot_scope') or 'host').strip().lower().replace('_', '-')
-            raw_item['source_scope'] = source_scope or 'host'
+            raw_item['pivot_provider'] = provider_aliases.get(provider, provider or 'random')
         _apply_count_defaults(raw_item)
 
     if not isinstance(node_section, dict):
@@ -31204,7 +31785,10 @@ def _parse_scenario_editor(se):
                 ):
                     val = item.get(xml_attr)
                     if val is not None and str(val).strip() != "" and state_key not in d:
-                        d[state_key] = str(val).strip()
+                        parsed_val = str(val).strip()
+                        if state_key == "pivot_provider" and parsed_val.lower().replace("_", "-") == "auto":
+                            parsed_val = "random"
+                        d[state_key] = parsed_val
             entry["items"].append(d)
         scen["sections"][name] = entry
         # Capture scenario-level density_count if present on Scenario element once
@@ -31729,14 +32313,6 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                         it.set('pivot_enabled', 'true')
                         for state_key, xml_attr in (
                             ('pivot_provider', 'pivot_provider'),
-                            ('pivot_node', 'pivot_node'),
-                            ('pivot_role', 'pivot_role'),
-                            ('target_node', 'target_node'),
-                            ('target_role', 'target_role'),
-                            ('target_ports', 'target_ports'),
-                            ('target_protocols', 'target_protocols'),
-                            ('target_exposure', 'target_exposure'),
-                            ('source_scope', 'source_scope'),
                             ('requires', 'requires'),
                             ('produces', 'produces'),
                         ):

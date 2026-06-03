@@ -64,7 +64,7 @@ class PivotInfo:
     target_protocols: str = ""
     exposure: str = "pivot-only"
     source_scope: str = "host"
-    access_provider: str = "auto"
+    access_provider: str = "random"
     entry_ports: str = ""
     produces: str = ""
     requires: str = ""
