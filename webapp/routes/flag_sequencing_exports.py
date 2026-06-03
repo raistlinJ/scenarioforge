@@ -102,6 +102,8 @@ def register(app, *, backend_module: Any) -> None:
             flow_assignments_from_plan = []
 
         flag_assignments: list[dict[str, Any]] = []
+        preview: dict[str, Any] | None = None
+        preview_payload: dict[str, Any] | None = None
         try:
             plan_path = None
             try:
@@ -207,12 +209,24 @@ def register(app, *, backend_module: Any) -> None:
                             scenario_label or scenario_norm,
                             initial_facts_override=initial_facts,
                             goal_facts_override=goal_facts,
+                            pivot_context=preview_payload,
                         )
         except Exception:
             flag_assignments = []
 
         if (not flag_assignments) and flow_assignments_from_plan:
             flag_assignments = flow_assignments_from_plan
+
+        try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=(preview if isinstance(preview, dict) else None),
+                pivot_context=(preview_payload if isinstance(preview_payload, dict) else None),
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         try:
             flow_valid, flow_errors = backend._flow_validate_chain_order_by_requires_produces(

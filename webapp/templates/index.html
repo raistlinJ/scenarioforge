@@ -17628,14 +17628,12 @@
                 const pivotEnabledRaw = it.pivot_enabled;
                 const pivotEnabled = pivotEnabledRaw === true || ['1', 'true', 'yes', 'on'].includes(String(pivotEnabledRaw || '').trim().toLowerCase());
                 const disabled = pivotEnabled ? '' : ' disabled';
-                const provider = (it.pivot_provider || 'auto').toString();
-                const exposure = (it.target_exposure || 'pivot-only').toString();
-                const scope = (it.source_scope || 'host').toString();
-                const protocols = (it.target_protocols || '').toString();
+                const providerRaw = (it.pivot_provider || 'random').toString();
+                const provider = providerRaw === 'auto' ? 'random' : providerRaw;
                 const optionHtml = (values, current) => values.map(([value, label]) => `<option value="${escAttr(value)}" ${value === current ? 'selected' : ''}>${escAttr(label)}</option>`).join('');
                 return `
                 <div class="d-flex flex-wrap gap-2 align-items-end segmentation-pivot-controls">
-                    <div class="form-check form-switch mb-1" title="Require a pivot source before this segmentation target is reachable.">
+                    <div class="form-check form-switch mb-1" title="Let the planner require a pivot path for segmented targets.">
                         <input class="form-check-input" type="checkbox" role="switch" ${pivotEnabled ? 'checked' : ''} data-field="pivot_enabled" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}">
                         <label class="form-check-label small">Pivot</label>
                     </div>
@@ -17643,42 +17641,12 @@
                         <label class="form-label mb-0 small">Provider</label>
                         <select class="form-select form-select-sm" style="width:150px" data-field="pivot_provider" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
                             ${optionHtml([
-                                ['auto', 'Auto'],
+                                ['random', 'Random'],
                                 ['vulnerability', 'Vulnerability'],
-                                ['flag-node-generator', 'Flag node'],
+                                ['flag-node-generator', 'flag-node-generator'],
                                 ['ssh-fallback', 'Docker SSH'],
                                 ['none', 'Manual']
                             ], provider)}
-                        </select>
-                    </div>
-                    <div>
-                        <label class="form-label mb-0 small">Pivot source</label>
-                        <input class="form-control form-control-sm" style="width:145px" value="${escAttr(it.pivot_node || '')}" placeholder="node or role" data-field="pivot_node" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
-                    </div>
-                    <div>
-                        <label class="form-label mb-0 small">Target</label>
-                        <input class="form-control form-control-sm" style="width:145px" value="${escAttr(it.target_node || '')}" placeholder="docker node/role" data-field="target_node" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
-                    </div>
-                    <div>
-                        <label class="form-label mb-0 small">Ports</label>
-                        <input class="form-control form-control-sm" style="width:95px" value="${escAttr(it.target_ports || '')}" placeholder="compose" data-field="target_ports" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
-                    </div>
-                    <div>
-                        <label class="form-label mb-0 small">Proto</label>
-                        <select class="form-select form-select-sm" style="width:90px" data-field="target_protocols" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
-                            ${optionHtml([['', 'Auto'], ['tcp', 'TCP'], ['udp', 'UDP'], ['tcp,udp', 'Both']], protocols)}
-                        </select>
-                    </div>
-                    <div>
-                        <label class="form-label mb-0 small">Scope</label>
-                        <select class="form-select form-select-sm" style="width:90px" data-field="source_scope" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
-                            ${optionHtml([['host', 'Host'], ['subnet', 'Subnet']], scope)}
-                        </select>
-                    </div>
-                    <div>
-                        <label class="form-label mb-0 small">Exposure</label>
-                        <select class="form-select form-select-sm" style="width:105px" data-field="target_exposure" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
-                            ${optionHtml([['pivot-only', 'Pivot-only'], ['internal', 'Internal'], ['public', 'Public'], ['blocked', 'Blocked']], exposure)}
                         </select>
                     </div>
                 </div>`;
@@ -17864,9 +17832,7 @@
                         if (field === 'pivot_enabled') {
                             item.pivot_enabled = !!el.checked;
                             if (item.pivot_enabled) {
-                                if (!item.pivot_provider) item.pivot_provider = 'auto';
-                                if (!item.target_exposure) item.target_exposure = 'pivot-only';
-                                if (!item.source_scope) item.source_scope = 'host';
+                                if (!item.pivot_provider || item.pivot_provider === 'auto') item.pivot_provider = 'random';
                             }
                             renderMain();
                         } else
@@ -17893,7 +17859,7 @@
                                 updateWeightWarning(sidx, sec);
                                 updateWeightInputsDisplay(sidx, sec, { skipElement: isInputEvent ? el : null });
                             }
-                        } else if (['pattern', 'content_type', 'selected', 'v_name', 'v_path', 'v_count', 'v_metric', 'r2r_mode', 'r2s_mode', 'pivot_provider', 'pivot_node', 'pivot_role', 'target_node', 'target_role', 'target_ports', 'target_protocols', 'target_exposure', 'source_scope', 'requires', 'produces'].includes(field)) {
+                        } else if (['pattern', 'content_type', 'selected', 'v_name', 'v_path', 'v_count', 'v_metric', 'r2r_mode', 'r2s_mode', 'pivot_provider', 'requires', 'produces'].includes(field)) {
                             const prev = item[field];
                             if (field === 'v_count') {
                                 let n = clampNodeCountValue(el.value);

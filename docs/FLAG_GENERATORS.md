@@ -76,7 +76,7 @@ Scenario XML can include a `Pivoting` section:
 
 At runtime, ScenarioForge resolves `pivot_node`/`pivot_role` and `target_node`/`target_role` against actual CORE host names and roles. Matching docker-compose targets receive `SegmentationExposure=pivot-only`, `SegmentationSources=<pivot IP>`, and optional port/protocol filters before compose port allow rules are written. Existing compose targets remain public unless a pivot declaration narrows them.
 
-The Web UI also supports the same model from Segmentation rows. Turn on `Pivot` for a Segmentation item, then choose a provider (`Auto`, `Vulnerability`, `Flag node`, `Docker SSH`, or `Manual`), pivot source, target, ports, protocol, source scope, and exposure. Saved XML stores these as attributes on the Segmentation item, for example:
+The Web UI also supports a simplified shortcut from Segmentation rows. Turn on `Pivot`, then choose a provider (`Random`, `Vulnerability`, `flag-node-generator`, `Docker SSH`, or `Manual`). The planner chooses the pivot source, target docker-compose nodes, target ports, protocols, source scope, and pivot-only exposure from the scenario's nodes and artifacts. Saved XML stores only the shortcut flag and provider:
 
 ```xml
 <section name="Segmentation" density="1.0">
@@ -84,17 +84,13 @@ The Web UI also supports the same model from Segmentation rows. Turn on `Pivot` 
 		selected="Firewall"
 		factor="1.0"
 		pivot_enabled="true"
-		pivot_provider="ssh-fallback"
-		pivot_node="jump-web"
-		target_node="internal-db"
-		target_ports="5432"
-		target_protocols="tcp"
-		target_exposure="pivot-only"
-		source_scope="host" />
+		pivot_provider="random" />
 </section>
 ```
 
-Those row attributes compile into the same runtime pivot metadata as a `Pivoting` section. If provider is `Auto`, no `requires`/`produces` artifacts are declared, and the pivot source is an eligible Docker node, ScenarioForge resolves it to `Docker SSH` and assigns a built-in OpenSSH docker-compose container to the pivot source. This avoids using CORE's host-backed SSH service and keeps the pivot shell inside the container filesystem.
+Those row attributes compile into runtime pivot metadata. `Random` prefers existing vulnerability or `flag-node-generator` access providers when available, then falls back to an eligible Docker SSH pivot source. Docker SSH assigns a built-in OpenSSH docker-compose container to the pivot source. This avoids using CORE's host-backed SSH service and keeps the pivot shell inside the container filesystem.
+
+Runtime pivot metadata also records the sequencing contract: the pivot source produces `Shell(host)` and `Pivot(host)` facts, while inferred downstream targets require `Pivot(host)`. This keeps generated Flow/Flag Sequencing chains solvable when pivot-only segmentation is enabled.
 
 ## Hint Levels
 

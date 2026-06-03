@@ -1309,6 +1309,28 @@ def refresh_hints_for_current_chain(
         assignment['hints'] = rendered_hint_levels.get('low') or rendered
         assignment['hint'] = (rendered_hint_levels.get('low') or rendered or [''])[0] if (rendered_hint_levels.get('low') or rendered) else ''
         try:
+            pivot_hints = [
+                str(x or '').strip()
+                for x in (assignment.get('pivot_hints') or [])
+                if str(x or '').strip()
+            ] if isinstance(assignment.get('pivot_hints'), list) else []
+            if pivot_hints:
+                current_hints = [str(x or '').strip() for x in (assignment.get('hints') or []) if str(x or '').strip()] if isinstance(assignment.get('hints'), list) else []
+                for pivot_hint in pivot_hints:
+                    if pivot_hint not in current_hints:
+                        current_hints.append(pivot_hint)
+                assignment['hints'] = current_hints
+                low_values = [str(x or '').strip() for x in (rendered_hint_levels.get('low') or []) if str(x or '').strip()] if isinstance(rendered_hint_levels.get('low'), list) else []
+                for pivot_hint in pivot_hints:
+                    if pivot_hint not in low_values:
+                        low_values.append(pivot_hint)
+                rendered_hint_levels['low'] = low_values
+                assignment['hint_levels'] = rendered_hint_levels
+                if not str(assignment.get('hint') or '').strip() and current_hints:
+                    assignment['hint'] = current_hints[0]
+        except Exception:
+            pass
+        try:
             apply_first = getattr(backend, '_flow_apply_first_step_chain_supplied_inputs', None)
             if callable(apply_first):
                 assignment = apply_first(

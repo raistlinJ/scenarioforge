@@ -1530,6 +1530,52 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
     }
     lines.push('');
+
+    const normalizeChainFacts = (value) => guideFigureNormalizeFactNames(value, ['artifact', 'name', 'field'])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    const chainInputFacts = Array.from(new Set([
+      ...normalizeChainFacts(assignment.requires),
+      ...normalizeChainFacts(assignment.inputs),
+    ]));
+    const chainOutputFacts = Array.from(new Set([
+      ...normalizeChainFacts(assignment.produces),
+      ...normalizeChainFacts(assignment.outputs),
+    ]));
+    const pivotEntries = Array.isArray(assignment.pivot)
+      ? assignment.pivot.filter((item) => item && typeof item === 'object')
+      : [];
+
+    lines.push('### Chain Inputs / Outputs');
+    lines.push('');
+    if (!chainInputFacts.length && !chainOutputFacts.length) {
+      lines.push('No chain-level facts were declared for this step.');
+    } else {
+      lines.push('| Direction | Fact |');
+      lines.push('| --- | --- |');
+      chainInputFacts.forEach((fact) => lines.push(`| Input | ${_cell(fact)} |`));
+      chainOutputFacts.forEach((fact) => lines.push(`| Output | ${_cell(fact)} |`));
+    }
+    lines.push('');
+
+    if (pivotEntries.length) {
+      lines.push('### Pivot Path');
+      lines.push('');
+      lines.push('| Role | Source | Target | Facts | Provider |');
+      lines.push('| --- | --- | --- | --- | --- |');
+      pivotEntries.forEach((entry) => {
+        const role = String(entry.role || '').trim() || 'pivot';
+        const source = String(entry.source || '').trim();
+        const target = String(entry.target || '').trim();
+        const facts = Array.from(new Set([
+          ...normalizeChainFacts(entry.requires),
+          ...normalizeChainFacts(entry.produces),
+        ])).join(', ');
+        const provider = String(entry.provider_label || entry.provider || '').trim();
+        lines.push(`| ${_cell(role)} | ${_cell(source)} | ${_cell(target)} | ${_cell(facts)} | ${_cell(provider)} |`);
+      });
+      lines.push('');
+    }
     
     // Apply access instructions: check generator metadata first, then heuristics
     const _applyAccessInstructionsLocal = (assign, nodeName, nodeIp, nodeId) => {

@@ -1018,8 +1018,9 @@ def _apply_pivoting_to_docker_nodes(
         return _ip_only(host.ip4)
 
     def _provider_name(value: Any) -> str:
-        provider = str(value or "auto").strip().lower().replace("_", "-")
+        provider = str(value or "random").strip().lower().replace("_", "-")
         aliases = {
+            "random": "auto",
             "ssh": "ssh-fallback",
             "ssh-server": "ssh-fallback",
             "fallback-ssh": "ssh-fallback",
@@ -1040,6 +1041,17 @@ def _apply_pivoting_to_docker_nodes(
             facts.extend([f"Shell({node_name})", f"Pivot({node_name})"])
         return list(dict.fromkeys(facts))
 
+    def _default_target_requires(pivot_names: list[str], provider: str) -> list[str]:
+        if provider in ("none", "manual"):
+            return []
+        return [f"Pivot({node_name})" for node_name in pivot_names if node_name]
+
+    def _merge_record_list(record: Dict[str, Any], key: str, values: list[str]) -> None:
+        if not isinstance(record, dict) or not values:
+            return
+        existing = _csv_values(record.get(key))
+        record[key] = list(dict.fromkeys(existing + values))
+
     def _can_replace_with_ssh_container(record: Any) -> bool:
         if not isinstance(record, dict):
             return False
@@ -1052,6 +1064,98 @@ def _apply_pivoting_to_docker_nodes(
         if name and name not in {"standard-ubuntu-docker-core", "pivot-ssh-container"} and "standard" not in name and "pivot-ssh" not in name:
             return False
         return True
+
+    def _record_text(record: Any, *keys: str) -> str:
+        if not isinstance(record, dict):
+            return ""
+        values: list[str] = []
+        for key in keys:
+            try:
+                value = record.get(key)
+            except Exception:
+                value = None
+            if value not in (None, ""):
+                values.append(str(value).strip())
+        return " ".join(value for value in values if value).lower()
+
+    def _is_vulnerability_record(record: Any) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("CoreTGVulnAssignment") or record.get("coretg_vuln_assignment") or "").strip():
+            return True
+        text = _record_text(record, "Vector", "vector", "Type", "type", "Name", "name")
+        return any(token in text for token in ("vulnerability", "vuln"))
+
+    def _is_flag_node_record(record: Any) -> bool:
+        text = _record_text(record, "Vector", "vector", "Type", "type", "Name", "name")
+        return "flag-node-generator" in text or "flag-nodegen" in text or "flag node generator" in text
+
+    def _candidate_provider(record: Any) -> str:
+        if _is_flag_node_record(record):
+            return "flag-node-generator"
+        if _is_vulnerability_record(record):
+            return "vulnerability"
+        if _can_replace_with_ssh_container(record):
+            return "ssh-fallback"
+        return "auto"
+
+    def _record_matches_provider(record: Any, provider: str) -> bool:
+        if provider == "vulnerability":
+            return _is_vulnerability_record(record)
+        if provider == "flag-node-generator":
+            return _is_flag_node_record(record)
+        if provider == "ssh-fallback":
+            return _can_replace_with_ssh_container(record)
+        if provider == "auto":
+            return _is_vulnerability_record(record) or _is_flag_node_record(record) or _can_replace_with_ssh_container(record)
+        return False
+
+    def _infer_pivot_matches(provider: str, excluded_names: set[str]) -> list[tuple[str, NodeInfo]]:
+        candidates: list[tuple[int, str, NodeInfo]] = []
+        provider_order = {
+            "vulnerability": 0,
+            "flag-node-generator": 1,
+            "ssh-fallback": 2,
+            "auto": 3,
+        }
+        for node_name in sorted(docker_nodes.keys()):
+            if node_name in excluded_names:
+                continue
+            host = node_by_name.get(node_name)
+            if host is None:
+                continue
+            record = docker_nodes.get(node_name)
+            if not _record_matches_provider(record, provider):
+                continue
+            effective_provider = _candidate_provider(record)
+            priority = provider_order.get(effective_provider, 99)
+            candidates.append((priority, node_name, host))
+        if not candidates:
+            return []
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        _priority, node_name, host = candidates[0]
+        return [(node_name, host)]
+
+    def _infer_target_matches(pivot_names: set[str]) -> list[tuple[str, NodeInfo]]:
+        inferred: list[tuple[str, NodeInfo]] = []
+        for node_name in sorted(docker_nodes.keys()):
+            if node_name in pivot_names:
+                continue
+            host = node_by_name.get(node_name)
+            if host is None:
+                continue
+            inferred.append((node_name, host))
+        return inferred
+
+    def _resolved_access_provider(requested_provider: str, pivot_names: list[str], requires: list[str], explicit_produces: list[str]) -> str:
+        if requested_provider != "auto":
+            return requested_provider
+        if requires or explicit_produces:
+            return "auto"
+        for provider in ("vulnerability", "flag-node-generator", "ssh-fallback"):
+            if any(_candidate_provider(docker_nodes.get(name)) == provider for name in pivot_names):
+                return provider
+        return "auto"
 
     def _install_ssh_container_record(pivot_name: str, idx: int) -> bool:
         record = docker_nodes.get(pivot_name)
@@ -1077,25 +1181,29 @@ def _apply_pivoting_to_docker_nodes(
         pivot_role = str(getattr(item, "pivot_role", "") or "").strip()
         target_node = str(getattr(item, "target_node", "") or "").strip()
         target_role = str(getattr(item, "target_role", "") or "").strip()
-        if not (pivot_node or pivot_role) or not (target_node or target_role):
-            warnings.append(f"pivot[{idx}] skipped: pivot and target selectors are both required")
-            continue
+        requested_provider = _provider_name(getattr(item, "access_provider", "random"))
 
-        pivot_matches = [
-            (node_name, host)
-            for node_name, host in node_by_name.items()
-            if _matches(host, node_name, pivot_node, pivot_role)
-        ]
+        explicit_pivot = bool(pivot_node or pivot_role)
+        explicit_target = bool(target_node or target_role)
         target_matches = [
             (node_name, host)
             for node_name, host in node_by_name.items()
             if node_name in docker_nodes and _matches(host, node_name, target_node, target_role)
-        ]
+        ] if explicit_target else []
+        explicit_target_names = {name for name, _host in target_matches}
+        pivot_matches = [
+            (node_name, host)
+            for node_name, host in node_by_name.items()
+            if _matches(host, node_name, pivot_node, pivot_role)
+        ] if explicit_pivot else _infer_pivot_matches(requested_provider, explicit_target_names)
+        pivot_names_for_exclusion = {name for name, _host in pivot_matches}
+        if not explicit_target:
+            target_matches = _infer_target_matches(pivot_names_for_exclusion)
         if not pivot_matches:
-            warnings.append(f"pivot[{idx}] skipped: no pivot node matched")
+            warnings.append(f"pivot[{idx}] skipped: no pivot source matched or could be inferred")
             continue
         if not target_matches:
-            warnings.append(f"pivot[{idx}] skipped: no docker target node matched")
+            warnings.append(f"pivot[{idx}] skipped: no docker target node matched or could be inferred")
             continue
 
         source_scope = str(getattr(item, "source_scope", "host") or "host")
@@ -1112,19 +1220,25 @@ def _apply_pivoting_to_docker_nodes(
         target_ports = _csv_values(getattr(item, "target_ports", "") or "")
         target_protocols = _csv_values(getattr(item, "target_protocols", "") or "")
         exposure = str(getattr(item, "exposure", "pivot-only") or "pivot-only").strip() or "pivot-only"
-        requested_provider = _provider_name(getattr(item, "access_provider", "auto"))
         item_name = str(getattr(item, "name", "Pivot") or "Pivot")
         pivot_node_names = [name for name, _host in pivot_matches]
         requires = _csv_values(getattr(item, "requires", "") or "")
         explicit_produces = _csv_values(getattr(item, "produces", "") or "")
-        auto_ssh_available = any(_can_replace_with_ssh_container(docker_nodes.get(name)) for name in pivot_node_names)
-        access_provider = "ssh-fallback" if requested_provider == "auto" and not requires and not explicit_produces and auto_ssh_available else requested_provider
-        produces = explicit_produces or _default_pivot_produces(pivot_node_names, access_provider)
+        access_provider = _resolved_access_provider(requested_provider, pivot_node_names, requires, explicit_produces)
+        produces = list(dict.fromkeys(explicit_produces + _default_pivot_produces(pivot_node_names, access_provider)))
+        target_requires = _default_target_requires(pivot_node_names, access_provider)
+        for pivot_name in pivot_node_names:
+            pivot_record = docker_nodes.get(pivot_name)
+            if isinstance(pivot_record, dict):
+                _merge_record_list(pivot_record, "PivotProduces", produces)
         if access_provider == "ssh-fallback":
             for pivot_name, _pivot_host in pivot_matches:
                 if _install_ssh_container_record(pivot_name, idx):
                     ssh_fallback_nodes.add(pivot_name)
                     logging.info("Pivoting: assigned Docker SSH fallback container on %s", pivot_name)
+                    pivot_record = docker_nodes.get(pivot_name)
+                    if isinstance(pivot_record, dict):
+                        _merge_record_list(pivot_record, "PivotProduces", produces)
         for target_name, target_host in target_matches:
             record = docker_nodes.get(target_name)
             if not isinstance(record, dict):
@@ -1134,6 +1248,7 @@ def _apply_pivoting_to_docker_nodes(
             record["SegmentationExposure"] = exposure
             record["SegmentationSources"] = merged_sources
             record["PivotAccessProvider"] = access_provider
+            _merge_record_list(record, "PivotRequires", target_requires)
             if target_ports:
                 existing_ports = _csv_values(record.get("SegmentationPorts"))
                 record["SegmentationPorts"] = list(dict.fromkeys(existing_ports + target_ports))
@@ -1156,6 +1271,7 @@ def _apply_pivoting_to_docker_nodes(
                 "sources": merged_sources,
                 "produces": produces,
                 "requires": requires,
+                "target_requires": target_requires,
             })
 
     return {

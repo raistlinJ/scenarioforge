@@ -178,7 +178,13 @@ def register(app, *, backend_module: Any) -> None:
             retry_index = 0
 
         if preset_steps:
-            flag_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(preview, chain_nodes, scenario_label or scenario_norm, preset)
+            flag_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(
+                preview,
+                chain_nodes,
+                scenario_label or scenario_norm,
+                preset,
+                pivot_context=payload,
+            )
             if preset_err:
                 return _validation_failure(f'Error: {preset_err}', stats=stats)
         else:
@@ -193,6 +199,7 @@ def register(app, *, backend_module: Any) -> None:
                 seed_override=seed_override,
                 disallow_generator_reuse=(not allow_node_duplicates),
                 dependency_level=dependency_level,
+                pivot_context=payload,
             )
             if (not flag_assignments) and (not allow_node_duplicates):
                 return _validation_failure(
@@ -220,6 +227,17 @@ def register(app, *, backend_module: Any) -> None:
                 dependency_level=dependency_level,
                 return_debug=bool(debug_dag),
             )
+
+        try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         try:
             flow_valid, flow_errors = backend._flow_validate_chain_order_by_requires_produces(

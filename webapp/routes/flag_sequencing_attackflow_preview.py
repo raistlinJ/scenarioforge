@@ -494,7 +494,13 @@ def register(app, *, backend_module: Any) -> None:
 
         if not flag_assignments:
             if preset_steps and not used_saved_chain:
-                preset_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(preview, chain_nodes, scenario_label or scenario_norm, preset)
+                preset_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(
+                    preview,
+                    chain_nodes,
+                    scenario_label or scenario_norm,
+                    preset,
+                    pivot_context=payload,
+                )
                 if preset_err:
                     return jsonify({'ok': False, 'error': f'Error: {preset_err}', 'stats': stats, 'preview_plan_path': preview_plan_path}), 422
                 flag_assignments = preset_assignments
@@ -507,6 +513,7 @@ def register(app, *, backend_module: Any) -> None:
                     goal_facts_override=goal_facts_override,
                     disallow_generator_reuse=(not allow_node_duplicates),
                     dependency_level=dependency_level,
+                    pivot_context=payload,
                 )
                 if (not flag_assignments) and (not allow_node_duplicates):
                     flag_assignments = backend._flow_compute_flag_assignments(
@@ -517,6 +524,7 @@ def register(app, *, backend_module: Any) -> None:
                         goal_facts_override=goal_facts_override,
                         disallow_generator_reuse=False,
                         dependency_level=dependency_level,
+                        pivot_context=payload,
                     )
                     if flag_assignments:
                         try:
@@ -591,6 +599,17 @@ def register(app, *, backend_module: Any) -> None:
         else:
             debug_dag = str(request.args.get('debug_dag') or '').strip().lower() in ('1', 'true', 'yes', 'y')
             dag_debug = None
+
+        try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         try:
             if isinstance(flag_assignments, list) and isinstance(chain_nodes, list):
@@ -768,6 +787,7 @@ def register(app, *, backend_module: Any) -> None:
                         initial_facts_override=initial_facts_override,
                         goal_facts_override=goal_facts_override,
                         dependency_level=dependency_level,
+                        pivot_context=payload,
                     )
                     missing_refs = []
                     try:

@@ -451,6 +451,17 @@ def register(app, *, backend_module: Any) -> None:
             pass
 
         try:
+            out_assignments = backend._flow_apply_pivot_context_to_assignments(
+                out_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=preview_payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
+
+        try:
             flow_valid, flow_errors = backend._flow_validate_chain_order_by_requires_produces(
                 chain_nodes,
                 out_assignments,
