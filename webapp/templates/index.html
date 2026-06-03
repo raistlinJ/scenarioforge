@@ -17628,8 +17628,10 @@
                 const pivotEnabledRaw = it.pivot_enabled;
                 const pivotEnabled = pivotEnabledRaw === true || ['1', 'true', 'yes', 'on'].includes(String(pivotEnabledRaw || '').trim().toLowerCase());
                 const disabled = pivotEnabled ? '' : ' disabled';
-                const providerRaw = (it.pivot_provider || 'random').toString();
-                const provider = providerRaw === 'auto' ? 'random' : providerRaw;
+                const providerRaw = (it.pivot_provider || 'random').toString().trim().toLowerCase().replace(/_/g, '-');
+                const providerNormalized = ['auto', 'none', 'manual'].includes(providerRaw) ? 'random' : providerRaw;
+                const allowedProviders = new Set(['random', 'vulnerability', 'flag-node-generator', 'ssh-fallback']);
+                const provider = allowedProviders.has(providerNormalized) ? providerNormalized : 'random';
                 const optionHtml = (values, current) => values.map(([value, label]) => `<option value="${escAttr(value)}" ${value === current ? 'selected' : ''}>${escAttr(label)}</option>`).join('');
                 return `
                 <div class="d-flex flex-wrap gap-2 align-items-end segmentation-pivot-controls">
@@ -17643,9 +17645,8 @@
                             ${optionHtml([
                                 ['random', 'Random'],
                                 ['vulnerability', 'Vulnerability'],
-                                ['flag-node-generator', 'flag-node-generator'],
-                                ['ssh-fallback', 'Docker SSH'],
-                                ['none', 'Manual']
+                                ['flag-node-generator', 'Flag-Node-Generator'],
+                                ['ssh-fallback', 'Docker SSH']
                             ], provider)}
                         </select>
                     </div>
@@ -17832,7 +17833,8 @@
                         if (field === 'pivot_enabled') {
                             item.pivot_enabled = !!el.checked;
                             if (item.pivot_enabled) {
-                                if (!item.pivot_provider || item.pivot_provider === 'auto') item.pivot_provider = 'random';
+                                const currentPivotProvider = (item.pivot_provider || '').toString().trim().toLowerCase().replace(/_/g, '-');
+                                if (!currentPivotProvider || ['auto', 'none', 'manual'].includes(currentPivotProvider)) item.pivot_provider = 'random';
                             }
                             renderMain();
                         } else

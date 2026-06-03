@@ -19254,7 +19254,7 @@ def _flow_pivot_provider_label(value: Any) -> str:
         'random': 'Random',
         'auto': 'Random',
         'vulnerability': 'Vulnerability',
-        'flag-node-generator': 'flag-node-generator',
+        'flag-node-generator': 'Flag-Node-Generator',
         'ssh-fallback': 'Docker SSH',
         'manual': 'Manual',
         'none': 'Manual',
@@ -27573,6 +27573,8 @@ def _normalize_scenario_section_semantics(scenario_payload: Any) -> Dict[str, An
             provider = str(raw_item.get('pivot_provider') or raw_item.get('access_provider') or 'random').strip().lower().replace('_', '-')
             provider_aliases = {
                 'auto': 'random',
+                'none': 'random',
+                'manual': 'random',
                 'ssh': 'ssh-fallback',
                 'ssh-server': 'ssh-fallback',
                 'fallback-ssh': 'ssh-fallback',
@@ -31786,7 +31788,7 @@ def _parse_scenario_editor(se):
                     val = item.get(xml_attr)
                     if val is not None and str(val).strip() != "" and state_key not in d:
                         parsed_val = str(val).strip()
-                        if state_key == "pivot_provider" and parsed_val.lower().replace("_", "-") == "auto":
+                        if state_key == "pivot_provider" and parsed_val.lower().replace("_", "-") in {"auto", "none", "manual"}:
                             parsed_val = "random"
                         d[state_key] = parsed_val
             entry["items"].append(d)

@@ -51,6 +51,28 @@ def test_report_guides_include_chain_io_and_pivot_sections() -> None:
     assert not missing, "Missing pivot/chain IO guide rendering snippets: " + "; ".join(missing)
 
 
+def test_segmentation_pivot_provider_options_are_curated() -> None:
+    text = FLOW_TEMPLATE_PATH.parent.joinpath("index.html").read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const providerNormalized = ['auto', 'none', 'manual'].includes(providerRaw) ? 'random' : providerRaw;",
+        "const allowedProviders = new Set(['random', 'vulnerability', 'flag-node-generator', 'ssh-fallback']);",
+        "['random', 'Random']",
+        "['vulnerability', 'Vulnerability']",
+        "['flag-node-generator', 'Flag-Node-Generator']",
+        "['ssh-fallback', 'Docker SSH']",
+        "['auto', 'none', 'manual'].includes(currentPivotProvider)",
+    ]
+    removed_snippets = [
+        "['none', 'Manual']",
+        "['flag-node-generator', 'flag-node-generator']",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not missing, "Missing curated pivot provider option snippets: " + "; ".join(missing)
+    assert not present, "Removed pivot provider options/labels should not remain: " + "; ".join(present)
+
+
 def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
