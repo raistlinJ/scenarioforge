@@ -48,8 +48,53 @@ Use these keys consistently so chains can be validated and composed.
 
 ### Networking
 - `Knowledge(value)` (e.g., an IP address)
+- `Pivot(host)`
 - `PortForward(host, port)`
 - `InternalNetwork(subnet)`
+
+## Pivoting Scenarios
+
+Pivoting is configured as a Flow capability plus a segmentation exposure rule. The first challenge should produce an access artifact such as `WebRCE(app)`, `Shell(host)`, or `Pivot(host)`. Downstream internal targets should require that artifact, while their docker-compose service ports are marked as reachable only from the pivot source.
+
+Scenario XML can include a `Pivoting` section:
+
+```xml
+<section name="Pivoting" density="1.0">
+	<item
+		selected="RCE Pivot"
+		factor="1.0"
+		pivot_node="jump-web"
+		target_node="internal-db"
+		target_ports="5432"
+		target_protocols="tcp"
+		target_exposure="pivot-only"
+		source_scope="host"
+		produces="Shell(jump-web),Pivot(jump-web)"
+		requires="WebRCE(jump-web)" />
+</section>
+```
+
+At runtime, ScenarioForge resolves `pivot_node`/`pivot_role` and `target_node`/`target_role` against actual CORE host names and roles. Matching docker-compose targets receive `SegmentationExposure=pivot-only`, `SegmentationSources=<pivot IP>`, and optional port/protocol filters before compose port allow rules are written. Existing compose targets remain public unless a pivot declaration narrows them.
+
+The Web UI also supports the same model from Segmentation rows. Turn on `Pivot` for a Segmentation item, then choose a provider (`Auto`, `Vulnerability`, `Flag node`, `Docker SSH`, or `Manual`), pivot source, target, ports, protocol, source scope, and exposure. Saved XML stores these as attributes on the Segmentation item, for example:
+
+```xml
+<section name="Segmentation" density="1.0">
+	<item
+		selected="Firewall"
+		factor="1.0"
+		pivot_enabled="true"
+		pivot_provider="ssh-fallback"
+		pivot_node="jump-web"
+		target_node="internal-db"
+		target_ports="5432"
+		target_protocols="tcp"
+		target_exposure="pivot-only"
+		source_scope="host" />
+</section>
+```
+
+Those row attributes compile into the same runtime pivot metadata as a `Pivoting` section. If provider is `Auto`, no `requires`/`produces` artifacts are declared, and the pivot source is an eligible Docker node, ScenarioForge resolves it to `Docker SSH` and assigns a built-in OpenSSH docker-compose container to the pivot source. This avoids using CORE's host-backed SSH service and keeps the pivot shell inside the container filesystem.
 
 ## Hint Levels
 

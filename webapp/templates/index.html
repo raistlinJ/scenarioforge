@@ -17471,6 +17471,12 @@
     function renderItemRow(sidx, secName, iidx, it) {
         // Build Selected options and current weight
         const weight = ((parseFloat(it.factor) || 0).toFixed(3));
+        const escAttr = (value) => (value ?? '').toString()
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
         let opts = '';
         if (secName === 'Vulnerabilities') {
             const curRaw = (it.selected || 'Random');
@@ -17617,6 +17623,65 @@
                     return `<span class="small" ${fullDesc ? `data-bs-toggle="tooltip" data-bs-title="${esc(fullDesc)}"` : ''}>${centerText}</span>${emptyHint}`;
                 }
                 return '';
+            }
+            if (secName === 'Segmentation') {
+                const pivotEnabledRaw = it.pivot_enabled;
+                const pivotEnabled = pivotEnabledRaw === true || ['1', 'true', 'yes', 'on'].includes(String(pivotEnabledRaw || '').trim().toLowerCase());
+                const disabled = pivotEnabled ? '' : ' disabled';
+                const provider = (it.pivot_provider || 'auto').toString();
+                const exposure = (it.target_exposure || 'pivot-only').toString();
+                const scope = (it.source_scope || 'host').toString();
+                const protocols = (it.target_protocols || '').toString();
+                const optionHtml = (values, current) => values.map(([value, label]) => `<option value="${escAttr(value)}" ${value === current ? 'selected' : ''}>${escAttr(label)}</option>`).join('');
+                return `
+                <div class="d-flex flex-wrap gap-2 align-items-end segmentation-pivot-controls">
+                    <div class="form-check form-switch mb-1" title="Require a pivot source before this segmentation target is reachable.">
+                        <input class="form-check-input" type="checkbox" role="switch" ${pivotEnabled ? 'checked' : ''} data-field="pivot_enabled" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}">
+                        <label class="form-check-label small">Pivot</label>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Provider</label>
+                        <select class="form-select form-select-sm" style="width:150px" data-field="pivot_provider" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                            ${optionHtml([
+                                ['auto', 'Auto'],
+                                ['vulnerability', 'Vulnerability'],
+                                ['flag-node-generator', 'Flag node'],
+                                ['ssh-fallback', 'Docker SSH'],
+                                ['none', 'Manual']
+                            ], provider)}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Pivot source</label>
+                        <input class="form-control form-control-sm" style="width:145px" value="${escAttr(it.pivot_node || '')}" placeholder="node or role" data-field="pivot_node" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Target</label>
+                        <input class="form-control form-control-sm" style="width:145px" value="${escAttr(it.target_node || '')}" placeholder="docker node/role" data-field="target_node" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Ports</label>
+                        <input class="form-control form-control-sm" style="width:95px" value="${escAttr(it.target_ports || '')}" placeholder="compose" data-field="target_ports" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Proto</label>
+                        <select class="form-select form-select-sm" style="width:90px" data-field="target_protocols" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                            ${optionHtml([['', 'Auto'], ['tcp', 'TCP'], ['udp', 'UDP'], ['tcp,udp', 'Both']], protocols)}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Scope</label>
+                        <select class="form-select form-select-sm" style="width:90px" data-field="source_scope" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                            ${optionHtml([['host', 'Host'], ['subnet', 'Subnet']], scope)}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Exposure</label>
+                        <select class="form-select form-select-sm" style="width:105px" data-field="target_exposure" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                            ${optionHtml([['pivot-only', 'Pivot-only'], ['internal', 'Internal'], ['public', 'Public'], ['blocked', 'Blocked']], exposure)}
+                        </select>
+                    </div>
+                </div>`;
             }
             return '';
         })();
@@ -17796,6 +17861,15 @@
                 if (sec) {
                     if (rowIdx !== null && !Number.isNaN(rowIdx)) {
                         const item = state.scenarios[sidx].sections[sec].items[rowIdx];
+                        if (field === 'pivot_enabled') {
+                            item.pivot_enabled = !!el.checked;
+                            if (item.pivot_enabled) {
+                                if (!item.pivot_provider) item.pivot_provider = 'auto';
+                                if (!item.target_exposure) item.target_exposure = 'pivot-only';
+                                if (!item.source_scope) item.source_scope = 'host';
+                            }
+                            renderMain();
+                        } else
                         if (['factor', 'rate_kbps', 'period_s', 'jitter_pct', 'total_nodes', 'density', 'r2r_edges', 'r2s_edges', 'r2s_hosts_min', 'r2s_hosts_max'].includes(field)) {
                             const parsedValue = parseFloat(el.value);
                             item ? (item[field] = parsedValue) : state.scenarios[sidx].sections[sec][field] = parsedValue;
@@ -17819,7 +17893,7 @@
                                 updateWeightWarning(sidx, sec);
                                 updateWeightInputsDisplay(sidx, sec, { skipElement: isInputEvent ? el : null });
                             }
-                        } else if (['pattern', 'content_type', 'selected', 'v_name', 'v_path', 'v_count', 'v_metric', 'r2r_mode', 'r2s_mode'].includes(field)) {
+                        } else if (['pattern', 'content_type', 'selected', 'v_name', 'v_path', 'v_count', 'v_metric', 'r2r_mode', 'r2s_mode', 'pivot_provider', 'pivot_node', 'pivot_role', 'target_node', 'target_role', 'target_ports', 'target_protocols', 'target_exposure', 'source_scope', 'requires', 'produces'].includes(field)) {
                             const prev = item[field];
                             if (field === 'v_count') {
                                 let n = clampNodeCountValue(el.value);

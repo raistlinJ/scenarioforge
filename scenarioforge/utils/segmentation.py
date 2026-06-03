@@ -204,6 +204,219 @@ def _choose_service_name(items: List[SegmentationInfo]) -> str:
     return weighted[-1][0]
 
 
+def _selector_matches_ip(selector: str, ip: str) -> bool:
+    if not selector:
+        return True
+    try:
+        if "/" in selector:
+            return ipaddress.ip_address(ip) in ipaddress.ip_network(selector, strict=False)
+        return selector == ip
+    except Exception:
+        return False
+
+
+def _build_lan_subnets(hosts: List[NodeInfo]) -> List[ipaddress._BaseNetwork]:
+    lan_subnets: List[ipaddress._BaseNetwork] = []
+    seen_cidrs: Set[str] = set()
+    for host in hosts or []:
+        if not host.ip4:
+            continue
+        raw = host.ip4 if "/" in host.ip4 else f"{host.ip4}/24"
+        try:
+            net = ipaddress.ip_network(raw, strict=False)
+        except Exception:
+            continue
+        cidr = str(net)
+        if cidr in seen_cidrs:
+            continue
+        seen_cidrs.add(cidr)
+        lan_subnets.append(net)
+    return lan_subnets
+
+
+def _same_lan(a: str, b: str, lan_subnets: List[ipaddress._BaseNetwork]) -> bool:
+    try:
+        ip_a = ipaddress.ip_address(a)
+        ip_b = ipaddress.ip_address(b)
+    except Exception:
+        return False
+    for net in lan_subnets:
+        if ip_a in net and ip_b in net:
+            return True
+    return False
+
+
+def _allow_rule_covers_flow(rule: dict, chain: str, proto: str, src_ip: str, dst_ip: str, dst_port: int) -> bool:
+    if (rule.get("type") or "").lower() != "allow":
+        return False
+    if str(rule.get("chain") or "").upper() != chain.upper():
+        return False
+    if str(rule.get("proto") or "").lower() != proto.lower():
+        return False
+    try:
+        rule_port = int(rule.get("port"))
+    except Exception:
+        return False
+    if rule_port != int(dst_port):
+        return False
+    return _selector_matches_ip(str(rule.get("src") or ""), src_ip) and _selector_matches_ip(str(rule.get("dst") or ""), dst_ip)
+
+
+def _flow_allowed_by_summary(
+    existing_rules: List[dict],
+    hosts: List[NodeInfo],
+    src_ip: str,
+    dst_ip: str,
+    proto: str,
+    dst_port: int,
+    recv_node_id: Optional[int],
+) -> bool:
+    if not src_ip or not dst_ip or proto.lower() not in ("tcp", "udp"):
+        return False
+
+    lan_subnets = _build_lan_subnets(hosts)
+    flow_crosses_router = not _same_lan(src_ip, dst_ip, lan_subnets)
+    requires_input_allow = False
+    required_forward_nodes: Set[int] = set()
+
+    for rr in existing_rules or []:
+        rule = rr.get("rule") or {}
+        rule_type = (rule.get("type") or "").lower()
+        try:
+            node_id = int(rr.get("node_id")) if rr.get("node_id") is not None else None
+        except Exception:
+            node_id = None
+        chain = str(rule.get("chain") or ("FORWARD" if rule_type == "nat" else "")).upper()
+
+        if recv_node_id is not None and node_id == int(recv_node_id) and rule.get("default_deny") and chain == "INPUT":
+            requires_input_allow = True
+
+        if flow_crosses_router and rule.get("default_deny") and chain == "FORWARD" and node_id is not None:
+            required_forward_nodes.add(node_id)
+
+        if rule_type == "subnet_block":
+            src_sel = str(rule.get("src") or "")
+            dst_sel = str(rule.get("dst") or "")
+            if _selector_matches_ip(src_sel, src_ip) and _selector_matches_ip(dst_sel, dst_ip):
+                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
+                    requires_input_allow = True
+                elif chain == "FORWARD" and node_id is not None:
+                    required_forward_nodes.add(node_id)
+        elif rule_type == "host_block":
+            if str(rule.get("src") or "") == src_ip and str(rule.get("dst") or "") == dst_ip:
+                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
+                    requires_input_allow = True
+                elif chain == "FORWARD" and node_id is not None:
+                    required_forward_nodes.add(node_id)
+        elif rule_type == "protect_internal":
+            internal = str(rule.get("subnet") or "")
+            if internal and (not _selector_matches_ip(internal, src_ip)) and _selector_matches_ip(internal, dst_ip):
+                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
+                    requires_input_allow = True
+                elif chain == "FORWARD" and node_id is not None:
+                    required_forward_nodes.add(node_id)
+
+    if requires_input_allow:
+        input_allowed = any(
+            int(rr.get("node_id")) == int(recv_node_id) and _allow_rule_covers_flow(rr.get("rule") or {}, "INPUT", proto, src_ip, dst_ip, int(dst_port))
+            for rr in (existing_rules or [])
+            if rr.get("node_id") is not None
+        )
+        if not input_allowed:
+            return False
+
+    if required_forward_nodes:
+        for node_id in required_forward_nodes:
+            forward_allowed = any(
+                int(rr.get("node_id")) == node_id and _allow_rule_covers_flow(rr.get("rule") or {}, "FORWARD", proto, src_ip, dst_ip, int(dst_port))
+                for rr in (existing_rules or [])
+                if rr.get("node_id") is not None
+            )
+            if not forward_allowed:
+                return False
+
+    return True
+
+
+def _next_segmentation_script_path(
+    out_dir: str,
+    node_id: int,
+    kind: str,
+    counters: Dict[Tuple[int, str], int],
+) -> str:
+    key = (int(node_id), str(kind))
+    next_count = counters.get(key)
+    if next_count is None:
+        prefix = f"seg_{kind}_{int(node_id)}_"
+        max_existing = 0
+        try:
+            for name in os.listdir(out_dir):
+                if not name.startswith(prefix) or not name.endswith(".py"):
+                    continue
+                suffix = name[len(prefix):-3]
+                try:
+                    max_existing = max(max_existing, int(suffix))
+                except Exception:
+                    continue
+        except Exception:
+            max_existing = 0
+        next_count = max_existing + 1
+    counters[key] = next_count + 1
+    return os.path.join(out_dir, f"seg_{kind}_{int(node_id)}_{next_count}.py")
+
+
+def _write_idempotent_iptables_script(script_path: str, commands: List[str], label: str) -> None:
+    py_lines = [
+        "#!/usr/bin/env python3",
+        "import subprocess, shlex",
+        "def build_check(cmd: str) -> str:",
+        "    tokens = shlex.split(cmd)",
+        "    out = []",
+        "    i = 0",
+        "    while i < len(tokens):",
+        "        t = tokens[i]",
+        "        if t == 'iptables':",
+        "            out.append(t)",
+        "        elif t == '-A' or t == '-I':",
+        "            out.append('-C')",
+        "            if i + 1 < len(tokens):",
+        "                out.append(tokens[i+1])",
+        "                i += 1",
+        "                if t == '-I' and i + 1 < len(tokens) and tokens[i+1].isdigit():",
+        "                    i += 1",
+        "        else:",
+        "            out.append(t)",
+        "        i += 1",
+        "    return ' '.join(out)",
+        "rules = [",
+    ]
+    for cmd in commands:
+        py_lines.append(f"    {cmd!r},")
+    py_lines += [
+        "]",
+        "applied = 0",
+        "for cmd in rules:",
+        "    check_cmd = build_check(cmd)",
+        "    try:",
+        "        subprocess.check_call(shlex.split(check_cmd))",
+        "        continue",
+        "    except Exception:",
+        "        pass",
+        "    try:",
+        "        subprocess.check_call(shlex.split(cmd))",
+        "        applied += 1",
+        "    except Exception:",
+        "        pass",
+        f"print('[{label}] applied', applied, 'new rules (idempotent)')",
+    ]
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(py_lines) + "\n")
+        os.chmod(script_path, 0o755)
+    except Exception:
+        pass
+
+
 def plan_and_apply_segmentation(
     session: object,
     routers: List[NodeInfo],
@@ -1189,90 +1402,6 @@ def write_allow_rules_for_flows(
             seen_allow.add((nid, chain, proto, srcv, dstv, portv))
             coverage_index[(nid, chain, proto, portv)].append((srcv, dstv))
 
-    def cidr_contains(cidr: str, ip: str) -> bool:
-        try:
-            net = ipaddress.ip_network(cidr, strict=False)
-            addr = ipaddress.ip_address(ip)
-            return addr in net
-        except Exception:
-            return False
-
-    # Determine if a flow is blocked by any existing DROP-style rule we generate
-    # Detect default-deny on FORWARD (from NAT or firewall setup) and on host INPUT from existing summary
-    default_deny_forward = False
-    default_deny_input_nodes: set[int] = set()
-    for rr in existing_rules:
-        r = rr.get("rule", {}) or {}
-        try:
-            if (r.get("type") or "").lower() == "nat" and r.get("default_deny"):
-                default_deny_forward = True
-            # firewall entries annotated with default_deny and chain
-            if (r.get("default_deny") and str(r.get("chain")).upper() == "INPUT"):
-                nid = int(rr.get("node_id")) if rr.get("node_id") is not None else None
-                if nid is not None:
-                    default_deny_input_nodes.add(nid)
-        except Exception:
-            pass
-
-    # Build actual LAN subnets from host addresses (mask aware). Fallback grouping by /24 if mask missing.
-    lan_subnets: List[ipaddress._BaseNetwork] = []
-    seen_cidrs: set[str] = set()
-    for h in hosts:
-        if not h.ip4:
-            continue
-        raw = h.ip4
-        try:
-            if "/" not in raw:
-                raw = raw + "/24"
-            net = ipaddress.ip_network(raw, strict=False)
-            cidr = str(net)
-            if cidr not in seen_cidrs:
-                seen_cidrs.add(cidr)
-                lan_subnets.append(net)
-        except Exception:
-            continue
-
-    def same_lan(a: str, b: str) -> bool:
-        try:
-            ip_a = ipaddress.ip_address(a)
-            ip_b = ipaddress.ip_address(b)
-        except Exception:
-            return False
-        for n in lan_subnets:
-            if ip_a in n and ip_b in n:
-                return True
-        return False
-
-    def is_flow_blocked(src_ip: str, dst_ip: str, recv_node_id: Optional[int]) -> bool:
-        for rr in existing_rules:
-            r = rr.get("rule", {}) or {}
-            rtype = (r.get("type") or "").lower()
-            if rtype == "subnet_block":
-                snet = r.get("src"); dnet = r.get("dst")
-                if snet and dnet and cidr_contains(snet, src_ip) and cidr_contains(dnet, dst_ip):
-                    return True
-            elif rtype == "host_block":
-                rs = r.get("src"); rd = r.get("dst")
-                if rs and rd and rs == src_ip and rd == dst_ip:
-                    return True
-            elif rtype == "protect_internal":
-                internal = r.get("subnet")
-                if internal:
-                    # Router-level protects: block any non-internal -> internal
-                    if (not cidr_contains(internal, src_ip)) and cidr_contains(internal, dst_ip):
-                        return True
-            # Other types (nat/custom/none) do not block
-        # If default-deny on FORWARD is enabled, treat inter-subnet flows as blocked
-        if default_deny_forward and not same_lan(src_ip, dst_ip):
-            return True
-        # If receiver host has INPUT default-deny, inbound flows require explicit allow
-        try:
-            if recv_node_id is not None and int(recv_node_id) in default_deny_input_nodes:
-                return True
-        except Exception:
-            pass
-        return False
-
     # Helpers for selector coverage
     def _to_network(sel: str):
         try:
@@ -1429,7 +1558,7 @@ def write_allow_rules_for_flows(
         dst_sel = subnet_of(dst_host) if use_dst_subnet else dst_ip
 
         # Only add allow rules if currently blocked by segmentation policies
-        if is_flow_blocked(src_ip, dst_ip, int(dst_host.node_id)):
+        if not _flow_allowed_by_summary(existing_rules, hosts, src_ip, dst_ip, proto, int(dst_port), int(dst_host.node_id)):
             # Receiver INPUT allow
             recv_key = (int(dst_host.node_id), 'INPUT', proto, src_sel, dst_sel, int(dst_port))
             covering = _covering_pair(int(dst_host.node_id), 'INPUT', proto, int(dst_port), src_sel, dst_sel)
@@ -1524,6 +1653,358 @@ def write_allow_rules_for_flows(
             json.dump(base, jf, indent=2)
     except Exception:
         pass
+
+    return {"rules": rules_out}
+
+
+def write_allow_rules_for_compose_ports(
+    session: object,
+    routers: List[NodeInfo],
+    hosts: List[NodeInfo],
+    docker_nodes: Dict[str, Dict[str, object]],
+    out_dir: str = "/tmp/segmentation",
+) -> Dict[str, object]:
+    """Allow exposed docker-compose service ports through generated segmentation firewalls.
+
+    This is used for vulnerability catalog nodes and flag-node-generator nodes, whose
+    reachable service ports come from docker-compose `ports`/`expose` metadata rather
+    than ScenarioForge traffic flows.
+    """
+    import json
+
+    os.makedirs(out_dir, exist_ok=True)
+    if not docker_nodes:
+        return {"rules": []}
+
+    summary_path = os.path.join(out_dir, "segmentation_summary.json")
+    existing_rules: List[dict] = []
+    base_summary: Dict[str, object] = {"rules": []}
+    try:
+        if os.path.exists(summary_path):
+            with open(summary_path, "r", encoding="utf-8") as jf:
+                loaded = json.load(jf) or {}
+            if isinstance(loaded, dict):
+                base_summary = loaded
+                existing_rules = loaded.get("rules", []) or []
+    except Exception:
+        existing_rules = []
+        base_summary = {"rules": []}
+    if not existing_rules:
+        logger.info("Segmentation-Compose-Allow: no segmentation summary found; skipping compose port allow rules")
+        return {"rules": []}
+
+    router_ids = {int(r.node_id) for r in (routers or [])}
+    host_ids = {int(h.node_id) for h in (hosts or [])}
+    node_by_name: Dict[str, NodeInfo] = {}
+    for host in hosts or []:
+        node_name = ""
+        try:
+            if session is not None and hasattr(session, "get_node"):
+                node_obj = session.get_node(host.node_id)
+                node_name = str(getattr(node_obj, "name", None) or getattr(node_obj, "label", None) or "").strip()
+        except Exception:
+            node_name = ""
+        if node_name:
+            node_by_name[node_name] = host
+
+    forward_firewall_nodes: Set[int] = set()
+    input_firewall_nodes: Set[int] = set()
+    for rr in existing_rules or []:
+        rule = rr.get("rule") or {}
+        rtype = (rule.get("type") or "").lower()
+        try:
+            node_id = int(rr.get("node_id")) if rr.get("node_id") is not None else None
+        except Exception:
+            node_id = None
+        if node_id is None:
+            continue
+        chain = str(rule.get("chain") or ("FORWARD" if rtype == "nat" else "")).upper()
+        if chain == "FORWARD" and (
+            rule.get("default_deny")
+            or rtype in ("subnet_block", "host_block", "protect_internal")
+        ):
+            forward_firewall_nodes.add(node_id)
+        if chain == "INPUT" and (
+            rule.get("default_deny")
+            or rtype in ("subnet_block", "host_block", "protect_internal")
+        ):
+            input_firewall_nodes.add(node_id)
+
+    if not forward_firewall_nodes and not input_firewall_nodes:
+        logger.info("Segmentation-Compose-Allow: no generated firewall chains require compose port allow rules")
+        return {"rules": []}
+
+    def ip_only(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        return str(value).split("/", 1)[0]
+
+    def _to_network(selector: str):
+        try:
+            if not selector:
+                return None
+            if "/" in selector:
+                return ipaddress.ip_network(selector, strict=False)
+            return ipaddress.ip_network(f"{selector}/32", strict=False)
+        except Exception:
+            return None
+
+    def _selector_covers(super_selector: str, sub_selector: str) -> bool:
+        if not super_selector or not sub_selector:
+            return False
+        if super_selector == sub_selector:
+            return True
+        super_net = _to_network(super_selector)
+        sub_net = _to_network(sub_selector)
+        if super_net is None or sub_net is None:
+            return False
+        return sub_net.network_address in super_net and sub_net.broadcast_address in super_net
+
+    seen_allow: Set[Tuple[int, str, str, str, str, int]] = set()
+    for rr in existing_rules or []:
+        rule = rr.get("rule") or {}
+        if (rule.get("type") or "").lower() != "allow":
+            continue
+        try:
+            node_id = int(rr.get("node_id"))
+            port = int(rule.get("port"))
+        except Exception:
+            continue
+        seen_allow.add((
+            node_id,
+            str(rule.get("chain") or "").upper(),
+            str(rule.get("proto") or "").lower(),
+            str(rule.get("src") or ""),
+            str(rule.get("dst") or ""),
+            port,
+        ))
+
+    def _allow_covered(node_id: int, chain: str, proto: str, src: str, dst: str, port: int) -> bool:
+        for existing_node, existing_chain, existing_proto, existing_src, existing_dst, existing_port in seen_allow:
+            if existing_node != int(node_id) or existing_chain != chain or existing_proto != proto or existing_port != int(port):
+                continue
+            if _selector_covers(existing_src, src) and _selector_covers(existing_dst, dst):
+                return True
+        return False
+
+    rules_out: List[dict] = []
+    counters: Dict[Tuple[int, str], int] = {}
+
+    def _write_script(node_id: int, commands: List[str]) -> str:
+        script_path = _next_segmentation_script_path(out_dir, int(node_id), "compose_allow", counters)
+        _write_idempotent_iptables_script(script_path, commands, "segmentation-compose-allow")
+        try:
+            if int(node_id) in router_ids or int(node_id) in host_ids:
+                ensure_service(session, int(node_id), "Segmentation")
+        except Exception:
+            pass
+        return script_path
+
+    def _compose_ports_for_record(record: Dict[str, object]) -> List[Tuple[str, int, str]]:
+        entries = record.get("compose_ports") if isinstance(record, dict) else None
+        if not (isinstance(entries, list) and entries and isinstance(entries[0], dict)):
+            try:
+                lookup_record = dict(record)
+                compose_path = str(lookup_record.get("compose_path") or "").strip()
+                if compose_path:
+                    lookup_record["Path"] = compose_path
+                    lookup_record["path"] = compose_path
+                entries = extract_compose_ports(lookup_record, out_base="/tmp/vulns")  # type: ignore[arg-type]
+                if entries and isinstance(record, dict):
+                    record["compose_ports"] = list(entries)
+            except Exception:
+                entries = []
+        out: List[Tuple[str, int, str]] = []
+        seen: Set[Tuple[str, int]] = set()
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            proto = str(entry.get("protocol") or "tcp").strip().lower() or "tcp"
+            if proto not in ("tcp", "udp"):
+                proto = "tcp"
+            try:
+                port = int(entry.get("port"))
+            except Exception:
+                continue
+            if port <= 0:
+                continue
+            key = (proto, port)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((proto, port, str(entry.get("service") or "")))
+        return out
+
+    def _split_csv(value: object) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            raw_items = list(value)
+        else:
+            raw_items = str(value).replace(";", ",").split(",")
+        out: List[str] = []
+        for item in raw_items:
+            text = str(item or "").strip()
+            if text:
+                out.append(text)
+        return out
+
+    def _port_filter(record: Dict[str, object]) -> Set[int]:
+        ports: Set[int] = set()
+        for key in ("SegmentationPorts", "segmentation_ports", "AllowedPorts", "allowed_ports", "TargetPorts", "target_ports"):
+            for item in _split_csv(record.get(key)):
+                try:
+                    ports.add(int(item.split("/", 1)[0].strip()))
+                except Exception:
+                    continue
+        return ports
+
+    def _protocol_filter(record: Dict[str, object]) -> Set[str]:
+        protos: Set[str] = set()
+        for key in ("SegmentationProtocols", "segmentation_protocols", "AllowedProtocols", "allowed_protocols", "TargetProtocols", "target_protocols"):
+            for item in _split_csv(record.get(key)):
+                proto = str(item or "").strip().lower()
+                if proto in ("tcp", "udp"):
+                    protos.add(proto)
+        return protos
+
+    def _subnet_of_host(host: NodeInfo) -> str:
+        try:
+            raw = host.ip4 if "/" in host.ip4 else f"{host.ip4}/24"
+            return str(ipaddress.ip_network(raw, strict=False))
+        except Exception:
+            return ""
+
+    def _source_selectors_for_record(record: Dict[str, object], host: NodeInfo) -> List[str]:
+        exposure = str(
+            record.get("SegmentationExposure")
+            or record.get("segmentation_exposure")
+            or record.get("Exposure")
+            or record.get("exposure")
+            or "public"
+        ).strip().lower()
+        exposure = exposure.replace("_", "-")
+        if exposure in ("blocked", "none", "closed", "deny"):
+            return []
+        if exposure in ("public", "external", "open", "internet"):
+            return ["0.0.0.0/0"]
+        if exposure in ("internal", "same-subnet", "lan"):
+            subnet = _subnet_of_host(host)
+            return [subnet] if subnet else []
+        selectors: List[str] = []
+        for key in (
+            "SegmentationSources",
+            "segmentation_sources",
+            "AllowedSources",
+            "allowed_sources",
+            "AllowedPivotSources",
+            "allowed_pivot_sources",
+            "PivotSources",
+            "pivot_sources",
+            "AllowedPivotIps",
+            "allowed_pivot_ips",
+        ):
+            selectors.extend(_split_csv(record.get(key)))
+        selectors = list(dict.fromkeys(selectors))
+        if exposure in ("pivot-only", "pivot", "pivoted"):
+            return selectors
+        return selectors or ["0.0.0.0/0"]
+
+    for node_name, record in sorted((docker_nodes or {}).items(), key=lambda item: str(item[0])):
+        if not isinstance(record, dict):
+            continue
+        host = node_by_name.get(str(node_name))
+        if host is None:
+            continue
+        dst_ip = ip_only(host.ip4)
+        if not dst_ip:
+            continue
+        ports = _compose_ports_for_record(record)
+        if not ports:
+            continue
+        source_selectors = _source_selectors_for_record(record, host)
+        if not source_selectors:
+            logger.info("Segmentation-Compose-Allow: skipping node=%s because exposure has no allowed sources", node_name)
+            continue
+        port_filter = _port_filter(record)
+        protocol_filter = _protocol_filter(record)
+        dst_sel = dst_ip
+        for proto, port, service_name in ports:
+            if port_filter and int(port) not in port_filter:
+                continue
+            if protocol_filter and proto not in protocol_filter:
+                continue
+            for src_sel in source_selectors:
+                if not src_sel:
+                    continue
+                exposure = str(record.get("SegmentationExposure") or record.get("segmentation_exposure") or "public").strip() or "public"
+                if int(host.node_id) in input_firewall_nodes:
+                    chain = "INPUT"
+                    if not _allow_covered(int(host.node_id), chain, proto, src_sel, dst_sel, port):
+                        cmd = f"iptables -I INPUT 1 -p {proto} -s {src_sel} --dport {port} -j ACCEPT"
+                        script = _write_script(int(host.node_id), [cmd])
+                        rule = {
+                            "type": "allow",
+                            "reason": "compose_port",
+                            "exposure": exposure,
+                            "node_name": str(node_name),
+                            "compose_name": str(record.get("Name") or record.get("name") or ""),
+                            "compose_service": service_name,
+                            "src": src_sel,
+                            "dst": dst_sel,
+                            "proto": proto,
+                            "port": port,
+                            "chain": chain,
+                        }
+                        rules_out.append({"node_id": int(host.node_id), "service": "Segmentation", "rule": rule, "script": script})
+                        seen_allow.add((int(host.node_id), chain, proto, src_sel, dst_sel, int(port)))
+                for router in routers or []:
+                    router_id = int(router.node_id)
+                    if router_id not in forward_firewall_nodes:
+                        continue
+                    chain = "FORWARD"
+                    if _allow_covered(router_id, chain, proto, src_sel, dst_sel, port):
+                        continue
+                    cmd = f"iptables -I FORWARD 1 -p {proto} -s {src_sel} -d {dst_sel} --dport {port} -j ACCEPT"
+                    script = _write_script(router_id, [cmd])
+                    rule = {
+                        "type": "allow",
+                        "reason": "compose_port",
+                        "exposure": exposure,
+                        "node_name": str(node_name),
+                        "compose_name": str(record.get("Name") or record.get("name") or ""),
+                        "compose_service": service_name,
+                        "src": src_sel,
+                        "dst": dst_sel,
+                        "proto": proto,
+                        "port": port,
+                        "chain": chain,
+                    }
+                    rules_out.append({"node_id": router_id, "service": "Segmentation", "rule": rule, "script": script})
+                    seen_allow.add((router_id, chain, proto, src_sel, dst_sel, int(port)))
+
+    try:
+        nodes_set = {rule.get("node_id") for rule in rules_out}
+        logger.info(
+            "Segmentation-Compose-Allow: inserted %d compose port allow rules across %d nodes",
+            len(rules_out),
+            len(nodes_set),
+        )
+    except Exception:
+        pass
+
+    if rules_out:
+        try:
+            base_summary.setdefault("rules", [])
+            current = base_summary.get("rules")
+            if not isinstance(current, list):
+                current = []
+                base_summary["rules"] = current
+            current.extend(rules_out)
+            with open(summary_path, "w", encoding="utf-8") as jf:
+                json.dump(base_summary, jf, indent=2)
+        except Exception:
+            pass
 
     return {"rules": rules_out}
 
@@ -1745,71 +2226,29 @@ def verify_flows_allowed(
             rules = data.get('rules') or []
     except Exception:
         rules = []
-    # Build blocking context
-    default_deny_forward = any((r.get('rule') or {}).get('default_deny') and (r.get('rule') or {}).get('type') == 'nat' for r in rules)
-    default_deny_input_nodes: set[int] = set()
-    subnet_blocks = []  # (src_net,dst_net)
-    host_blocks = []    # (src_ip,dst_ip)
-    protect_internals = []  # subnets
-    for rr in rules:
-        r = rr.get('rule') or {}
-        rtype = (r.get('type') or '').lower()
-        if rtype == 'subnet_block':
-            subnet_blocks.append((r.get('src'), r.get('dst')))
-        elif rtype == 'host_block':
-            host_blocks.append((r.get('src'), r.get('dst')))
-        elif rtype == 'protect_internal':
-            protect_internals.append(r.get('subnet'))
-        elif rtype in ('nat','firewall') and r.get('default_deny') and (r.get('chain') or 'FORWARD').upper() == 'INPUT':
-            try:
-                default_deny_input_nodes.add(int(rr.get('node_id')))
-            except Exception:
-                pass
-        if r.get('default_deny') and (r.get('chain') or '').upper() == 'INPUT':
-            try:
-                default_deny_input_nodes.add(int(rr.get('node_id')))
-            except Exception:
-                pass
     blocked: List[dict] = []
-    def cidr_contains(cidr: str, ip: str) -> bool:
-        try:
-            net = ipaddress.ip_network(cidr, strict=False)
-            return ipaddress.ip_address(ip) in net
-        except Exception:
-            return False
+    synthetic_hosts: List[NodeInfo] = []
+    synthetic_seen: Set[str] = set()
+    next_node_id = 1
     for fl in flows:
-        src = (fl.get('src_ip') or '') or ''  # may not include; use sender host IP if missing (not stored currently)
+        src = str(fl.get('src_ip') or '')
         dst_ip = (fl.get('dst_ip') or '')
         proto = (fl.get('protocol') or '').lower()
         dport = fl.get('dst_port')
         if not dst_ip or not dport:
             continue
-        # Determine if host src ip stored; traffic_summary currently stores only dst_ip, so skip src-level checks needing IP
-        # Evaluate blocking rules that require dst only + default deny heuristics must assume src unknown => treat as potentially external
-        is_blocked = False
-        # subnet blocks
-        for s, d in subnet_blocks:
-            if s and d and src and dst_ip and cidr_contains(s, src) and cidr_contains(d, dst_ip):
-                is_blocked = True; break
-        if not is_blocked:
-            for hs, hd in host_blocks:
-                if hs == src and hd == dst_ip:
-                    is_blocked = True; break
-        if not is_blocked:
-            for internal in protect_internals:
-                if internal and not cidr_contains(internal, src) and cidr_contains(internal, dst_ip):
-                    is_blocked = True; break
-        # Default deny forward if present and either src missing or src/dst not in same LAN (heuristic omitted due to missing src)
-        if not is_blocked and default_deny_forward and src and dst_ip:
-            # Without LAN context here, conservatively treat as allowed if src missing; if present, enforce difference at /24
-            try:
-                net_a = ipaddress.ip_network(f"{src}/24", strict=False)
-                net_b = ipaddress.ip_network(f"{dst_ip}/24", strict=False)
-                if net_a.network_address != net_b.network_address:
-                    is_blocked = True
-            except Exception:
-                pass
-        if is_blocked:
+        for ip in (src, str(dst_ip)):
+            if not ip or ip in synthetic_seen:
+                continue
+            synthetic_seen.add(ip)
+            synthetic_hosts.append(NodeInfo(node_id=next_node_id, ip4=f"{ip}/24", role="Host"))
+            next_node_id += 1
+        recv_node_id = fl.get('dst_id')
+        try:
+            recv_node_id = int(recv_node_id) if recv_node_id is not None else None
+        except Exception:
+            recv_node_id = None
+        if not _flow_allowed_by_summary(rules, synthetic_hosts, src, str(dst_ip), proto, int(dport), recv_node_id):
             blocked.append({"dst_ip": dst_ip, "dst_port": dport, "proto": proto})
     result = {"flows_total": len(flows), "blocked": blocked, "blocked_count": len(blocked)}
     try:

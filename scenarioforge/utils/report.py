@@ -130,6 +130,7 @@ def write_report(
     services_cfg: Optional[List[Dict[str, object]]] = None,
     segmentation_cfg: Optional[Dict[str, object]] = None,
     vulnerabilities_cfg: Optional[Dict[str, object]] = None,
+    pivoting_cfg: Optional[Dict[str, object]] = None,
 ) -> str:
     routers = routers or []
     hosts = hosts or []
@@ -256,6 +257,12 @@ def write_report(
     if allow_verify:
         bc = allow_verify.get('blocked_count') or 0
         lines.append(f"- Flow verification blocked: {bc} (see allow_verification.json)")
+    try:
+        pivot_meta = metadata.get('pivoting') if metadata else None
+        if isinstance(pivot_meta, dict) and pivot_meta.get('rules'):
+            lines.append(f"- Pivot paths: {len(pivot_meta.get('rules') or [])}")
+    except Exception:
+        pass
     try:
         if metadata and metadata.get('segmentation_preview_rules') and not seg_rules:
             lines.append(f"- Segmentation (preview injected): {len(metadata.get('segmentation_preview_rules') or [])}")
@@ -477,6 +484,37 @@ def write_report(
             vuln_assigned = None
     if vuln_assigned is not None:
         lines.append(f"- Vulnerabilities assigned: {vuln_assigned}")
+
+    try:
+        pivot_meta = metadata.get('pivoting') if metadata else None
+        pivot_rules = pivot_meta.get('rules') if isinstance(pivot_meta, dict) else None
+        pivot_warnings = pivot_meta.get('warnings') if isinstance(pivot_meta, dict) else None
+        if pivot_rules or (pivoting_cfg and pivoting_cfg.get('items')):
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append("## Pivot Paths")
+            if pivot_rules:
+                lines.append("| Pivot | Target | Provider | Exposure | Sources | Ports |")
+                lines.append("| --- | --- | --- | --- | --- | --- |")
+                for entry in pivot_rules:
+                    if not isinstance(entry, dict):
+                        continue
+                    pivots = ", ".join(str(v) for v in (entry.get('pivot_nodes') or [])) or "-"
+                    target = str(entry.get('target_node') or "-")
+                    if entry.get('target_ip'):
+                        target = f"{target} ({entry.get('target_ip')})"
+                    sources = ", ".join(str(v) for v in (entry.get('sources') or [])) or "-"
+                    ports = ", ".join(str(v) for v in (entry.get('target_ports') or [])) or "compose exposed"
+                    provider = str(entry.get('access_provider') or entry.get('provider') or '-')
+                    lines.append(f"| {pivots} | {target} | {provider} | {entry.get('exposure') or '-'} | {sources} | {ports} |")
+            else:
+                lines.append("- Configured pivot declarations did not match runtime docker targets.")
+            if pivot_warnings:
+                for warning in pivot_warnings[:10]:
+                    lines.append(f"- Warning: {warning}")
+            lines.append("")
+    except Exception:
+        pass
 
     # Flag/artifact details (CTF)
     try:
@@ -742,7 +780,7 @@ def write_report(
             lines.append("")
 
     # Optional Details section (extra info grouped at end)
-    if any([metadata, routing_cfg, traffic_cfg, services_cfg, segmentation_cfg, vulnerabilities_cfg]):
+    if any([metadata, routing_cfg, traffic_cfg, services_cfg, segmentation_cfg, vulnerabilities_cfg, pivoting_cfg]):
         lines.append("## Details")
         # Connectivity Matrix (router adjacency + R2S counts) if metadata has degrees / edges
         try:
@@ -847,6 +885,19 @@ def write_report(
                 for it in items:
                     lines.append(f"| {it.get('name','')} | {it.get('factor','')} |")
             lines.append("")
+        if pivoting_cfg:
+            den = pivoting_cfg.get("density", "")
+            items = pivoting_cfg.get("items", []) or []
+            lines.append("### Pivoting config")
+            lines.append(f"- Density: {den}")
+            if items:
+                lines.append("| Pivot | Target | Provider | Exposure | Ports |")
+                lines.append("| --- | --- | --- | --- | --- |")
+                for it in items:
+                    pivot = it.get('pivot_node') or it.get('pivot_role') or ''
+                    target = it.get('target_node') or it.get('target_role') or ''
+                    lines.append(f"| {pivot} | {target} | {it.get('access_provider','')} | {it.get('exposure','')} | {it.get('target_ports','')} |")
+            lines.append("")
         if vulnerabilities_cfg:
             den = vulnerabilities_cfg.get("density", "")
             items = vulnerabilities_cfg.get("items", []) or []
@@ -906,6 +957,7 @@ def write_report(
         "services_cfg": _json_safe(services_cfg) if services_cfg is not None else None,
         "segmentation_cfg": _json_safe(segmentation_cfg) if segmentation_cfg is not None else None,
         "vulnerabilities_cfg": _json_safe(vulnerabilities_cfg) if vulnerabilities_cfg is not None else None,
+        "pivoting_cfg": _json_safe(pivoting_cfg) if pivoting_cfg is not None else None,
     }
     if flows:
         summary_payload["traffic"]["flows"] = flows
