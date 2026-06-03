@@ -62,6 +62,8 @@ def test_segmentation_pivot_provider_options_are_curated() -> None:
         "['flag-node-generator', 'Flag-Node-Generator']",
         "['ssh-fallback', 'Docker SSH']",
         "['auto', 'none', 'manual'].includes(currentPivotProvider)",
+        "const providerOptions = ['vulnerability', 'flag-node-generator', 'ssh-fallback'];",
+        "field: 'pivot_provider'",
     ]
     removed_snippets = [
         "['none', 'Manual']",

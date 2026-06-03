@@ -27288,6 +27288,7 @@ def _default_scenario_payload(name: str) -> Dict[str, Any]:
 
 
 _ROUTING_RANDOM_PROTOCOL_DEFAULTS = ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3']
+_PIVOT_PROVIDER_OPTIONS: List[str] = ['vulnerability', 'flag-node-generator', 'ssh-fallback']
 _RANDOM_OPTIONS_BY_SECTION: Dict[str, List[str]] = {
     'Node Information': ['Server', 'Workstation', 'PC', 'Docker'],
     'Routing': ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3'],
@@ -28186,6 +28187,44 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
 
                     routing_section['items'] = next_items
                     sections['Routing'] = routing_section
+                    next_scenario['sections'] = sections
+
+                segmentation_section = sections.get('Segmentation') if isinstance(sections.get('Segmentation'), dict) else None
+                segmentation_items = segmentation_section.get('items') if isinstance(segmentation_section, dict) and isinstance(segmentation_section.get('items'), list) else None
+                if isinstance(segmentation_items, list):
+                    next_items = []
+                    for index, raw_item in enumerate(segmentation_items):
+                        if not isinstance(raw_item, dict):
+                            next_items.append(raw_item)
+                            continue
+
+                        item = copy.deepcopy(raw_item)
+                        if _coerce_bool(item.get('pivot_enabled')):
+                            provider = str(item.get('pivot_provider') or item.get('access_provider') or 'random').strip().lower().replace('_', '-')
+                            provider_aliases = {
+                                'auto': 'random',
+                                'none': 'random',
+                                'manual': 'random',
+                                'ssh': 'ssh-fallback',
+                                'ssh-server': 'ssh-fallback',
+                                'fallback-ssh': 'ssh-fallback',
+                                'flag-node': 'flag-node-generator',
+                                'flagnode': 'flag-node-generator',
+                                'flag-nodegen': 'flag-node-generator',
+                                'vuln': 'vulnerability',
+                            }
+                            provider = provider_aliases.get(provider, provider or 'random')
+                            if provider == 'random':
+                                provider = str(_deterministic_pick(
+                                    _PIVOT_PROVIDER_OPTIONS,
+                                    f'{seed_int}|{scenario_name}|Segmentation|{index}|pivot_provider{_random_reroll_salt(item, "pivot_provider")}|save-xml',
+                                ) or 'ssh-fallback')
+                            if provider in _PIVOT_PROVIDER_OPTIONS:
+                                item['pivot_provider'] = provider
+                        next_items.append(item)
+
+                    segmentation_section['items'] = next_items
+                    sections['Segmentation'] = segmentation_section
                     next_scenario['sections'] = sections
 
             concretized.append(next_scenario)
