@@ -11400,6 +11400,14 @@ def _canonicalize_flow_state_paths(flow_state: dict[str, Any], *, xml_path: str 
         out['allow_node_duplicates'] = bool(_coerce_bool(out.get('allow_node_duplicates') or out.get('allow_duplicates')))
     except Exception:
         out['allow_node_duplicates'] = False
+    try:
+        out['include_all_topology_vulns'] = bool(_coerce_bool(out.get('include_all_topology_vulns')))
+    except Exception:
+        out['include_all_topology_vulns'] = False
+    try:
+        out['include_all_topology_pivots'] = bool(_coerce_bool(out.get('include_all_topology_pivots')))
+    except Exception:
+        out['include_all_topology_pivots'] = False
 
     # Keep FlowState chain fields consistent for readers that rely on chain_ids.
     try:
@@ -19600,6 +19608,146 @@ def _flow_pivot_rules_for_chain(
                     exposure=item.get('exposure') or item.get('target_exposure') or 'pivot-only',
                 )
     return rules
+
+
+def _flow_expand_chain_for_topology_requirements(
+    nodes: list[dict[str, Any]],
+    chain_nodes: list[dict[str, Any]],
+    preview: Any | None = None,
+    *,
+    include_all_topology_vulns: bool = False,
+    include_all_topology_pivots: bool = False,
+    pivot_context: Any | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Append topology-required Flow nodes without truncating the user's chain.
+
+    The caller still performs normal assignment and dependency ordering after this,
+    so this helper only guarantees that requested topology nodes are present once.
+    """
+    requested_vulns = bool(include_all_topology_vulns)
+    requested_pivots = bool(include_all_topology_pivots)
+    info: dict[str, Any] = {
+        'requested': {
+            'include_all_topology_vulns': requested_vulns,
+            'include_all_topology_pivots': requested_pivots,
+        },
+        'added_node_ids': [],
+        'added_vuln_node_ids': [],
+        'added_pivot_node_ids': [],
+        'effective_length': len(chain_nodes or []),
+    }
+    if not requested_vulns and not requested_pivots:
+        return list(chain_nodes or []), info
+
+    all_nodes = [node for node in (nodes or []) if isinstance(node, dict)]
+    if not all_nodes:
+        try:
+            built_nodes, _links, _adj = _build_topology_graph_from_preview_plan(preview) if isinstance(preview, dict) else ([], [], {})
+            all_nodes = [node for node in (built_nodes or []) if isinstance(node, dict)]
+        except Exception:
+            all_nodes = []
+
+    id_to_node: dict[str, dict[str, Any]] = {}
+    key_to_id: dict[str, str] = {}
+
+    def _index_node(node: dict[str, Any]) -> None:
+        node_id = _flow_pivot_node_id(node)
+        if not node_id:
+            return
+        if node_id not in id_to_node:
+            id_to_node[node_id] = node
+        for raw in (
+            node_id,
+            node.get('id'),
+            node.get('node_id'),
+            node.get('name'),
+            node.get('label'),
+            node.get('hostname'),
+        ):
+            key = str(raw or '').strip().lower()
+            if key and key not in key_to_id:
+                key_to_id[key] = node_id
+
+    for node in all_nodes:
+        _index_node(node)
+    for node in (chain_nodes or []):
+        if isinstance(node, dict):
+            _index_node(node)
+
+    expanded = list(chain_nodes or [])
+    present_ids = {
+        _flow_pivot_node_id(node)
+        for node in expanded
+        if isinstance(node, dict) and _flow_pivot_node_id(node)
+    }
+    added_ids: list[str] = []
+    added_vuln_ids: list[str] = []
+    added_pivot_ids: list[str] = []
+
+    def _resolve_id(raw: Any) -> str:
+        text = str(raw or '').strip()
+        if not text:
+            return ''
+        if text in id_to_node:
+            return text
+        return key_to_id.get(text.lower(), '')
+
+    def _append_node(node_id: str, bucket: list[str]) -> None:
+        resolved_id = _resolve_id(node_id)
+        if not resolved_id or resolved_id in present_ids:
+            return
+        node = id_to_node.get(resolved_id)
+        if not isinstance(node, dict):
+            return
+        expanded.append(node)
+        present_ids.add(resolved_id)
+        added_ids.append(resolved_id)
+        if resolved_id not in bucket:
+            bucket.append(resolved_id)
+
+    if requested_vulns:
+        for node in all_nodes:
+            node_id = _flow_pivot_node_id(node)
+            if node_id and _flow_node_is_vuln(node):
+                _append_node(node_id, added_vuln_ids)
+
+    if requested_pivots:
+        try:
+            pivot_rules = _flow_pivot_rules_for_chain(preview, expanded, pivot_context=pivot_context)
+        except Exception:
+            pivot_rules = []
+        for rule in pivot_rules or []:
+            if not isinstance(rule, dict):
+                continue
+            _append_node(str(rule.get('source_id') or ''), added_pivot_ids)
+            _append_node(str(rule.get('target_id') or ''), added_pivot_ids)
+        for rule in pivot_rules or []:
+            if not isinstance(rule, dict):
+                continue
+            source_id = _resolve_id(rule.get('source_id'))
+            target_id = _resolve_id(rule.get('target_id'))
+            if not source_id or not target_id or source_id == target_id:
+                continue
+            try:
+                source_index = next(
+                    idx for idx, node in enumerate(expanded)
+                    if isinstance(node, dict) and _flow_pivot_node_id(node) == source_id
+                )
+                target_index = next(
+                    idx for idx, node in enumerate(expanded)
+                    if isinstance(node, dict) and _flow_pivot_node_id(node) == target_id
+                )
+            except StopIteration:
+                continue
+            if source_index > target_index:
+                source_node = expanded.pop(source_index)
+                expanded.insert(target_index, source_node)
+
+    info['added_node_ids'] = added_ids
+    info['added_vuln_node_ids'] = added_vuln_ids
+    info['added_pivot_node_ids'] = added_pivot_ids
+    info['effective_length'] = len(expanded)
+    return expanded, info
 
 
 def _flow_add_assignment_hint(assignment: dict[str, Any], hint_text: str) -> None:

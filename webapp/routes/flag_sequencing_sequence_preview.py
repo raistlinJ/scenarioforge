@@ -21,6 +21,8 @@ def register(app, *, backend_module: Any) -> None:
         scenario_norm = backend._normalize_scenario_label(scenario_label)
         preset = str(payload_in.get('preset') or '').strip()
         allow_node_duplicates = str(payload_in.get('allow_node_duplicates') or payload_in.get('allow_duplicates') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_vulns = str(payload_in.get('include_all_topology_vulns') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_pivots = str(payload_in.get('include_all_topology_pivots') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         length = 5
         try:
             length = int(payload_in.get('length') or 5)
@@ -116,6 +118,16 @@ def register(app, *, backend_module: Any) -> None:
             )
 
         warning: str | None = None
+        topology_inclusion_info: dict[str, Any] = {
+            'requested': {
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+            },
+            'added_node_ids': [],
+            'added_vuln_node_ids': [],
+            'added_pivot_node_ids': [],
+            'effective_length': len(chain_nodes or []),
+        }
 
         if (not preset_steps) and (not allow_node_duplicates) and len(chain_nodes) < length:
             if best_effort:
@@ -128,6 +140,19 @@ def register(app, *, backend_module: Any) -> None:
                     requested_length=requested_length,
                     stats=stats,
                 )
+
+        if (not preset_steps) and (include_all_topology_vulns or include_all_topology_pivots):
+            chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
+                nodes,
+                chain_nodes,
+                preview,
+                include_all_topology_vulns=include_all_topology_vulns,
+                include_all_topology_pivots=include_all_topology_pivots,
+                pivot_context=payload,
+            )
+            length = max(length, len(chain_nodes or []))
+        elif preset_steps and (include_all_topology_vulns or include_all_topology_pivots):
+            topology_inclusion_info['ignored'] = 'preset'
 
         host_by_id: dict[str, dict[str, Any]] = {}
         try:
@@ -341,6 +366,9 @@ def register(app, *, backend_module: Any) -> None:
                 'requested_length': requested_length,
                 'dependency_level': dependency_level,
                 'allow_node_duplicates': bool(allow_node_duplicates),
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+                'topology_inclusion': dict(topology_inclusion_info or {}),
                 'chain': list(chain_payload or []),
                 'flag_assignments': backend._flow_strip_runtime_sensitive_fields(flag_assignments),
                 'flags_enabled': bool(flow_valid),
@@ -435,6 +463,9 @@ def register(app, *, backend_module: Any) -> None:
                 'flow_errors': list(flow_errors or []),
                 'flow_seed': response_flow_seed,
                 'dependency_level': dependency_level,
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+                'topology_inclusion': dict(topology_inclusion_info or {}),
                 'preview_plan_path': out_path,
                 'base_preview_plan_path': preview_plan_path,
                 **({'warning': warning} if warning else {}),

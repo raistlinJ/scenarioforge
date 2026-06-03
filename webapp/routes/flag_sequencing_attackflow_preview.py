@@ -42,6 +42,10 @@ def register(app, *, backend_module: Any) -> None:
         prefer_flow = str(request.args.get('prefer_flow') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         best_effort_query = str(request.args.get('best_effort') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         allow_node_duplicates = str(request.args.get('allow_node_duplicates') or request.args.get('allow_duplicates') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_vulns_arg = request.args.get('include_all_topology_vulns')
+        include_all_topology_pivots_arg = request.args.get('include_all_topology_pivots')
+        include_all_topology_vulns = str(include_all_topology_vulns_arg or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_pivots = str(include_all_topology_pivots_arg or '').strip().lower() in ('1', 'true', 'yes', 'y')
         debug_mode = str(request.args.get('debug') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         dependency_level = backend._flow_normalize_dependency_level(request.args.get('dependency_level'))
         ignore_saved_flow = bool(force_preview)
@@ -196,6 +200,19 @@ def register(app, *, backend_module: Any) -> None:
 
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
+
+        try:
+            metadata_for_options = payload.get('metadata') if isinstance(payload, dict) else None
+            flow_for_options = metadata_for_options.get('flow') if isinstance(metadata_for_options, dict) and isinstance(metadata_for_options.get('flow'), dict) else None
+            if isinstance(flow_for_options, dict):
+                if include_all_topology_vulns_arg is None:
+                    include_all_topology_vulns = bool(flow_for_options.get('include_all_topology_vulns'))
+                if include_all_topology_pivots_arg is None:
+                    include_all_topology_pivots = bool(flow_for_options.get('include_all_topology_pivots'))
+        except Exception:
+            pass
+        if include_all_topology_vulns or include_all_topology_pivots:
+            ignore_saved_flow = True
 
         runtime_ip_by_id: dict[str, str] = {}
         try:
@@ -396,6 +413,29 @@ def register(app, *, backend_module: Any) -> None:
             if available > 0 and available < length:
                 warning = f'Only {available} eligible nodes found; using chain length {available} instead of requested {length}.'
                 length = available
+
+        topology_inclusion_info: dict[str, Any] = {
+            'requested': {
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+            },
+            'added_node_ids': [],
+            'added_vuln_node_ids': [],
+            'added_pivot_node_ids': [],
+            'effective_length': len(chain_nodes or []),
+        }
+        if (not preset_steps) and (include_all_topology_vulns or include_all_topology_pivots):
+            chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
+                nodes,
+                chain_nodes,
+                preview,
+                include_all_topology_vulns=include_all_topology_vulns,
+                include_all_topology_pivots=include_all_topology_pivots,
+                pivot_context=payload,
+            )
+            length = max(length, len(chain_nodes or []))
+        elif preset_steps and (include_all_topology_vulns or include_all_topology_pivots):
+            topology_inclusion_info['ignored'] = 'preset'
 
         try:
             host_by_id: dict[str, dict[str, Any]] = {}
@@ -1142,6 +1182,9 @@ def register(app, *, backend_module: Any) -> None:
             **({'flow_errors_detail': flow_errors_detail} if flow_errors_detail else {}),
             'flags_enabled': bool(flags_enabled),
             'allow_node_duplicates': bool(allow_node_duplicates),
+            'include_all_topology_vulns': bool(include_all_topology_vulns),
+            'include_all_topology_pivots': bool(include_all_topology_pivots),
+            'topology_inclusion': dict(topology_inclusion_info or {}),
             'dependency_level': dependency_level,
             'participant_network_setup': participant_network_setup,
             'preview_summary': preview_summary,

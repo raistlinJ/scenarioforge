@@ -51,6 +51,24 @@ def test_report_guides_include_chain_io_and_pivot_sections() -> None:
     assert not missing, "Missing pivot/chain IO guide rendering snippets: " + "; ".join(missing)
 
 
+def test_flow_chain_editor_surfaces_pivot_paths() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function renderPivotPathSummary(assignment)",
+        "addRow('Pivot Path', pivotPathSummary);",
+        "const pivotEntries = (curA && Array.isArray(curA.pivot))",
+        "if (pivotEntries !== undefined && pivotEntries.length) out.pivot = pivotEntries;",
+        "if (savedA.pivot && !Array.isArray(curA.pivot)) curA.pivot = savedA.pivot;",
+        "if (savedA.pivot_inputs && !Array.isArray(curA.pivot_inputs)) curA.pivot_inputs = savedA.pivot_inputs;",
+        "if (savedA.pivot_outputs && !Array.isArray(curA.pivot_outputs)) curA.pivot_outputs = savedA.pivot_outputs;",
+        "if (savedA.pivot_hints && !Array.isArray(curA.pivot_hints)) curA.pivot_hints = savedA.pivot_hints;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow chain-card pivot rendering/persistence snippets: " + "; ".join(missing)
+
+
 def test_segmentation_pivot_provider_options_are_curated() -> None:
     text = FLOW_TEMPLATE_PATH.parent.joinpath("index.html").read_text(encoding="utf-8", errors="ignore")
 
@@ -64,10 +82,12 @@ def test_segmentation_pivot_provider_options_are_curated() -> None:
         "['auto', 'none', 'manual'].includes(currentPivotProvider)",
         "const providerOptions = ['vulnerability', 'flag-node-generator', 'ssh-fallback'];",
         "field: 'pivot_provider'",
+        '<label class="form-check-label small">Pivot-Accessible</label>',
     ]
     removed_snippets = [
         "['none', 'Manual']",
         "['flag-node-generator', 'flag-node-generator']",
+        '<label class="form-check-label small">Pivot</label>',
     ]
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     present = [snippet for snippet in removed_snippets if snippet in text]
@@ -379,6 +399,16 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
         "function normalizeDependencyLevel(value) {",
         "dependency_level: getFlowDependencyLevel(),",
         "dependency_level: dependencyLevel,",
+        'id="flowIncludeAllTopologyVulns"',
+        'Include All Topology Vulns',
+        'id="flowIncludeAllTopologyPivots"',
+        'Include all Topology Pivots',
+        'expands the chain beyond Number of Challenges',
+        'syncTopologyInclusionOptionsFromUi()',
+        "include_all_topology_vulns: !!includeAllTopologyVulns,",
+        "include_all_topology_pivots: !!includeAllTopologyPivots,",
+        "params.set('include_all_topology_vulns', '1')",
+        "params.set('include_all_topology_pivots', '1')",
         "dependencyLevelEl.addEventListener('input'",
         "setFlowDependencyLevel(dependencyLevelEl.value",
     ]

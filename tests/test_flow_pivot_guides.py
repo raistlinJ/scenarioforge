@@ -178,3 +178,56 @@ def test_flow_pivot_context_infers_simplified_planner_shortcut():
     assert "Pivot(jump-web)" in enriched[0].get("outputs", [])
     assert "Pivot(jump-web)" in enriched[1].get("inputs", [])
     assert any(entry.get("role") == "target" for entry in enriched[1].get("pivot", []))
+
+
+def test_flow_topology_inclusion_adds_all_vuln_nodes_past_initial_length():
+    nodes = [
+        {"id": "worker", "name": "worker", "type": "docker", "is_vuln": False},
+        {"id": "web", "name": "web", "type": "docker", "is_vuln": True, "vulnerabilities": ["rce"]},
+        {"id": "api", "name": "api", "type": "docker", "vulnerabilities": ["token-leak"]},
+    ]
+
+    expanded, info = app_backend._flow_expand_chain_for_topology_requirements(
+        nodes,
+        [nodes[0]],
+        {"hosts": []},
+        include_all_topology_vulns=True,
+    )
+
+    assert [node.get("id") for node in expanded] == ["worker", "web", "api"]
+    assert info["effective_length"] == 3
+    assert info["added_vuln_node_ids"] == ["web", "api"]
+
+
+def test_flow_topology_inclusion_adds_pivot_source_before_target():
+    preview = _preview()
+    nodes = [
+        {"id": "jump", "name": "jump-web", "type": "docker", "is_vuln": True, "ip4": "10.0.0.10"},
+        {"id": "db", "name": "internal-db", "type": "docker", "is_vuln": False, "ip4": "10.0.1.20"},
+    ]
+    pivot_context = {
+        "metadata": {
+            "pivoting": {
+                "rules": [
+                    {
+                        "name": "RCE Pivot",
+                        "pivot_nodes": ["jump-web"],
+                        "target_node": "internal-db",
+                        "access_provider": "vulnerability",
+                    }
+                ]
+            }
+        }
+    }
+
+    expanded, info = app_backend._flow_expand_chain_for_topology_requirements(
+        nodes,
+        [nodes[1]],
+        preview,
+        include_all_topology_pivots=True,
+        pivot_context=pivot_context,
+    )
+
+    assert [node.get("id") for node in expanded] == ["jump", "db"]
+    assert info["effective_length"] == 2
+    assert info["added_pivot_node_ids"] == ["jump"]

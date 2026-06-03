@@ -76,7 +76,7 @@ Scenario XML can include a `Pivoting` section:
 
 At runtime, ScenarioForge resolves `pivot_node`/`pivot_role` and `target_node`/`target_role` against actual CORE host names and roles. Matching docker-compose targets receive `SegmentationExposure=pivot-only`, `SegmentationSources=<pivot IP>`, and optional port/protocol filters before compose port allow rules are written. Existing compose targets remain public unless a pivot declaration narrows them.
 
-The Web UI also supports a simplified shortcut from Segmentation rows. Turn on `Pivot`, then choose a provider (`Random`, `Vulnerability`, `Flag-Node-Generator`, or `Docker SSH`). The planner chooses the pivot source, target docker-compose nodes, target ports, protocols, source scope, and pivot-only exposure from the scenario's nodes and artifacts. When `Random` is selected, save resolves it to one concrete provider. Saved XML stores only the shortcut flag and resolved provider:
+The Web UI also supports a simplified shortcut from Segmentation rows. Turn on `Pivot-Accessible`, then choose a provider (`Random`, `Vulnerability`, `Flag-Node-Generator`, or `Docker SSH`). The planner chooses the pivot source, target docker-compose nodes, target ports, protocols, source scope, and pivot-only exposure from the scenario's nodes and artifacts. When `Random` is selected, save resolves it to one concrete provider. Saved XML stores only the shortcut flag and resolved provider:
 
 ```xml
 <section name="Segmentation" density="1.0">
