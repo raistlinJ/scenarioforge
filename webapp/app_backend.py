@@ -26984,6 +26984,22 @@ def _normalize_scenario_section_semantics(scenario_payload: Any) -> Dict[str, An
         normalized_selected = _normalize_segmentation_item_selection(raw_selected)
         if normalized_selected and normalized_selected != 'CUSTOM':
             raw_item['selected'] = normalized_selected
+        if _coerce_bool(raw_item.get('pivot_enabled')):
+            raw_item['pivot_enabled'] = True
+            provider = str(raw_item.get('pivot_provider') or raw_item.get('access_provider') or 'auto').strip().lower().replace('_', '-')
+            provider_aliases = {
+                'ssh': 'ssh-fallback',
+                'ssh-server': 'ssh-fallback',
+                'fallback-ssh': 'ssh-fallback',
+                'flag-node': 'flag-node-generator',
+                'flag-nodegen': 'flag-node-generator',
+                'vuln': 'vulnerability',
+            }
+            raw_item['pivot_provider'] = provider_aliases.get(provider, provider or 'auto')
+            exposure = str(raw_item.get('target_exposure') or raw_item.get('exposure') or 'pivot-only').strip().lower().replace('_', '-')
+            raw_item['target_exposure'] = exposure or 'pivot-only'
+            source_scope = str(raw_item.get('source_scope') or raw_item.get('pivot_scope') or 'host').strip().lower().replace('_', '-')
+            raw_item['source_scope'] = source_scope or 'host'
         _apply_count_defaults(raw_item)
 
     if not isinstance(node_section, dict):
@@ -31166,6 +31182,29 @@ def _parse_scenario_editor(se):
                         d["v_count"] = 1
             except Exception:
                 pass
+            if name == "Segmentation":
+                pivot_enabled_raw = (item.get("pivot_enabled") or item.get("pivot_required") or item.get("pivot") or "").strip().lower()
+                if pivot_enabled_raw in ("1", "true", "yes", "on", "pivot", "pivot-only", "required"):
+                    d["pivot_enabled"] = True
+                for xml_attr, state_key in (
+                    ("pivot_provider", "pivot_provider"),
+                    ("access_provider", "pivot_provider"),
+                    ("provider", "pivot_provider"),
+                    ("pivot_node", "pivot_node"),
+                    ("pivot_role", "pivot_role"),
+                    ("target_node", "target_node"),
+                    ("target_role", "target_role"),
+                    ("target_ports", "target_ports"),
+                    ("target_protocols", "target_protocols"),
+                    ("target_exposure", "target_exposure"),
+                    ("exposure", "target_exposure"),
+                    ("source_scope", "source_scope"),
+                    ("requires", "requires"),
+                    ("produces", "produces"),
+                ):
+                    val = item.get(xml_attr)
+                    if val is not None and str(val).strip() != "" and state_key not in d:
+                        d[state_key] = str(val).strip()
             entry["items"].append(d)
         scen["sections"][name] = entry
         # Capture scenario-level density_count if present on Scenario element once
@@ -31685,6 +31724,25 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                             it.set('v_name', str(vn))
                         if vp:
                             it.set('v_path', str(vp))
+                if name == 'Segmentation':
+                    if _coerce_bool(item.get('pivot_enabled')):
+                        it.set('pivot_enabled', 'true')
+                        for state_key, xml_attr in (
+                            ('pivot_provider', 'pivot_provider'),
+                            ('pivot_node', 'pivot_node'),
+                            ('pivot_role', 'pivot_role'),
+                            ('target_node', 'target_node'),
+                            ('target_role', 'target_role'),
+                            ('target_ports', 'target_ports'),
+                            ('target_protocols', 'target_protocols'),
+                            ('target_exposure', 'target_exposure'),
+                            ('source_scope', 'source_scope'),
+                            ('requires', 'requires'),
+                            ('produces', 'produces'),
+                        ):
+                            val = item.get(state_key)
+                            if val is not None and str(val).strip() != '':
+                                it.set(xml_attr, str(val).strip())
                 vm_any = item.get('v_metric')
                 if vm_any:
                     it.set('v_metric', str(vm_any))

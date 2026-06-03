@@ -1,0 +1,13 @@
+services:
+  pivot_ssh:
+    image: lscr.io/linuxserver/openssh-server:latest
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - PASSWORD_ACCESS=true
+      - USER_NAME=student
+      - USER_PASSWORD=studentpw
+      - SUDO_ACCESS=false
+    expose:
+      - "2222/tcp"

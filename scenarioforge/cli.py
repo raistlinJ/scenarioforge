@@ -26,6 +26,7 @@ from .parsers.routing import parse_routing_info
 from .parsers.traffic import parse_traffic_info
 from .parsers.segmentation import parse_segmentation_info
 from .parsers.vulnerabilities import parse_vulnerabilities_info
+from .parsers.pivoting import parse_pivoting_info
 from .parsers.planning_metadata import parse_planning_metadata
 from .parsers.services import parse_services
 from .parsers.hitl import parse_hitl_info
@@ -906,6 +907,266 @@ def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) ->
             os.environ['CORETG_FLOW_ASSIGNMENTS_JSON'] = json.dumps(assigns, ensure_ascii=False)
     except Exception:
         pass
+
+
+def _csv_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = str(value).replace(";", ",").split(",")
+    out: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _ip_only(value: Any) -> str:
+    text = str(value or "").strip()
+    return text.split("/", 1)[0] if text else ""
+
+
+def _subnet_of_ip4(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        import ipaddress
+
+        raw = text if "/" in text else f"{text}/24"
+        return str(ipaddress.ip_network(raw, strict=False))
+    except Exception:
+        return ""
+
+
+def _pivot_ssh_compose_template_path() -> str:
+    return os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "generator_templates",
+            "pivot-ssh-compose",
+            "docker-compose.yml",
+        )
+    )
+
+
+def _pivot_ssh_compose_record() -> Dict[str, Any]:
+    return {
+        "Type": "docker-compose",
+        "Name": "pivot-ssh-container",
+        "Path": _pivot_ssh_compose_template_path(),
+        "Vector": "pivot-ssh-fallback",
+        "PivotAccessProvider": "ssh-fallback",
+        "ReplaceComposeServiceWithNode": "true",
+        "compose_ports": [{"service": "pivot_ssh", "protocol": "tcp", "port": 2222}],
+        "SegmentationExposure": "public",
+        "SegmentationPorts": ["2222"],
+        "SegmentationProtocols": ["tcp"],
+    }
+
+
+def _apply_pivoting_to_docker_nodes(
+    *,
+    session: object,
+    hosts: list[NodeInfo],
+    docker_nodes: Dict[str, Dict[str, Any]],
+    pivot_items: list[Any],
+) -> Dict[str, Any]:
+    import fnmatch
+
+    node_by_name: Dict[str, NodeInfo] = {}
+    for host in hosts or []:
+        node_name = ""
+        try:
+            node_obj = session.get_node(host.node_id) if session is not None and hasattr(session, "get_node") else None
+            node_name = str(getattr(node_obj, "name", None) or getattr(node_obj, "label", None) or "").strip()
+        except Exception:
+            node_name = ""
+        if not node_name:
+            node_name = f"node-{host.node_id}"
+        node_by_name[node_name] = host
+
+    def _matches(host: NodeInfo, node_name: str, node_selector: str, role_selector: str) -> bool:
+        node_selector = str(node_selector or "").strip()
+        role_selector = str(role_selector or "").strip()
+        if node_selector:
+            selectors = _csv_values(node_selector)
+            node_ok = False
+            for selector in selectors:
+                selector_l = selector.lower()
+                node_l = node_name.lower()
+                role_l = str(host.role or "").strip().lower()
+                if selector == str(host.node_id) or selector_l == node_l or selector_l == role_l or fnmatch.fnmatchcase(node_l, selector_l):
+                    node_ok = True
+                    break
+            if not node_ok:
+                return False
+        if role_selector:
+            roles = [role.lower() for role in _csv_values(role_selector)]
+            if str(host.role or "").strip().lower() not in roles:
+                return False
+        return True
+
+    def _source_for_pivot(host: NodeInfo, scope: str) -> str:
+        scope_norm = str(scope or "host").strip().lower().replace("_", "-")
+        if scope_norm in ("subnet", "lan", "same-subnet"):
+            return _subnet_of_ip4(host.ip4)
+        return _ip_only(host.ip4)
+
+    def _provider_name(value: Any) -> str:
+        provider = str(value or "auto").strip().lower().replace("_", "-")
+        aliases = {
+            "ssh": "ssh-fallback",
+            "ssh-server": "ssh-fallback",
+            "fallback-ssh": "ssh-fallback",
+            "flag-node": "flag-node-generator",
+            "flagnode": "flag-node-generator",
+            "flag-nodegen": "flag-node-generator",
+            "vuln": "vulnerability",
+        }
+        return aliases.get(provider, provider or "auto")
+
+    def _default_pivot_produces(pivot_names: list[str], provider: str) -> list[str]:
+        if provider in ("none", "manual"):
+            return []
+        facts: list[str] = []
+        for node_name in pivot_names:
+            if not node_name:
+                continue
+            facts.extend([f"Shell({node_name})", f"Pivot({node_name})"])
+        return list(dict.fromkeys(facts))
+
+    def _can_replace_with_ssh_container(record: Any) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("CoreTGVulnAssignment") or record.get("coretg_vuln_assignment") or "").strip():
+            return False
+        vector = str(record.get("Vector") or record.get("vector") or "").strip().lower()
+        if vector in {"flag-nodegen", "flag-node-generator", "vulnerability", "vuln"}:
+            return False
+        name = str(record.get("Name") or record.get("name") or "").strip().lower()
+        if name and name not in {"standard-ubuntu-docker-core", "pivot-ssh-container"} and "standard" not in name and "pivot-ssh" not in name:
+            return False
+        return True
+
+    def _install_ssh_container_record(pivot_name: str, idx: int) -> bool:
+        record = docker_nodes.get(pivot_name)
+        if record is None:
+            warnings.append(f"pivot[{idx}] ssh fallback requires pivot source '{pivot_name}' to be a Docker node")
+            return False
+        if not _can_replace_with_ssh_container(record):
+            warnings.append(f"pivot[{idx}] ssh fallback skipped for '{pivot_name}': pivot source already has a compose assignment")
+            return False
+        template_path = _pivot_ssh_compose_template_path()
+        if not os.path.exists(template_path):
+            warnings.append(f"pivot[{idx}] ssh fallback template missing: {template_path}")
+            return False
+        record.clear()
+        record.update(_pivot_ssh_compose_record())
+        return True
+
+    applied: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    ssh_fallback_nodes: set[str] = set()
+    for idx, item in enumerate(pivot_items or [], start=1):
+        pivot_node = str(getattr(item, "pivot_node", "") or "").strip()
+        pivot_role = str(getattr(item, "pivot_role", "") or "").strip()
+        target_node = str(getattr(item, "target_node", "") or "").strip()
+        target_role = str(getattr(item, "target_role", "") or "").strip()
+        if not (pivot_node or pivot_role) or not (target_node or target_role):
+            warnings.append(f"pivot[{idx}] skipped: pivot and target selectors are both required")
+            continue
+
+        pivot_matches = [
+            (node_name, host)
+            for node_name, host in node_by_name.items()
+            if _matches(host, node_name, pivot_node, pivot_role)
+        ]
+        target_matches = [
+            (node_name, host)
+            for node_name, host in node_by_name.items()
+            if node_name in docker_nodes and _matches(host, node_name, target_node, target_role)
+        ]
+        if not pivot_matches:
+            warnings.append(f"pivot[{idx}] skipped: no pivot node matched")
+            continue
+        if not target_matches:
+            warnings.append(f"pivot[{idx}] skipped: no docker target node matched")
+            continue
+
+        source_scope = str(getattr(item, "source_scope", "host") or "host")
+        sources = list(dict.fromkeys([
+            source
+            for _name, host in pivot_matches
+            for source in [_source_for_pivot(host, source_scope)]
+            if source
+        ]))
+        if not sources:
+            warnings.append(f"pivot[{idx}] skipped: matched pivot nodes had no IPv4 source")
+            continue
+
+        target_ports = _csv_values(getattr(item, "target_ports", "") or "")
+        target_protocols = _csv_values(getattr(item, "target_protocols", "") or "")
+        exposure = str(getattr(item, "exposure", "pivot-only") or "pivot-only").strip() or "pivot-only"
+        requested_provider = _provider_name(getattr(item, "access_provider", "auto"))
+        item_name = str(getattr(item, "name", "Pivot") or "Pivot")
+        pivot_node_names = [name for name, _host in pivot_matches]
+        requires = _csv_values(getattr(item, "requires", "") or "")
+        explicit_produces = _csv_values(getattr(item, "produces", "") or "")
+        auto_ssh_available = any(_can_replace_with_ssh_container(docker_nodes.get(name)) for name in pivot_node_names)
+        access_provider = "ssh-fallback" if requested_provider == "auto" and not requires and not explicit_produces and auto_ssh_available else requested_provider
+        produces = explicit_produces or _default_pivot_produces(pivot_node_names, access_provider)
+        if access_provider == "ssh-fallback":
+            for pivot_name, _pivot_host in pivot_matches:
+                if _install_ssh_container_record(pivot_name, idx):
+                    ssh_fallback_nodes.add(pivot_name)
+                    logging.info("Pivoting: assigned Docker SSH fallback container on %s", pivot_name)
+        for target_name, target_host in target_matches:
+            record = docker_nodes.get(target_name)
+            if not isinstance(record, dict):
+                continue
+            existing_sources = _csv_values(record.get("SegmentationSources"))
+            merged_sources = list(dict.fromkeys(existing_sources + sources))
+            record["SegmentationExposure"] = exposure
+            record["SegmentationSources"] = merged_sources
+            record["PivotAccessProvider"] = access_provider
+            if target_ports:
+                existing_ports = _csv_values(record.get("SegmentationPorts"))
+                record["SegmentationPorts"] = list(dict.fromkeys(existing_ports + target_ports))
+            if target_protocols:
+                existing_protocols = _csv_values(record.get("SegmentationProtocols"))
+                record["SegmentationProtocols"] = list(dict.fromkeys(existing_protocols + target_protocols))
+            record.setdefault("PivotPlan", [])
+            if isinstance(record.get("PivotPlan"), list):
+                record["PivotPlan"].append(item_name)
+            applied.append({
+                "name": item_name,
+                "pivot_nodes": pivot_node_names,
+                "target_node": target_name,
+                "target_ip": _ip_only(target_host.ip4),
+                "target_ports": target_ports,
+                "target_protocols": target_protocols,
+                "exposure": exposure,
+                "access_provider": access_provider,
+                "requested_access_provider": requested_provider,
+                "sources": merged_sources,
+                "produces": produces,
+                "requires": requires,
+            })
+
+    return {
+        "rules": applied,
+        "warnings": warnings,
+        "nodes": sorted({str(entry.get("target_node")) for entry in applied if entry.get("target_node")}),
+        "ssh_fallback_nodes": sorted(ssh_fallback_nodes),
+        "ssh_service_nodes": [],
+    }
+
+
 from .utils.services import ensure_service
 from .utils.hitl import attach_hitl_rj45_nodes
 
@@ -1068,6 +1329,32 @@ def _run_offline_report(
         "flag_type": vuln_flag_type,
     }
 
+    try:
+        pivot_density, pivot_items = parse_pivoting_info(args.xml, args.scenario)
+    except Exception:
+        pivot_density, pivot_items = None, []
+    pivoting_cfg = {
+        "density": pivot_density,
+        "items": [
+            {
+                "name": getattr(item, 'name', ''),
+                "factor": getattr(item, 'factor', 0.0),
+                "pivot_node": getattr(item, 'pivot_node', ''),
+                "pivot_role": getattr(item, 'pivot_role', ''),
+                "target_node": getattr(item, 'target_node', ''),
+                "target_role": getattr(item, 'target_role', ''),
+                "target_ports": getattr(item, 'target_ports', ''),
+                "target_protocols": getattr(item, 'target_protocols', ''),
+                "exposure": getattr(item, 'exposure', ''),
+                "source_scope": getattr(item, 'source_scope', ''),
+                "access_provider": getattr(item, 'access_provider', ''),
+            }
+            for item in (pivot_items or [])
+        ],
+    }
+    if pivot_items:
+        generation_meta['pivoting_items'] = pivoting_cfg['items']
+
     from datetime import datetime as _dt
     report_dir = os.path.join(repo_root, "reports")
     os.makedirs(report_dir, exist_ok=True)
@@ -1089,6 +1376,7 @@ def _run_offline_report(
         services_cfg=services_cfg,
         segmentation_cfg=segmentation_cfg,
         vulnerabilities_cfg=vulnerabilities_cfg,
+        pivoting_cfg=pivoting_cfg,
     )
 
     logging.info("Scenario report written to %s", report_path)
@@ -1644,6 +1932,27 @@ def main():
     docker_slot_plan: dict | None = None
     preview_vuln_slots: list[str] = []
     flow_state = _flow_state_from_xml(args.xml, args.scenario)
+    try:
+        pivot_density, pivot_items = parse_pivoting_info(args.xml, args.scenario)
+    except Exception:
+        pivot_density, pivot_items = 0.0, []
+    if pivot_items:
+        generation_meta['pivoting_items'] = [
+            {
+                'name': getattr(item, 'name', ''),
+                'factor': getattr(item, 'factor', 0.0),
+                'pivot_node': getattr(item, 'pivot_node', ''),
+                'pivot_role': getattr(item, 'pivot_role', ''),
+                'target_node': getattr(item, 'target_node', ''),
+                'target_role': getattr(item, 'target_role', ''),
+                'target_ports': getattr(item, 'target_ports', ''),
+                'target_protocols': getattr(item, 'target_protocols', ''),
+                'exposure': getattr(item, 'exposure', ''),
+                'source_scope': getattr(item, 'source_scope', ''),
+                'access_provider': getattr(item, 'access_provider', ''),
+            }
+            for item in (pivot_items or [])
+        ]
     seed_for_vuln = args.seed
     try:
         if seed_for_vuln is None and isinstance(preview_full, dict):
@@ -1890,6 +2199,23 @@ def main():
             logging.info("No docker nodes created by topology builders (either no assignments or NodeType.DOCKER unavailable)")
     except Exception:
         pass
+
+    try:
+        if pivot_items and docker_by_name:
+            pivot_summary = _apply_pivoting_to_docker_nodes(
+                session=session,
+                hosts=hosts,
+                docker_nodes=docker_by_name,
+                pivot_items=pivot_items,
+            )
+            generation_meta['pivoting'] = pivot_summary
+            applied_count = len(pivot_summary.get('rules') or []) if isinstance(pivot_summary, dict) else 0
+            warning_count = len(pivot_summary.get('warnings') or []) if isinstance(pivot_summary, dict) else 0
+            logging.info("Applied pivot exposure metadata: targets=%d warnings=%d", applied_count, warning_count)
+            for warning in (pivot_summary.get('warnings') or [])[:10]:
+                logging.warning("Pivoting: %s", warning)
+    except Exception as e_pivot:
+        logging.warning("Pivoting metadata application failed: %s", e_pivot)
 
     try:
         preview_hitl_router_ids = []
@@ -2494,6 +2820,7 @@ def main():
                         continue
                     all_docker_nodes[nm] = rec
             if all_docker_nodes:
+                segmentation_active = os.path.exists('/tmp/segmentation/segmentation_summary.json')
                 # Ensure ScenarioTag is present so wrapper images are scoped.
                 try:
                     _scenario_tag = str(os.getenv('CORETG_SCENARIO_TAG') or '').strip()
@@ -2503,10 +2830,29 @@ def main():
                     for _nm, _rec in all_docker_nodes.items():
                         if isinstance(_rec, dict):
                             _rec.setdefault('ScenarioTag', _scenario_tag)
+                            if segmentation_active:
+                                _rec.setdefault('EnableSegmentationMount', 'true')
                 except Exception:
                     pass
                 created = prepare_compose_for_assignments(all_docker_nodes, out_base="/tmp/vulns")
                 logging.info("Prepared docker compose files (all docker nodes): %d for %d docker nodes", len(created), len(all_docker_nodes))
+
+                if segmentation_active:
+                    try:
+                        from .utils.segmentation import write_allow_rules_for_compose_ports
+
+                        compose_allow = write_allow_rules_for_compose_ports(
+                            session,
+                            routers if 'routers' in locals() else [],
+                            hosts,
+                            all_docker_nodes,
+                            out_dir="/tmp/segmentation",
+                        )
+                        compose_allow_count = len(compose_allow.get('rules', []) if isinstance(compose_allow, dict) else [])
+                        generation_meta['compose_port_allow_rules'] = compose_allow_count
+                        logging.info("Inserted compose port allow rules for docker service ports: %d", compose_allow_count)
+                    except Exception as e_allow:
+                        logging.warning("Failed to insert compose port allow rules: %s", e_allow)
 
                 # Sanity logging: show final per-node compose inputs and output file.
                 # Keep detail at DEBUG to avoid noisy logs by default.
@@ -2531,6 +2877,25 @@ def main():
         segmentation_cfg = {
             "density": seg_density if 'seg_density' in locals() else None,
             "items": [{"name": i.name, "factor": i.factor} for i in (seg_items or [])] if 'seg_items' in locals() and seg_items else [],
+        }
+        pivoting_cfg = {
+            "density": pivot_density if 'pivot_density' in locals() else None,
+            "items": [
+                {
+                    "name": getattr(item, 'name', ''),
+                    "factor": getattr(item, 'factor', 0.0),
+                    "pivot_node": getattr(item, 'pivot_node', ''),
+                    "pivot_role": getattr(item, 'pivot_role', ''),
+                    "target_node": getattr(item, 'target_node', ''),
+                    "target_role": getattr(item, 'target_role', ''),
+                    "target_ports": getattr(item, 'target_ports', ''),
+                    "target_protocols": getattr(item, 'target_protocols', ''),
+                    "exposure": getattr(item, 'exposure', ''),
+                    "source_scope": getattr(item, 'source_scope', ''),
+                    "access_provider": getattr(item, 'access_provider', ''),
+                }
+                for item in (pivot_items or [])
+            ] if 'pivot_items' in locals() and pivot_items else [],
         }
         logging.info("PHASE: Report")
         if routing_density and routing_density > 0:
@@ -2572,6 +2937,7 @@ def main():
                 services_cfg=services_cfg,
                 segmentation_cfg=segmentation_cfg,
                 vulnerabilities_cfg=vulnerabilities_cfg,
+                pivoting_cfg=pivoting_cfg if 'pivoting_cfg' in locals() else None,
             )
         else:
             try:
@@ -2610,6 +2976,7 @@ def main():
                 services_cfg=services_cfg,
                 segmentation_cfg=segmentation_cfg,
                 vulnerabilities_cfg=vulnerabilities_cfg,
+                pivoting_cfg=pivoting_cfg if 'pivoting_cfg' in locals() else None,
             )
         logging.info("Scenario report written to %s", report_path)
         # Also emit a plain stdout line for robust parsing by web frontends
@@ -3026,6 +3393,7 @@ def main():
                 services_cfg=services_cfg if 'services_cfg' in locals() else None,
                 segmentation_cfg=segmentation_cfg if 'segmentation_cfg' in locals() else None,
                 vulnerabilities_cfg=vulnerabilities_cfg if 'vulnerabilities_cfg' in locals() else None,
+                pivoting_cfg=pivoting_cfg if 'pivoting_cfg' in locals() else None,
             )
     except Exception:
         # Keep exit code semantics even if report rewrite fails.
