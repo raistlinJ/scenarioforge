@@ -175,6 +175,62 @@ def test_save_xml_api_concretizes_routing_random_edge_modes(tmp_path, monkeypatc
         assert int(routing_item.get('r2s_hosts_max') or 0) >= int(routing_item.get('r2s_hosts_min') or 0)
 
 
+def test_save_xml_api_concretizes_segmentation_pivot_random_provider(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+
+    payload = {
+        'seed': 17,
+        'scenarios': [
+            {
+                'name': 'PivotProviderRandomSave',
+                'base': {'filepath': ''},
+                'sections': {
+                    'Node Information': {'density': 0, 'items': []},
+                    'Routing': {'density': 0.0, 'items': []},
+                    'Services': {'density': 0.0, 'items': []},
+                    'Traffic': {'density': 0.0, 'items': []},
+                    'Vulnerabilities': {'density': 0.0, 'items': [], 'flag_type': 'text'},
+                    'Segmentation': {
+                        'density': 1.0,
+                        'items': [
+                            {
+                                'selected': 'Firewall',
+                                'factor': 1.0,
+                                'pivot_enabled': True,
+                                'pivot_provider': 'random',
+                            }
+                        ],
+                    },
+                },
+                'notes': '',
+            }
+        ],
+    }
+
+    resp = client.post('/save_xml_api', data=json.dumps(payload), content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json() or {}
+    assert data.get('ok') is True
+
+    parsed = backend._parse_scenarios_xml(data.get('result_path'))
+    scenarios = parsed.get('scenarios') or []
+    seg_items = (((scenarios[0] if scenarios else {}).get('sections') or {}).get('Segmentation') or {}).get('items') or []
+
+    assert seg_items
+    seg_item = seg_items[0]
+    assert seg_item.get('pivot_enabled') is True
+    assert seg_item.get('pivot_provider') in {'vulnerability', 'flag-node-generator', 'ssh-fallback'}
+    assert seg_item.get('pivot_provider') != 'random'
+
+
 def test_save_xml_api_accepts_empty_scenarios_and_persists_snapshot(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)

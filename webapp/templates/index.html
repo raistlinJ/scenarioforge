@@ -10136,6 +10136,41 @@
                             });
                         } catch (e) { }
                     }
+
+                    // Segmentation Pivot Provider has its own Random option; freeze it on save.
+                    if (sectionName === 'Segmentation') {
+                        try {
+                            const pivotEnabledRaw = it.pivot_enabled;
+                            const pivotEnabled = pivotEnabledRaw === true || ['1', 'true', 'yes', 'on'].includes(String(pivotEnabledRaw || '').trim().toLowerCase());
+                            if (pivotEnabled) {
+                                const providerOptions = ['vulnerability', 'flag-node-generator', 'ssh-fallback'];
+                                const rawProvider = (it.pivot_provider !== undefined && it.pivot_provider !== null) ? String(it.pivot_provider).trim().toLowerCase().replace(/_/g, '-') : '';
+                                const providerAliases = {
+                                    auto: 'random',
+                                    none: 'random',
+                                    manual: 'random',
+                                    ssh: 'ssh-fallback',
+                                    'ssh-server': 'ssh-fallback',
+                                    'fallback-ssh': 'ssh-fallback',
+                                    'flag-node': 'flag-node-generator',
+                                    flagnode: 'flag-node-generator',
+                                    'flag-nodegen': 'flag-node-generator',
+                                    vuln: 'vulnerability',
+                                };
+                                const provider = providerAliases[rawProvider] || rawProvider || 'random';
+                                if (provider === 'random') {
+                                    const rngProvider = makeDeterministicRng(`${seedVal}|${scenName}|${sectionName}|${i}|pivot_provider${getRandomRerollSalt(it, 'pivot_provider')}|save-xml`);
+                                    const pickProvider = providerOptions[Math.floor(rngProvider() * providerOptions.length) % providerOptions.length];
+                                    it.pivot_provider = pickProvider;
+                                    resolvedCount += 1;
+                                    bumpSection('Segmentation');
+                                    pushExample({ scenario: scenName, section: 'Segmentation', row: i + 1, field: 'pivot_provider', from: rawProvider || 'Random', to: pickProvider });
+                                } else if (providerOptions.includes(provider)) {
+                                    it.pivot_provider = provider;
+                                }
+                            }
+                        } catch (e) { }
+                    }
                 }
             }
 
