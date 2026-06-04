@@ -359,6 +359,7 @@ def register(app, *, backend_module: Any) -> None:
                 scenario_label=(scenario_label or scenario_norm),
                 dependency_level=dependency_level,
                 return_debug=bool(debug_dag),
+                flow_progress=_flow_progress,
             )
 
         try:

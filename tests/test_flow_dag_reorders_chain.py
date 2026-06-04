@@ -48,16 +48,21 @@ def test_flow_reorder_chain_by_generator_dag_reorders_nodes_and_updates_next_fie
         },
     }
 
+    progress_messages = []
     new_chain, new_assignments, dag_debug = app_backend._flow_reorder_chain_by_generator_dag(
         chain_nodes,
         flag_assignments,
         scenario_label="scenario",
         plugins_by_id_override=plugins_by_id,
         return_debug=True,
+        flow_progress=progress_messages.append,
     )
 
     assert [n["id"] for n in new_chain] == ["n1", "n2"]
     assert [a["node_id"] for a in new_assignments] == ["n1", "n2"]
+    assert any("DAG: start nodes=2 assignments=2" in msg for msg in progress_messages)
+    assert any("DAG: trying greedy reorder for invalid current chain" in msg for msg in progress_messages)
+    assert any("DAG: DAG reorder complete" in msg for msg in progress_messages)
 
     assert new_assignments[0]["next_node_id"] == "n2"
     assert new_assignments[1]["next_node_id"] == ""
