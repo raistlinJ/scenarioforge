@@ -19905,12 +19905,19 @@ def _flow_apply_pivot_context_to_assignments(
         return flag_assignments
 
     node_by_id: dict[str, dict[str, Any]] = {}
+    # Build a comprehensive lookup of all chain node identifiers so we can
+    # detect when a pivot SOURCE node is absent from the chain entirely.
+    _chain_all_ids: set[str] = set()
     for node in chain_nodes:
         if not isinstance(node, dict):
             continue
         node_id = _flow_pivot_node_id(node)
         if node_id:
             node_by_id[node_id] = node
+        for _raw in (node.get('id'), node.get('node_id'), node.get('name'), node.get('label')):
+            _val = str(_raw or '').strip()
+            if _val:
+                _chain_all_ids.add(_val.lower())
 
     out: list[dict[str, Any]] = []
     for index, assignment in enumerate(flag_assignments):
@@ -19926,6 +19933,9 @@ def _flow_apply_pivot_context_to_assignments(
         node = node_by_id.get(node_id) if node_id else None
         node_name = _flow_pivot_node_name(node) if isinstance(node, dict) else node_id
         pivot_entries: list[dict[str, Any]] = [entry for entry in (a2.get('pivot') or []) if isinstance(entry, dict)] if isinstance(a2.get('pivot'), list) else []
+        # Collect target-side hint parts so all pivot sources for this node are
+        # consolidated into a single hint instead of one hint per source rule.
+        _pivot_target_hint_parts: list[tuple[str, list[str], str]] = []  # (source_name, requires, port_text)
 
         for rule in rules:
             source_id = str(rule.get('source_id') or '').strip()
@@ -19953,17 +19963,24 @@ def _flow_apply_pivot_context_to_assignments(
                 })
             if node_id and target_id and node_id == target_id:
                 requires = _flow_split_top_level_list(rule.get('target_requires'))
-                _flow_append_unique_values(a2, 'requires', requires)
-                _flow_append_unique_values(a2, 'inputs', requires)
+                # Only treat the pivot fact as a hard generator dependency when the
+                # pivot source node is also present in this chain.  If it is absent
+                # the fact will never be produced and would permanently invalidate
+                # the chain order check, blocking all flag execution.
+                _source_in_chain = bool(
+                    source_id and source_id.lower() in _chain_all_ids
+                ) or bool(
+                    rule.get('source_name') and str(rule.get('source_name')).lower() in _chain_all_ids
+                )
+                if _source_in_chain:
+                    _flow_append_unique_values(a2, 'requires', requires)
+                    _flow_append_unique_values(a2, 'inputs', requires)
                 provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
                 source_name = str(rule.get('source_name') or rule.get('source_id') or '').strip()
                 ports = _flow_split_top_level_list(rule.get('target_ports'))
                 port_text = f" Ports: {', '.join(ports)}." if ports else ''
-                hint = (
-                    f"Pivot required: reach {node_name or target_id} through {source_name} "
-                    f"after the pivot source is solved. Required fact: {', '.join(requires)}.{port_text}"
-                )
-                _flow_add_assignment_hint(a2, hint)
+                # Defer hint emission — collect parts and consolidate below.
+                _pivot_target_hint_parts.append((source_name, list(requires), port_text))
                 pivot_entries.append({
                     'role': 'target',
                     'provider': rule.get('provider'),
@@ -19976,6 +19993,32 @@ def _flow_apply_pivot_context_to_assignments(
                     'target_protocols': _flow_split_top_level_list(rule.get('target_protocols')),
                     'exposure': rule.get('exposure') or 'pivot-only',
                 })
+
+        # Emit a single consolidated "Pivot required" hint for this assignment.
+        if _pivot_target_hint_parts:
+            if len(_pivot_target_hint_parts) == 1:
+                s_name, s_requires, s_port_text = _pivot_target_hint_parts[0]
+                _fact_label = 'Required fact' if len(s_requires) == 1 else 'Required facts'
+                _flow_add_assignment_hint(
+                    a2,
+                    f"Pivot required: reach {node_name or node_id} through {s_name} "
+                    f"after the pivot source is solved. {_fact_label}: {', '.join(s_requires)}.{s_port_text}",
+                )
+            else:
+                _all_sources = ', '.join(p[0] for p in _pivot_target_hint_parts if p[0])
+                _all_facts: list[str] = []
+                _seen_facts: set[str] = set()
+                for _, _reqs, _ in _pivot_target_hint_parts:
+                    for _f in _reqs:
+                        if _f not in _seen_facts:
+                            _seen_facts.add(_f)
+                            _all_facts.append(_f)
+                _fact_label = 'Required fact' if len(_all_facts) == 1 else 'Required facts'
+                _flow_add_assignment_hint(
+                    a2,
+                    f"Pivot required: reach {node_name or node_id} through {_all_sources} "
+                    f"after the pivot sources are solved. {_fact_label}: {', '.join(_all_facts)}.",
+                )
 
         if pivot_entries:
             deduped: list[dict[str, Any]] = []
@@ -21786,12 +21829,24 @@ def _flow_reorder_chain_by_generator_dag(
                 pass
             debug: dict[str, Any] | None = None
             if return_debug:
+                _greedy_edges: list[dict[str, Any]] = []
+                for _gi, (_, _gni, _gai) in enumerate(ordered):
+                    _src = str((_gai or {}).get('node_id') or (_gni or {}).get('id') or '')
+                    _prod = _assignment_produces(_gai)
+                    for _gj, (_, _gnj, _gaj) in enumerate(ordered):
+                        if _gj <= _gi:
+                            continue
+                        _dst = str((_gaj or {}).get('node_id') or (_gnj or {}).get('id') or '')
+                        _req = _assignment_requires(_gaj)
+                        for _art in sorted(_prod & _req):
+                            _greedy_edges.append({'src': _src, 'dst': _dst, 'artifact': _art})
                 debug = {
                     'ok': True,
                     'strategy': 'high_dependency_greedy',
                     'before_adjacent_dependencies': before_adjacent,
                     'after_adjacent_dependencies': after_adjacent,
                     'order': [str((node or {}).get('id') or '') for node in ordered_nodes],
+                    'edges': _greedy_edges,
                 }
             refreshed_nodes, refreshed_assignments = _refresh_next_fields(ordered_nodes, ordered_assignments)
             return refreshed_nodes, refreshed_assignments, debug

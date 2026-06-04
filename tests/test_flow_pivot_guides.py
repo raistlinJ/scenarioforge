@@ -419,3 +419,133 @@ def test_flow_topology_inclusion_adds_pivot_source_before_target():
     assert [node.get("id") for node in expanded] == ["jump", "db"]
     assert info["effective_length"] == 2
     assert info["added_pivot_node_ids"] == ["jump"]
+
+
+def test_pivot_apply_skips_requires_when_source_not_in_chain():
+    """Pivot source nodes absent from the chain must not add Pivot facts as
+    hard generator dependencies.  Adding them when the producer is missing
+    from the chain permanently invalidates the dependency order check and
+    blocks all flag execution (the real-world 7-node chain_ids=19,22,21,17,16,20,18 bug).
+    """
+    # Topology: docker-11 -> [19, 22], docker-13 -> [19, 22, 21, 17, 16, 20]
+    # Chain contains only the TARGET nodes (11 and 13 are NOT in the chain).
+    chain_nodes = [
+        {"id": "19", "name": "docker-19", "type": "docker",
+         "PivotRequires": ["Pivot(docker-11)", "Pivot(docker-13)"],
+         "SegmentationExposure": "pivot-only"},
+        {"id": "22", "name": "docker-22", "type": "docker",
+         "PivotRequires": ["Pivot(docker-11)", "Pivot(docker-13)"],
+         "SegmentationExposure": "pivot-only"},
+        {"id": "21", "name": "docker-21", "type": "docker",
+         "PivotRequires": ["Pivot(docker-13)"],
+         "SegmentationExposure": "pivot-only"},
+        {"id": "18", "name": "docker-18", "type": "docker"},
+    ]
+    assignments = [
+        {"node_id": "19", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "22", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "21", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "18", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+    ]
+    # No pivot source nodes (11 or 13) appear in chain_nodes.
+    enriched = app_backend._flow_apply_pivot_context_to_assignments(
+        assignments,
+        chain_nodes,
+        preview=None,
+        pivot_context={},
+        scenario_label="missing-source-test",
+    )
+
+    # Pivot metadata hints may still be added, but NEVER hard dependencies
+    # for facts whose producer is outside the chain.
+    for a in enriched:
+        assert "Pivot(docker-11)" not in (a.get("inputs") or []), (
+            f"node {a['node_id']} should not require Pivot(docker-11) — source 11 not in chain"
+        )
+        assert "Pivot(docker-13)" not in (a.get("inputs") or []), (
+            f"node {a['node_id']} should not require Pivot(docker-13) — source 13 not in chain"
+        )
+        assert "Pivot(docker-11)" not in (a.get("requires") or []), (
+            f"node {a['node_id']} should not have Pivot(docker-11) in requires"
+        )
+        assert "Pivot(docker-13)" not in (a.get("requires") or []), (
+            f"node {a['node_id']} should not have Pivot(docker-13) in requires"
+        )
+
+    # The chain order validation must now pass with no "before they are produced" errors.
+    # (Unknown-plugin warnings are expected since we pass no plugin registry here.)
+    _, errors = app_backend._flow_validate_chain_order_by_requires_produces(
+        chain_nodes, enriched, scenario_label="missing-source-test",
+    )
+    pivot_order_errors = [e for e in (errors or []) if "before they are produced" in str(e)]
+    assert not pivot_order_errors, (
+        f"Chain should have no 'before they are produced' errors when pivot sources are absent: {pivot_order_errors}"
+    )
+
+
+def test_pivot_apply_consolidates_multi_source_hints():
+    """When a node is a pivot target of multiple source nodes, only a single
+    consolidated 'Pivot required' hint should appear — not one per source rule.
+    """
+    # docker-14 is reachable via both docker-11 and docker-13 (two rules).
+    chain_nodes = [
+        {"id": "docker-11", "name": "docker-11 @ 10.51.145.4", "type": "docker"},
+        {"id": "docker-13", "name": "docker-13 @ 10.82.34.4", "type": "docker"},
+        {"id": "docker-14", "name": "docker-14 @ 172.29.115.4", "type": "docker",
+         "PivotRequires": ["Pivot(docker-11 @ 10.51.145.4)", "Pivot(docker-13 @ 10.82.34.4)"],
+         "SegmentationExposure": "pivot-only"},
+    ]
+    assignments = [
+        {"node_id": "docker-11", "id": "pivot-rce", "type": "flag-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "docker-13", "id": "pivot-rce", "type": "flag-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "docker-14", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+    ]
+    pivot_context = {
+        "metadata": {
+            "pivoting": {
+                "rules": [
+                    {
+                        "source_id": "docker-11",
+                        "source_name": "docker-11 @ 10.51.145.4",
+                        "target_id": "docker-14",
+                        "target_name": "docker-14 @ 172.29.115.4",
+                        "produces": ["Pivot(docker-11 @ 10.51.145.4)"],
+                        "target_requires": ["Pivot(docker-11 @ 10.51.145.4)"],
+                        "access_provider": "vulnerability",
+                    },
+                    {
+                        "source_id": "docker-13",
+                        "source_name": "docker-13 @ 10.82.34.4",
+                        "target_id": "docker-14",
+                        "target_name": "docker-14 @ 172.29.115.4",
+                        "produces": ["Pivot(docker-13 @ 10.82.34.4)"],
+                        "target_requires": ["Pivot(docker-13 @ 10.82.34.4)"],
+                        "access_provider": "vulnerability",
+                    },
+                ]
+            }
+        }
+    }
+
+    enriched = app_backend._flow_apply_pivot_context_to_assignments(
+        assignments, chain_nodes, preview=None, pivot_context=pivot_context,
+        scenario_label="multi-pivot-hint-test",
+    )
+
+    target_assignment = next(a for a in enriched if a["node_id"] == "docker-14")
+    pivot_hints = [h for h in (target_assignment.get("hints") or []) if "Pivot required" in h]
+
+    assert len(pivot_hints) == 1, (
+        f"Expected exactly one consolidated 'Pivot required' hint, got {len(pivot_hints)}: {pivot_hints}"
+    )
+    # The single hint must name both sources.
+    combined_hint = pivot_hints[0]
+    assert "docker-11" in combined_hint, f"Expected docker-11 in hint: {combined_hint}"
+    assert "docker-13" in combined_hint, f"Expected docker-13 in hint: {combined_hint}"

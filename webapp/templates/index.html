@@ -12823,10 +12823,14 @@
         if (Number.isNaN(sidx) || !state.scenarios?.[sidx]) {
             return { ok: false, message: 'Scenario unavailable' };
         }
-        const logCoreTestLine = (message, level = 'INFO') => {
+        const revealCoreTestDock = () => {
+            try { revealDock(); } catch (_) { }
+        };
+        const logCoreTestLine = (message, level = 'INFO', { revealDock = false } = {}) => {
             const text = String(message ?? '').trim();
             if (!text) return;
             const scoped = `[core-test][scenario ${sidx + 1}] ${text}`;
+            if (revealDock) { try { revealCoreTestDock(); } catch (_) { } }
             try {
                 dockLog(scoped, level);
             } catch (e) {
@@ -13205,7 +13209,7 @@
                         logCoreTestLine(line, isFailed ? 'WARN' : 'INFO');
                     });
                 } catch (e) { }
-                warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN'));
+                warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN', { revealDock: true }));
                 if (closeModalOnSuccess && coreConnectionModal && window.bootstrap) {
                     try { bootstrap.Modal.getInstance(coreConnectionModal)?.hide(); } catch (e) { }
                 }
@@ -13312,7 +13316,7 @@
                     setCoreConnectionHint(message, 'danger');
                 }
             }
-            logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR');
+            logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR', { revealDock: true });
             if (data && data.daemon_conflict && Array.isArray(data.daemon_pids) && data.daemon_pids.length) {
                 logCoreTestLine(`Duplicate core-daemon PIDs: ${data.daemon_pids.join(', ')}`, 'WARN');
             }
@@ -13348,7 +13352,7 @@
                     setCoreConnectionHint(message, 'danger');
                 }
             }
-            logCoreTestLine(`FAILED: ${message}`, 'ERROR');
+            logCoreTestLine(`FAILED: ${message}`, 'ERROR', { revealDock: true });
             if (!suppressToasts) {
                 try { showToast(`CORE test failed: ${message}`, { autohide: false }); } catch (e) { }
             }
