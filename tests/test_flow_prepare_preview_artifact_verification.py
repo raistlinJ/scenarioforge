@@ -328,3 +328,15 @@ def test_finalize_generator_assignment_prefers_inject_override_over_detail(tmp_p
 
     assert assignment["inject_files"] == ["service -> /home/git/repositories/deploy.git"]
     assert meta_host["flow_flag"]["inject_files"] == ["service -> /home/git/repositories/deploy.git"]
+
+
+def test_compute_output_mismatch_ignores_pivot_and_shell_chain_facts():
+    mismatch = helpers.compute_output_mismatch(
+        declared_output_keys=["Flag(flag_id)", "Pivot(docker-13)", "Shell(docker-13)"],
+        actual_output_keys=["Flag(flag_id)"],
+        ok_run=True,
+    )
+
+    assert mismatch.get("ok") is True
+    assert mismatch.get("missing") == []
+    assert mismatch.get("extra") == []

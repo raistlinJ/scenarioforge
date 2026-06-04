@@ -1563,7 +1563,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       lines.push('');
       lines.push('| Role | Source | Target | Facts | Provider |');
       lines.push('| --- | --- | --- | --- | --- |');
-      pivotEntries.forEach((entry) => {
+      const pivotRows = pivotEntries.map((entry) => {
         const role = String(entry.role || '').trim() || 'pivot';
         const source = String(entry.source || '').trim();
         const target = String(entry.target || '').trim();
@@ -1572,8 +1572,20 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
           ...normalizeChainFacts(entry.produces),
         ])).join(', ');
         const provider = String(entry.provider_label || entry.provider || '').trim();
-        lines.push(`| ${_cell(role)} | ${_cell(source)} | ${_cell(target)} | ${_cell(facts)} | ${_cell(provider)} |`);
+        return `| ${_cell(role)} | ${_cell(source)} | ${_cell(target)} | ${_cell(facts)} | ${_cell(provider)} |`;
       });
+      lines.push(pivotRows[0]);
+      if (pivotRows.length > 1) {
+        lines.push('');
+        lines.push('<details>');
+        lines.push(`<summary>${pivotRows.length - 1} other pivot path${(pivotRows.length - 1) === 1 ? '' : 's'} exist (click to see)</summary>`);
+        lines.push('');
+        lines.push('| Role | Source | Target | Facts | Provider |');
+        lines.push('| --- | --- | --- | --- | --- |');
+        pivotRows.slice(1).forEach((row) => lines.push(row));
+        lines.push('');
+        lines.push('</details>');
+      }
       lines.push('');
     }
     
@@ -1734,12 +1746,12 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
         if (!values.length) return;
         const firstValue = values[0];
         lines.push('<details>');
-        lines.push(`<summary>Hint ${reportHintLevelTitle(level)}: ${firstValue}</summary>`);
+        lines.push(`<summary>Hint ${reportHintLevelTitle(level)}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
         lines.push('');
         if (values.length === 1) {
           lines.push(firstValue);
         } else {
-          values.forEach((value) => lines.push(`- ${value}`));
+          values.slice(1).forEach((value) => lines.push(`- ${value}`));
         }
         lines.push('');
         lines.push('</details>');
