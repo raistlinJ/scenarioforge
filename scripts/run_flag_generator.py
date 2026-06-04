@@ -860,6 +860,11 @@ def _python_fallback_enabled() -> bool:
     return raw not in ('0', 'false', 'no', 'n', 'off')
 
 
+def _python_direct_first_enabled() -> bool:
+    raw = str(os.getenv('CORETG_RUN_FLAG_GENERATOR_PY_FIRST', '0') or '').strip().lower()
+    return raw in ('1', 'true', 'yes', 'y', 'on')
+
+
 def run_direct_python_generator(
     source_dir: Path,
     config_path: Path,
@@ -1125,6 +1130,20 @@ def main() -> int:
     if isinstance(compose, dict):
         compose_file = str(compose.get("file") or "docker-compose.yml")
         service = str(compose.get("service") or "generator")
+        ran_direct_python = False
+
+        if _python_direct_first_enabled() and (source_dir / 'generator.py').exists():
+            try:
+                print('[direct-python-first] generator.py found; trying direct Python before Docker compose')
+                run_direct_python_generator(
+                    source_dir=source_dir,
+                    config_path=config_path,
+                    outputs_dir=out_dir,
+                    env=env,
+                )
+                ran_direct_python = True
+            except Exception as exc:
+                print(f'[direct-python-first] failed; falling back to Docker compose: {exc}')
 
         # Optional: force host networking (useful when docker bridge is disabled).
         try:
@@ -1134,7 +1153,7 @@ def main() -> int:
         except Exception:
             use_host_network = False
         stable_image_tag: str | None = None
-        if use_host_network:
+        if (not ran_direct_python) and use_host_network:
             try:
                 compose_src = (source_dir / compose_file).resolve()
                 if compose_src.exists():
@@ -1163,26 +1182,37 @@ def main() -> int:
             "OUT_DIR": "/outputs",
             "CONFIG_PATH": "/inputs/config.json",
         }
-        try:
-            run_compose(
-                source_dir=source_dir,
-                compose_file=compose_file,
-                service=service,
-                inputs_dir=inputs_dir,
-                outputs_dir=out_dir,
-                stable_image_tag=stable_image_tag,
-                env=compose_run_env,
-            )
-        except subprocess.CalledProcessError:
-            if not _python_fallback_enabled():
-                raise
-            print('[compose] docker compose generator failed; trying direct Python fallback')
-            run_direct_python_generator(
-                source_dir=source_dir,
-                config_path=config_path,
-                outputs_dir=out_dir,
-                env=env,
-            )
+        if not ran_direct_python:
+            try:
+                run_compose(
+                    source_dir=source_dir,
+                    compose_file=compose_file,
+                    service=service,
+                    inputs_dir=inputs_dir,
+                    outputs_dir=out_dir,
+                    stable_image_tag=stable_image_tag,
+                    env=compose_run_env,
+                )
+            except subprocess.CalledProcessError:
+                if not _python_fallback_enabled():
+                    raise
+                print('[compose] docker compose generator failed; trying direct Python fallback')
+                run_direct_python_generator(
+                    source_dir=source_dir,
+                    config_path=config_path,
+                    outputs_dir=out_dir,
+                    env=env,
+                )
+            except SystemExit as exc:
+                if not _python_fallback_enabled():
+                    raise
+                print(f'[compose] docker compose generator exited before completion; trying direct Python fallback: {exc}')
+                run_direct_python_generator(
+                    source_dir=source_dir,
+                    config_path=config_path,
+                    outputs_dir=out_dir,
+                    env=env,
+                )
 
         _fix_output_permissions(out_dir)
 
