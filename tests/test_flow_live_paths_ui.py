@@ -483,7 +483,7 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
         "Request: scenario=${ctx.scenario || '-'} chain=${ctx.chainLength || '-'} progress_id=${ctx.progressId || '-'}",
         "Timing: elapsed=${elapsedSeconds !== null ? elapsedSeconds.toFixed(1) + 's' : '-'}",
         "Last progress: ${progressLines.join(' | ')}",
-        "webapp terminal/log for a restart or traceback at that progress_id",
+        "grep outputs/logs/webui-${logPort}.log and the webapp terminal for progress_id=${ctx.progressId || '-'}",
         "dependency_level: getFlowDependencyLevel(),",
         "dependency_level: dependencyLevel,",
         'id="flowIncludeAllTopologyVulns"',

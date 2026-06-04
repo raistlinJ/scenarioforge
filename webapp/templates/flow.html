@@ -2946,7 +2946,8 @@
       } else {
         parts.push('Last progress: none received for this resolve request.');
       }
-      parts.push('Check next: webapp terminal/log for a restart or traceback at that progress_id; Flask reloader/proxy timeout/server restart are the most likely causes. If using nginx or another proxy, raise its read/send timeout above the browser timeout shown here.');
+      const logPort = (window.location && window.location.port) ? String(window.location.port) : '9090';
+      parts.push(`Check next: grep outputs/logs/webui-${logPort}.log and the webapp terminal for progress_id=${ctx.progressId || '-'}, a restart, or a traceback. Flask reloader/proxy timeout/server restart are the most likely causes. If using nginx or another proxy, raise its read/send timeout above the browser timeout shown here.`);
       return parts.join('\n');
     } catch (diagErr) {
       return `Resolve request connection was interrupted while generators were running: ${describeFetchError(err)}`;
