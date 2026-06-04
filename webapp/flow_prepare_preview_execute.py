@@ -720,6 +720,7 @@ def _prepare_chain_and_assignments(
             scenario_label=(scenario_label or scenario_norm),
             dependency_level=dependency_level,
             return_debug=bool(debug_dag),
+            flow_progress=_progress,
         )
         try:
             chain_ids = [str(node.get('id') or '').strip() for node in chain_nodes if isinstance(node, dict) and str(node.get('id') or '').strip()]

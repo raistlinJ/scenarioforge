@@ -21641,6 +21641,7 @@ def _flow_reorder_chain_by_generator_dag(
     dependency_level: int | None = None,
     plugins_by_id_override: dict[str, dict[str, Any]] | None = None,
     return_debug: bool = False,
+    flow_progress: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Best-effort: reorder the chain using generator artifact dependencies.
 
@@ -21649,14 +21650,27 @@ def _flow_reorder_chain_by_generator_dag(
 
     If the DAG cannot be built, returns inputs unchanged.
     """
+    def _progress(message: str) -> None:
+        if flow_progress is None:
+            return
+        try:
+            flow_progress(f'DAG: {message}')
+        except Exception:
+            pass
+
     try:
+        _progress(f'start nodes={len(chain_nodes or [])} assignments={len(flag_assignments or [])} dependency_level={_flow_normalize_dependency_level(dependency_level)}')
         if not isinstance(chain_nodes, list) or not chain_nodes:
+            _progress('skipped: missing chain nodes')
             return chain_nodes, flag_assignments, None
         if not isinstance(flag_assignments, list) or not flag_assignments:
+            _progress('skipped: missing flag assignments')
             return chain_nodes, flag_assignments, None
 
+        _progress('loading sequencer DAG helpers')
         from scenarioforge.sequencer.dag import build_dag
         from scenarioforge.sequencer.chain import validate_chain_doc, validate_linear_chain
+        _progress('sequencer DAG helpers loaded')
 
         node_by_id: dict[str, dict[str, Any]] = {}
         for n in chain_nodes:
@@ -21677,13 +21691,39 @@ def _flow_reorder_chain_by_generator_dag(
         # Only reorder when we have a 1:1 mapping.
         chain_ids = [str(n.get('id') or '').strip() for n in chain_nodes if isinstance(n, dict) and str(n.get('id') or '').strip()]
         if not chain_ids:
+            _progress('skipped: chain has no ids')
             return chain_nodes, flag_assignments, None
         if any(cid not in assign_by_node for cid in chain_ids):
+            _progress('skipped: chain and assignments are not 1:1')
             return chain_nodes, flag_assignments, None
+
+        _progress(f'indexed chain ids={",".join(chain_ids)}')
+
+        gen_defs_by_id_for_reorder: dict[str, dict[str, Any]] = {}
+        try:
+            _progress('loading enabled generator definitions')
+            gen_defs_by_id_for_reorder = _flow_enabled_generator_defs_by_id()
+            _progress(f'loaded generator definitions count={len(gen_defs_by_id_for_reorder or {})}')
+        except Exception as exc:
+            gen_defs_by_id_for_reorder = {}
+            _progress(f'generator definition load failed: {type(exc).__name__}: {exc}')
+
+        plugins_by_id: dict[str, dict[str, Any]] = {}
+        if isinstance(plugins_by_id_override, dict) and plugins_by_id_override:
+            plugins_by_id = plugins_by_id_override
+            _progress(f'using provided plugin contracts count={len(plugins_by_id)}')
+        else:
+            try:
+                _progress('loading enabled plugin contracts')
+                plugins_by_id = _flow_enabled_plugin_contracts_by_id()
+                _progress(f'loaded plugin contracts count={len(plugins_by_id or {})}')
+            except Exception as exc:
+                plugins_by_id = {}
+                _progress(f'plugin contract load failed: {type(exc).__name__}: {exc}')
 
         initial_artifacts = set(_flow_synthesized_inputs())
         try:
-            gen_defs_by_id_for_initial = _flow_enabled_generator_defs_by_id()
+            gen_defs_by_id_for_initial = gen_defs_by_id_for_reorder
             ordered_for_initial = [assign_by_node.get(cid) or {} for cid in chain_ids]
             start_positions_for_initial = _flow_parallel_start_assignment_indexes(
                 ordered_for_initial,
@@ -21705,6 +21745,7 @@ def _flow_reorder_chain_by_generator_dag(
                 initial_artifacts |= set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else start_assignment_for_initial))
         except Exception:
             pass
+            _progress(f'initial artifacts ready count={len(initial_artifacts)}')
 
         def _assignment_fact_list(assignment: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
             facts: set[str] = set()
@@ -21787,7 +21828,7 @@ def _flow_reorder_chain_by_generator_dag(
             try:
                 start_positions = _flow_parallel_start_assignment_indexes(
                     ordered_assignments,
-                    gen_defs_by_id=_flow_enabled_generator_defs_by_id(),
+                    gen_defs_by_id=gen_defs_by_id_for_reorder,
                 )
             except Exception:
                 start_positions = {0} if ordered_assignments else set()
@@ -21844,14 +21885,17 @@ def _flow_reorder_chain_by_generator_dag(
             return ordered_nodes, ordered_assignments
 
         def _high_dependency_greedy_order() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None] | None:
+            _progress('high-dependency greedy ordering start')
             pairs: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
             for idx, node_id in enumerate(chain_ids):
                 node = node_by_id.get(node_id)
                 assignment = assign_by_node.get(node_id)
                 if not isinstance(node, dict) or not isinstance(assignment, dict):
+                    _progress(f'high-dependency greedy skipped: missing node or assignment for {node_id}')
                     return None
                 pairs.append((idx, node, assignment))
             if len(pairs) != len(chain_ids):
+                _progress('high-dependency greedy skipped: incomplete pair list')
                 return None
             remaining = list(pairs)
             ordered: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
@@ -21865,6 +21909,7 @@ def _flow_reorder_chain_by_generator_dag(
                     future_required |= _assignment_requires(assignment)
                 eligible = [item for item in remaining if _assignment_requires(item[2]).issubset(known)]
                 pool = eligible or list(remaining)
+                _progress(f'high-dependency greedy step={len(ordered) + 1}/{len(pairs)} eligible={len(eligible)} remaining={len(remaining)}')
 
                 def _score(item: tuple[int, dict[str, Any], dict[str, Any]]) -> tuple[int, int]:
                     original_index, _node, assignment = item
@@ -21894,12 +21939,14 @@ def _flow_reorder_chain_by_generator_dag(
             after_adjacent = _adjacent_dependency_count(ordered_assignments)
             current_valid = False
             try:
+                _progress('validating current order before accepting greedy result')
                 current_valid, _errors = _flow_validate_chain_order_by_requires_produces(
                     chain_nodes,
                     flag_assignments,
                     scenario_label=scenario_label,
-                    plugins_by_id_override=plugins_by_id_override,
+                    plugins_by_id_override=plugins_by_id,
                 )
+                _progress(f'current order validation valid={bool(current_valid)} errors={len(_errors or [])}')
             except Exception:
                 current_valid = False
             if after_adjacent <= before_adjacent and current_valid:
@@ -21913,16 +21960,21 @@ def _flow_reorder_chain_by_generator_dag(
                         'order': [str((node or {}).get('id') or '') for node in chain_nodes],
                     }
                 refreshed_nodes, refreshed_assignments = _refresh_next_fields(chain_nodes, flag_assignments)
+                _progress('high-dependency greedy preserved current order')
+                _progress('DAG reorder complete strategy=high_dependency_preserve')
                 return refreshed_nodes, refreshed_assignments, debug
             try:
+                _progress('validating greedy candidate order')
                 valid, _errors = _flow_validate_chain_order_by_requires_produces(
                     ordered_nodes,
                     ordered_assignments,
                     scenario_label=scenario_label,
-                    plugins_by_id_override=plugins_by_id_override,
+                    plugins_by_id_override=plugins_by_id,
                 )
                 if not valid:
+                    _progress(f'high-dependency greedy candidate invalid errors={len(_errors or [])}')
                     return None
+                _progress('high-dependency greedy candidate valid')
             except Exception:
                 pass
             debug: dict[str, Any] | None = None
@@ -21947,35 +21999,37 @@ def _flow_reorder_chain_by_generator_dag(
                     'edges': _greedy_edges,
                 }
             refreshed_nodes, refreshed_assignments = _refresh_next_fields(ordered_nodes, ordered_assignments)
+            _progress(f'high-dependency greedy selected order={",".join([str((node or {}).get("id") or "") for node in ordered_nodes])}')
+            _progress('DAG reorder complete strategy=high_dependency_greedy')
             return refreshed_nodes, refreshed_assignments, debug
 
         try:
             if _flow_normalize_dependency_level(dependency_level) >= 5:
+                _progress('trying high-dependency greedy reorder')
                 greedy_result = _high_dependency_greedy_order()
                 if greedy_result is not None:
                     return greedy_result
+                _progress('high-dependency greedy did not produce an order')
         except Exception:
             pass
 
         try:
+            _progress('checking current chain order before DAG build')
             current_valid, _current_errors = _flow_validate_chain_order_by_requires_produces(
                 chain_nodes,
                 flag_assignments,
                 scenario_label=scenario_label,
-                plugins_by_id_override=plugins_by_id_override,
+                plugins_by_id_override=plugins_by_id,
             )
+            _progress(f'current chain order valid={bool(current_valid)} errors={len(_current_errors or [])}')
             if not current_valid:
+                _progress('trying greedy reorder for invalid current chain')
                 greedy_result = _high_dependency_greedy_order()
                 if greedy_result is not None:
                     return greedy_result
+                _progress('greedy reorder for invalid current chain did not produce an order')
         except Exception:
             pass
-
-        plugins_by_id: dict[str, dict[str, Any]] = {}
-        if isinstance(plugins_by_id_override, dict) and plugins_by_id_override:
-            plugins_by_id = plugins_by_id_override
-        else:
-            plugins_by_id = _flow_enabled_plugin_contracts_by_id()
 
         # Build a real sequencer chain instance (YAML-shape) from the current Flow chain.
         #
@@ -21994,14 +22048,17 @@ def _flow_reorder_chain_by_generator_dag(
 
         effective_plugins_by_id: dict[str, dict[str, Any]] = dict(plugins_by_id or {})
         challenges: list[dict[str, Any]] = []
-        for cid in chain_ids:
+        _progress(f'building DAG chain document challenges={len(chain_ids)}')
+        for index, cid in enumerate(chain_ids, 1):
             a = assign_by_node.get(cid) or {}
             plugin_id = str(a.get('id') or '').strip()
             if not plugin_id:
+                _progress(f'skipped DAG build: missing plugin id for node {cid}')
                 return chain_nodes, flag_assignments, None
             plugin = plugins_by_id.get(plugin_id)
             if not isinstance(plugin, dict):
                 # Without the plugin contract we can't build a correct artifact DAG.
+                _progress(f'skipped DAG build: missing plugin contract {plugin_id}')
                 return chain_nodes, flag_assignments, None
 
             inferred_requires = [str(x).strip() for x in (a.get('inputs') or []) if str(x).strip()]
@@ -22057,10 +22114,15 @@ def _flow_reorder_chain_by_generator_dag(
 
             # Also build the challenge instances for build_dag.
             challenges.append(ch)
+            _progress(f'DAG chain document challenge={index}/{len(chain_ids)} node={cid} plugin={plugin_id}')
 
+        _progress('validating DAG chain document')
         chain_ok, chain_errors, chain_norm = validate_chain_doc(chain_doc)
+        _progress(f'DAG chain document validation ok={bool(chain_ok)} errors={len(chain_errors or [])}')
 
+        _progress('building sequencer DAG')
         dag, errors = build_dag(challenges, plugins_by_id=effective_plugins_by_id, initial_artifacts=sorted(list(initial_artifacts)))
+        _progress(f'sequencer DAG build complete ok={bool(dag is not None)} errors={len(errors or [])}')
         debug: dict[str, Any] | None = None
         if return_debug:
             try:
@@ -22080,18 +22142,22 @@ def _flow_reorder_chain_by_generator_dag(
             except Exception:
                 debug = None
         if dag is None:
+            _progress('DAG build returned no order; keeping current chain')
             return chain_nodes, flag_assignments, debug
 
         order = [str(x) for x in (dag.order or ()) if str(x).strip()]
         if not order:
+            _progress('DAG order empty; keeping current chain')
             return chain_nodes, flag_assignments, debug
         if set(order) != set(chain_ids):
+            _progress('DAG order did not match chain ids; keeping current chain')
             return chain_nodes, flag_assignments, debug
 
         # Reorder nodes + assignments.
         new_chain_nodes = [node_by_id[cid] for cid in order if cid in node_by_id]
         new_assignments = [assign_by_node[cid] for cid in order if cid in assign_by_node]
         if len(new_chain_nodes) != len(chain_nodes) or len(new_assignments) != len(flag_assignments):
+            _progress('DAG ordered result length mismatch; keeping current chain')
             return chain_nodes, flag_assignments, debug
 
         # Optional: validate that the new order is linearly solvable by the chain spec.
@@ -22147,11 +22213,12 @@ def _flow_reorder_chain_by_generator_dag(
         try:
             dag_start_positions = _flow_parallel_start_assignment_indexes(
                 new_assignments,
-                gen_defs_by_id=_flow_enabled_generator_defs_by_id(),
+                gen_defs_by_id=gen_defs_by_id_for_reorder,
             )
         except Exception:
             dag_start_positions = {0} if new_assignments else set()
 
+        _progress(f'refreshing NEXT fields for DAG order={",".join(order)}')
         for i, a in enumerate(new_assignments):
             try:
                 this_id = str(a.get('node_id') or '').strip()
@@ -22179,8 +22246,16 @@ def _flow_reorder_chain_by_generator_dag(
             except Exception:
                 continue
 
+        _progress('DAG reorder complete')
         return new_chain_nodes, new_assignments, debug
-    except Exception:
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        _progress(f'failed: {type(exc).__name__}: {exc}')
+        try:
+            app.logger.exception('Flow DAG reorder failed; returning original chain.')
+        except Exception:
+            pass
         return chain_nodes, flag_assignments, None
 
 
