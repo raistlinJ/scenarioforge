@@ -45154,7 +45154,7 @@ if __name__ == '__main__':
             app.logger.info('[hitl_config] scrubbed unverified hitl_config entries from scenario_catalog.json')
     except Exception:
         pass
-    app.run(host=host, port=port, debug=debug, use_reloader=use_reloader)
+    app.run(host=host, port=port, debug=debug, use_reloader=use_reloader, threaded=True)
 
 def _remote_docker_exec_listener_snapshot_script(*, containers: List[str], sudo_password: str | None = None) -> str:
     containers_literal = json.dumps([str(value) for value in (containers or [])])

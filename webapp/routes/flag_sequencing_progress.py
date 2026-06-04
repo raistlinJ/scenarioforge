@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from flask import jsonify
+from flask import jsonify, request
 
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
 
@@ -18,6 +18,7 @@ def register(
 
     @app.route('/api/flag-sequencing/flow_progress', methods=['GET'])
     def api_flow_progress():
+        progress_id = str(request.args.get('progress_id') or '').strip()
         try:
             port = int(os_module.environ.get('CORETG_PORT') or 9090)
         except Exception:
@@ -29,6 +30,8 @@ def register(
                 with open(log_path, 'r', encoding='utf-8', errors='ignore') as file_handle:
                     raw = file_handle.read().splitlines()[-400:]
                 for line in raw:
+                    if progress_id and f'progress_id={progress_id}' not in line:
+                        continue
                     if ('[flow.progress]' in line) or ('[flow.' in line) or ('[remote-sync]' in line) or ('Repo upload' in line):
                         lines.append(line.strip())
         except Exception:

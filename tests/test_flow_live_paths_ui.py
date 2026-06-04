@@ -36,6 +36,25 @@ def test_flow_generator_output_shows_phase_timings() -> None:
     assert not missing, "Missing phase timing display wiring in flow template: " + "; ".join(missing)
 
 
+def test_flow_sequencing_progress_is_request_scoped_and_visible() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function startFlowProgressPoll(options)",
+        "if (opts.progressId) url += '?progress_id=' + encodeURIComponent(String(opts.progressId));",
+        "const display = _formatFlowProgressLine(s);",
+        "if (newLines.length && opts.loadingLog) newLines.forEach((line) => appendLoadingLog(line));",
+        "const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;",
+        "startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });",
+        "progress_id: sequenceProgressId,",
+        "if (s.includes('phase: building topology graph')) return 'Building topology graph…';",
+        "if (s.includes('phase: computing generator assignments')) return 'Assigning generators…';",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing request-scoped visible sequencing progress snippets: " + "; ".join(missing)
+
+
 def test_report_guides_include_chain_io_and_pivot_sections() -> None:
     text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
