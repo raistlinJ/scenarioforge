@@ -1512,7 +1512,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xml", required=True, help="Path to XML scenario file")
     ap.add_argument("--scenario", default=None, help="Scenario name to use (defaults to first)")
-    ap.add_argument("--host", default="127.0.0.1", help="core-daemon gRPC host")
+    ap.add_argument("--host", default="localhost", help="core-daemon gRPC host")
     ap.add_argument("--port", type=int, default=50051, help="core-daemon gRPC port")
     ap.add_argument("--prefix", default="10.0.0.0/24", help="IPv4 prefix for auto-assigned addresses")
     ap.add_argument(

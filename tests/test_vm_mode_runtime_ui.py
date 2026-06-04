@@ -124,3 +124,14 @@ def test_vm_mode_core_management_nav_allows_runtime_managed_defaults() -> None:
     modal_body = modal_match.group("body")
     assert "{% if webui_runtime_mode == 'vm' %}" in modal_body
     assert "VM mode CORE defaults are incomplete" in modal_body
+
+
+def test_hitl_summary_prefers_stored_bridge_mapping_over_inventory() -> None:
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected = [
+        "const mappedIfaceId = extIfaceId || extIfaceIdLive;",
+        "const extBridge = extBridgeStored || extBridgeLive;",
+    ]
+    missing = [snippet for snippet in expected if snippet not in index_text]
+    assert not missing, "Missing stored-bridge precedence snippets: " + "; ".join(missing)
