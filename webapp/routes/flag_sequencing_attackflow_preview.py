@@ -189,22 +189,15 @@ def register(app, *, backend_module: Any) -> None:
                 pass
             return 0.0
 
+        flow_state_from_xml: dict[str, Any] | None = None
         try:
-            backend._canonicalize_payload_flow_from_xml(
+            _meta_from_xml, flow_state_from_xml = backend._canonicalize_payload_flow_from_xml(
                 payload,
                 xml_path=preview_plan_path,
                 scenario_label=(scenario_label or scenario_norm),
             )
         except Exception:
-            pass
-        try:
-            backend._flow_attach_pivoting_plan_from_xml(
-                payload,
-                xml_path=preview_plan_path,
-                scenario_label=(scenario_label or scenario_norm),
-            )
-        except Exception:
-            pass
+            flow_state_from_xml = None
 
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
@@ -219,6 +212,15 @@ def register(app, *, backend_module: Any) -> None:
                     include_all_topology_pivots = bool(flow_for_options.get('include_all_topology_pivots'))
         except Exception:
             pass
+        if include_all_topology_pivots:
+            try:
+                backend._flow_attach_pivoting_plan_from_xml(
+                    payload,
+                    xml_path=preview_plan_path,
+                    scenario_label=(scenario_label or scenario_norm),
+                )
+            except Exception:
+                pass
         if include_all_topology_vulns or include_all_topology_pivots:
             ignore_saved_flow = True
 
@@ -491,9 +493,8 @@ def register(app, *, backend_module: Any) -> None:
             host_ip_map = {}
 
         flag_assignments: list[dict[str, Any]] = []
-        flow_state_from_xml: dict[str, Any] | None = None
         try:
-            if not ignore_saved_flow:
+            if (not ignore_saved_flow) and flow_state_from_xml is None:
                 flow_state_from_xml = backend._flow_state_from_xml_path(preview_plan_path, scenario_label or scenario_norm)
             if flow_state_from_xml:
                 candidate_nodes, _saved_flow_source = _saved_chain_nodes_from_flow_state(flow_state_from_xml)
