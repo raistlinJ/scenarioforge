@@ -19901,8 +19901,6 @@ def _flow_apply_pivot_context_to_assignments(
         rules = _flow_pivot_rules_for_chain(preview, chain_nodes, pivot_context=pivot_context)
     except Exception:
         rules = []
-    if not rules:
-        return flag_assignments
 
     node_by_id: dict[str, dict[str, Any]] = {}
     # Build a comprehensive lookup of all chain node identifiers so we can
@@ -19932,12 +19930,32 @@ def _flow_apply_pivot_context_to_assignments(
         text = str(value or '').strip().lower()
         if not text:
             return set()
-        names = {text}
-        if ' @ ' in text:
-            names.add(text.split(' @ ', 1)[0].strip())
-        if text.isdigit():
-            names.add(f'docker-{text}')
+        names: set[str] = set()
+
+        def _add(raw: str) -> None:
+            candidate = str(raw or '').strip().lower()
+            if not candidate:
+                return
+            names.add(candidate)
+            base = candidate.split(' @ ', 1)[0].strip() if ' @ ' in candidate else candidate
+            if base and base != candidate:
+                names.add(base)
+            if base.isdigit():
+                names.add(f'docker-{base}')
+            if base.startswith('docker-'):
+                suffix = base.split('docker-', 1)[1].strip()
+                if suffix.isdigit():
+                    names.add(suffix)
+
+        _add(text)
         return {name for name in names if name}
+
+    def _pivot_fact_source_in_chain(value: Any) -> bool:
+        subject = _pivot_fact_subject(value)
+        if not subject:
+            return True
+        source_names = _pivot_source_name_candidates(subject)
+        return any(source_name in _chain_all_ids for source_name in source_names)
 
     def _rule_source_in_chain(rule: dict[str, Any], source_id: str) -> bool:
         source_name = str(rule.get('source_name') or '').strip()
@@ -19963,6 +19981,14 @@ def _flow_apply_pivot_context_to_assignments(
         target[key] = [
             item for item in (target.get(key) or [])
             if str(item or '').strip() not in remove
+        ]
+
+    def _remove_absent_pivot_facts(target: dict[str, Any], key: str) -> None:
+        if not isinstance(target.get(key), list):
+            return
+        target[key] = [
+            item for item in (target.get(key) or [])
+            if not (_pivot_fact_subject(item) and not _pivot_fact_source_in_chain(item))
         ]
 
     out: list[dict[str, Any]] = []
@@ -20065,6 +20091,9 @@ def _flow_apply_pivot_context_to_assignments(
                     f"Pivot required: reach {node_name or node_id} through {_all_sources} "
                     f"after the pivot sources are solved. {_fact_label}: {', '.join(_all_facts)}.",
                 )
+
+        _remove_absent_pivot_facts(a2, 'requires')
+        _remove_absent_pivot_facts(a2, 'inputs')
 
         if pivot_entries:
             deduped: list[dict[str, Any]] = []

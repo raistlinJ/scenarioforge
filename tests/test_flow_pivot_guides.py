@@ -560,6 +560,50 @@ def test_pivot_apply_prunes_saved_requires_when_source_not_in_chain():
     assert ok, errors
 
 
+def test_pivot_apply_prunes_saved_requires_without_matching_rule():
+    """A saved assignment may carry a stale Pivot fact even when current
+    pivot metadata does not produce a rule for that missing source.
+    """
+    chain_nodes = [
+        {"id": "16", "name": "docker-16", "type": "docker"},
+        {"id": "18", "name": "docker-18", "type": "docker"},
+        {"id": "21", "name": "docker-21", "type": "docker"},
+        {"id": "22", "name": "docker-22", "type": "docker"},
+        {"id": "17", "name": "docker-17", "type": "docker"},
+        {"id": "19", "name": "docker-19", "type": "docker"},
+        {"id": "20", "name": "docker-20", "type": "docker"},
+    ]
+    assignments = [
+        {"node_id": "16", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": ["Pivot(docker-13)"], "outputs": [], "requires": ["Pivot(docker-13)"], "produces": []},
+        *[
+            {"node_id": node_id, "id": "db-flag", "type": "flag-node-generator",
+             "inputs": [], "outputs": [], "requires": [], "produces": []}
+            for node_id in ("18", "21", "22", "17", "19", "20")
+        ],
+    ]
+
+    enriched = app_backend._flow_apply_pivot_context_to_assignments(
+        assignments,
+        chain_nodes,
+        preview=None,
+        pivot_context={},
+        scenario_label="stale-pivot-no-rule-test",
+    )
+
+    first = enriched[0]
+    assert "Pivot(docker-13)" not in (first.get("inputs") or [])
+    assert "Pivot(docker-13)" not in (first.get("requires") or [])
+
+    ok, errors = app_backend._flow_validate_chain_order_by_requires_produces(
+        chain_nodes,
+        enriched,
+        scenario_label="stale-pivot-no-rule-test",
+        plugins_by_id_override=_plugins_by_id(),
+    )
+    assert ok, errors
+
+
 def test_pivot_apply_consolidates_multi_source_hints():
     """When a node is a pivot target of multiple source nodes, only a single
     consolidated 'Pivot required' hint should appear - not one per source rule.
