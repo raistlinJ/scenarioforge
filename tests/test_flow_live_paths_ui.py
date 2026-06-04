@@ -59,19 +59,36 @@ def test_flow_loading_progress_uses_scrollable_container() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
+        'id="flowLoadingSteps"',
+        'max-height: 150px; overflow-y: auto;',
+        'id="flowComposeSteps"',
+        'max-height: 140px; overflow-y: auto;',
         'id="flowLoadingLog"',
         'max-height: 180px; overflow-y: auto;',
         'white-space: pre-wrap; word-break: break-word;',
+        '<div class="d-flex align-items-center gap-2 ${cls}">',
+        'try { stepsEl.scrollTop = stepsEl.scrollHeight; } catch (e) { }',
         "const entry = document.createElement('div');",
         'entry.textContent = msg;',
+        'try { loadingLogEl.scrollTop = loadingLogEl.scrollHeight; } catch (scrollErr) { }',
+        "${progress.map(p => `<div>${esc(p)}</div>`).join('')}",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing scrollable loading log snippets: " + "; ".join(missing)
 
+    forbidden_snippets = [
+        '<ul id="flowLoadingSteps"',
+        '<ul id="flowComposeSteps"',
+        "<ul class=\"small mb-3\">${progress.map(p => `<li>${esc(p)}</li>`).join('')}</ul>",
+    ]
+    present = [snippet for snippet in forbidden_snippets if snippet in text]
+    assert not present, "Progress output should not use bullet-list markup: " + "; ".join(present)
+
 
 def test_report_guides_include_chain_io_and_pivot_sections() -> None:
-    text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    reports_text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    flow_text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
         "### Chain Inputs / Outputs",
@@ -81,8 +98,11 @@ def test_report_guides_include_chain_io_and_pivot_sections() -> None:
         "...normalizeChainFacts(assignment.produces)",
         "entry.provider_label || entry.provider",
     ]
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing pivot/chain IO guide rendering snippets: " + "; ".join(missing)
+    reports_missing = [snippet for snippet in expected_snippets if snippet not in reports_text]
+    assert not reports_missing, "Missing pivot/chain IO report-guide rendering snippets: " + "; ".join(reports_missing)
+
+    flow_missing = [snippet for snippet in expected_snippets if snippet not in flow_text]
+    assert not flow_missing, "Missing pivot/chain IO flow-guide rendering snippets: " + "; ".join(flow_missing)
 
 
 def test_flow_chain_editor_surfaces_pivot_paths() -> None:
@@ -442,8 +462,12 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
         "if (generateInFlight) {",
         "Generate ignored: another Generate/Resolve request is already running.",
         "const resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));",
+        "const resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;",
+        "startFlowProgressPoll({ progressId: resolveProgressId, loadingLog: true });",
         "timeout_s: resolveTimeoutSeconds,",
+        "progress_id: resolveProgressId,",
         "Resolve request connection was interrupted while generators were running",
+        "This is the browser-to-webapp request, not the CORE VM internet path",
         "dependency_level: getFlowDependencyLevel(),",
         "dependency_level: dependencyLevel,",
         'id="flowIncludeAllTopologyVulns"',

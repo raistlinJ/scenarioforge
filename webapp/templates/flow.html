@@ -322,7 +322,7 @@
                         style="width: 100%">Working…</div>
                     </div>
                     <div class="small text-muted mb-1" id="flowComposeStepsLabel">Progress steps</div>
-                    <ul id="flowComposeSteps" class="small mb-3"></ul>
+                    <div id="flowComposeSteps" class="small mb-3 border rounded bg-light p-2" style="max-height: 140px; overflow-y: auto;"></div>
                     <div class="small text-muted mb-1" id="flowComposeLogLabel">Output / Log</div>
                     <div id="flowComposeBody" class="small bg-light p-2 mb-0" style="max-height: 55vh; overflow: auto;">
                     </div>
@@ -386,7 +386,11 @@
       <div class="fw-semibold" id="flowLoadingText">Loading…</div>
     </div>
     <div class="small text-muted mt-2" id="flowLoadingStepsLabel">Progress steps</div>
-    <ul id="flowLoadingSteps" class="small mt-1 mb-0 d-none"></ul>
+    <div
+      id="flowLoadingSteps"
+      class="small mt-1 mb-0 d-none border rounded bg-light p-2"
+      style="max-height: 150px; overflow-y: auto;"
+    ></div>
     <div class="small text-muted mt-2 d-none" id="flowLoadingLogLabel">Details</div>
     <div
       id="flowLoadingLog"
@@ -1958,13 +1962,14 @@
       const badgeCls = state === 'active' ? 'text-bg-primary' : (state === 'done' ? 'text-bg-success' : 'text-bg-secondary');
       const status = state === 'active' ? 'Working' : (state === 'done' ? 'Done' : 'Pending');
       return `
-        <li class="d-flex align-items-center gap-2 ${cls}">
+        <div class="d-flex align-items-center gap-2 ${cls}">
           <span class="badge ${badgeCls}">${i + 1}</span>
           <span>${escapeHtml(s)}</span>
           <span class="ms-auto small text-muted">${status}</span>
-        </li>
+        </div>
       `;
     }).join('');
+    try { stepsEl.scrollTop = stepsEl.scrollHeight; } catch (e) { }
   }
 
   function setLoadingSteps(steps, activeIndex) {
@@ -2015,6 +2020,7 @@
         const entry = document.createElement('div');
         entry.textContent = msg;
         loadingLogEl.appendChild(entry);
+        try { loadingLogEl.scrollTop = loadingLogEl.scrollHeight; } catch (scrollErr) { }
       }
       if (composeBodyEl && !composeFinalized) {
         if (composeLogLabelEl) composeLogLabelEl.classList.remove('d-none');
@@ -2139,7 +2145,7 @@
         `;
       }).join('');
       const progressHtml = progress.length
-        ? `<div class="small text-muted mb-2">Progress</div><ul class="small mb-3">${progress.map(p => `<li>${esc(p)}</li>`).join('')}</ul>`
+        ? `<div class="small text-muted mb-2">Progress</div><div class="small text-muted mb-3 border rounded bg-light p-2" style="max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">${progress.map(p => `<div>${esc(p)}</div>`).join('')}</div>`
         : '';
       const outputLines = rows.map((r) => {
         const gid = String((r && (r.generator_id || r.id)) || '').trim() || 'unknown';
@@ -10527,7 +10533,8 @@
             } catch (e) { }
             const chain_ids = currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean);
             const resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));
-            stopProgressPoll = startFlowProgressPoll();
+            const resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            stopProgressPoll = startFlowProgressPoll({ progressId: resolveProgressId, loadingLog: true });
             const prepData = await postJson(
               '/api/flag-sequencing/prepare_preview_for_execute',
               {
@@ -10543,6 +10550,7 @@
                 timeout_s: resolveTimeoutSeconds,
                 initial_facts: flowInitialFactsOverride,
                 goal_facts: flowGoalFactsOverride,
+                progress_id: resolveProgressId,
               },
               { timeoutMs: (resolveTimeoutSeconds * 1000) + 30000, throwOnHttpError: true } // Ensure HTTP errors (422) throw so we can catch them.
             );
@@ -10695,7 +10703,7 @@
             if (isTransientFetchError(e) || (e && e.isTimeout)) {
               const msg = e && e.isTimeout
                 ? 'Resolve request timed out while generators were running. Increase timeout or retry after checking the generator output.'
-                : `Resolve request connection was interrupted while generators were running: ${describeFetchError(e)}`;
+                : `Resolve request connection was interrupted while generators were running: ${describeFetchError(e)}. This is the browser-to-webapp request, not the CORE VM internet path; check whether the webapp restarted, the Flask reloader fired, or a proxy closed the long request.`;
               appendLoadingLog(msg);
               try { setComposeError(msg); } catch (_) { }
               setStatus('Resolve interrupted: ' + msg, true);
@@ -12101,6 +12109,64 @@ ${out.join('\n')}
         optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
       }
       lines.push('');
+
+      const normalizeChainFacts = (value) => guideFigureNormalizeFactNames(value, ['artifact', 'name', 'field'])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+      const chainInputFacts = Array.from(new Set([
+        ...normalizeChainFacts(assignment.requires),
+        ...normalizeChainFacts(assignment.inputs),
+      ]));
+      const chainOutputFacts = Array.from(new Set([
+        ...normalizeChainFacts(assignment.produces),
+        ...normalizeChainFacts(assignment.outputs),
+      ]));
+      const pivotEntries = Array.isArray(assignment.pivot)
+        ? assignment.pivot.filter((item) => item && typeof item === 'object')
+        : [];
+
+      lines.push('### Chain Inputs / Outputs');
+      lines.push('');
+      if (!chainInputFacts.length && !chainOutputFacts.length) {
+        lines.push('No chain-level facts were declared for this step.');
+      } else {
+        lines.push('| Direction | Fact |');
+        lines.push('| --- | --- |');
+        chainInputFacts.forEach((fact) => lines.push(`| Input | ${_cell(fact)} |`));
+        chainOutputFacts.forEach((fact) => lines.push(`| Output | ${_cell(fact)} |`));
+      }
+      lines.push('');
+
+      if (pivotEntries.length) {
+        lines.push('### Pivot Path');
+        lines.push('');
+        lines.push('| Role | Source | Target | Facts | Provider |');
+        lines.push('| --- | --- | --- | --- | --- |');
+        const pivotRows = pivotEntries.map((entry) => {
+          const role = String(entry.role || '').trim() || 'pivot';
+          const source = String(entry.source || '').trim();
+          const target = String(entry.target || '').trim();
+          const facts = Array.from(new Set([
+            ...normalizeChainFacts(entry.requires),
+            ...normalizeChainFacts(entry.produces),
+          ])).join(', ');
+          const provider = String(entry.provider_label || entry.provider || '').trim();
+          return `| ${_cell(role)} | ${_cell(source)} | ${_cell(target)} | ${_cell(facts)} | ${_cell(provider)} |`;
+        });
+        lines.push(pivotRows[0]);
+        if (pivotRows.length > 1) {
+          lines.push('');
+          lines.push('<details>');
+          lines.push(`<summary>${pivotRows.length - 1} other pivot path${(pivotRows.length - 1) === 1 ? '' : 's'} exist (click to see)</summary>`);
+          lines.push('');
+          lines.push('| Role | Source | Target | Facts | Provider |');
+          lines.push('| --- | --- | --- | --- | --- |');
+          pivotRows.slice(1).forEach((row) => lines.push(row));
+          lines.push('');
+          lines.push('</details>');
+        }
+        lines.push('');
+      }
       
       // Apply access instructions: check generator metadata first, then heuristics
       const _applyAccessInstructions = (assign, nodeName, nodeIp, nodeId) => {
