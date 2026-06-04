@@ -4807,11 +4807,37 @@
           return normalizeFactList(values).join(', ');
         }
 
-        if (pivotEntries.length) {
+        function appendPrimaryWithExpandableList(parent, items, summaryLabelBuilder) {
+          const normalizedItems = Array.isArray(items)
+            ? items.map((item) => String(item || '').trim()).filter(Boolean)
+            : [];
+          if (!normalizedItems.length) return;
+          const primary = document.createElement('div');
+          primary.textContent = normalizedItems[0];
+          parent.appendChild(primary);
+          if (normalizedItems.length <= 1) return;
+
+          const details = document.createElement('details');
+          details.className = 'small';
+          const summary = document.createElement('summary');
+          summary.className = 'text-primary';
+          summary.textContent = summaryLabelBuilder(normalizedItems.length - 1);
+          details.appendChild(summary);
+
           const list = document.createElement('ol');
-          list.className = 'mb-0 ps-3';
-          pivotEntries.forEach((entry) => {
+          list.className = 'mb-0 ps-3 mt-1';
+          normalizedItems.slice(1).forEach((item) => {
             const li = document.createElement('li');
+            li.textContent = item;
+            list.appendChild(li);
+          });
+          details.appendChild(list);
+          parent.appendChild(details);
+        }
+
+        if (pivotEntries.length) {
+          const pivotRows = [];
+          pivotEntries.forEach((entry) => {
             const parts = [];
             const source = String(entry.source || '').trim();
             const target = String(entry.target || '').trim();
@@ -4829,14 +4855,20 @@
             if (protocols) parts.push(`protocols: ${protocols}`);
             const exposure = String(entry.exposure || '').trim();
             if (exposure) parts.push(`exposure: ${exposure}`);
-            li.textContent = parts.filter(Boolean).join('; ');
-            list.appendChild(li);
+            const rowText = parts.filter(Boolean).join('; ');
+            if (rowText) pivotRows.push(rowText);
           });
-          wrap.appendChild(list);
+          appendPrimaryWithExpandableList(
+            wrap,
+            pivotRows,
+            (remaining) => `${remaining} other pivot path${remaining === 1 ? '' : 's'} exist (click to see)`
+          );
         } else if (pivotSummary.length) {
-          const summary = document.createElement('div');
-          summary.textContent = pivotSummary.join('; ');
-          wrap.appendChild(summary);
+          appendPrimaryWithExpandableList(
+            wrap,
+            pivotSummary,
+            (remaining) => `${remaining} other pivot path${remaining === 1 ? '' : 's'} exist (click to see)`
+          );
         }
 
         const factLines = [];
@@ -4998,14 +5030,25 @@
         renderedAnyHintLevel = true;
         if (values.length > 1) {
           const wrap = document.createElement('div');
+          const primary = document.createElement('div');
+          primary.textContent = values[0];
+          wrap.appendChild(primary);
+
+          const details = document.createElement('details');
+          details.className = 'small';
+          const summary = document.createElement('summary');
+          summary.className = 'text-primary';
+          summary.textContent = `${values.length - 1} other hint path${(values.length - 1) === 1 ? '' : 's'} exist (click to see)`;
+          details.appendChild(summary);
           const ul = document.createElement('ol');
-          ul.className = 'mb-0 ps-3';
-          values.forEach((ht) => {
+          ul.className = 'mb-0 ps-3 mt-1';
+          values.slice(1).forEach((ht) => {
             const li = document.createElement('li');
             li.textContent = ht;
             ul.appendChild(li);
           });
-          wrap.appendChild(ul);
+          details.appendChild(ul);
+          wrap.appendChild(details);
           addRow(`Hint ${hintLevelTitle(level)}`, wrap);
         } else {
           addRow(`Hint ${hintLevelTitle(level)}`, values[0]);
@@ -12163,12 +12206,12 @@ ${out.join('\n')}
           if (!values.length) return;
           const firstValue = values[0];
           lines.push('<details>');
-          lines.push(`<summary>Hint ${hintLevelTitle(level)}: ${firstValue}</summary>`);
+          lines.push(`<summary>Hint ${hintLevelTitle(level)}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
           lines.push('');
           if (values.length === 1) {
             lines.push(firstValue);
           } else {
-            values.forEach((value) => lines.push(`- ${value}`));
+            values.slice(1).forEach((value) => lines.push(`- ${value}`));
           }
           lines.push('');
           lines.push('</details>');

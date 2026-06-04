@@ -3208,9 +3208,19 @@ def compute_output_mismatch(declared_output_keys: list[str], actual_output_keys:
     if not (ok_run and actual_output_keys):
         return {}
     try:
+        def _is_synthetic_chain_fact(key: Any) -> bool:
+            text = str(key or '').strip().lower()
+            return text.startswith('pivot(') or text.startswith('shell(')
+
         ignore_actual = {'node_name', 'nodename', 'nodeName'}
-        declared_set = set(declared_output_keys or [])
-        actual_set = {key for key in (actual_output_keys or []) if key not in ignore_actual}
+        declared_set = {
+            key for key in (declared_output_keys or [])
+            if not _is_synthetic_chain_fact(key)
+        }
+        actual_set = {
+            key for key in (actual_output_keys or [])
+            if key not in ignore_actual and not _is_synthetic_chain_fact(key)
+        }
         missing = sorted(list(declared_set - actual_set))
         extra = sorted(list(actual_set - declared_set))
         return {
