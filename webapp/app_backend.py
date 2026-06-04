@@ -19384,6 +19384,107 @@ def _flow_pivot_node_id(node: dict[str, Any] | None) -> str:
     return str(node.get('id') or node.get('node_id') or node.get('name') or '').strip()
 
 
+def _flow_pivot_fact_subject(value: Any) -> str:
+    text = str(value or '').strip()
+    if not text or '(' not in text or not text.endswith(')'):
+        return ''
+    prefix = text.split('(', 1)[0].strip().lower()
+    if prefix not in {'pivot', 'shell'}:
+        return ''
+    return text[text.find('(') + 1:-1].strip().lower()
+
+
+def _flow_pivot_source_name_candidates(value: Any) -> set[str]:
+    text = str(value or '').strip().lower()
+    if not text:
+        return set()
+    names: set[str] = set()
+
+    def _add(raw: str) -> None:
+        candidate = str(raw or '').strip().lower()
+        if not candidate:
+            return
+        names.add(candidate)
+        base = candidate.split(' @ ', 1)[0].strip() if ' @ ' in candidate else candidate
+        if base and base != candidate:
+            names.add(base)
+        if base.isdigit():
+            names.add(f'docker-{base}')
+        if base.startswith('docker-'):
+            suffix = base.split('docker-', 1)[1].strip()
+            if suffix.isdigit():
+                names.add(suffix)
+
+    _add(text)
+    return {name for name in names if name}
+
+
+def _flow_pivot_aliases_for_values(*values: Any) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        aliases |= _flow_pivot_source_name_candidates(value)
+    return aliases
+
+
+def _flow_pivot_aliases_for_node(node: dict[str, Any] | None) -> set[str]:
+    if not isinstance(node, dict):
+        return set()
+    return _flow_pivot_aliases_for_values(
+        node.get('id'),
+        node.get('node_id'),
+        node.get('name'),
+        node.get('label'),
+    )
+
+
+def _flow_pivot_aliases_for_assignment(assignment: dict[str, Any] | None) -> set[str]:
+    if not isinstance(assignment, dict):
+        return set()
+    return _flow_pivot_aliases_for_values(
+        assignment.get('node_id'),
+        assignment.get('node_name'),
+        assignment.get('name'),
+        assignment.get('label'),
+    )
+
+
+def _flow_chain_pivot_aliases(chain_nodes: list[dict[str, Any]] | Any) -> set[str]:
+    aliases: set[str] = set()
+    if not isinstance(chain_nodes, list):
+        return aliases
+    for node in chain_nodes:
+        aliases |= _flow_pivot_aliases_for_node(node if isinstance(node, dict) else None)
+    return aliases
+
+
+def _flow_prune_unavailable_or_self_pivot_facts(
+    values: Any,
+    chain_nodes: list[dict[str, Any]],
+    *,
+    current_node: dict[str, Any] | None = None,
+    current_assignment: dict[str, Any] | None = None,
+) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    chain_aliases = _flow_chain_pivot_aliases(chain_nodes)
+    current_aliases = _flow_pivot_aliases_for_node(current_node) | _flow_pivot_aliases_for_assignment(current_assignment)
+    out: list[str] = []
+    for raw in values:
+        value = str(raw or '').strip()
+        if not value:
+            continue
+        subject = _flow_pivot_fact_subject(value)
+        if subject:
+            source_aliases = _flow_pivot_source_name_candidates(subject)
+            if source_aliases and not (source_aliases & chain_aliases):
+                continue
+            if source_aliases and (source_aliases & current_aliases):
+                continue
+        if value not in out:
+            out.append(value)
+    return out
+
+
 def _flow_pivot_match_nodes(
     nodes: list[dict[str, Any]],
     *,
@@ -19912,10 +20013,10 @@ def _flow_apply_pivot_context_to_assignments(
         node_id = _flow_pivot_node_id(node)
         if node_id:
             node_by_id[node_id] = node
-        for _raw in (node.get('id'), node.get('node_id'), node.get('name'), node.get('label')):
-            _val = str(_raw or '').strip()
-            if _val:
-                _chain_all_ids.add(_val.lower())
+        for _alias in _flow_pivot_aliases_for_node(node):
+            if _alias:
+                node_by_id.setdefault(_alias, node)
+                _chain_all_ids.add(_alias)
 
     def _pivot_fact_subject(value: Any) -> str:
         text = str(value or '').strip()
@@ -20010,21 +20111,13 @@ def _flow_apply_pivot_context_to_assignments(
             node_id = _flow_pivot_node_id(chain_nodes[index])
             if node_id:
                 a2['node_id'] = node_id
-        node = node_by_id.get(node_id) if node_id else None
+        node = (node_by_id.get(node_id) or node_by_id.get(node_id.lower())) if node_id else None
         node_name = _flow_pivot_node_name(node) if isinstance(node, dict) else node_id
         current_names: set[str] = set()
-        for raw_name in (
-            node_id,
-            node_name,
-            a2.get('node_id'),
-            a2.get('node_name'),
-            a2.get('name'),
-            node.get('id') if isinstance(node, dict) else '',
-            node.get('node_id') if isinstance(node, dict) else '',
-            node.get('name') if isinstance(node, dict) else '',
-            node.get('label') if isinstance(node, dict) else '',
-        ):
-            current_names |= _pivot_source_name_candidates(raw_name)
+        current_names |= _flow_pivot_aliases_for_node(node if isinstance(node, dict) else None)
+        current_names |= _flow_pivot_aliases_for_assignment(a2)
+        current_names |= _pivot_source_name_candidates(node_id)
+        current_names |= _pivot_source_name_candidates(node_name)
         pivot_entries: list[dict[str, Any]] = [entry for entry in (a2.get('pivot') or []) if isinstance(entry, dict)] if isinstance(a2.get('pivot'), list) else []
         # Collect target-side hint parts so all pivot sources for this node are
         # consolidated into a single hint instead of one hint per source rule.
@@ -20872,7 +20965,16 @@ def _flow_enrich_saved_flag_assignments(
             )
 
         out.append(a2)
-    return out
+    try:
+        return _flow_apply_pivot_context_to_assignments(
+            out,
+            chain_nodes,
+            preview=None,
+            pivot_context={},
+            scenario_label=scenario_label,
+        )
+    except Exception:
+        return out
 
 
 def _infer_flow_artifacts_dir_from_assignment(assignment: dict[str, Any], *, max_dirs: int = 60) -> dict[str, str]:
@@ -21490,6 +21592,14 @@ def _flow_validate_chain_order_by_requires_produces(
     else:
         plugins_by_id = _flow_enabled_plugin_contracts_by_id()
 
+    node_by_id: dict[str, dict[str, Any]] = {}
+    for node in chain_nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get('id') or '').strip()
+        if nid:
+            node_by_id[nid] = node
+
     # Best-effort: load enabled generator definitions so we can infer optional
     # input fields even if the assignment payload doesn't include them.
     gen_defs_by_id: dict[str, dict[str, Any]] = _flow_enabled_generator_defs_by_id()
@@ -21555,7 +21665,12 @@ def _flow_validate_chain_order_by_requires_produces(
             base_requires = {r for r in base_requires if r not in opt_set}
             inferred_requires = {r for r in inferred_requires if r not in opt_set}
 
-        requires = base_requires | inferred_requires
+        requires = set(_flow_prune_unavailable_or_self_pivot_facts(
+            sorted(base_requires | inferred_requires),
+            chain_nodes,
+            current_node=node_by_id.get(cid),
+            current_assignment=a,
+        ))
 
         base_prod: set[str] = set()
         try:

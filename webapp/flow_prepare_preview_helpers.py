@@ -1896,9 +1896,60 @@ def reuse_saved_flag_assignments(
         if (not desired_len) or len(saved_assignments) < desired_len:
             return []
 
+        def _alias_candidates(value: Any) -> set[str]:
+            text = str(value or '').strip().lower()
+            if not text:
+                return set()
+            aliases = {text}
+            base = text.split(' @ ', 1)[0].strip() if ' @ ' in text else text
+            if base and base != text:
+                aliases.add(base)
+            if base.isdigit():
+                aliases.add(f'docker-{base}')
+            if base.startswith('docker-'):
+                suffix = base.split('docker-', 1)[1].strip()
+                if suffix.isdigit():
+                    aliases.add(suffix)
+            return {alias for alias in aliases if alias}
+
+        def _node_aliases(node: Any) -> set[str]:
+            if not isinstance(node, dict):
+                return set()
+            aliases: set[str] = set()
+            for key in ('id', 'node_id', 'name', 'label'):
+                aliases |= _alias_candidates(node.get(key))
+            return aliases
+
+        def _assignment_aliases(assignment: Any) -> set[str]:
+            if not isinstance(assignment, dict):
+                return set()
+            aliases: set[str] = set()
+            for key in ('node_id', 'node_name', 'name', 'label'):
+                aliases |= _alias_candidates(assignment.get(key))
+            return aliases
+
+        saved_indexes_by_alias: dict[str, list[int]] = {}
+        for saved_index, saved_assignment in enumerate(saved_assignments):
+            for alias in _assignment_aliases(saved_assignment):
+                saved_indexes_by_alias.setdefault(alias, []).append(saved_index)
+
+        used_saved_indexes: set[int] = set()
         ordered: list[dict[str, Any]] = []
         for index in range(desired_len):
-            assignment = saved_assignments[index]
+            selected_index: int | None = None
+            for alias in _node_aliases(chain_nodes[index] if index < len(chain_nodes) else {}):
+                for candidate_index in saved_indexes_by_alias.get(alias, []):
+                    if candidate_index not in used_saved_indexes:
+                        selected_index = candidate_index
+                        break
+                if selected_index is not None:
+                    break
+            if selected_index is None and index < len(saved_assignments) and index not in used_saved_indexes:
+                selected_index = index
+            if selected_index is None:
+                selected_index = next((i for i in range(len(saved_assignments)) if i not in used_saved_indexes), index)
+            used_saved_indexes.add(selected_index)
+            assignment = saved_assignments[selected_index] if selected_index < len(saved_assignments) else {}
             if not isinstance(assignment, dict):
                 ordered.append({})
                 continue
