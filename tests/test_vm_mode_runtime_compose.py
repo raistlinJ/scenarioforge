@@ -13,7 +13,7 @@ def test_vm_mode_compose_exposes_runtime_defaults() -> None:
         "required: true",
         "path: ./.scenarioforge.env",
         "required: false",
-        "CORETG_HOST=127.0.0.1",
+        "CORETG_HOST=0.0.0.0",
         "CORETG_PORT=9090",
         "CORETG_SECRETS_DIR=/root/.scenarioforge/secrets",
     ]

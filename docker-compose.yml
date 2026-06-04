@@ -15,7 +15,7 @@ services:
         required: false
     environment:
       - CORETG_DOCKER_BRIDGE=1
-      - CORETG_HOST=127.0.0.1
+      - CORETG_HOST=0.0.0.0
       - CORETG_PORT=9090
       - CORETG_SECRETS_DIR=/root/.scenarioforge/secrets
     extra_hosts:
