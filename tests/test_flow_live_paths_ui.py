@@ -55,6 +55,21 @@ def test_flow_sequencing_progress_is_request_scoped_and_visible() -> None:
     assert not missing, "Missing request-scoped visible sequencing progress snippets: " + "; ".join(missing)
 
 
+def test_flow_loading_progress_uses_scrollable_container() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        'id="flowLoadingLog"',
+        'max-height: 180px; overflow-y: auto;',
+        'white-space: pre-wrap; word-break: break-word;',
+        "const entry = document.createElement('div');",
+        'entry.textContent = msg;',
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing scrollable loading log snippets: " + "; ".join(missing)
+
+
 def test_report_guides_include_chain_io_and_pivot_sections() -> None:
     text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

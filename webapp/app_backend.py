@@ -19991,6 +19991,14 @@ def _flow_apply_pivot_context_to_assignments(
             if not (_pivot_fact_subject(item) and not _pivot_fact_source_in_chain(item))
         ]
 
+    def _remove_self_pivot_facts(target: dict[str, Any], key: str, current_names: set[str]) -> None:
+        if not isinstance(target.get(key), list) or not current_names:
+            return
+        target[key] = [
+            item for item in (target.get(key) or [])
+            if not (_pivot_fact_subject(item) and (_pivot_source_name_candidates(_pivot_fact_subject(item)) & current_names))
+        ]
+
     out: list[dict[str, Any]] = []
     for index, assignment in enumerate(flag_assignments):
         if not isinstance(assignment, dict):
@@ -20004,6 +20012,19 @@ def _flow_apply_pivot_context_to_assignments(
                 a2['node_id'] = node_id
         node = node_by_id.get(node_id) if node_id else None
         node_name = _flow_pivot_node_name(node) if isinstance(node, dict) else node_id
+        current_names: set[str] = set()
+        for raw_name in (
+            node_id,
+            node_name,
+            a2.get('node_id'),
+            a2.get('node_name'),
+            a2.get('name'),
+            node.get('id') if isinstance(node, dict) else '',
+            node.get('node_id') if isinstance(node, dict) else '',
+            node.get('name') if isinstance(node, dict) else '',
+            node.get('label') if isinstance(node, dict) else '',
+        ):
+            current_names |= _pivot_source_name_candidates(raw_name)
         pivot_entries: list[dict[str, Any]] = [entry for entry in (a2.get('pivot') or []) if isinstance(entry, dict)] if isinstance(a2.get('pivot'), list) else []
         # Collect target-side hint parts so all pivot sources for this node are
         # consolidated into a single hint instead of one hint per source rule.
@@ -20094,6 +20115,8 @@ def _flow_apply_pivot_context_to_assignments(
 
         _remove_absent_pivot_facts(a2, 'requires')
         _remove_absent_pivot_facts(a2, 'inputs')
+        _remove_self_pivot_facts(a2, 'requires', current_names)
+        _remove_self_pivot_facts(a2, 'inputs', current_names)
 
         if pivot_entries:
             deduped: list[dict[str, Any]] = []
