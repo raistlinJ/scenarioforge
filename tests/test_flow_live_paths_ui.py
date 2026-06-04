@@ -492,17 +492,18 @@ def test_flow_restore_prefers_xml_authoritative_state() -> None:
     assert not missing, "Missing XML-authoritative flow restore snippets: " + "; ".join(missing)
 
 
-def test_flow_restore_refreshes_xml_before_state_selection() -> None:
+def test_flow_restore_refreshes_xml_only_when_server_state_missing() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
-        "if (hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {",
+        "const hasServerFlowState = !!getFlowStateForScenario(scenarioName);",
+        "if (!hasServerFlowState && hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {",
         "const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath });",
         "if (key) flowStateByScenario[key] = fs;",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Flow restore should refresh XML-backed scenario state first: " + "; ".join(missing)
+    assert not missing, "Flow restore should refresh XML-backed state only when server state is missing: " + "; ".join(missing)
 
 
 def test_flow_restore_emits_debug_logs_for_roundtrip_diagnostics() -> None:

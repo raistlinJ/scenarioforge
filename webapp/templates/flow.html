@@ -1570,7 +1570,8 @@
       });
     } catch (e) { }
     try {
-      if (hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {
+      const hasServerFlowState = !!getFlowStateForScenario(scenarioName);
+      if (!hasServerFlowState && hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {
         const xmlPath = (typeof window.coretgGetLatestXmlPathForScenario === 'function')
           ? String(window.coretgGetLatestXmlPathForScenario(scenarioName) || '').trim()
           : '';
@@ -2629,24 +2630,14 @@
     updateScenarioFilterControls();
     refreshParticipantNavForScenario(activeScenario);
     rememberActiveScenario();
-    try {
-      if (activeScenario && typeof window.coretgRefreshScenarioStateFromXml === 'function') {
-        const latest = await window.coretgRefreshScenarioStateFromXml(activeScenario, { updateHidden: true });
-        const scenState = (latest && latest.scenario_state && typeof latest.scenario_state === 'object') ? latest.scenario_state : null;
-        const fs = (scenState && scenState.flow_state && typeof scenState.flow_state === 'object') ? scenState.flow_state : null;
-        if (fs) {
-          const key = normalizeScenarioNorm(activeScenario);
-          if (key) flowStateByScenario[key] = fs;
-        }
-      }
-    } catch (e) { }
     setTopologyDirtyState(false, '');
     updateScenarioSeedBadges();
     clearPreviewPlanCacheForScenario(activeScenario);
-    await refreshLatestPreviewPlanPathForScenario(activeScenario);
+    const latestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');
     // When switching scenarios (or loading after refresh), restore any saved Flow state.
     const restored = await restoreSavedFlowForScenario(activeScenario);
     if (!restored) {
+      try { await latestPreviewPromise; } catch (e) { }
       currentChain = [];
       currentFlagAssignments = [];
       selectedChainIndex = -1;
@@ -2664,6 +2655,8 @@
       } else {
         setStatus('Chain does not exist. Click Generate to start.', false);
       }
+    } else {
+      latestPreviewPromise.then(() => { try { updateMeta(); } catch (e) { } }).catch(() => { });
     }
   }
 
@@ -13201,18 +13194,6 @@ ${out.join('\n')}
   refreshParticipantNavForScenario(activeScenario);
   rememberActiveScenario();
 
-  try {
-    if (activeScenario && typeof window.coretgRefreshScenarioStateFromXml === 'function') {
-      const latest = await window.coretgRefreshScenarioStateFromXml(activeScenario, { updateHidden: true });
-      const scenState = (latest && latest.scenario_state && typeof latest.scenario_state === 'object') ? latest.scenario_state : null;
-      const fs = (scenState && scenState.flow_state && typeof scenState.flow_state === 'object') ? scenState.flow_state : null;
-      if (fs) {
-        const key = normalizeScenarioNorm(activeScenario);
-        if (key) flowStateByScenario[key] = fs;
-      }
-    }
-  } catch (e) { }
-
   updateFlowEnabledUi();
   // Auto-generate on load (prefer any saved Flow state).
   try { refreshXmlDockPreview({ force: false }); } catch (e) { }
@@ -13223,10 +13204,13 @@ ${out.join('\n')}
     }
   } catch (e) { }
   clearPreviewPlanCacheForScenario(activeScenario);
-  await refreshLatestPreviewPlanPathForScenario(activeScenario);
+  const initialLatestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');
   const restored = await restoreSavedFlowForScenario(activeScenario);
   if (!restored) {
+    try { await initialLatestPreviewPromise; } catch (e) { }
     setStatus('Chain does not exist. Click Generate to start.', false);
+  } else {
+    initialLatestPreviewPromise.then(() => { try { updateMeta(); } catch (e) { } }).catch(() => { });
   }
   // Scenarios header Preview tab: route to /scenarios/preview.
   document.addEventListener('DOMContentLoaded', () => {

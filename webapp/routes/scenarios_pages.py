@@ -122,10 +122,13 @@ def register(app, *, backend_module: Any) -> None:
             except Exception:
                 active_scenario_xml_path = ''
 
+        parsed_active_xml: dict[str, Any] | None = None
         xml_scenario_names: list[str] = []
         try:
             if active_scenario_xml_path and os.path.isfile(active_scenario_xml_path):
                 parsed_for_names = backend._parse_scenarios_xml(active_scenario_xml_path)
+                if isinstance(parsed_for_names, dict):
+                    parsed_active_xml = parsed_for_names
                 scen_list_for_names = parsed_for_names.get('scenarios') if isinstance(parsed_for_names, dict) else None
                 if isinstance(scen_list_for_names, list):
                     for scenario in scen_list_for_names:
@@ -152,10 +155,8 @@ def register(app, *, backend_module: Any) -> None:
         flow_state_by_scenario: dict[str, Any] = {}
         try:
             if active_scenario_xml_path and os.path.isfile(active_scenario_xml_path):
-                with open(active_scenario_xml_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                    xml_preview = handle.read()
                 try:
-                    parsed = backend._parse_scenarios_xml(active_scenario_xml_path)
+                    parsed = parsed_active_xml if isinstance(parsed_active_xml, dict) else backend._parse_scenarios_xml(active_scenario_xml_path)
                     scen_list = parsed.get('scenarios') if isinstance(parsed, dict) else None
                     if isinstance(scen_list, list):
                         for scenario in scen_list:
@@ -171,16 +172,21 @@ def register(app, *, backend_module: Any) -> None:
             xml_preview = ''
 
         try:
-            snap = backend._xml_trace_snapshot(active_scenario_xml_path, active_scenario)
+            active_flow_state = flow_state_by_scenario.get(backend._normalize_scenario_label(active_scenario)) if isinstance(flow_state_by_scenario, dict) else None
+            chain_ids = active_flow_state.get('chain_ids') if isinstance(active_flow_state, dict) and isinstance(active_flow_state.get('chain_ids'), list) else []
+            try:
+                xml_mtime = float(os.path.getmtime(active_scenario_xml_path)) if active_scenario_xml_path and os.path.exists(active_scenario_xml_path) else 0.0
+            except Exception:
+                xml_mtime = 0.0
             app.logger.info(
                 '[flow.page] scenario=%s xml=%s exists=%s mtime=%s sha12=%s flow_chain_len=%s flow_enabled=%s flow_state_entries=%s',
                 backend._normalize_scenario_label(active_scenario),
-                snap.get('xml_path'),
-                snap.get('exists'),
-                snap.get('mtime'),
-                snap.get('sha12'),
-                snap.get('flow_chain_len'),
-                snap.get('flow_enabled'),
+                active_scenario_xml_path,
+                bool(active_scenario_xml_path and os.path.exists(active_scenario_xml_path)),
+                xml_mtime,
+                '',
+                len(chain_ids) if isinstance(chain_ids, list) else None,
+                active_flow_state.get('flow_enabled') if isinstance(active_flow_state, dict) and 'flow_enabled' in active_flow_state else None,
                 len(flow_state_by_scenario or {}),
             )
         except Exception:
