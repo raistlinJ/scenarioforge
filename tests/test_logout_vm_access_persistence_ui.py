@@ -28,3 +28,13 @@ def test_logout_waits_for_editor_snapshot_persist() -> None:
 
     assert not missing_layout, 'Missing logout persistence wiring in layout.html: ' + '; '.join(missing_layout)
     assert not missing_index, 'Missing pre-logout snapshot flush hook in index.html: ' + '; '.join(missing_index)
+
+
+def test_templates_define_anonymous_current_user_fallback() -> None:
+    layout_text = LAYOUT_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected = "current_user|default({'username': none, 'role': none, 'is_authenticated': false})"
+
+    assert expected in layout_text
+    assert expected in index_text

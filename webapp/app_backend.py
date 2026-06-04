@@ -6004,6 +6004,32 @@ def _select_remote_python_interpreter(client: Any, core_cfg: Dict[str, Any]) -> 
     raise RuntimeError(f"Unable to locate a python interpreter on the CORE host{detail}")
 
 
+def _is_core_daemon_socket_probe_failure(text: Any) -> bool:
+    lowered = str(text or '').strip().lower()
+    if not lowered:
+        return False
+    return any(token in lowered for token in (
+        'connection refused',
+        'timed out',
+        'timeout',
+        'no route to host',
+        'network is unreachable',
+        'connection reset',
+        'connection aborted',
+    ))
+
+
+def _summarize_core_daemon_probe_errors(errors: list[str], *, limit: int = 4) -> str:
+    cleaned = [str(error or '').strip() for error in (errors or []) if str(error or '').strip()]
+    if not cleaned:
+        return 'probe failed'
+    shown = cleaned[:max(1, limit)]
+    suffix = ''
+    if len(cleaned) > len(shown):
+        suffix = f'; ... {len(cleaned) - len(shown)} more interpreter candidate(s) failed'
+    return '; '.join(shown) + suffix
+
+
 def _resolve_remote_artifact_path(
     sftp: Any,
     candidate: str,
@@ -6401,9 +6427,9 @@ def _normalize_core_config(raw: Any, *, include_password: bool = True) -> Dict[s
 
     if _webui_local_mode():
         try:
-            local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or '127.0.0.1').strip() or '127.0.0.1'
+            local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or 'localhost').strip() or 'localhost'
         except Exception:
-            local_host = '127.0.0.1'
+            local_host = 'localhost'
         try:
             local_port = int(os.getenv('CORETG_LOCAL_CORE_PORT') or CORE_PORT)
         except Exception:
@@ -9176,9 +9202,17 @@ def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 
                 combined = f'exit status {exit_code}'
             probe_errors.append(f'{interpreter}: {combined}')
             lower = combined.lower()
+            if _is_core_daemon_socket_probe_failure(combined):
+                raise RuntimeError(
+                    f'core-daemon is not accepting gRPC connections on {daemon_host}:{daemon_port}. '
+                    f'The Python probe ran via {interpreter}, but the daemon socket returned: {combined}. '
+                    'Test Venv only verifies that the CORE Python modules import; Save & Validate also requires '
+                    'a running core-daemon listening on the configured gRPC host/port. '
+                    'Check the configured gRPC port and run `systemctl status core-daemon` on the CORE host.'
+                )
             if 'not found' in lower or 'command not found' in lower:
                 continue
-        error_detail = '; '.join(probe_errors) if probe_errors else 'probe failed'
+        error_detail = _summarize_core_daemon_probe_errors(probe_errors)
         raise RuntimeError(f'core-daemon did not respond on {daemon_host}:{daemon_port} ({error_detail})')
     finally:
         try:
@@ -13632,13 +13666,13 @@ def _inject_ui_view_state() -> dict:
 
 @app.context_processor
 def _inject_runtime_flags() -> dict:
-    local_host = '127.0.0.1'
+    local_host = 'localhost'
     local_port = CORE_PORT
     local_ssh_port = 22
     try:
-        local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or '127.0.0.1').strip() or '127.0.0.1'
+        local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or 'localhost').strip() or 'localhost'
     except Exception:
-        local_host = '127.0.0.1'
+        local_host = 'localhost'
     try:
         local_port = int(os.getenv('CORETG_LOCAL_CORE_PORT') or CORE_PORT)
     except Exception:

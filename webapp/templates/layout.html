@@ -102,6 +102,7 @@
 </head>
 
 <body class="{% block body_class %}{% endblock %}">
+    {% set current_user = current_user|default({'username': none, 'role': none, 'is_authenticated': false}) %}
     {% block active_page %}{% set active_page = '' %}{% endblock %}
     {% set hide_chrome = hide_chrome|default(false) %}
     <div class="container-fluid mt-4">

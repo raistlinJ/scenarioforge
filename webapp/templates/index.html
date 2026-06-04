@@ -1611,6 +1611,7 @@
 {% endblock %}
 {% block extra_scripts %}
 <script id="payload-data" type="application/json">{{ payload | tojson }}</script>
+{% set current_user = current_user|default({'username': none, 'role': none, 'is_authenticated': false}) %}
 <script id="current-user-meta"
     type="application/json">{{ {'username': current_user.username, 'role': current_user.role}|tojson }}</script>
 <script>
@@ -15268,8 +15269,10 @@
                         const extBridgeLive = (liveExternalIface?.bridge ?? '').toString().trim();
 
                         const coreBridge = coreBridgeHint || coreBridgeStored;
-                        const mappedIfaceId = extIfaceIdLive || extIfaceId;
-                        const extBridge = extBridgeLive || extBridgeStored;
+                        // Prefer persisted mapping written during Verify/Apply;
+                        // inventory can be stale until the next refresh.
+                        const mappedIfaceId = extIfaceId || extIfaceIdLive;
+                        const extBridge = extBridgeStored || extBridgeLive;
 
                         const name = (iface?.name ?? '').toString().trim();
                         return {

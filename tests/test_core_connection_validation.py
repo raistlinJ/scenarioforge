@@ -72,6 +72,54 @@ def test_require_core_ssh_credentials_trims_fields():
     assert cfg['ssh_password'] == ' pw '
 
 
+def test_ensure_core_daemon_listening_stops_after_socket_refused(monkeypatch):
+    class _FakeSSH:
+        def set_missing_host_key_policy(self, *_args, **_kwargs):
+            return None
+
+        def connect(self, **_kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeParamiko:
+        @staticmethod
+        def SSHClient():
+            return _FakeSSH()
+
+        @staticmethod
+        def AutoAddPolicy():
+            return object()
+
+    calls = []
+
+    def _fake_probe(_client, command, *, timeout):
+        calls.append(command)
+        return 1, 'ERROR: [Errno 111] Connection refused\n', ''
+
+    monkeypatch.setattr(backend, 'paramiko', _FakeParamiko())
+    monkeypatch.setattr(backend, '_exec_ssh_python_probe', _fake_probe)
+
+    with pytest.raises(RuntimeError) as exc:
+        backend._ensure_core_daemon_listening({
+            'host': 'localhost',
+            'port': 55001,
+            'ssh_host': 'core-host',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+            'venv_bin': '/custom/core/venv/bin',
+        })
+
+    message = str(exc.value)
+    assert len(calls) == 1
+    assert 'core-daemon is not accepting gRPC connections on 127.0.0.1:55001' in message
+    assert 'Test Venv only verifies' in message
+    assert '/custom/core/venv/bin/python3' in message
+    assert '/opt/core/venv/python3.13' not in message
+
+
 def test_normalize_core_config_uses_grpc_fields_when_host_missing():
     cfg = backend._normalize_core_config({
         'grpc_host': 'core-vm.example.test',
@@ -519,6 +567,85 @@ def test_test_core_uses_dialog_core_fields_only(client, monkeypatch):
     assert data['host'] == 'core-vm.example.test'
     assert captured_cfg.get('host') == 'core-vm.example.test'
     assert captured_cfg.get('ssh_host') == 'core-vm.example.test'
+
+
+def test_test_core_daemon_listener_failure_is_structured(client, monkeypatch):
+    # Force the handler down the non-pytest path so daemon listener failures are surfaced.
+    monkeypatch.delenv('PYTEST_CURRENT_TEST', raising=False)
+    monkeypatch.delitem(backend.sys.modules, 'pytest', raising=False)
+
+    monkeypatch.setattr(backend, '_core_connection', _fake_core_connection)
+    monkeypatch.setattr(backend.socket, 'socket', _FakeSocket)
+    monkeypatch.setattr(backend, '_load_core_credentials', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_ensure_paramiko_available', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_collect_remote_core_daemon_pids', lambda *_args, **_kwargs: [123])
+    monkeypatch.setattr(
+        backend,
+        '_ensure_core_daemon_listening',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(
+            'core-daemon is not accepting gRPC connections on 127.0.0.1:55001. '
+            'The Python probe ran via /custom/core/venv/bin/python3, but the daemon socket returned: '
+            'ERROR: [Errno 111] Connection refused. Test Venv only verifies imports.'
+        )),
+    )
+
+    def _fail_save(_payload):  # pragma: no cover - should not be called
+        raise AssertionError('Should not persist credentials when daemon listener check fails')
+
+    monkeypatch.setattr(backend, '_save_core_credentials', _fail_save)
+
+    class _FakeSSH:
+        def set_missing_host_key_policy(self, *_args, **_kwargs):
+            return None
+
+        def connect(self, **_kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeParamiko:
+        @staticmethod
+        def SSHClient():
+            return _FakeSSH()
+
+        @staticmethod
+        def AutoAddPolicy():
+            return object()
+
+    monkeypatch.setattr(backend, 'paramiko', _FakeParamiko())
+
+    payload = {
+        'core': {
+            'host': 'localhost',
+            'port': 55001,
+            'ssh_host': 'core-host',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+            'venv_bin': '/custom/core/venv/bin',
+        },
+        'scenario_name': 'Scenario Listener Down',
+        'scenario_index': 0,
+        'hitl_core': {
+            'vm_key': 'pve1::101',
+            'vm_node': 'pve1',
+            'vm_name': 'CORE VM',
+            'vmid': 101,
+        },
+    }
+
+    resp = client.post('/test_core', json=payload)
+    assert resp.status_code == 502
+    data = resp.get_json()
+    assert data['ok'] is False
+    assert data.get('code') == 'core_daemon_unreachable'
+    assert data.get('daemon_unreachable') is True
+    assert data.get('host') == 'localhost'
+    assert data.get('port') == 55001
+    assert data.get('venv_bin') == '/custom/core/venv/bin'
+    assert 'Test Venv only verifies' in data.get('error', '')
+    assert '/opt/core/venv/python3.13' not in data.get('error', '')
 
 
 def test_test_core_prefers_stored_config_when_requested(client, monkeypatch):
