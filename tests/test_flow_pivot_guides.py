@@ -233,6 +233,8 @@ def test_prepare_chain_repairs_explicit_pivot_target_before_source(monkeypatch):
     monkeypatch.setattr(app_backend, "_flow_compute_flag_assignments", _assignments)
     monkeypatch.setattr(app_backend, "_flow_enabled_plugin_contracts_by_id", _plugins_by_id)
 
+    progress_messages = []
+
     result = flow_prepare_preview_execute._prepare_chain_and_assignments(
         app_backend,
         backend=app_backend,
@@ -254,6 +256,7 @@ def test_prepare_chain_repairs_explicit_pivot_target_before_source(monkeypatch):
         goal_facts_override=None,
         base_plan_path="",
         pivot_context=pivot_context,
+        flow_progress=progress_messages.append,
     )
 
     assert result.get("response") is None
@@ -262,6 +265,11 @@ def test_prepare_chain_repairs_explicit_pivot_target_before_source(monkeypatch):
     assert result.get("flow_valid") is True, result.get("flow_errors")
     assert result.get("flags_enabled") is True
     assert "repaired" in str(result.get("warning") or "").lower()
+    joined_progress = "\n".join(progress_messages)
+    assert "Solve: building topology graph from preview plan" in joined_progress
+    assert "Solve: repairing explicit chain ids=db,jump" in joined_progress
+    assert "Solve: reordering chain by dependency DAG" in joined_progress
+    assert "Solve complete:" in joined_progress
 
 
 def test_flow_pivot_context_infers_simplified_planner_shortcut():
