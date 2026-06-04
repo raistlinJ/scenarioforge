@@ -464,10 +464,10 @@ def test_pivot_apply_skips_requires_when_source_not_in_chain():
     # for facts whose producer is outside the chain.
     for a in enriched:
         assert "Pivot(docker-11)" not in (a.get("inputs") or []), (
-            f"node {a['node_id']} should not require Pivot(docker-11) — source 11 not in chain"
+            f"node {a['node_id']} should not require Pivot(docker-11) - source 11 not in chain"
         )
         assert "Pivot(docker-13)" not in (a.get("inputs") or []), (
-            f"node {a['node_id']} should not require Pivot(docker-13) — source 13 not in chain"
+            f"node {a['node_id']} should not require Pivot(docker-13) - source 13 not in chain"
         )
         assert "Pivot(docker-11)" not in (a.get("requires") or []), (
             f"node {a['node_id']} should not have Pivot(docker-11) in requires"
@@ -487,9 +487,82 @@ def test_pivot_apply_skips_requires_when_source_not_in_chain():
     )
 
 
+def test_pivot_apply_prunes_saved_requires_when_source_not_in_chain():
+    """Saved Flow state can already contain stale Pivot facts.  When the
+    producer is absent from the execution chain those facts must be removed
+    from both requires and inputs before order validation runs.
+    """
+    chain_nodes = [
+        {"id": "21", "name": "docker-21", "type": "docker", "PivotRequires": ["Pivot(docker-11)"]},
+        {"id": "19", "name": "docker-19", "type": "docker", "PivotRequires": ["Pivot(docker-11)"]},
+        {"id": "20", "name": "docker-20", "type": "docker", "PivotRequires": ["Pivot(docker-11)"]},
+        {"id": "16", "name": "docker-16", "type": "docker"},
+    ]
+    assignments = [
+        {"node_id": "21", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": ["Pivot(docker-11)"], "outputs": [], "requires": ["Pivot(docker-11)"], "produces": []},
+        {"node_id": "19", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": ["Pivot(docker-11)"], "outputs": [], "requires": ["Pivot(docker-11)"], "produces": []},
+        {"node_id": "20", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": ["Pivot(docker-11)"], "outputs": [], "requires": ["Pivot(docker-11)"], "produces": []},
+        {"node_id": "16", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+    ]
+    preview = {
+        "routers": [],
+        "switches": [],
+        "switches_detail": [],
+        "host_router_map": {},
+        "r2r_links_preview": [],
+        "hosts": [
+            {"node_id": "11", "name": "docker-11", "role": "Docker", "ip4": "10.0.0.11"},
+            {"node_id": "21", "name": "docker-21", "role": "Docker", "ip4": "10.0.0.21"},
+            {"node_id": "19", "name": "docker-19", "role": "Docker", "ip4": "10.0.0.19"},
+            {"node_id": "20", "name": "docker-20", "role": "Docker", "ip4": "10.0.0.20"},
+            {"node_id": "16", "name": "docker-16", "role": "Docker", "ip4": "10.0.0.16"},
+        ],
+    }
+    pivot_context = {
+        "metadata": {
+            "pivoting": {
+                "rules": [
+                    {
+                        "pivot_nodes": ["docker-11"],
+                        "target_node": target,
+                        "produces": ["Shell(docker-11)", "Pivot(docker-11)"],
+                        "target_requires": ["Pivot(docker-11)"],
+                    }
+                    for target in ("docker-21", "docker-19", "docker-20")
+                ]
+            }
+        }
+    }
+
+    enriched = app_backend._flow_apply_pivot_context_to_assignments(
+        assignments,
+        chain_nodes,
+        preview=preview,
+        pivot_context=pivot_context,
+        scenario_label="stale-missing-source-test",
+    )
+
+    for node_id in ("21", "19", "20"):
+        assignment = next(a for a in enriched if a["node_id"] == node_id)
+        assert "Pivot(docker-11)" not in (assignment.get("inputs") or [])
+        assert "Pivot(docker-11)" not in (assignment.get("requires") or [])
+
+    ok, errors = app_backend._flow_validate_chain_order_by_requires_produces(
+        chain_nodes,
+        enriched,
+        scenario_label="stale-missing-source-test",
+        plugins_by_id_override=_plugins_by_id(),
+    )
+    assert ok, errors
+
+
 def test_pivot_apply_consolidates_multi_source_hints():
     """When a node is a pivot target of multiple source nodes, only a single
-    consolidated 'Pivot required' hint should appear — not one per source rule.
+    consolidated 'Pivot required' hint should appear - not one per source rule.
     """
     # docker-14 is reachable via both docker-11 and docker-13 (two rules).
     chain_nodes = [
