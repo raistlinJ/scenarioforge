@@ -658,6 +658,112 @@ def test_pivot_apply_prunes_self_alias_requires_without_matching_rule():
     assert ok, errors
 
 
+def test_validate_prunes_plugin_contract_stale_pivot_for_latest_order():
+    chain_nodes = [
+        {"id": node_id, "name": f"docker-{node_id}", "type": "docker"}
+        for node_id in ("16", "18", "17", "21", "20", "19", "22")
+    ]
+    assignments = [
+        {"node_id": node_id, "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []}
+        for node_id in ("16", "18", "17", "21", "20", "19", "22")
+    ]
+    plugins = _plugins_by_id()
+    plugins["db-flag"] = {
+        **plugins["db-flag"],
+        "requires": ["Pivot(docker-13)"],
+        "produces": [],
+    }
+
+    ok, errors = app_backend._flow_validate_chain_order_by_requires_produces(
+        chain_nodes,
+        assignments,
+        scenario_label="latest-order-stale-plugin-pivot-test",
+        plugins_by_id_override=plugins,
+    )
+
+    assert ok, errors
+
+
+def test_validate_prunes_plugin_contract_self_alias_pivot_for_latest_order():
+    chain_nodes = [
+        {"id": "16", "name": "docker-13", "type": "docker"},
+        *[
+            {"id": node_id, "name": f"docker-{node_id}", "type": "docker"}
+            for node_id in ("18", "17", "21", "20", "19", "22")
+        ],
+    ]
+    assignments = [
+        {"node_id": "16", "id": "db-flag", "type": "flag-node-generator",
+         "inputs": [], "outputs": [], "requires": [], "produces": []},
+        *[
+            {"node_id": node_id, "id": "plain-flag", "type": "flag-node-generator",
+             "inputs": [], "outputs": [], "requires": [], "produces": []}
+            for node_id in ("18", "17", "21", "20", "19", "22")
+        ],
+    ]
+    plugins = _plugins_by_id()
+    plugins["db-flag"] = {
+        **plugins["db-flag"],
+        "requires": ["Pivot(docker-13)"],
+        "produces": [],
+    }
+    plugins["plain-flag"] = {
+        **plugins["db-flag"],
+        "plugin_id": "plain-flag",
+        "requires": [],
+        "produces": [],
+    }
+
+    ok, errors = app_backend._flow_validate_chain_order_by_requires_produces(
+        chain_nodes,
+        assignments,
+        scenario_label="latest-order-self-plugin-pivot-test",
+        plugins_by_id_override=plugins,
+    )
+
+    assert ok, errors
+
+
+def test_reuse_saved_flag_assignments_matches_reordered_nodes_by_alias():
+    class Backend:
+        @staticmethod
+        def _flow_enrich_saved_flag_assignments(assignments, chain_nodes, *, scenario_label):
+            return assignments
+
+        @staticmethod
+        def _flow_node_is_docker_role(node):
+            return str((node or {}).get("type") or "").lower() == "docker"
+
+        @staticmethod
+        def _flow_node_is_vuln(node):
+            return False
+
+    chain_nodes = [
+        {"id": "20", "name": "docker-20", "type": "docker"},
+        {"id": "16", "name": "docker-16", "type": "docker"},
+        {"id": "18", "name": "docker-18", "type": "docker"},
+    ]
+    flow_state = {
+        "flag_assignments": [
+            {"node_id": "16", "id": "gen16", "type": "flag-node-generator"},
+            {"node_id": "18", "id": "gen18", "type": "flag-node-generator"},
+            {"node_id": "20", "id": "gen20", "type": "flag-node-generator"},
+        ]
+    }
+
+    reused = flow_prepare_preview_helpers.reuse_saved_flag_assignments(
+        flow_state,
+        chain_nodes,
+        scenario_label="reordered-saved-test",
+        scenario_norm="reordered-saved-test",
+        backend=Backend,
+    )
+
+    assert [assignment.get("id") for assignment in reused] == ["gen20", "gen16", "gen18"]
+    assert [assignment.get("node_id") for assignment in reused] == ["20", "16", "18"]
+
+
 def test_pivot_apply_consolidates_multi_source_hints():
     """When a node is a pivot target of multiple source nodes, only a single
     consolidated 'Pivot required' hint should appear - not one per source rule.
