@@ -355,11 +355,60 @@ def _looks_like_python_traceback(text: str) -> bool:
     return 'traceback (most recent call last)' in lowered or 'subprocess.calledprocesserror' in lowered
 
 
+def _summarize_docker_registry_failure(text: str) -> str | None:
+    lowered = str(text or '').lower()
+    docker_markers = (
+        'registry-1.docker.io',
+        'docker.io',
+        'failed to resolve source metadata',
+        'failed to solve',
+        'docker compose',
+    )
+    network_markers = (
+        'lookup ',
+        'no such host',
+        'temporary failure in name resolution',
+        'i/o timeout',
+        'read udp',
+        'tls handshake timeout',
+        'context deadline exceeded',
+        'connection timed out',
+        'failed to do request',
+    )
+    if not any(marker in lowered for marker in docker_markers):
+        return None
+    if not any(marker in lowered for marker in network_markers):
+        return None
+    detail_lines: list[str] = []
+    for line in str(text or '').splitlines():
+        line_text = line.strip()
+        if not line_text:
+            continue
+        lowered_line = line_text.lower()
+        if 'traceback (most recent call last)' in lowered_line:
+            continue
+        if lowered_line.startswith('file "'):
+            continue
+        detail_lines.append(line_text)
+    detail = ' '.join(detail_lines)
+    detail = detail[-700:] if detail else '(no Docker output)'
+    return (
+        'Docker image pull/DNS failed on the CORE VM while contacting Docker Hub. '
+        'Direct Python fallback could not complete or was unavailable for this generator. '
+        'Fix CORE VM DNS/egress or pre-pull/cache the image, then rerun Generate. '
+        f'Details: {detail}'
+    )
+
+
 def summarize_remote_generator_failure(*, rc: Any, stdout: str, stderr: str, remote_err: Any = None) -> str:
     if remote_err:
         return str(remote_err)
     stdout_text = str(stdout or '').strip()
     stderr_text = str(stderr or '').strip()
+    full_text = '\n'.join([part for part in (stdout_text, stderr_text) if part]).strip()
+    docker_summary = _summarize_docker_registry_failure(full_text)
+    if docker_summary:
+        return f'remote generator failed (rc={rc}): {docker_summary}'
     parts: list[str] = []
     if stdout_text:
         parts.append(stdout_text[-1400:])
@@ -429,6 +478,8 @@ def flow_try_run_generator_remote(
         "env=os.environ.copy()\n"
         "env['CORETG_DOCKER_USE_SUDO']='1'\n"
         "env['CORETG_DOCKER_HOST_NETWORK']='1'\n"
+        "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK','1')\n"
+        "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FIRST','1')\n"
         "preflight=''\n"
         "deps_dir='/tmp/coretg_pydeps'\n"
         "try:\n"

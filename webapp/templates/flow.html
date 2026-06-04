@@ -573,7 +573,7 @@
     }
     if (revalidateBtnEl) {
       const hasChain = Array.isArray(currentChain) && currentChain.length > 0;
-      revalidateBtnEl.disabled = (!flowEnabled || !flowEligible || dirty || !hasChain);
+      revalidateBtnEl.disabled = (!!generateInFlight || !flowEnabled || !flowEligible || dirty || !hasChain);
     }
     if (flowDownloadDropdownEl) {
       flowDownloadDropdownEl.disabled = dirty;
@@ -715,7 +715,7 @@
     if (lengthEl) lengthEl.disabled = !enabled || !flowEligible;
     if (dependencyLevelEl) dependencyLevelEl.disabled = !enabled || !flowEligible;
     if (presetEl) presetEl.disabled = !enabled || !flowEligible;
-    if (btnEl) btnEl.disabled = !enabled || !flowEligible;
+    if (btnEl) btnEl.disabled = !enabled || !flowEligible || !!generateInFlight;
     if (flowEnabledToggleEl) {
       flowEnabledToggleEl.disabled = !flowEligible;
       flowEnabledToggleEl.checked = !!flowEnabled;
@@ -803,10 +803,20 @@
   let allowNodeDuplicates = false;
   let includeAllTopologyVulns = false;
   let includeAllTopologyPivots = false;
+  let generateInFlight = false;
   let heldChainIndices = new Set();
   let heldFactRows = new Set();
   let flowInitialFactsOverride = null;
   let flowGoalFactsOverride = null;
+
+  function setGenerateBusy(value) {
+    generateInFlight = !!value;
+    try {
+      if (btnEl) btnEl.disabled = !!generateInFlight || !flowEnabled || !flowEligible;
+      if (revalidateBtnEl && generateInFlight) revalidateBtnEl.disabled = true;
+      if (!generateInFlight) updateTopologyDirtyUi();
+    } catch (e) { }
+  }
 
   function syncTopologyInclusionOptionsFromUi() {
     includeAllTopologyVulns = !!(includeAllTopologyVulnsEl && includeAllTopologyVulnsEl.checked);
@@ -9925,6 +9935,13 @@
       setStatus('Flag sequencing is disabled.', true);
       return;
     }
+    if (generateInFlight) {
+      setStatus('Generate is already running.', true);
+      try { appendLoadingLog('Generate ignored: another Generate/Resolve request is already running.'); } catch (e) { }
+      return;
+    }
+    setGenerateBusy(true);
+    try {
 
     // User-click Generate should be deterministic: save current settings, produce a fresh
     // preview plan, then build the flow chain from that exact snapshot.
@@ -10021,7 +10038,6 @@
       ? !!options.saveAfterResolve
       : !!runSavePreviewResolve;
     let savedXmlWithGeneratedChain = false;
-    try {
       if (runSavePreviewResolve) {
         const scenLabel = (scenario || activeScenario || '').toString().trim();
         const msg = scenLabel
@@ -10413,6 +10429,7 @@
         let resolveRetriesRemaining = Math.max(0, retriesRemaining || 0);
         while (!resolved) {
           resolveAttempts += 1;
+          let stopProgressPoll = null;
           try {
             setStatus('Resolving values…', false);
             showLoading('Resolving values…');
@@ -10421,8 +10438,9 @@
             try {
               showComposeDialog('Generator Output', 'Solving chain and assignments…');
             } catch (e) { }
-            const stopProgressPoll = startFlowProgressPoll();
             const chain_ids = currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean);
+            const resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));
+            stopProgressPoll = startFlowProgressPoll();
             const prepData = await postJson(
               '/api/flag-sequencing/prepare_preview_for_execute',
               {
@@ -10435,13 +10453,13 @@
                 allow_node_duplicates: !!allowDupes,
                 mode: 'resolve',
                 best_effort: false, // User requested strict failure
-                timeout_s: 120,
+                timeout_s: resolveTimeoutSeconds,
                 initial_facts: flowInitialFactsOverride,
                 goal_facts: flowGoalFactsOverride,
               },
-              { timeoutMs: 120000, throwOnHttpError: true } // Ensure HTTP errors (422) throw so we can catch them.
+              { timeoutMs: (resolveTimeoutSeconds * 1000) + 30000, throwOnHttpError: true } // Ensure HTTP errors (422) throw so we can catch them.
             );
-            try { stopProgressPoll(); } catch (e) { }
+            try { if (stopProgressPoll) stopProgressPoll(); } catch (e) { }
             lastResolvePayload = prepData;
             try {
               const runs = (prepData && Array.isArray(prepData.generator_runs)) ? prepData.generator_runs : [];
@@ -10554,6 +10572,7 @@
             resolved = true;
           } catch (e) {
             const duplicateFlagError = _isDuplicateFlagError(e);
+            try { if (stopProgressPoll) stopProgressPoll(); } catch (ex) { }
             // Handling for strict generation failures (best_effort=false)
             // postJson sets err.payload = data, so we check e.payload.
             if (e && e.payload && Array.isArray(e.payload.generation_failures) && e.payload.generation_failures.length > 0) {
@@ -10572,7 +10591,6 @@
                 </li>`;
               });
               msg += '</ul>';
-              try { stopProgressPoll(); } catch (ex) { }
               hideLoading();
               updateComposeDialog({
                 title: 'Generation Failed',
@@ -10585,6 +10603,16 @@
               // Force the dialog to standard state so it doesn't auto-close or look like a spinner
               // (updateComposeDialog acts on the existing modal)
               break; // Stop retrying
+            }
+
+            if (isTransientFetchError(e) || (e && e.isTimeout)) {
+              const msg = e && e.isTimeout
+                ? 'Resolve request timed out while generators were running. Increase timeout or retry after checking the generator output.'
+                : `Resolve request connection was interrupted while generators were running: ${describeFetchError(e)}`;
+              appendLoadingLog(msg);
+              try { setComposeError(msg); } catch (_) { }
+              setStatus('Resolve interrupted: ' + msg, true);
+              break;
             }
 
             if (duplicateFlagError && resolveRetriesRemaining > 0) {
@@ -10760,6 +10788,7 @@
       const diagram = buildMermaid([]);
       await renderMermaid(diagram);
     } finally {
+      setGenerateBusy(false);
       hideLoading();
     }
   }
