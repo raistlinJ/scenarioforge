@@ -667,8 +667,23 @@ def _prepare_chain_and_assignments(
     except Exception:
         has_dupes = False
 
-    if (not explicit_chain) and (not preset_steps) and (not has_dupes):
-        debug_dag = bool(j.get('debug_dag'))
+    debug_dag = bool(j.get('debug_dag'))
+    should_reorder_chain = bool((not explicit_chain) and (not preset_steps) and (not has_dupes))
+    if explicit_chain and (not preset_steps) and (not has_dupes) and flag_assignments:
+        try:
+            explicit_valid, explicit_errors = deps._flow_validate_chain_order_by_requires_produces(
+                chain_nodes,
+                flag_assignments,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+            if not explicit_valid and any('before they are produced' in str(error or '') for error in (explicit_errors or [])):
+                should_reorder_chain = True
+                if not warning:
+                    warning = 'Explicit Flow chain order was repaired to satisfy generator and pivot dependencies.'
+        except Exception:
+            pass
+
+    if should_reorder_chain:
         chain_nodes, flag_assignments, dag_debug = deps._flow_reorder_chain_by_generator_dag(
             chain_nodes,
             flag_assignments,
@@ -681,7 +696,6 @@ def _prepare_chain_and_assignments(
         except Exception:
             pass
     else:
-        debug_dag = bool(j.get('debug_dag'))
         dag_debug = None
 
     try:

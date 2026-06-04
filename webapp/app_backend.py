@@ -21751,30 +21751,28 @@ def _flow_reorder_chain_by_generator_dag(
             ordered_assignments = [assignment for _idx, _node, assignment in ordered]
             before_adjacent = _adjacent_dependency_count(flag_assignments)
             after_adjacent = _adjacent_dependency_count(ordered_assignments)
-            if after_adjacent <= before_adjacent:
-                if before_adjacent > 0:
-                    try:
-                        valid, _errors = _flow_validate_chain_order_by_requires_produces(
-                            chain_nodes,
-                            flag_assignments,
-                            scenario_label=scenario_label,
-                            plugins_by_id_override=plugins_by_id_override,
-                        )
-                        if valid:
-                            debug: dict[str, Any] | None = None
-                            if return_debug:
-                                debug = {
-                                    'ok': True,
-                                    'strategy': 'high_dependency_preserve',
-                                    'before_adjacent_dependencies': before_adjacent,
-                                    'after_adjacent_dependencies': before_adjacent,
-                                    'order': [str((node or {}).get('id') or '') for node in chain_nodes],
-                                }
-                            refreshed_nodes, refreshed_assignments = _refresh_next_fields(chain_nodes, flag_assignments)
-                            return refreshed_nodes, refreshed_assignments, debug
-                    except Exception:
-                        pass
-                return None
+            current_valid = False
+            try:
+                current_valid, _errors = _flow_validate_chain_order_by_requires_produces(
+                    chain_nodes,
+                    flag_assignments,
+                    scenario_label=scenario_label,
+                    plugins_by_id_override=plugins_by_id_override,
+                )
+            except Exception:
+                current_valid = False
+            if after_adjacent <= before_adjacent and current_valid:
+                debug: dict[str, Any] | None = None
+                if return_debug:
+                    debug = {
+                        'ok': True,
+                        'strategy': 'high_dependency_preserve',
+                        'before_adjacent_dependencies': before_adjacent,
+                        'after_adjacent_dependencies': before_adjacent,
+                        'order': [str((node or {}).get('id') or '') for node in chain_nodes],
+                    }
+                refreshed_nodes, refreshed_assignments = _refresh_next_fields(chain_nodes, flag_assignments)
+                return refreshed_nodes, refreshed_assignments, debug
             try:
                 valid, _errors = _flow_validate_chain_order_by_requires_produces(
                     ordered_nodes,
@@ -21800,6 +21798,20 @@ def _flow_reorder_chain_by_generator_dag(
 
         try:
             if _flow_normalize_dependency_level(dependency_level) >= 5:
+                greedy_result = _high_dependency_greedy_order()
+                if greedy_result is not None:
+                    return greedy_result
+        except Exception:
+            pass
+
+        try:
+            current_valid, _current_errors = _flow_validate_chain_order_by_requires_produces(
+                chain_nodes,
+                flag_assignments,
+                scenario_label=scenario_label,
+                plugins_by_id_override=plugins_by_id_override,
+            )
+            if not current_valid:
                 greedy_result = _high_dependency_greedy_order()
                 if greedy_result is not None:
                     return greedy_result
