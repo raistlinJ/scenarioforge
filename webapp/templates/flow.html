@@ -2117,10 +2117,10 @@
       const timingRows = timingSpecs.map(([key, label]) => {
         const value = formatTiming(timings[key]);
         if (!value) return '';
-        return `<li class="d-flex align-items-center justify-content-between gap-3"><span>${esc(label)}</span><span class="fw-semibold">${esc(value)}</span></li>`;
+        return `<div class="d-flex align-items-center justify-content-between gap-3"><span>${esc(label)}</span><span class="fw-semibold">${esc(value)}</span></div>`;
       }).filter(Boolean).join('');
       const timingHtml = timingRows
-        ? `<div class="small text-muted mb-2">Phase Timing</div><ul class="small mb-3" style="list-style: none; padding-left: 0; max-width: 32rem;">${timingRows}</ul>`
+        ? `<div class="small text-muted mb-2">Phase Timing</div><div class="small mb-3" style="max-width: 32rem;">${timingRows}</div>`
         : '';
       const renderCheckbox = (r) => {
         const ok = r && r.ok ? true : false;
@@ -2134,14 +2134,14 @@
         const logPath = String((r && r.log_path) || '').trim();
         const logHref = logPath ? `/download_report?path=${encodeURIComponent(logPath)}` : '';
         return `
-          <li class="d-flex align-items-center gap-2">
+          <div class="d-flex align-items-center gap-2">
             <span>${renderCheckbox(r)}</span>
             <span class="text-muted">${idx + 1}.</span>
             <span class="fw-semibold">${esc(gid)}</span>
             <span class="text-muted">${esc(node || '')}</span>
             ${note ? `<span class="small text-muted">(${esc(note)})</span>` : ''}
             ${logHref ? `<a class="small" href="${logHref}" target="_blank" rel="noopener">log file</a>` : ''}
-          </li>
+          </div>
         `;
       }).join('');
       const progressHtml = progress.length
@@ -2160,9 +2160,9 @@
         ${timingHtml}
         ${progressHtml}
         <div class="small text-muted mb-2">Summary</div>
-        <ul class="small mb-3" style="list-style: none; padding-left: 0;">
-          ${summaryRows || '<li class="text-muted">No generator output captured.</li>'}
-        </ul>
+        <div class="small mb-3">
+          ${summaryRows || '<div class="text-muted">No generator output captured.</div>'}
+        </div>
         <div class="small text-muted mb-1">Output / Log</div>
         <pre class="small bg-white border p-2 mb-0" style="white-space: pre-wrap;">${esc(outputLines || 'No generator output captured.')}</pre>
       `;
@@ -2309,6 +2309,9 @@
         });
         if (newLines.length && opts.composeLog !== false) appendComposeLines(newLines);
         if (newLines.length && opts.loadingLog) newLines.forEach((line) => appendLoadingLog(line));
+        if (newLines.length && typeof opts.onLines === 'function') {
+          try { opts.onLines(newLines.slice(), lines.slice()); } catch (callbackErr) { }
+        }
       } catch (e) { }
       setTimeout(tick, 1000);
     };
@@ -2913,6 +2916,41 @@
       throw err;
     }
     return data;
+  }
+
+  function buildResolveInterruptionDiagnostics(err, context) {
+    try {
+      const ctx = (context && typeof context === 'object') ? context : {};
+      const elapsedSeconds = Number.isFinite(+ctx.elapsedSeconds) ? Math.max(0, +ctx.elapsedSeconds) : null;
+      const backendTimeoutSeconds = Number.isFinite(+ctx.backendTimeoutSeconds) ? Math.max(0, +ctx.backendTimeoutSeconds) : null;
+      const browserTimeoutSeconds = Number.isFinite(+ctx.browserTimeoutSeconds) ? Math.max(0, +ctx.browserTimeoutSeconds) : null;
+      const progressLines = Array.isArray(ctx.progressLines)
+        ? ctx.progressLines.map((line) => String(line || '').trim()).filter(Boolean).slice(-6)
+        : [];
+      const parts = [
+        `Resolve request connection was interrupted while generators were running: ${describeFetchError(err)}`,
+        'Meaning: the browser lost its HTTP connection to the ScenarioForge webapp while /api/flag-sequencing/prepare_preview_for_execute was active. This is separate from CORE VM internet access.',
+      ];
+      if (ctx.scenario || ctx.chainLength || ctx.progressId) {
+        parts.push(`Request: scenario=${ctx.scenario || '-'} chain=${ctx.chainLength || '-'} progress_id=${ctx.progressId || '-'}`);
+      }
+      if (elapsedSeconds !== null || backendTimeoutSeconds !== null || browserTimeoutSeconds !== null) {
+        parts.push(
+          `Timing: elapsed=${elapsedSeconds !== null ? elapsedSeconds.toFixed(1) + 's' : '-'} `
+          + `backend_timeout=${backendTimeoutSeconds !== null ? backendTimeoutSeconds + 's' : '-'} `
+          + `browser_timeout=${browserTimeoutSeconds !== null ? browserTimeoutSeconds + 's' : '-'}`
+        );
+      }
+      if (progressLines.length) {
+        parts.push(`Last progress: ${progressLines.join(' | ')}`);
+      } else {
+        parts.push('Last progress: none received for this resolve request.');
+      }
+      parts.push('Check next: webapp terminal/log for a restart or traceback at that progress_id; Flask reloader/proxy timeout/server restart are the most likely causes. If using nginx or another proxy, raise its read/send timeout above the browser timeout shown here.');
+      return parts.join('\n');
+    } catch (diagErr) {
+      return `Resolve request connection was interrupted while generators were running: ${describeFetchError(err)}`;
+    }
   }
 
   async function saveXmlViaFlowState(scenarioName) {
@@ -10523,6 +10561,10 @@
         while (!resolved) {
           resolveAttempts += 1;
           let stopProgressPoll = null;
+          let resolveProgressId = '';
+          let resolveProgressLines = [];
+          let resolveStartedAt = Date.now();
+          let resolveTimeoutSeconds = 0;
           try {
             setStatus('Resolving values…', false);
             showLoading('Resolving values…');
@@ -10532,9 +10574,18 @@
               showComposeDialog('Generator Output', 'Solving chain and assignments…');
             } catch (e) { }
             const chain_ids = currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean);
-            const resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));
-            const resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-            stopProgressPoll = startFlowProgressPoll({ progressId: resolveProgressId, loadingLog: true });
+            resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));
+            resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            resolveStartedAt = Date.now();
+            stopProgressPoll = startFlowProgressPoll({
+              progressId: resolveProgressId,
+              loadingLog: true,
+              onLines: (lines) => {
+                try {
+                  resolveProgressLines = resolveProgressLines.concat(lines || []).slice(-20);
+                } catch (progressErr) { }
+              },
+            });
             const prepData = await postJson(
               '/api/flag-sequencing/prepare_preview_for_execute',
               {
@@ -10562,12 +10613,12 @@
               const phaseTimings = (prepData && prepData.phase_timings && typeof prepData.phase_timings === 'object') ? prepData.phase_timings : {};
               if (runs.length) {
                 appendLoadingLog(`Generator runs (${runs.length}):`);
-                runs.forEach((r) => {
+                runs.forEach((r, runIndex) => {
                   const ok = r && r.ok ? 'ok' : 'fail';
                   const gid = String((r && (r.generator_id || r.id)) || '').trim() || 'unknown';
                   const node = String((r && (r.node_name || r.node_id)) || '').trim();
                   const note = String((r && r.note) || '').trim();
-                  appendLoadingLog(`- ${gid}${node ? ` @ ${node}` : ''}: ${ok}${note ? ` (${note})` : ''}`);
+                  appendLoadingLog(`${runIndex + 1}. ${gid}${node ? ` @ ${node}` : ''}: ${ok}${note ? ` (${note})` : ''}`);
                 });
               }
 
@@ -10701,9 +10752,26 @@
             }
 
             if (isTransientFetchError(e) || (e && e.isTimeout)) {
+              const elapsedSeconds = Math.max(0, (Date.now() - resolveStartedAt) / 1000);
               const msg = e && e.isTimeout
-                ? 'Resolve request timed out while generators were running. Increase timeout or retry after checking the generator output.'
-                : `Resolve request connection was interrupted while generators were running: ${describeFetchError(e)}. This is the browser-to-webapp request, not the CORE VM internet path; check whether the webapp restarted, the Flask reloader fired, or a proxy closed the long request.`;
+                ? buildResolveInterruptionDiagnostics(new Error('Request timed out.'), {
+                    scenario,
+                    chainLength: Array.isArray(currentChain) ? currentChain.length : 0,
+                    progressId: resolveProgressId,
+                    elapsedSeconds,
+                    backendTimeoutSeconds: resolveTimeoutSeconds,
+                    browserTimeoutSeconds: resolveTimeoutSeconds ? resolveTimeoutSeconds + 30 : 0,
+                    progressLines: resolveProgressLines,
+                  })
+                : buildResolveInterruptionDiagnostics(e, {
+                    scenario,
+                    chainLength: Array.isArray(currentChain) ? currentChain.length : 0,
+                    progressId: resolveProgressId,
+                    elapsedSeconds,
+                    backendTimeoutSeconds: resolveTimeoutSeconds,
+                    browserTimeoutSeconds: resolveTimeoutSeconds ? resolveTimeoutSeconds + 30 : 0,
+                    progressLines: resolveProgressLines,
+                  });
               appendLoadingLog(msg);
               try { setComposeError(msg); } catch (_) { }
               setStatus('Resolve interrupted: ' + msg, true);
@@ -13091,14 +13159,14 @@ ${out.join('\n')}
       if (data && data.ok && missing.length) {
         setLoadingSteps(revalidateSteps, revalidateSteps.length);
         appendLoadingLog(`Missing files: ${missing.length}`);
-        missing.slice(0, 8).forEach((m) => appendLoadingLog(`- ${m}`));
-        if (missing.length > 8) appendLoadingLog(`- ... (${missing.length - 8} more)`);
+        missing.slice(0, 8).forEach((m, missingIndex) => appendLoadingLog(`${missingIndex + 1}. ${m}`));
+        if (missing.length > 8) appendLoadingLog(`More missing files: ${missing.length - 8}`);
         const snap = composeBodyEl ? (composeBodyEl.innerText || '') : '';
-        const missingItems = missing.slice(0, 8).map(m => `<li>${esc(m)}</li>`).join('');
-        const missingMore = missing.length > 8 ? `<li>... (${missing.length - 8} more)</li>` : '';
+        const missingItems = missing.slice(0, 8).map((m, missingIndex) => `<div>${missingIndex + 1}. ${esc(m)}</div>`).join('');
+        const missingMore = missing.length > 8 ? `<div>More missing files: ${missing.length - 8}</div>` : '';
         const detailsHtml = `
           <div class="small text-muted mb-2">Missing files</div>
-          <ul class="small mb-3">${missingItems}${missingMore}</ul>
+          <div class="small mb-3 border rounded bg-light p-2" style="max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">${missingItems}${missingMore}</div>
           ${buildCheckedFilesDropdown(checkedFiles)}
         `;
         const html = buildRevalidateHtml(
