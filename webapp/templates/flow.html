@@ -388,7 +388,11 @@
     <div class="small text-muted mt-2" id="flowLoadingStepsLabel">Progress steps</div>
     <ul id="flowLoadingSteps" class="small mt-1 mb-0 d-none"></ul>
     <div class="small text-muted mt-2 d-none" id="flowLoadingLogLabel">Details</div>
-    <ul id="flowLoadingLog" class="small text-muted mt-1 mb-0 d-none"></ul>
+    <div
+      id="flowLoadingLog"
+      class="small text-muted mt-1 d-none border rounded bg-light"
+      style="max-height: 180px; overflow-y: auto; padding: .5rem .75rem; white-space: pre-wrap; word-break: break-word;"
+    ></div>
     <div class="small text-muted mt-2">This can take a few seconds while ScenarioForge prepares the latest data.</div>
   </div>
 </div>
@@ -2008,9 +2012,9 @@
       if (loadingLogEl) {
         if (loadingLogLabelEl) loadingLogLabelEl.classList.remove('d-none');
         loadingLogEl.classList.remove('d-none');
-        const item = document.createElement('li');
-        item.textContent = msg;
-        loadingLogEl.appendChild(item);
+        const entry = document.createElement('div');
+        entry.textContent = msg;
+        loadingLogEl.appendChild(entry);
       }
       if (composeBodyEl && !composeFinalized) {
         if (composeLogLabelEl) composeLogLabelEl.classList.remove('d-none');
