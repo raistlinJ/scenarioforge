@@ -45158,7 +45158,10 @@ if __name__ == '__main__':
         port = 9090
     host = os.environ.get('CORETG_HOST') or '0.0.0.0'
     debug = _env_flag('CORETG_DEBUG', False) or _env_flag('FLASK_DEBUG', False)
-    use_reloader = _env_flag('CORETG_USE_RELOADER', debug)
+    # Generator/VM-mode workflows write plan, report, and artifact files under the repo.
+    # Werkzeug's reloader can treat those writes as source changes and restart the
+    # webapp mid-request, which appears in the browser as a fetch NetworkError.
+    use_reloader = _env_flag('CORETG_USE_RELOADER', False)
     try:
         did_scrub = _scrub_hitl_validation_usernames_in_scenario_catalog()
         if did_scrub:

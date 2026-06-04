@@ -1667,6 +1667,11 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
 def execute_impl(*, backend: Any):
     deps = _backend_dependencies(backend)
     phase_timings: dict[str, float] = {}
+    try:
+        progress_payload = request.get_json(silent=True) or {}
+        progress_id = str(progress_payload.get('progress_id') or '').strip()
+    except Exception:
+        progress_id = ''
 
     def _mark_phase(name: str, started: float) -> float:
         elapsed = max(0.0, float(time.monotonic() - started))
@@ -1676,7 +1681,8 @@ def execute_impl(*, backend: Any):
     # Stub for early progress calls; overridden later if generator runs occur.
     def _flow_progress(msg: str) -> None:
         try:
-            current_app.logger.info('[flow.progress] %s', msg)
+            prefix = f'progress_id={progress_id} ' if progress_id else ''
+            current_app.logger.info('[flow.progress] %s%s', prefix, msg)
         except Exception:
             pass
 
