@@ -19919,6 +19919,52 @@ def _flow_apply_pivot_context_to_assignments(
             if _val:
                 _chain_all_ids.add(_val.lower())
 
+    def _pivot_fact_subject(value: Any) -> str:
+        text = str(value or '').strip()
+        if not text or '(' not in text or not text.endswith(')'):
+            return ''
+        prefix = text.split('(', 1)[0].strip().lower()
+        if prefix not in {'pivot', 'shell'}:
+            return ''
+        return text[text.find('(') + 1:-1].strip().lower()
+
+    def _pivot_source_name_candidates(value: Any) -> set[str]:
+        text = str(value or '').strip().lower()
+        if not text:
+            return set()
+        names = {text}
+        if ' @ ' in text:
+            names.add(text.split(' @ ', 1)[0].strip())
+        if text.isdigit():
+            names.add(f'docker-{text}')
+        return {name for name in names if name}
+
+    def _rule_source_in_chain(rule: dict[str, Any], source_id: str) -> bool:
+        source_name = str(rule.get('source_name') or '').strip()
+        source_names = _pivot_source_name_candidates(source_id) | _pivot_source_name_candidates(source_name)
+        return any(source_name in _chain_all_ids for source_name in source_names)
+
+    def _rule_source_requires(rule: dict[str, Any], requires: list[str], source_id: str) -> list[str]:
+        produces = set(_flow_split_top_level_list(rule.get('produces')))
+        matched = [fact for fact in requires if fact in produces]
+        if matched:
+            return matched
+        source_names = _pivot_source_name_candidates(source_id) | _pivot_source_name_candidates(rule.get('source_name'))
+        matched = [fact for fact in requires if _pivot_fact_subject(fact) in source_names]
+        if matched:
+            return matched
+        synthetic_requires = [fact for fact in requires if _pivot_fact_subject(fact)]
+        return synthetic_requires or list(requires)
+
+    def _remove_assignment_values(target: dict[str, Any], key: str, values: list[str]) -> None:
+        remove = {str(value or '').strip() for value in (values or []) if str(value or '').strip()}
+        if not remove or not isinstance(target.get(key), list):
+            return
+        target[key] = [
+            item for item in (target.get(key) or [])
+            if str(item or '').strip() not in remove
+        ]
+
     out: list[dict[str, Any]] = []
     for index, assignment in enumerate(flag_assignments):
         if not isinstance(assignment, dict):
@@ -19963,31 +20009,31 @@ def _flow_apply_pivot_context_to_assignments(
                 })
             if node_id and target_id and node_id == target_id:
                 requires = _flow_split_top_level_list(rule.get('target_requires'))
+                source_requires = _rule_source_requires(rule, requires, source_id)
                 # Only treat the pivot fact as a hard generator dependency when the
                 # pivot source node is also present in this chain.  If it is absent
                 # the fact will never be produced and would permanently invalidate
                 # the chain order check, blocking all flag execution.
-                _source_in_chain = bool(
-                    source_id and source_id.lower() in _chain_all_ids
-                ) or bool(
-                    rule.get('source_name') and str(rule.get('source_name')).lower() in _chain_all_ids
-                )
+                _source_in_chain = _rule_source_in_chain(rule, source_id)
                 if _source_in_chain:
-                    _flow_append_unique_values(a2, 'requires', requires)
-                    _flow_append_unique_values(a2, 'inputs', requires)
+                    _flow_append_unique_values(a2, 'requires', source_requires)
+                    _flow_append_unique_values(a2, 'inputs', source_requires)
+                else:
+                    _remove_assignment_values(a2, 'requires', source_requires)
+                    _remove_assignment_values(a2, 'inputs', source_requires)
                 provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
                 source_name = str(rule.get('source_name') or rule.get('source_id') or '').strip()
                 ports = _flow_split_top_level_list(rule.get('target_ports'))
                 port_text = f" Ports: {', '.join(ports)}." if ports else ''
-                # Defer hint emission — collect parts and consolidate below.
-                _pivot_target_hint_parts.append((source_name, list(requires), port_text))
+                # Defer hint emission - collect parts and consolidate below.
+                _pivot_target_hint_parts.append((source_name, list(source_requires), port_text))
                 pivot_entries.append({
                     'role': 'target',
                     'provider': rule.get('provider'),
                     'provider_label': provider_label,
                     'source': source_name,
                     'target': rule.get('target_name') or target_id,
-                    'requires': requires,
+                    'requires': source_requires,
                     'produces': [],
                     'target_ports': ports,
                     'target_protocols': _flow_split_top_level_list(rule.get('target_protocols')),
