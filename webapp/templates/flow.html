@@ -2229,6 +2229,17 @@
     try {
       const s = String(line || '').toLowerCase();
       if (!s) return '';
+      if (s.includes('phase: locating preview plan')) return 'Finding preview plan…';
+      if (s.includes('phase: loading preview payload')) return 'Loading preview plan…';
+      if (s.includes('phase: building topology graph')) return 'Building topology graph…';
+      if (s.includes('phase: selecting chain nodes')) return 'Selecting chain nodes…';
+      if (s.includes('phase: expanding chain')) return 'Expanding chain…';
+      if (s.includes('phase: computing generator assignments')) return 'Assigning generators…';
+      if (s.includes('phase: applying pivot context')) return 'Applying pivot context…';
+      if (s.includes('phase: ordering dependency graph')) return 'Ordering dependency graph…';
+      if (s.includes('phase: validating dependency order')) return 'Validating dependency order…';
+      if (s.includes('phase: persisting sequence plan')) return 'Saving sequence plan…';
+      if (s.includes('phase complete: sequencing preview ready')) return 'Sequence ready.';
       if (s.includes('phase: solving chain and assignments')) return 'Solving chain…';
       if (s.includes('phase complete: solving chain and assignments')) return 'Chain solved. Preparing runtime…';
       if (s.includes('phase: preparing generator runtime')) return 'Preparing generator runtime…';
@@ -2249,13 +2260,30 @@
     }
   }
 
-  function startFlowProgressPoll() {
+  function _formatFlowProgressLine(line) {
+    try {
+      let text = String(line || '').trim();
+      const marker = '[flow.progress]';
+      const idx = text.indexOf(marker);
+      if (idx >= 0) text = text.slice(idx + marker.length).trim();
+      text = text.replace(/^progress_id=\S+\s+/i, '');
+      text = text.replace(/^elapsed=([0-9.]+s)\s+/i, '[$1] ');
+      return text || String(line || '').trim();
+    } catch (e) {
+      return String(line || '').trim();
+    }
+  }
+
+  function startFlowProgressPoll(options) {
+    const opts = (options && typeof options === 'object') ? options : {};
     let cancelled = false;
     const seen = new Set();
     const tick = async () => {
       if (cancelled) return;
       try {
-        const resp = await fetch('/api/flag-sequencing/flow_progress');
+        let url = '/api/flag-sequencing/flow_progress';
+        if (opts.progressId) url += '?progress_id=' + encodeURIComponent(String(opts.progressId));
+        const resp = await fetch(url);
         const data = await resp.json();
         const lines = (data && Array.isArray(data.lines)) ? data.lines : [];
         const newLines = [];
@@ -2263,11 +2291,14 @@
           const s = String(ln || '').trim();
           if (!s || seen.has(s)) return;
           seen.add(s);
-          newLines.push(s);
+          const display = _formatFlowProgressLine(s);
+          newLines.push(display);
           const status = _composeStatusFromProgressLine(s);
-          if (status && composeStatusEl) composeStatusEl.textContent = status;
+          if (status && composeStatusEl && opts.composeLog !== false) composeStatusEl.textContent = status;
+          if (status && opts.loadingLog && loadingTextEl) loadingTextEl.textContent = status;
         });
-        if (newLines.length) appendComposeLines(newLines);
+        if (newLines.length && opts.composeLog !== false) appendComposeLines(newLines);
+        if (newLines.length && opts.loadingLog) newLines.forEach((line) => appendLoadingLog(line));
       } catch (e) { }
       setTimeout(tick, 1000);
     };
@@ -10258,20 +10289,28 @@
             showLoading('Sequencing chain…');
             setLoadingSteps(progressSteps, 3);
             appendLoadingLog(`Sequencing attempt ${retryIndex + 1}`);
-            data = await postSequencePreviewPlan({
-              scenario,
-              length,
-              dependency_level: dependencyLevel,
-              preset,
-              preview_plan: previewPlanForRequest(),
-              allow_node_duplicates: !!allowDupes,
-              ...topologyInclusionOptions,
-              retry_index: retryIndex,
-              flow_seed: (flowSeedInputEl && flowSeedInputEl.value) ? parseInt(flowSeedInputEl.value, 10) : undefined,
-              xml_path: (typeof window.coretgGetLatestXmlPathForScenario === 'function') ? window.coretgGetLatestXmlPathForScenario(scenario) : '',
-              initial_facts: flowInitialFactsOverride,
-              goal_facts: flowGoalFactsOverride,
-            }, { timeoutMs: 60000 });
+            const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            let stopSequenceProgressPoll = null;
+            try {
+              stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
+              data = await postSequencePreviewPlan({
+                scenario,
+                length,
+                dependency_level: dependencyLevel,
+                preset,
+                preview_plan: previewPlanForRequest(),
+                allow_node_duplicates: !!allowDupes,
+                ...topologyInclusionOptions,
+                retry_index: retryIndex,
+                flow_seed: (flowSeedInputEl && flowSeedInputEl.value) ? parseInt(flowSeedInputEl.value, 10) : undefined,
+                xml_path: (typeof window.coretgGetLatestXmlPathForScenario === 'function') ? window.coretgGetLatestXmlPathForScenario(scenario) : '',
+                initial_facts: flowInitialFactsOverride,
+                goal_facts: flowGoalFactsOverride,
+                progress_id: sequenceProgressId,
+              }, { timeoutMs: 60000 });
+            } finally {
+              try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
+            }
           } else {
 
             data = await fetchJson(buildAttackflowPreviewUrl(params), { timeoutMs: 180000, networkRetries: 2, retryDelayMs: 350 });
@@ -10339,20 +10378,28 @@
             }
             if (runSavePreviewResolve) {
               appendLoadingLog(`Retrying best-effort length ${offer.available}`);
-              data = await postSequencePreviewPlan({
-                scenario,
-                length,
-                dependency_level: dependencyLevel,
-                preset,
-                preview_plan: previewPlanForRequest(),
-                allow_node_duplicates: !!allowDupes,
-                ...topologyInclusionOptions,
-                best_effort: true,
-                flow_seed: (flowSeedInputEl && flowSeedInputEl.value) ? parseInt(flowSeedInputEl.value, 10) : undefined,
-                xml_path: (typeof window.coretgGetLatestXmlPathForScenario === 'function') ? window.coretgGetLatestXmlPathForScenario(scenario) : '',
-                initial_facts: flowInitialFactsOverride,
-                goal_facts: flowGoalFactsOverride,
-              }, { timeoutMs: 60000 });
+              const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+              let stopSequenceProgressPoll = null;
+              try {
+                stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
+                data = await postSequencePreviewPlan({
+                  scenario,
+                  length,
+                  dependency_level: dependencyLevel,
+                  preset,
+                  preview_plan: previewPlanForRequest(),
+                  allow_node_duplicates: !!allowDupes,
+                  ...topologyInclusionOptions,
+                  best_effort: true,
+                  flow_seed: (flowSeedInputEl && flowSeedInputEl.value) ? parseInt(flowSeedInputEl.value, 10) : undefined,
+                  xml_path: (typeof window.coretgGetLatestXmlPathForScenario === 'function') ? window.coretgGetLatestXmlPathForScenario(scenario) : '',
+                  initial_facts: flowInitialFactsOverride,
+                  goal_facts: flowGoalFactsOverride,
+                  progress_id: sequenceProgressId,
+                }, { timeoutMs: 60000 });
+              } finally {
+                try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
+              }
             } else {
 
               const params2 = new URLSearchParams(params.toString());
@@ -10659,20 +10706,29 @@
               setStatus(`Resolve hit duplicate flags; retrying (${attemptedRetries})…`, true);
               showLoading('Retrying resolve…');
               appendLoadingLog('Duplicate flags during resolve; resequencing.');
-              const data2 = await postSequencePreviewPlan({
-                scenario,
-                length,
-                dependency_level: dependencyLevel,
-                preset,
-                preview_plan: previewPlanForRequest(),
-                allow_node_duplicates: !!allowDupes,
-                ...topologyInclusionOptions,
-                retry_index: retryIndex,
-                flow_seed: (flowSeedInputEl && flowSeedInputEl.value) ? parseInt(flowSeedInputEl.value, 10) : undefined,
-                xml_path: (typeof window.coretgGetLatestXmlPathForScenario === 'function') ? window.coretgGetLatestXmlPathForScenario(scenario) : '',
-                initial_facts: flowInitialFactsOverride,
-                goal_facts: flowGoalFactsOverride,
-              }, { timeoutMs: 60000 });
+              const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+              let stopSequenceProgressPoll = null;
+              let data2 = null;
+              try {
+                stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
+                data2 = await postSequencePreviewPlan({
+                  scenario,
+                  length,
+                  dependency_level: dependencyLevel,
+                  preset,
+                  preview_plan: previewPlanForRequest(),
+                  allow_node_duplicates: !!allowDupes,
+                  ...topologyInclusionOptions,
+                  retry_index: retryIndex,
+                  flow_seed: (flowSeedInputEl && flowSeedInputEl.value) ? parseInt(flowSeedInputEl.value, 10) : undefined,
+                  xml_path: (typeof window.coretgGetLatestXmlPathForScenario === 'function') ? window.coretgGetLatestXmlPathForScenario(scenario) : '',
+                  initial_facts: flowInitialFactsOverride,
+                  goal_facts: flowGoalFactsOverride,
+                  progress_id: sequenceProgressId,
+                }, { timeoutMs: 60000 });
+              } finally {
+                try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
+              }
 
               currentChain = Array.isArray(data2.chain) ? data2.chain.slice() : [];
               currentFlagAssignments = Array.isArray(data2.flag_assignments) ? data2.flag_assignments.slice() : [];
