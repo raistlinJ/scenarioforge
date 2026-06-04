@@ -855,6 +855,54 @@ def run_cmd_capture(cmd: list[str], workdir: Path, env: dict[str, str]) -> subpr
     )
 
 
+def _python_fallback_enabled() -> bool:
+    raw = str(os.getenv('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK', '1') or '').strip().lower()
+    return raw not in ('0', 'false', 'no', 'n', 'off')
+
+
+def run_direct_python_generator(
+    source_dir: Path,
+    config_path: Path,
+    outputs_dir: Path,
+    env: dict[str, str],
+) -> None:
+    """Run a self-contained generator.py without Docker as a failure fallback."""
+    generator_py = (source_dir / 'generator.py').resolve()
+    if not generator_py.exists():
+        raise FileNotFoundError(f'direct Python fallback unavailable: {generator_py} not found')
+
+    cmd = [
+        sys.executable,
+        str(generator_py),
+        '--config',
+        str(config_path.resolve()),
+        '--out-dir',
+        str(outputs_dir.resolve()),
+    ]
+    print(f"[direct-python-fallback] running: {' '.join(cmd)}")
+    p = subprocess.run(
+        cmd,
+        cwd=str(source_dir),
+        env={**os.environ, **env, 'CONFIG_PATH': str(config_path.resolve()), 'OUT_DIR': str(outputs_dir.resolve())},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=float(os.getenv('CORETG_RUN_FLAG_GENERATOR_DOCKER_TIMEOUT', '180') or 180),
+    )
+    out = (p.stdout or '').strip()
+    err = (p.stderr or '').strip()
+    if out:
+        print(out)
+    if err:
+        print(err)
+    if p.returncode != 0:
+        raise subprocess.CalledProcessError(p.returncode, cmd, output=p.stdout, stderr=p.stderr)
+    manifest = outputs_dir / 'outputs.json'
+    if not manifest.exists():
+        raise FileNotFoundError(f'direct Python fallback did not create {manifest}')
+    print('[direct-python-fallback] completed')
+
+
 def _compose_run_supports_no_build(workdir: Path, env: dict[str, str]) -> bool:
     global _COMPOSE_RUN_SUPPORTS_NO_BUILD
     if _COMPOSE_RUN_SUPPORTS_NO_BUILD is not None:
@@ -1109,20 +1157,32 @@ def main() -> int:
             except Exception as exc:
                 print(f"[compose] warning: host-network rewrite failed: {exc}")
 
-        run_compose(
-            source_dir=source_dir,
-            compose_file=compose_file,
-            service=service,
-            inputs_dir=inputs_dir,
-            outputs_dir=out_dir,
-            stable_image_tag=stable_image_tag,
-            env={
-                **env,
-                # inside container, OUT_DIR should resolve to /outputs; leave host OUT_DIR too
-                "OUT_DIR": "/outputs",
-                "CONFIG_PATH": "/inputs/config.json",
-            },
-        )
+        compose_run_env = {
+            **env,
+            # inside container, OUT_DIR should resolve to /outputs; leave host OUT_DIR too
+            "OUT_DIR": "/outputs",
+            "CONFIG_PATH": "/inputs/config.json",
+        }
+        try:
+            run_compose(
+                source_dir=source_dir,
+                compose_file=compose_file,
+                service=service,
+                inputs_dir=inputs_dir,
+                outputs_dir=out_dir,
+                stable_image_tag=stable_image_tag,
+                env=compose_run_env,
+            )
+        except subprocess.CalledProcessError:
+            if not _python_fallback_enabled():
+                raise
+            print('[compose] docker compose generator failed; trying direct Python fallback')
+            run_direct_python_generator(
+                source_dir=source_dir,
+                config_path=config_path,
+                outputs_dir=out_dir,
+                env=env,
+            )
 
         _fix_output_permissions(out_dir)
 
@@ -1167,5 +1227,19 @@ def main() -> int:
     return 0
 
 
+def cli_main() -> int:
+    try:
+        return int(main() or 0)
+    except subprocess.CalledProcessError as exc:
+        stdout = str(exc.output or '').strip()
+        stderr = str(exc.stderr or '').strip()
+        print(f"[cmd] failed rc={int(exc.returncode or 1)}", file=sys.stderr)
+        if stderr:
+            print(f"[cmd] stderr: {stderr[-2000:]}", file=sys.stderr)
+        if stdout:
+            print(f"[cmd] stdout: {stdout[-2000:]}", file=sys.stderr)
+        return int(exc.returncode or 1)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli_main())
