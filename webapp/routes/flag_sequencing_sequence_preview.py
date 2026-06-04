@@ -90,6 +90,14 @@ def register(app, *, backend_module: Any) -> None:
                 xml_path=preview_plan_path,
                 scenario_label=(scenario_label or scenario_norm),
             )
+            try:
+                backend._flow_attach_pivoting_plan_from_xml(
+                    payload,
+                    xml_path=preview_plan_path,
+                    scenario_label=(scenario_label or scenario_norm),
+                )
+            except Exception:
+                pass
         except Exception as exc:
             return jsonify({'ok': False, 'error': f'Failed to load preview plan: {exc}'}), 422
 
@@ -233,6 +241,17 @@ def register(app, *, backend_module: Any) -> None:
                     length=len(chain_nodes or []),
                     chain=[{'id': str(node.get('id') or ''), 'name': str(node.get('name') or ''), 'type': str(node.get('type') or '')} for node in (chain_nodes or []) if isinstance(node, dict)],
                 )
+
+        try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         try:
             ids = [str(node.get('id') or '').strip() for node in (chain_nodes or []) if isinstance(node, dict) and str(node.get('id') or '').strip()]
