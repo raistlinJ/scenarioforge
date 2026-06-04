@@ -180,6 +180,77 @@ def test_flow_pivot_context_infers_simplified_planner_shortcut():
     assert any(entry.get("role") == "target" for entry in enriched[1].get("pivot", []))
 
 
+def test_flow_pivot_context_accepts_full_preview_pivot_provider_key():
+    preview = _preview()
+    chain_nodes = [
+        {"id": "jump", "name": "jump-web", "type": "docker", "is_vuln": True},
+        {"id": "db", "name": "internal-db", "type": "docker", "is_vuln": False},
+    ]
+    assignments = [
+        {"node_id": "jump", "id": "pivot-rce", "type": "flag-generator", "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "db", "id": "db-flag", "type": "flag-node-generator", "inputs": [], "outputs": [], "requires": [], "produces": []},
+    ]
+    pivot_context = {
+        "full_preview": {
+            "pivoting_plan": {
+                "raw_items_serialized": [
+                    {"selected": "Firewall", "factor": 1.0, "pivot_provider": "random"}
+                ]
+            }
+        }
+    }
+
+    enriched = app_backend._flow_apply_pivot_context_to_assignments(
+        assignments,
+        chain_nodes,
+        preview=preview,
+        pivot_context=pivot_context,
+        scenario_label="pivot-demo",
+    )
+
+    assert "Pivot(jump-web)" in enriched[0].get("outputs", [])
+    assert "Pivot(jump-web)" in enriched[1].get("inputs", [])
+    assert enriched[1].get("pivot", [])[0].get("provider") == "random"
+
+
+def test_flow_pivot_context_infers_from_node_pivot_annotations():
+    preview = _preview()
+    chain_nodes = [
+        {
+            "id": "jump",
+            "name": "jump-web",
+            "type": "docker",
+            "is_vuln": True,
+            "PivotProduces": ["Shell(jump-web)", "Pivot(jump-web)"],
+        },
+        {
+            "id": "db",
+            "name": "internal-db",
+            "type": "docker",
+            "is_vuln": False,
+            "PivotRequires": ["Pivot(jump-web)"],
+            "PivotAccessProvider": "ssh-fallback",
+            "SegmentationExposure": "pivot-only",
+        },
+    ]
+    assignments = [
+        {"node_id": "jump", "id": "pivot-rce", "type": "flag-generator", "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "db", "id": "db-flag", "type": "flag-node-generator", "inputs": [], "outputs": [], "requires": [], "produces": []},
+    ]
+
+    enriched = app_backend._flow_apply_pivot_context_to_assignments(
+        assignments,
+        chain_nodes,
+        preview=preview,
+        pivot_context={},
+        scenario_label="pivot-demo",
+    )
+
+    assert "Pivot(jump-web)" in enriched[0].get("outputs", [])
+    assert "Pivot(jump-web)" in enriched[1].get("inputs", [])
+    assert any(entry.get("provider") == "ssh-fallback" for entry in enriched[1].get("pivot", []))
+
+
 def test_flow_topology_inclusion_adds_all_vuln_nodes_past_initial_length():
     nodes = [
         {"id": "worker", "name": "worker", "type": "docker", "is_vuln": False},

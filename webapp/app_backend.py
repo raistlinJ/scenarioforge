@@ -17458,6 +17458,7 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
         is_vuln: bool = False,
         ip4: str = '',
         vulnerabilities: list[Any] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         if not nid or nid in by_id:
             return
@@ -17473,6 +17474,11 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             'interfaces': [],
             'services': [],
         }
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if value in (None, '', []):
+                    continue
+                rec[key] = value
         by_id[nid] = rec
         nodes_out.append(rec)
 
@@ -17561,6 +17567,30 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
                         break
             except Exception:
                 host_ip4 = ''
+        extra: dict[str, Any] = {}
+        for key in (
+            'PivotProduces',
+            'PivotRequires',
+            'PivotAccessProvider',
+            'PivotPlan',
+            'SegmentationExposure',
+            'SegmentationSources',
+            'SegmentationPorts',
+            'SegmentationProtocols',
+            'pivot_produces',
+            'pivot_requires',
+            'pivot_access_provider',
+            'pivot_plan',
+            'segmentation_exposure',
+            'segmentation_sources',
+            'segmentation_ports',
+            'segmentation_protocols',
+        ):
+            try:
+                if h.get(key) not in (None, '', []):
+                    extra[key] = h.get(key)
+            except Exception:
+                continue
         _add_node(
             hid,
             str(h.get('name') or f'host-{hid}'),
@@ -17570,6 +17600,7 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             is_vuln=is_vuln,
             ip4=host_ip4,
             vulnerabilities=vulns,
+            extra=extra,
         )
 
     # Router-to-router links
@@ -19516,9 +19547,42 @@ def _flow_pivot_rules_for_chain(
                 return
         rules.append(rule)
 
+    def _candidate_pivot_dicts(source: Any) -> list[dict[str, Any]]:
+        if not isinstance(source, dict):
+            return []
+        candidates: list[dict[str, Any]] = []
+
+        def _add_candidate(value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            if value in candidates:
+                return
+            has_pivot_shape = any(
+                isinstance(value.get(key), list)
+                for key in ('rules', 'raw_items_serialized')
+            ) or isinstance(value.get('pivoting'), dict) or isinstance(value.get('pivoting_plan'), dict)
+            if has_pivot_shape:
+                candidates.append(value)
+
+        _add_candidate(source)
+        _add_candidate(source.get('pivoting'))
+        _add_candidate(source.get('pivoting_plan'))
+        breakdowns = source.get('breakdowns') if isinstance(source.get('breakdowns'), dict) else None
+        if isinstance(breakdowns, dict):
+            _add_candidate(breakdowns.get('pivoting'))
+        return candidates
+
+    def _fact_name_from_pivot_fact(value: Any) -> str:
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        low = text.lower()
+        if low.startswith('pivot(') and text.endswith(')'):
+            return text[text.find('(') + 1:-1].strip()
+        return ''
+
     for source in _flow_pivot_context_sources(pivot_context, preview):
-        pivot_meta = source.get('pivoting') if isinstance(source.get('pivoting'), dict) else None
-        if isinstance(pivot_meta, dict):
+        for pivot_meta in _candidate_pivot_dicts(source):
             for raw_rule in (pivot_meta.get('rules') or []):
                 if not isinstance(raw_rule, dict):
                     continue
@@ -19545,19 +19609,69 @@ def _flow_pivot_rules_for_chain(
     if rules:
         return rules
 
+    produces_by_fact: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        produces = _flow_split_top_level_list(
+            node.get('PivotProduces')
+            or node.get('pivot_produces')
+            or node.get('produces_pivot')
+            or node.get('pivot_outputs')
+        )
+        for fact in produces:
+            produces_by_fact.setdefault(fact, []).append(node)
+
+    for target_node in nodes or []:
+        if not isinstance(target_node, dict):
+            continue
+        target_requires = _flow_split_top_level_list(
+            target_node.get('PivotRequires')
+            or target_node.get('pivot_requires')
+            or target_node.get('requires_pivot')
+            or target_node.get('pivot_inputs')
+        )
+        if not target_requires:
+            continue
+        provider = (
+            target_node.get('PivotAccessProvider')
+            or target_node.get('pivot_access_provider')
+            or target_node.get('access_provider')
+            or target_node.get('provider')
+            or 'random'
+        )
+        for required_fact in target_requires:
+            source_nodes = list(produces_by_fact.get(required_fact) or [])
+            if not source_nodes:
+                pivot_name = _fact_name_from_pivot_fact(required_fact)
+                source_node = _node_for_name(pivot_name)
+                if isinstance(source_node, dict):
+                    source_nodes = [source_node]
+            for source_node in source_nodes:
+                source_produces = _flow_split_top_level_list(
+                    source_node.get('PivotProduces')
+                    or source_node.get('pivot_produces')
+                    or source_node.get('produces_pivot')
+                    or source_node.get('pivot_outputs')
+                )
+                _add_rule(
+                    name='Pivot',
+                    source_node=source_node,
+                    target_node=target_node,
+                    provider=provider,
+                    produces=source_produces,
+                    target_requires=target_requires,
+                    target_ports=target_node.get('SegmentationPorts') or target_node.get('segmentation_ports'),
+                    target_protocols=target_node.get('SegmentationProtocols') or target_node.get('segmentation_protocols'),
+                    exposure=target_node.get('SegmentationExposure') or target_node.get('segmentation_exposure') or 'pivot-only',
+                )
+
+    if rules:
+        return rules
+
     pivot_items: list[dict[str, Any]] = []
     for source in _flow_pivot_context_sources(pivot_context, preview):
-        candidates: list[Any] = []
-        for key in ('pivoting_plan', 'pivoting'):
-            candidate = source.get(key) if isinstance(source.get(key), dict) else None
-            if isinstance(candidate, dict):
-                candidates.append(candidate)
-        breakdowns = source.get('breakdowns') if isinstance(source.get('breakdowns'), dict) else None
-        if isinstance(breakdowns, dict):
-            pivot_breakdown = breakdowns.get('pivoting') if isinstance(breakdowns.get('pivoting'), dict) else None
-            if isinstance(pivot_breakdown, dict):
-                candidates.append(pivot_breakdown)
-        for candidate in candidates:
+        for candidate in _candidate_pivot_dicts(source):
             raw_items = candidate.get('raw_items_serialized') if isinstance(candidate.get('raw_items_serialized'), list) else []
             for item in raw_items:
                 if isinstance(item, dict):
@@ -19569,7 +19683,7 @@ def _flow_pivot_rules_for_chain(
         if item_key in seen_item_keys:
             continue
         seen_item_keys.add(item_key)
-        provider = _flow_pivot_requested_provider(item.get('access_provider') or item.get('provider') or 'random')
+        provider = _flow_pivot_requested_provider(item.get('access_provider') or item.get('pivot_provider') or item.get('provider') or 'random')
         explicit_targets = _flow_pivot_match_nodes(
             nodes,
             node_selector=item.get('target_node') or item.get('target'),
@@ -31429,6 +31543,88 @@ def _canonicalize_payload_flow_from_xml(
         payload['metadata'] = meta
     return meta, (flow_state if isinstance(flow_state, dict) else None)
 
+
+def _flow_payload_has_pivoting_plan(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for source in _flow_pivot_context_sources(payload, payload.get('full_preview') if isinstance(payload.get('full_preview'), dict) else None):
+        if not isinstance(source, dict):
+            continue
+        for key in ('pivoting', 'pivoting_plan'):
+            candidate = source.get(key) if isinstance(source.get(key), dict) else None
+            if isinstance(candidate, dict):
+                if candidate.get('rules') or candidate.get('raw_items_serialized') or candidate.get('items_count'):
+                    return True
+        if source.get('rules') or source.get('raw_items_serialized') or source.get('items_count'):
+            return True
+        breakdowns = source.get('breakdowns') if isinstance(source.get('breakdowns'), dict) else None
+        pivoting = breakdowns.get('pivoting') if isinstance(breakdowns, dict) and isinstance(breakdowns.get('pivoting'), dict) else None
+        if isinstance(pivoting, dict) and (pivoting.get('rules') or pivoting.get('raw_items_serialized') or pivoting.get('items_count')):
+            return True
+    return False
+
+
+def _flow_attach_pivoting_plan_from_xml(
+    payload: dict[str, Any] | None,
+    *,
+    xml_path: str,
+    scenario_label: str | None,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if _flow_payload_has_pivoting_plan(payload):
+        return False
+    try:
+        xml_abs = os.path.abspath(str(xml_path or '').strip())
+    except Exception:
+        xml_abs = ''
+    if not xml_abs or not os.path.exists(xml_abs):
+        return False
+    try:
+        from scenarioforge.planning.orchestrator import compute_full_plan
+        seed = None
+        try:
+            full = payload.get('full_preview') if isinstance(payload.get('full_preview'), dict) else {}
+            meta = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
+            seed_raw = full.get('seed') if isinstance(full, dict) else None
+            if seed_raw is None and isinstance(meta, dict):
+                seed_raw = meta.get('seed')
+            if seed_raw is not None:
+                seed = int(seed_raw)
+        except Exception:
+            seed = None
+        plan = compute_full_plan(xml_abs, scenario=scenario_label, seed=seed, include_breakdowns=True)
+    except Exception:
+        return False
+    pivoting_plan = None
+    try:
+        if isinstance(plan.get('pivoting_plan'), dict):
+            pivoting_plan = plan.get('pivoting_plan')
+        if not isinstance(pivoting_plan, dict):
+            breakdowns = plan.get('breakdowns') if isinstance(plan.get('breakdowns'), dict) else {}
+            candidate = breakdowns.get('pivoting') if isinstance(breakdowns.get('pivoting'), dict) else None
+            if isinstance(candidate, dict):
+                pivoting_plan = candidate
+    except Exception:
+        pivoting_plan = None
+    if not isinstance(pivoting_plan, dict):
+        return False
+    if not (pivoting_plan.get('rules') or pivoting_plan.get('raw_items_serialized') or pivoting_plan.get('items_count')):
+        return False
+    full_preview = payload.get('full_preview') if isinstance(payload.get('full_preview'), dict) else None
+    if not isinstance(full_preview, dict):
+        full_preview = {}
+        payload['full_preview'] = full_preview
+    full_preview['pivoting_plan'] = pivoting_plan
+    try:
+        meta = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
+        meta = dict(meta or {})
+        meta['pivoting_plan_attached_from_xml'] = True
+        payload['metadata'] = meta
+    except Exception:
+        pass
+    return True
+
     scenario_norm = _normalize_scenario_label(scenario_label or '')
     scen_el = None
     try:
@@ -34297,6 +34493,14 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
         base_scenario=plan.get('base_scenario'),
     )
     fp['router_plan'] = plan.get('breakdowns', {}).get('router', {})
+    try:
+        pivoting_plan = plan.get('pivoting_plan') if isinstance(plan.get('pivoting_plan'), dict) else None
+        if not isinstance(pivoting_plan, dict):
+            pivoting_plan = plan.get('breakdowns', {}).get('pivoting') if isinstance(plan.get('breakdowns', {}).get('pivoting'), dict) else None
+        if isinstance(pivoting_plan, dict) and (pivoting_plan.get('raw_items_serialized') or pivoting_plan.get('rules') or pivoting_plan.get('items_count')):
+            fp['pivoting_plan'] = pivoting_plan
+    except Exception:
+        pass
     try:
         _attach_display_artifacts(fp)
     except Exception:

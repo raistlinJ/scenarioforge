@@ -197,6 +197,14 @@ def register(app, *, backend_module: Any) -> None:
             )
         except Exception:
             pass
+        try:
+            backend._flow_attach_pivoting_plan_from_xml(
+                payload,
+                xml_path=preview_plan_path,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
@@ -620,6 +628,17 @@ def register(app, *, backend_module: Any) -> None:
                         })
             if fallback and len(fallback) == len(chain_nodes):
                 flag_assignments = fallback
+
+        try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         try:
             node_ids = [str(n.get('id') or '').strip() for n in (chain_nodes or []) if isinstance(n, dict) and str(n.get('id') or '').strip()]

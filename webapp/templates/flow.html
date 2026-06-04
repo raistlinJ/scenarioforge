@@ -2737,28 +2737,79 @@
     return err;
   }
 
-  async function fetchJson(url, opts) {
+  function isTransientFetchError(err) {
+    try {
+      if (!err) return false;
+      if (err.isTimeout || err.loginRequired || err.payload || err.status) return false;
+      const name = String(err.name || '').toLowerCase();
+      if (name === 'aborterror') return false;
+      const msg = String(err.message || err || '').toLowerCase();
+      return name === 'typeerror'
+        || name === 'networkerror'
+        || msg.includes('networkerror')
+        || msg.includes('failed to fetch')
+        || msg.includes('load failed')
+        || msg.includes('network request failed')
+        || msg.includes('fetch resource');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function describeFetchError(err) {
+    try {
+      const msg = String((err && err.message) || err || '').trim();
+      if (msg) return msg;
+      const name = String(err && err.name || '').trim();
+      return name || 'Network request failed';
+    } catch (e) {
+      return 'Network request failed';
+    }
+  }
+
+  function sleepForFetchRetry(ms) {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
+
+  async function fetchWithTransientRetry(url, init, opts) {
     opts = opts || {};
     const timeoutMs = Number.isFinite(+opts.timeoutMs) ? (+opts.timeoutMs) : 0;
-    const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    const signal = controller ? controller.signal : undefined;
-    let t = null;
-    if (controller && timeoutMs > 0) {
-      t = setTimeout(() => { try { controller.abort(); } catch (e) { } }, timeoutMs);
-    }
-    let res;
-    try {
-      res = await fetch(url, { credentials: 'same-origin', signal });
-    } catch (e) {
-      if (controller && e && (e.name === 'AbortError')) {
-        const err = new Error('Request timed out.');
-        err.isTimeout = true;
-        throw err;
+    const maxRetries = Math.max(0, Math.min(5, parseInt(String(opts.networkRetries || 0), 10) || 0));
+    const baseDelayMs = Math.max(0, Math.min(5000, parseInt(String(opts.retryDelayMs || 350), 10) || 350));
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const requestInit = Object.assign({}, init || {});
+      if (controller) requestInit.signal = controller.signal;
+      let timerId = null;
+      if (controller && timeoutMs > 0) {
+        timerId = setTimeout(() => { try { controller.abort(); } catch (e) { } }, timeoutMs);
       }
-      throw e;
-    } finally {
-      if (t) clearTimeout(t);
+      try {
+        return await fetch(url, requestInit);
+      } catch (e) {
+        if (controller && e && e.name === 'AbortError') {
+          const err = new Error('Request timed out.');
+          err.isTimeout = true;
+          throw err;
+        }
+        if (attempt < maxRetries && isTransientFetchError(e)) {
+          const retryNumber = attempt + 1;
+          const delayMs = Math.min(5000, baseDelayMs * Math.pow(2, attempt));
+          try { appendLoadingLog(`Transient fetch error; retrying request ${retryNumber}/${maxRetries}: ${describeFetchError(e)}`); } catch (_) { }
+          await sleepForFetchRetry(delayMs);
+          continue;
+        }
+        throw e;
+      } finally {
+        if (timerId) clearTimeout(timerId);
+      }
     }
+    throw new Error('Network request failed.');
+  }
+
+  async function fetchJson(url, opts) {
+    opts = opts || {};
+    const res = await fetchWithTransientRetry(url, { credentials: 'same-origin' }, opts);
     const ct = (res.headers.get('content-type') || '').toLowerCase();
     if (!ct.includes('application/json')) {
       const text = await res.text();
@@ -2776,32 +2827,12 @@
 
   async function postJson(url, payload, opts) {
     opts = opts || {};
-    const timeoutMs = Number.isFinite(+opts.timeoutMs) ? (+opts.timeoutMs) : 0;
-    const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    const signal = controller ? controller.signal : undefined;
-    let t = null;
-    if (controller && timeoutMs > 0) {
-      t = setTimeout(() => { try { controller.abort(); } catch (e) { } }, timeoutMs);
-    }
-    let res;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify(payload || {}),
-        signal,
-      });
-    } catch (e) {
-      if (controller && e && (e.name === 'AbortError')) {
-        const err = new Error('Request timed out.');
-        err.isTimeout = true;
-        throw err;
-      }
-      throw e;
-    } finally {
-      if (t) clearTimeout(t);
-    }
+    const res = await fetchWithTransientRetry(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload || {}),
+    }, opts);
     const ct = (res.headers.get('content-type') || '').toLowerCase();
     if (!ct.includes('application/json')) {
       const text = await res.text();
@@ -2823,6 +2854,12 @@
     const requestedTimeoutMs = Number(requestOpts.timeoutMs);
     if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs < timeoutFloorMs) {
       requestOpts.timeoutMs = timeoutFloorMs;
+    }
+    if (!Number.isFinite(+requestOpts.networkRetries)) {
+      requestOpts.networkRetries = 2;
+    }
+    if (!Number.isFinite(+requestOpts.retryDelayMs)) {
+      requestOpts.retryDelayMs = 350;
     }
     const data = await postJson('/api/flag-sequencing/sequence_preview_plan', payload, requestOpts);
     if (data && data.ok === false) {
@@ -10185,7 +10222,7 @@
             }, { timeoutMs: 60000 });
           } else {
 
-            data = await fetchJson(buildAttackflowPreviewUrl(params));
+            data = await fetchJson(buildAttackflowPreviewUrl(params), { timeoutMs: 180000, networkRetries: 2, retryDelayMs: 350 });
           }
 
           // Enforce no-duplicates cap to Docker node count from fresh topology stats.
@@ -10269,10 +10306,19 @@
               const params2 = new URLSearchParams(params.toString());
               params2.set('best_effort', '1');
               const retryUrl = buildAttackflowPreviewUrl(params2);
-              data = await fetchJson(retryUrl);
+              data = await fetchJson(retryUrl, { timeoutMs: 180000, networkRetries: 2, retryDelayMs: 350 });
             }
             usedBestEffort = true;
             break;
+          }
+
+          if (isTransientFetchError(err) && retriesRemaining > 0) {
+            attemptedRetries += 1;
+            retriesRemaining -= 1;
+            setStatus(`Network request interrupted; retrying (${attemptedRetries})…`, true);
+            showLoading('Retrying request…');
+            appendLoadingLog(`Network request interrupted after request-level retries: ${describeFetchError(err)}`);
+            continue;
           }
 
           if (retriesRemaining > 0) {
