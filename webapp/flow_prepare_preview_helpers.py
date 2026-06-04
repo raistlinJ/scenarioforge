@@ -350,6 +350,34 @@ def flow_try_run_generator(
         return False, f'generator exception: {exc}', None, None, None
 
 
+def _looks_like_python_traceback(text: str) -> bool:
+    lowered = str(text or '').lower()
+    return 'traceback (most recent call last)' in lowered or 'subprocess.calledprocesserror' in lowered
+
+
+def summarize_remote_generator_failure(*, rc: Any, stdout: str, stderr: str, remote_err: Any = None) -> str:
+    if remote_err:
+        return str(remote_err)
+    stdout_text = str(stdout or '').strip()
+    stderr_text = str(stderr or '').strip()
+    parts: list[str] = []
+    if stdout_text:
+        parts.append(stdout_text[-1400:])
+    if stderr_text:
+        if _looks_like_python_traceback(stderr_text):
+            last_line = ''
+            try:
+                last_line = [line for line in stderr_text.splitlines() if line.strip()][-1]
+            except Exception:
+                last_line = stderr_text[-400:]
+            if last_line:
+                parts.append(f'runner traceback summary: {last_line}')
+        else:
+            parts.append(stderr_text[-1400:])
+    tail = '\n'.join([part for part in parts if part]).strip()
+    return f'remote generator failed (rc={rc}): {tail[-1800:] if tail else "(no output)"}'
+
+
 def flow_try_run_generator_remote(
     generator_id: str,
     *,
@@ -579,11 +607,7 @@ def flow_try_run_generator_remote(
     remote_err = payload.get('error') if isinstance(payload, dict) else None
     note = 'ok'
     if not ok:
-        tail = (stderr or stdout).strip()
-        if remote_err:
-            note = str(remote_err)
-        else:
-            note = f'remote generator failed (rc={rc}): {tail[-800:] if tail else "(no output)"}'
+        note = summarize_remote_generator_failure(rc=rc, stdout=stdout, stderr=stderr, remote_err=remote_err)
         try:
             app.logger.error(
                 '[flow.generator.remote] generator=%s ok=%s rc=%s note=%s manifest=%s stdout_tail=%s stderr_tail=%s',
