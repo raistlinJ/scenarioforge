@@ -716,6 +716,24 @@ def apply_outputs_to_hint_text(text_in: str, outs: dict[str, Any]) -> str:
             return json.dumps(val, ensure_ascii=False)
         return str(val)
 
+    def _canonical_output_key(raw: Any) -> str:
+        key = str(raw or '').strip().lower()
+        if not key:
+            return ''
+        if '(' in key and ')' in key:
+            return re.sub(r"\s+", "", key)
+        return key
+
+    canonical_keys: dict[str, str] = {}
+    try:
+        for existing_key in outs.keys():
+            key_text = str(existing_key or '').strip()
+            canonical = _canonical_output_key(key_text)
+            if key_text and canonical and canonical not in canonical_keys:
+                canonical_keys[canonical] = key_text
+    except Exception:
+        canonical_keys = {}
+
     def _transform(val: Any, tf: str) -> str:
         transform_name = (tf or '').strip().lower()
         rendered = _render_value(val)
@@ -766,9 +784,12 @@ def apply_outputs_to_hint_text(text_in: str, outs: dict[str, Any]) -> str:
         tf = (match.group(2) or '').strip()
         if not key:
             return match.group(0)
-        if key not in outs:
+        output_key = key
+        if output_key not in outs:
+            output_key = canonical_keys.get(_canonical_output_key(key), '')
+        if output_key not in outs:
             return match.group(0)
-        return _transform(outs.get(key), tf)
+        return _transform(outs.get(output_key), tf)
 
     try:
         return pattern.sub(_replace, text)

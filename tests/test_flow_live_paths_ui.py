@@ -185,6 +185,8 @@ def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
 
     expected_snippets = [
         "function _fallbackOutputTemplateText(expr)",
+        "function _canonicalOutputTemplateKey(expr)",
+        "const roCanonical = new Map();",
         "return 'generated credential';",
         "function _applyHintNodeTemplateVars(text, assignment)",
         "const FLOW_TEMPLATE_OPEN = '{' + '{';",
