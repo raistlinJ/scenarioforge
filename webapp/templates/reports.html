@@ -1445,6 +1445,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       ? assignment.chain_supplied_input_hints
         .map((value) => applyReportHintOutputTemplates(String(value || '').trim(), assignment))
         .map((value) => String(value || '').trim())
+        .filter((value) => !/^Pivot source:/i.test(value))
         .filter(Boolean)
       : [];
     if (sequenceOneRequiredHintLines.length) {

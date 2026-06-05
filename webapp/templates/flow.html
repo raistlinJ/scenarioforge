@@ -2526,6 +2526,18 @@
     return s.startsWith('Flag(') || s.startsWith('flag(');
   }
 
+  function isSyntheticChainFactName(name) {
+    const s = String(name || '').trim().toLowerCase();
+    return s.startsWith('pivot(') || s.startsWith('shell(');
+  }
+
+  function hasResolvedFactValue(value) {
+    if (value === undefined || value === null) return false;
+    if (Array.isArray(value)) return value.some((item) => hasResolvedFactValue(item));
+    if (value && typeof value === 'object') return Object.keys(value).length > 0;
+    return String(value).trim() !== '';
+  }
+
   async function refreshXmlDockPreview({ force = false } = {}) {
     const xmlPre = document.getElementById('xmlPre');
     if (!xmlPre) return;
@@ -4307,6 +4319,7 @@
           if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
             const name = String(entry.name || '').trim();
             if (!name || seen.has(name)) return;
+            if (isSyntheticChainFactName(name) && !hasResolvedFactValue(entry.resolved)) return;
             seen.add(name);
             outputs.push({
               name,
@@ -4320,6 +4333,7 @@
           }
           const name = String(entry || '').trim();
           if (!name || seen.has(name)) return;
+          if (isSyntheticChainFactName(name)) return;
           seen.add(name);
           outputs.push({ name, resolved: undefined, toChain: true });
         });
@@ -4527,6 +4541,7 @@
               ? entry.assignment.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)
               : [];
             suppliedHints.forEach((text) => {
+              if (/^Pivot source:/i.test(String(text || '').trim())) return;
               if (text && !initHints.includes(text)) initHints.push(text);
             });
           });
@@ -4586,7 +4601,7 @@
             if (!resolvedInputs) return;
             Object.keys(resolvedInputs).sort((a, b) => String(a).localeCompare(String(b))).forEach((k) => {
               const row = makeInitialOutputRow(k, resolvedInputs[k]);
-              if (row && row.name && !isFlagFactName(row.name) && !rowsByName.has(row.name)) rowsByName.set(row.name, row);
+                if (row && row.name && !isFlagFactName(row.name) && !isSyntheticChainFactName(row.name) && !rowsByName.has(row.name)) rowsByName.set(row.name, row);
             });
           });
           initOutputs = Array.from(rowsByName.values());
@@ -4610,7 +4625,7 @@
               fields.forEach(n => { const s = String(n || '').trim(); if (s) names.add(s); });
             });
           } catch (e) { }
-          initOutputs = Array.from(names).sort().filter(k => !isFlagFactName(k)).map((k) => makeInitialOutputRow(k, ri ? ri[k] : undefined));
+          initOutputs = Array.from(names).sort().filter(k => !isFlagFactName(k) && !isSyntheticChainFactName(k)).map((k) => makeInitialOutputRow(k, ri ? ri[k] : undefined));
         }
       } catch (e) { initHints = []; }
       renderFactSummaryRow({
@@ -4879,7 +4894,8 @@
         const pivotSummary = normalizeFactList(assignment && assignment.pivot_summary);
         const pivotInputs = normalizeFactList(assignment && assignment.pivot_inputs);
         const pivotOutputs = normalizeFactList(assignment && assignment.pivot_outputs);
-        const pivotHints = normalizeFactList(assignment && assignment.pivot_hints);
+        const pivotHints = normalizeFactList(assignment && assignment.pivot_hints)
+          .filter((text) => !/^Pivot source:/i.test(String(text || '').trim()));
         if (!pivotEntries.length && !pivotSummary.length && !pivotInputs.length && !pivotOutputs.length && !pivotHints.length) return null;
 
         const wrap = document.createElement('div');
@@ -5521,6 +5537,7 @@
             outArtifacts.map(String).filter(Boolean).sort().forEach((name) => {
               const n = String(name || '').trim();
               if (!n) return;
+              if (isSyntheticChainFactName(n) && !(resolvedOutputs && hasResolvedFactValue(resolvedOutputs[n]))) return;
               rows.push({
                 name: n,
                 kind: 'Artifact',
@@ -5539,6 +5556,7 @@
             Array.from(outFieldNameSet).sort().forEach((name) => {
               const n = String(name || '').trim();
               if (!n) return;
+              if (isSyntheticChainFactName(n) && !(resolvedOutputs && hasResolvedFactValue(resolvedOutputs[n]))) return;
               if (outArtifactSet.has(n)) return;
               rows.push({
                 name: n,
@@ -7132,6 +7150,7 @@
           Array.from(outFieldNameSet).sort().forEach((name) => {
             const n = String(name || '').trim();
             if (!n) return;
+            if (isSyntheticChainFactName(n) && !(resolvedOutputs && hasResolvedFactValue(resolvedOutputs[n]))) return;
             rows.push({
               name: n,
               kind: 'Field',
@@ -8563,6 +8582,7 @@
           Object.keys(ri).sort((a, b) => String(a).localeCompare(String(b))).forEach((k0) => {
             const k1 = String(k0 || '').trim();
             if (!k1 || isFlagFactName(k1)) return;
+            if (isSyntheticChainFactName(k1) && !hasResolvedFactValue(ri[k1])) return;
             fieldNameSet.add(k1);
             rows.push({ name: k1, resolved: ri[k1], toChain: true, kind: 'Field', overrideValue: overrideFields.has(k1) ? k1 : '' });
           });
@@ -12121,6 +12141,7 @@ ${out.join('\n')}
         ? assignment.chain_supplied_input_hints
           .map((value) => _applyHintOutputTemplates(String(value || '').trim(), assignment))
           .map((value) => String(value || '').trim())
+          .filter((value) => !/^Pivot source:/i.test(value))
           .filter(Boolean)
         : [];
       if (sequenceOneRequiredHintLines.length) {

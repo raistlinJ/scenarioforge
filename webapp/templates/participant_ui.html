@@ -336,6 +336,7 @@
     const out = [];
     raw.forEach((value) => {
       const text = String(value || '').trim();
+      if(/^Pivot source:/i.test(text)) return;
       if(text && !out.includes(text)) out.push(text);
     });
     return out;
