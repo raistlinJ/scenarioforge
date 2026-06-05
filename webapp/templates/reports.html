@@ -798,6 +798,16 @@ const _REPORT_TEMPLATE_OPEN = '\u007b\u007b';
 const _REPORT_TEMPLATE_CLOSE = '\u007d\u007d';
 const _REPORT_OUTPUT_TEMPLATE_PREFIX = _REPORT_TEMPLATE_OPEN + 'OUTPUT.';
 const REPORT_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
+function canonicalReportOutputTemplateKey(expr) {
+  try {
+    const key = String(expr || '').trim().toLowerCase();
+    if (!key) return '';
+    if (key.includes('(') && key.includes(')')) return key.replace(/\s+/g, '');
+    return key;
+  } catch (e) {
+    return '';
+  }
+}
 function applyReportHintOutputTemplates(text, assignment) {
   const t = String(text || '');
   if (!t || !t.includes(_REPORT_OUTPUT_TEMPLATE_PREFIX)) return t;
@@ -806,11 +816,14 @@ function applyReportHintOutputTemplates(text, assignment) {
     : null;
   if (!ro) return t;
   const roLower = new Map();
+  const roCanonical = new Map();
   try {
     Object.keys(ro).forEach((k) => {
       const key = String(k || '').trim();
       if (!key) return;
       roLower.set(key.toLowerCase(), key);
+      const canonical = canonicalReportOutputTemplateKey(key);
+      if (canonical && !roCanonical.has(canonical)) roCanonical.set(canonical, key);
     });
   } catch (e) {}
   const normalizeValue = (val) => {
@@ -858,6 +871,8 @@ function applyReportHintOutputTemplates(text, assignment) {
     if (direct !== undefined && direct !== null) return normalizeValue(direct);
     const key = roLower.get(token.toLowerCase());
     if (key) return normalizeValue(ro[key]);
+    const canonicalKey = roCanonical.get(canonicalReportOutputTemplateKey(token));
+    if (canonicalKey) return normalizeValue(ro[canonicalKey]);
     return '';
   };
 

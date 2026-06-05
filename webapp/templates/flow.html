@@ -3443,6 +3443,17 @@
 
   const _OUTPUT_TEMPLATE_PREFIX = '{' + '{OUTPUT.';
 
+  function _canonicalOutputTemplateKey(expr) {
+    try {
+      const key = String(expr || '').trim().toLowerCase();
+      if (!key) return '';
+      if (key.includes('(') && key.includes(')')) return key.replace(/\s+/g, '');
+      return key;
+    } catch (e) {
+      return '';
+    }
+  }
+
   function _fallbackOutputTemplateText(expr) {
     try {
       const key = String(expr || '').trim().toLowerCase();
@@ -3466,12 +3477,15 @@
       : {};
 
     const roLower = new Map();
+    const roCanonical = new Map();
     try {
       if (ro) {
         Object.keys(ro).forEach((k) => {
           const key = String(k || '').trim();
           if (!key) return;
           roLower.set(key.toLowerCase(), key);
+          const canonical = _canonicalOutputTemplateKey(key);
+          if (canonical && !roCanonical.has(canonical)) roCanonical.set(canonical, key);
         });
       }
     } catch (e) { }
@@ -3524,6 +3538,8 @@
       if (direct !== undefined && direct !== null) return normalizeValue(direct);
       const key = roLower.get(token.toLowerCase());
       if (key) return normalizeValue(ro[key]);
+      const canonicalKey = roCanonical.get(_canonicalOutputTemplateKey(token));
+      if (canonicalKey) return normalizeValue(ro[canonicalKey]);
       return '';
     };
 
@@ -3930,6 +3946,17 @@
 
     const _OUTPUT_TEMPLATE_PREFIX = '{' + '{OUTPUT.';
 
+    function _canonicalOutputTemplateKey(expr) {
+      try {
+        const key = String(expr || '').trim().toLowerCase();
+        if (!key) return '';
+        if (key.includes('(') && key.includes(')')) return key.replace(/\s+/g, '');
+        return key;
+      } catch (e) {
+        return '';
+      }
+    }
+
     function _applyHintOutputTemplates(text, assignment) {
       const t = String(text || '');
       if (!t || !t.includes(_OUTPUT_TEMPLATE_PREFIX)) return t;
@@ -3939,11 +3966,14 @@
       if (!ro) return t;
 
       const roLower = new Map();
+      const roCanonical = new Map();
       try {
         Object.keys(ro).forEach((k) => {
           const key = String(k || '').trim();
           if (!key) return;
           roLower.set(key.toLowerCase(), key);
+          const canonical = _canonicalOutputTemplateKey(key);
+          if (canonical && !roCanonical.has(canonical)) roCanonical.set(canonical, key);
         });
       } catch (e) { }
 
@@ -3994,6 +4024,8 @@
         if (direct !== undefined && direct !== null) return normalizeValue(direct);
         const key = roLower.get(token.toLowerCase());
         if (key) return normalizeValue(ro[key]);
+        const canonicalKey = roCanonical.get(_canonicalOutputTemplateKey(token));
+        if (canonicalKey) return normalizeValue(ro[canonicalKey]);
         return '';
       };
 
