@@ -383,8 +383,8 @@ function markdownToHtmlDocument(title, markdown) {
     .guide-path-missing-container td { background: #fef9c3; border-color: #fde68a; }
     .guide-flow-figure { margin: 1.1rem 0; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: .75rem; }
     .guide-flow-figure figcaption { font-weight: 700; margin-bottom: .55rem; color: #0f172a; }
-    .guide-flow-scroll { overflow-x: auto; }
-    .guide-flow-figure svg { display: block; min-width: 720px; }
+    .guide-flow-scroll { overflow: auto; max-height: 72vh; padding-bottom: .35rem; }
+    .guide-flow-figure svg { display: block; min-width: 880px; }
     code { background: #e2e8f0; border-radius: 4px; padding: .1rem .25rem; }
     pre { background: #111827; color: #f8fafc; border-radius: 6px; padding: .9rem 1rem; overflow-x: auto; }
     pre code { background: transparent; color: inherit; padding: 0; }
@@ -632,28 +632,29 @@ function guideFigureEdgeLabel(facts) {
     .map((value) => String(value || '').trim())
     .filter(Boolean);
   if (!values.length) return '';
-  const shown = values.slice(0, 2);
-  if (values.length > shown.length) shown.push(`+${values.length - shown.length}`);
-  return shown.join(', ');
+  return values.length > 1 ? `${values[0]} +${values.length - 1}` : values[0];
 }
 
 function guideFigureDependencyTooltip(facts) {
-  return (Array.isArray(facts) ? facts : [facts])
+  const clean = (Array.isArray(facts) ? facts : [facts])
     .map((value) => String(value || '').trim())
-    .filter(Boolean)
-    .join('\n');
+    .filter(Boolean);
+  if (!clean.length) return '';
+  const visibleFact = clean[0];
+  const tooltipFacts = [visibleFact].concat(clean.slice(1).filter((factName) => factName !== visibleFact));
+  return tooltipFacts.join('\n');
 }
 
 function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
   const nodes = Array.isArray(chain) ? chain : [];
   if (!nodes.length) return '';
   const assignmentList = Array.isArray(assignments) ? assignments : [];
-  const cardWidth = 220;
-  const cardHeight = 104;
-  const columnGap = 92;
-  const rowGap = 24;
-  const marginX = 36;
-  const marginY = 34;
+  const cardWidth = 228;
+  const cardHeight = 108;
+  const columnGap = 150;
+  const rowGap = 46;
+  const marginX = 46;
+  const marginY = 38;
   const stageLabelHeight = 30;
   const marginBottom = 30;
   const liveLayout = (typeof buildFlowDependencyLayout === 'function') ? buildFlowDependencyLayout(nodes, assignmentList) : null;
@@ -664,7 +665,7 @@ function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
     ? layout.stages
     : [{ stage: 0, indices: nodes.map((_node, nodeIndex) => nodeIndex) }];
   const maxRows = Math.max(1, ...stages.map((stageGroup) => Math.max(1, Array.isArray(stageGroup.indices) ? stageGroup.indices.length : 0)));
-  const width = Math.max(760, (marginX * 2) + (stages.length * cardWidth) + (Math.max(0, stages.length - 1) * columnGap));
+  const width = Math.max(880, (marginX * 2) + (stages.length * cardWidth) + (Math.max(0, stages.length - 1) * columnGap));
   const height = marginY + stageLabelHeight + (maxRows * cardHeight) + (Math.max(0, maxRows - 1) * rowGap) + marginBottom;
   const titleId = `guide-flow-title-${Math.random().toString(36).slice(2, 9)}`;
   const scen = guideFigureFirstNonEmpty(scenarioName, 'Scenario');
@@ -724,17 +725,17 @@ function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
     const midX = startX + Math.max(36, (endX - startX) / 2);
     const label = guideFigureEdgeLabel(edge && edge.facts);
     const tooltip = guideFigureDependencyTooltip(edge && edge.facts);
-    const labelLines = label ? guideFigureWrapText(label, 28, 2) : [];
+    const labelLines = label ? guideFigureWrapText(label, 34, 2) : [];
     const labelX = (startX + endX) / 2;
-    const labelY = (startY + endY) / 2 - 9;
-    const labelWidth = labelLines.length ? Math.min(190, Math.max(84, Math.max(...labelLines.map((line) => line.length)) * 6.2 + 18)) : 0;
+    const labelY = (startY + endY) / 2 - 16;
+    const labelWidth = labelLines.length ? Math.min(230, Math.max(96, Math.max(...labelLines.map((line) => line.length)) * 6.2 + 22)) : 0;
     const labelHeight = labelLines.length ? (labelLines.length * 13) + 8 : 0;
     const labelSpans = labelLines.map((line, lineIndex) => `<tspan x="${labelX}" dy="${lineIndex === 0 ? 0 : 13}">${escapeHtml(line)}</tspan>`).join('');
-    return `<g class="guide-flow-edge" data-edge="${edgeIndex + 1}">
+    return `<g class="guide-flow-edge" data-edge="${edgeIndex + 1}"${tooltip ? ` aria-label="${escapeHtml(tooltip)}"` : ''}>
       ${tooltip ? `<title>${escapeHtml(tooltip)}</title>` : ''}
         <path d="M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}" fill="none" stroke="#2563eb" stroke-width="2.2" marker-end="url(#guide-flow-arrow)" />
         ${labelLines.length ? `<rect x="${labelX - (labelWidth / 2)}" y="${labelY - 12}" width="${labelWidth}" height="${labelHeight}" rx="5" fill="#ffffff" stroke="#bfdbfe" />
-        <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10" fill="#1e40af">${labelSpans}</text>` : ''}
+        <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10" fill="#1e40af">${tooltip ? `<title>${escapeHtml(tooltip)}</title>` : ''}${labelSpans}</text>` : ''}
       </g>`;
   }).filter(Boolean).join('\n');
   return `<figure class="guide-flow-figure" aria-label="Challenge sequence flow">

@@ -139,7 +139,12 @@ def test_flow_chain_editor_hides_synthetic_pivot_noise() -> None:
 
     expected_flow_snippets = [
         "function isSyntheticChainFactName(name)",
+        "function isPivotChainFactName(name)",
+        "function pivotFactSourceName(name)",
         "function hasResolvedFactValue(value)",
+        "function renderPivotInputResolvedValue(key)",
+        "span.textContent = `pivot from ${source}`;",
+        "{ isInput: isInputs }",
         "!/^Pivot source:/i.test(String(text || '').trim())",
         "if (isSyntheticChainFactName(name) && !hasResolvedFactValue(entry.resolved)) return;",
         "if (isSyntheticChainFactName(n) && !(resolvedOutputs && hasResolvedFactValue(resolvedOutputs[n]))) return;",
@@ -198,6 +203,27 @@ def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing unresolved hint template cleanup wiring in flow template: " + "; ".join(missing)
+
+
+def test_flow_inputs_tab_labels_pivot_requirements() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function _pivotNodeFromFact(expr)",
+        "function _singlePivotSourceNode(assignment, fallbackFact)",
+        "function _formatPivotInputFact(value, assignment)",
+        "pivot from ${sourceNode}",
+        "const sourceAssignment = Object.keys(explicitAssignment).length ? explicitAssignment : { requires: rawArtifacts.concat(rawFields), inputs: rawArtifacts.concat(rawFields) };",
+        "const formatInputFact = (value) => /(?:input|require)/i.test(label) ? _formatPivotInputFact(value, sourceAssignment) : value;",
+        "const collapsedPivotRows = Array.isArray(opts.collapsedPivotRows) ? opts.collapsedPivotRows : [];",
+        "summary.textContent = `${collapsedPivotRows.length} other Pivot input${collapsedPivotRows.length === 1 ? '' : 's'}`;",
+        "function collapsePivotInputRows(rows)",
+        "collapsedPivotRows: pivotRows.slice(1)",
+        "collapsePivotInputRows(rows).forEach(addRowVar);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Pivot(...) input display labels in flow template: " + "; ".join(missing)
 
 
 def test_flow_template_compiles_with_hint_placeholders() -> None:
@@ -440,10 +466,16 @@ def test_flow_visualization_groups_parallel_dependency_layers() -> None:
         "(Array.isArray(layout.edges) ? layout.edges : []).forEach((edge) => {",
         "const edgeLabel = mermaidSafeEdgeLabel(edge && edge.facts);",
         "lines.push(`  N${fromIndex} -->|\"${edgeLabel}\"| N${toIndex}`);",
+        "%%{init: {\"flowchart\": {\"nodeSpacing\": 72, \"rankSpacing\": 118, \"padding\": 18, \"curve\": \"basis\"}}}%%",
+        "max-height: 70vh; overflow: auto;",
         "function flowDependencyTooltipText(facts) {",
+        "const visibleFact = clean[0];",
+        "const tooltipFacts = [visibleFact].concat(clean.slice(1).filter((factName) => factName !== visibleFact));",
         "function buildFlowDependencyEdgeTooltips(chain, assignments, dependencyLevelOverride) {",
         "function applyFlowDependencyEdgeTooltips(wrap, chain, assignments, dependencyLevelOverride) {",
         "target.setAttribute('data-dependency-tooltip', tooltip);",
+        "target.setAttribute('title', tooltip);",
+        "child.setAttribute('data-dependency-tooltip', tooltip);",
         "const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'title');",
         "applyFlowDependencyEdgeTooltips(wrap, currentChain, currentFlagAssignments);",
     ]
