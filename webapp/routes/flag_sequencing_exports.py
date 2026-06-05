@@ -41,17 +41,40 @@ def register(app, *, backend_module: Any) -> None:
                 vulnerabilities = node.get('vulnerabilities') if isinstance(node.get('vulnerabilities'), list) else None
             except Exception:
                 vulnerabilities = None
-            chain_nodes.append(
-                {
-                    'id': node_id,
-                    'name': str(node.get('name') or node_id),
-                    'type': str(node.get('type') or ''),
-                    'compose': str(node.get('compose') or ''),
-                    'compose_name': str(node.get('compose_name') or ''),
-                    'is_vuln': bool(is_vuln),
-                    **({'vulnerabilities': list(vulnerabilities or [])} if vulnerabilities else {}),
-                }
-            )
+            chain_node = {
+                'id': node_id,
+                'name': str(node.get('name') or node_id),
+                'type': str(node.get('type') or ''),
+                'compose': str(node.get('compose') or ''),
+                'compose_name': str(node.get('compose_name') or ''),
+                'is_vuln': bool(is_vuln),
+                **({'vulnerabilities': list(vulnerabilities or [])} if vulnerabilities else {}),
+            }
+            for extra_key in (
+                'label',
+                'hostname',
+                'host_name',
+                'docker_name',
+                'container_name',
+                'service_name',
+                'ipv4',
+                'ip4',
+                'ip',
+                'PivotProduces',
+                'PivotRequires',
+                'pivot',
+                'pivot_rules',
+                'pivot_source',
+                'pivot_target',
+                'pivot_sources',
+                'pivot_targets',
+            ):
+                try:
+                    if extra_key in node:
+                        chain_node[extra_key] = node.get(extra_key)
+                except Exception:
+                    continue
+            chain_nodes.append(chain_node)
         if not chain_nodes:
             return jsonify({'ok': False, 'error': 'Chain contained no valid nodes.'}), 400
 
@@ -227,6 +250,37 @@ def register(app, *, backend_module: Any) -> None:
             )
         except Exception:
             pass
+
+        try:
+            initial_valid, initial_errors = backend._flow_validate_chain_order_by_requires_produces(
+                chain_nodes,
+                flag_assignments,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            initial_valid, initial_errors = True, []
+
+        if (not initial_valid) and flag_assignments and any('before they are produced' in str(error or '') for error in (initial_errors or [])):
+            try:
+                dependency_level = None
+                normalizer = getattr(backend, '_flow_normalize_dependency_level', None)
+                if callable(normalizer):
+                    dependency_level = normalizer(payload.get('dependency_level'))
+                chain_nodes, flag_assignments, _dag_debug = backend._flow_reorder_chain_by_generator_dag(
+                    chain_nodes,
+                    flag_assignments,
+                    scenario_label=(scenario_label or scenario_norm),
+                    dependency_level=dependency_level,
+                )
+                flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                    flag_assignments,
+                    chain_nodes,
+                    preview=(preview if isinstance(preview, dict) else None),
+                    pivot_context=(preview_payload if isinstance(preview_payload, dict) else None),
+                    scenario_label=(scenario_label or scenario_norm),
+                )
+            except Exception:
+                pass
 
         try:
             flow_valid, flow_errors = backend._flow_validate_chain_order_by_requires_produces(

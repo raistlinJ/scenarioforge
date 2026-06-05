@@ -6430,10 +6430,7 @@ def _normalize_core_config(raw: Any, *, include_password: bool = True) -> Dict[s
             local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or 'localhost').strip() or 'localhost'
         except Exception:
             local_host = 'localhost'
-        try:
-            local_port = int(os.getenv('CORETG_LOCAL_CORE_PORT') or CORE_PORT)
-        except Exception:
-            local_port = CORE_PORT
+        local_port = 50051
         try:
             local_ssh_port = int(os.getenv('CORETG_LOCAL_SSH_PORT') or 22)
         except Exception:
@@ -13667,16 +13664,12 @@ def _inject_ui_view_state() -> dict:
 @app.context_processor
 def _inject_runtime_flags() -> dict:
     local_host = 'localhost'
-    local_port = CORE_PORT
+    local_port = 50051
     local_ssh_port = 22
     try:
         local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or 'localhost').strip() or 'localhost'
     except Exception:
         local_host = 'localhost'
-    try:
-        local_port = int(os.getenv('CORETG_LOCAL_CORE_PORT') or CORE_PORT)
-    except Exception:
-        local_port = CORE_PORT
     try:
         local_ssh_port = int(os.getenv('CORETG_LOCAL_SSH_PORT') or 22)
     except Exception:
@@ -18557,13 +18550,9 @@ def _flow_compute_flag_assignments(
             gen = _choose_candidate(candidates, state_known, i)
 
         try:
-            chain_produced_before = set(chain_produced)
-        except Exception:
-            chain_produced_before = set()
-        try:
             supplied_names_for_start = set(_flow_first_step_chain_supplied_input_names(gen))
             required_for_start = set(_required_inputs_of(gen)) - set(initial_facts) - supplied_names_for_start
-            supply_on_start = bool(i == 0 or not (required_for_start & chain_produced_before))
+            supply_on_start = bool(not required_for_start)
         except Exception:
             supply_on_start = bool(i == 0)
 
@@ -18918,10 +18907,18 @@ def _flow_parallel_start_assignment_indexes(
                 gen_def = gen_defs_by_id.get(gen_id)
         except Exception:
             gen_def = None
-        supplied_names = set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else assignment))
+        explicit_supplied_names = {
+            str(x or '').strip()
+            for x in (assignment.get('chain_supplied_inputs') or [])
+            if str(x or '').strip()
+        } if isinstance(assignment.get('chain_supplied_inputs'), list) else set()
+        supplied_names = set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else assignment)) | explicit_supplied_names
         required = _flow_assignment_fact_names(assignment, ('requires', 'input_fields_required', 'inputs'))
         required = {name for name in required if name and name not in available_initial and name not in supplied_names}
-        if not (required & provided_so_far):
+        if explicit_supplied_names:
+            if required.issubset(provided_so_far):
+                starts.add(index)
+        elif not (required & provided_so_far):
             starts.add(index)
         provided_so_far |= _flow_assignment_fact_names(assignment, ('produces', 'output_fields', 'outputs'))
     return starts
@@ -21918,10 +21915,20 @@ def _flow_reorder_chain_by_generator_dag(
             return facts
 
         def _assignment_requires(assignment: dict[str, Any]) -> set[str]:
-            return _assignment_fact_list(
+            requires = _assignment_fact_list(
                 assignment,
                 ('requires', 'input_fields_required', 'inputs'),
             ) - initial_artifacts
+            try:
+                explicit_supplied = {
+                    str(x or '').strip()
+                    for x in (assignment.get('chain_supplied_inputs') or [])
+                    if str(x or '').strip()
+                } if isinstance(assignment.get('chain_supplied_inputs'), list) else set()
+                requires -= explicit_supplied
+            except Exception:
+                pass
+            return requires
 
         def _assignment_produces(assignment: dict[str, Any]) -> set[str]:
             return _assignment_fact_list(

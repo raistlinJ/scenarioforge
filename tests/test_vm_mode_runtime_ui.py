@@ -135,3 +135,17 @@ def test_hitl_summary_prefers_stored_bridge_mapping_over_inventory() -> None:
     ]
     missing = [snippet for snippet in expected if snippet not in index_text]
     assert not missing, "Missing stored-bridge precedence snippets: " + "; ".join(missing)
+
+
+def test_hitl_verify_updates_bridge_metadata_with_canonical_name() -> None:
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected = [
+        "const resolvedBridgeName = (data && data.bridge_name)",
+        "hitlState.core.internal_bridge = resolvedBridgeName;",
+        "iface.core_bridge = resolvedBridgeName;",
+        "iface.proxmox_target.bridge = resolvedBridgeName;",
+        "ext.interface_bridge = resolvedBridgeName;",
+    ]
+    missing = [snippet for snippet in expected if snippet not in index_text]
+    assert not missing, "Missing verify bridge-sync snippets: " + "; ".join(missing)
