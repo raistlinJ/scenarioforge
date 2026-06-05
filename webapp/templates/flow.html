@@ -245,7 +245,7 @@
                 </tbody>
               </table>
             </div>
-            <div id="flowDiagramWrap" class="border rounded p-2" style="min-height: 180px; overflow-x: auto;">
+            <div id="flowDiagramWrap" class="border rounded p-2" style="min-height: 180px; max-height: 70vh; overflow: auto;">
               <div id="flowDiagram">Please generate a chain. It will appear here.</div>
             </div>
 
@@ -2531,6 +2531,27 @@
     return s.startsWith('pivot(') || s.startsWith('shell(');
   }
 
+  function isPivotChainFactName(name) {
+    const s = String(name || '').trim().toLowerCase();
+    return s.startsWith('pivot(');
+  }
+
+  function singlePivotSourceLabel(value) {
+    let label = String(value || '').trim();
+    if (!label) return '';
+    const factMatch = label.match(/^(?:pivot|shell)\((.*)\)$/i);
+    if (factMatch) label = String(factMatch[1] || '').trim();
+    const parts = label.split(/[;,]/).map((part) => String(part || '').trim()).filter(Boolean);
+    return parts.length ? parts[0] : label;
+  }
+
+  function pivotFactSourceName(name) {
+    const s = String(name || '').trim();
+    const match = s.match(/^pivot\((.*)\)$/i);
+    if (!match) return '';
+    return singlePivotSourceLabel(match[1]);
+  }
+
   function hasResolvedFactValue(value) {
     if (value === undefined || value === null) return false;
     if (Array.isArray(value)) return value.some((item) => hasResolvedFactValue(item));
@@ -3454,6 +3475,63 @@
     }
   }
 
+  function _pivotNodeFromFact(expr) {
+    try {
+      const match = String(expr || '').trim().match(/^`?Pivot\(([^)]+)\)`?\s*\*?$/i);
+      return match ? String(match[1] || '').trim() : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function _singlePivotSourceNode(assignment, fallbackFact) {
+    const seen = new Set();
+    const candidates = [];
+    const add = (value) => {
+      const text = String(value || '').trim();
+      if (!text) return;
+      const fromFact = _pivotNodeFromFact(text);
+      const embeddedFact = fromFact ? null : text.match(/\bPivot\(([^)]+)\)/i);
+      const node = fromFact || (embeddedFact ? String(embeddedFact[1] || '').trim() : text);
+      if (!fromFact && !embeddedFact && !/^[A-Za-z0-9_.-]+$/.test(node)) return;
+      const key = node.toLowerCase();
+      if (!node || seen.has(key)) return;
+      seen.add(key);
+      candidates.push(node);
+    };
+    try {
+      const source = assignment && typeof assignment === 'object' ? assignment : {};
+      [
+        'pivot_from_node_name', 'pivot_from_node', 'pivot_from',
+        'pivot_source_node_name', 'pivot_source_node', 'pivot_source',
+        'pivot_node_name', 'pivot_node',
+      ].forEach((key) => add(source[key]));
+      ['pivot_sources', 'pivot_source_nodes', 'pivot_from_nodes'].forEach((key) => {
+        const raw = source[key];
+        if (!Array.isArray(raw)) return;
+        raw.forEach((item) => {
+          if (item && typeof item === 'object') add(item.name || item.node_name || item.node || item.id || item.node_id);
+          else add(item);
+        });
+      });
+      ['requires', 'inputs', 'input_fields_required', 'hints'].forEach((key) => {
+        const raw = source[key];
+        if (!Array.isArray(raw)) return;
+        raw.forEach((item) => add(item && typeof item === 'object' ? (item.artifact || item.name || item.field || item.value) : item));
+      });
+    } catch (e) { }
+    add(fallbackFact);
+    return candidates.length ? candidates[0] : '';
+  }
+
+  function _formatPivotInputFact(value, assignment) {
+    const text = String(value || '').trim();
+    if (!_pivotNodeFromFact(text)) return value;
+    if (/\bpivot\s+from\b/i.test(text)) return text;
+    const sourceNode = _singlePivotSourceNode(assignment, text);
+    return sourceNode ? `${text} - pivot from ${sourceNode}` : text;
+  }
+
   function _fallbackOutputTemplateText(expr) {
     try {
       const key = String(expr || '').trim().toLowerCase();
@@ -4044,8 +4122,13 @@
     function renderFactSummaryRow(opts) {
       const o = (opts && typeof opts === 'object') ? opts : {};
       const label = String(o.label || '').trim() || 'Facts';
-      const artifacts = normalizeFactList(o.artifacts);
-      const fields = normalizeFactList(o.fields);
+      const rawArtifacts = normalizeFactList(o.artifacts);
+      const rawFields = normalizeFactList(o.fields);
+      const explicitAssignment = (o.assignment && typeof o.assignment === 'object') ? o.assignment : ((o.source && typeof o.source === 'object') ? o.source : {});
+      const sourceAssignment = Object.keys(explicitAssignment).length ? explicitAssignment : { requires: rawArtifacts.concat(rawFields), inputs: rawArtifacts.concat(rawFields) };
+      const formatInputFact = (value) => /(?:input|require)/i.test(label) ? _formatPivotInputFact(value, sourceAssignment) : value;
+      const artifacts = rawArtifacts.map((value) => formatInputFact(value));
+      const fields = rawFields.map((value) => formatInputFact(value));
       const hints = normalizeFactList(o.hints);
       const hintLabel = String(o.hintLabel || 'Hint').trim() || 'Hint';
       const hintListLabel = String(o.hintListLabel || `${hintLabel}s`).trim() || `${hintLabel}s`;
@@ -5409,8 +5492,9 @@
         function renderVarName(name, required, options) {
           const opts = (options && typeof options === 'object') ? options : {};
           const showOptionalBadge = !!opts.showOptionalBadge;
+          const collapsedPivotRows = Array.isArray(opts.collapsedPivotRows) ? opts.collapsedPivotRows : [];
           const span = document.createElement('span');
-          span.style.whiteSpace = 'nowrap';
+          span.style.whiteSpace = collapsedPivotRows.length ? 'normal' : 'nowrap';
           const code = document.createElement('code');
           code.className = 'font-monospace';
           code.textContent = String(name || '').trim() || '-';
@@ -5428,11 +5512,71 @@
             badge.title = 'Optional input (non-blocking for step completion)';
             span.appendChild(badge);
           }
+          if (collapsedPivotRows.length) {
+            const details = document.createElement('details');
+            details.className = 'small mt-1';
+            const summary = document.createElement('summary');
+            summary.className = 'text-primary';
+            summary.style.cursor = 'pointer';
+            summary.textContent = `${collapsedPivotRows.length} other Pivot input${collapsedPivotRows.length === 1 ? '' : 's'}`;
+            details.appendChild(summary);
+            const ul = document.createElement('ul');
+            ul.className = 'mb-0 ps-3';
+            collapsedPivotRows.forEach((row) => {
+              const li = document.createElement('li');
+              const otherCode = document.createElement('code');
+              otherCode.className = 'font-monospace';
+              otherCode.textContent = String((row && row.name) || '').trim() || '-';
+              li.appendChild(otherCode);
+              const source = pivotSourceForInputFact(row && row.name);
+              if (source) {
+                const sourceText = document.createElement('span');
+                sourceText.className = 'text-muted ms-1';
+                sourceText.textContent = `pivot from ${source}`;
+                li.appendChild(sourceText);
+              }
+              ul.appendChild(li);
+            });
+            details.appendChild(ul);
+            span.appendChild(details);
+          }
           return span;
         }
 
-        function renderResolvedValueForKey(resolvedKv, key) {
+        function pivotSourceForInputFact(key) {
+          const factName = String(key || '').trim();
+          if (!isPivotChainFactName(factName)) return '';
+          try {
+            const pivotEntries = (fa && Array.isArray(fa.pivot)) ? fa.pivot : [];
+            for (const entry of pivotEntries) {
+              if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+              const role = String(entry.role || '').trim().toLowerCase();
+              if (role && role !== 'target') continue;
+              const requires = Array.isArray(entry.requires) ? entry.requires.map((item) => String(item || '').trim()) : [];
+              if (!requires.includes(factName)) continue;
+              const source = singlePivotSourceLabel(entry.source || pivotFactSourceName(factName));
+              if (source) return source;
+            }
+          } catch (e) { }
+          return pivotFactSourceName(factName);
+        }
+
+        function renderPivotInputResolvedValue(key) {
+          const source = pivotSourceForInputFact(key);
+          if (!source) return null;
+          const span = document.createElement('span');
+          span.className = 'text-muted';
+          span.textContent = `pivot from ${source}`;
+          return span;
+        }
+
+        function renderResolvedValueForKey(resolvedKv, key, opts) {
+          const options = (opts && typeof opts === 'object') ? opts : {};
           const k = String(key || '').trim();
+          if (options.isInput) {
+            const pivotValue = renderPivotInputResolvedValue(k);
+            if (pivotValue) return pivotValue;
+          }
           if (!k || !resolvedKv || typeof resolvedKv !== 'object' || Array.isArray(resolvedKv)) return document.createTextNode('-');
           if (!(k in resolvedKv)) return document.createTextNode('-');
           const obj = {};
@@ -5462,11 +5606,11 @@
             const tr = document.createElement('tr');
 
             const tdVar = document.createElement('td');
-            tdVar.appendChild(renderVarName(v.name, v.required, { showOptionalBadge: isInputs }));
+            tdVar.appendChild(renderVarName(v.name, v.required, { showOptionalBadge: isInputs, collapsedPivotRows: v.collapsedPivotRows }));
 
             const tdRes = document.createElement('td');
             tdRes.className = 'small';
-            tdRes.appendChild(renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name));
+            tdRes.appendChild(renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name, { isInput: isInputs }));
 
             tr.appendChild(tdVar);
             tr.appendChild(tdRes);
@@ -5491,6 +5635,32 @@
             }
 
             tbody2.appendChild(tr);
+          }
+
+          function collapsePivotInputRows(rows) {
+            if (!Array.isArray(rows) || rows.length < 2) return Array.isArray(rows) ? rows : [];
+            const pivotRows = rows.filter((row) => row && isPivotChainFactName(row.name));
+            if (pivotRows.length <= 1) return rows;
+            const primaryPivot = Object.assign({}, pivotRows[0], {
+              required: pivotRows.some((row) => !!row.required),
+              fromChain: pivotRows.some((row) => !!row.fromChain),
+              fromSeq: pivotRows.some((row) => !!row.fromSeq),
+              missing: pivotRows.some((row) => !!row.missing),
+              collapsedPivotRows: pivotRows.slice(1),
+            });
+            let insertedPrimary = false;
+            const collapsedRows = [];
+            rows.forEach((row) => {
+              if (row && isPivotChainFactName(row.name)) {
+                if (!insertedPrimary) {
+                  collapsedRows.push(primaryPivot);
+                  insertedPrimary = true;
+                }
+                return;
+              }
+              collapsedRows.push(row);
+            });
+            return collapsedRows;
           }
 
           const reqArtifactSet = new Set(reqArtifacts);
@@ -5560,7 +5730,7 @@
                 missing: missFldSet.has(n),
               });
             });
-            rows.forEach(addRowVar);
+            collapsePivotInputRows(rows).forEach(addRowVar);
           } else {
             const reqOutArtifactSet = new Set(outArtifactsReq);
             const reqOutFieldSet = new Set(outFieldsReq);
@@ -9736,13 +9906,17 @@
     const clean = values.map((item) => String(item || '').trim()).filter(Boolean);
     if (!clean.length) return '';
     const label = clean.length > 1 ? `${clean[0]} +${clean.length - 1}` : clean[0];
-    const compact = label.length > 48 ? `${label.slice(0, 45)}...` : label;
+    const compact = label.length > 56 ? `${label.slice(0, 53)}...` : label;
     return mermaidSafeLabel(compact);
   }
 
   function flowDependencyTooltipText(facts) {
     const values = Array.isArray(facts) ? facts : [facts];
-    return values.map((item) => String(item || '').trim()).filter(Boolean).join('\n');
+    const clean = values.map((item) => String(item || '').trim()).filter(Boolean);
+    if (!clean.length) return '';
+    const visibleFact = clean[0];
+    const tooltipFacts = [visibleFact].concat(clean.slice(1).filter((factName) => factName !== visibleFact));
+    return tooltipFacts.join('\n');
   }
 
   function buildFlowDependencyEdgeTooltips(chain, assignments, dependencyLevelOverride) {
@@ -9784,6 +9958,7 @@
         if (!target || !tooltip) return;
         target.setAttribute('data-dependency-tooltip', tooltip);
         target.setAttribute('aria-label', tooltip);
+        target.setAttribute('title', tooltip);
         target.style.cursor = 'help';
         Array.from(target.children || []).forEach((child) => {
           if (String(child && child.tagName || '').toLowerCase() === 'title') child.remove();
@@ -9791,6 +9966,14 @@
         const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'title');
         titleEl.textContent = tooltip;
         target.insertBefore(titleEl, target.firstChild || null);
+        try {
+          Array.from(target.querySelectorAll('*')).forEach((child) => {
+            child.setAttribute('data-dependency-tooltip', tooltip);
+            child.setAttribute('aria-label', tooltip);
+            child.setAttribute('title', tooltip);
+            child.style.cursor = 'help';
+          });
+        } catch (e) { }
       };
       edgeTargets.forEach((target, index) => setTooltip(target, tooltips[index] || ''));
       edgeLabels.forEach((target, index) => setTooltip(target, tooltips[index] || ''));
@@ -9978,7 +10161,10 @@
   }
 
   function buildMermaid(chain, assignments, dependencyLevelOverride) {
-    const lines = ['flowchart LR'];
+    const lines = [
+      '%%{init: {"flowchart": {"nodeSpacing": 72, "rankSpacing": 118, "padding": 18, "curve": "basis"}}}%%',
+      'flowchart LR'
+    ];
     if (!Array.isArray(chain) || chain.length === 0) {
       return '';
     }
@@ -11345,8 +11531,8 @@
     .guide-path-missing-container td { background: #fef9c3; border-color: #fde68a; }
     .guide-flow-figure { margin: 1.1rem 0; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: .75rem; }
     .guide-flow-figure figcaption { font-weight: 700; margin-bottom: .55rem; color: #0f172a; }
-    .guide-flow-scroll { overflow-x: auto; }
-    .guide-flow-figure svg { display: block; min-width: 720px; }
+    .guide-flow-scroll { overflow: auto; max-height: 72vh; padding-bottom: .35rem; }
+    .guide-flow-figure svg { display: block; min-width: 880px; }
     code { background: #e2e8f0; border-radius: 4px; padding: .1rem .25rem; }
     pre { background: #111827; color: #f8fafc; border-radius: 6px; padding: .9rem 1rem; overflow-x: auto; }
     pre code { background: transparent; color: inherit; padding: 0; }
@@ -11594,28 +11780,29 @@ ${out.join('\n')}
       .map((value) => String(value || '').trim())
       .filter(Boolean);
     if (!values.length) return '';
-    const shown = values.slice(0, 2);
-    if (values.length > shown.length) shown.push(`+${values.length - shown.length}`);
-    return shown.join(', ');
+    return values.length > 1 ? `${values[0]} +${values.length - 1}` : values[0];
   }
 
   function guideFigureDependencyTooltip(facts) {
-    return (Array.isArray(facts) ? facts : [facts])
+    const clean = (Array.isArray(facts) ? facts : [facts])
       .map((value) => String(value || '').trim())
-      .filter(Boolean)
-      .join('\n');
+      .filter(Boolean);
+    if (!clean.length) return '';
+    const visibleFact = clean[0];
+    const tooltipFacts = [visibleFact].concat(clean.slice(1).filter((factName) => factName !== visibleFact));
+    return tooltipFacts.join('\n');
   }
 
   function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
     const nodes = Array.isArray(chain) ? chain : [];
     if (!nodes.length) return '';
     const assignmentList = Array.isArray(assignments) ? assignments : [];
-    const cardWidth = 220;
-    const cardHeight = 104;
-    const columnGap = 92;
-    const rowGap = 24;
-    const marginX = 36;
-    const marginY = 34;
+    const cardWidth = 228;
+    const cardHeight = 108;
+    const columnGap = 150;
+    const rowGap = 46;
+    const marginX = 46;
+    const marginY = 38;
     const stageLabelHeight = 30;
     const marginBottom = 30;
     const liveLayout = (typeof buildFlowDependencyLayout === 'function') ? buildFlowDependencyLayout(nodes, assignmentList) : null;
@@ -11626,7 +11813,7 @@ ${out.join('\n')}
       ? layout.stages
       : [{ stage: 0, indices: nodes.map((_node, nodeIndex) => nodeIndex) }];
     const maxRows = Math.max(1, ...stages.map((stageGroup) => Math.max(1, Array.isArray(stageGroup.indices) ? stageGroup.indices.length : 0)));
-    const width = Math.max(760, (marginX * 2) + (stages.length * cardWidth) + (Math.max(0, stages.length - 1) * columnGap));
+    const width = Math.max(880, (marginX * 2) + (stages.length * cardWidth) + (Math.max(0, stages.length - 1) * columnGap));
     const height = marginY + stageLabelHeight + (maxRows * cardHeight) + (Math.max(0, maxRows - 1) * rowGap) + marginBottom;
     const titleId = `guide-flow-title-${Math.random().toString(36).slice(2, 9)}`;
     const scen = guideFigureFirstNonEmpty(scenarioName, 'Scenario');
@@ -11686,17 +11873,17 @@ ${out.join('\n')}
       const midX = startX + Math.max(36, (endX - startX) / 2);
       const label = guideFigureEdgeLabel(edge && edge.facts);
       const tooltip = guideFigureDependencyTooltip(edge && edge.facts);
-      const labelLines = label ? guideFigureWrapText(label, 28, 2) : [];
+      const labelLines = label ? guideFigureWrapText(label, 34, 2) : [];
       const labelX = (startX + endX) / 2;
-      const labelY = (startY + endY) / 2 - 9;
-      const labelWidth = labelLines.length ? Math.min(190, Math.max(84, Math.max(...labelLines.map((line) => line.length)) * 6.2 + 18)) : 0;
+      const labelY = (startY + endY) / 2 - 16;
+      const labelWidth = labelLines.length ? Math.min(230, Math.max(96, Math.max(...labelLines.map((line) => line.length)) * 6.2 + 22)) : 0;
       const labelHeight = labelLines.length ? (labelLines.length * 13) + 8 : 0;
       const labelSpans = labelLines.map((line, lineIndex) => `<tspan x="${labelX}" dy="${lineIndex === 0 ? 0 : 13}">${escapeHtml(line)}</tspan>`).join('');
-      return `<g class="guide-flow-edge" data-edge="${edgeIndex + 1}">
+      return `<g class="guide-flow-edge" data-edge="${edgeIndex + 1}"${tooltip ? ` aria-label="${escapeHtml(tooltip)}"` : ''}>
         ${tooltip ? `<title>${escapeHtml(tooltip)}</title>` : ''}
         <path d="M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}" fill="none" stroke="#2563eb" stroke-width="2.2" marker-end="url(#guide-flow-arrow)" />
         ${labelLines.length ? `<rect x="${labelX - (labelWidth / 2)}" y="${labelY - 12}" width="${labelWidth}" height="${labelHeight}" rx="5" fill="#ffffff" stroke="#bfdbfe" />
-        <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10" fill="#1e40af">${labelSpans}</text>` : ''}
+        <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10" fill="#1e40af">${tooltip ? `<title>${escapeHtml(tooltip)}</title>` : ''}${labelSpans}</text>` : ''}
       </g>`;
     }).filter(Boolean).join('\n');
     return `<figure class="guide-flow-figure" aria-label="Challenge sequence flow">
