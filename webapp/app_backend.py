@@ -20131,6 +20131,73 @@ def _flow_apply_pivot_context_to_assignments(
             if not (_pivot_fact_subject(item) and (_pivot_source_name_candidates(_pivot_fact_subject(item)) & current_names))
         ]
 
+    def _pivot_provider_priority(value: Any) -> int:
+        provider = _flow_pivot_requested_provider(value)
+        return {
+            'vulnerability': 0,
+            'flag-node-generator': 1,
+            'ssh-fallback': 2,
+            'manual': 3,
+            'random': 4,
+            'auto': 4,
+        }.get(provider, 5)
+
+    chain_index_by_id: dict[str, int] = {}
+    for index, node in enumerate(chain_nodes or []):
+        if not isinstance(node, dict):
+            continue
+        node_id_for_index = _flow_pivot_node_id(node)
+        if node_id_for_index:
+            chain_index_by_id.setdefault(node_id_for_index, index)
+
+    cyclic_pivot_requires_by_target: dict[str, set[str]] = {}
+    try:
+        pair_rules: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for rule in rules or []:
+            if not isinstance(rule, dict):
+                continue
+            source_id = str(rule.get('source_id') or '').strip()
+            target_id = str(rule.get('target_id') or '').strip()
+            if not source_id or not target_id or source_id == target_id:
+                continue
+            pair_key = tuple(sorted((source_id, target_id)))
+            pair_rules.setdefault(pair_key, []).append(rule)
+        for (_left_id, _right_id), related_rules in pair_rules.items():
+            directions = {
+                (str(rule.get('source_id') or '').strip(), str(rule.get('target_id') or '').strip())
+                for rule in related_rules
+                if isinstance(rule, dict)
+            }
+            if (_left_id, _right_id) not in directions or (_right_id, _left_id) not in directions:
+                continue
+            source_priority: dict[str, int] = {}
+            for rule in related_rules:
+                source_id = str(rule.get('source_id') or '').strip()
+                if not source_id:
+                    continue
+                priority = _pivot_provider_priority(rule.get('provider'))
+                source_priority[source_id] = min(source_priority.get(source_id, priority), priority)
+            if not source_priority:
+                continue
+            bootstrap_id = min(
+                source_priority,
+                key=lambda node_id: (
+                    source_priority.get(node_id, 5),
+                    chain_index_by_id.get(node_id, 10**9),
+                    node_id,
+                ),
+            )
+            for rule in related_rules:
+                target_id = str(rule.get('target_id') or '').strip()
+                source_id = str(rule.get('source_id') or '').strip()
+                if target_id != bootstrap_id or source_id == bootstrap_id:
+                    continue
+                requires_to_prune = _flow_split_top_level_list(rule.get('target_requires'))
+                if requires_to_prune:
+                    cyclic_pivot_requires_by_target.setdefault(target_id, set()).update(requires_to_prune)
+    except Exception:
+        cyclic_pivot_requires_by_target = {}
+
     out: list[dict[str, Any]] = []
     for index, assignment in enumerate(flag_assignments):
         if not isinstance(assignment, dict):
@@ -20181,12 +20248,18 @@ def _flow_apply_pivot_context_to_assignments(
             if node_id and target_id and node_id == target_id:
                 requires = _flow_split_top_level_list(rule.get('target_requires'))
                 source_requires = _rule_source_requires(rule, requires, source_id)
+                cyclic_pruned_requires = sorted(
+                    set(source_requires) & set(cyclic_pivot_requires_by_target.get(target_id) or set())
+                )
                 # Only treat the pivot fact as a hard generator dependency when the
                 # pivot source node is also present in this chain.  If it is absent
                 # the fact will never be produced and would permanently invalidate
                 # the chain order check, blocking all flag execution.
                 _source_in_chain = _rule_source_in_chain(rule, source_id)
-                if _source_in_chain:
+                if cyclic_pruned_requires:
+                    _remove_assignment_values(a2, 'requires', cyclic_pruned_requires)
+                    _remove_assignment_values(a2, 'inputs', cyclic_pruned_requires)
+                elif _source_in_chain:
                     _flow_append_unique_values(a2, 'requires', source_requires)
                     _flow_append_unique_values(a2, 'inputs', source_requires)
                 else:
@@ -20197,14 +20270,15 @@ def _flow_apply_pivot_context_to_assignments(
                 ports = _flow_split_top_level_list(rule.get('target_ports'))
                 port_text = f" Ports: {', '.join(ports)}." if ports else ''
                 # Defer hint emission - collect parts and consolidate below.
-                _pivot_target_hint_parts.append((source_name, list(source_requires), port_text))
+                if not cyclic_pruned_requires:
+                    _pivot_target_hint_parts.append((source_name, list(source_requires), port_text))
                 pivot_entries.append({
                     'role': 'target',
                     'provider': rule.get('provider'),
                     'provider_label': provider_label,
                     'source': source_name,
                     'target': rule.get('target_name') or target_id,
-                    'requires': source_requires,
+                    'requires': [fact for fact in source_requires if fact not in set(cyclic_pruned_requires)],
                     'produces': [],
                     'target_ports': ports,
                     'target_protocols': _flow_split_top_level_list(rule.get('target_protocols')),
