@@ -133,6 +133,27 @@ def test_flow_chain_editor_surfaces_pivot_paths() -> None:
     assert not missing, "Missing Flow chain-card pivot rendering/persistence snippets: " + "; ".join(missing)
 
 
+def test_flow_chain_editor_hides_synthetic_pivot_noise() -> None:
+    flow_text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    reports_text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_flow_snippets = [
+        "function isSyntheticChainFactName(name)",
+        "function hasResolvedFactValue(value)",
+        "!/^Pivot source:/i.test(String(text || '').trim())",
+        "if (isSyntheticChainFactName(name) && !hasResolvedFactValue(entry.resolved)) return;",
+        "if (isSyntheticChainFactName(n) && !(resolvedOutputs && hasResolvedFactValue(resolvedOutputs[n]))) return;",
+    ]
+    missing_flow = [snippet for snippet in expected_flow_snippets if snippet not in flow_text]
+    assert not missing_flow, "Missing Flow synthetic pivot display filters: " + "; ".join(missing_flow)
+
+    expected_report_snippets = [
+        ".filter((value) => !/^Pivot source:/i.test(value))",
+    ]
+    missing_reports = [snippet for snippet in expected_report_snippets if snippet not in reports_text]
+    assert not missing_reports, "Missing report synthetic pivot hint filter: " + "; ".join(missing_reports)
+
+
 def test_segmentation_pivot_provider_options_are_curated() -> None:
     text = FLOW_TEMPLATE_PATH.parent.joinpath("index.html").read_text(encoding="utf-8", errors="ignore")
 
