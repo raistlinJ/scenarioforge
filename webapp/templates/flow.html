@@ -1020,6 +1020,22 @@
     }
   }
 
+  function buildFlowExportPayload(chainOverride, assignmentsOverride) {
+    const chain = Array.isArray(chainOverride) ? chainOverride : (Array.isArray(currentChain) ? currentChain : []);
+    const assignments = Array.isArray(assignmentsOverride) ? assignmentsOverride : (Array.isArray(currentFlagAssignments) ? currentFlagAssignments : []);
+    const payload = {
+      scenario: activeScenario,
+      chain,
+      flag_assignments: alignAssignmentsToChain(chain, assignments.slice ? assignments.slice() : assignments),
+      dependency_level: getFlowDependencyLevel(),
+    };
+    if (lastPreviewPlanPath) {
+      payload.preview_plan_path = lastPreviewPlanPath;
+      payload.xml_path = lastPreviewPlanPath;
+    }
+    return payload;
+  }
+
   function clearFlowState(message) {
     try {
       currentChain = [];
@@ -9521,15 +9537,18 @@
     setStatus('Updating…', false);
     try {
       // Recompute assignments + validity based on the current chain order.
-      const data = await postJson('/api/flag-sequencing/afb_from_chain', { scenario: activeScenario, chain: currentChain });
+      const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
+      const nextChain = (data && Array.isArray(data.chain) && data.chain.length)
+        ? data.chain.slice()
+        : currentChain.slice();
       const prevAssignments = alignAssignmentsToChain(
-        currentChain,
+        nextChain,
         Array.isArray(currentFlagAssignments) ? currentFlagAssignments.slice() : []
       );
       let nextAssignments = Array.isArray(data.flag_assignments)
         ? data.flag_assignments.slice()
         : prevAssignments.slice();
-      nextAssignments = alignAssignmentsToChain(currentChain, nextAssignments);
+      nextAssignments = alignAssignmentsToChain(nextChain, nextAssignments);
 
       const _hasObjectValues = (obj) => !!(obj && typeof obj === 'object' && !Array.isArray(obj) && Object.keys(obj).length);
       const _hasArrayValues = (arr) => !!(Array.isArray(arr) && arr.length);
@@ -9587,6 +9606,7 @@
         return cur;
       });
 
+      currentChain = nextChain;
       currentFlagAssignments = nextAssignments;
       setFlowValidityFromPayload(data);
       if (jsonEl) {
@@ -9601,6 +9621,7 @@
           flags_enabled: !!(data && data.flags_enabled),
         }, null, 2);
       }
+      renderChainEditor();
       const diagram = buildMermaid(currentChain);
       await renderMermaid(diagram);
       updateMeta();
@@ -13215,7 +13236,7 @@ ${out.join('\n')}
         try { await refreshAssignmentsFromChain(); } catch (err) { }
 
         setStatus('Building .afb…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', { scenario: activeScenario, chain: currentChain });
+        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
         setFlowValidityFromPayload(data);
         const afb = data && data.afb ? data.afb : null;
         if (!afb) {
@@ -13254,7 +13275,7 @@ ${out.join('\n')}
         try { await refreshAssignmentsFromChain(); } catch (err) { }
 
         setStatus('Building attack graph…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', { scenario: activeScenario, chain: currentChain });
+        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
         setFlowValidityFromPayload(data);
         const graph = data && data.attack_graph ? data.attack_graph : null;
         if (!graph) {
@@ -13293,7 +13314,7 @@ ${out.join('\n')}
         try { await refreshAssignmentsFromChain(); } catch (err) { }
 
         setStatus('Building attack graph (.dot)…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', { scenario: activeScenario, chain: currentChain });
+        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
         setFlowValidityFromPayload(data);
         const dot = data && data.attack_graph_dot ? String(data.attack_graph_dot) : '';
         if (!dot) {
@@ -13332,7 +13353,7 @@ ${out.join('\n')}
         try { await refreshAssignmentsFromChain(); } catch (err) { }
 
         setStatus('Building attack graph (.pdf)…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', { scenario: activeScenario, chain: currentChain });
+        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
         setFlowValidityFromPayload(data);
         const b64 = data && data.attack_graph_pdf_base64 ? String(data.attack_graph_pdf_base64) : '';
         if (!b64) {
