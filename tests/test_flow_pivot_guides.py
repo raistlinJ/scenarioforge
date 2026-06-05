@@ -658,6 +658,85 @@ def test_pivot_apply_prunes_self_alias_requires_without_matching_rule():
     assert ok, errors
 
 
+def test_pivot_apply_prunes_mutual_cycle_prefers_vulnerability_source(monkeypatch):
+    monkeypatch.setattr(app_backend, "_flow_enabled_generator_defs_by_id", lambda: {})
+
+    chain_nodes = [
+        {"id": "8", "name": "docker-3", "type": "docker", "is_vuln": False},
+        {"id": "6", "name": "docker-1", "type": "docker", "is_vuln": True, "vulnerabilities": [{"name": "rce"}]},
+    ]
+    assignments = [
+        {"node_id": "8", "id": "node-gen", "type": "flag-node-generator", "inputs": [], "outputs": [], "requires": [], "produces": []},
+        {"node_id": "6", "id": "vuln-gen", "type": "flag-generator", "inputs": [], "outputs": [], "requires": [], "produces": []},
+    ]
+    pivot_context = {
+        "metadata": {
+            "pivoting": {
+                "rules": [
+                    {
+                        "pivot_nodes": ["docker-1"],
+                        "target_node": "docker-3",
+                        "access_provider": "vulnerability",
+                        "produces": ["Shell(docker-1)", "Pivot(docker-1)"],
+                        "target_requires": ["Pivot(docker-1)"],
+                    },
+                    {
+                        "pivot_nodes": ["docker-3"],
+                        "target_node": "docker-1",
+                        "access_provider": "flag-node-generator",
+                        "produces": ["Shell(docker-3)", "Pivot(docker-3)"],
+                        "target_requires": ["Pivot(docker-3)"],
+                    },
+                ]
+            }
+        }
+    }
+    plugins = {
+        "node-gen": {
+            "plugin_id": "node-gen",
+            "plugin_type": "flag-node-generator",
+            "requires": [],
+            "produces": [{"artifact": "Shell(docker-3)"}, {"artifact": "Pivot(docker-3)"}],
+        },
+        "vuln-gen": {
+            "plugin_id": "vuln-gen",
+            "plugin_type": "flag-generator",
+            "requires": [],
+            "produces": [{"artifact": "Shell(docker-1)"}, {"artifact": "Pivot(docker-1)"}],
+        },
+    }
+
+    enriched = app_backend._flow_apply_pivot_context_to_assignments(
+        assignments,
+        chain_nodes,
+        preview=None,
+        pivot_context=pivot_context,
+        scenario_label="mutual-pivot-cycle-test",
+    )
+
+    docker1_assignment = next(assignment for assignment in enriched if assignment["node_id"] == "6")
+    docker3_assignment = next(assignment for assignment in enriched if assignment["node_id"] == "8")
+    assert "Pivot(docker-3)" not in (docker1_assignment.get("requires") or [])
+    assert "Pivot(docker-3)" not in (docker1_assignment.get("inputs") or [])
+    assert "Pivot(docker-1)" in (docker3_assignment.get("requires") or [])
+
+    ordered_nodes, ordered_assignments, _debug = app_backend._flow_reorder_chain_by_generator_dag(
+        chain_nodes,
+        enriched,
+        scenario_label="mutual-pivot-cycle-test",
+        plugins_by_id_override=plugins,
+    )
+
+    assert [node["id"] for node in ordered_nodes] == ["6", "8"]
+    ok, errors = app_backend._flow_validate_chain_order_by_requires_produces(
+        ordered_nodes,
+        ordered_assignments,
+        scenario_label="mutual-pivot-cycle-test",
+        plugins_by_id_override=plugins,
+    )
+    assert ok, errors
+
+
 def test_validate_prunes_plugin_contract_stale_pivot_for_latest_order():
     chain_nodes = [
         {"id": node_id, "name": f"docker-{node_id}", "type": "docker"}
