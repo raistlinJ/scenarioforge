@@ -235,7 +235,7 @@ def _attack_graph_for_chain(
             items.append(f"{key_str}={value_str}" if value_str else key_str)
         return items
 
-    for node in (chain_nodes or []):
+    for step_index, node in enumerate((chain_nodes or []), start=1):
         if not isinstance(node, dict):
             continue
         nid = str(node.get('id') or '').strip()
@@ -250,8 +250,10 @@ def _attack_graph_for_chain(
                 'kind': str(assignment.get('type') or ''),
                 'source': str(assignment.get('flag_generator') or ''),
                 'catalog': str(assignment.get('generator_catalog') or ''),
+                'sequence_index': int(step_index),
                 'chain': [
                     {
+                        'sequence_index': int(chain_index),
                         'id': str(n.get('id') or ''),
                         'name': str(n.get('name') or ''),
                         'type': str(n.get('type') or ''),
@@ -260,13 +262,16 @@ def _attack_graph_for_chain(
                         'ipv4': str(n.get('ipv4') or ''),
                         'interfaces': list(n.get('interfaces') or []) if isinstance(n.get('interfaces'), list) else [],
                     }
-                    for n in chain_nodes
+                    for chain_index, n in enumerate(chain_nodes, start=1)
+                    if isinstance(n, dict)
                 ],
+                'resolved_inputs': _resolved_map(assignment, 'resolved_inputs'),
                 'resolved_outputs': _resolved_map(assignment, 'resolved_outputs'),
                 'flag_value': assignment.get('flag_value'),
             }
         nodes_out.append({
             'id': nid,
+            'sequence_index': int(step_index),
             'label': str(node.get('name') or nid),
             'type': str(node.get('type') or ''),
             'is_vuln': bool(node.get('is_vuln')),
@@ -286,6 +291,7 @@ def _attack_graph_for_chain(
         assignment = assignment_by_node_id.get(src_id)
         resolved_out = _resolved_map(assignment, 'resolved_outputs')
         edges_out.append({
+            'sequence_index': int(i + 1),
             'source': src_id,
             'target': tgt_id,
             'artifacts': _outputs_for_assignment(assignment),
@@ -296,6 +302,8 @@ def _attack_graph_for_chain(
     return {
         'schema_version': 1,
         'scenario': str(scenario_label or ''),
+        'chain_order': [str(node.get('id') or '').strip() for node in (chain_nodes or []) if isinstance(node, dict) and str(node.get('id') or '').strip()],
+        'assignment_order': [str(assignment.get('node_id') or '').strip() for assignment in (flag_assignments or []) if isinstance(assignment, dict) and str(assignment.get('node_id') or '').strip()],
         'nodes': nodes_out,
         'edges': edges_out,
     }
@@ -326,6 +334,12 @@ def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
         if not nid:
             continue
         label = str(n.get('label') or nid)
+        try:
+            seq = int(n.get('sequence_index') or 0)
+        except Exception:
+            seq = 0
+        if seq > 0:
+            label = f"Step {seq}: {label}"
         gen = n.get('generator') if isinstance(n.get('generator'), dict) else None
         gen_name = str((gen or {}).get('name') or '').strip()
         gen_kind = str((gen or {}).get('kind') or '').strip()
@@ -15783,7 +15797,7 @@ def _attack_flow_builder_afb_for_chain(
         gen_label = (gen_name or gen_id or '').strip()
         if not gen_label:
             gen_label = 'Unassigned generator'
-        action_title = f"Find Flag -- {gen_label}: {node_name}"
+        action_title = f"Step {idx}: Find Flag -- {gen_label}: {node_name}"
 
         action_instance = _new_uuid()
         flow_children.append(action_instance)

@@ -78,60 +78,86 @@ def register(app, *, backend_module: Any) -> None:
         if not chain_nodes:
             return jsonify({'ok': False, 'error': 'Chain contained no valid nodes.'}), 400
 
+        def _assignment_has_generator(assignment: dict[str, Any]) -> bool:
+            if not isinstance(assignment, dict):
+                return False
+            try:
+                return bool(str(assignment.get('id') or assignment.get('generator_id') or '').strip())
+            except Exception:
+                return False
+
+        def _align_assignments_to_chain(assignments: Any) -> list[dict[str, Any]]:
+            if not isinstance(assignments, list) or not assignments:
+                return []
+            assignment_by_node: dict[str, dict[str, Any]] = {}
+            for assignment in assignments:
+                if not isinstance(assignment, dict):
+                    continue
+                node_id = str(assignment.get('node_id') or '').strip()
+                if node_id and node_id not in assignment_by_node:
+                    assignment_by_node[node_id] = assignment
+
+            aligned: list[dict[str, Any]] = []
+            for index, node in enumerate(chain_nodes):
+                node_id = str((node or {}).get('id') or '').strip()
+                source = assignment_by_node.get(node_id) if node_id else None
+                if source is None and index < len(assignments) and isinstance(assignments[index], dict):
+                    source = assignments[index]
+                if not isinstance(source, dict):
+                    aligned.append({})
+                    continue
+                assignment_copy = dict(source)
+                if node_id:
+                    assignment_copy['node_id'] = node_id
+                aligned.append(assignment_copy)
+            return aligned
+
+        def _complete_assignment_set(assignments: list[dict[str, Any]]) -> bool:
+            return bool(assignments) and len(assignments) == len(chain_nodes) and all(_assignment_has_generator(a) for a in assignments)
+
+        request_assignments = _align_assignments_to_chain(payload.get('flag_assignments'))
+
         flow_assignments_from_plan: list[dict[str, Any]] = []
         try:
-            flow_meta = backend._flow_state_from_latest_xml(scenario_norm)
+            flow_meta = None
+            xml_hint = str(payload.get('xml_path') or payload.get('preview_plan_path') or payload.get('preview_plan') or '').strip()
+            if xml_hint:
+                try:
+                    xml_abs = backend.os.path.abspath(xml_hint)
+                    if backend.os.path.exists(xml_abs):
+                        reader = getattr(backend, '_flow_state_from_xml_path', None)
+                        if callable(reader):
+                            flow_meta = reader(xml_abs, scenario_label or scenario_norm)
+                except Exception:
+                    flow_meta = None
+            if flow_meta is None:
+                flow_meta = backend._flow_state_from_latest_xml(scenario_norm)
             saved_assignments = (flow_meta or {}).get('flag_assignments') if isinstance(flow_meta, dict) else None
             if isinstance(saved_assignments, list) and saved_assignments:
-                desired_len = len(chain_nodes)
-                ordered: list[dict[str, Any]] = []
-                if desired_len and len(saved_assignments) >= desired_len:
-                    for index in range(desired_len):
-                        assignment = saved_assignments[index]
-                        if not isinstance(assignment, dict):
-                            ordered.append({})
-                            continue
-                        assignment_copy = dict(assignment)
-                        try:
-                            assignment_copy['node_id'] = str((chain_nodes[index] or {}).get('id') or '').strip()
-                        except Exception:
-                            pass
-                        ordered.append(assignment_copy)
-                else:
-                    assignment_by_node: dict[str, dict[str, Any]] = {}
-                    for assignment in saved_assignments:
-                        if not isinstance(assignment, dict):
-                            continue
-                        node_id = str(assignment.get('node_id') or '').strip()
-                        if node_id:
-                            assignment_by_node[node_id] = assignment
-                    if assignment_by_node:
-                        for node in chain_nodes:
-                            node_id = str((node or {}).get('id') or '').strip()
-                            assignment = assignment_by_node.get(node_id)
-                            if isinstance(assignment, dict):
-                                assignment_copy = dict(assignment)
-                                assignment_copy['node_id'] = node_id
-                                ordered.append(assignment_copy)
-                            else:
-                                ordered.append({})
-                if ordered and all(
-                    isinstance(assignment, dict)
-                    and str(assignment.get('id') or assignment.get('generator_id') or '').strip()
-                    for assignment in ordered
-                ):
+                ordered = _align_assignments_to_chain(saved_assignments)
+                if _complete_assignment_set(ordered):
                     flow_assignments_from_plan = ordered
         except Exception:
             flow_assignments_from_plan = []
 
-        flag_assignments: list[dict[str, Any]] = []
+        flag_assignments: list[dict[str, Any]] = list(request_assignments) if _complete_assignment_set(request_assignments) else []
         preview: dict[str, Any] | None = None
         preview_payload: dict[str, Any] | None = None
         try:
-            plan_path = None
+            plan_path = str(payload.get('preview_plan_path') or payload.get('preview_plan') or payload.get('xml_path') or '').strip() or None
+            if plan_path:
+                try:
+                    plan_path = backend.os.path.abspath(plan_path)
+                except Exception:
+                    pass
+                try:
+                    if not backend.os.path.exists(plan_path):
+                        plan_path = None
+                except Exception:
+                    plan_path = None
             try:
                 entry = backend._planner_get_plan(scenario_norm)
-                if entry:
+                if (not plan_path) and entry:
                     plan_path = entry.get('plan_path') or plan_path
             except Exception:
                 plan_path = plan_path
@@ -157,8 +183,10 @@ def register(app, *, backend_module: Any) -> None:
                     metadata = preview_payload.get('metadata') if isinstance(preview_payload, dict) else None
                     flow_meta = (metadata or {}).get('flow') if isinstance(metadata, dict) else None
                     flow_assignments = flow_meta.get('flag_assignments') if isinstance(flow_meta, dict) else None
-                    if isinstance(flow_assignments, list) and flow_assignments:
-                        flag_assignments = flow_assignments
+                    if (not flag_assignments) and isinstance(flow_assignments, list) and flow_assignments:
+                        aligned = _align_assignments_to_chain(flow_assignments)
+                        if _complete_assignment_set(aligned):
+                            flag_assignments = aligned
                 except Exception:
                     pass
 
@@ -235,8 +263,11 @@ def register(app, *, backend_module: Any) -> None:
                             pivot_context=preview_payload,
                         )
         except Exception:
-            flag_assignments = []
+            if not flag_assignments:
+                flag_assignments = []
 
+        if (not flag_assignments) and _complete_assignment_set(request_assignments):
+            flag_assignments = request_assignments
         if (not flag_assignments) and flow_assignments_from_plan:
             flag_assignments = flow_assignments_from_plan
 
@@ -272,6 +303,7 @@ def register(app, *, backend_module: Any) -> None:
                     scenario_label=(scenario_label or scenario_norm),
                     dependency_level=dependency_level,
                 )
+                flag_assignments = _align_assignments_to_chain(flag_assignments)
                 flag_assignments = backend._flow_apply_pivot_context_to_assignments(
                     flag_assignments,
                     chain_nodes,

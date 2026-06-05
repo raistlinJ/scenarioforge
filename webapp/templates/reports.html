@@ -1976,11 +1976,19 @@ async function fetchReportFlowPreview(scenario, previewPlanPath, xmlPath) {
   return data;
 }
 
-async function fetchReportFlowExports(scenario, chain) {
+async function fetchReportFlowExports(scenario, chain, assignments, options) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const body = {
+    scenario,
+    chain,
+    flag_assignments: Array.isArray(assignments) ? assignments : [],
+  };
+  if (opts.previewPlanPath) body.preview_plan_path = String(opts.previewPlanPath);
+  if (opts.xmlPath) body.xml_path = String(opts.xmlPath);
   const data = await fetchJsonOrThrow('/api/flag-sequencing/afb_from_chain', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scenario, chain })
+    body: JSON.stringify(body)
   });
   return data;
 }
@@ -2164,28 +2172,33 @@ async function handleReportDownloadAction(link) {
     downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), fname);
     return;
   }
-  const exportData = await fetchReportFlowExports(scenario, chain);
+  const exportData = await fetchReportFlowExports(scenario, chain, assignments, {
+    previewPlanPath: preview.preview_plan_path || previewPlanPath || xmlPath,
+    xmlPath: xmlPath || preview.preview_plan_path || previewPlanPath,
+  });
+  const exportChain = Array.isArray(exportData.chain) ? exportData.chain : chain;
+  const exportLen = String(exportChain.length || chain.length || 0);
   if (kind === 'afb') {
     if (!exportData.afb) throw new Error('No .afb returned by server.');
-    downloadBlob(new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json' }), `attackflow_builder_${norm}_${len}.afb`);
+    downloadBlob(new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json' }), `attackflow_builder_${norm}_${exportLen}.afb`);
     return;
   }
   if (kind === 'attack-graph-json') {
     if (!exportData.attack_graph) throw new Error('No attack graph returned by server.');
-    downloadBlob(new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json' }), `attack_graph_${norm}_${len}.json`);
+    downloadBlob(new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json' }), `attack_graph_${norm}_${exportLen}.json`);
     return;
   }
   if (kind === 'attack-graph-dot') {
     const dot = exportData.attack_graph_dot ? String(exportData.attack_graph_dot) : '';
     if (!dot) throw new Error('No attack graph .dot returned by server.');
-    downloadBlob(new Blob([dot], { type: 'text/vnd.graphviz' }), `attack_graph_${norm}_${len}.dot`);
+    downloadBlob(new Blob([dot], { type: 'text/vnd.graphviz' }), `attack_graph_${norm}_${exportLen}.dot`);
     return;
   }
   if (kind === 'attack-graph-pdf') {
     const b64 = exportData.attack_graph_pdf_base64 ? String(exportData.attack_graph_pdf_base64) : '';
     if (!b64) throw new Error('Attack graph PDF unavailable (Graphviz not installed).');
     const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    downloadBlob(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${len}.pdf`);
+    downloadBlob(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${exportLen}.pdf`);
     return;
   }
   throw new Error('Unknown download type.');
