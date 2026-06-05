@@ -12677,12 +12677,15 @@
                 return { ok: false, message: errMessage, data };
             }
 
+            const resolvedBridgeName = (data && data.bridge_name)
+                ? String(data.bridge_name).trim()
+                : bridgeName;
             const msg = data.message || 'HITL bridge settings verified.';
             try {
                 hitlState.bridge_validated = true;
                 hitlState.bridge_validated_at = new Date().toISOString();
                 if (hitlState.core && typeof hitlState.core === 'object') {
-                    hitlState.core.internal_bridge = bridgeName;
+                    hitlState.core.internal_bridge = resolvedBridgeName;
                 }
                 const ifaces = Array.isArray(hitlState.interfaces) ? hitlState.interfaces : [];
                 ifaces.forEach((iface) => {
@@ -12690,12 +12693,12 @@
                     const ext = iface.external_vm;
                     const hasMappedExternal = !!(ext && typeof ext === 'object' && ((ext.vm_key || '').toString().trim() || (ext.vmid || '').toString().trim() || (ext.vm_name || '').toString().trim()));
                     if (!hasMappedExternal) return;
-                    iface.core_bridge = bridgeName;
-                    if (iface.proxmox_target && typeof iface.proxmox_target === 'object' && !((iface.proxmox_target.bridge || '').toString().trim())) {
-                        iface.proxmox_target.bridge = bridgeName;
+                    iface.core_bridge = resolvedBridgeName;
+                    if (iface.proxmox_target && typeof iface.proxmox_target === 'object') {
+                        iface.proxmox_target.bridge = resolvedBridgeName;
                     }
-                    if (ext && typeof ext === 'object' && !((ext.interface_bridge || '').toString().trim())) {
-                        ext.interface_bridge = bridgeName;
+                    if (ext && typeof ext === 'object') {
+                        ext.interface_bridge = resolvedBridgeName;
                     }
                 });
                 persistEditorState();
@@ -16498,15 +16501,31 @@
                 coreAdvAutoKillSessionsInput.checked = !!(coreState.adv_auto_kill_sessions);
                 coreAdvAutoKillSessionsInput.disabled = builderLocked || inputsDisabled;
             }
+            const coreSecretIdForDefaults = (coreState.core_secret_id || '').toString().trim();
+            const useStoredConnectionDefaults = !coreSecretIdForDefaults;
+            const modalDefaultGrpcHost = 'localhost';
+            const modalDefaultGrpcPort = 50051;
+            const modalDefaultSshPort = 22;
+            const grpcHostValue = useStoredConnectionDefaults
+                ? (coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost))
+                : modalDefaultGrpcHost;
+            const grpcPortValue = useStoredConnectionDefaults
+                ? (Number.isFinite(Number(coreState.grpc_port)) && Number(coreState.grpc_port) > 0 ? Number(coreState.grpc_port) : modalDefaultGrpcPort)
+                : modalDefaultGrpcPort;
+            const sshHostValue = useStoredConnectionDefaults
+                ? (coreState.ssh_host || coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost))
+                : modalDefaultGrpcHost;
+            const sshPortValue = useStoredConnectionDefaults
+                ? (Number.isFinite(Number(coreState.ssh_port)) && Number(coreState.ssh_port) > 0 ? Number(coreState.ssh_port) : modalDefaultSshPort)
+                : modalDefaultSshPort;
             if (coreModalInputs.grpc_host) {
-                coreModalInputs.grpc_host.value = coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : '');
+                coreModalInputs.grpc_host.value = grpcHostValue;
                 coreModalInputs.grpc_host.disabled = inputsDisabled;
                 coreModalInputs.grpc_host.readOnly = false;
                 coreModalInputs.grpc_host.setAttribute('data-scen-idx', String(sidx));
             }
             if (coreModalInputs.grpc_port) {
-                const port = Number.isFinite(Number(coreState.grpc_port)) && Number(coreState.grpc_port) > 0 ? Number(coreState.grpc_port) : 50051;
-                coreModalInputs.grpc_port.value = port || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_PORT : 50051);
+                coreModalInputs.grpc_port.value = grpcPortValue;
                 coreModalInputs.grpc_port.disabled = inputsDisabled;
                 coreModalInputs.grpc_port.readOnly = false;
                 coreModalInputs.grpc_port.setAttribute('data-scen-idx', String(sidx));
@@ -16517,14 +16536,13 @@
                 coreModalInputs.venv_bin.setAttribute('data-scen-idx', String(sidx));
             }
             if (coreModalInputs.ssh_host) {
-                coreModalInputs.ssh_host.value = coreState.ssh_host || coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : '');
+                coreModalInputs.ssh_host.value = sshHostValue;
                 coreModalInputs.ssh_host.disabled = inputsDisabled;
                 coreModalInputs.ssh_host.readOnly = false;
                 coreModalInputs.ssh_host.setAttribute('data-scen-idx', String(sidx));
             }
             if (coreModalInputs.ssh_port) {
-                const sshPort = Number.isFinite(Number(coreState.ssh_port)) && Number(coreState.ssh_port) > 0 ? Number(coreState.ssh_port) : 22;
-                coreModalInputs.ssh_port.value = sshPort || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_SSH_PORT : 22);
+                coreModalInputs.ssh_port.value = sshPortValue;
                 coreModalInputs.ssh_port.disabled = inputsDisabled;
                 coreModalInputs.ssh_port.readOnly = false;
                 coreModalInputs.ssh_port.setAttribute('data-scen-idx', String(sidx));
