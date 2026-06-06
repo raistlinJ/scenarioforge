@@ -226,6 +226,71 @@ def test_flow_inputs_tab_labels_pivot_requirements() -> None:
     assert not missing, "Missing Pivot(...) input display labels in flow template: " + "; ".join(missing)
 
 
+def test_flow_inputs_tab_has_source_column_for_chain_and_sequencer_inputs() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function flowInputSourceInfo(row)",
+        "function renderFlowInputSourceBadge(row)",
+        "function hasMeaningfulFlowInputSourceValue(value)",
+        "if (fromChain && fromSeq)",
+        "return { text: 'From Chain'",
+        "return { text: 'From Sequencer'",
+        "return { text: 'Config/default'",
+        "return { text: 'Not supplied'",
+        "<th style=\"width: 1%; white-space: nowrap;\">Source</th>",
+        "tdSource.appendChild(renderFlowInputSourceBadge(row));",
+        "tdSource.appendChild(renderFlowInputSourceBadge(v));",
+        "resolved: resolvedInputs ? resolvedInputs[n] : undefined,",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow input source column wiring: " + "; ".join(missing)
+
+
+def test_flow_resolved_columns_scroll_and_optional_badges_are_removed() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function flowResolvedScrollContent(content)",
+        "function flowAppendResolvedCell(cell, content)",
+        "wrap.style.display = 'block';",
+        "wrap.style.width = '100%';",
+        "wrap.style.overflow = 'auto';",
+        "wrap.style.whiteSpace = 'nowrap';",
+        "cell.style.minWidth = '10rem';",
+        "cell.style.width = '18rem';",
+        "cell.style.maxWidth = '18rem';",
+        "function flowStyleCompactTableCell(cell, minWidth)",
+        "function flowScrollableTable(tableEl)",
+        "tableEl.style.width = 'max-content';",
+        "tableEl.style.minWidth = '100%';",
+        "flowStyleCompactTableCell(tdVar, '12rem');",
+        "flowStyleCompactTableCell(tdSource, '8rem');",
+        "return flowScrollableTable(tbl);",
+        "addRow('', flowScrollableTable(inTbl));",
+        "addRow('', flowScrollableTable(outTbl));",
+        "flowAppendResolvedCell(tdRes, renderResolvedInline(row.resolved));",
+        "flowAppendResolvedCell(tdRes, renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name, { isInput: isInputs }));",
+        "flowAppendResolvedCell(tdRes, renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name));",
+        "inputs without * are optional",
+    ]
+    removed_snippets = [
+        "showOptionalBadge",
+        "badge.textContent = 'Optional';",
+        "Optional badge = non-blocking for step completion",
+        "Optional means non-blocking for step completion",
+        "tableLayout = 'fixed'",
+        "cell.style.maxWidth = '0';",
+        "clamp(10rem, 32vw, 30rem)",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not missing, "Missing Flow resolved-cell scroll wiring: " + "; ".join(missing)
+    assert not present, "Optional variable badges should be removed: " + "; ".join(present)
+
+
 def test_flow_template_compiles_with_hint_placeholders() -> None:
     from webapp.app_backend import app
 

@@ -2559,6 +2559,120 @@
     return String(value).trim() !== '';
   }
 
+  function hasMeaningfulFlowInputSourceValue(value) {
+    if (!hasResolvedFactValue(value)) return false;
+    if (typeof value === 'string' && value.trim() === '-') return false;
+    return true;
+  }
+
+  function flowInputSourceInfo(row) {
+    const item = (row && typeof row === 'object') ? row : {};
+    const sourceBadge = (item.sourceBadge && typeof item.sourceBadge === 'object') ? item.sourceBadge : null;
+    if (sourceBadge && String(sourceBadge.text || '').trim()) {
+      return {
+        text: String(sourceBadge.text || '').trim(),
+        className: String(sourceBadge.className || 'badge text-bg-secondary').trim() || 'badge text-bg-secondary',
+        title: String(sourceBadge.title || 'Explicit source metadata for this row.').trim() || 'Explicit source metadata for this row.',
+      };
+    }
+    const fromChain = !!item.fromChain;
+    const fromSeq = !!item.fromSeq;
+    if (fromChain && fromSeq) {
+      return { text: 'Chain + Sequencer', className: 'badge text-bg-primary', title: 'Provided by both an earlier chain output and a sequencer-synthesized value.' };
+    }
+    if (fromChain) {
+      return { text: 'From Chain', className: 'badge text-bg-primary', title: 'Provided by an earlier chain step output.' };
+    }
+    if (fromSeq) {
+      return { text: 'From Sequencer', className: 'badge text-bg-info', title: 'Synthesized by the sequencer from built-in defaults or planning metadata.' };
+    }
+    if (item.missing) {
+      return { text: 'Missing', className: 'badge text-bg-danger', title: 'Required by this step, but not provided by the chain or sequencer.' };
+    }
+    if (hasMeaningfulFlowInputSourceValue(item.overrideValue)) {
+      return { text: 'Override', className: 'badge text-bg-warning', title: 'Set by a manual value override.' };
+    }
+    if (hasMeaningfulFlowInputSourceValue(item.resolved)) {
+      return { text: 'Config/default', className: 'badge text-bg-secondary', title: 'Resolved on this assignment, not supplied by a prior chain step or sequencer.' };
+    }
+    if (item.required) {
+      return { text: 'Not supplied', className: 'badge text-bg-secondary', title: 'Required input with no chain or sequencer provider.' };
+    }
+    return { text: 'Optional', className: 'badge text-bg-light text-dark border', title: 'Optional input with no chain or sequencer provider.' };
+  }
+
+  function renderFlowInputSourceBadge(row) {
+    const info = flowInputSourceInfo(row);
+    const badge = document.createElement('span');
+    badge.className = info.className || 'badge text-bg-secondary';
+    badge.textContent = info.text || 'Unknown';
+    if (info.title) badge.title = info.title;
+    return badge;
+  }
+
+  function flowResolvedScrollContent(content) {
+    const wrap = document.createElement('div');
+    wrap.className = 'flow-resolved-scroll';
+    wrap.style.display = 'block';
+    wrap.style.width = '100%';
+    wrap.style.maxWidth = '100%';
+    wrap.style.maxHeight = '8rem';
+    wrap.style.overflow = 'auto';
+    wrap.style.minWidth = '0';
+    wrap.style.whiteSpace = 'nowrap';
+    if (content && typeof content === 'object' && content.nodeType) {
+      wrap.appendChild(content);
+    } else {
+      wrap.textContent = String(content || '-') || '-';
+    }
+    try {
+      Array.from(wrap.querySelectorAll('code')).forEach((codeEl) => {
+        codeEl.style.whiteSpace = 'pre';
+      });
+    } catch (err) { }
+    return wrap;
+  }
+
+  function flowAppendResolvedCell(cell, content) {
+    if (!cell) return;
+    cell.classList.add('small');
+    cell.style.minWidth = '10rem';
+    cell.style.width = '18rem';
+    cell.style.maxWidth = '18rem';
+    cell.style.verticalAlign = 'top';
+    cell.appendChild(flowResolvedScrollContent(content));
+  }
+
+  function flowStyleCompactTableCell(cell, minWidth) {
+    if (!cell) return;
+    cell.style.width = '1%';
+    cell.style.minWidth = minWidth || '8rem';
+    cell.style.whiteSpace = 'nowrap';
+    cell.style.wordBreak = 'normal';
+    cell.style.overflowWrap = 'normal';
+    cell.style.verticalAlign = 'top';
+    try {
+      Array.from(cell.querySelectorAll('code')).forEach((codeEl) => {
+        codeEl.style.whiteSpace = 'nowrap';
+        codeEl.style.wordBreak = 'normal';
+        codeEl.style.overflowWrap = 'normal';
+      });
+    } catch (err) { }
+  }
+
+  function flowScrollableTable(tableEl) {
+    if (!tableEl) return tableEl;
+    const wrap = document.createElement('div');
+    wrap.className = 'flow-table-scroll';
+    wrap.style.maxWidth = '100%';
+    wrap.style.overflowX = 'auto';
+    wrap.style.overflowY = 'hidden';
+    tableEl.style.width = 'max-content';
+    tableEl.style.minWidth = '100%';
+    wrap.appendChild(tableEl);
+    return wrap;
+  }
+
   async function refreshXmlDockPreview({ force = false } = {}) {
     const xmlPre = document.getElementById('xmlPre');
     if (!xmlPre) return;
@@ -4302,8 +4416,8 @@
           thead.innerHTML = '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Flag</th><th>Generator</th><th style="width: 1%; white-space: nowrap;">Sequence</th></tr>';
         } else {
           thead.innerHTML = inputsShowMissing
-            ? '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">From Chain</th><th style="width: 1%; white-space: nowrap;">From Sequencer</th><th style="width: 1%; white-space: nowrap;">Missing</th></tr>'
-            : '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">From Chain</th><th style="width: 1%; white-space: nowrap;">From Sequencer</th></tr>';
+            ? '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">Source</th><th style="width: 1%; white-space: nowrap;">Missing</th></tr>'
+            : '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">Source</th></tr>';
         }
         inTbl.appendChild(thead);
         try {
@@ -4353,62 +4467,33 @@
             reqMark.className = 'ms-1 text-danger fw-semibold';
             reqMark.textContent = '*';
             reqMark.title = 'Required input';
-            if (row.sourceBadge && row.sourceBadge.text) {
+            if (row.required) {
               const wrap = document.createElement('div');
-              wrap.className = 'd-flex align-items-center gap-2';
+              wrap.className = 'd-flex align-items-center gap-1';
               wrap.appendChild(code);
-              if (row.required) wrap.appendChild(reqMark);
-              const badge = document.createElement('span');
-              badge.className = row.sourceBadge.className || 'badge text-bg-secondary';
-              badge.textContent = String(row.sourceBadge.text || '').trim();
-              wrap.appendChild(badge);
+              wrap.appendChild(reqMark);
               tdVar.appendChild(wrap);
             } else {
-              if (row.required) {
-                const wrap = document.createElement('div');
-                wrap.className = 'd-flex align-items-center gap-1';
-                wrap.appendChild(code);
-                wrap.appendChild(reqMark);
-                tdVar.appendChild(wrap);
-              } else {
-                tdVar.appendChild(code);
-              }
+              tdVar.appendChild(code);
             }
 
+            flowStyleCompactTableCell(tdVar, '12rem');
+
             const tdRes = document.createElement('td');
-            tdRes.className = 'small';
-            tdRes.appendChild(renderResolvedInline(row.resolved));
+            flowAppendResolvedCell(tdRes, renderResolvedInline(row.resolved));
 
-            const tdFromChain = document.createElement('td');
-            const cbWrap1 = document.createElement('div');
-            cbWrap1.className = 'form-check mb-0';
-            const cb1 = document.createElement('input');
-            cb1.type = 'checkbox';
-            cb1.className = 'form-check-input';
-            cb1.disabled = true;
-            cb1.checked = !!row.fromChain;
-            cbWrap1.appendChild(cb1);
-            tdFromChain.appendChild(cbWrap1);
-
-            const tdFromSeq = document.createElement('td');
-            const cbWrap2 = document.createElement('div');
-            cbWrap2.className = 'form-check mb-0';
-            const cb2 = document.createElement('input');
-            cb2.type = 'checkbox';
-            cb2.className = 'form-check-input';
-            cb2.disabled = true;
-            cb2.checked = !!row.fromSeq;
-            cbWrap2.appendChild(cb2);
-            tdFromSeq.appendChild(cbWrap2);
+            const tdSource = document.createElement('td');
+            tdSource.appendChild(renderFlowInputSourceBadge(row));
+            flowStyleCompactTableCell(tdSource, '8rem');
 
             tr.appendChild(tdVar);
             tr.appendChild(tdRes);
-            tr.appendChild(tdFromChain);
-            tr.appendChild(tdFromSeq);
+            tr.appendChild(tdSource);
 
             if (inputsShowMissing) {
               const tdMiss = document.createElement('td');
               if (row.missing) tdMiss.classList.add('text-danger');
+              flowStyleCompactTableCell(tdMiss, '5rem');
               const cbWrap3 = document.createElement('div');
               cbWrap3.className = 'form-check mb-0';
               const cb3 = document.createElement('input');
@@ -4424,7 +4509,7 @@
           tbodyIn.appendChild(tr);
         });
         inTbl.appendChild(tbodyIn);
-        addRow('', inTbl);
+        addRow('', flowScrollableTable(inTbl));
       }
 
       if (outputsRaw) {
@@ -4496,11 +4581,12 @@
             tdVar.appendChild(code);
           }
 
+          flowStyleCompactTableCell(tdVar, '12rem');
           const tdRes = document.createElement('td');
-          tdRes.className = 'small';
-          tdRes.appendChild(renderResolvedInline(row.resolved));
+          flowAppendResolvedCell(tdRes, renderResolvedInline(row.resolved));
 
           const tdToChain = document.createElement('td');
+          flowStyleCompactTableCell(tdToChain, '5rem');
           const cbWrap = document.createElement('div');
           cbWrap.className = 'form-check mb-0';
           const cb = document.createElement('input');
@@ -4517,7 +4603,7 @@
           tbodyOut.appendChild(tr);
         });
         outTbl.appendChild(tbodyOut);
-        addRow('', outTbl);
+        addRow('', flowScrollableTable(outTbl));
       }
       if (!hideArtifactsFields) {
         addRow('Artifacts', artifacts.length ? artifacts.join(', ') : '-');
@@ -5491,7 +5577,6 @@
 
         function renderVarName(name, required, options) {
           const opts = (options && typeof options === 'object') ? options : {};
-          const showOptionalBadge = !!opts.showOptionalBadge;
           const collapsedPivotRows = Array.isArray(opts.collapsedPivotRows) ? opts.collapsedPivotRows : [];
           const span = document.createElement('span');
           span.style.whiteSpace = collapsedPivotRows.length ? 'normal' : 'nowrap';
@@ -5505,12 +5590,6 @@
             star.textContent = '*';
             star.title = 'Required input (blocking for step completion)';
             span.appendChild(star);
-          } else if (showOptionalBadge) {
-            const badge = document.createElement('span');
-            badge.className = 'badge text-bg-secondary ms-2';
-            badge.textContent = 'Optional';
-            badge.title = 'Optional input (non-blocking for step completion)';
-            span.appendChild(badge);
           }
           if (collapsedPivotRows.length) {
             const details = document.createElement('details');
@@ -5593,8 +5672,8 @@
           const thead = document.createElement('thead');
           if (isInputs) {
             thead.innerHTML = showMissingCol
-              ? '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">From Chain</th><th style="width: 1%; white-space: nowrap;">From Sequencer</th><th style="width: 1%; white-space: nowrap;">Missing</th></tr>'
-              : '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">From Chain</th><th style="width: 1%; white-space: nowrap;">From Sequencer</th></tr>';
+              ? '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">Source</th><th style="width: 1%; white-space: nowrap;">Missing</th></tr>'
+              : '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">Source</th></tr>';
           } else {
             thead.innerHTML = '<tr class="text-secondary"><th style="width: 1%; white-space: nowrap;">Variable</th><th>Resolved</th><th style="width: 1%; white-space: nowrap;">To Chain</th></tr>';
           }
@@ -5606,30 +5685,30 @@
             const tr = document.createElement('tr');
 
             const tdVar = document.createElement('td');
-            tdVar.appendChild(renderVarName(v.name, v.required, { showOptionalBadge: isInputs, collapsedPivotRows: v.collapsedPivotRows }));
+            tdVar.appendChild(renderVarName(v.name, v.required, { collapsedPivotRows: v.collapsedPivotRows }));
+            flowStyleCompactTableCell(tdVar, '12rem');
 
             const tdRes = document.createElement('td');
-            tdRes.className = 'small';
-            tdRes.appendChild(renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name, { isInput: isInputs }));
+            flowAppendResolvedCell(tdRes, renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name, { isInput: isInputs }));
 
             tr.appendChild(tdVar);
             tr.appendChild(tdRes);
 
             if (isInputs) {
-              const tdFromChain = document.createElement('td');
-              tdFromChain.appendChild(renderBoolCheckbox(v.fromChain, 'Provided by chain'));
-              const tdFromSeq = document.createElement('td');
-              tdFromSeq.appendChild(renderBoolCheckbox(v.fromSeq, 'Provided by sequencer (synthesized)'));
-              tr.appendChild(tdFromChain);
-              tr.appendChild(tdFromSeq);
+              const tdSource = document.createElement('td');
+              tdSource.appendChild(renderFlowInputSourceBadge(v));
+              flowStyleCompactTableCell(tdSource, '8rem');
+              tr.appendChild(tdSource);
               if (showMissingCol) {
                 const tdMiss = document.createElement('td');
                 if (v.missing) tdMiss.classList.add('text-danger');
+                flowStyleCompactTableCell(tdMiss, '5rem');
                 tdMiss.appendChild(renderBoolCheckbox(v.missing, v.missing ? 'Missing' : 'Not missing'));
                 tr.appendChild(tdMiss);
               }
             } else {
               const tdToChain = document.createElement('td');
+              flowStyleCompactTableCell(tdToChain, '5rem');
               tdToChain.appendChild(renderBoolCheckbox(v.toChain, 'Provided to chain'));
               tr.appendChild(tdToChain);
             }
@@ -5690,6 +5769,7 @@
                 fromChain: provArtChainSet.has(n),
                 fromSeq: provArtSeqSet.has(n),
                 missing: missArtSet.has(n),
+                resolved: resolvedInputs ? resolvedInputs[n] : undefined,
               });
             });
 
@@ -5728,6 +5808,7 @@
                 fromChain: provFldChainSet.has(n),
                 fromSeq: provFldSeqSet.has(n),
                 missing: missFldSet.has(n),
+                resolved: resolvedInputs ? resolvedInputs[n] : undefined,
               });
             });
             collapsePivotInputRows(rows).forEach(addRowVar);
@@ -5771,7 +5852,7 @@
           }
 
           tbl.appendChild(tbody2);
-          return tbl;
+          return flowScrollableTable(tbl);
         }
 
         // Single tabbed table (Inputs/Outputs) in chain order.
@@ -5802,7 +5883,7 @@
 
         const inputLegend = document.createElement('div');
         inputLegend.className = 'small text-muted mb-2';
-        inputLegend.textContent = '* required input (blocking), Optional badge = non-blocking for step completion';
+        inputLegend.textContent = '* required input (blocking); inputs without * are optional';
         ioWrap.appendChild(inputLegend);
 
         const inputsPane = document.createElement('div');
@@ -6937,8 +7018,6 @@
       }
 
       function renderVarName(name, required, options) {
-        const opts = (options && typeof options === 'object') ? options : {};
-        const showOptionalBadge = !!opts.showOptionalBadge;
         const span = document.createElement('span');
         span.style.whiteSpace = 'nowrap';
         const code = document.createElement('code');
@@ -6951,12 +7030,6 @@
           star.textContent = '*';
           star.title = 'Required input (blocking for step completion)';
           span.appendChild(star);
-        } else if (showOptionalBadge) {
-          const badge = document.createElement('span');
-          badge.className = 'badge text-bg-secondary ms-2';
-          badge.textContent = 'Optional';
-          badge.title = 'Optional input (non-blocking for step completion)';
-          span.appendChild(badge);
         }
         return span;
       }
@@ -7036,11 +7109,13 @@
           const tr = document.createElement('tr');
 
           const tdVar = document.createElement('td');
-          tdVar.appendChild(renderVarName(v.name, v.required, { showOptionalBadge: isInputs }));
+          tdVar.appendChild(renderVarName(v.name, v.required));
+          flowStyleCompactTableCell(tdVar, '12rem');
 
           const tdType = document.createElement('td');
           tdType.className = 'text-muted';
           tdType.style.whiteSpace = 'nowrap';
+          flowStyleCompactTableCell(tdType, '6rem');
           let typeLabel = v.kind;
           try {
             if (isInputs && v.kind === 'Field') {
@@ -7051,14 +7126,14 @@
           tdType.textContent = typeLabel;
 
           const tdRes = document.createElement('td');
-          tdRes.className = 'small';
           if (v.kind === 'Field') {
-            tdRes.appendChild(renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name));
+            flowAppendResolvedCell(tdRes, renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name));
           } else {
-            tdRes.textContent = '-';
+            flowAppendResolvedCell(tdRes, '-');
           }
 
           const tdOvr = document.createElement('td');
+          tdOvr.style.minWidth = '16rem';
           if (v.kind === 'Field') {
             const inp = document.createElement('input');
             inp.type = 'text';
@@ -7269,19 +7344,23 @@
 
           if (isInputs) {
             const tdFromChain = document.createElement('td');
+            flowStyleCompactTableCell(tdFromChain, '5rem');
             tdFromChain.appendChild(renderBoolCheckbox(v.fromChain, 'Provided by chain'));
             const tdFromSeq = document.createElement('td');
+            flowStyleCompactTableCell(tdFromSeq, '7rem');
             tdFromSeq.appendChild(renderBoolCheckbox(v.fromSeq, 'Provided by sequencer (synthesized)'));
             tr.appendChild(tdFromChain);
             tr.appendChild(tdFromSeq);
             if (showMissingCol) {
               const tdMiss = document.createElement('td');
               if (v.missing) tdMiss.classList.add('text-danger');
+              flowStyleCompactTableCell(tdMiss, '5rem');
               tdMiss.appendChild(renderBoolCheckbox(v.missing, v.missing ? 'Missing' : 'Not missing'));
               tr.appendChild(tdMiss);
             }
           } else {
             const tdToChain = document.createElement('td');
+            flowStyleCompactTableCell(tdToChain, '5rem');
             tdToChain.appendChild(renderBoolCheckbox(v.toChain, 'Provided to chain'));
             tr.appendChild(tdToChain);
           }
@@ -7364,7 +7443,7 @@
         }
 
         tbl.appendChild(tbody2);
-        return tbl;
+        return flowScrollableTable(tbl);
       }
 
       const ioOuter = document.createElement('div');
@@ -7372,7 +7451,7 @@
 
       const ioHelp = document.createElement('div');
       ioHelp.className = 'small text-muted';
-      ioHelp.textContent = 'Inputs/Outputs view for this step. Resolved values appear after Generate (with hint resolution) or Execute. * means required (blocking); Optional means non-blocking for step completion.';
+      ioHelp.textContent = 'Inputs/Outputs view for this step. Resolved values appear after Generate (with hint resolution) or Execute. * means required (blocking); inputs without * are optional.';
       ioOuter.appendChild(ioHelp);
 
       const tabBar = document.createElement('div');
@@ -8574,14 +8653,16 @@
         code.className = 'font-monospace';
         code.textContent = String(row.name || '-');
         tdVar.appendChild(code);
+        flowStyleCompactTableCell(tdVar, '12rem');
         const tdType = document.createElement('td');
         tdType.className = 'text-muted';
         tdType.style.whiteSpace = 'nowrap';
         tdType.textContent = String(row.kind || 'Field');
+        flowStyleCompactTableCell(tdType, '6rem');
         const tdRes = document.createElement('td');
-        tdRes.className = 'small';
-        tdRes.appendChild(renderResolvedInline(row.resolved));
+        flowAppendResolvedCell(tdRes, renderResolvedInline(row.resolved));
         const tdOvr = document.createElement('td');
+        tdOvr.style.minWidth = '16rem';
         const ovrInput = document.createElement('input');
         ovrInput.type = 'text';
         ovrInput.className = 'form-control form-control-sm font-monospace';
@@ -8600,8 +8681,10 @@
         });
         tdOvr.appendChild(ovrInput);
         const tdFromChain = document.createElement('td');
+        flowStyleCompactTableCell(tdFromChain, '5rem');
         tdFromChain.appendChild(renderBoolCheckbox(row.fromChain));
         const tdFromSeq = document.createElement('td');
+        flowStyleCompactTableCell(tdFromSeq, '7rem');
         tdFromSeq.appendChild(renderBoolCheckbox(row.fromSeq));
         tr.appendChild(tdVar);
         tr.appendChild(tdType);
@@ -8612,13 +8695,14 @@
         if (showMissing) {
           const tdMiss = document.createElement('td');
           if (row.missing) tdMiss.classList.add('text-danger');
+          flowStyleCompactTableCell(tdMiss, '5rem');
           tdMiss.appendChild(renderBoolCheckbox(row.missing));
           tr.appendChild(tdMiss);
         }
         tbody.appendChild(tr);
       });
       tbl.appendChild(tbody);
-      return tbl;
+      return flowScrollableTable(tbl);
     }
 
     function buildOutputsTable(rows) {
@@ -8636,14 +8720,16 @@
         code.className = 'font-monospace';
         code.textContent = String(row.name || '-');
         tdVar.appendChild(code);
+        flowStyleCompactTableCell(tdVar, '12rem');
         const tdType = document.createElement('td');
         tdType.className = 'text-muted';
         tdType.style.whiteSpace = 'nowrap';
         tdType.textContent = String(row.kind || 'Field');
+        flowStyleCompactTableCell(tdType, '6rem');
         const tdRes = document.createElement('td');
-        tdRes.className = 'small';
-        tdRes.appendChild(renderResolvedInline(row.resolved));
+        flowAppendResolvedCell(tdRes, renderResolvedInline(row.resolved));
         const tdOvr = document.createElement('td');
+        tdOvr.style.minWidth = '16rem';
         const ovrInput = document.createElement('input');
         ovrInput.type = 'text';
         ovrInput.className = 'form-control form-control-sm font-monospace';
@@ -8657,6 +8743,7 @@
         });
         tdOvr.appendChild(ovrInput);
         const tdToChain = document.createElement('td');
+        flowStyleCompactTableCell(tdToChain, '5rem');
         tdToChain.appendChild(renderBoolCheckbox(row.toChain));
         tr.appendChild(tdVar);
         tr.appendChild(tdType);
@@ -8666,7 +8753,7 @@
         tbody.appendChild(tr);
       });
       tbl.appendChild(tbody);
-      return tbl;
+      return flowScrollableTable(tbl);
     }
 
     try {
