@@ -168,45 +168,11 @@ def _attack_graph_for_chain(
     except Exception:
         assignment_by_node_id = {}
 
-    nodes_out: list[dict[str, Any]] = []
-    edges_out: list[dict[str, Any]] = []
-
     def _node_ipv4(node: dict[str, Any]) -> str:
         try:
             return _first_valid_ipv4(node.get('ipv4') or node.get('ip4') or node.get('ip') or '')
         except Exception:
             return ''
-
-    def _outputs_for_assignment(assignment: dict[str, Any] | None) -> list[str]:
-        if not isinstance(assignment, dict):
-            return []
-        out: list[str] = []
-        try:
-            outputs = assignment.get('outputs')
-            if isinstance(outputs, list):
-                out.extend([str(item or '').strip() for item in outputs if str(item or '').strip()])
-        except Exception:
-            pass
-        try:
-            produces = assignment.get('produces')
-            if isinstance(produces, list):
-                out.extend([str(item or '').strip() for item in produces if str(item or '').strip()])
-        except Exception:
-            pass
-        try:
-            fields = assignment.get('output_fields')
-            if isinstance(fields, list):
-                out.extend([str(item or '').strip() for item in fields if str(item or '').strip()])
-        except Exception:
-            pass
-        seen: set[str] = set()
-        uniq: list[str] = []
-        for key in out:
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            uniq.append(key)
-        return uniq
 
     def _resolved_map(assignment: dict[str, Any] | None, key: str) -> dict[str, Any]:
         if not isinstance(assignment, dict):
@@ -235,12 +201,65 @@ def _attack_graph_for_chain(
             items.append(f"{key_str}={value_str}" if value_str else key_str)
         return items
 
+    def _normalize_fact_names(value: Any, preferred_keys: list[str] | None = None) -> list[str]:
+        keys = preferred_keys or ['artifact', 'name', 'field']
+        seen: set[str] = set()
+        out: list[str] = []
+
+        def _push(item: Any) -> None:
+            if item is None:
+                return
+            if isinstance(item, list):
+                for nested in item:
+                    _push(nested)
+                return
+            if isinstance(item, dict):
+                for key in keys:
+                    nested = item.get(key)
+                    if nested is not None and str(nested or '').strip():
+                        _push(nested)
+                        return
+                return
+            fact_name = str(item or '').strip()
+            if not fact_name or fact_name in seen:
+                return
+            seen.add(fact_name)
+            out.append(fact_name)
+
+        _push(value)
+        return out
+
+    def _requirements_for_assignment(assignment: dict[str, Any] | None, synthesized_set: set[str]) -> dict[str, list[str]]:
+        item = assignment if isinstance(assignment, dict) else {}
+        raw_artifacts = _normalize_fact_names(item.get('requires'), ['artifact', 'name'])
+        artifacts = [name for name in raw_artifacts if name and name not in synthesized_set]
+        field_base = _normalize_fact_names(item.get('input_fields_required'), ['name', 'field'])
+        if not field_base:
+            field_base = _normalize_fact_names(item.get('input_fields'), ['name', 'field'])
+        fields = field_base + [name for name in raw_artifacts if name and name in synthesized_set]
+        optional_fields = set(_normalize_fact_names(item.get('input_fields_optional'), ['name', 'field']))
+        return {
+            'artifacts': [name for name in artifacts if name and name not in optional_fields],
+            'fields': [name for name in fields if name and name not in optional_fields],
+        }
+
+    def _outputs_for_assignment(assignment: dict[str, Any] | None) -> dict[str, list[str]]:
+        item = assignment if isinstance(assignment, dict) else {}
+        return {
+            'artifacts': _normalize_fact_names(item.get('produces'), ['artifact', 'name']),
+            'fields': _normalize_fact_names(item.get('output_fields'), ['name', 'field']),
+            'effective': _normalize_fact_names(item.get('outputs'), ['name', 'artifact', 'field']),
+        }
+
+    nodes_out: list[dict[str, Any]] = []
+    chain_order: list[str] = []
     for step_index, node in enumerate((chain_nodes or []), start=1):
         if not isinstance(node, dict):
             continue
         nid = str(node.get('id') or '').strip()
         if not nid:
             continue
+        chain_order.append(nid)
         assignment = assignment_by_node_id.get(nid)
         generator: dict[str, Any] = {}
         if isinstance(assignment, dict):
@@ -251,20 +270,6 @@ def _attack_graph_for_chain(
                 'source': str(assignment.get('flag_generator') or ''),
                 'catalog': str(assignment.get('generator_catalog') or ''),
                 'sequence_index': int(step_index),
-                'chain': [
-                    {
-                        'sequence_index': int(chain_index),
-                        'id': str(n.get('id') or ''),
-                        'name': str(n.get('name') or ''),
-                        'type': str(n.get('type') or ''),
-                        'is_vuln': bool(n.get('is_vuln')),
-                        'ip4': str(n.get('ip4') or ''),
-                        'ipv4': str(n.get('ipv4') or ''),
-                        'interfaces': list(n.get('interfaces') or []) if isinstance(n.get('interfaces'), list) else [],
-                    }
-                    for chain_index, n in enumerate(chain_nodes, start=1)
-                    if isinstance(n, dict)
-                ],
                 'resolved_inputs': _resolved_map(assignment, 'resolved_inputs'),
                 'resolved_outputs': _resolved_map(assignment, 'resolved_outputs'),
                 'flag_value': assignment.get('flag_value'),
@@ -279,44 +284,117 @@ def _attack_graph_for_chain(
             'generator': generator or None,
         })
 
-    for i in range(len(chain_nodes) - 1):
-        src = chain_nodes[i]
-        tgt = chain_nodes[i + 1]
-        if not isinstance(src, dict) or not isinstance(tgt, dict):
+    synthesized_fields = ['seed', 'secret', 'env_name', 'challenge', 'flag_prefix', 'username_prefix', 'key_len', 'node_name']
+    synthesized_set = set(synthesized_fields)
+    initial_artifacts = {'Knowledge(ip)'}
+    initial_fields = set(synthesized_fields)
+
+    stage_by_index: list[int] = [0] * len(nodes_out)
+    last_artifact_provider: dict[str, int] = {}
+    last_field_provider: dict[str, int] = {}
+    edge_facts_by_pair: dict[tuple[int, int], list[str]] = {}
+
+    for node_index, node_meta in enumerate(nodes_out):
+        assignment = assignment_by_node_id.get(str(node_meta.get('id') or '').strip()) or {}
+        requirements = _requirements_for_assignment(assignment, synthesized_set)
+        provider_indexes: set[int] = set()
+        provider_facts_by_index: dict[int, list[str]] = {}
+
+        def _add_provider(provider_idx: int, fact_name: str) -> None:
+            if provider_idx < 0 or provider_idx >= len(nodes_out):
+                return
+            facts = provider_facts_by_index.setdefault(provider_idx, [])
+            if fact_name and fact_name not in facts:
+                facts.append(fact_name)
+            provider_indexes.add(provider_idx)
+
+        for fact_name in requirements.get('artifacts', []):
+            if not fact_name or fact_name in initial_artifacts:
+                continue
+            provider_idx = last_artifact_provider.get(fact_name)
+            if isinstance(provider_idx, int):
+                _add_provider(provider_idx, fact_name)
+
+        for fact_name in requirements.get('fields', []):
+            if not fact_name or fact_name in initial_fields:
+                continue
+            provider_idx = last_field_provider.get(fact_name)
+            if isinstance(provider_idx, int):
+                _add_provider(provider_idx, fact_name)
+
+        stage = 0
+        for provider_idx in provider_indexes:
+            stage = max(stage, (stage_by_index[provider_idx] or 0) + 1)
+            pair = (provider_idx, node_index)
+            edge_facts = edge_facts_by_pair.setdefault(pair, [])
+            for fact_name in provider_facts_by_index.get(provider_idx, []):
+                if fact_name and fact_name not in edge_facts:
+                    edge_facts.append(fact_name)
+        stage_by_index[node_index] = stage
+
+        outputs = _outputs_for_assignment(assignment)
+        for fact_name in outputs.get('artifacts', []):
+            if fact_name:
+                last_artifact_provider[fact_name] = node_index
+        for fact_name in outputs.get('fields', []):
+            if fact_name:
+                last_field_provider[fact_name] = node_index
+
+    edges_out: list[dict[str, Any]] = []
+    for (from_index, to_index), facts in edge_facts_by_pair.items():
+        if from_index < 0 or to_index < 0 or from_index >= len(nodes_out) or to_index >= len(nodes_out):
             continue
-        src_id = str(src.get('id') or '').strip()
-        tgt_id = str(tgt.get('id') or '').strip()
+        src_id = str(nodes_out[from_index].get('id') or '').strip()
+        tgt_id = str(nodes_out[to_index].get('id') or '').strip()
         if not src_id or not tgt_id:
             continue
         assignment = assignment_by_node_id.get(src_id)
         resolved_out = _resolved_map(assignment, 'resolved_outputs')
         edges_out.append({
-            'sequence_index': int(i + 1),
+            'sequence_index': int(from_index + 1),
             'source': src_id,
             'target': tgt_id,
-            'artifacts': _outputs_for_assignment(assignment),
+            'facts': list(facts),
+            'artifacts': list(facts),
             'artifacts_resolved': resolved_out,
             'artifacts_resolved_kv': _resolved_kv_list(resolved_out),
         })
 
+    stage_map: dict[int, list[int]] = {}
+    for node_index, stage in enumerate(stage_by_index):
+        stage_key = int(stage) if isinstance(stage, int) else 0
+        stage_map.setdefault(stage_key, []).append(node_index)
+    stages = [
+        {'stage': stage, 'indices': indices}
+        for stage, indices in sorted(stage_map.items(), key=lambda item: item[0])
+    ]
+
     return {
         'schema_version': 1,
         'scenario': str(scenario_label or ''),
-        'chain_order': [str(node.get('id') or '').strip() for node in (chain_nodes or []) if isinstance(node, dict) and str(node.get('id') or '').strip()],
-        'assignment_order': [str(assignment.get('node_id') or '').strip() for assignment in (flag_assignments or []) if isinstance(assignment, dict) and str(assignment.get('node_id') or '').strip()],
+        'chain_order': chain_order,
+        'assignment_order': [
+            str(assignment.get('node_id') or '').strip()
+            for assignment in (flag_assignments or [])
+            if isinstance(assignment, dict) and str(assignment.get('node_id') or '').strip()
+        ],
         'nodes': nodes_out,
         'edges': edges_out,
+        'stages': stages,
     }
 
 
 def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
-    """Return a Graphviz DOT representation of the attack graph."""
+    """Return a Graphviz DOT representation aligned with the Mermaid flow graph."""
     nodes = attack_graph.get('nodes') if isinstance(attack_graph, dict) else None
     edges = attack_graph.get('edges') if isinstance(attack_graph, dict) else None
+    stages = attack_graph.get('stages') if isinstance(attack_graph, dict) else None
     if not isinstance(nodes, list):
         nodes = []
     if not isinstance(edges, list):
         edges = []
+    if not isinstance(stages, list):
+        stages = []
 
     def _esc(text: Any) -> str:
         s = str(text or '')
@@ -324,68 +402,97 @@ def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
         s = s.replace('\n', '\\n')
         return s
 
-    lines: list[str] = ['digraph attack_graph {']
-    lines.append('  rankdir=LR;')
-    lines.append('  node [shape=box, fontsize=10];')
-    for n in nodes:
-        if not isinstance(n, dict):
+    def _to_roman(n: int) -> str:
+        if n <= 0:
+            return ''
+        vals = [
+            (1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),
+            (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),
+            (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I'),
+        ]
+        out: list[str] = []
+        rem = int(n)
+        for value, token in vals:
+            while rem >= value:
+                out.append(token)
+                rem -= value
+        return ''.join(out)
+
+    def _compact_edge_label(facts: list[Any]) -> str:
+        clean = [str(item or '').strip() for item in facts if str(item or '').strip()]
+        if not clean:
+            return ''
+        label = clean[0]
+        if len(clean) > 1:
+            label = f"{label} +{len(clean) - 1}"
+        return label if len(label) <= 56 else (label[:53] + '...')
+
+    node_by_id: dict[str, dict[str, Any]] = {}
+    for idx, node in enumerate(nodes):
+        if not isinstance(node, dict):
             continue
-        nid = str(n.get('id') or '').strip()
+        nid = str(node.get('id') or '').strip()
         if not nid:
             continue
+        node_by_id[nid] = node
+
+    ordered_node_ids = [str(n.get('id') or '').strip() for n in nodes if isinstance(n, dict) and str(n.get('id') or '').strip()]
+    dot_ref_by_id = {nid: f"N{idx}" for idx, nid in enumerate(ordered_node_ids)}
+
+    lines: list[str] = ['digraph attack_graph {']
+    lines.append('  rankdir=LR;')
+    lines.append('  graph [pad="0.25", nodesep="1.0", ranksep="1.6", splines=polyline, overlap=false];')
+    lines.append('  node [shape=box, style="rounded,filled", fillcolor="#f8fafc", color="#64748b", fontsize=11, fontname="Trebuchet MS"];')
+    lines.append('  edge [color="#2563eb", fontsize=10, fontname="Trebuchet MS", penwidth=1.4, arrowsize=0.8, decorate=false, labelfloat=false];')
+
+    for idx, nid in enumerate(ordered_node_ids):
+        n = node_by_id.get(nid)
+        if not isinstance(n, dict):
+            continue
         label = str(n.get('label') or nid)
-        try:
-            seq = int(n.get('sequence_index') or 0)
-        except Exception:
-            seq = 0
-        if seq > 0:
-            label = f"Step {seq}: {label}"
-        gen = n.get('generator') if isinstance(n.get('generator'), dict) else None
-        gen_name = str((gen or {}).get('name') or '').strip()
-        gen_kind = str((gen or {}).get('kind') or '').strip()
-        ip = str(n.get('ipv4') or '').strip()
-        parts = [label]
-        if ip:
-            parts.append(f"@ {ip}")
-        if gen_name or gen_kind:
-            gline = gen_name if gen_name else ''
-            if gen_kind:
-                gline = f"{gline} [{gen_kind}]" if gline else f"[{gen_kind}]"
-            parts.append(gline)
-        try:
-            rin = (gen or {}).get('resolved_inputs') if isinstance(gen, dict) else None
-            if isinstance(rin, dict) and rin:
-                items = []
-                for k, v in list(rin.items())[:3]:
-                    try:
-                        vs = v.strip() if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                    except Exception:
-                        vs = str(v)
-                    kk = str(k or '').strip()
-                    if kk:
-                        items.append(f"{kk}={vs}" if vs else kk)
-                if items:
-                    parts.append("in: " + ", ".join(items))
-        except Exception:
-            pass
-        try:
-            rout = (gen or {}).get('resolved_outputs') if isinstance(gen, dict) else None
-            if isinstance(rout, dict) and rout:
-                items = []
-                for k, v in list(rout.items())[:3]:
-                    try:
-                        vs = v.strip() if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                    except Exception:
-                        vs = str(v)
-                    kk = str(k or '').strip()
-                    if kk:
-                        items.append(f"{kk}={vs}" if vs else kk)
-                if items:
-                    parts.append("out: " + ", ".join(items))
-        except Exception:
-            pass
-        node_label = "\\n".join([p for p in parts if p])
-        lines.append(f"  \"{_esc(nid)}\" [label=\"{_esc(node_label)}\"];" )
+        roman = _to_roman(idx + 1)
+        prefixed = f"{roman}. {label}" if roman else label
+        dot_ref = dot_ref_by_id.get(nid) or nid
+        is_vuln = bool(n.get('is_vuln'))
+        node_fill = '#fff4e6' if is_vuln else '#f8fafc'
+        node_stroke = '#d97706' if is_vuln else '#64748b'
+        lines.append(
+            f"  \"{_esc(dot_ref)}\" [label=\"{_esc(prefixed)}\", fillcolor=\"{node_fill}\", color=\"{node_stroke}\", penwidth=\"1.4\"];"
+        )
+
+    if stages:
+        stage_anchor_ids: list[str] = []
+        for stage_ord, stage_group in enumerate(stages):
+            if not isinstance(stage_group, dict):
+                continue
+            indices = stage_group.get('indices') if isinstance(stage_group.get('indices'), list) else []
+            valid_indices = [int(i) for i in indices if isinstance(i, int) and i >= 0 and i < len(nodes)]
+            if not valid_indices:
+                continue
+            stage_label = 'Parallel' if len(valid_indices) > 1 else 'Step'
+            stage_anchor = f"STAGE_{stage_ord}"
+            stage_anchor_ids.append(stage_anchor)
+            lines.append(f"  subgraph \"cluster_G{stage_ord}\" {{")
+            lines.append(f"    label=\"{_esc(stage_label + ' ' + str(stage_ord + 1))}\";")
+            lines.append('    color="#cbd5e1";')
+            lines.append('    style="rounded";')
+            lines.append('    penwidth=1.2;')
+            lines.append('    rank=same;')
+            lines.append(f"    \"{_esc(stage_anchor)}\" [label=\"\", shape=point, width=0, height=0, style=invis];")
+            for node_idx in valid_indices:
+                node = nodes[node_idx] if node_idx < len(nodes) else None
+                if not isinstance(node, dict):
+                    continue
+                nid = str(node.get('id') or '').strip()
+                if nid:
+                    dot_ref = dot_ref_by_id.get(nid) or nid
+                    lines.append(f"    \"{_esc(dot_ref)}\";")
+            lines.append('  }')
+        for idx in range(len(stage_anchor_ids) - 1):
+            left = stage_anchor_ids[idx]
+            right = stage_anchor_ids[idx + 1]
+            lines.append(f"  \"{_esc(left)}\" -> \"{_esc(right)}\" [style=invis, weight=100, minlen=2];")
+
     for e in edges:
         if not isinstance(e, dict):
             continue
@@ -393,22 +500,16 @@ def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
         tgt = str(e.get('target') or '').strip()
         if not src or not tgt:
             continue
-        artifacts = e.get('artifacts') if isinstance(e.get('artifacts'), list) else []
-        resolved_kv = e.get('artifacts_resolved_kv') if isinstance(e.get('artifacts_resolved_kv'), list) else []
-        label = ""
-        try:
-            items = [str(x or '').strip() for x in artifacts if str(x or '').strip()]
-            items = items + [str(x or '').strip() for x in resolved_kv if str(x or '').strip()]
-            if items:
-                label = "\\n".join(items[:6])
-                if len(items) > 6:
-                    label = label + "\\n..."
-        except Exception:
-            label = ""
+        src_ref = dot_ref_by_id.get(src) or src
+        tgt_ref = dot_ref_by_id.get(tgt) or tgt
+        facts = e.get('facts') if isinstance(e.get('facts'), list) else []
+        if not facts:
+            facts = e.get('artifacts') if isinstance(e.get('artifacts'), list) else []
+        label = _compact_edge_label(facts)
         if label:
-            lines.append(f"  \"{_esc(src)}\" -> \"{_esc(tgt)}\" [label=\"{_esc(label)}\"];" )
+            lines.append(f"  \"{_esc(src_ref)}\" -> \"{_esc(tgt_ref)}\" [label=\"{_esc(label)}\"];" )
         else:
-            lines.append(f"  \"{_esc(src)}\" -> \"{_esc(tgt)}\";" )
+            lines.append(f"  \"{_esc(src_ref)}\" -> \"{_esc(tgt_ref)}\";")
     lines.append('}')
     return "\n".join(lines)
 
