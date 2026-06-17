@@ -937,30 +937,96 @@
     } catch (e) { }
   }
 
-  async function saveFlowStateToXml(xmlPath) {
+  function buildCurrentFlowStatePayload(options) {
+    const opts = (options && typeof options === 'object') ? options : {};
+    const scenario = (scenarioEl && scenarioEl.value || activeScenario || '').trim();
+    if (!scenario) return null;
+    const chain_ids = (!flowEnabled)
+      ? []
+      : (Array.isArray(currentChain) ? currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean) : []);
+    const payload = {
+      scenario,
+      preset: (presetEl && presetEl.value) ? String(presetEl.value).trim() : '',
+      length: chain_ids.length,
+      dependency_level: getFlowDependencyLevel(),
+      chain_ids,
+      flag_assignments: (!flowEnabled) ? [] : buildPersistAssignments(chain_ids),
+      allow_node_duplicates: !!allowNodeDuplicates,
+      include_all_topology_vulns: !!includeAllTopologyVulns,
+      include_all_topology_pivots: !!includeAllTopologyPivots,
+      initial_facts: flowInitialFactsOverride,
+      goal_facts: flowGoalFactsOverride,
+      flow_enabled: !!flowEnabled,
+      topology_dirty: !!topologyDirty,
+      topology_dirty_reason: topologyDirtyReason || '',
+    };
+    if (opts.includeUpdatedAt !== false) {
+      payload.updated_at = Date.now();
+    }
+    return payload;
+  }
+
+  function flowStateXmlComparable(state) {
+    if (!state || typeof state !== 'object') return null;
+    const chain_ids = Array.isArray(state.chain_ids)
+      ? state.chain_ids.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    return {
+      scenario: String(state.scenario || '').trim(),
+      preset: String(state.preset || '').trim(),
+      length: chain_ids.length,
+      dependency_level: normalizeDependencyLevel(state.dependency_level),
+      chain_ids,
+      flag_assignments: Array.isArray(state.flag_assignments) ? state.flag_assignments : [],
+      allow_node_duplicates: !!state.allow_node_duplicates,
+      include_all_topology_vulns: !!state.include_all_topology_vulns,
+      include_all_topology_pivots: !!state.include_all_topology_pivots,
+      initial_facts: normalizeFactsOverride(state.initial_facts),
+      goal_facts: normalizeFactsOverride(state.goal_facts),
+      flow_enabled: !!state.flow_enabled,
+      topology_dirty: !!state.topology_dirty,
+      topology_dirty_reason: state.topology_dirty ? String(state.topology_dirty_reason || '').trim() : '',
+    };
+  }
+
+  function flowStateXmlSignature(state) {
+    try {
+      const comparable = flowStateXmlComparable(state);
+      return comparable ? JSON.stringify(comparable) : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function shouldSaveFlowStateToXml(xmlPath) {
     try {
       const scenario = (scenarioEl && scenarioEl.value || activeScenario || '').trim();
-      if (!scenario) return false;
-      const chain_ids = (!flowEnabled)
-        ? []
-        : (Array.isArray(currentChain) ? currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean) : []);
-      const flowStatePayload = {
-        scenario,
-        preset: (presetEl && presetEl.value) ? String(presetEl.value).trim() : '',
-        length: chain_ids.length,
-        dependency_level: getFlowDependencyLevel(),
-        chain_ids: chain_ids,
-        flag_assignments: (!flowEnabled) ? [] : buildPersistAssignments(chain_ids),
-        allow_node_duplicates: !!allowNodeDuplicates,
-        include_all_topology_vulns: !!includeAllTopologyVulns,
-        include_all_topology_pivots: !!includeAllTopologyPivots,
-        initial_facts: flowInitialFactsOverride,
-        goal_facts: flowGoalFactsOverride,
-        flow_enabled: !!flowEnabled,
-        topology_dirty: !!topologyDirty,
-        topology_dirty_reason: topologyDirtyReason || '',
-        updated_at: Date.now(),
-      };
+      const targetXmlPath = String(xmlPath || '').trim();
+      if (!scenario || !targetXmlPath) return true;
+
+      let latestXmlPath = '';
+      try {
+        if (typeof window.coretgGetLatestXmlPathForScenario === 'function') {
+          latestXmlPath = String(window.coretgGetLatestXmlPathForScenario(scenario) || '').trim();
+        }
+      } catch (e) { latestXmlPath = ''; }
+      if (!latestXmlPath || latestXmlPath !== targetXmlPath) return true;
+
+      const key = normalizeScenarioNorm(scenario);
+      const savedState = (key && flowStateByScenario && typeof flowStateByScenario === 'object') ? flowStateByScenario[key] : null;
+      const currentSig = flowStateXmlSignature(buildCurrentFlowStatePayload({ includeUpdatedAt: false }));
+      const savedSig = flowStateXmlSignature(savedState);
+      return !currentSig || !savedSig || currentSig !== savedSig;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  async function saveFlowStateToXml(xmlPath) {
+    try {
+      const flowStatePayload = buildCurrentFlowStatePayload({ includeUpdatedAt: true });
+      const scenario = String((flowStatePayload && flowStatePayload.scenario) || '').trim();
+      if (!scenario || !flowStatePayload) return false;
       if (!xmlPath) return false;
       await postJson('/api/flag-sequencing/save_flow_state_to_xml', {
         xml_path: xmlPath,
@@ -13109,8 +13175,6 @@ ${out.join('\n')}
       persistFlowState();
 
       if (execEl) execEl.disabled = true;
-      setStatus('Saving flow state…', false);
-      showLoading('Saving flow state…');
       let xmlPath = '';
       try {
         if (typeof window.coretgGetLatestXmlPathForScenario === 'function') {
@@ -13131,8 +13195,13 @@ ${out.join('\n')}
         }
       }
 
-      if (!(await saveFlowStateToXml(xmlPath))) {
-        throw new Error('Failed to save Flag Sequencing state into XML.');
+      const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);
+      if (shouldPersistFlowState) {
+        setStatus('Saving flow state…', false);
+        showLoading('Saving flow state…');
+        if (!(await saveFlowStateToXml(xmlPath))) {
+          throw new Error('Failed to save Flag Sequencing state into XML.');
+        }
       }
 
       if (!flowEnabled) {
@@ -13769,7 +13838,8 @@ ${out.join('\n')}
           alert('Save XML first to preview.');
           return;
         }
-        if (!(await saveFlowStateToXml(xmlPath))) {
+        const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);
+        if (shouldPersistFlowState && !(await saveFlowStateToXml(xmlPath))) {
           throw new Error('Failed to save Flag Sequencing state into XML.');
         }
         const baseUrl = String(link.dataset?.previewBaseUrl || '/scenarios/preview');

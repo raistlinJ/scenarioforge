@@ -7541,8 +7541,12 @@
                 coreState.last_validated_at = null;
                 coreState.stored_summary = null;
             } catch (e) { /* ignore */ }
+            const { scenario: activeScenario } = getActiveScenarioContext();
+            const inlinePreviewScenarios = (IS_BUILDER_VIEW && activeScenario)
+                ? [activeScenario]
+                : state.scenarios;
             const baseBody = IS_BUILDER_VIEW
-                ? { scenarios: state.scenarios, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) }
+                ? { scenarios: inlinePreviewScenarios, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) }
                 : { xml_path: newXmlPath, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) };
             const body = enrichPayloadWithScenarioContext(baseBody);
 

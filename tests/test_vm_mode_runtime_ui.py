@@ -154,3 +154,16 @@ def test_hitl_verify_updates_bridge_metadata_with_canonical_name() -> None:
     ]
     missing = [snippet for snippet in expected if snippet not in index_text]
     assert not missing, "Missing verify bridge-sync snippets: " + "; ".join(missing)
+
+
+def test_builder_preview_inline_request_uses_active_scenario_only() -> None:
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected = [
+        "const { scenario: activeScenario } = getActiveScenarioContext();",
+        "const inlinePreviewScenarios = (IS_BUILDER_VIEW && activeScenario)",
+        "? [activeScenario]",
+        "? { scenarios: inlinePreviewScenarios, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) }",
+    ]
+    missing = [snippet for snippet in expected if snippet not in index_text]
+    assert not missing, "Missing builder preview active-scenario snippets: " + "; ".join(missing)

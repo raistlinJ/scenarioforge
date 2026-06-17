@@ -23764,6 +23764,140 @@ def _scenario_names_from_xml(xml_path: str) -> list[str]:
     return names
 
 
+def _scenario_payloads_from_xml_input(
+    xml_path: str | None,
+    session_xml_str: str | None,
+    *,
+    default_scenario_name: str = 'Scenario',
+) -> list[dict[str, Any]]:
+    if xml_path and os.path.exists(xml_path):
+        try:
+            parsed = _parse_scenarios_xml(xml_path)
+            scenarios = parsed.get('scenarios') if isinstance(parsed, dict) else None
+            if isinstance(scenarios, list):
+                return [sc for sc in scenarios if isinstance(sc, dict)]
+        except Exception:
+            return []
+
+    raw = str(session_xml_str or '').strip()
+    if not raw:
+        return []
+
+    try:
+        root = ET.fromstring(raw)
+    except Exception:
+        return []
+
+    scenarios: list[dict[str, Any]] = []
+    if root.tag == 'Scenarios':
+        for scen_el in root.findall('Scenario'):
+            if not isinstance(scen_el, ET.Element):
+                continue
+            se = scen_el.find('ScenarioEditor')
+            if se is None:
+                continue
+            scen = {'name': scen_el.get('name', default_scenario_name)}
+            scen.update(_parse_scenario_editor(se))
+            scenarios.append(scen)
+        return scenarios
+
+    if root.tag == 'ScenarioEditor':
+        scen = _parse_scenario_editor(root)
+        scen['name'] = default_scenario_name
+        scenarios.append(scen)
+    return scenarios
+
+
+def _required_builtin_core_services_for_xml_input(
+    xml_path: str | None,
+    session_xml_str: str | None,
+    *,
+    scenario_name: str | None = None,
+) -> set[str]:
+    scenarios = _scenario_payloads_from_xml_input(
+        xml_path,
+        session_xml_str,
+        default_scenario_name=str(scenario_name or 'Scenario').strip() or 'Scenario',
+    )
+    if not scenarios:
+        return set()
+
+    target_norm = _normalize_scenario_label(scenario_name or '')
+    scenario_payload: dict[str, Any] | None = None
+    if target_norm:
+        for candidate in scenarios:
+            name = str(candidate.get('name') or '').strip()
+            if _normalize_scenario_label(name) == target_norm:
+                scenario_payload = candidate
+                break
+    if scenario_payload is None:
+        scenario_payload = scenarios[0]
+
+    sections = scenario_payload.get('sections') if isinstance(scenario_payload, dict) else None
+    if not isinstance(sections, dict):
+        return set()
+    service_section = sections.get('Services') if isinstance(sections.get('Services'), dict) else None
+    if not isinstance(service_section, dict):
+        return set()
+    service_items = service_section.get('items') if isinstance(service_section.get('items'), list) else []
+    if not service_items:
+        return set()
+
+    try:
+        section_density = float(service_section.get('density') or 0.0)
+    except Exception:
+        section_density = 0.0
+    if section_density < 0:
+        section_density = 0.0
+
+    required: set[str] = set()
+    concrete: set[str] = set()
+    saw_random = False
+    canonical_services = set(_RANDOM_OPTIONS_BY_SECTION.get('Services') or [])
+
+    for raw_item in service_items:
+        if not isinstance(raw_item, dict):
+            continue
+
+        try:
+            factor = float(raw_item.get('factor') or 0.0)
+        except Exception:
+            factor = 0.0
+        if factor <= 0:
+            continue
+
+        count_override: int | None = None
+        try:
+            metric = str(raw_item.get('v_metric') or '').strip()
+            count_raw = str(raw_item.get('v_count') or '').strip()
+            if metric == 'Count' and count_raw:
+                parsed_count = int(count_raw)
+                if parsed_count >= 0:
+                    count_override = parsed_count
+        except Exception:
+            count_override = None
+
+        item_density = float(count_override) if count_override is not None else section_density
+        if item_density <= 0:
+            continue
+
+        normalized_selected = _normalize_service_item_selection(raw_item.get('selected'))
+        selected = str(normalized_selected or raw_item.get('selected') or '').strip()
+        if not selected:
+            continue
+        if selected == 'Random':
+            saw_random = True
+            continue
+        if selected in canonical_services:
+            concrete.add(selected)
+
+    if saw_random:
+        required.update(concrete or canonical_services)
+    else:
+        required.update(concrete)
+    return required
+
+
 def _normalize_scenario_label(value: Any) -> str:
     if value is None:
         return ''
@@ -38650,6 +38784,46 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             extra={'error_code': 'custom_services_install_failed'},
         )
         return
+
+    try:
+        required_builtin_services = _required_builtin_core_services_for_xml_input(
+            xml_path,
+            session_xml_str,
+            scenario_name=scenario_name_hint,
+        )
+        if required_builtin_services:
+            discovered_builtin_services = _remote_core_service_names(
+                remote_client,
+                core_cfg=core_cfg,
+                require_custom_services_dir=False,
+            )
+            missing_builtin_services = sorted(
+                name for name in required_builtin_services if name not in discovered_builtin_services
+            )
+            if missing_builtin_services:
+                try:
+                    log_f.write(
+                        f"{log_prefix}Missing built-in CORE services on CORE VM ({', '.join(missing_builtin_services)}).\n"
+                    )
+                except Exception:
+                    pass
+                _fail_run(
+                    f"Required built-in CORE service(s) missing on remote host: {', '.join(missing_builtin_services)}. "
+                    "This usually means the CORE VM install is incomplete or core-daemon did not load its default services. "
+                    "If you also saw '/etc/core/logging.conf does not exist', repair the CORE daemon config on the VM and restart core-daemon before re-running Execute.",
+                    code=1,
+                    extra={
+                        'error_code': 'missing_builtin_services',
+                        'missing_services': missing_builtin_services,
+                        'required_services': sorted(required_builtin_services),
+                    },
+                )
+                return
+    except Exception as exc:
+        try:
+            log_f.write(f"{log_prefix}WARN: built-in CORE service preflight skipped: {exc}\n")
+        except Exception:
+            pass
 
     _sanitize_remote_compose_templates()
 

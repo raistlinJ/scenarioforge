@@ -785,7 +785,8 @@ def test_flow_preview_tab_persists_flow_state_before_redirect() -> None:
 
     expected_snippets = [
         "link.addEventListener('click', async (ev) => {",
-        "if (!(await saveFlowStateToXml(xmlPath))) {",
+        "const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);",
+        "if (shouldPersistFlowState && !(await saveFlowStateToXml(xmlPath))) {",
         "window.location.href = url;",
     ]
 

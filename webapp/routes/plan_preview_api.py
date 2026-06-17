@@ -30,11 +30,32 @@ def register(app, *, backend_module: Any) -> None:
                     seed = int(seed)
             except Exception:
                 seed = None
+            preview_scenarios = scenarios_inline
+            if isinstance(scenarios_inline, list) and scenario:
+                try:
+                    scenario_norm = backend._normalize_scenario_label(scenario)
+                except Exception:
+                    scenario_norm = str(scenario or '').strip().lower()
+                if scenario_norm:
+                    try:
+                        matching_scenario = next(
+                            (
+                                sc
+                                for sc in scenarios_inline
+                                if isinstance(sc, dict)
+                                and backend._normalize_scenario_label(str(sc.get('name') or '')) == scenario_norm
+                            ),
+                            None,
+                        )
+                    except Exception:
+                        matching_scenario = None
+                    if isinstance(matching_scenario, dict):
+                        preview_scenarios = [matching_scenario]
             if not xml_path:
-                if isinstance(scenarios_inline, list):
+                if isinstance(preview_scenarios, list):
                     try:
                         normalized_core = backend._normalize_core_config(core_inline, include_password=True) if isinstance(core_inline, dict) else None
-                        tree = backend._build_scenarios_xml({'scenarios': scenarios_inline, 'core': normalized_core})
+                        tree = backend._build_scenarios_xml({'scenarios': preview_scenarios, 'core': normalized_core})
                         ts = backend._local_timestamp_safe()
                         tag = str(uuid.uuid4())[:8]
                         out_dir = os.path.join(backend._outputs_dir(), f'tmp-preview-{ts}-{tag}')
@@ -43,7 +64,7 @@ def register(app, *, backend_module: Any) -> None:
                         if not stem_raw:
                             try:
                                 first_name = None
-                                for sc in scenarios_inline:
+                                for sc in preview_scenarios:
                                     if isinstance(sc, dict) and sc.get('name'):
                                         first_name = sc.get('name')
                                         break
