@@ -1,4 +1,5 @@
 from flask import Flask
+import xml.etree.ElementTree as ET
 
 from webapp.routes import plan_preview_api
 
@@ -101,3 +102,60 @@ def test_preview_full_route_returns_embedded_preview_without_recompute():
     assert payload['plan'] == {}
     assert payload['breakdowns'] is None
     assert payload['flow_meta'] == {'repaired': True}
+
+
+def test_preview_full_route_limits_inline_builder_payload_to_requested_scenario(tmp_path):
+    captured = {}
+
+    def build_scenarios_xml(payload):
+        scenarios = payload.get('scenarios') or []
+        captured['names'] = [str((sc or {}).get('name') or '') for sc in scenarios if isinstance(sc, dict)]
+        root = ET.Element('Scenarios')
+        for scen in scenarios:
+            if not isinstance(scen, dict):
+                continue
+            ET.SubElement(root, 'Scenario', name=str(scen.get('name') or ''))
+        return ET.ElementTree(root)
+
+    app = Flask(__name__)
+    plan_preview_api.register(
+        app,
+        backend_module=type(
+            'BackendModule',
+            (),
+            {
+                '_normalize_scenario_label': staticmethod(lambda value: str(value or '').strip().lower()),
+                '_normalize_core_config': staticmethod(lambda core, include_password=True: core),
+                '_build_scenarios_xml': staticmethod(build_scenarios_xml),
+                '_local_timestamp_safe': staticmethod(lambda: '06-17-26-12-00-00'),
+                '_outputs_dir': staticmethod(lambda: str(tmp_path)),
+                'secure_filename': staticmethod(lambda value: str(value or '').replace(' ', '_')),
+                'ET': ET,
+                '_load_preview_payload_from_path': staticmethod(
+                    lambda xml_path, scenario=None: {
+                        'full_preview': {'seed': 11, 'hosts': []},
+                        'metadata': {'seed': 11},
+                    }
+                ),
+                '_flow_state_from_xml_path': staticmethod(lambda xml_path, scenario=None: None),
+                '_attach_latest_flow_into_full_preview': staticmethod(lambda preview, scenario=None: {'attached': True}),
+                '_flow_repair_saved_flow_for_preview': staticmethod(lambda preview, flow_meta: flow_meta),
+            },
+        )(),
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        '/api/plan/preview_full',
+        json={
+            'scenario': 'Beta',
+            'scenarios': [
+                {'name': 'Alpha', 'sections': {'Node Information': {'items': []}}},
+                {'name': 'Beta', 'sections': {'Node Information': {'items': []}}},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()['ok'] is True
+    assert captured['names'] == ['Beta']

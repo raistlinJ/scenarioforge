@@ -269,3 +269,85 @@ def test_install_custom_services_ignores_core_conf_file_value(tmp_path, monkeypa
     assert d1 in targets
     assert bad_value not in targets
     assert not any(("install -m 0644" in cmd and bad_value in cmd) for cmd in client.commands)
+
+
+def test_required_builtin_core_services_for_xml_input_uses_selected_scenario(tmp_path):
+        xml_path = tmp_path / "scenario.xml"
+        xml_path.write_text(
+                """
+<Scenarios>
+    <Scenario name="Scenario One">
+        <ScenarioEditor>
+            <section name="Services" density="1.0">
+                <item selected="SSH" factor="1.0" />
+            </section>
+        </ScenarioEditor>
+    </Scenario>
+    <Scenario name="Scenario Two">
+        <ScenarioEditor>
+            <section name="Services" density="1.0">
+                <item selected="HTTP" factor="1.0" />
+            </section>
+        </ScenarioEditor>
+    </Scenario>
+</Scenarios>
+""".strip(),
+                encoding="utf-8",
+        )
+
+        required = backend._required_builtin_core_services_for_xml_input(
+                str(xml_path),
+                None,
+                scenario_name="Scenario Two",
+        )
+
+        assert required == {"HTTP"}
+
+
+def test_required_builtin_core_services_for_xml_input_expands_random_service_from_session_xml():
+        session_xml = """
+<Scenarios>
+    <Scenario name="Scenario Random">
+        <ScenarioEditor>
+            <section name="Services" density="1.0">
+                <item selected="Random" factor="1.0" />
+            </section>
+        </ScenarioEditor>
+    </Scenario>
+</Scenarios>
+""".strip()
+
+        required = backend._required_builtin_core_services_for_xml_input(
+                None,
+                session_xml,
+                scenario_name="Scenario Random",
+        )
+
+        assert required == {"SSH", "HTTP", "DHCPClient"}
+
+
+def test_required_builtin_core_services_for_xml_input_ignores_zero_density_and_factor(tmp_path):
+        xml_path = tmp_path / "scenario.xml"
+        xml_path.write_text(
+                """
+<Scenarios>
+    <Scenario name="Scenario Zero">
+        <ScenarioEditor>
+            <section name="Services" density="0.0">
+                <item selected="HTTP" factor="1.0" />
+                <item selected="SSH" factor="0.0" />
+            </section>
+        </ScenarioEditor>
+    </Scenario>
+</Scenarios>
+""".strip(),
+                encoding="utf-8",
+        )
+
+        required = backend._required_builtin_core_services_for_xml_input(
+                str(xml_path),
+                None,
+                scenario_name="Scenario Zero",
+        )
+
+        assert required == set()

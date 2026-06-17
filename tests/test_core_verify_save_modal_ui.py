@@ -219,6 +219,8 @@ def test_flow_save_and_preview_do_not_swallow_flow_state_save_failures() -> None
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
+        "const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);",
+        "if (shouldPersistFlowState) {",
         "if (!(await saveFlowStateToXml(xmlPath))) {",
         "throw new Error('Failed to save Flag Sequencing state into XML.');",
     ]
@@ -231,6 +233,22 @@ def test_flow_save_and_preview_do_not_swallow_flow_state_save_failures() -> None
     ]
     present = [snippet for snippet in forbidden if snippet in text]
     assert not present, "Unexpected swallowed Flag Sequencing save failure snippets still present: " + "; ".join(present)
+
+
+def test_flow_preview_skips_xml_rewrite_when_saved_state_matches() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function buildCurrentFlowStatePayload(options) {",
+        "function flowStateXmlSignature(state) {",
+        "function shouldSaveFlowStateToXml(xmlPath) {",
+        "if (!latestXmlPath || latestXmlPath !== targetXmlPath) return true;",
+        "const currentSig = flowStateXmlSignature(buildCurrentFlowStatePayload({ includeUpdatedAt: false }));",
+        "return !currentSig || !savedSig || currentSig !== savedSig;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow Preview no-op XML-save guard snippets: " + "; ".join(missing)
 
 
 def test_flow_restore_rehydrates_duplicate_toggle_from_saved_state() -> None:
