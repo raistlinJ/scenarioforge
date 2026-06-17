@@ -9969,6 +9969,18 @@ def _enrich_hitl_interfaces_with_ips(hitl_cfg: Dict[str, Any]) -> None:
     preview_routers: List[Dict[str, Any]] = []
     used_hitl_link_networks: set[str] = set()
     total_interfaces = len(interfaces)
+
+    def _ipv4_list_contains_ip(values: Any, ip: str) -> bool:
+        if not ip or not isinstance(values, list):
+            return False
+        for raw_value in values:
+            text = str(raw_value or '').strip()
+            if not text:
+                continue
+            if text.split('/', 1)[0].strip() == ip:
+                return True
+        return False
+
     for idx, iface in enumerate(list(interfaces)):
         if not isinstance(iface, dict):
             continue
@@ -9980,7 +9992,9 @@ def _enrich_hitl_interfaces_with_ips(hitl_cfg: Dict[str, Any]) -> None:
         iface['interface_count'] = total_interfaces
         ip_info: Optional[Dict[str, Any]] = None
         if attachment in {'new_router', 'existing_router'}:
-            ip_info = predict_hitl_link_ips_unique(scenario_key, iface.get('name'), idx, used_hitl_link_networks)
+            ip_info = preferred_hitl_link_ips(iface, used_hitl_link_networks)
+            if not ip_info:
+                ip_info = predict_hitl_link_ips_unique(scenario_key, iface.get('name'), idx, used_hitl_link_networks)
         if attachment in {'new_router', 'existing_router'} and ip_info:
             iface['link_network'] = ip_info.get('network')
             iface['link_network_cidr'] = ip_info.get('network_cidr') or ip_info.get('network')
@@ -9998,7 +10012,7 @@ def _enrich_hitl_interfaces_with_ips(hitl_cfg: Dict[str, Any]) -> None:
                 if not ipv4_current:
                     iface['ipv4'] = [rj45_ip]
                 else:
-                    if rj45_ip not in ipv4_current:
+                    if not _ipv4_list_contains_ip(ipv4_current, rj45_ip):
                         iface['ipv4'] = list(ipv4_current) + [rj45_ip]
                     else:
                         iface['ipv4'] = ipv4_current
@@ -10644,7 +10658,7 @@ except ModuleNotFoundError as exc:
         "Run webapp commands from the repository root so the in-repo package is importable."
     ) from exc
 
-from scenarioforge.utils.hitl import predict_hitl_link_ips, predict_hitl_link_ips_unique
+from scenarioforge.utils.hitl import preferred_hitl_link_ips, predict_hitl_link_ips, predict_hitl_link_ips_unique
 
 # Proactively ensure the in-repo planning.full_preview module is available even if an
 # older site-packages installation of scenarioforge (without that module) is first on sys.path.
@@ -13660,16 +13674,25 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
         os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION')
         or 'Scenario HITL participant network'
     ).strip() or 'Scenario HITL participant network'
+    single_ifx_ipv4 = [
+        part.strip()
+        for part in str(
+            os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_IPV4')
+            or ''
+        ).split(',')
+        if part.strip()
+    ]
 
     interfaces_defaults: List[Dict[str, Any]] = []
     if single_ifx_name:
-        interfaces_defaults.append(
-            {
-                'name': single_ifx_name,
-                'attachment': single_ifx_attachment,
-                'description': single_ifx_description,
-            }
-        )
+        iface_defaults: Dict[str, Any] = {
+            'name': single_ifx_name,
+            'attachment': single_ifx_attachment,
+            'description': single_ifx_description,
+        }
+        if single_ifx_ipv4:
+            iface_defaults['ipv4'] = single_ifx_ipv4
+        interfaces_defaults.append(iface_defaults)
 
     return {
         'core': core_defaults,

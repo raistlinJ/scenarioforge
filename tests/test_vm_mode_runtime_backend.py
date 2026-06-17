@@ -147,6 +147,7 @@ def test_vm_mode_backend_defaults_leave_hitl_ifnames_blank_until_configured(monk
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION", raising=False)
+    monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_IPV4", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_NET0_NAME", raising=False)
 
     vm_defaults = app_backend._webui_vm_mode_defaults(include_password=False)
@@ -155,12 +156,14 @@ def test_vm_mode_backend_defaults_leave_hitl_ifnames_blank_until_configured(monk
 
     monkeypatch.setenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", "ens18")
     monkeypatch.setenv("CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT", "existing_router")
+    monkeypatch.setenv("CORETG_VM_MODE_HITL_CORE_IFX_IPV4", "10.254.200.3/24")
 
     vm_defaults = app_backend._webui_vm_mode_defaults(include_password=False)
     hitl_defaults = vm_defaults["hitl"]
     assert len(hitl_defaults["interfaces"]) == 1
     assert hitl_defaults["interfaces"][0]["name"] == "ens18"
     assert hitl_defaults["interfaces"][0]["attachment"] == "existing_router"
+    assert hitl_defaults["interfaces"][0]["ipv4"] == ["10.254.200.3/24"]
     assert "proxmox_target" not in hitl_defaults["interfaces"][0]
 
 
