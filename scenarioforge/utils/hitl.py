@@ -473,6 +473,88 @@ def _compute_hitl_link_ips_unique(
     return _compute_hitl_link_ips(scenario_key, iface_name, base_ordinal, prefix_len=prefix_len)
 
 
+def preferred_hitl_link_ips(
+    iface_entry: Dict[str, Any],
+    used_network_cidrs: Optional[Set[str]] = None,
+    *,
+    default_prefix_len: int = DEFAULT_IPV4_PREFIXLEN,
+) -> Optional[Dict[str, Any]]:
+    """Derive HITL link IPs from an explicit configured participant-side IPv4.
+
+    When the application or scenario config already specifies an interface IPv4/CIDR,
+    use that address as the RJ45 endpoint so configured values take priority over the
+    deterministic auto-allocation path.
+    """
+
+    if not isinstance(iface_entry, dict):
+        return None
+
+    preferred_raw = ''
+    raw_ipv4 = iface_entry.get("ipv4")
+    if isinstance(raw_ipv4, str):
+        for part in raw_ipv4.split(','):
+            candidate = part.strip()
+            if candidate:
+                preferred_raw = candidate
+                break
+    elif isinstance(raw_ipv4, (list, tuple, set)):
+        for part in raw_ipv4:
+            candidate = str(part or '').strip()
+            if candidate:
+                preferred_raw = candidate
+                break
+    if not preferred_raw:
+        candidate = str(iface_entry.get("rj45_ip4_cidr") or iface_entry.get("rj45_ip4") or '').strip()
+        if candidate:
+            preferred_raw = candidate
+    if not preferred_raw:
+        return None
+
+    try:
+        configured_prefix = iface_entry.get("prefix_len")
+        if configured_prefix in (None, ''):
+            configured_prefix = default_prefix_len
+        configured_prefix = int(configured_prefix)
+    except Exception:
+        configured_prefix = int(default_prefix_len)
+
+    try:
+        preferred_iface = ipaddress.IPv4Interface(
+            preferred_raw if '/' in preferred_raw else f"{preferred_raw}/{configured_prefix}"
+        )
+    except Exception:
+        return None
+
+    network = preferred_iface.network
+    preferred_ip = preferred_iface.ip
+    if preferred_ip in {network.network_address, network.broadcast_address}:
+        return None
+
+    router_hosts: List[ipaddress.IPv4Address] = []
+    for host in network.hosts():
+        if host == preferred_ip:
+            continue
+        router_hosts.append(host)
+        if len(router_hosts) >= 2:
+            break
+    if len(router_hosts) < 2:
+        return None
+
+    info = {
+        "network": str(network.network_address),
+        "network_cidr": f"{network.network_address}/{network.prefixlen}",
+        "prefix_len": network.prefixlen,
+        "netmask": str(network.netmask),
+        "broadcast_ip4": str(network.broadcast_address),
+        "existing_router_ip4": str(router_hosts[0]),
+        "new_router_ip4": str(router_hosts[1]),
+        "rj45_ip4": str(preferred_ip),
+    }
+    if used_network_cidrs is not None:
+        used_network_cidrs.add(str(info["network_cidr"]))
+    return info
+
+
 def _apply_iface_ip(iface: Any, ip: Optional[str], prefix_len: Optional[int]) -> None:
     if iface is None or not ip or prefix_len is None:
         return
@@ -967,12 +1049,14 @@ def attach_hitl_rj45_nodes(
             target_node_id = None
         target_is_router = bool(target_node_id is not None and target_node_id in router_node_ids)
         if target_is_router and rj_link_ips is None:
-            rj_link_ips = _compute_hitl_link_ips_unique(
-                scenario_key,
-                raw_name,
-                idx,
-                used_hitl_link_networks,
-            )
+            rj_link_ips = preferred_hitl_link_ips(iface_entry, used_hitl_link_networks)
+            if rj_link_ips is None:
+                rj_link_ips = _compute_hitl_link_ips_unique(
+                    scenario_key,
+                    raw_name,
+                    idx,
+                    used_hitl_link_networks,
+                )
         iface_peer_id = _next_iface_id(target_node, iface_id_cache)
         # Keep peer ifname short/valid for CORE/vcmd rename.
         # Also make it recognizable so the web UI can show only the RJ45-facing router IP.

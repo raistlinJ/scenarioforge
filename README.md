@@ -80,6 +80,7 @@ Key VM-mode variables in [.scenarioforge.env.example](.scenarioforge.env.example
 - `CORETG_VM_MODE_HITL_ENABLED` – enables participant-facing HITL defaults in VM mode.
 - `CORETG_VM_MODE_HITL_CORE_IFX_NAME` – expected Linux interface name inside the CORE VM for the participant network, such as `ens18`.
 - `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
+- `CORETG_VM_MODE_HITL_CORE_IFX_IPV4` – optional IPv4 or CIDR to pre-seed on that HITL interface entry, such as `10.254.200.3/24`.
 - `CORETG_VM_MODE_PARTICIPANT_URL` – optional participant UI URL shown in VM-mode flows.
 
 Minimum VM-mode override example:
@@ -95,6 +96,7 @@ CORETG_WEBUI_MODE=vm
 CORETG_VM_MODE_HITL_ENABLED=true
 CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens18
 CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router
+CORETG_VM_MODE_HITL_CORE_IFX_IPV4=10.254.200.3/24
 ```
 
 ### Run the Web UI

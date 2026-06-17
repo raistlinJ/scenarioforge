@@ -475,6 +475,36 @@ def test_hitl_preview_router_added_to_full_preview(monkeypatch) -> None:
     assert degree_preview.get(hitl_node_id) == 1
 
 
+def test_hitl_config_prefers_explicit_ipv4_for_new_router_preview() -> None:
+    from webapp import app_backend as backend
+
+    hitl_cfg = backend._sanitize_hitl_config(
+        {
+            'enabled': True,
+            'interfaces': [
+                {
+                    'name': 'uplink0',
+                    'attachment': 'new_router',
+                    'ipv4': ['192.0.2.10/24'],
+                },
+            ],
+        },
+        'PriorityScenario',
+        'priority_scenario',
+    )
+
+    iface_entry = hitl_cfg['interfaces'][0]
+    assert iface_entry.get('link_network_cidr') == '192.0.2.0/24'
+    assert iface_entry.get('existing_router_ip4') == '192.0.2.1'
+    assert iface_entry.get('new_router_ip4') == '192.0.2.2'
+    assert iface_entry.get('rj45_ip4') == '192.0.2.10'
+    assert iface_entry.get('ipv4') == ['192.0.2.10/24']
+
+    preview_routers = hitl_cfg.get('preview_routers') or []
+    assert preview_routers
+    assert preview_routers[0].get('ip4') == '192.0.2.2/24'
+
+
 def test_hitl_config_normalizes_new_switch_attachment() -> None:
     from webapp import app_backend as backend
 
@@ -648,6 +678,37 @@ def test_attach_hitl_rj45_nodes_assigns_ipv4_for_new_router(monkeypatch) -> None
 
     rj45_node = session.nodes[entry["rj45_node_id"]]
     assert any(getattr(iface, "ip4", None) == entry["rj45_ip4"] for iface in rj45_node.ifaces)
+
+
+def test_attach_hitl_rj45_nodes_prefers_explicit_ipv4_for_existing_router() -> None:
+    session = StubSession()
+    router_type = getattr(NodeType, "ROUTER", getattr(NodeType, "DEFAULT", None))
+    router = session.add_node(10, _type=router_type, position=Position(x=250, y=250), name="router-1")
+    router.ifaces.append(Interface(id=0, name="eth0"))
+
+    routers = [NodeInfo(node_id=router.id, ip4="10.0.0.1/24", role="Router")]
+    hitl_config = {
+        "enabled": True,
+        "interfaces": [
+            {
+                "name": "en0",
+                "attachment": "existing_router",
+                "ipv4": ["192.0.2.10/24"],
+            },
+        ],
+        "scenario_key": "PreferredIp",
+    }
+
+    summary = attach_hitl_rj45_nodes(session, routers, [], hitl_config)
+
+    entry = summary["interfaces"][0]
+    assert entry.get("link_network_cidr") == "192.0.2.0/24"
+    assert entry.get("existing_router_ip4") == "192.0.2.1"
+    assert entry.get("new_router_ip4") == "192.0.2.2"
+    assert entry.get("rj45_ip4") == "192.0.2.10"
+
+    rj45_node = session.nodes[entry["rj45_node_id"]]
+    assert any(getattr(iface, "ip4", None) == "192.0.2.10" for iface in rj45_node.ifaces)
 
 
 def test_attach_hitl_new_router_reuses_preview_router(monkeypatch) -> None:
