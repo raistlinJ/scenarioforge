@@ -700,6 +700,36 @@ def test_flow_restore_refreshes_xml_only_when_server_state_missing() -> None:
     assert not missing, "Flow restore should refresh XML-backed state only when server state is missing: " + "; ".join(missing)
 
 
+def test_flow_scenario_switch_uses_cached_preview_plan_before_background_refresh() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "lastPreviewPlanPath = (typeof window.coretgGetPreviewPlanPathForScenario === 'function')",
+        "try { updateMeta(); } catch (e) { }",
+        "const latestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');",
+        "latestPreviewPromise.then(() => {",
+        "updateEmptyFlowStatus();",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow scenario switching should use cached preview plan before background refresh: " + "; ".join(missing)
+
+
+def test_flow_latest_preview_refresh_uses_conditional_json_cache() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "if (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function') {",
+        "data = await window.CORETG_FETCH_CONDITIONAL_JSON(url, {",
+        "scope: 'flow-latest-preview-plan',",
+        "if (!data) {",
+        "data = await fetchJson(url);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow latest preview refresh should use conditional JSON cache before plain fetch: " + "; ".join(missing)
+
+
 def test_flow_restore_emits_debug_logs_for_roundtrip_diagnostics() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

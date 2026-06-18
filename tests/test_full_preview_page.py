@@ -110,3 +110,19 @@ def test_full_preview_page_includes_saved_xml_warning_banner() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in html_text]
     assert not missing, 'Missing saved-XML warning banner in full_preview.html: ' + '; '.join(missing)
+
+
+def test_full_preview_scripts_post_ready_after_graph_render_setup() -> None:
+    text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    expected_snippets = [
+        "let parentReadyPosted = false;",
+        "function notifyParentReady(reason = 'ready') {",
+        "window.parent.postMessage({ type: 'full-preview-ready', reason }, window.location.origin);",
+        "wrapNode.addEventListener('coretg-graph-ready', () => {",
+        "notifyParentReady('graph-ready')",
+        "setTimeout(() => notifyParentReady('init-fallback'), 1200);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, 'Missing delayed full-preview ready signaling snippets: ' + '; '.join(missing)

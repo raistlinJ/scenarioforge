@@ -123,6 +123,7 @@
     let previewLoadingProgress = 0;
     let previewLoadingDetail = 'Rendering preview page.';
     let previewLoadingStartedAt = 0;
+  let previewExplicitReadyReceived = false;
 
     function stopPreviewLoadingProgress() {
       if (!previewLoadingTimer) return;
@@ -258,6 +259,7 @@
           const data = ev && ev.data ? ev.data : null;
           if (data && data.type === 'full-preview-ready') {
             try { console.debug('[preview] message full-preview-ready'); } catch (e) { }
+            previewExplicitReadyReceived = true;
             completePreviewLoading('postMessage', 'Preview ready.');
           }
         } catch (e) { }
@@ -267,6 +269,7 @@
     async function loadPreview() {
       const startTs = Date.now();
       const modal = showLoading();
+      previewExplicitReadyReceived = false;
       const params = new URLSearchParams(window.location.search || '');
       // Prefer server-validated hidden inputs over query params. If a stale/invalid
       // xml_path is present in the URL, the backend will intentionally clear it and
@@ -286,17 +289,40 @@
       setPreviewLoadingProgress(12, 'Refreshing preview inputs…');
 
       if (scenario) {
+        let latestStateRefreshPromise = null;
         try {
-          setPreviewLoadingProgress(18, 'Refreshing saved scenario state…');
+          const cachedState = (typeof window.CORETG_READ_LATEST_STATE_CACHE === 'function')
+            ? window.CORETG_READ_LATEST_STATE_CACHE(scenario, { xmlPath })
+            : null;
+          const cachedPath = (cachedState && cachedState.xml_path) ? String(cachedState.xml_path || '').trim() : '';
+          if (!xmlPath && cachedPath) {
+            xmlPath = cachedPath;
+            if (inXml) inXml.value = xmlPath;
+          }
           if (typeof window.coretgRefreshScenarioStateFromXml === 'function') {
-            const latestState = await window.coretgRefreshScenarioStateFromXml(scenario, { updateHidden: true });
-            const latestPath = (latestState && latestState.xml_path) ? String(latestState.xml_path || '').trim() : '';
-            if (latestPath) {
-              xmlPath = latestPath;
-              if (inXml) inXml.value = xmlPath;
+            if (xmlPath) {
+              setPreviewLoadingProgress(18, 'Using cached saved scenario state…');
+              latestStateRefreshPromise = window.coretgRefreshScenarioStateFromXml(scenario, { updateHidden: true, xml_path: xmlPath })
+                .then((latestState) => {
+                  const latestPath = (latestState && latestState.xml_path) ? String(latestState.xml_path || '').trim() : '';
+                  if (latestPath) {
+                    xmlPath = latestPath;
+                    if (inXml) inXml.value = xmlPath;
+                  }
+                  return latestState;
+                })
+                .catch(() => null);
+            } else {
+              setPreviewLoadingProgress(18, 'Refreshing saved scenario state…');
+              const latestState = await window.coretgRefreshScenarioStateFromXml(scenario, { updateHidden: true });
+              const latestPath = (latestState && latestState.xml_path) ? String(latestState.xml_path || '').trim() : '';
+              if (latestPath) {
+                xmlPath = latestPath;
+                if (inXml) inXml.value = xmlPath;
+              }
             }
           }
-          if (!xmlPath) {
+          if (!xmlPath && !latestStateRefreshPromise) {
             setPreviewLoadingProgress(24, 'Checking latest saved XML…');
             const latestResp = await fetch('/api/scenario/latest_xml?scenario=' + encodeURIComponent(scenario), { credentials: 'same-origin' });
             const latestData = await latestResp.json();
@@ -348,7 +374,9 @@
         setPreviewLoadingProgress(50, 'Waiting for preview response…');
         frame.addEventListener('load', async () => {
           try { modal && modal.hide(); } catch (e) { }
-          try { completePreviewLoading('iframe-load', 'Preview ready.'); } catch (e) { }
+          if (!previewExplicitReadyReceived) {
+            try { setPreviewLoadingProgress(94, 'Rendering preview graph…'); } catch (e) { }
+          }
           try {
             const doc = frame.contentDocument || frame.contentWindow?.document;
             const title = doc && doc.title ? doc.title : '(no title)';
@@ -368,11 +396,15 @@
           const doc = frame.contentDocument || frame.contentWindow?.document;
           const rs = doc && doc.readyState ? doc.readyState : '';
           if (rs === 'interactive' || rs === 'complete') {
-            clearInterval(pollTimer);
-            if (rs === 'interactive') {
-              setPreviewLoadingProgress(96, 'Rendering preview page…');
+            if (!previewExplicitReadyReceived) {
+              if (rs === 'interactive') {
+                setPreviewLoadingProgress(96, 'Rendering preview page…');
+              } else {
+                setPreviewLoadingProgress(97, 'Finishing preview render…');
+              }
+            } else {
+              clearInterval(pollTimer);
             }
-            completePreviewLoading('readyState-' + rs, 'Preview ready.');
             try { console.debug('[preview] readyState', rs, 'ms', Date.now() - startTs); } catch (e) { }
           }
         } catch (e) { }

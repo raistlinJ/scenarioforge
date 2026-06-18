@@ -399,7 +399,20 @@
   }
 
   function getPreviewPlanPathForScenario(scenarioName){
-    return '';
+    try {
+      const key = normalizeScenarioKey(scenarioName);
+      if (!key) return '';
+      const map = readPreviewPlanMap();
+      const entry = (map && typeof map === 'object') ? map[key] : null;
+      if (typeof entry === 'string') return entry.trim();
+      if (entry && typeof entry === 'object') {
+        const path = entry.preview_plan_path ?? entry.path ?? '';
+        return (typeof path === 'string') ? path.trim() : '';
+      }
+      return '';
+    } catch (e) {
+      return '';
+    }
   }
 
   function setPreviewPlanPathForScenario(scenarioName, previewPlanPath){
@@ -408,7 +421,16 @@
       if (!key) return;
       const map = readPreviewPlanMap();
       const next = (map && typeof map === 'object') ? map : {};
-      try { delete next[key]; } catch (e) {}
+      const path = (previewPlanPath || '').toString().trim();
+      if (!path) {
+        try { delete next[key]; } catch (e) {}
+      } else {
+        next[key] = {
+          scenario: (scenarioName || '').toString().trim(),
+          preview_plan_path: path,
+          updated_at: Date.now(),
+        };
+      }
       localStorage.setItem(PREVIEW_PLAN_BY_SCENARIO_STORAGE_KEY, JSON.stringify(next));
     } catch (e) {}
   }
