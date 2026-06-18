@@ -30064,6 +30064,27 @@ def _first_existing(path_candidates):
     return None
 
 
+def _normalize_remote_flow_path(path_value):
+    text = str(path_value or '').strip()
+    if not text:
+        return text
+    text = text.replace('\\', '/')
+    if text.startswith('/tmp/vulns/'):
+        return text
+    markers = (
+        ('/outputs/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+        ('/outputs/vulns/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/vulns/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+    )
+    for marker, remote_prefix in markers:
+        if marker not in text:
+            continue
+        suffix = text.split(marker, 1)[1].lstrip('/')
+        return (remote_prefix + suffix) if suffix else remote_prefix.rstrip('/')
+    return text
+
+
 def _read_json(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -30281,6 +30302,27 @@ def _first_existing(path_candidates):
     return None
 
 
+def _normalize_remote_flow_path(path_value):
+    text = str(path_value or '').strip()
+    if not text:
+        return text
+    text = text.replace('\\', '/')
+    if text.startswith('/tmp/vulns/'):
+        return text
+    markers = (
+        ('/outputs/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+        ('/outputs/vulns/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/vulns/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+    )
+    for marker, remote_prefix in markers:
+        if marker not in text:
+            continue
+        suffix = text.split(marker, 1)[1].lstrip('/')
+        return (remote_prefix + suffix) if suffix else remote_prefix.rstrip('/')
+    return text
+
+
 def _read_json(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -30296,7 +30338,7 @@ def _docker_names():
 def _parse_flow_labels(txt: str):
     # Flow artifacts labels can appear as YAML dict entries (key: value) or as
     # docker-compose list labels (key=value). Use the generic extractor.
-    src = _extract_label_value(txt, 'coretg.flow_artifacts.src') or None
+    src = _normalize_remote_flow_path(_extract_label_value(txt, 'coretg.flow_artifacts.src') or '') or None
     dest = _extract_label_value(txt, 'coretg.flow_artifacts.dest') or None
     return src, dest
 
@@ -30320,14 +30362,22 @@ def _extract_label_value(txt: str, key: str):
 
 
 def _parse_inject_labels(txt: str):
-    source_dir = _extract_label_value(txt, 'coretg.inject.source_dir') or None
+    source_dir = _normalize_remote_flow_path(_extract_label_value(txt, 'coretg.inject.source_dir') or '') or None
     raw_map = _extract_label_value(txt, 'coretg.inject.map') or None
     items = []
     if raw_map:
         try:
             parsed = json.loads(raw_map)
             if isinstance(parsed, list):
-                items = [x for x in parsed if isinstance(x, dict)]
+                normalized = []
+                for x in parsed:
+                    if not isinstance(x, dict):
+                        continue
+                    item = dict(x)
+                    if 'src' in item:
+                        item['src'] = _normalize_remote_flow_path(item.get('src') or '')
+                    normalized.append(item)
+                items = normalized
         except Exception:
             items = []
     return source_dir, items
@@ -30414,7 +30464,7 @@ def _inject_mappings_from_assignment(entry):
 
     if not isinstance(entry, dict):
         return source_dir, out
-    source_dir = str(_entry_get('inject_source_dir', 'InjectSourceDir', 'artifacts_dir', 'ArtifactsDir') or '').strip()
+    source_dir = _normalize_remote_flow_path(str(_entry_get('inject_source_dir', 'InjectSourceDir', 'artifacts_dir', 'ArtifactsDir') or '').strip())
     is_flow_source = _is_flow_source_dir(source_dir)
 
     detail_value = _entry_get('inject_files_detail', 'InjectFilesDetail')
@@ -30706,7 +30756,7 @@ def main():
 
         # Apply inject mappings when present (independent of flow artifacts labels).
         if inject_items:
-            source_dir = inject_source or src
+            source_dir = _normalize_remote_flow_path(inject_source or src)
             if not source_dir:
                 # No usable base path for relative inject sources.
                 errs.append('inject mappings present but no inject source_dir and no flow src')
@@ -30718,10 +30768,11 @@ def main():
                     if not rel or not dest_dir or not dest_dir.startswith('/'):
                         continue
                     if os.path.isabs(rel):
-                        src_path = rel
-                        rel_path = os.path.basename(rel)
+                        src_path = _normalize_remote_flow_path(rel)
+                        rel_path = os.path.basename(str(src_path or rel).rstrip('/')) or os.path.basename(rel.rstrip('/'))
                     else:
                         src_path = os.path.join(source_dir, rel.lstrip('/')) if source_dir else rel
+                        src_path = _normalize_remote_flow_path(src_path)
                         rel_path = rel
                     if not src_path or not rel_path:
                         continue
