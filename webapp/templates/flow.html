@@ -2840,7 +2840,16 @@
           url += '&xml_path=' + encodeURIComponent(String(xmlPath));
         }
       } catch (e) { }
-      const data = await fetchJson(url);
+      let data = null;
+      if (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function') {
+        data = await window.CORETG_FETCH_CONDITIONAL_JSON(url, {
+          scope: 'flow-latest-preview-plan',
+          fetchInit: { credentials: 'same-origin', cache: 'no-store' },
+        });
+      }
+      if (!data) {
+        data = await fetchJson(url);
+      }
       try {
         flowEligibilityReasons = (data && Array.isArray(data.flow_eligibility_reasons))
           ? data.flow_eligibility_reasons.map((reason) => String(reason || '').trim()).filter(Boolean)
@@ -2895,6 +2904,18 @@
     return '';
   }
 
+  function updateEmptyFlowStatus() {
+    if (!flowEligible) {
+      setStatus(flowIneligibleMessage(), true);
+    } else if (topologyDirty) {
+      setStatus('Topology/IP changed. Re-run Generate to refresh flow and flags.', true);
+    } else if (!flowEnabled) {
+      setStatus('Flag sequencing is disabled.', false);
+    } else {
+      setStatus('Chain does not exist. Click Generate to start.', false);
+    }
+  }
+
   async function setScenario(value) {
     activeScenario = (value || defaultScenarioName() || '').toString().trim();
     if (scenarioEl) scenarioEl.value = activeScenario;
@@ -2905,12 +2926,18 @@
     rememberActiveScenario();
     setTopologyDirtyState(false, '');
     updateScenarioSeedBadges();
-    clearPreviewPlanCacheForScenario(activeScenario);
+    try {
+      lastPreviewPlanPath = (typeof window.coretgGetPreviewPlanPathForScenario === 'function')
+        ? String(window.coretgGetPreviewPlanPathForScenario(activeScenario) || '').trim()
+        : '';
+    } catch (e) {
+      lastPreviewPlanPath = '';
+    }
+    try { updateMeta(); } catch (e) { }
     const latestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');
     // When switching scenarios (or loading after refresh), restore any saved Flow state.
     const restored = await restoreSavedFlowForScenario(activeScenario);
     if (!restored) {
-      try { await latestPreviewPromise; } catch (e) { }
       currentChain = [];
       currentFlagAssignments = [];
       selectedChainIndex = -1;
@@ -2919,15 +2946,15 @@
         const diagram = buildMermaid([]);
         await renderMermaid(diagram);
       } catch (e) { }
-      if (!flowEligible) {
-        setStatus(flowIneligibleMessage(), true);
-      } else if (topologyDirty) {
-        setStatus('Topology/IP changed. Re-run Generate to refresh flow and flags.', true);
-      } else if (!flowEnabled) {
-        setStatus('Flag sequencing is disabled.', false);
-      } else {
-        setStatus('Chain does not exist. Click Generate to start.', false);
-      }
+      updateEmptyFlowStatus();
+      latestPreviewPromise.then(() => {
+        try { updateMeta(); } catch (e) { }
+        try {
+          if (!currentChain.length && !currentFlagAssignments.length) {
+            updateEmptyFlowStatus();
+          }
+        } catch (e) { }
+      }).catch(() => { });
     } else {
       latestPreviewPromise.then(() => { try { updateMeta(); } catch (e) { } }).catch(() => { });
     }

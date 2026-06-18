@@ -12,7 +12,12 @@ def test_preview_loading_modal_includes_percentage_progress_ui() -> None:
         'id="scenariosPreviewLoadingBar"',
         'function setPreviewLoadingProgress(percent, detail) {',
         'function startPreviewLoadingProgress(initialPercent, detail) {',
-        "completePreviewLoading('iframe-load', 'Preview ready.')",
+        "if (!previewExplicitReadyReceived) {",
+        "setPreviewLoadingProgress(94, 'Rendering preview graph…');",
+        "completePreviewLoading('postMessage', 'Preview ready.')",
+        "const cachedState = (typeof window.CORETG_READ_LATEST_STATE_CACHE === 'function')",
+        "setPreviewLoadingProgress(18, 'Using cached saved scenario state…');",
+        "latestStateRefreshPromise = window.coretgRefreshScenarioStateFromXml(scenario, { updateHidden: true, xml_path: xmlPath })",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]

@@ -2982,6 +2982,17 @@
       const labelToggleEl = document.getElementById('graphLabelsToggle');
       const wrapNode = document.getElementById('previewGraph');
       const storageKey = 'coretg_fp_labels_state';
+      if (wrapNode) {
+        wrapNode.addEventListener('coretg-graph-ready', () => {
+          try {
+            window.requestAnimationFrame(() => {
+              window.requestAnimationFrame(() => notifyParentReady('graph-ready'));
+            });
+          } catch (e) {
+            notifyParentReady('graph-ready');
+          }
+        }, { once: true });
+      }
       if (labelToggleEl && !labelToggleEl.dataset.bound) {
         labelToggleEl.dataset.bound = '1';
         labelToggleEl.addEventListener('change', () => {
@@ -2999,6 +3010,13 @@
         labelToggleEl.checked = savedLabelState === 'on';
       }
       buildGraph();
+      if (!wrapNode) {
+        try {
+          window.requestAnimationFrame(() => notifyParentReady('init-ready'));
+        } catch (e) {
+          notifyParentReady('init-ready');
+        }
+      }
 
       wrapNode?.addEventListener('coretg-graph-ready', (ev) => {
         const show = ev.detail?.showLabels ?? (labelToggleEl ? labelToggleEl.checked : false);
@@ -3187,22 +3205,24 @@
       }
       // Delay styling until after DOM is built
       setTimeout(() => { applySegmentationRowStyling(); applyTrafficRowStyling(); }, 0);
+      setTimeout(() => notifyParentReady('init-fallback'), 1200);
     }
-    function notifyParentReady() {
+    let parentReadyPosted = false;
+    function notifyParentReady(reason = 'ready') {
       try {
+        if (parentReadyPosted) return;
         if (window.parent && window.parent !== window) {
+          parentReadyPosted = true;
           try { console.debug('[full_preview] posting ready'); } catch (e) { }
-          window.parent.postMessage({ type: 'full-preview-ready' }, window.location.origin);
+          window.parent.postMessage({ type: 'full-preview-ready', reason }, window.location.origin);
         }
       } catch (e) { }
     }
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => {
-        notifyParentReady();
         setTimeout(init, 0);
       });
     } else {
-      notifyParentReady();
       setTimeout(init, 0);
     }
     // Export JSON
