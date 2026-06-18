@@ -1284,7 +1284,7 @@ def _apply_pivoting_to_docker_nodes(
 
 
 from .utils.services import ensure_service
-from .utils.hitl import attach_hitl_rj45_nodes
+from .utils.hitl import attach_hitl_rj45_nodes, collect_hitl_preview_ip_reservations
 
 # Ensure planning.full_preview is importable even if an older installed scenarioforge shadows repo version
 try:  # pragma: no cover
@@ -1776,6 +1776,10 @@ def main():
         derived_key = orchestrated_plan.get("scenario_name") or orchestrated_plan.get("scenario_key")
         if derived_key:
             hitl_config["scenario_key"] = derived_key
+    try:
+        hitl_preview_reservations = collect_hitl_preview_ip_reservations(hitl_config)
+    except Exception:
+        hitl_preview_reservations = {"ip_addresses": set(), "network_cidrs": set()}
     prelim_router_count = orchestrated_plan['routers_planned']
     if preview_router_count is not None and preview_router_count > 0:
         prelim_router_count = preview_router_count
@@ -1807,6 +1811,8 @@ def main():
                 ip_mode=args.ip_mode,
                 ip_region=args.ip_region,
                 base_scenario=orchestrated_plan.get('base_scenario'),
+                reserved_ipv4_addrs=sorted(hitl_preview_reservations.get('ip_addresses') or []),
+                reserved_ipv4_networks=sorted(hitl_preview_reservations.get('network_cidrs') or []),
             )
         except Exception as auto_prev_exc:
             logging.getLogger(__name__).warning("Failed to generate automatic full preview: %s", auto_prev_exc)
@@ -1908,6 +1914,8 @@ def main():
                             ip_mode=args.ip_mode,
                             ip_region=args.ip_region,
                             base_scenario=orchestrated_plan.get('base_scenario'),
+                            reserved_ipv4_addrs=sorted(hitl_preview_reservations.get('ip_addresses') or []),
+                            reserved_ipv4_networks=sorted(hitl_preview_reservations.get('network_cidrs') or []),
                         )
                     full_prev['router_plan'] = router_plan_breakdown
                     out['full_preview'] = full_prev
