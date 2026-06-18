@@ -23347,6 +23347,101 @@
         return missing.map((item) => String(item || '').trim()).filter(Boolean);
     }
 
+    const EXECUTE_FLOW_PREFLIGHT_CACHE_PREFIX = 'coretg_execute_flow_preflight_v1::';
+    const EXECUTE_FLOW_PREFLIGHT_CACHE_TTL_MS = 30000;
+
+    function executeFlowPreflightCacheStorage() {
+        try {
+            return window.sessionStorage;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function executeFlowPreflightHash(text) {
+        const input = String(text || '');
+        let hash = 5381;
+        for (let i = 0; i < input.length; i += 1) {
+            hash = ((hash << 5) + hash) + input.charCodeAt(i);
+            hash >>>= 0;
+        }
+        return hash.toString(16);
+    }
+
+    function buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath } = {}) {
+        try {
+            const scenario = String(scenarioName || '').trim().toLowerCase();
+            const path = String(xmlPath || '').trim();
+            const previewPlanPath = (scenario && typeof window.coretgGetPreviewPlanPathForScenario === 'function')
+                ? String(window.coretgGetPreviewPlanPathForScenario(scenario) || '').trim()
+                : '';
+            let xmlCacheKey = '';
+            try {
+                if (scenario && typeof window.CORETG_READ_LATEST_STATE_CACHE === 'function') {
+                    const latestState = window.CORETG_READ_LATEST_STATE_CACHE(scenario, { xmlPath: path });
+                    xmlCacheKey = (latestState && latestState.xml_cache_key) ? String(latestState.xml_cache_key || '').trim() : '';
+                }
+            } catch (e) { xmlCacheKey = ''; }
+            let flowSignature = '';
+            try {
+                const scenarios = Array.isArray(state?.scenarios) ? state.scenarios : [];
+                const activeScenario = scenarios.find((entry) => {
+                    const name = (entry && typeof entry === 'object' && entry.name) ? String(entry.name).trim().toLowerCase() : '';
+                    return !!scenario && name === scenario;
+                });
+                const flowState = (activeScenario && typeof activeScenario === 'object' && activeScenario.flow_state && typeof activeScenario.flow_state === 'object')
+                    ? activeScenario.flow_state
+                    : null;
+                flowSignature = flowState ? JSON.stringify(flowState) : '';
+            } catch (e) { flowSignature = ''; }
+            const rawKey = JSON.stringify({ scenario, path, previewPlanPath, xmlCacheKey, flowSignature });
+            return EXECUTE_FLOW_PREFLIGHT_CACHE_PREFIX + executeFlowPreflightHash(rawKey);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function readExecuteFlowPreflightCache({ scenarioName, xmlPath } = {}) {
+        try {
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath });
+            if (!storage || !key) return null;
+            const raw = storage.getItem(key);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            const savedAt = Number(parsed.saved_at || 0);
+            if (!savedAt || (Date.now() - savedAt) > EXECUTE_FLOW_PREFLIGHT_CACHE_TTL_MS) {
+                storage.removeItem(key);
+                return null;
+            }
+            const payload = parsed.payload;
+            if (!payload || typeof payload !== 'object') return null;
+            const missing = executeFlowMissingList(payload);
+            const containerMissing = Array.isArray(payload.container_missing) ? payload.container_missing.filter(Boolean) : [];
+            if (payload.ok !== true || missing.length || containerMissing.length) {
+                storage.removeItem(key);
+                return null;
+            }
+            return payload;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function writeExecuteFlowPreflightCache({ scenarioName, xmlPath } = {}, payload) {
+        try {
+            if (!payload || typeof payload !== 'object' || payload.ok !== true) return;
+            const missing = executeFlowMissingList(payload);
+            const containerMissing = Array.isArray(payload.container_missing) ? payload.container_missing.filter(Boolean) : [];
+            if (missing.length || containerMissing.length) return;
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath });
+            if (!storage || !key) return;
+            storage.setItem(key, JSON.stringify({ saved_at: Date.now(), payload }));
+        } catch (e) { }
+    }
+
     async function ensureExecuteFlowArtifactsReady({ scenarioName, xmlPath, appendLog, updateStatus, abortRun } = {}) {
         const scenario = String(scenarioName || '').trim();
         const planPath = String(xmlPath || '').trim();
@@ -23356,6 +23451,13 @@
         const log = typeof appendLog === 'function' ? appendLog : () => { };
         const setStatus = typeof updateStatus === 'function' ? updateStatus : () => { };
         const abort = typeof abortRun === 'function' ? abortRun : () => { };
+
+        const cached = readExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath });
+        if (cached) {
+            log('Using recent Flow challenge file check.');
+            setStatus('Using recent Flow challenge file check…', 'Skipping duplicate Flow Re-Validate before execute.');
+            return true;
+        }
 
         log('Checking Flow challenge files on CORE VM…');
         setStatus('Checking Flow challenge files…', 'Running Flow Re-Validate before execute.');
@@ -23378,6 +23480,7 @@
         const missing = executeFlowMissingList(check);
         if (!missing.length) {
             log('Flow challenge files found on CORE VM.');
+            writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, check);
             return true;
         }
 
@@ -23438,12 +23541,92 @@
         }
 
         log('Flow challenge files regenerated and verified.');
+        writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, verify);
         return true;
     }
 
     function executeMissingServicesList(data) {
         const missing = data && Array.isArray(data.missing_services) ? data.missing_services : [];
         return missing.map((item) => String(item || '').trim()).filter(Boolean);
+    }
+
+    const EXECUTE_CUSTOM_SERVICES_CACHE_PREFIX = 'coretg_execute_custom_services_v1::';
+    const EXECUTE_CUSTOM_SERVICES_CACHE_TTL_MS = 30000;
+
+    function buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig } = {}) {
+        try {
+            const scenario = String(scenarioName || '').trim().toLowerCase();
+            const core = (coreConfig && typeof coreConfig === 'object') ? coreConfig : {};
+            let xmlCacheKey = '';
+            let xmlPath = '';
+            try {
+                xmlPath = (scenario && typeof window.coretgGetLatestXmlPathForScenario === 'function')
+                    ? String(window.coretgGetLatestXmlPathForScenario(scenario) || '').trim()
+                    : '';
+            } catch (e) { xmlPath = ''; }
+            try {
+                if (scenario && typeof window.CORETG_READ_LATEST_STATE_CACHE === 'function') {
+                    const latestState = window.CORETG_READ_LATEST_STATE_CACHE(scenario, { xmlPath });
+                    xmlCacheKey = (latestState && latestState.xml_cache_key) ? String(latestState.xml_cache_key || '').trim() : '';
+                }
+            } catch (e) { xmlCacheKey = ''; }
+            const coreFingerprint = {
+                host: String(core.grpc_host || core.host || '').trim(),
+                port: String(core.grpc_port || core.port || '').trim(),
+                ssh_host: String(core.ssh_host || '').trim(),
+                ssh_port: String(core.ssh_port || '').trim(),
+                ssh_username: String(core.ssh_username || '').trim(),
+                vm_key: String(core.vm_key || '').trim(),
+                vm_name: String(core.vm_name || '').trim(),
+                vm_node: String(core.vm_node || '').trim(),
+                vmid: String(core.vmid || '').trim(),
+            };
+            return EXECUTE_CUSTOM_SERVICES_CACHE_PREFIX + executeFlowPreflightHash(JSON.stringify({ scenario, xmlPath, xmlCacheKey, coreFingerprint }));
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function readExecuteCustomServicesCache({ scenarioName, coreConfig } = {}) {
+        try {
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig });
+            if (!storage || !key) return null;
+            const raw = storage.getItem(key);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            const savedAt = Number(parsed.saved_at || 0);
+            if (!savedAt || (Date.now() - savedAt) > EXECUTE_CUSTOM_SERVICES_CACHE_TTL_MS) {
+                storage.removeItem(key);
+                return null;
+            }
+            const payload = parsed.payload;
+            if (!payload || typeof payload !== 'object' || payload.ok !== true) {
+                storage.removeItem(key);
+                return null;
+            }
+            const missing = executeMissingServicesList(payload);
+            if (missing.length) {
+                storage.removeItem(key);
+                return null;
+            }
+            return payload;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function writeExecuteCustomServicesCache({ scenarioName, coreConfig } = {}, payload) {
+        try {
+            if (!payload || typeof payload !== 'object' || payload.ok !== true) return;
+            const missing = executeMissingServicesList(payload);
+            if (missing.length) return;
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig });
+            if (!storage || !key) return;
+            storage.setItem(key, JSON.stringify({ saved_at: Date.now(), payload }));
+        } catch (e) { }
     }
 
     async function ensureExecuteCustomServicesReady({ scenarioName, coreConfig, appendLog, updateStatus, abortRun } = {}) {
@@ -23458,6 +23641,13 @@
             core,
             scenario_name: String(scenarioName || '').trim(),
         };
+
+        const cached = readExecuteCustomServicesCache({ scenarioName, coreConfig: core });
+        if (cached) {
+            log('Using recent custom CORE services check.');
+            setStatus('Using recent custom CORE services check…', 'Skipping duplicate custom services check before execute.');
+            return true;
+        }
 
         log('Checking custom CORE services on CORE VM…');
         setStatus('Checking custom CORE services…', 'Verifying ScenarioForge service modules are installed.');
@@ -23475,6 +23665,7 @@
         const missing = executeMissingServicesList(check);
         if (!missing.length) {
             log('Custom CORE services are installed on CORE VM.');
+            writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, check);
             return true;
         }
 
@@ -23513,6 +23704,7 @@
         const meta = (install.install_custom_services && typeof install.install_custom_services === 'object') ? install.install_custom_services : null;
         const modules = meta && Array.isArray(meta.modules) ? meta.modules.map(v => String(v || '').trim()).filter(Boolean) : [];
         log(`Custom CORE services installed${modules.length ? `: ${modules.join(', ')}` : '.'}`);
+        writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, install);
         return true;
     }
 

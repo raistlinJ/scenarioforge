@@ -661,6 +661,7 @@
     const options = (opts && typeof opts === 'object') ? opts : {};
     flowEnabled = !!value;
     const clearStateOnDisable = options.clearStateOnDisable !== false;
+    const skipXmlPersist = (!flowEnabled && clearStateOnDisable);
     if (flowEnabledToggleEl) {
       flowEnabledToggleEl.checked = !!flowEnabled;
     }
@@ -697,7 +698,7 @@
         if (!xmlPath && scenario && typeof window.coretgGetLatestXmlPathForScenario === 'function') {
           xmlPath = String(window.coretgGetLatestXmlPathForScenario(scenario) || '').trim();
         }
-        if (xmlPath) {
+        if (xmlPath && !skipXmlPersist) {
           saveFlowStateToXml(xmlPath);
         }
       } catch (e) { }
@@ -10711,11 +10712,6 @@
             window.coretgSetPreviewPlanPathForScenario(scenario, previewPlan);
           }
         } catch (e) { }
-        try {
-          if (scenario && typeof window.coretgSetPreviewPlanPathForScenario === 'function') {
-            window.coretgSetPreviewPlanPathForScenario(scenario, previewPlan);
-          }
-        } catch (e) { }
         lastPreviewPlanPath = previewPlan;
         params.delete('preview_plan');
       }
@@ -13223,16 +13219,16 @@ ${out.join('\n')}
       }
 
       const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);
-      if (shouldPersistFlowState) {
+      if (!flowEnabled) {
+        if (shouldPersistFlowState && !(await clearFlowStateInXml())) {
+          throw new Error('Failed to clear Flag Sequencing state in XML.');
+        }
+      } else if (shouldPersistFlowState) {
         setStatus('Saving flow state…', false);
         showLoading('Saving flow state…');
         if (!(await saveFlowStateToXml(xmlPath))) {
           throw new Error('Failed to save Flag Sequencing state into XML.');
         }
-      }
-
-      if (!flowEnabled) {
-        try { await clearFlowStateInXml(); } catch (e) { }
       }
 
       // Navigate to Preview tab.
@@ -13842,12 +13838,25 @@ ${out.join('\n')}
       window.coretgSetLatestXmlPathForScenario(activeScenario, xmlPath);
     }
   } catch (e) { }
-  clearPreviewPlanCacheForScenario(activeScenario);
+  try {
+    lastPreviewPlanPath = (typeof window.coretgGetPreviewPlanPathForScenario === 'function')
+      ? String(window.coretgGetPreviewPlanPathForScenario(activeScenario) || '').trim()
+      : '';
+  } catch (e) {
+    lastPreviewPlanPath = '';
+  }
+  try { updateMeta(); } catch (e) { }
   const initialLatestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');
   const restored = await restoreSavedFlowForScenario(activeScenario);
   if (!restored) {
-    try { await initialLatestPreviewPromise; } catch (e) { }
     setStatus('Chain does not exist. Click Generate to start.', false);
+    initialLatestPreviewPromise.then(() => {
+      try {
+        if (!currentChain.length && !currentFlagAssignments.length) {
+          updateEmptyFlowStatus();
+        }
+      } catch (e) { }
+    }).catch(() => { });
   } else {
     initialLatestPreviewPromise.then(() => { try { updateMeta(); } catch (e) { } }).catch(() => { });
   }
