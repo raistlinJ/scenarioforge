@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 FLOW_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "flow.html"
+REPORTS_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "reports.html"
 
 
 def test_flow_assignment_persists_resolved_paths() -> None:
@@ -35,11 +36,162 @@ def test_flow_generator_output_shows_phase_timings() -> None:
     assert not missing, "Missing phase timing display wiring in flow template: " + "; ".join(missing)
 
 
+def test_flow_sequencing_progress_is_request_scoped_and_visible() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function startFlowProgressPoll(options)",
+        "if (opts.progressId) url += '?progress_id=' + encodeURIComponent(String(opts.progressId));",
+        "const display = _formatFlowProgressLine(s);",
+        "if (newLines.length && opts.loadingLog) newLines.forEach((line) => appendLoadingLog(line));",
+        "const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;",
+        "startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });",
+        "progress_id: sequenceProgressId,",
+        "if (s.includes('phase: building topology graph')) return 'Building topology graph…';",
+        "if (s.includes('phase: computing generator assignments')) return 'Assigning generators…';",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing request-scoped visible sequencing progress snippets: " + "; ".join(missing)
+
+
+def test_flow_loading_progress_uses_scrollable_container() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        'id="flowLoadingSteps"',
+        'max-height: 150px; overflow-y: auto;',
+        'id="flowComposeSteps"',
+        'max-height: 140px; overflow-y: auto;',
+        'id="flowLoadingLog"',
+        'max-height: 180px; overflow-y: auto;',
+        'white-space: pre-wrap; word-break: break-word;',
+        '<div class="d-flex align-items-center gap-2 ${cls}">',
+        'try { stepsEl.scrollTop = stepsEl.scrollHeight; } catch (e) { }',
+        "const entry = document.createElement('div');",
+        'entry.textContent = msg;',
+        'try { loadingLogEl.scrollTop = loadingLogEl.scrollHeight; } catch (scrollErr) { }',
+        "${progress.map(p => `<div>${esc(p)}</div>`).join('')}",
+        "appendLoadingLog(`${runIndex + 1}. ${gid}${node ? ` @ ${node}` : ''}: ${ok}${note ? ` (${note})` : ''}`);",
+        "<div class=\"small mb-3\">",
+        "${summaryRows || '<div class=\"text-muted\">No generator output captured.</div>'}",
+        "missing.slice(0, 8).forEach((m, missingIndex) => appendLoadingLog(`${missingIndex + 1}. ${m}`));",
+        "More missing files:",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing scrollable loading log snippets: " + "; ".join(missing)
+
+    forbidden_snippets = [
+        '<ul id="flowLoadingSteps"',
+        '<ul id="flowComposeSteps"',
+        "<ul class=\"small mb-3\">${progress.map(p => `<li>${esc(p)}</li>`).join('')}</ul>",
+        '<ul class="small mb-3"',
+        '<li class="d-flex align-items-center gap-2"',
+        '<li class="text-muted">No generator output captured.',
+        'appendLoadingLog(`- ',
+        "appendLoadingLog('- ",
+    ]
+    present = [snippet for snippet in forbidden_snippets if snippet in text]
+    assert not present, "Progress output should not use bullet-list markup: " + "; ".join(present)
+
+
+def test_report_guides_include_chain_io_and_pivot_sections() -> None:
+    reports_text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    flow_text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "### Chain Inputs / Outputs",
+        "### Pivot Path",
+        "const pivotEntries = Array.isArray(assignment.pivot)",
+        "...normalizeChainFacts(assignment.requires)",
+        "...normalizeChainFacts(assignment.produces)",
+        "entry.provider_label || entry.provider",
+    ]
+    reports_missing = [snippet for snippet in expected_snippets if snippet not in reports_text]
+    assert not reports_missing, "Missing pivot/chain IO report-guide rendering snippets: " + "; ".join(reports_missing)
+
+    flow_missing = [snippet for snippet in expected_snippets if snippet not in flow_text]
+    assert not flow_missing, "Missing pivot/chain IO flow-guide rendering snippets: " + "; ".join(flow_missing)
+
+
+def test_flow_chain_editor_surfaces_pivot_paths() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function renderPivotPathSummary(assignment)",
+        "addRow('Pivot Path', pivotPathSummary);",
+        "const pivotEntries = (curA && Array.isArray(curA.pivot))",
+        "if (pivotEntries !== undefined && pivotEntries.length) out.pivot = pivotEntries;",
+        "if (savedA.pivot && !Array.isArray(curA.pivot)) curA.pivot = savedA.pivot;",
+        "if (savedA.pivot_inputs && !Array.isArray(curA.pivot_inputs)) curA.pivot_inputs = savedA.pivot_inputs;",
+        "if (savedA.pivot_outputs && !Array.isArray(curA.pivot_outputs)) curA.pivot_outputs = savedA.pivot_outputs;",
+        "if (savedA.pivot_hints && !Array.isArray(curA.pivot_hints)) curA.pivot_hints = savedA.pivot_hints;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow chain-card pivot rendering/persistence snippets: " + "; ".join(missing)
+
+
+def test_flow_chain_editor_hides_synthetic_pivot_noise() -> None:
+    flow_text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    reports_text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_flow_snippets = [
+        "function isSyntheticChainFactName(name)",
+        "function isPivotChainFactName(name)",
+        "function pivotFactSourceName(name)",
+        "function hasResolvedFactValue(value)",
+        "function renderPivotInputResolvedValue(key)",
+        "span.textContent = `pivot from ${source}`;",
+        "{ isInput: isInputs }",
+        "!/^Pivot source:/i.test(String(text || '').trim())",
+        "if (isSyntheticChainFactName(name) && !hasResolvedFactValue(entry.resolved)) return;",
+        "if (isSyntheticChainFactName(n) && !(resolvedOutputs && hasResolvedFactValue(resolvedOutputs[n]))) return;",
+    ]
+    missing_flow = [snippet for snippet in expected_flow_snippets if snippet not in flow_text]
+    assert not missing_flow, "Missing Flow synthetic pivot display filters: " + "; ".join(missing_flow)
+
+    expected_report_snippets = [
+        ".filter((value) => !/^Pivot source:/i.test(value))",
+    ]
+    missing_reports = [snippet for snippet in expected_report_snippets if snippet not in reports_text]
+    assert not missing_reports, "Missing report synthetic pivot hint filter: " + "; ".join(missing_reports)
+
+
+def test_segmentation_pivot_provider_options_are_curated() -> None:
+    text = FLOW_TEMPLATE_PATH.parent.joinpath("index.html").read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const providerNormalized = ['auto', 'none', 'manual'].includes(providerRaw) ? 'random' : providerRaw;",
+        "const allowedProviders = new Set(['random', 'vulnerability', 'flag-node-generator', 'ssh-fallback']);",
+        "['random', 'Random']",
+        "['vulnerability', 'Vulnerability']",
+        "['flag-node-generator', 'Flag-Node-Generator']",
+        "['ssh-fallback', 'Docker SSH']",
+        "['auto', 'none', 'manual'].includes(currentPivotProvider)",
+        "const providerOptions = ['vulnerability', 'flag-node-generator', 'ssh-fallback'];",
+        "field: 'pivot_provider'",
+        '<label class="form-check-label small">Pivot-Accessible</label>',
+    ]
+    removed_snippets = [
+        "['none', 'Manual']",
+        "['flag-node-generator', 'flag-node-generator']",
+        '<label class="form-check-label small">Pivot</label>',
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not missing, "Missing curated pivot provider option snippets: " + "; ".join(missing)
+    assert not present, "Removed pivot provider options/labels should not remain: " + "; ".join(present)
+
+
 def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
         "function _fallbackOutputTemplateText(expr)",
+        "function _canonicalOutputTemplateKey(expr)",
+        "const roCanonical = new Map();",
         "return 'generated credential';",
         "function _applyHintNodeTemplateVars(text, assignment)",
         "const FLOW_TEMPLATE_OPEN = '{' + '{';",
@@ -51,6 +203,92 @@ def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing unresolved hint template cleanup wiring in flow template: " + "; ".join(missing)
+
+
+def test_flow_inputs_tab_labels_pivot_requirements() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function _pivotNodeFromFact(expr)",
+        "function _singlePivotSourceNode(assignment, fallbackFact)",
+        "function _formatPivotInputFact(value, assignment)",
+        "pivot from ${sourceNode}",
+        "const sourceAssignment = Object.keys(explicitAssignment).length ? explicitAssignment : { requires: rawArtifacts.concat(rawFields), inputs: rawArtifacts.concat(rawFields) };",
+        "const formatInputFact = (value) => /(?:input|require)/i.test(label) ? _formatPivotInputFact(value, sourceAssignment) : value;",
+        "const collapsedPivotRows = Array.isArray(opts.collapsedPivotRows) ? opts.collapsedPivotRows : [];",
+        "summary.textContent = `${collapsedPivotRows.length} other Pivot input${collapsedPivotRows.length === 1 ? '' : 's'}`;",
+        "function collapsePivotInputRows(rows)",
+        "collapsedPivotRows: pivotRows.slice(1)",
+        "collapsePivotInputRows(rows).forEach(addRowVar);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Pivot(...) input display labels in flow template: " + "; ".join(missing)
+
+
+def test_flow_inputs_tab_has_source_column_for_chain_and_sequencer_inputs() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function flowInputSourceInfo(row)",
+        "function renderFlowInputSourceBadge(row)",
+        "function hasMeaningfulFlowInputSourceValue(value)",
+        "if (fromChain && fromSeq)",
+        "return { text: 'From Chain'",
+        "return { text: 'From Sequencer'",
+        "return { text: 'Config/default'",
+        "return { text: 'Not supplied'",
+        "<th style=\"width: 1%; white-space: nowrap;\">Source</th>",
+        "tdSource.appendChild(renderFlowInputSourceBadge(row));",
+        "tdSource.appendChild(renderFlowInputSourceBadge(v));",
+        "resolved: resolvedInputs ? resolvedInputs[n] : undefined,",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow input source column wiring: " + "; ".join(missing)
+
+
+def test_flow_resolved_columns_scroll_and_optional_badges_are_removed() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function flowResolvedScrollContent(content)",
+        "function flowAppendResolvedCell(cell, content)",
+        "wrap.style.display = 'block';",
+        "wrap.style.width = '100%';",
+        "wrap.style.overflow = 'auto';",
+        "wrap.style.whiteSpace = 'nowrap';",
+        "cell.style.minWidth = '10rem';",
+        "cell.style.width = '18rem';",
+        "cell.style.maxWidth = '18rem';",
+        "function flowStyleCompactTableCell(cell, minWidth)",
+        "function flowScrollableTable(tableEl)",
+        "tableEl.style.width = 'max-content';",
+        "tableEl.style.minWidth = '100%';",
+        "flowStyleCompactTableCell(tdVar, '12rem');",
+        "flowStyleCompactTableCell(tdSource, '8rem');",
+        "return flowScrollableTable(tbl);",
+        "addRow('', flowScrollableTable(inTbl));",
+        "addRow('', flowScrollableTable(outTbl));",
+        "flowAppendResolvedCell(tdRes, renderResolvedInline(row.resolved));",
+        "flowAppendResolvedCell(tdRes, renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name, { isInput: isInputs }));",
+        "flowAppendResolvedCell(tdRes, renderResolvedValueForKey(isInputs ? resolvedInputs : resolvedOutputs, v.name));",
+        "inputs without * are optional",
+    ]
+    removed_snippets = [
+        "showOptionalBadge",
+        "badge.textContent = 'Optional';",
+        "Optional badge = non-blocking for step completion",
+        "Optional means non-blocking for step completion",
+        "tableLayout = 'fixed'",
+        "cell.style.maxWidth = '0';",
+        "clamp(10rem, 32vw, 30rem)",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    present = [snippet for snippet in removed_snippets if snippet in text]
+    assert not missing, "Missing Flow resolved-cell scroll wiring: " + "; ".join(missing)
+    assert not present, "Optional variable badges should be removed: " + "; ".join(present)
 
 
 def test_flow_template_compiles_with_hint_placeholders() -> None:
@@ -293,10 +531,16 @@ def test_flow_visualization_groups_parallel_dependency_layers() -> None:
         "(Array.isArray(layout.edges) ? layout.edges : []).forEach((edge) => {",
         "const edgeLabel = mermaidSafeEdgeLabel(edge && edge.facts);",
         "lines.push(`  N${fromIndex} -->|\"${edgeLabel}\"| N${toIndex}`);",
+        "%%{init: {\"flowchart\": {\"nodeSpacing\": 72, \"rankSpacing\": 118, \"padding\": 18, \"curve\": \"basis\"}}}%%",
+        "max-height: 70vh; overflow: auto;",
         "function flowDependencyTooltipText(facts) {",
+        "const visibleFact = clean[0];",
+        "const tooltipFacts = [visibleFact].concat(clean.slice(1).filter((factName) => factName !== visibleFact));",
         "function buildFlowDependencyEdgeTooltips(chain, assignments, dependencyLevelOverride) {",
         "function applyFlowDependencyEdgeTooltips(wrap, chain, assignments, dependencyLevelOverride) {",
         "target.setAttribute('data-dependency-tooltip', tooltip);",
+        "target.setAttribute('title', tooltip);",
+        "child.setAttribute('data-dependency-tooltip', tooltip);",
         "const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'title');",
         "applyFlowDependencyEdgeTooltips(wrap, currentChain, currentFlagAssignments);",
     ]
@@ -337,8 +581,41 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
         '<span>Non-dependent</span>',
         '<span>Completely dependent</span>',
         "function normalizeDependencyLevel(value) {",
+        "function isTransientFetchError(err) {",
+        "function buildResolveInterruptionDiagnostics(err, context) {",
+        "async function fetchWithTransientRetry(url, init, opts) {",
+        "Transient fetch error; retrying request",
+        "requestOpts.networkRetries = 2;",
+        "Network request interrupted; retrying",
+        "Network request interrupted after request-level retries",
+        "let generateInFlight = false;",
+        "function setGenerateBusy(value) {",
+        "if (generateInFlight) {",
+        "Generate ignored: another Generate/Resolve request is already running.",
+        "resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));",
+        "resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;",
+        "onLines: (lines) => {",
+        "resolveProgressLines = resolveProgressLines.concat(lines || []).slice(-20);",
+        "timeout_s: resolveTimeoutSeconds,",
+        "progress_id: resolveProgressId,",
+        "Resolve request connection was interrupted while generators were running",
+        "Meaning: the browser lost its HTTP connection to the ScenarioForge webapp",
+        "Request: scenario=${ctx.scenario || '-'} chain=${ctx.chainLength || '-'} progress_id=${ctx.progressId || '-'}",
+        "Timing: elapsed=${elapsedSeconds !== null ? elapsedSeconds.toFixed(1) + 's' : '-'}",
+        "Last progress: ${progressLines.join(' | ')}",
+        "grep outputs/logs/webui-${logPort}.log and the webapp terminal for progress_id=${ctx.progressId || '-'}",
         "dependency_level: getFlowDependencyLevel(),",
         "dependency_level: dependencyLevel,",
+        'id="flowIncludeAllTopologyVulns"',
+        'Include All Topology Vulns',
+        'id="flowIncludeAllTopologyPivots"',
+        'Include all Topology Pivots',
+        'expands the chain beyond Number of Challenges',
+        'syncTopologyInclusionOptionsFromUi()',
+        "include_all_topology_vulns: !!includeAllTopologyVulns,",
+        "include_all_topology_pivots: !!includeAllTopologyPivots,",
+        "params.set('include_all_topology_vulns', '1')",
+        "params.set('include_all_topology_pivots', '1')",
         "dependencyLevelEl.addEventListener('input'",
         "setFlowDependencyLevel(dependencyLevelEl.value",
     ]
@@ -409,17 +686,18 @@ def test_flow_restore_prefers_xml_authoritative_state() -> None:
     assert not missing, "Missing XML-authoritative flow restore snippets: " + "; ".join(missing)
 
 
-def test_flow_restore_refreshes_xml_before_state_selection() -> None:
+def test_flow_restore_refreshes_xml_only_when_server_state_missing() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
-        "if (hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {",
+        "const hasServerFlowState = !!getFlowStateForScenario(scenarioName);",
+        "if (!hasServerFlowState && hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {",
         "const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath });",
         "if (key) flowStateByScenario[key] = fs;",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Flow restore should refresh XML-backed scenario state first: " + "; ".join(missing)
+    assert not missing, "Flow restore should refresh XML-backed state only when server state is missing: " + "; ".join(missing)
 
 
 def test_flow_restore_emits_debug_logs_for_roundtrip_diagnostics() -> None:
@@ -507,7 +785,8 @@ def test_flow_preview_tab_persists_flow_state_before_redirect() -> None:
 
     expected_snippets = [
         "link.addEventListener('click', async (ev) => {",
-        "if (!(await saveFlowStateToXml(xmlPath))) {",
+        "const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);",
+        "if (shouldPersistFlowState && !(await saveFlowStateToXml(xmlPath))) {",
         "window.location.href = url;",
     ]
 

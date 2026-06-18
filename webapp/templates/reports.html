@@ -121,6 +121,27 @@
     </div>
   </div>
 </div>
+<div class="modal fade" id="reportGenerationModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="reportGenerationModalTitle">Generating…</h5>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex align-items-center gap-3" id="reportGenerationModalWorkingState">
+          <div class="spinner-border text-primary" id="reportGenerationModalSpinner" role="status" aria-hidden="true"></div>
+          <div>
+            <div class="fw-semibold" id="reportGenerationModalStatus">Generating…</div>
+            <div class="small text-muted" id="reportGenerationModalDetail">Please wait while the report artifact is prepared.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer d-none" id="reportGenerationModalFooter">
+        <button type="button" class="btn btn-primary" id="reportGenerationModalCloseBtn" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 {% include 'partials/dock.html' %}
 {% endblock %}
 {% block extra_scripts %}
@@ -150,6 +171,86 @@ const participantDetailsBaseUrl = "{{ url_for('participant_ui_details_api') }}";
 let scenarioNamesCache = {{ (scenarios or [])|tojson }};
 const initialScenarioFilter = {{ (active_scenario or '')|tojson }};
 let activeScenarioFilter = initialScenarioFilter || null;
+let reportGenerationModalEl = null;
+let reportGenerationModalInst = null;
+let reportGenerationModalTitleEl = null;
+let reportGenerationModalStatusEl = null;
+let reportGenerationModalDetailEl = null;
+let reportGenerationModalSpinnerEl = null;
+let reportGenerationModalFooterEl = null;
+const reportGenerationState = {
+  active: false,
+};
+const reportGenerationBeforeUnload = (event) => {
+  if (!reportGenerationState.active) return undefined;
+  event.preventDefault();
+  event.returnValue = '';
+  return '';
+};
+
+function ensureReportGenerationModal(){
+  if (!reportGenerationModalEl) reportGenerationModalEl = document.getElementById('reportGenerationModal');
+  if (!reportGenerationModalTitleEl) reportGenerationModalTitleEl = document.getElementById('reportGenerationModalTitle');
+  if (!reportGenerationModalStatusEl) reportGenerationModalStatusEl = document.getElementById('reportGenerationModalStatus');
+  if (!reportGenerationModalDetailEl) reportGenerationModalDetailEl = document.getElementById('reportGenerationModalDetail');
+  if (!reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl = document.getElementById('reportGenerationModalSpinner');
+  if (!reportGenerationModalFooterEl) reportGenerationModalFooterEl = document.getElementById('reportGenerationModalFooter');
+  if (!reportGenerationModalInst && reportGenerationModalEl && window.bootstrap) {
+    reportGenerationModalInst = bootstrap.Modal.getOrCreateInstance(reportGenerationModalEl, { backdrop: 'static', keyboard: false });
+  }
+}
+
+function setReportGenerationNavigationGuard(enabled){
+  if (enabled) window.addEventListener('beforeunload', reportGenerationBeforeUnload);
+  else window.removeEventListener('beforeunload', reportGenerationBeforeUnload);
+}
+
+function showReportGenerationModal(kindLabel){
+  ensureReportGenerationModal();
+  reportGenerationState.active = true;
+  setReportGenerationNavigationGuard(true);
+  if (reportGenerationModalTitleEl) reportGenerationModalTitleEl.textContent = 'Generating…';
+  if (reportGenerationModalStatusEl) reportGenerationModalStatusEl.textContent = 'Generating…';
+  if (reportGenerationModalDetailEl) reportGenerationModalDetailEl.textContent = kindLabel
+    ? `Please wait while ${kindLabel} is prepared.`
+    : 'Please wait while the report artifact is prepared.';
+  if (reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl.classList.remove('d-none');
+  if (reportGenerationModalFooterEl) reportGenerationModalFooterEl.classList.add('d-none');
+  if (reportGenerationModalInst) reportGenerationModalInst.show();
+}
+
+function hideReportGenerationModal(){
+  reportGenerationState.active = false;
+  setReportGenerationNavigationGuard(false);
+  ensureReportGenerationModal();
+  if (reportGenerationModalInst) reportGenerationModalInst.hide();
+}
+
+function showReportGenerationError(message){
+  ensureReportGenerationModal();
+  reportGenerationState.active = false;
+  setReportGenerationNavigationGuard(false);
+  if (reportGenerationModalTitleEl) reportGenerationModalTitleEl.textContent = 'Generation failed';
+  if (reportGenerationModalStatusEl) reportGenerationModalStatusEl.textContent = 'Unable to generate the requested download.';
+  if (reportGenerationModalDetailEl) reportGenerationModalDetailEl.textContent = String(message || 'An unexpected error occurred.');
+  if (reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl.classList.add('d-none');
+  if (reportGenerationModalFooterEl) reportGenerationModalFooterEl.classList.remove('d-none');
+  if (reportGenerationModalInst) reportGenerationModalInst.show();
+}
+
+function reportDownloadLabel(kind){
+  const labels = {
+    'preview-plan-html': 'Flow/Preview Plan',
+    'afb': 'Attack Flow',
+    'attack-graph-dot': 'Attack Graph (.dot)',
+    'attack-graph-json': 'Attack Graph (.json)',
+    'attack-graph-pdf': 'Attack Graph (.pdf)',
+    'participant-guide': 'Participant Steps Guide',
+    'facilitator-guide': 'Facilitator Guide',
+  };
+  return labels[String(kind || '').trim()] || 'download';
+}
+
 const clearScenarioBtn = document.getElementById('clearScenarioFilter');
 if(clearScenarioBtn){ clearScenarioBtn.style.display = activeScenarioFilter ? 'inline-block':'none'; }
 // Tracks whether user explicitly activated select-all across currently visible rows.
@@ -383,8 +484,8 @@ function markdownToHtmlDocument(title, markdown) {
     .guide-path-missing-container td { background: #fef9c3; border-color: #fde68a; }
     .guide-flow-figure { margin: 1.1rem 0; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: .75rem; }
     .guide-flow-figure figcaption { font-weight: 700; margin-bottom: .55rem; color: #0f172a; }
-    .guide-flow-scroll { overflow-x: auto; }
-    .guide-flow-figure svg { display: block; min-width: 720px; }
+    .guide-flow-scroll { overflow: auto; max-height: 72vh; padding-bottom: .35rem; }
+    .guide-flow-figure svg { display: block; min-width: 880px; }
     code { background: #e2e8f0; border-radius: 4px; padding: .1rem .25rem; }
     pre { background: #111827; color: #f8fafc; border-radius: 6px; padding: .9rem 1rem; overflow-x: auto; }
     pre code { background: transparent; color: inherit; padding: 0; }
@@ -632,28 +733,29 @@ function guideFigureEdgeLabel(facts) {
     .map((value) => String(value || '').trim())
     .filter(Boolean);
   if (!values.length) return '';
-  const shown = values.slice(0, 2);
-  if (values.length > shown.length) shown.push(`+${values.length - shown.length}`);
-  return shown.join(', ');
+  return values.length > 1 ? `${values[0]} +${values.length - 1}` : values[0];
 }
 
 function guideFigureDependencyTooltip(facts) {
-  return (Array.isArray(facts) ? facts : [facts])
+  const clean = (Array.isArray(facts) ? facts : [facts])
     .map((value) => String(value || '').trim())
-    .filter(Boolean)
-    .join('\n');
+    .filter(Boolean);
+  if (!clean.length) return '';
+  const visibleFact = clean[0];
+  const tooltipFacts = [visibleFact].concat(clean.slice(1).filter((factName) => factName !== visibleFact));
+  return tooltipFacts.join('\n');
 }
 
 function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
   const nodes = Array.isArray(chain) ? chain : [];
   if (!nodes.length) return '';
   const assignmentList = Array.isArray(assignments) ? assignments : [];
-  const cardWidth = 220;
-  const cardHeight = 104;
-  const columnGap = 92;
-  const rowGap = 24;
-  const marginX = 36;
-  const marginY = 34;
+  const cardWidth = 228;
+  const cardHeight = 108;
+  const columnGap = 150;
+  const rowGap = 46;
+  const marginX = 46;
+  const marginY = 38;
   const stageLabelHeight = 30;
   const marginBottom = 30;
   const liveLayout = (typeof buildFlowDependencyLayout === 'function') ? buildFlowDependencyLayout(nodes, assignmentList) : null;
@@ -664,7 +766,7 @@ function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
     ? layout.stages
     : [{ stage: 0, indices: nodes.map((_node, nodeIndex) => nodeIndex) }];
   const maxRows = Math.max(1, ...stages.map((stageGroup) => Math.max(1, Array.isArray(stageGroup.indices) ? stageGroup.indices.length : 0)));
-  const width = Math.max(760, (marginX * 2) + (stages.length * cardWidth) + (Math.max(0, stages.length - 1) * columnGap));
+  const width = Math.max(880, (marginX * 2) + (stages.length * cardWidth) + (Math.max(0, stages.length - 1) * columnGap));
   const height = marginY + stageLabelHeight + (maxRows * cardHeight) + (Math.max(0, maxRows - 1) * rowGap) + marginBottom;
   const titleId = `guide-flow-title-${Math.random().toString(36).slice(2, 9)}`;
   const scen = guideFigureFirstNonEmpty(scenarioName, 'Scenario');
@@ -724,17 +826,17 @@ function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
     const midX = startX + Math.max(36, (endX - startX) / 2);
     const label = guideFigureEdgeLabel(edge && edge.facts);
     const tooltip = guideFigureDependencyTooltip(edge && edge.facts);
-    const labelLines = label ? guideFigureWrapText(label, 28, 2) : [];
+    const labelLines = label ? guideFigureWrapText(label, 34, 2) : [];
     const labelX = (startX + endX) / 2;
-    const labelY = (startY + endY) / 2 - 9;
-    const labelWidth = labelLines.length ? Math.min(190, Math.max(84, Math.max(...labelLines.map((line) => line.length)) * 6.2 + 18)) : 0;
+    const labelY = (startY + endY) / 2 - 16;
+    const labelWidth = labelLines.length ? Math.min(230, Math.max(96, Math.max(...labelLines.map((line) => line.length)) * 6.2 + 22)) : 0;
     const labelHeight = labelLines.length ? (labelLines.length * 13) + 8 : 0;
     const labelSpans = labelLines.map((line, lineIndex) => `<tspan x="${labelX}" dy="${lineIndex === 0 ? 0 : 13}">${escapeHtml(line)}</tspan>`).join('');
-    return `<g class="guide-flow-edge" data-edge="${edgeIndex + 1}">
+    return `<g class="guide-flow-edge" data-edge="${edgeIndex + 1}"${tooltip ? ` aria-label="${escapeHtml(tooltip)}"` : ''}>
       ${tooltip ? `<title>${escapeHtml(tooltip)}</title>` : ''}
         <path d="M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}" fill="none" stroke="#2563eb" stroke-width="2.2" marker-end="url(#guide-flow-arrow)" />
         ${labelLines.length ? `<rect x="${labelX - (labelWidth / 2)}" y="${labelY - 12}" width="${labelWidth}" height="${labelHeight}" rx="5" fill="#ffffff" stroke="#bfdbfe" />
-        <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10" fill="#1e40af">${labelSpans}</text>` : ''}
+        <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10" fill="#1e40af">${tooltip ? `<title>${escapeHtml(tooltip)}</title>` : ''}${labelSpans}</text>` : ''}
       </g>`;
   }).filter(Boolean).join('\n');
   return `<figure class="guide-flow-figure" aria-label="Challenge sequence flow">
@@ -798,6 +900,16 @@ const _REPORT_TEMPLATE_OPEN = '\u007b\u007b';
 const _REPORT_TEMPLATE_CLOSE = '\u007d\u007d';
 const _REPORT_OUTPUT_TEMPLATE_PREFIX = _REPORT_TEMPLATE_OPEN + 'OUTPUT.';
 const REPORT_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
+function canonicalReportOutputTemplateKey(expr) {
+  try {
+    const key = String(expr || '').trim().toLowerCase();
+    if (!key) return '';
+    if (key.includes('(') && key.includes(')')) return key.replace(/\s+/g, '');
+    return key;
+  } catch (e) {
+    return '';
+  }
+}
 function applyReportHintOutputTemplates(text, assignment) {
   const t = String(text || '');
   if (!t || !t.includes(_REPORT_OUTPUT_TEMPLATE_PREFIX)) return t;
@@ -806,11 +918,14 @@ function applyReportHintOutputTemplates(text, assignment) {
     : null;
   if (!ro) return t;
   const roLower = new Map();
+  const roCanonical = new Map();
   try {
     Object.keys(ro).forEach((k) => {
       const key = String(k || '').trim();
       if (!key) return;
       roLower.set(key.toLowerCase(), key);
+      const canonical = canonicalReportOutputTemplateKey(key);
+      if (canonical && !roCanonical.has(canonical)) roCanonical.set(canonical, key);
     });
   } catch (e) {}
   const normalizeValue = (val) => {
@@ -858,6 +973,8 @@ function applyReportHintOutputTemplates(text, assignment) {
     if (direct !== undefined && direct !== null) return normalizeValue(direct);
     const key = roLower.get(token.toLowerCase());
     if (key) return normalizeValue(ro[key]);
+    const canonicalKey = roCanonical.get(canonicalReportOutputTemplateKey(token));
+    if (canonicalKey) return normalizeValue(ro[canonicalKey]);
     return '';
   };
 
@@ -1445,6 +1562,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       ? assignment.chain_supplied_input_hints
         .map((value) => applyReportHintOutputTemplates(String(value || '').trim(), assignment))
         .map((value) => String(value || '').trim())
+        .filter((value) => !/^Pivot source:/i.test(value))
         .filter(Boolean)
       : [];
     if (sequenceOneRequiredHintLines.length) {
@@ -1530,6 +1648,64 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
     }
     lines.push('');
+
+    const normalizeChainFacts = (value) => guideFigureNormalizeFactNames(value, ['artifact', 'name', 'field'])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    const chainInputFacts = Array.from(new Set([
+      ...normalizeChainFacts(assignment.requires),
+      ...normalizeChainFacts(assignment.inputs),
+    ]));
+    const chainOutputFacts = Array.from(new Set([
+      ...normalizeChainFacts(assignment.produces),
+      ...normalizeChainFacts(assignment.outputs),
+    ]));
+    const pivotEntries = Array.isArray(assignment.pivot)
+      ? assignment.pivot.filter((item) => item && typeof item === 'object')
+      : [];
+
+    lines.push('### Chain Inputs / Outputs');
+    lines.push('');
+    if (!chainInputFacts.length && !chainOutputFacts.length) {
+      lines.push('No chain-level facts were declared for this step.');
+    } else {
+      lines.push('| Direction | Fact |');
+      lines.push('| --- | --- |');
+      chainInputFacts.forEach((fact) => lines.push(`| Input | ${_cell(fact)} |`));
+      chainOutputFacts.forEach((fact) => lines.push(`| Output | ${_cell(fact)} |`));
+    }
+    lines.push('');
+
+    if (pivotEntries.length) {
+      lines.push('### Pivot Path');
+      lines.push('');
+      lines.push('| Role | Source | Target | Facts | Provider |');
+      lines.push('| --- | --- | --- | --- | --- |');
+      const pivotRows = pivotEntries.map((entry) => {
+        const role = String(entry.role || '').trim() || 'pivot';
+        const source = String(entry.source || '').trim();
+        const target = String(entry.target || '').trim();
+        const facts = Array.from(new Set([
+          ...normalizeChainFacts(entry.requires),
+          ...normalizeChainFacts(entry.produces),
+        ])).join(', ');
+        const provider = String(entry.provider_label || entry.provider || '').trim();
+        return `| ${_cell(role)} | ${_cell(source)} | ${_cell(target)} | ${_cell(facts)} | ${_cell(provider)} |`;
+      });
+      lines.push(pivotRows[0]);
+      if (pivotRows.length > 1) {
+        lines.push('');
+        lines.push('<details>');
+        lines.push(`<summary>${pivotRows.length - 1} other pivot path${(pivotRows.length - 1) === 1 ? '' : 's'} exist (click to see)</summary>`);
+        lines.push('');
+        lines.push('| Role | Source | Target | Facts | Provider |');
+        lines.push('| --- | --- | --- | --- | --- |');
+        pivotRows.slice(1).forEach((row) => lines.push(row));
+        lines.push('');
+        lines.push('</details>');
+      }
+      lines.push('');
+    }
     
     // Apply access instructions: check generator metadata first, then heuristics
     const _applyAccessInstructionsLocal = (assign, nodeName, nodeIp, nodeId) => {
@@ -1688,12 +1864,12 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
         if (!values.length) return;
         const firstValue = values[0];
         lines.push('<details>');
-        lines.push(`<summary>Hint ${reportHintLevelTitle(level)}: ${firstValue}</summary>`);
+        lines.push(`<summary>Hint ${reportHintLevelTitle(level)}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
         lines.push('');
         if (values.length === 1) {
           lines.push(firstValue);
         } else {
-          values.forEach((value) => lines.push(`- ${value}`));
+          values.slice(1).forEach((value) => lines.push(`- ${value}`));
         }
         lines.push('');
         lines.push('</details>');
@@ -1918,11 +2094,19 @@ async function fetchReportFlowPreview(scenario, previewPlanPath, xmlPath) {
   return data;
 }
 
-async function fetchReportFlowExports(scenario, chain) {
+async function fetchReportFlowExports(scenario, chain, assignments, options) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const body = {
+    scenario,
+    chain,
+    flag_assignments: Array.isArray(assignments) ? assignments : [],
+  };
+  if (opts.previewPlanPath) body.preview_plan_path = String(opts.previewPlanPath);
+  if (opts.xmlPath) body.xml_path = String(opts.xmlPath);
   const data = await fetchJsonOrThrow('/api/flag-sequencing/afb_from_chain', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scenario, chain })
+    body: JSON.stringify(body)
   });
   return data;
 }
@@ -2106,28 +2290,33 @@ async function handleReportDownloadAction(link) {
     downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), fname);
     return;
   }
-  const exportData = await fetchReportFlowExports(scenario, chain);
+  const exportData = await fetchReportFlowExports(scenario, chain, assignments, {
+    previewPlanPath: preview.preview_plan_path || previewPlanPath || xmlPath,
+    xmlPath: xmlPath || preview.preview_plan_path || previewPlanPath,
+  });
+  const exportChain = Array.isArray(exportData.chain) ? exportData.chain : chain;
+  const exportLen = String(exportChain.length || chain.length || 0);
   if (kind === 'afb') {
     if (!exportData.afb) throw new Error('No .afb returned by server.');
-    downloadBlob(new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json' }), `attackflow_builder_${norm}_${len}.afb`);
+    downloadBlob(new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json' }), `attackflow_builder_${norm}_${exportLen}.afb`);
     return;
   }
   if (kind === 'attack-graph-json') {
     if (!exportData.attack_graph) throw new Error('No attack graph returned by server.');
-    downloadBlob(new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json' }), `attack_graph_${norm}_${len}.json`);
+    downloadBlob(new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json' }), `attack_graph_${norm}_${exportLen}.json`);
     return;
   }
   if (kind === 'attack-graph-dot') {
     const dot = exportData.attack_graph_dot ? String(exportData.attack_graph_dot) : '';
     if (!dot) throw new Error('No attack graph .dot returned by server.');
-    downloadBlob(new Blob([dot], { type: 'text/vnd.graphviz' }), `attack_graph_${norm}_${len}.dot`);
+    downloadBlob(new Blob([dot], { type: 'text/vnd.graphviz' }), `attack_graph_${norm}_${exportLen}.dot`);
     return;
   }
   if (kind === 'attack-graph-pdf') {
     const b64 = exportData.attack_graph_pdf_base64 ? String(exportData.attack_graph_pdf_base64) : '';
     if (!b64) throw new Error('Attack graph PDF unavailable (Graphviz not installed).');
     const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    downloadBlob(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${len}.pdf`);
+    downloadBlob(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${exportLen}.pdf`);
     return;
   }
   throw new Error('Unknown download type.');
@@ -2164,19 +2353,16 @@ document.addEventListener('click', async (event) => {
   const link = event.target && event.target.closest ? event.target.closest('.report-download-action') : null;
   if (!link) return;
   event.preventDefault();
-  if (link.dataset.busy === '1') return;
-  const originalText = link.textContent || 'Download';
+  if (link.dataset.busy === '1' || reportGenerationState.active) return;
   link.dataset.busy = '1';
-  link.classList.add('disabled');
-  link.textContent = 'Preparing…';
+  showReportGenerationModal(reportDownloadLabel(link.dataset.kind));
   try {
     await handleReportDownloadAction(link);
+    hideReportGenerationModal();
   } catch (err) {
-    alert(String(err && err.message || err));
+    showReportGenerationError(String(err && err.message || err));
   } finally {
     delete link.dataset.busy;
-    link.classList.remove('disabled');
-    link.textContent = originalText;
   }
 });
 

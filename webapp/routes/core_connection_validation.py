@@ -48,12 +48,16 @@ def register(
             else:
                 data = {
                     'host': request.form.get('host'),
+                    'grpc_host': request.form.get('grpc_host'),
                     'port': request.form.get('port'),
+                    'grpc_port': request.form.get('grpc_port'),
                     'ssh_enabled': request.form.get('ssh_enabled'),
                     'ssh_host': request.form.get('ssh_host'),
                     'ssh_port': request.form.get('ssh_port'),
                     'ssh_username': request.form.get('ssh_username'),
                     'ssh_password': request.form.get('ssh_password'),
+                    'venv_bin': request.form.get('venv_bin'),
+                    'venv_user_override': request.form.get('venv_user_override'),
                     'core': request.form.get('core_json'),
                 }
                 try:
@@ -63,7 +67,19 @@ def register(
                     data['core'] = None
             direct_override = {
                 key: data.get(key)
-                for key in ('host', 'port', 'ssh_enabled', 'ssh_host', 'ssh_port', 'ssh_username', 'ssh_password')
+                for key in (
+                    'host',
+                    'port',
+                    'grpc_host',
+                    'grpc_port',
+                    'ssh_enabled',
+                    'ssh_host',
+                    'ssh_port',
+                    'ssh_username',
+                    'ssh_password',
+                    'venv_bin',
+                    'venv_user_override',
+                )
                 if data.get(key) not in (None, '')
             }
             scenario_core_raw = data.get('hitl_core')
@@ -416,6 +432,18 @@ def register(
                     ensure_core_daemon_listening(cfg, timeout=5.0)
                 except Exception as exc:
                     app.logger.warning('[core] daemon listening check failed: %s', exc)
+                    error_text = str(exc)
+                    lower_error = error_text.lower()
+                    if 'core-daemon is not accepting grpc connections' in lower_error or 'core-daemon did not respond' in lower_error:
+                        return jsonify({
+                            'ok': False,
+                            'error': error_text,
+                            'code': 'core_daemon_unreachable',
+                            'daemon_unreachable': True,
+                            'host': cfg.get('host'),
+                            'port': cfg.get('port'),
+                            'venv_bin': cfg.get('venv_bin'),
+                        }), 502
                     return jsonify({'ok': False, 'error': f'core-daemon is not reachable on {cfg.get("host")}:{cfg.get("port")}: {exc}'}), 502
             remote_desc = f"{cfg.get('host')}:{cfg.get('port')}"
             forwarded_host = ''

@@ -78,9 +78,12 @@ def test_prepare_preview_resolves_chain_and_output_template_vars(monkeypatch):
                 "Scenario={{SCENARIO}} next={{NEXT_NODE_NAME}} ip={{OUTPUT.Knowledge(ip)}}",
                 "subnet={{OUTPUT.Knowledge(ip):subnet24}} last={{OUTPUT.Knowledge(ip):last_octet}} port={{OUTPUT.https_port}}",
             ],
+            "medium": [
+                "Credential artifact: {{OUTPUT.Credential(user,password)}}",
+            ],
         },
         "inputs": [],
-        "outputs": [],
+        "outputs": [{"name": "Credential(user, password)"}],
     }
 
     monkeypatch.setattr(app_backend, "_flag_generators_from_enabled_sources", lambda: ([], []))
@@ -100,7 +103,7 @@ def test_prepare_preview_resolves_chain_and_output_template_vars(monkeypatch):
                 _f.write("ok\n")
             with open(os.path.join(out_dir, "outputs.json"), "w", encoding="utf-8") as mf:
                 # Deliberately emit a mismatching Knowledge(ip) to ensure the clamp uses preview ip4.
-                json.dump({"outputs": {"Knowledge(ip)": "10.0.0.99", "https_port": 8443}}, mf)
+                json.dump({"outputs": {"Knowledge(ip)": "10.0.0.99", "https_port": 8443, "Credential(user, password)": "alice:correct-horse"}}, mf)
 
         class Result:
             def __init__(self):
@@ -136,6 +139,7 @@ def test_prepare_preview_resolves_chain_and_output_template_vars(monkeypatch):
         assert isinstance(resolved_outputs, dict)
         assert "Knowledge(ip)" in resolved_outputs
         assert resolved_outputs.get("https_port") == 8443
+        assert resolved_outputs.get("Credential(user, password)") == "alice:correct-horse"
 
         hints = fas[0].get("hints") or []
         assert len(hints) >= 2
@@ -153,6 +157,8 @@ def test_prepare_preview_resolves_chain_and_output_template_vars(monkeypatch):
         assert "subnet=" in h1
         assert "last=" in h1
         assert "port=8443" in h1
+        medium_hints = ((fas[0].get("hint_levels") or {}).get("medium") or [])
+        assert medium_hints == ["Credential artifact: alice:correct-horse"]
 
         # No unresolved placeholders
         assert "{{OUTPUT." not in h0

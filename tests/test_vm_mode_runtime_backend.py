@@ -144,24 +144,49 @@ def test_docker_bridge_rewrites_loopback_core_host_in_native_mode(monkeypatch) -
 
 
 def test_vm_mode_backend_defaults_leave_hitl_ifnames_blank_until_configured(monkeypatch) -> None:
+    monkeypatch.delenv("CORETG_VM_MODE_HITL_ENABLED", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION", raising=False)
+    monkeypatch.delenv("CORETG_HITL_CORE_IFX_IPV4", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_NET0_NAME", raising=False)
 
     vm_defaults = app_backend._webui_vm_mode_defaults(include_password=False)
     hitl_defaults = vm_defaults["hitl"]
     assert hitl_defaults["interfaces"] == []
 
+    monkeypatch.setenv("CORETG_VM_MODE_HITL_ENABLED", "true")
     monkeypatch.setenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", "ens18")
     monkeypatch.setenv("CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT", "existing_router")
+    monkeypatch.setenv("CORETG_HITL_CORE_IFX_IPV4", "10.254.200.3/24")
 
     vm_defaults = app_backend._webui_vm_mode_defaults(include_password=False)
     hitl_defaults = vm_defaults["hitl"]
+    assert hitl_defaults["enabled"] is True
     assert len(hitl_defaults["interfaces"]) == 1
     assert hitl_defaults["interfaces"][0]["name"] == "ens18"
     assert hitl_defaults["interfaces"][0]["attachment"] == "existing_router"
+    assert hitl_defaults["interfaces"][0]["ipv4"] == ["10.254.200.3/24"]
     assert "proxmox_target" not in hitl_defaults["interfaces"][0]
+    assert hitl_defaults["shared_core_ifx_ipv4"] == ["10.254.200.3/24"]
+
+
+def test_vm_mode_backend_defaults_ignore_non_vm_hitl_interface_names(monkeypatch) -> None:
+    monkeypatch.delenv("CORETG_VM_MODE_HITL_ENABLED", raising=False)
+    monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", raising=False)
+    monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT", raising=False)
+    monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION", raising=False)
+    monkeypatch.delenv("CORETG_HITL_CORE_IFX_IPV4", raising=False)
+
+    monkeypatch.setenv("CORETG_HITL_CORE_IFX_NAME", "ens19")
+    monkeypatch.setenv("CORETG_HITL_CORE_IFX_ATTACHMENT", "new_router")
+    monkeypatch.setenv("CORETG_HITL_CORE_IFX_IPV4", "10.10.20.3/24")
+
+    vm_defaults = app_backend._webui_vm_mode_defaults(include_password=False)
+    hitl_defaults = vm_defaults["hitl"]
+    assert hitl_defaults["enabled"] is True
+    assert hitl_defaults["interfaces"] == []
+    assert hitl_defaults["shared_core_ifx_ipv4"] == ["10.10.20.3/24"]
 
 
 def test_runtime_env_loader_prefers_dotenv_over_example_and_preserves_real_env(tmp_path, monkeypatch) -> None:
@@ -183,7 +208,7 @@ def test_runtime_env_loader_prefers_dotenv_over_example_and_preserves_real_env(t
     monkeypatch.delenv("CORE_HOST", raising=False)
     monkeypatch.setenv("CORE_SSH_USERNAME", "shell-user")
 
-    loaded = env_loader.load_runtime_env_files(base_dir=tmp_path)
+    loaded = env_loader.load_runtime_env_files(base_dir=tmp_path, include_example=True)
 
     assert env_path.resolve() in loaded
     assert example_path.resolve() in loaded
@@ -192,7 +217,7 @@ def test_runtime_env_loader_prefers_dotenv_over_example_and_preserves_real_env(t
     assert os.environ["CORE_SSH_USERNAME"] == "shell-user"
 
 
-def test_runtime_env_loader_can_skip_example_defaults_for_native_startup(tmp_path, monkeypatch) -> None:
+def test_runtime_env_loader_ignores_example_defaults_by_default(tmp_path, monkeypatch) -> None:
     example_path = tmp_path / ".scenarioforge.env.example"
     example_path.write_text(
         "CORETG_WEBUI_MODE=vm\n"
@@ -211,7 +236,7 @@ def test_runtime_env_loader_can_skip_example_defaults_for_native_startup(tmp_pat
     monkeypatch.delenv("CORE_HOST", raising=False)
     monkeypatch.delenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", raising=False)
 
-    loaded = env_loader.load_runtime_env_files(base_dir=tmp_path, include_example=False)
+    loaded = env_loader.load_runtime_env_files(base_dir=tmp_path)
 
     assert env_path.resolve() in loaded
     assert example_path.resolve() not in loaded

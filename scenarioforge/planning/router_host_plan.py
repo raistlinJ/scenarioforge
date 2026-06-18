@@ -13,7 +13,7 @@ Notes:
         router derivation). When not known, callers may pass total hosts; results will still
         be consistent with current heuristic.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Iterable, List, Optional
 import random
 import ipaddress
 import math
@@ -112,6 +112,7 @@ def plan_r2s_grouping(
     ip_mode: str | None = None,
     ip_region: str | None = None,
     subnet_alloc_override: Any | None = None,
+    reserved_ipv4_networks: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Replica of grouping logic from full_preview, returned as a structured dict.
 
@@ -193,6 +194,51 @@ def plan_r2s_grouping(
             subnet_alloc = None
     # seeded RNG for deterministic but varied subnet selection per preview seed
     rnd = random.Random(seed if seed is not None else 0)
+    reserved_networks: List[ipaddress.IPv4Network] = []
+    reserved_network_keys: set[str] = set()
+    for raw_reserved in reserved_ipv4_networks or []:
+        try:
+            reserved_net = ipaddress.ip_network(str(raw_reserved), strict=False)
+        except Exception:
+            continue
+        if getattr(reserved_net, "version", None) != 4:
+            continue
+        reserved_key = str(reserved_net)
+        if reserved_key in reserved_network_keys:
+            continue
+        reserved_network_keys.add(reserved_key)
+        reserved_networks.append(reserved_net)
+
+    def _subnet_overlaps_reserved(subnet: Any) -> bool:
+        try:
+            net = subnet if isinstance(subnet, ipaddress.IPv4Network) else ipaddress.ip_network(str(subnet), strict=False)
+        except Exception:
+            return False
+        return any(net.overlaps(reserved) for reserved in reserved_networks)
+
+    def _allocator_subnet(prefix_len: int) -> Optional[ipaddress.IPv4Network]:
+        if subnet_alloc is None:
+            return None
+        for _ in range(1024):
+            try:
+                try:
+                    candidate = subnet_alloc.next_random_subnet(prefix_len, rnd=rnd)
+                except TypeError:
+                    candidate = subnet_alloc.next_random_subnet(prefix_len)
+            except Exception:
+                return None
+            if not _subnet_overlaps_reserved(candidate):
+                return candidate
+        return None
+
+    def _fallback_subnet(start_ip: str = '10.200.0.0') -> ipaddress.IPv4Network:
+        base = int(ipaddress.IPv4Address(start_ip))
+        block = 1 << (32 - DEFAULT_IPV4_PREFIXLEN)
+        for idx in range(4096):
+            candidate = ipaddress.ip_network((ipaddress.IPv4Address(base + idx * block), DEFAULT_IPV4_PREFIXLEN), strict=False)
+            if not _subnet_overlaps_reserved(candidate):
+                return candidate
+        return ipaddress.ip_network((ipaddress.IPv4Address(base), DEFAULT_IPV4_PREFIXLEN), strict=False)
 
     # Special-case: no routers planned.
     # In this mode, preview should still show all hosts in a sensible topology.
@@ -211,15 +257,11 @@ def plan_r2s_grouping(
         switch_id = next_switch_id
         lan_subnet = None
         if subnet_alloc is not None and host_ids:
-            try:
-                try:
-                    lan_subnet = str(subnet_alloc.next_random_subnet(DEFAULT_IPV4_PREFIXLEN, rnd=rnd))
-                except TypeError:
-                    lan_subnet = str(subnet_alloc.next_random_subnet(DEFAULT_IPV4_PREFIXLEN))
-            except Exception:
-                lan_subnet = None
+            subnet_obj = _allocator_subnet(DEFAULT_IPV4_PREFIXLEN)
+            if subnet_obj is not None:
+                lan_subnet = str(subnet_obj)
         if not lan_subnet:
-            lan_subnet = '10.200.0.0/24'
+            lan_subnet = str(_fallback_subnet())
 
         rsw_subnet = lan_subnet
         router_ip = None
@@ -283,18 +325,14 @@ def plan_r2s_grouping(
         """
         if subnet_alloc is None:
             raise RuntimeError("Subnet allocator unavailable; cannot allocate /24 subnets.")
-        try:
-            # Prefer randomized subnet selection when allocator supports it to vary ranges per-preview
-            try:
-                shared_net = subnet_alloc.next_random_subnet(DEFAULT_IPV4_PREFIXLEN, rnd=rnd)
-            except TypeError:
-                # older allocator signature without rnd
-                shared_net = subnet_alloc.next_random_subnet(DEFAULT_IPV4_PREFIXLEN)
-            # Return the same subnet for both fields for backward compatibility with
-            # existing payload consumers.
-            return str(shared_net), str(shared_net)
-        except Exception as e:
-            raise RuntimeError(f"Failed to allocate /24 subnets for router {router_id} group {group_idx}: {e}")
+        shared_net = _allocator_subnet(DEFAULT_IPV4_PREFIXLEN)
+        if shared_net is None:
+            raise RuntimeError(
+                f"Failed to allocate /24 subnets for router {router_id} group {group_idx}: no non-reserved subnets available"
+            )
+        # Return the same subnet for both fields for backward compatibility with
+        # existing payload consumers.
+        return str(shared_net), str(shared_net)
 
     router_meta: Dict[int, Dict[str, Any]] = {}
     for rid in sorted(hosts_by_router.keys()):

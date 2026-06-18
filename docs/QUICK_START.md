@@ -63,7 +63,7 @@ python -m scenarioforge.cli --xml examples/sample.xml --seed 42 --verbose
 Popular options:
 - Replace `examples/sample.xml` with your own ScenarioForge XML file when you are ready to run a custom scenario.
 - `--scenario NAME` pick a specific scenario entry
-- `--host / --port` override the CORE gRPC endpoint (defaults `127.0.0.1:50051`)
+- `--host / --port` override the CORE gRPC endpoint (defaults `localhost:50051`)
 - `--layout-density {compact|normal|spacious}` adjust map spacing
 - `--seg-include-hosts`, `--seg-allow-docker-ports`, `--nat-mode`, `--dnat-prob` fine-tune segmentation
 - `--traffic-pattern`, `--traffic-rate`, `--traffic-content` override traffic defaults

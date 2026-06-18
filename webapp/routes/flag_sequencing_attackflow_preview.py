@@ -42,6 +42,10 @@ def register(app, *, backend_module: Any) -> None:
         prefer_flow = str(request.args.get('prefer_flow') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         best_effort_query = str(request.args.get('best_effort') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         allow_node_duplicates = str(request.args.get('allow_node_duplicates') or request.args.get('allow_duplicates') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_vulns_arg = request.args.get('include_all_topology_vulns')
+        include_all_topology_pivots_arg = request.args.get('include_all_topology_pivots')
+        include_all_topology_vulns = str(include_all_topology_vulns_arg or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_pivots = str(include_all_topology_pivots_arg or '').strip().lower() in ('1', 'true', 'yes', 'y')
         debug_mode = str(request.args.get('debug') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         dependency_level = backend._flow_normalize_dependency_level(request.args.get('dependency_level'))
         ignore_saved_flow = bool(force_preview)
@@ -185,17 +189,40 @@ def register(app, *, backend_module: Any) -> None:
                 pass
             return 0.0
 
+        flow_state_from_xml: dict[str, Any] | None = None
         try:
-            backend._canonicalize_payload_flow_from_xml(
+            _meta_from_xml, flow_state_from_xml = backend._canonicalize_payload_flow_from_xml(
                 payload,
                 xml_path=preview_plan_path,
                 scenario_label=(scenario_label or scenario_norm),
             )
         except Exception:
-            pass
+            flow_state_from_xml = None
 
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
+
+        try:
+            metadata_for_options = payload.get('metadata') if isinstance(payload, dict) else None
+            flow_for_options = metadata_for_options.get('flow') if isinstance(metadata_for_options, dict) and isinstance(metadata_for_options.get('flow'), dict) else None
+            if isinstance(flow_for_options, dict):
+                if include_all_topology_vulns_arg is None:
+                    include_all_topology_vulns = bool(flow_for_options.get('include_all_topology_vulns'))
+                if include_all_topology_pivots_arg is None:
+                    include_all_topology_pivots = bool(flow_for_options.get('include_all_topology_pivots'))
+        except Exception:
+            pass
+        if include_all_topology_pivots:
+            try:
+                backend._flow_attach_pivoting_plan_from_xml(
+                    payload,
+                    xml_path=preview_plan_path,
+                    scenario_label=(scenario_label or scenario_norm),
+                )
+            except Exception:
+                pass
+        if include_all_topology_vulns or include_all_topology_pivots:
+            ignore_saved_flow = True
 
         runtime_ip_by_id: dict[str, str] = {}
         try:
@@ -397,6 +424,29 @@ def register(app, *, backend_module: Any) -> None:
                 warning = f'Only {available} eligible nodes found; using chain length {available} instead of requested {length}.'
                 length = available
 
+        topology_inclusion_info: dict[str, Any] = {
+            'requested': {
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+            },
+            'added_node_ids': [],
+            'added_vuln_node_ids': [],
+            'added_pivot_node_ids': [],
+            'effective_length': len(chain_nodes or []),
+        }
+        if (not preset_steps) and (include_all_topology_vulns or include_all_topology_pivots):
+            chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
+                nodes,
+                chain_nodes,
+                preview,
+                include_all_topology_vulns=include_all_topology_vulns,
+                include_all_topology_pivots=include_all_topology_pivots,
+                pivot_context=payload,
+            )
+            length = max(length, len(chain_nodes or []))
+        elif preset_steps and (include_all_topology_vulns or include_all_topology_pivots):
+            topology_inclusion_info['ignored'] = 'preset'
+
         try:
             host_by_id: dict[str, dict[str, Any]] = {}
             hosts = preview.get('hosts') if isinstance(preview, dict) else None
@@ -443,9 +493,8 @@ def register(app, *, backend_module: Any) -> None:
             host_ip_map = {}
 
         flag_assignments: list[dict[str, Any]] = []
-        flow_state_from_xml: dict[str, Any] | None = None
         try:
-            if not ignore_saved_flow:
+            if (not ignore_saved_flow) and flow_state_from_xml is None:
                 flow_state_from_xml = backend._flow_state_from_xml_path(preview_plan_path, scenario_label or scenario_norm)
             if flow_state_from_xml:
                 candidate_nodes, _saved_flow_source = _saved_chain_nodes_from_flow_state(flow_state_from_xml)
@@ -494,7 +543,13 @@ def register(app, *, backend_module: Any) -> None:
 
         if not flag_assignments:
             if preset_steps and not used_saved_chain:
-                preset_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(preview, chain_nodes, scenario_label or scenario_norm, preset)
+                preset_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(
+                    preview,
+                    chain_nodes,
+                    scenario_label or scenario_norm,
+                    preset,
+                    pivot_context=payload,
+                )
                 if preset_err:
                     return jsonify({'ok': False, 'error': f'Error: {preset_err}', 'stats': stats, 'preview_plan_path': preview_plan_path}), 422
                 flag_assignments = preset_assignments
@@ -507,6 +562,7 @@ def register(app, *, backend_module: Any) -> None:
                     goal_facts_override=goal_facts_override,
                     disallow_generator_reuse=(not allow_node_duplicates),
                     dependency_level=dependency_level,
+                    pivot_context=payload,
                 )
                 if (not flag_assignments) and (not allow_node_duplicates):
                     flag_assignments = backend._flow_compute_flag_assignments(
@@ -517,6 +573,7 @@ def register(app, *, backend_module: Any) -> None:
                         goal_facts_override=goal_facts_override,
                         disallow_generator_reuse=False,
                         dependency_level=dependency_level,
+                        pivot_context=payload,
                     )
                     if flag_assignments:
                         try:
@@ -574,6 +631,17 @@ def register(app, *, backend_module: Any) -> None:
                 flag_assignments = fallback
 
         try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
+
+        try:
             node_ids = [str(n.get('id') or '').strip() for n in (chain_nodes or []) if isinstance(n, dict) and str(n.get('id') or '').strip()]
             has_dupes = len(set(node_ids)) != len(node_ids)
         except Exception:
@@ -591,6 +659,17 @@ def register(app, *, backend_module: Any) -> None:
         else:
             debug_dag = str(request.args.get('debug_dag') or '').strip().lower() in ('1', 'true', 'yes', 'y')
             dag_debug = None
+
+        try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         try:
             if isinstance(flag_assignments, list) and isinstance(chain_nodes, list):
@@ -768,6 +847,7 @@ def register(app, *, backend_module: Any) -> None:
                         initial_facts_override=initial_facts_override,
                         goal_facts_override=goal_facts_override,
                         dependency_level=dependency_level,
+                        pivot_context=payload,
                     )
                     missing_refs = []
                     try:
@@ -1122,6 +1202,9 @@ def register(app, *, backend_module: Any) -> None:
             **({'flow_errors_detail': flow_errors_detail} if flow_errors_detail else {}),
             'flags_enabled': bool(flags_enabled),
             'allow_node_duplicates': bool(allow_node_duplicates),
+            'include_all_topology_vulns': bool(include_all_topology_vulns),
+            'include_all_topology_pivots': bool(include_all_topology_pivots),
+            'topology_inclusion': dict(topology_inclusion_info or {}),
             'dependency_level': dependency_level,
             'participant_network_setup': participant_network_setup,
             'preview_summary': preview_summary,

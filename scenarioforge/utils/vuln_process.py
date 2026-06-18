@@ -4815,6 +4815,13 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					except Exception:
 						alias_src = None
 					obj = _ensure_service_named_as_node(obj, node_name, prefer_service=alias_src or prefer)
+					try:
+						replace_original = _is_truthy(rec.get('ReplaceComposeServiceWithNode') or rec.get('replace_compose_service_with_node'))
+						services_obj = obj.get('services') if isinstance(obj, dict) else None
+						if replace_original and alias_src and alias_src != str(node_name) and isinstance(services_obj, dict):
+							services_obj.pop(alias_src, None)
+					except Exception:
+						pass
 					# CORE should start the node-name service.
 					rec['compose_service'] = str(node_name)
 					# Optional: set container_name ONLY for the node-name service.

@@ -48,8 +48,49 @@ Use these keys consistently so chains can be validated and composed.
 
 ### Networking
 - `Knowledge(value)` (e.g., an IP address)
+- `Pivot(host)`
 - `PortForward(host, port)`
 - `InternalNetwork(subnet)`
+
+## Pivoting Scenarios
+
+Pivoting is configured as a Flow capability plus a segmentation exposure rule. The first challenge should produce an access artifact such as `WebRCE(app)`, `Shell(host)`, or `Pivot(host)`. Downstream internal targets should require that artifact, while their docker-compose service ports are marked as reachable only from the pivot source.
+
+Scenario XML can include a `Pivoting` section:
+
+```xml
+<section name="Pivoting" density="1.0">
+	<item
+		selected="RCE Pivot"
+		factor="1.0"
+		pivot_node="jump-web"
+		target_node="internal-db"
+		target_ports="5432"
+		target_protocols="tcp"
+		target_exposure="pivot-only"
+		source_scope="host"
+		produces="Shell(jump-web),Pivot(jump-web)"
+		requires="WebRCE(jump-web)" />
+</section>
+```
+
+At runtime, ScenarioForge resolves `pivot_node`/`pivot_role` and `target_node`/`target_role` against actual CORE host names and roles. Matching docker-compose targets receive `SegmentationExposure=pivot-only`, `SegmentationSources=<pivot IP>`, and optional port/protocol filters before compose port allow rules are written. Existing compose targets remain public unless a pivot declaration narrows them.
+
+The Web UI also supports a simplified shortcut from Segmentation rows. Turn on `Pivot-Accessible`, then choose a provider (`Random`, `Vulnerability`, `Flag-Node-Generator`, or `Docker SSH`). The planner chooses the pivot source, target docker-compose nodes, target ports, protocols, source scope, and pivot-only exposure from the scenario's nodes and artifacts. When `Random` is selected, save resolves it to one concrete provider. Saved XML stores only the shortcut flag and resolved provider:
+
+```xml
+<section name="Segmentation" density="1.0">
+	<item
+		selected="Firewall"
+		factor="1.0"
+		pivot_enabled="true"
+		pivot_provider="flag-node-generator" />
+</section>
+```
+
+Those row attributes compile into runtime pivot metadata. `Random` is a save-time convenience that resolves deterministically to one of the concrete providers. Docker SSH assigns a built-in OpenSSH docker-compose container to the pivot source. This avoids using CORE's host-backed SSH service and keeps the pivot shell inside the container filesystem.
+
+Runtime pivot metadata also records the sequencing contract: the pivot source produces `Shell(host)` and `Pivot(host)` facts, while inferred downstream targets require `Pivot(host)`. This keeps generated Flow/Flag Sequencing chains solvable when pivot-only segmentation is enabled.
 
 ## Hint Levels
 

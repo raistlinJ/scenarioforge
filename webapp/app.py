@@ -1,40 +1,48 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
+from __future__ import annotations
+
 import os
-from werkzeug.utils import secure_filename
+import sys
 
-UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'xml'}
+if __package__ in (None, ''):
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
 
-app = Flask(__name__)
-app.secret_key = 'scenarioforge-web'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+from webapp import app_backend as backend
 
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+app = backend.app
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
-        if 'scenario' not in request.files:
-            flash('No file part')
-            return redirect(request.url)
-        file = request.files['scenario']
-        if file.filename == '':
-            flash('No selected file')
-            return redirect(request.url)
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
-            flash('Scenario uploaded successfully!')
-            return redirect(url_for('index'))
-        else:
-            flash('Invalid file type. Only XML allowed.')
-            return redirect(request.url)
-    return render_template('index.html')
+def main() -> None:
+    try:
+        port = int(os.environ.get('CORETG_PORT') or os.environ.get('PORT') or '9090')
+    except Exception:
+        port = 9090
+    host = os.environ.get('CORETG_HOST') or '0.0.0.0'
+    debug = backend._env_flag('CORETG_DEBUG', False) or backend._env_flag('FLASK_DEBUG', False)
+    use_reloader = backend._env_flag('CORETG_USE_RELOADER', False)
+
+    try:
+        did_scrub = backend._scrub_hitl_validation_usernames_in_scenario_catalog()
+        if did_scrub:
+            app.logger.info('[hitl_validation] scrubbed usernames from scenario_catalog.json')
+    except Exception:
+        pass
+    try:
+        did_backfill = backend._backfill_hitl_config_from_editor_snapshots()
+        if did_backfill:
+            app.logger.info('[hitl_config] backfilled hitl_config from editor snapshots')
+    except Exception:
+        pass
+    try:
+        did_scrub_cfg = backend._scrub_unverified_hitl_config_in_scenario_catalog()
+        if did_scrub_cfg:
+            app.logger.info('[hitl_config] scrubbed unverified hitl_config entries from scenario_catalog.json')
+    except Exception:
+        pass
+
+    app.run(host=host, port=port, debug=debug, use_reloader=use_reloader, threaded=True)
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=9090, debug=True)
+    main()

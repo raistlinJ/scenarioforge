@@ -166,3 +166,33 @@ def test_preview_full_repairs_saved_flow_chain_that_points_to_non_docker_host():
             assert str((fas[0] or {}).get("node_id") or "") == repaired_id
         finally:
             pass
+
+
+    def test_planner_persist_flow_plan_does_not_scan_latest_flow_when_current_xml_has_none(tmp_path, monkeypatch):
+      scenario = "persist-no-flow"
+      xml_path = _write_xml(str(tmp_path), scenario)
+
+      monkeypatch.setattr(
+        'scenarioforge.planning.orchestrator.compute_full_plan',
+        lambda *args, **kwargs: {'seed': 42, 'routers_planned': 0},
+      )
+      monkeypatch.setattr(
+        app_backend,
+        '_build_full_preview_from_plan',
+        lambda *args, **kwargs: {'seed': 42, 'hosts': [], 'routers': [], 'switches': [], 'switches_detail': [], 'host_router_map': {}},
+      )
+      monkeypatch.setattr(app_backend, 'parse_hitl_info', lambda *args, **kwargs: {'enabled': False, 'interfaces': []})
+      monkeypatch.setattr(app_backend, '_sanitize_hitl_config', lambda raw, *_args, **_kwargs: raw)
+      monkeypatch.setattr(app_backend, '_flow_state_from_xml_path', lambda *args, **kwargs: None)
+      monkeypatch.setattr(
+        app_backend,
+        '_attach_latest_flow_into_full_preview',
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('latest-flow fallback should not run')),
+      )
+      monkeypatch.setattr(app_backend, '_update_plan_preview_in_xml', lambda *args, **kwargs: (True, 'ok'))
+      monkeypatch.setattr(app_backend, '_update_flow_state_in_xml', lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('flow xml update should not run without flow state')))
+
+      result = app_backend._planner_persist_flow_plan(xml_path=xml_path, scenario=scenario, seed=42, persist_plan_file=False)
+
+      assert result.get('seed') == 42
+      assert (result.get('full_preview') or {}).get('seed') == 42

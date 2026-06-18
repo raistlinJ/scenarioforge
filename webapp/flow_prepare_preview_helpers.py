@@ -350,6 +350,83 @@ def flow_try_run_generator(
         return False, f'generator exception: {exc}', None, None, None
 
 
+def _looks_like_python_traceback(text: str) -> bool:
+    lowered = str(text or '').lower()
+    return 'traceback (most recent call last)' in lowered or 'subprocess.calledprocesserror' in lowered
+
+
+def _summarize_docker_registry_failure(text: str) -> str | None:
+    lowered = str(text or '').lower()
+    docker_markers = (
+        'registry-1.docker.io',
+        'docker.io',
+        'failed to resolve source metadata',
+        'failed to solve',
+        'docker compose',
+    )
+    network_markers = (
+        'lookup ',
+        'no such host',
+        'temporary failure in name resolution',
+        'i/o timeout',
+        'read udp',
+        'tls handshake timeout',
+        'context deadline exceeded',
+        'connection timed out',
+        'failed to do request',
+    )
+    if not any(marker in lowered for marker in docker_markers):
+        return None
+    if not any(marker in lowered for marker in network_markers):
+        return None
+    detail_lines: list[str] = []
+    for line in str(text or '').splitlines():
+        line_text = line.strip()
+        if not line_text:
+            continue
+        lowered_line = line_text.lower()
+        if 'traceback (most recent call last)' in lowered_line:
+            continue
+        if lowered_line.startswith('file "'):
+            continue
+        detail_lines.append(line_text)
+    detail = ' '.join(detail_lines)
+    detail = detail[-700:] if detail else '(no Docker output)'
+    return (
+        'Docker image pull/DNS failed on the CORE VM while contacting Docker Hub. '
+        'Direct Python fallback could not complete or was unavailable for this generator. '
+        'Fix CORE VM DNS/egress or pre-pull/cache the image, then rerun Generate. '
+        f'Details: {detail}'
+    )
+
+
+def summarize_remote_generator_failure(*, rc: Any, stdout: str, stderr: str, remote_err: Any = None) -> str:
+    if remote_err:
+        return str(remote_err)
+    stdout_text = str(stdout or '').strip()
+    stderr_text = str(stderr or '').strip()
+    full_text = '\n'.join([part for part in (stdout_text, stderr_text) if part]).strip()
+    docker_summary = _summarize_docker_registry_failure(full_text)
+    if docker_summary:
+        return f'remote generator failed (rc={rc}): {docker_summary}'
+    parts: list[str] = []
+    if stdout_text:
+        parts.append(stdout_text[-1400:])
+    if stderr_text:
+        if _looks_like_python_traceback(stderr_text):
+            last_line = ''
+            try:
+                last_line = [line for line in stderr_text.splitlines() if line.strip()][-1]
+            except Exception:
+                last_line = stderr_text[-400:]
+            if last_line:
+                parts.append(f'runner traceback summary: {last_line}')
+        else:
+            parts.append(stderr_text[-1400:])
+    tail = '\n'.join([part for part in parts if part]).strip()
+    return f'remote generator failed (rc={rc}): {tail[-1800:] if tail else "(no output)"}'
+
+
 def flow_try_run_generator_remote(
     generator_id: str,
     *,
@@ -401,6 +478,8 @@ def flow_try_run_generator_remote(
         "env=os.environ.copy()\n"
         "env['CORETG_DOCKER_USE_SUDO']='1'\n"
         "env['CORETG_DOCKER_HOST_NETWORK']='1'\n"
+        "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK','1')\n"
+        "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FIRST','1')\n"
         "preflight=''\n"
         "deps_dir='/tmp/coretg_pydeps'\n"
         "try:\n"
@@ -579,11 +658,7 @@ def flow_try_run_generator_remote(
     remote_err = payload.get('error') if isinstance(payload, dict) else None
     note = 'ok'
     if not ok:
-        tail = (stderr or stdout).strip()
-        if remote_err:
-            note = str(remote_err)
-        else:
-            note = f'remote generator failed (rc={rc}): {tail[-800:] if tail else "(no output)"}'
+        note = summarize_remote_generator_failure(rc=rc, stdout=stdout, stderr=stderr, remote_err=remote_err)
         try:
             app.logger.error(
                 '[flow.generator.remote] generator=%s ok=%s rc=%s note=%s manifest=%s stdout_tail=%s stderr_tail=%s',
@@ -641,6 +716,24 @@ def apply_outputs_to_hint_text(text_in: str, outs: dict[str, Any]) -> str:
             return json.dumps(val, ensure_ascii=False)
         return str(val)
 
+    def _canonical_output_key(raw: Any) -> str:
+        key = str(raw or '').strip().lower()
+        if not key:
+            return ''
+        if '(' in key and ')' in key:
+            return re.sub(r"\s+", "", key)
+        return key
+
+    canonical_keys: dict[str, str] = {}
+    try:
+        for existing_key in outs.keys():
+            key_text = str(existing_key or '').strip()
+            canonical = _canonical_output_key(key_text)
+            if key_text and canonical and canonical not in canonical_keys:
+                canonical_keys[canonical] = key_text
+    except Exception:
+        canonical_keys = {}
+
     def _transform(val: Any, tf: str) -> str:
         transform_name = (tf or '').strip().lower()
         rendered = _render_value(val)
@@ -691,9 +784,12 @@ def apply_outputs_to_hint_text(text_in: str, outs: dict[str, Any]) -> str:
         tf = (match.group(2) or '').strip()
         if not key:
             return match.group(0)
-        if key not in outs:
+        output_key = key
+        if output_key not in outs:
+            output_key = canonical_keys.get(_canonical_output_key(key), '')
+        if output_key not in outs:
             return match.group(0)
-        return _transform(outs.get(key), tf)
+        return _transform(outs.get(output_key), tf)
 
     try:
         return pattern.sub(_replace, text)
@@ -1309,6 +1405,28 @@ def refresh_hints_for_current_chain(
         assignment['hints'] = rendered_hint_levels.get('low') or rendered
         assignment['hint'] = (rendered_hint_levels.get('low') or rendered or [''])[0] if (rendered_hint_levels.get('low') or rendered) else ''
         try:
+            pivot_hints = [
+                str(x or '').strip()
+                for x in (assignment.get('pivot_hints') or [])
+                if str(x or '').strip()
+            ] if isinstance(assignment.get('pivot_hints'), list) else []
+            if pivot_hints:
+                current_hints = [str(x or '').strip() for x in (assignment.get('hints') or []) if str(x or '').strip()] if isinstance(assignment.get('hints'), list) else []
+                for pivot_hint in pivot_hints:
+                    if pivot_hint not in current_hints:
+                        current_hints.append(pivot_hint)
+                assignment['hints'] = current_hints
+                low_values = [str(x or '').strip() for x in (rendered_hint_levels.get('low') or []) if str(x or '').strip()] if isinstance(rendered_hint_levels.get('low'), list) else []
+                for pivot_hint in pivot_hints:
+                    if pivot_hint not in low_values:
+                        low_values.append(pivot_hint)
+                rendered_hint_levels['low'] = low_values
+                assignment['hint_levels'] = rendered_hint_levels
+                if not str(assignment.get('hint') or '').strip() and current_hints:
+                    assignment['hint'] = current_hints[0]
+        except Exception:
+            pass
+        try:
             apply_first = getattr(backend, '_flow_apply_first_step_chain_supplied_inputs', None)
             if callable(apply_first):
                 assignment = apply_first(
@@ -1799,9 +1917,60 @@ def reuse_saved_flag_assignments(
         if (not desired_len) or len(saved_assignments) < desired_len:
             return []
 
+        def _alias_candidates(value: Any) -> set[str]:
+            text = str(value or '').strip().lower()
+            if not text:
+                return set()
+            aliases = {text}
+            base = text.split(' @ ', 1)[0].strip() if ' @ ' in text else text
+            if base and base != text:
+                aliases.add(base)
+            if base.isdigit():
+                aliases.add(f'docker-{base}')
+            if base.startswith('docker-'):
+                suffix = base.split('docker-', 1)[1].strip()
+                if suffix.isdigit():
+                    aliases.add(suffix)
+            return {alias for alias in aliases if alias}
+
+        def _node_aliases(node: Any) -> set[str]:
+            if not isinstance(node, dict):
+                return set()
+            aliases: set[str] = set()
+            for key in ('id', 'node_id', 'name', 'label'):
+                aliases |= _alias_candidates(node.get(key))
+            return aliases
+
+        def _assignment_aliases(assignment: Any) -> set[str]:
+            if not isinstance(assignment, dict):
+                return set()
+            aliases: set[str] = set()
+            for key in ('node_id', 'node_name', 'name', 'label'):
+                aliases |= _alias_candidates(assignment.get(key))
+            return aliases
+
+        saved_indexes_by_alias: dict[str, list[int]] = {}
+        for saved_index, saved_assignment in enumerate(saved_assignments):
+            for alias in _assignment_aliases(saved_assignment):
+                saved_indexes_by_alias.setdefault(alias, []).append(saved_index)
+
+        used_saved_indexes: set[int] = set()
         ordered: list[dict[str, Any]] = []
         for index in range(desired_len):
-            assignment = saved_assignments[index]
+            selected_index: int | None = None
+            for alias in _node_aliases(chain_nodes[index] if index < len(chain_nodes) else {}):
+                for candidate_index in saved_indexes_by_alias.get(alias, []):
+                    if candidate_index not in used_saved_indexes:
+                        selected_index = candidate_index
+                        break
+                if selected_index is not None:
+                    break
+            if selected_index is None and index < len(saved_assignments) and index not in used_saved_indexes:
+                selected_index = index
+            if selected_index is None:
+                selected_index = next((i for i in range(len(saved_assignments)) if i not in used_saved_indexes), index)
+            used_saved_indexes.add(selected_index)
+            assignment = saved_assignments[selected_index] if selected_index < len(saved_assignments) else {}
             if not isinstance(assignment, dict):
                 ordered.append({})
                 continue
@@ -3111,9 +3280,19 @@ def compute_output_mismatch(declared_output_keys: list[str], actual_output_keys:
     if not (ok_run and actual_output_keys):
         return {}
     try:
+        def _is_synthetic_chain_fact(key: Any) -> bool:
+            text = str(key or '').strip().lower()
+            return text.startswith('pivot(') or text.startswith('shell(')
+
         ignore_actual = {'node_name', 'nodename', 'nodeName'}
-        declared_set = set(declared_output_keys or [])
-        actual_set = {key for key in (actual_output_keys or []) if key not in ignore_actual}
+        declared_set = {
+            key for key in (declared_output_keys or [])
+            if not _is_synthetic_chain_fact(key)
+        }
+        actual_set = {
+            key for key in (actual_output_keys or [])
+            if key not in ignore_actual and not _is_synthetic_chain_fact(key)
+        }
         missing = sorted(list(declared_set - actual_set))
         extra = sorted(list(actual_set - declared_set))
         return {

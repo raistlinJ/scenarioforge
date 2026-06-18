@@ -33,6 +33,7 @@ def _backend_dependencies(backend: Any) -> Any:
         '_flow_compose_docker_stats',
         '_flow_compute_flag_assignments_for_preset',
         '_flow_compute_flag_assignments',
+        '_flow_apply_pivot_context_to_assignments',
         '_flow_reorder_chain_by_generator_dag',
         '_flag_generators_from_enabled_sources',
         '_flag_node_generators_from_enabled_sources',
@@ -463,6 +464,7 @@ def _load_prepare_preview_request_context(*, deps, flow_progress) -> dict[str, A
         'meta': meta,
         'flow_state_for_prepare': flow_state_for_prepare,
         'preview': preview,
+        'preview_payload': payload,
     }
 
 
@@ -487,13 +489,28 @@ def _prepare_chain_and_assignments(
     initial_facts_override: dict[str, list[str]] | None,
     goal_facts_override: dict[str, list[str]] | None,
     base_plan_path: str,
+    pivot_context: Any | None = None,
+    flow_progress: Any | None = None,
 ) -> dict[str, Any]:
     warning: str | None = None
+    def _progress(message: str) -> None:
+        try:
+            if callable(flow_progress):
+                flow_progress(str(message or '').strip())
+        except Exception:
+            pass
+
     try:
+        _progress('Solve: building topology graph from preview plan')
         nodes, _links, adj = deps._build_topology_graph_from_preview_plan(preview)
         stats = deps._flow_compose_docker_stats(nodes)
         eligible_debug = helpers.eligible_debug_summary(nodes, backend=backend)
+        try:
+            _progress(f'Solve: topology graph ready nodes={len(nodes or [])} links={len(_links or [])}')
+        except Exception:
+            pass
 
+        _progress('Solve: resolving requested chain ids')
         chain_ids_in = j.get('chain_ids')
         if (not chain_ids_in) and (not preset_steps):
             try:
@@ -513,6 +530,7 @@ def _prepare_chain_and_assignments(
         explicit_chain = bool(chain_ids)
 
         if chain_ids:
+            _progress(f'Solve: repairing explicit chain ids={",".join(chain_ids)}')
             repaired_chain = helpers.repair_explicit_chain_nodes(
                 chain_ids,
                 nodes,
@@ -540,7 +558,9 @@ def _prepare_chain_and_assignments(
             chain_ids = repaired_chain.get('chain_ids') or []
             explicit_chain = bool(repaired_chain.get('explicit_chain'))
             warning = str(repaired_chain.get('warning') or warning or '')
+            _progress(f'Solve: explicit chain ready count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
         else:
+            _progress('Solve: picking chain nodes')
             chain_nodes = helpers.pick_chain_nodes(
                 nodes,
                 adj,
@@ -577,6 +597,7 @@ def _prepare_chain_and_assignments(
                     ),
                 }
             chain_ids = [str(node.get('id') or '').strip() for node in chain_nodes if str(node.get('id') or '').strip()]
+            _progress(f'Solve: picked chain count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
     except Exception as exc:
         current_app.logger.exception('[flow.prepare_preview_for_execute] internal error: %s', exc)
         return {
@@ -595,6 +616,7 @@ def _prepare_chain_and_assignments(
     except Exception:
         pass
 
+    _progress('Solve: loading saved flag assignments')
     flag_assignments = helpers.reuse_saved_flag_assignments(
         flow_state_for_prepare,
         chain_nodes,
@@ -602,16 +624,26 @@ def _prepare_chain_and_assignments(
         scenario_norm=scenario_norm,
         backend=backend,
     )
+    if flag_assignments:
+        _progress(f'Solve: reused saved assignments count={len(flag_assignments or [])}')
 
     if not flag_assignments:
         if preset_steps:
-            preset_assignments, preset_err = deps._flow_compute_flag_assignments_for_preset(preview, chain_nodes, scenario_label or scenario_norm, preset)
+            _progress('Solve: computing preset flag assignments')
+            preset_assignments, preset_err = deps._flow_compute_flag_assignments_for_preset(
+                preview,
+                chain_nodes,
+                scenario_label or scenario_norm,
+                preset,
+                pivot_context=pivot_context,
+            )
             if preset_err:
                 return {
                     'response': (jsonify({'ok': False, 'error': f'Error: {preset_err}', 'stats': stats}), 422),
                 }
             flag_assignments = preset_assignments
         else:
+            _progress('Solve: computing flag assignments')
             flag_assignments = deps._flow_compute_flag_assignments(
                 preview,
                 chain_nodes,
@@ -619,7 +651,22 @@ def _prepare_chain_and_assignments(
                 initial_facts_override=initial_facts_override,
                 goal_facts_override=goal_facts_override,
                 dependency_level=dependency_level,
+                pivot_context=pivot_context,
             )
+            _progress(f'Solve: assignments ready count={len(flag_assignments or [])}')
+
+    try:
+        _progress('Solve: applying pivot context to assignments')
+        flag_assignments = deps._flow_apply_pivot_context_to_assignments(
+            flag_assignments,
+            chain_nodes,
+            preview=preview,
+            pivot_context=pivot_context,
+            scenario_label=(scenario_label or scenario_norm),
+        )
+        _progress('Solve: pivot context applied')
+    except Exception:
+        pass
 
     try:
         hint_refresh_triggers = {'preview', 'resolve', 'resolve_hints', 'hint', 'hint_only'}
@@ -629,6 +676,7 @@ def _prepare_chain_and_assignments(
 
     if should_force_refresh_hints:
         try:
+            _progress('Solve: refreshing hints for current chain')
             flag_assignments = helpers.refresh_hints_for_current_chain(
                 flag_assignments,
                 chain_nodes=chain_nodes,
@@ -637,6 +685,7 @@ def _prepare_chain_and_assignments(
                 scenario_norm=scenario_norm,
                 backend=backend,
             )
+            _progress('Solve: hints refreshed')
         except Exception:
             pass
 
@@ -646,22 +695,53 @@ def _prepare_chain_and_assignments(
     except Exception:
         has_dupes = False
 
-    if (not explicit_chain) and (not preset_steps) and (not has_dupes):
-        debug_dag = bool(j.get('debug_dag'))
+    debug_dag = bool(j.get('debug_dag'))
+    should_reorder_chain = bool((not explicit_chain) and (not preset_steps) and (not has_dupes))
+    if explicit_chain and (not preset_steps) and (not has_dupes) and flag_assignments:
+        try:
+            _progress('Solve: validating explicit chain order before repair')
+            explicit_valid, explicit_errors = deps._flow_validate_chain_order_by_requires_produces(
+                chain_nodes,
+                flag_assignments,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+            if not explicit_valid and any('before they are produced' in str(error or '') for error in (explicit_errors or [])):
+                should_reorder_chain = True
+                if not warning:
+                    warning = 'Explicit Flow chain order was repaired to satisfy generator and pivot dependencies.'
+        except Exception:
+            pass
+
+    if should_reorder_chain:
+        _progress('Solve: reordering chain by dependency DAG')
         chain_nodes, flag_assignments, dag_debug = deps._flow_reorder_chain_by_generator_dag(
             chain_nodes,
             flag_assignments,
             scenario_label=(scenario_label or scenario_norm),
             dependency_level=dependency_level,
             return_debug=bool(debug_dag),
+            flow_progress=_progress,
         )
         try:
             chain_ids = [str(node.get('id') or '').strip() for node in chain_nodes if isinstance(node, dict) and str(node.get('id') or '').strip()]
         except Exception:
             pass
+        _progress(f'Solve: DAG order ready ids={",".join(chain_ids or [])}')
     else:
-        debug_dag = bool(j.get('debug_dag'))
         dag_debug = None
+
+    try:
+        _progress('Solve: reapplying pivot context after ordering')
+        flag_assignments = deps._flow_apply_pivot_context_to_assignments(
+            flag_assignments,
+            chain_nodes,
+            preview=preview,
+            pivot_context=pivot_context,
+            scenario_label=(scenario_label or scenario_norm),
+        )
+        _progress('Solve: pivot context reapplied')
+    except Exception:
+        pass
 
     has_assignment_ids = False
     try:
@@ -707,11 +787,13 @@ def _prepare_chain_and_assignments(
             f'chain_docker_nodes={docker_nodes}',
         ])
     else:
+        _progress('Solve: validating final chain order')
         flow_valid, flow_errors = deps._flow_validate_chain_order_by_requires_produces(
             chain_nodes,
             flag_assignments,
             scenario_label=(scenario_label or scenario_norm),
         )
+        _progress(f'Solve: final validation flow_valid={int(bool(flow_valid))} errors={len(flow_errors or [])}')
     try:
         assign_ids = [str(assignment.get('id') or assignment.get('generator_id') or '').strip() for assignment in (flag_assignments or []) if isinstance(assignment, dict)]
         chain_ids_dbg = [str(node.get('id') or '').strip() for node in (chain_nodes or []) if isinstance(node, dict) and str(node.get('id') or '').strip()]
@@ -725,6 +807,7 @@ def _prepare_chain_and_assignments(
         flow_errors_detail = None
     flags_enabled = bool(flow_valid)
     run_generators = bool(flags_enabled or j.get('mode') in {'resolve', 'resolve_hints', 'hint', 'hint_only'})
+    _progress(f'Solve complete: chain={len(chain_nodes or [])} assignments={len(flag_assignments or [])} run_generators={int(bool(run_generators))}')
     try:
         if not flow_valid:
             current_app.logger.warning(
@@ -1621,6 +1704,11 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
 def execute_impl(*, backend: Any):
     deps = _backend_dependencies(backend)
     phase_timings: dict[str, float] = {}
+    try:
+        progress_payload = request.get_json(silent=True) or {}
+        progress_id = str(progress_payload.get('progress_id') or '').strip()
+    except Exception:
+        progress_id = ''
 
     def _mark_phase(name: str, started: float) -> float:
         elapsed = max(0.0, float(time.monotonic() - started))
@@ -1630,7 +1718,8 @@ def execute_impl(*, backend: Any):
     # Stub for early progress calls; overridden later if generator runs occur.
     def _flow_progress(msg: str) -> None:
         try:
-            current_app.logger.info('[flow.progress] %s', msg)
+            prefix = f'progress_id={progress_id} ' if progress_id else ''
+            current_app.logger.info('[flow.progress] %s%s', prefix, msg)
         except Exception:
             pass
 
@@ -1665,6 +1754,7 @@ def execute_impl(*, backend: Any):
     meta = request_context['meta'] if isinstance(request_context['meta'], dict) else request_context['meta']
     flow_state_for_prepare = request_context['flow_state_for_prepare']
     preview = request_context['preview']
+    preview_payload = request_context.get('preview_payload') if isinstance(request_context.get('preview_payload'), dict) else None
 
     _flow_progress('Phase: Solving chain and assignments...')
     phase_started = time.monotonic()
@@ -1688,6 +1778,8 @@ def execute_impl(*, backend: Any):
         initial_facts_override=initial_facts_override,
         goal_facts_override=goal_facts_override,
         base_plan_path=base_plan_path,
+        pivot_context=preview_payload,
+        flow_progress=_flow_progress,
     )
     solve_elapsed = _mark_phase('solve_chain_and_assignments_s', phase_started)
     _flow_progress(f'Phase complete: Solving chain and assignments ({solve_elapsed:.2f}s).')
