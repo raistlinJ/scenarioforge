@@ -384,11 +384,23 @@ def set_node_services(session: object, node_id: int, services: List[str], node_o
     for svc in ordered:
         added = False
         try:
-            if hasattr(session, "add_service"):
-                session.add_service(node_id=node_id, service_name=svc)
-                added = True
+            if hasattr(session, "client") and hasattr(session.client, "set_node_service"):
+                session_id = getattr(session, "id", getattr(session, "session_id", None))
+                if session_id is not None:
+                    try:
+                        session.client.set_node_service(session_id, node_id, svc)
+                        added = True
+                    except Exception as e:
+                        logger.debug("client.set_node_service failed for %s on node %s: %s", svc, node_id, e)
         except Exception:
             pass
+        if not added:
+            try:
+                if hasattr(session, "add_service"):
+                    session.add_service(node_id=node_id, service_name=svc)
+                    added = True
+            except Exception:
+                pass
         if not added:
             try:
                 if hasattr(session, "services") and hasattr(session.services, "add"):
@@ -404,10 +416,15 @@ def set_node_services(session: object, node_id: int, services: List[str], node_o
                 pass
         if not added and node_obj is not None:
             try:
-                if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
-                    node_obj.services.add(svc)
-                    added = True
-                elif hasattr(node_obj, "add_service"):
+                if hasattr(node_obj, "services"):
+                    if hasattr(node_obj.services, "add"):
+                        node_obj.services.add(svc)
+                        added = True
+                    elif hasattr(node_obj.services, "append"):
+                        if svc not in node_obj.services:
+                            node_obj.services.append(svc)
+                        added = True
+                if not added and hasattr(node_obj, "add_service"):
                     node_obj.add_service(svc)
                     added = True
             except Exception:
