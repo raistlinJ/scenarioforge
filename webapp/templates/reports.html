@@ -121,6 +121,27 @@
     </div>
   </div>
 </div>
+<div class="modal fade" id="reportGenerationModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="reportGenerationModalTitle">Generating…</h5>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex align-items-center gap-3" id="reportGenerationModalWorkingState">
+          <div class="spinner-border text-primary" id="reportGenerationModalSpinner" role="status" aria-hidden="true"></div>
+          <div>
+            <div class="fw-semibold" id="reportGenerationModalStatus">Generating…</div>
+            <div class="small text-muted" id="reportGenerationModalDetail">Please wait while the report artifact is prepared.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer d-none" id="reportGenerationModalFooter">
+        <button type="button" class="btn btn-primary" id="reportGenerationModalCloseBtn" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 {% include 'partials/dock.html' %}
 {% endblock %}
 {% block extra_scripts %}
@@ -150,6 +171,86 @@ const participantDetailsBaseUrl = "{{ url_for('participant_ui_details_api') }}";
 let scenarioNamesCache = {{ (scenarios or [])|tojson }};
 const initialScenarioFilter = {{ (active_scenario or '')|tojson }};
 let activeScenarioFilter = initialScenarioFilter || null;
+let reportGenerationModalEl = null;
+let reportGenerationModalInst = null;
+let reportGenerationModalTitleEl = null;
+let reportGenerationModalStatusEl = null;
+let reportGenerationModalDetailEl = null;
+let reportGenerationModalSpinnerEl = null;
+let reportGenerationModalFooterEl = null;
+const reportGenerationState = {
+  active: false,
+};
+const reportGenerationBeforeUnload = (event) => {
+  if (!reportGenerationState.active) return undefined;
+  event.preventDefault();
+  event.returnValue = '';
+  return '';
+};
+
+function ensureReportGenerationModal(){
+  if (!reportGenerationModalEl) reportGenerationModalEl = document.getElementById('reportGenerationModal');
+  if (!reportGenerationModalTitleEl) reportGenerationModalTitleEl = document.getElementById('reportGenerationModalTitle');
+  if (!reportGenerationModalStatusEl) reportGenerationModalStatusEl = document.getElementById('reportGenerationModalStatus');
+  if (!reportGenerationModalDetailEl) reportGenerationModalDetailEl = document.getElementById('reportGenerationModalDetail');
+  if (!reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl = document.getElementById('reportGenerationModalSpinner');
+  if (!reportGenerationModalFooterEl) reportGenerationModalFooterEl = document.getElementById('reportGenerationModalFooter');
+  if (!reportGenerationModalInst && reportGenerationModalEl && window.bootstrap) {
+    reportGenerationModalInst = bootstrap.Modal.getOrCreateInstance(reportGenerationModalEl, { backdrop: 'static', keyboard: false });
+  }
+}
+
+function setReportGenerationNavigationGuard(enabled){
+  if (enabled) window.addEventListener('beforeunload', reportGenerationBeforeUnload);
+  else window.removeEventListener('beforeunload', reportGenerationBeforeUnload);
+}
+
+function showReportGenerationModal(kindLabel){
+  ensureReportGenerationModal();
+  reportGenerationState.active = true;
+  setReportGenerationNavigationGuard(true);
+  if (reportGenerationModalTitleEl) reportGenerationModalTitleEl.textContent = 'Generating…';
+  if (reportGenerationModalStatusEl) reportGenerationModalStatusEl.textContent = 'Generating…';
+  if (reportGenerationModalDetailEl) reportGenerationModalDetailEl.textContent = kindLabel
+    ? `Please wait while ${kindLabel} is prepared.`
+    : 'Please wait while the report artifact is prepared.';
+  if (reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl.classList.remove('d-none');
+  if (reportGenerationModalFooterEl) reportGenerationModalFooterEl.classList.add('d-none');
+  if (reportGenerationModalInst) reportGenerationModalInst.show();
+}
+
+function hideReportGenerationModal(){
+  reportGenerationState.active = false;
+  setReportGenerationNavigationGuard(false);
+  ensureReportGenerationModal();
+  if (reportGenerationModalInst) reportGenerationModalInst.hide();
+}
+
+function showReportGenerationError(message){
+  ensureReportGenerationModal();
+  reportGenerationState.active = false;
+  setReportGenerationNavigationGuard(false);
+  if (reportGenerationModalTitleEl) reportGenerationModalTitleEl.textContent = 'Generation failed';
+  if (reportGenerationModalStatusEl) reportGenerationModalStatusEl.textContent = 'Unable to generate the requested download.';
+  if (reportGenerationModalDetailEl) reportGenerationModalDetailEl.textContent = String(message || 'An unexpected error occurred.');
+  if (reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl.classList.add('d-none');
+  if (reportGenerationModalFooterEl) reportGenerationModalFooterEl.classList.remove('d-none');
+  if (reportGenerationModalInst) reportGenerationModalInst.show();
+}
+
+function reportDownloadLabel(kind){
+  const labels = {
+    'preview-plan-html': 'Flow/Preview Plan',
+    'afb': 'Attack Flow',
+    'attack-graph-dot': 'Attack Graph (.dot)',
+    'attack-graph-json': 'Attack Graph (.json)',
+    'attack-graph-pdf': 'Attack Graph (.pdf)',
+    'participant-guide': 'Participant Steps Guide',
+    'facilitator-guide': 'Facilitator Guide',
+  };
+  return labels[String(kind || '').trim()] || 'download';
+}
+
 const clearScenarioBtn = document.getElementById('clearScenarioFilter');
 if(clearScenarioBtn){ clearScenarioBtn.style.display = activeScenarioFilter ? 'inline-block':'none'; }
 // Tracks whether user explicitly activated select-all across currently visible rows.
@@ -2252,19 +2353,16 @@ document.addEventListener('click', async (event) => {
   const link = event.target && event.target.closest ? event.target.closest('.report-download-action') : null;
   if (!link) return;
   event.preventDefault();
-  if (link.dataset.busy === '1') return;
-  const originalText = link.textContent || 'Download';
+  if (link.dataset.busy === '1' || reportGenerationState.active) return;
   link.dataset.busy = '1';
-  link.classList.add('disabled');
-  link.textContent = 'Preparing…';
+  showReportGenerationModal(reportDownloadLabel(link.dataset.kind));
   try {
     await handleReportDownloadAction(link);
+    hideReportGenerationModal();
   } catch (err) {
-    alert(String(err && err.message || err));
+    showReportGenerationError(String(err && err.message || err));
   } finally {
     delete link.dataset.busy;
-    link.classList.remove('disabled');
-    link.textContent = originalText;
   }
 });
 
