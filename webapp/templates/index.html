@@ -1249,7 +1249,7 @@
                     <h5 class="modal-title mb-0">Execute Scenario</h5>
                     <div class="small text-muted" id="executePhaseHeader">Phase: —</div>
                 </div>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" id="executeConfirmCloseX"></button>
             </div>
             <div class="modal-body">
                 <p class="mb-3" id="executeConfirmMessage">Execute this scenario now?</p>
@@ -20216,6 +20216,15 @@
             executeSelectCoreVmBtn.dataset.execBound = '1';
         }
         if (executeConfirmModalEl && !executeConfirmModalEl.dataset.execHiddenBound) {
+            // Prevent closing while summarizing results (non-closable until summary modal appears)
+            executeConfirmModalEl.addEventListener('hide.bs.modal', (event) => {
+                try {
+                    if (executeProgressState && executeProgressState.done && !executeProgressState._allowHide) {
+                        event.preventDefault();
+                        return;
+                    }
+                } catch (e) { }
+            });
             executeConfirmModalEl.addEventListener('hidden.bs.modal', () => {
                 // If the modal is closed while a run is in progress, treat it as a cancel.
                 // Otherwise there is no way to cancel after closing.
@@ -20659,7 +20668,18 @@
         renderExecuteSummary(!!success);
         if (executeSummaryModalEl && window.bootstrap) {
             try {
+                // Restore confirm modal close controls before hiding so state is clean for next use
                 if (executeConfirmModalEl && window.bootstrap) {
+                    try {
+                        const closeX = document.getElementById('executeConfirmCloseX');
+                        if (closeX) closeX.classList.remove('d-none');
+                        if (executeConfirmCancelBtn) {
+                            executeConfirmCancelBtn.textContent = 'Close';
+                            executeConfirmCancelBtn.disabled = false;
+                        }
+                    } catch (e) { }
+                    // Allow the programmatic hide through the hide guard
+                    try { executeProgressState._allowHide = true; } catch (e) { }
                     bootstrap.Modal.getOrCreateInstance(executeConfirmModalEl).hide();
                 }
                 bootstrap.Modal.getOrCreateInstance(executeSummaryModalEl).show();
@@ -21428,6 +21448,12 @@
             executeConfirmCancelBtn.disabled = false;
             executeConfirmCancelBtn.textContent = executeConfirmCancelBtn.dataset.cancelLabel;
         }
+        // Reset summarizing-phase lock state
+        executeProgressState._allowHide = false;
+        try {
+            const closeX = document.getElementById('executeConfirmCloseX');
+            if (closeX) closeX.classList.remove('d-none');
+        } catch (e) { }
         updateExecuteBeforeUnloadGuard(false);
     }
 
@@ -21557,18 +21583,42 @@
                 updateExecuteConfirmAlert(msg, 'warning');
             }
         } catch (e) { }
-        if (executePhaseHeaderEl) executePhaseHeaderEl.textContent = success ? 'Phase: Complete' : 'Phase: Error';
-        if (executeConfirmCancelBtn) {
-            executeConfirmCancelBtn.textContent = 'Close';
-            executeConfirmCancelBtn.disabled = false;
-        }
-        if (executeConfirmRunBtn) {
-            executeConfirmRunBtn.disabled = true;
-        }
+        if (executePhaseHeaderEl) executePhaseHeaderEl.textContent = success ? 'Phase: Summarizing…' : 'Phase: Error';
         if (executeProgressCancelBtn) {
             executeProgressCancelBtn.classList.add('d-none');
             executeProgressCancelBtn.disabled = true;
         }
+        if (executeConfirmRunBtn) {
+            executeConfirmRunBtn.disabled = true;
+        }
+        // Make the modal non-closable while summarizing results
+        if (executeConfirmCancelBtn) {
+            executeConfirmCancelBtn.textContent = 'Summarizing results, please wait…';
+            executeConfirmCancelBtn.disabled = true;
+        }
+        try {
+            const closeX = document.getElementById('executeConfirmCloseX');
+            if (closeX) closeX.classList.add('d-none');
+        } catch (e) { }
+        // Show summarizing spinner in the progress status area
+        if (executeProgressSpinnerEl) executeProgressSpinnerEl.classList.remove('d-none');
+        setExecuteProgressStatus('Summarizing results, please wait…', '');
+        // Safety fallback: re-enable close controls if summary modal doesn't appear within 15s
+        try {
+            setTimeout(() => {
+                try {
+                    if (executeSummaryModalEl && executeSummaryModalEl.classList.contains('show')) return;
+                    // Allow closing again
+                    try { executeProgressState._allowHide = true; } catch (e) { }
+                    const closeX = document.getElementById('executeConfirmCloseX');
+                    if (closeX) closeX.classList.remove('d-none');
+                    if (executeConfirmCancelBtn) {
+                        executeConfirmCancelBtn.textContent = 'Close';
+                        executeConfirmCancelBtn.disabled = false;
+                    }
+                } catch (e) { }
+            }, 15000);
+        } catch (e) { }
         updateExecuteBeforeUnloadGuard(false);
         // Re-enable connection & advanced controls only after run completes.
         try { if (typeof setExecuteDialogControlsEnabled === 'function') setExecuteDialogControlsEnabled(true); } catch (e) { }

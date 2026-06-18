@@ -149,6 +149,10 @@ def safe_create_session(core: Any, max_attempts: int = 5) -> Any:
                         continue
             except Exception:
                 pass
+            try:
+                setattr(sess, 'client', core)
+            except Exception:
+                pass
             return sess
         except BaseException as e:  # noqa: BLE001
             last_err = e
@@ -167,5 +171,11 @@ def safe_create_session(core: Any, max_attempts: int = 5) -> Any:
     # Should not reach here; fallback to no-arg call
     # Final fallback: if create_session missing but add_session present (test stubs)
     if hasattr(core, 'add_session'):
-        return core.add_session()
-    return core.create_session()
+        sess = core.add_session()
+    else:
+        sess = core.create_session()
+    try:
+        setattr(sess, 'client', core)
+    except Exception:
+        pass
+    return sess
