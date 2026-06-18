@@ -82,3 +82,31 @@ def test_full_preview_scripts_use_pre_serialized_preview_json() -> None:
     assert '{{ preview_json' in text
     assert "replace('<', '\\\\u003c')" in text
     assert '{{ full_preview | tojson }}' not in text
+
+
+def test_full_preview_scripts_guard_execute_when_saved_xml_warning_is_active() -> None:
+    text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    expected_snippets = [
+        "const savedXmlWarningEl = document.getElementById('fpSavedXmlWarning');",
+        "function syncSavedXmlGroundTruthAlert() {",
+        "(window.top || window).coretgGetSavedXmlGroundTruthWarningState",
+        "await ((window.top || window).coretgConfirmSavedXmlGroundTruth?.('Execute', {",
+        "allowStored: true,",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, 'Missing saved-XML execute guard wiring in full_preview_scripts.html: ' + '; '.join(missing)
+
+
+def test_full_preview_page_includes_saved_xml_warning_banner() -> None:
+    html_text = (Path(__file__).resolve().parent.parent / 'webapp' / 'templates' / 'full_preview.html').read_text(encoding='utf-8', errors='ignore')
+
+    expected_snippets = [
+        'id="fpSavedXmlWarning"',
+        'Unsaved edits were present when this preview was opened.',
+        'Preview and Execute use the last saved XML until you save again.',
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in html_text]
+    assert not missing, 'Missing saved-XML warning banner in full_preview.html: ' + '; '.join(missing)

@@ -1,4 +1,5 @@
 from flask import Flask
+from werkzeug.security import generate_password_hash
 
 from webapp.routes import ai_provider
 from webapp.routes import admin_cleanup_pycore
@@ -293,6 +294,47 @@ def test_auth_users_register_is_idempotent():
     assert '/users/role/<username>' in rules
     assert '/users/scenarios/<username>' in rules
     assert '/me/password' in rules
+
+
+def test_auth_users_participant_login_redirects_to_index_when_participant_ui_disabled():
+    app = Flask(__name__)
+    app.secret_key = 'test-secret'
+
+    @app.route('/')
+    def index():
+        return 'index'
+
+    auth_users.register(
+        app,
+        load_users=lambda: {
+            'users': [
+                {
+                    'username': 'participant1',
+                    'password_hash': generate_password_hash('participantpw'),
+                    'role': 'participant',
+                }
+            ]
+        },
+        save_users=lambda data: None,
+        require_admin=lambda: True,
+        current_user_getter=lambda: None,
+        set_current_user=lambda user: None,
+        normalize_role_value=lambda role: str(role or '').strip().lower(),
+        allowed_user_roles=lambda: {'admin', 'builder', 'participant'},
+        normalize_scenario_label=lambda value: str(value or '').strip(),
+        normalize_scenario_assignments=lambda values: list(values or []),
+        scenario_catalog_for_user=lambda *args, **kwargs: ([], {}, {}),
+        default_ui_view_mode_for_role=lambda role: 'participant',
+        is_participant_role=lambda role: str(role or '').strip().lower() == 'participant',
+        ui_view_session_key='ui_view_mode',
+        participant_ui_enabled=lambda: False,
+    )
+
+    client = app.test_client()
+    resp = client.post('/login', data={'username': 'participant1', 'password': 'participantpw'})
+
+    assert resp.status_code in (302, 303)
+    assert resp.headers.get('Location', '').endswith('/')
 
 
 def test_editor_snapshot_register_is_idempotent():
@@ -2198,6 +2240,7 @@ def test_planner_register_is_idempotent():
         },
         normalize_scenario_label=lambda value: str(value or '').strip(),
         latest_xml_path_for_scenario=lambda scenario_name: f'/tmp/{scenario_name}.xml',
+        resolve_preexecute_xml_path=lambda xml_path, scenario_name: str(xml_path or ''),
     )
     planner.register(
         app,
@@ -2209,6 +2252,7 @@ def test_planner_register_is_idempotent():
         },
         normalize_scenario_label=lambda value: str(value or '').strip(),
         latest_xml_path_for_scenario=lambda scenario_name: f'/tmp/{scenario_name}.xml',
+        resolve_preexecute_xml_path=lambda xml_path, scenario_name: str(xml_path or ''),
     )
 
     rules = {rule.rule for rule in app.url_map.iter_rules()}

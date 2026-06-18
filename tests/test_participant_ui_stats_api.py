@@ -88,6 +88,24 @@ def test_participant_ui_gateway_api_ok_shape():
     assert isinstance(payload.get('nearest_gateway') or '', str)
 
 
+def test_participant_ui_routes_return_404_in_vm_mode():
+    app.config['TESTING'] = True
+    client = app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    with patch('webapp.app_backend._webui_runtime_mode', return_value='vm'):
+        page_resp = client.get('/participant-ui')
+        assert page_resp.status_code == 404
+
+        api_resp = client.get('/participant-ui/stats?scenario=test-scenario')
+        assert api_resp.status_code == 404
+
+        open_resp = client.get('/participant-ui/open?scenario=test-scenario')
+        assert open_resp.status_code == 404
+
+
 def test_participant_ui_details_api_ok_shape(tmp_path):
     app.config['TESTING'] = True
     client = app.test_client()
@@ -149,6 +167,96 @@ def test_participant_ui_details_api_ok_shape(tmp_path):
         assert payload['counts']['switches'] == 3
         assert payload['counts']['vulnerabilities'] == 7
         assert payload.get('vulnerability_ips') == []
+
+
+def test_participant_ui_details_returns_not_modified_when_cache_key_matches(tmp_path):
+    app.config['TESTING'] = True
+    client = app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    out_dir = os.path.join(repo_root, 'outputs')
+    os.makedirs(out_dir, exist_ok=True)
+    summary_path = os.path.join(out_dir, 'test_summary_cache.json')
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        f.write('{"counts": {"total_nodes": 1}, "metadata": {}}')
+
+    fake_history = [
+        {
+            'timestamp': '2025-01-01T00:00:00Z',
+            'scenario_names': ['Test Scenario'],
+            'returncode': 0,
+            'summary_path': summary_path,
+            'session_xml_path': str(tmp_path / 'core-session.xml'),
+        }
+    ]
+    fake_state = {
+        'selected_norm': 'test scenario',
+        'selected_nearest_gateway': '10.0.0.1',
+        'listing': [
+            {
+                'norm': 'test scenario',
+                'display': 'Test Scenario',
+                'url': 'https://example.com',
+                'has_url': True,
+                'assigned': True,
+                'active': True,
+            }
+        ],
+    }
+
+    with patch('webapp.app_backend._participant_ui_state', return_value=fake_state), \
+         patch('webapp.app_backend._load_run_history', return_value=fake_history), \
+         patch('webapp.app_backend._hitl_details_from_path', return_value=[]):
+        first = client.get('/participant-ui/details?scenario=test%20scenario')
+        assert first.status_code == 200
+        first_payload = first.get_json() or {}
+        cache_key = str(first_payload.get('data_cache_key') or '')
+        assert cache_key
+
+        second = client.get('/participant-ui/details', query_string={'scenario': 'test scenario', 'if_data_cache_key': cache_key})
+        assert second.status_code == 200
+        second_payload = second.get_json() or {}
+        assert second_payload.get('ok') is True
+        assert second_payload.get('not_modified') is True
+        assert second_payload.get('data_cache_key') == cache_key
+
+
+def test_participant_ui_topology_returns_not_modified_when_cache_key_matches(tmp_path):
+    app.config['TESTING'] = True
+    client = app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    session_xml_path = tmp_path / 'session.xml'
+    session_xml_path.write_text('<session />', encoding='utf-8')
+    fake_state = {
+        'selected_norm': 'test scenario',
+        'selected_nearest_gateway': '',
+        'listing': [{'norm': 'test scenario', 'display': 'Test Scenario', 'has_url': True}],
+    }
+
+    with patch('webapp.app_backend._participant_ui_state', return_value=fake_state), \
+         patch('webapp.app_backend._flow_state_from_latest_xml', return_value={'chain_ids': ['a']}), \
+         patch('webapp.app_backend._latest_session_xml_for_scenario_norm', return_value=str(session_xml_path)), \
+         patch('webapp.app_backend._build_topology_graph_from_session_xml', return_value=([{'id': 'n1'}], [], {})), \
+         patch('webapp.app_backend._subnet_cidrs_from_session_xml', return_value=['10.0.0.0/24']), \
+         patch('webapp.app_backend._vulnerability_ipv4s_from_session_xml', return_value=['10.0.0.10']):
+        first = client.get('/participant-ui/topology?scenario=test%20scenario')
+        assert first.status_code == 200
+        first_payload = first.get_json() or {}
+        cache_key = str(first_payload.get('data_cache_key') or '')
+        assert cache_key
+
+        second = client.get('/participant-ui/topology', query_string={'scenario': 'test scenario', 'if_data_cache_key': cache_key})
+        assert second.status_code == 200
+        second_payload = second.get_json() or {}
+        assert second_payload.get('ok') is True
+        assert second_payload.get('not_modified') is True
+        assert second_payload.get('data_cache_key') == cache_key
 
 
 def test_participant_ui_details_populates_vulnerability_ips_from_session_xml(tmp_path):

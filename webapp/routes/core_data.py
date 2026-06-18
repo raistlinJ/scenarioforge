@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from typing import Any, Callable, Optional
 
@@ -43,6 +45,13 @@ def register(
 ) -> None:
     if not begin_route_registration(app, 'core_data_routes'):
         return
+
+    def _stable_cache_hash(value: Any) -> str:
+        try:
+            raw = json.dumps(value, sort_keys=True, separators=(',', ':'), default=str)
+        except Exception:
+            raw = repr(value)
+        return hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:24]
 
     def _core_data_view():
         def _display_core_target(core_cfg: dict[str, Any], host_value: Any, port_value: Any) -> tuple[str, Any]:
@@ -91,7 +100,9 @@ def register(
         scenario_display = resolve_scenario_display(scenario_norm, scenario_names, scenario_query)
         no_scenario_context = (not bool(scenario_names)) and (not bool(scenario_query))
         if no_scenario_context:
+            logs_snapshot = current_core_ui_logs()
             payload: dict[str, Any] = {
+                'ok': True,
                 'sessions': [],
                 'scenarios': [],
                 'active_scenario': '',
@@ -107,12 +118,17 @@ def register(
                 'core_modal_href': url_for('index', core_modal=1),
                 'errors': [],
                 'grpc_command': '',
-                'logs': current_core_ui_logs(),
+                'logs': logs_snapshot,
                 'daemon_status': 'idle',
                 'no_scenario_context': True,
             }
             if include_xmls:
                 payload['xmls'] = []
+            cache_key = _stable_cache_hash(payload)
+            incoming_cache_key = (request.args.get('if_data_cache_key') or request.headers.get('X-Data-Cache-Key') or '').strip()
+            if incoming_cache_key and incoming_cache_key == cache_key:
+                return jsonify({'ok': True, 'data_cache_key': cache_key, 'not_modified': True, 'no_scenario_context': True})
+            payload['data_cache_key'] = cache_key
             return jsonify(payload)
 
         core_cfg = select_core_config_for_page(scenario_norm, history, include_password=True)
@@ -360,7 +376,9 @@ def register(
                     break
 
         core_modal_href = url_for('index', core_modal=1, scenario=scenario_display) if scenario_display else url_for('index', core_modal=1)
+        logs_snapshot = current_core_ui_logs()
         payload = {
+            'ok': True,
             'sessions': sessions,
             'scenarios': scenario_names,
             'active_scenario': scenario_display,
@@ -376,12 +394,17 @@ def register(
             'core_modal_href': core_modal_href,
             'errors': core_errors,
             'grpc_command': grpc_command,
-            'logs': current_core_ui_logs(),
+            'logs': logs_snapshot,
             'daemon_status': daemon_status,
             'no_scenario_context': False,
         }
         if include_xmls:
             payload['xmls'] = xmls or []
+        cache_key = _stable_cache_hash(payload)
+        incoming_cache_key = (request.args.get('if_data_cache_key') or request.headers.get('X-Data-Cache-Key') or '').strip()
+        if incoming_cache_key and incoming_cache_key == cache_key:
+            return jsonify({'ok': True, 'data_cache_key': cache_key, 'not_modified': True, 'no_scenario_context': False})
+        payload['data_cache_key'] = cache_key
         return jsonify(payload)
 
     app.add_url_rule('/core/data', endpoint='core_data', view_func=_core_data_view, methods=['GET'])

@@ -13,6 +13,7 @@ def register(
     planner_persist_flow_plan: Callable[..., dict[str, Any]],
     normalize_scenario_label: Callable[[Any], str],
     latest_xml_path_for_scenario: Callable[[str], str],
+    resolve_preexecute_xml_path: Callable[[Any, Any], str],
 ) -> None:
     """Register planner endpoints.
 
@@ -25,8 +26,8 @@ def register(
     @app.route("/api/planner/ensure_plan", methods=["POST"])
     def api_planner_ensure_plan():
         j = request.get_json(silent=True) or {}
-        xml_path = str(j.get("xml_path") or "").strip()
         scenario = str(j.get("scenario") or "").strip() or None
+        xml_path = resolve_preexecute_xml_path(j.get("xml_path"), scenario)
         seed = j.get("seed")
         try:
             if seed is not None:

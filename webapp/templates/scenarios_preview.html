@@ -394,8 +394,17 @@
       try {
         const params = new URLSearchParams(window.location.search || '');
         const scenario = (params.get('scenario') || document.getElementById('scenariosPreviewLoadScenario')?.value || '').trim();
+        const xmlPath = (document.getElementById('scenariosPreviewLoadXmlPath')?.value || params.get('xml_path') || '').trim();
         if (scenario && typeof window.coretgSetActiveScenarioForNav === 'function') {
           window.coretgSetActiveScenarioForNav(scenario);
+        }
+        if (typeof window.coretgSyncSavedXmlWarningBadge === 'function') {
+          window.coretgSyncSavedXmlWarningBadge({
+            scenario,
+            xmlPath,
+            persist: false,
+            allowStored: true,
+          });
         }
       } catch (e) { }
 
@@ -403,7 +412,7 @@
 
       // Shared Scenarios Execute button: hand off to Topology execution flow.
       try {
-        document.getElementById('scenariosExecuteBtn')?.addEventListener('click', (ev) => {
+        document.getElementById('scenariosExecuteBtn')?.addEventListener('click', async (ev) => {
           try {
             ev.preventDefault();
             const params = new URLSearchParams(window.location.search || '');
@@ -417,6 +426,14 @@
             if (!xmlPath) {
               alert('Save XML first to execute.');
               return;
+            }
+            if (typeof window.coretgConfirmSavedXmlGroundTruth === 'function') {
+              const proceedWithSavedXml = await window.coretgConfirmSavedXmlGroundTruth('Execute', {
+                scenario,
+                xmlPath,
+                allowStored: true,
+              });
+              if (!proceedWithSavedXml) return;
             }
             const base = '/';
             const url = base + '?xml_path=' + encodeURIComponent(xmlPath)

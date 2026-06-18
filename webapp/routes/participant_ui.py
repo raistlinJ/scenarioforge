@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from typing import Any, Callable, Optional
 
@@ -12,6 +14,7 @@ def register(
     app,
     *,
     participant_ui_state_getter: Callable[[], dict[str, Any]],
+    participant_ui_enabled: Optional[Callable[[], bool]] = None,
     normalize_scenario_label: Callable[[Any], str],
     normalize_participant_proxmox_url: Callable[[Any], str],
     load_run_history: Callable[[], list[dict[str, Any]]],
@@ -46,8 +49,42 @@ def register(
     if not begin_route_registration(app, "participant_ui_routes"):
         return
 
+    if participant_ui_enabled is None:
+        participant_ui_enabled = lambda: True
+
+    def _path_fingerprint(path_value: Any) -> str:
+        text = str(path_value or '').strip()
+        if not text:
+            return ''
+        try:
+            abs_path = os.path.abspath(text)
+        except Exception:
+            abs_path = text
+        try:
+            st = os.stat(abs_path)
+            mtime_ns = int(getattr(st, 'st_mtime_ns', 0) or 0)
+            return f"{abs_path}|{int(getattr(st, 'st_size', 0) or 0)}|{mtime_ns}"
+        except Exception:
+            return abs_path
+
+    def _stable_cache_hash(value: Any) -> str:
+        try:
+            raw = json.dumps(value, sort_keys=True, separators=(',', ':'), default=str)
+        except Exception:
+            raw = repr(value)
+        return hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:24]
+
+    def _abort_if_disabled() -> None:
+        try:
+            if participant_ui_enabled and participant_ui_enabled():
+                return
+        except Exception:
+            return
+        abort(404)
+
     @app.route("/participant-ui")
     def participant_ui_page():
+        _abort_if_disabled()
         state = participant_ui_state_getter()
         url_value = state.get("selected_url", "")
         scenario_label = state.get("selected_label", "")
@@ -70,6 +107,7 @@ def register(
 
     @app.route("/participant-ui/gateway")
     def participant_ui_gateway_api():
+        _abort_if_disabled()
         state = participant_ui_state_getter()
         scenario_norm = normalize_scenario_label(request.args.get("scenario") or "")
         if not scenario_norm:
@@ -126,6 +164,7 @@ def register(
 
     @app.route("/participant-ui/details")
     def participant_ui_details_api():
+        _abort_if_disabled()
         state = participant_ui_state_getter()
         scenario_norm = normalize_scenario_label(request.args.get("scenario") or "")
         if not scenario_norm:
@@ -167,85 +206,11 @@ def register(
         last_execute_ok = (returncode_int == 0) if returncode_int is not None else None
 
         summary_path = (last_run or {}).get("summary_path") if isinstance(last_run, dict) else None
-        summary_counts = load_summary_counts(summary_path)
-        summary_meta = load_summary_metadata(summary_path)
-
-        nodes_total = summary_counts.get("total_nodes")
-        routers_total = summary_counts.get("routers")
-        switches_total = summary_counts.get("switches")
-        try:
-            nodes_total = int(nodes_total) if nodes_total is not None else None
-        except Exception:
-            nodes_total = None
-        try:
-            routers_total = int(routers_total) if routers_total is not None else None
-        except Exception:
-            routers_total = None
-        try:
-            switches_total = int(switches_total) if switches_total is not None else None
-        except Exception:
-            switches_total = None
-
         session_xml_path = None
         if isinstance(last_run, dict):
             session_xml_path = last_run.get("session_xml_path") or last_run.get("post_xml_path")
         if (not session_xml_path) and scenario_norm:
             session_xml_path = latest_session_xml_for_scenario_norm(scenario_norm)
-        session_xml_exists = bool(session_xml_path and os.path.exists(str(session_xml_path)))
-        subnetworks = subnet_cidrs_from_session_xml(session_xml_path) if session_xml_exists else []
-        vulnerability_ips = vulnerability_ipv4s_from_session_xml(session_xml_path) if session_xml_exists else []
-
-        vuln_total: Optional[int] = None
-        xml_exists = False
-        try:
-            xml_exists = bool(session_xml_path and os.path.exists(str(session_xml_path)))
-        except Exception:
-            xml_exists = False
-        if xml_exists:
-            vuln_total = len(vulnerability_ips)
-        else:
-            planned = summary_meta.get("vuln_total_planned_additive") if isinstance(summary_meta, dict) else None
-            try:
-                vuln_total = int(planned) if planned is not None else None
-            except Exception:
-                vuln_total = None
-
-        gateway = ""
-        if session_xml_path:
-            try:
-                hitl = hitl_details_from_path(str(session_xml_path))
-                first = hitl[0] if isinstance(hitl, list) and hitl else None
-                ips = first.get("ips") if isinstance(first, dict) else None
-                if isinstance(ips, list) and ips:
-                    gateway = str(ips[0]).split("/", 1)[0]
-            except Exception:
-                gateway = ""
-
-        if not gateway:
-            if scenario_norm and scenario_norm == normalize_scenario_label(state.get("selected_norm", "")):
-                gateway = str(state.get("selected_nearest_gateway") or "")
-            else:
-                try:
-                    _names, scenario_paths, _scenario_url_hints = scenario_catalog_for_user(
-                        None,
-                        user=current_user_getter(),
-                    )
-                except Exception:
-                    scenario_paths = {}
-                gateway = (
-                    nearest_gateway_address_for_scenario(scenario_norm, scenario_paths=scenario_paths)
-                    if scenario_norm
-                    else ""
-                )
-
-        xml_counts = counts_from_session_xml(session_xml_path)
-        if isinstance(xml_counts.get("nodes"), int):
-            nodes_total = xml_counts.get("nodes")
-        if isinstance(xml_counts.get("routers"), int):
-            routers_total = xml_counts.get("routers")
-        if isinstance(xml_counts.get("switches"), int):
-            switches_total = xml_counts.get("switches")
-
         session_running: Optional[bool] = None
         session_state = ""
         session_id: Optional[int] = None
@@ -285,9 +250,111 @@ def register(
             except Exception:
                 session_id = None
 
+        selected_norm = normalize_scenario_label(state.get("selected_norm", ""))
+        if scenario_norm and scenario_norm == selected_norm:
+            gateway_fallback = str(state.get("selected_nearest_gateway") or "")
+        else:
+            gateway_fallback = (
+                nearest_gateway_address_for_scenario(scenario_norm, scenario_paths=scenario_paths_live)
+                if scenario_norm
+                else ""
+            )
+
+        details_cache_key = _stable_cache_hash(
+            {
+                "scenario_norm": scenario_norm,
+                "scenario": {
+                    "display": display,
+                    "assigned": assigned,
+                    "placeholder": placeholder,
+                    "participant_link_configured": bool(has_url),
+                },
+                "open_stats": {
+                    "open_count": int(scenario_stats.get("open_count") or 0),
+                    "last_open_ts": format_local_timestamp(scenario_stats.get("last_open_ts")),
+                },
+                "execute": {
+                    "last_execute_ts": str(last_execute_ts or ""),
+                    "returncode": returncode_int,
+                    "ok": last_execute_ok,
+                },
+                "summary_path": _path_fingerprint(summary_path),
+                "session_xml_path": _path_fingerprint(session_xml_path),
+                "gateway_fallback": gateway_fallback,
+                "session": {
+                    "session_id": session_id,
+                    "running": session_running,
+                    "state": session_state,
+                },
+            }
+        )
+        incoming_cache_key = (request.args.get("if_data_cache_key") or request.headers.get("X-Data-Cache-Key") or "").strip()
+        if incoming_cache_key and incoming_cache_key == details_cache_key:
+            return jsonify({
+                "ok": True,
+                "scenario_norm": scenario_norm,
+                "data_cache_key": details_cache_key,
+                "not_modified": True,
+            })
+
+        summary_counts = load_summary_counts(summary_path)
+        summary_meta = load_summary_metadata(summary_path)
+
+        nodes_total = summary_counts.get("total_nodes")
+        routers_total = summary_counts.get("routers")
+        switches_total = summary_counts.get("switches")
+        try:
+            nodes_total = int(nodes_total) if nodes_total is not None else None
+        except Exception:
+            nodes_total = None
+        try:
+            routers_total = int(routers_total) if routers_total is not None else None
+        except Exception:
+            routers_total = None
+        try:
+            switches_total = int(switches_total) if switches_total is not None else None
+        except Exception:
+            switches_total = None
+
+        session_xml_exists = bool(session_xml_path and os.path.exists(str(session_xml_path)))
+        subnetworks = subnet_cidrs_from_session_xml(session_xml_path) if session_xml_exists else []
+        vulnerability_ips = vulnerability_ipv4s_from_session_xml(session_xml_path) if session_xml_exists else []
+
+        vuln_total: Optional[int] = None
+        if session_xml_exists:
+            vuln_total = len(vulnerability_ips)
+        else:
+            planned = summary_meta.get("vuln_total_planned_additive") if isinstance(summary_meta, dict) else None
+            try:
+                vuln_total = int(planned) if planned is not None else None
+            except Exception:
+                vuln_total = None
+
+        gateway = ""
+        if session_xml_path:
+            try:
+                hitl = hitl_details_from_path(str(session_xml_path))
+                first = hitl[0] if isinstance(hitl, list) and hitl else None
+                ips = first.get("ips") if isinstance(first, dict) else None
+                if isinstance(ips, list) and ips:
+                    gateway = str(ips[0]).split("/", 1)[0]
+            except Exception:
+                gateway = ""
+        if not gateway:
+            gateway = gateway_fallback
+
+        xml_counts = counts_from_session_xml(session_xml_path)
+        if isinstance(xml_counts.get("nodes"), int):
+            nodes_total = xml_counts.get("nodes")
+        if isinstance(xml_counts.get("routers"), int):
+            routers_total = xml_counts.get("routers")
+        if isinstance(xml_counts.get("switches"), int):
+            switches_total = xml_counts.get("switches")
+
         return jsonify(
             {
                 "ok": True,
+                "data_cache_key": details_cache_key,
                 "scenario_norm": scenario_norm,
                 "scenario": {
                     "display": display,
@@ -324,6 +391,7 @@ def register(
     @app.route("/participant-ui/topology")
     def participant_ui_topology_api():
         """Return a graph-friendly topology summary for the Participant UI."""
+        _abort_if_disabled()
         state = participant_ui_state_getter()
         scenario_norm = normalize_scenario_label(request.args.get("scenario") or "")
         if not scenario_norm:
@@ -355,6 +423,22 @@ def register(
         except Exception:
             xml_path = None
 
+        topology_cache_key = _stable_cache_hash(
+            {
+                "scenario_norm": scenario_norm,
+                "session_xml_path": _path_fingerprint(xml_path),
+                "flow": flow_meta if isinstance(flow_meta, dict) else {},
+            }
+        )
+        incoming_cache_key = (request.args.get("if_data_cache_key") or request.headers.get("X-Data-Cache-Key") or "").strip()
+        if incoming_cache_key and incoming_cache_key == topology_cache_key:
+            return jsonify({
+                "ok": True,
+                "scenario_norm": scenario_norm,
+                "data_cache_key": topology_cache_key,
+                "not_modified": True,
+            })
+
         if not xml_path or not os.path.exists(str(xml_path)):
             out: dict[str, Any] = {
                 "ok": True,
@@ -364,6 +448,7 @@ def register(
                 "links": [],
                 "subnets": [],
                 "vulnerability_ips": [],
+                "data_cache_key": topology_cache_key,
             }
             if isinstance(flow_meta, dict) and flow_meta:
                 out["flow"] = flow_meta
@@ -381,6 +466,7 @@ def register(
             "links": links,
             "subnets": subnets,
             "vulnerability_ips": vuln_ips,
+            "data_cache_key": topology_cache_key,
         }
         if isinstance(flow_meta, dict) and flow_meta:
             out["flow"] = flow_meta
@@ -388,6 +474,7 @@ def register(
 
     @app.route("/participant-ui/stats")
     def participant_ui_stats_api():
+        _abort_if_disabled()
         scenario_norm = normalize_scenario_label(request.args.get("scenario") or "")
         if not scenario_norm:
             try:
@@ -418,6 +505,7 @@ def register(
 
     @app.route("/participant-ui/record-open", methods=["POST"])
     def participant_ui_record_open_api():
+        _abort_if_disabled()
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             payload = {}
@@ -461,6 +549,7 @@ def register(
 
     @app.route("/participant-ui/open")
     def participant_ui_open_redirect():
+        _abort_if_disabled()
         scenario_norm = normalize_scenario_label(request.args.get("scenario") or "")
         state = participant_ui_state_getter()
         resolved = ""

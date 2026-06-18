@@ -1640,6 +1640,7 @@
     const WEBUI_LOCAL_MODE = {{ 'true' if webui_local_mode else 'false' }};
     const WEBUI_RUNTIME_MODE = {{ (webui_runtime_mode or 'native')|tojson }};
     const WEBUI_VM_MODE = WEBUI_RUNTIME_MODE === 'vm';
+    const RUNTIME_PARTICIPANT_UI_ENABLED = !WEBUI_VM_MODE;
     const WEBUI_VM_MODE_DEFAULTS = {{ (webui_vm_mode_defaults or {})|tojson }};
     const WEBUI_LOCAL_CORE_HOST = {{ (webui_local_core_host or '127.0.0.1')|tojson }};
     const WEBUI_LOCAL_CORE_PORT = {{ (webui_local_core_port or 50051)|int }};
@@ -2561,10 +2562,10 @@
         if (!WEBUI_VM_MODE) return;
 
         hitl.runtime_mode = 'vm';
-        const participantUrl = (hitlDefaults.participant_ui_url ?? '').toString().trim();
-        if (participantUrl) {
-            hitl.participant_proxmox_url = participantUrl;
-        }
+        hitl.participant_proxmox_url = '';
+        delete hitl.participant_ui_url;
+        delete hitl.participant_url;
+        delete hitl.participant;
         hitl.vm_mode_participant_pool = (hitlDefaults.participant_pool ?? 'same-pool').toString().trim() || 'same-pool';
         hitl.vm_mode_participant_notes = hitlDefaults.participant_notes && typeof hitlDefaults.participant_notes === 'object'
             ? { ...hitlDefaults.participant_notes }
@@ -7016,6 +7017,25 @@
             }
             return false;
         }
+
+        try {
+            window.coretgHasUnsavedChanges = function () {
+                try { return hasUnsavedChanges(); } catch (e) { return false; }
+            };
+        } catch (e) { }
+
+        function updateSavedXmlGroundTruthWarning() {
+            try {
+                if (typeof window.coretgSyncSavedXmlWarningBadge !== 'function') return;
+                const activeScenarioName = (typeof getActiveScenarioName === 'function') ? (getActiveScenarioName() || '') : '';
+                const xmlPath = (state?.result_path || '').toString().trim();
+                window.coretgSyncSavedXmlWarningBadge({
+                    scenario: activeScenarioName,
+                    xmlPath,
+                    hasUnsavedChanges: hasUnsavedChanges(),
+                });
+            } catch (e) { }
+        }
         const full = payload.full_preview || payload.fullPreview || payload.preview || payload.full || payload;
         return _applyPlanPreviewToUi(full);
     }
@@ -7317,18 +7337,21 @@
         const hint = document.getElementById('planHint');
         const genBtn = document.getElementById('runSyncBtn');
         const xmlPathVal = (state.result_path || '').trim();
+        const unsavedChanges = hasUnsavedChanges();
         previewState.xmlSaved = !!xmlPathVal;
         const canPreview = previewState.xmlSaved || previewState.dirty;
         if (previewBtn) previewBtn.disabled = !canPreview;
         if (genBtn) genBtn.disabled = !canPreview;
         if (hint) {
             if (!previewState.xmlSaved) hint.textContent = 'Save XML to enable planning.';
+            else if (unsavedChanges && !IS_BUILDER_VIEW) hint.textContent = 'Unsaved edits are present. Preview and Execute use the last saved XML until you save again.';
             else hint.textContent = previewState.fullPreview ? 'Full preview ready.' : 'Generate a full preview.';
         }
         if (statusBadge) {
             statusBadge.className = 'badge ' + (previewState.fullPreview ? 'text-bg-info' : 'text-bg-secondary');
             statusBadge.textContent = previewState.fullPreview ? 'Preview' : 'No Preview';
         }
+        try { updateSavedXmlGroundTruthWarning(); } catch (e) { }
     }
 
 
@@ -7520,6 +7543,15 @@
     async function computeFullPlanPreview() {
         let newXmlPath = (state.result_path || '').trim();
         if (!IS_BUILDER_VIEW) {
+            if (newXmlPath && hasUnsavedChanges()) {
+                const proceedWithSavedXml = await window.coretgConfirmSavedXmlGroundTruth('Preview', {
+                    scenario: (typeof getActiveScenarioName === 'function') ? (getActiveScenarioName() || '') : '',
+                    xmlPath: newXmlPath,
+                    hasUnsavedChanges: true,
+                    allowStored: false,
+                });
+                if (!proceedWithSavedXml) return;
+            }
             if (!newXmlPath) {
                 try { await autoSaveXml(); } catch (e) { alert('Auto-save failed: ' + e); return; }
             }
@@ -11005,6 +11037,14 @@
         const wrapper = document.getElementById('navParticipantLinkWrap');
         const link = document.getElementById('navParticipantLink');
         if (!wrapper || !link) return;
+        if (WEBUI_VM_MODE) {
+            wrapper.classList.add('d-none');
+            link.href = '#';
+            link.setAttribute('aria-disabled', 'true');
+            link.dataset.participantUiHref = '';
+            window.CORETG_PARTICIPANT_UI_HREF = '';
+            return;
+        }
         const scenario = state.scenarios?.[activeIdx];
 
         // Server can inject the participant URL for the currently loaded `?scenario=` even before
@@ -14241,17 +14281,22 @@
             ].map(v => (v || '').toString().trim()).filter(Boolean);
             const preferredXmlPath = pathCandidates.find(p => p.toLowerCase().endsWith('.xml')) || '';
             const query = new URLSearchParams({ scenario: scenLabel });
-            if (preferredXmlPath) {
-                query.set('xml_path', preferredXmlPath);
-            }
-            const resp = await fetch(`/api/scenario/latest_state?${query.toString()}`, {
-                method: 'GET',
-                credentials: 'same-origin',
-                headers: { 'Accept': 'application/json' },
-            });
-            let data = null;
-            try { data = await resp.json(); } catch (e) { data = null; }
-            if (!resp.ok || !data || data.ok === false || !data.scenario_state || typeof data.scenario_state !== 'object') {
+            // Let the server resolve the latest saved XML for this scenario.
+            // The explicit path is only a cache hint, not the source of truth.
+            const data = (typeof window.CORETG_FETCH_LATEST_STATE === 'function')
+                ? await window.CORETG_FETCH_LATEST_STATE(scenLabel, preferredXmlPath ? { xmlPath: preferredXmlPath } : {})
+                : await (async () => {
+                    const resp = await fetch(`/api/scenario/latest_state?${query.toString()}`, {
+                        method: 'GET',
+                        credentials: 'same-origin',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    let payload = null;
+                    try { payload = await resp.json(); } catch (e) { payload = null; }
+                    if (!resp.ok || !payload || payload.ok === false) return null;
+                    return payload;
+                })();
+            if (!data || !data.scenario_state || typeof data.scenario_state !== 'object') {
                 return false;
             }
 
@@ -15060,7 +15105,9 @@
         const hostInterfaces = getEffectiveHostInterfacesForScenario(activeIdx);
         const hitl = ensureHitlStateForScenario(scen);
         const proxmox = hitl.proxmox || { url: '', port: 8006, username: '', password: '' };
-        const participantProxmoxUrlRaw = (hitl.participant_proxmox_url || '').toString();
+        const participantProxmoxUrlRaw = RUNTIME_PARTICIPANT_UI_ENABLED
+            ? (hitl.participant_proxmox_url || '').toString()
+            : '';
         const participantProxmoxUrlHtml = escapeHtml(participantProxmoxUrlRaw);
         const participantProxmoxUrlHasValue = participantProxmoxUrlRaw.trim().length > 0;
         // In builder view, credentials are intentionally hidden and secret-backed actions are disabled.
@@ -15760,10 +15807,12 @@
                             ? `${mappedVmIfaceLabelsUnique.length}: ${mappedVmIfaceLabelsUnique.join(', ')}`
                             : 'Not set';
 
-                        const participantUrlValue = participantProxmoxUrlHasValue
-                            ? participantProxmoxUrlRaw
-                            : 'Not set';
-                        hitlRows.push(['Participant UI', participantUrlValue, participantProxmoxUrlHasValue ? 'ok' : 'no']);
+                        if (RUNTIME_PARTICIPANT_UI_ENABLED) {
+                            const participantUrlValue = participantProxmoxUrlHasValue
+                                ? participantProxmoxUrlRaw
+                                : 'Not set';
+                            hitlRows.push(['Participant UI', participantUrlValue, participantProxmoxUrlHasValue ? 'ok' : 'no']);
+                        }
                         if (persistedHitlValidatedAtLabel) {
                             hitlRows.push(['Last verified', persistedHitlValidatedAtLabel, 'ok']);
                         }
@@ -16541,13 +16590,13 @@
             <fieldset class="hitl-step-fieldset ${step3Disabled ? 'hitl-step-disabled' : ''}" ${step3Disabled ? 'disabled' : ''} data-hitl-step4-body>
                 ${step4Content}
             </fieldset>
-            <div class="text-center small text-muted mt-2">▼ Step 5 below</div>
+            ${RUNTIME_PARTICIPANT_UI_ENABLED ? '<div class="text-center small text-muted mt-2">▼ Step 5 below</div>' : ''}
         </div>`;
         const participantUrlStatusClass = participantProxmoxUrlHasValue ? 'text-success' : 'text-muted';
         const participantUrlStatusText = participantProxmoxUrlHasValue
             ? PARTICIPANT_STATUS_SAVED_TEXT
             : PARTICIPANT_STATUS_EMPTY_TEXT;
-        const part5SectionHtml = `
+        const part5SectionHtml = WEBUI_VM_MODE ? '' : `
         <div data-hitl-part="5">
             <h6 class="mb-2">Step 5 — Participant UI (optional)</h6>
             <div class="form-text mb-3">Paste the Proxmox console or landing URL that participants should use. This adds the Participant UI navigation tab and links the HITL interface entry so facilitators and players open the same console.</div>
@@ -21764,6 +21813,36 @@
         const updateRemoteDefault = typeof options.updateRemoteDefault === 'boolean'
             ? options.updateRemoteDefault
             : getExecuteConfirmUpdateRemotePref();
+        if (!IS_BUILDER_VIEW) {
+            const scenarioName = (() => {
+                try {
+                    const scen = Array.isArray(state?.scenarios) ? state.scenarios[scenarioIndex] : null;
+                    return String(scen?.name || getActiveScenarioName() || '').trim();
+                } catch (e) {
+                    return '';
+                }
+            })();
+            const xmlPath = (state?.result_path || '').toString().trim();
+            if (xmlPath && hasUnsavedChanges()) {
+                const proceedWithSavedXml = await window.coretgConfirmSavedXmlGroundTruth('Execute', {
+                    scenario: scenarioName,
+                    xmlPath,
+                    hasUnsavedChanges: true,
+                    allowStored: false,
+                });
+                if (!proceedWithSavedXml) {
+                    const remoteExecution = true;
+                    const pushPreference = !!updateRemoteDefault;
+                    return {
+                        confirmed: false,
+                        scenarioIndex,
+                        updateRemote: pushPreference,
+                        remoteExecution,
+                        pushPreference,
+                    };
+                }
+            }
+        }
         if (executeConfirmPushUpdateToggle) {
             executeConfirmPushUpdateToggle.checked = !!updateRemoteDefault;
         } else if (typeof updateRemoteDefault === 'boolean') {

@@ -574,9 +574,13 @@
   const fetchScenarioDetails = async (norm) => {
     try {
       const url = norm ? `/participant-ui/details?scenario=${encodeURIComponent(norm)}` : '/participant-ui/details';
-      const resp = await fetch(url, { credentials: 'same-origin' });
-      if(!resp.ok) return null;
-      const payload = await resp.json();
+      const payload = (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function')
+        ? await window.CORETG_FETCH_CONDITIONAL_JSON(url, { scope: 'participant-ui-details', fetchInit: { credentials: 'same-origin', cache: 'no-store' } })
+        : await (async () => {
+            const resp = await fetch(url, { credentials: 'same-origin' });
+            if(!resp.ok) return null;
+            try { return await resp.json(); } catch(e) { return null; }
+          })();
       if(!payload || !payload.ok) return null;
       return payload;
     } catch(e){
@@ -587,9 +591,13 @@
   const fetchScenarioTopology = async (norm) => {
     try {
       const url = norm ? `/participant-ui/topology?scenario=${encodeURIComponent(norm)}` : '/participant-ui/topology';
-      const resp = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
-      if(!resp.ok) return null;
-      const payload = await resp.json();
+      const payload = (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function')
+        ? await window.CORETG_FETCH_CONDITIONAL_JSON(url, { scope: 'participant-ui-topology', fetchInit: { credentials: 'same-origin', cache: 'no-store' } })
+        : await (async () => {
+            const resp = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+            if(!resp.ok) return null;
+            try { return await resp.json(); } catch(e) { return null; }
+          })();
       if(!payload || !payload.ok) return null;
       return payload;
     } catch(e){

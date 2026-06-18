@@ -202,6 +202,55 @@ def test_run_cli_async_blocks_when_sessions_present_and_no_adv_kill(tmp_path, mo
     assert isinstance(payload.get('run_id'), str) and payload.get('run_id')
 
 
+def test_run_cli_async_prefers_latest_xml_for_scenario(tmp_path, monkeypatch):
+    from webapp import app_backend as backend
+
+    stale_xml = tmp_path / 'stale.xml'
+    latest_xml = tmp_path / 'latest.xml'
+    stale_xml.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    latest_xml.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    fake_core_cfg = {
+        'host': '127.0.0.1',
+        'port': 50051,
+        'ssh_enabled': False,
+        'ssh_host': '127.0.0.1',
+        'ssh_port': 22,
+        'ssh_username': 'core',
+        'ssh_password': 'pw',
+        'auto_start_daemon': False,
+        'venv_bin': '',
+    }
+
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _norm: str(latest_xml))
+    monkeypatch.setattr(backend, '_merge_core_configs', lambda *a, **k: dict(fake_core_cfg))
+    monkeypatch.setattr(backend, '_require_core_ssh_credentials', lambda cfg: cfg)
+    monkeypatch.setattr(backend, '_scenario_names_from_xml', lambda _p: ['Scenario One'])
+    monkeypatch.setattr(backend, '_SshTunnel', _DummyTunnel)
+    monkeypatch.setattr(backend, '_open_ssh_client', lambda _cfg: _DummySSHClient())
+    monkeypatch.setattr(backend.threading, 'Thread', _CaptureThread)
+    monkeypatch.setattr(backend, '_list_active_core_sessions', lambda *a, **k: [])
+
+    _CaptureThread.calls = []
+    client = app.test_client()
+    _login(client)
+
+    resp = client.post(
+        '/run_cli_async',
+        data={
+            'xml_path': str(stale_xml),
+            'scenario': 'Scenario One',
+            'flow_enabled': '0',
+        },
+    )
+
+    assert resp.status_code == 202
+    assert _CaptureThread.calls
+    run_id, job_spec = _CaptureThread.calls[-1]['kwargs']['args']
+    assert run_id
+    assert job_spec['xml_path'] == str(latest_xml)
+
+
 def test_run_cli_async_blocks_when_flow_artifact_paths_missing(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 

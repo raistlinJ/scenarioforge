@@ -270,6 +270,41 @@ def test_api_latest_state_prefers_explicit_xml_path_over_latest_lookup(tmp_path,
     assert hitl.get('enabled') is True
 
 
+def test_api_latest_state_short_circuits_when_xml_cache_key_matches(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    from webapp import app_backend as backend
+
+    scenario_name = 'CacheCheck'
+    xml_path = tmp_path / 'cache-check.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="CacheCheck"><ScenarioEditor><HardwareInLoop enabled="true"/></ScenarioEditor></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _norm: str(xml_path))
+
+    first = client.get('/api/scenario/latest_state', query_string={'scenario': scenario_name})
+    assert first.status_code == 200
+    first_data = first.get_json() or {}
+    cache_key = str(first_data.get('xml_cache_key') or '')
+    assert cache_key
+
+    def _parse_should_not_run(_path):
+        raise AssertionError('parse_scenarios_xml should not run when xml cache key matches')
+
+    monkeypatch.setattr(backend, '_parse_scenarios_xml', _parse_should_not_run)
+
+    second = client.get('/api/scenario/latest_state', query_string={'scenario': scenario_name, 'if_xml_cache_key': cache_key})
+    assert second.status_code == 200
+    second_data = second.get_json() or {}
+    assert second_data.get('ok') is True
+    assert second_data.get('not_modified') is True
+    assert second_data.get('xml_cache_key') == cache_key
+    assert 'scenario_state' not in second_data
+
+
 def test_api_latest_state_returns_scenario_core_over_root_core(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)
