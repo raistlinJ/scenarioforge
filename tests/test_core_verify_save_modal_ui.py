@@ -149,6 +149,32 @@ def test_execute_progress_success_is_normalized_and_can_override_spurious_error_
     assert not missing, "Missing execute success normalization snippets: " + "; ".join(missing)
 
 
+def test_execute_summary_handoff_closes_progress_modal_immediately() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function showExecuteSummaryModal(success, runId = null) {",
+        "const summaryRunId = runId || getLatestRunIdForSummary();",
+        "try { closeRunProgress(); } catch (e) { }",
+        "try { refreshValidationSummaryFromRunStatus(summaryRunId); } catch (e) { }",
+        "showExecuteSummaryModal(true, runId);",
+        "showExecuteSummaryModal(true, run_id);",
+        "showExecuteSummaryModal(success, executeProgressState.runId);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing immediate execute-summary handoff snippets: " + "; ".join(missing)
+
+    forbidden_snippets = [
+        "refreshValidationSummaryFromRunStatus(runId).finally(() => {",
+        "refreshValidationSummaryFromRunStatus(run_id).finally(() => {",
+        "refreshValidationSummaryFromRunStatus().finally(() => {",
+    ]
+
+    present = [snippet for snippet in forbidden_snippets if snippet in text]
+    assert not present, "Unexpected delayed execute-summary handoff snippets still present: " + "; ".join(present)
+
+
 def test_save_xml_button_uses_direct_local_save() -> None:
     text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -169,6 +195,22 @@ def test_save_xml_button_uses_direct_local_save() -> None:
     ]
     present = [snippet for snippet in forbidden if snippet in text]
     assert not present, "Unexpected helper-fallback snippets still present: " + "; ".join(present)
+
+
+def test_save_xml_skips_redundant_flow_plan_persist_when_preview_is_current() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const currentPreviewSignature = buildXmlPreviewSignature();",
+        "input_signature: currentPreviewSignature,",
+        "const hasMeaningfulFlowState = (flowState) => {",
+        "const matchingCurrentPreview = !!(",
+        "activeScenario.plan_preview.input_signature === currentPreviewSignature",
+        "if (!hasMeaningfulFlowState(flowState) && matchingCurrentPreview) return;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing no-op flow-plan persist guard snippets: " + "; ".join(missing)
 
 
 def test_topology_save_xml_ajax_uses_local_autosave() -> None:
@@ -219,6 +261,8 @@ def test_flow_save_and_preview_do_not_swallow_flow_state_save_failures() -> None
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
+        "const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);",
+        "if (shouldPersistFlowState) {",
         "if (!(await saveFlowStateToXml(xmlPath))) {",
         "throw new Error('Failed to save Flag Sequencing state into XML.');",
     ]
@@ -231,6 +275,22 @@ def test_flow_save_and_preview_do_not_swallow_flow_state_save_failures() -> None
     ]
     present = [snippet for snippet in forbidden if snippet in text]
     assert not present, "Unexpected swallowed Flag Sequencing save failure snippets still present: " + "; ".join(present)
+
+
+def test_flow_preview_skips_xml_rewrite_when_saved_state_matches() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function buildCurrentFlowStatePayload(options) {",
+        "function flowStateXmlSignature(state) {",
+        "function shouldSaveFlowStateToXml(xmlPath) {",
+        "if (!latestXmlPath || latestXmlPath !== targetXmlPath) return true;",
+        "const currentSig = flowStateXmlSignature(buildCurrentFlowStatePayload({ includeUpdatedAt: false }));",
+        "return !currentSig || !savedSig || currentSig !== savedSig;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow Preview no-op XML-save guard snippets: " + "; ".join(missing)
 
 
 def test_flow_restore_rehydrates_duplicate_toggle_from_saved_state() -> None:

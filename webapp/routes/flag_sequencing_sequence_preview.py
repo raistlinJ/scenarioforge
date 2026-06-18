@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from flask import jsonify, request
@@ -17,10 +18,50 @@ def register(app, *, backend_module: Any) -> None:
     def api_flow_sequence_preview_plan():
         """Generate a Flow chain from an existing preview plan and persist sequence metadata."""
         payload_in = request.get_json(silent=True) or {}
+        started_at = time.monotonic()
+        progress_id = str(payload_in.get('progress_id') or '').strip()
+
+        def _flow_progress(message: str) -> None:
+            try:
+                elapsed = max(0.0, time.monotonic() - started_at)
+                prefix = f'progress_id={progress_id} ' if progress_id else ''
+                app.logger.info('[flow.progress] %selapsed=%.2fs %s', prefix, elapsed, str(message or '').strip())
+            except Exception:
+                pass
+
+        def _short_path(path_value: Any) -> str:
+            try:
+                text = str(path_value or '').strip()
+                if not text:
+                    return ''
+                return backend.os.path.basename(text) or text
+            except Exception:
+                return str(path_value or '').strip()
+
+        def _chain_ids(nodes_value: Any, *, limit: int = 16) -> str:
+            try:
+                ids = [str(node.get('id') or '').strip() for node in (nodes_value or []) if isinstance(node, dict) and str(node.get('id') or '').strip()]
+                if len(ids) > limit:
+                    return ','.join(ids[:limit]) + f',...(+{len(ids) - limit})'
+                return ','.join(ids)
+            except Exception:
+                return ''
+
+        def _assignment_ids(assignments_value: Any, *, limit: int = 16) -> str:
+            try:
+                ids = [str(assignment.get('id') or assignment.get('generator_id') or '').strip() for assignment in (assignments_value or []) if isinstance(assignment, dict) and str(assignment.get('id') or assignment.get('generator_id') or '').strip()]
+                if len(ids) > limit:
+                    return ','.join(ids[:limit]) + f',...(+{len(ids) - limit})'
+                return ','.join(ids)
+            except Exception:
+                return ''
+
         scenario_label = str(payload_in.get('scenario') or '').strip()
         scenario_norm = backend._normalize_scenario_label(scenario_label)
         preset = str(payload_in.get('preset') or '').strip()
         allow_node_duplicates = str(payload_in.get('allow_node_duplicates') or payload_in.get('allow_duplicates') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_vulns = str(payload_in.get('include_all_topology_vulns') or '').strip().lower() in ('1', 'true', 'yes', 'y')
+        include_all_topology_pivots = str(payload_in.get('include_all_topology_pivots') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         length = 5
         try:
             length = int(payload_in.get('length') or 5)
@@ -34,6 +75,13 @@ def register(app, *, backend_module: Any) -> None:
         best_effort = bool(payload_in.get('best_effort'))
         dependency_level = backend._flow_normalize_dependency_level(payload_in.get('dependency_level'))
 
+        _flow_progress(
+            f"Sequence start: scenario={scenario_norm or scenario_label or '-'} length={length} "
+            f"dependency={dependency_level}/5 preset={preset or 'random'} "
+            f"duplicates={'on' if allow_node_duplicates else 'off'} "
+            f"include_vulns={int(include_all_topology_vulns)} include_pivots={int(include_all_topology_pivots)}"
+        )
+
         flow_seed_param: int | None = None
         try:
             flow_seed_raw = payload_in.get('flow_seed')
@@ -43,13 +91,16 @@ def register(app, *, backend_module: Any) -> None:
             flow_seed_param = None
 
         if not scenario_norm:
+            _flow_progress('Validation failed: no scenario specified')
             return jsonify({'ok': False, 'error': 'No scenario specified.'}), 400
 
         def _validation_failure(message: str, **extra: Any):
+            _flow_progress(f'Validation failed: {message}')
             failure_payload = {'ok': False, 'error': message, 'validation_error': True}
             failure_payload.update(extra)
             return jsonify(failure_payload)
 
+        _flow_progress('Phase: locating preview plan')
         preview_plan_path = str(payload_in.get('preview_plan') or '').strip() or None
         xml_hint = str(payload_in.get('xml_path') or '').strip()
         if preview_plan_path:
@@ -77,27 +128,58 @@ def register(app, *, backend_module: Any) -> None:
             preview_plan_path = backend._latest_xml_path_for_scenario(scenario_norm)
 
         if not preview_plan_path:
+            _flow_progress('Validation failed: no XML/preview plan found')
             return jsonify({'ok': False, 'error': 'No XML found for this scenario. Save XML with a PlanPreview first.'}), 404
 
         try:
+            _flow_progress(f'Phase: loading preview payload from {_short_path(preview_plan_path)}')
             payload = backend._load_preview_payload_from_path(preview_plan_path, scenario_norm)
             if not isinstance(payload, dict):
+                _flow_progress('Validation failed: preview plan not embedded in XML')
                 return jsonify({'ok': False, 'error': 'Preview plan not embedded in XML.'}), 422
             backend._canonicalize_payload_flow_from_xml(
                 payload,
                 xml_path=preview_plan_path,
                 scenario_label=(scenario_label or scenario_norm),
             )
+            try:
+                backend._flow_attach_pivoting_plan_from_xml(
+                    payload,
+                    xml_path=preview_plan_path,
+                    scenario_label=(scenario_label or scenario_norm),
+                )
+            except Exception:
+                pass
         except Exception as exc:
+            _flow_progress(f'Failed to load preview plan: {exc}')
             return jsonify({'ok': False, 'error': f'Failed to load preview plan: {exc}'}), 422
 
         preview = payload.get('full_preview') if isinstance(payload, dict) else None
         if not isinstance(preview, dict):
+            _flow_progress('Validation failed: preview plan is missing full_preview')
             return jsonify({'ok': False, 'error': 'Preview plan is missing full_preview.'}), 422
 
+        try:
+            hosts_count = len(preview.get('hosts') or []) if isinstance(preview.get('hosts'), list) else 0
+            routers_count = len(preview.get('routers') or []) if isinstance(preview.get('routers'), list) else 0
+            switches_count = len(preview.get('switches') or []) if isinstance(preview.get('switches'), list) else 0
+            _flow_progress(f'Preview loaded: hosts={hosts_count} routers={routers_count} switches={switches_count}')
+        except Exception:
+            pass
+
+        _flow_progress('Phase: building topology graph')
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
+        try:
+            _flow_progress(
+                f"Topology graph ready: nodes={len(nodes or [])} links={len(_links or [])} "
+                f"eligible={stats.get('eligible_total', 'n/a')} vuln={stats.get('vuln_total', 'n/a')} "
+                f"docker_nonvuln={stats.get('docker_nonvuln_total', 'n/a')}"
+            )
+        except Exception:
+            pass
 
+        _flow_progress('Phase: selecting chain nodes')
         if preset_steps:
             chain_nodes = backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
         else:
@@ -106,6 +188,8 @@ def register(app, *, backend_module: Any) -> None:
                 chain_nodes = backend._pick_flag_chain_nodes_allow_duplicates(nodes, adj, length=length, seed=seed_val)
             else:
                 chain_nodes = backend._pick_flag_chain_nodes(nodes, adj, length=length)
+
+        _flow_progress(f'Selected chain nodes: count={len(chain_nodes or [])} ids={_chain_ids(chain_nodes) or "-"}')
 
         if not chain_nodes:
             return _validation_failure(
@@ -116,6 +200,16 @@ def register(app, *, backend_module: Any) -> None:
             )
 
         warning: str | None = None
+        topology_inclusion_info: dict[str, Any] = {
+            'requested': {
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+            },
+            'added_node_ids': [],
+            'added_vuln_node_ids': [],
+            'added_pivot_node_ids': [],
+            'effective_length': len(chain_nodes or []),
+        }
 
         if (not preset_steps) and (not allow_node_duplicates) and len(chain_nodes) < length:
             if best_effort:
@@ -128,6 +222,28 @@ def register(app, *, backend_module: Any) -> None:
                     requested_length=requested_length,
                     stats=stats,
                 )
+
+        if (not preset_steps) and (include_all_topology_vulns or include_all_topology_pivots):
+            _flow_progress('Phase: expanding chain for requested topology inclusions')
+            chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
+                nodes,
+                chain_nodes,
+                preview,
+                include_all_topology_vulns=include_all_topology_vulns,
+                include_all_topology_pivots=include_all_topology_pivots,
+                pivot_context=payload,
+            )
+            length = max(length, len(chain_nodes or []))
+            try:
+                _flow_progress(
+                    'Topology inclusion complete: '
+                    f"effective_length={topology_inclusion_info.get('effective_length', len(chain_nodes or []))} "
+                    f"added={','.join(topology_inclusion_info.get('added_node_ids') or []) or '-'}"
+                )
+            except Exception:
+                pass
+        elif preset_steps and (include_all_topology_vulns or include_all_topology_pivots):
+            topology_inclusion_info['ignored'] = 'preset'
 
         host_by_id: dict[str, dict[str, Any]] = {}
         try:
@@ -178,10 +294,18 @@ def register(app, *, backend_module: Any) -> None:
             retry_index = 0
 
         if preset_steps:
-            flag_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(preview, chain_nodes, scenario_label or scenario_norm, preset)
+            _flow_progress('Phase: computing generator assignments for preset')
+            flag_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(
+                preview,
+                chain_nodes,
+                scenario_label or scenario_norm,
+                preset,
+                pivot_context=payload,
+            )
             if preset_err:
                 return _validation_failure(f'Error: {preset_err}', stats=stats)
         else:
+            _flow_progress('Phase: computing generator assignments')
             base_seed = backend._get_flow_seed(preview, flow_seed_param)
             seed_override = base_seed ^ (retry_index * 0x9E3779B1) if retry_index else flow_seed_param
             flag_assignments = backend._flow_compute_flag_assignments(
@@ -193,6 +317,7 @@ def register(app, *, backend_module: Any) -> None:
                 seed_override=seed_override,
                 disallow_generator_reuse=(not allow_node_duplicates),
                 dependency_level=dependency_level,
+                pivot_context=payload,
             )
             if (not flag_assignments) and (not allow_node_duplicates):
                 return _validation_failure(
@@ -201,6 +326,20 @@ def register(app, *, backend_module: Any) -> None:
                     length=len(chain_nodes or []),
                     chain=[{'id': str(node.get('id') or ''), 'name': str(node.get('name') or ''), 'type': str(node.get('type') or '')} for node in (chain_nodes or []) if isinstance(node, dict)],
                 )
+
+        _flow_progress(f'Generator assignments ready: count={len(flag_assignments or [])} ids={_assignment_ids(flag_assignments) or "-"}')
+
+        try:
+            _flow_progress('Phase: applying pivot context')
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
 
         try:
             ids = [str(node.get('id') or '').strip() for node in (chain_nodes or []) if isinstance(node, dict) and str(node.get('id') or '').strip()]
@@ -213,15 +352,29 @@ def register(app, *, backend_module: Any) -> None:
                 debug_dag = bool(payload_in.get('debug_dag'))
             except Exception:
                 debug_dag = False
+            _flow_progress('Phase: ordering dependency graph')
             chain_nodes, flag_assignments, _dag_debug = backend._flow_reorder_chain_by_generator_dag(
                 chain_nodes,
                 flag_assignments,
                 scenario_label=(scenario_label or scenario_norm),
                 dependency_level=dependency_level,
                 return_debug=bool(debug_dag),
+                flow_progress=_flow_progress,
             )
 
         try:
+            flag_assignments = backend._flow_apply_pivot_context_to_assignments(
+                flag_assignments,
+                chain_nodes,
+                preview=preview,
+                pivot_context=payload,
+                scenario_label=(scenario_label or scenario_norm),
+            )
+        except Exception:
+            pass
+
+        try:
+            _flow_progress('Phase: validating dependency order')
             flow_valid, flow_errors = backend._flow_validate_chain_order_by_requires_produces(
                 chain_nodes,
                 flag_assignments,
@@ -229,6 +382,7 @@ def register(app, *, backend_module: Any) -> None:
             )
         except Exception:
             flow_valid, flow_errors = True, []
+        _flow_progress(f'Dependency validation: flow_valid={int(bool(flow_valid))} errors={len(flow_errors or [])}')
 
         if not allow_node_duplicates:
             try:
@@ -256,6 +410,7 @@ def register(app, *, backend_module: Any) -> None:
 
         chain_payload: list[dict[str, Any]] = []
         try:
+            _flow_progress('Phase: building response payload')
             for node in (chain_nodes or []):
                 if not isinstance(node, dict):
                     continue
@@ -323,6 +478,9 @@ def register(app, *, backend_module: Any) -> None:
                 'requested_length': requested_length,
                 'dependency_level': dependency_level,
                 'allow_node_duplicates': bool(allow_node_duplicates),
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+                'topology_inclusion': dict(topology_inclusion_info or {}),
                 'chain': list(chain_payload or []),
                 'flag_assignments': backend._flow_strip_runtime_sensitive_fields(flag_assignments),
                 'flags_enabled': bool(flow_valid),
@@ -351,6 +509,7 @@ def register(app, *, backend_module: Any) -> None:
             pass
 
         try:
+            _flow_progress('Phase: persisting sequence plan')
             if isinstance(metadata, dict):
                 metadata = dict(metadata)
                 metadata['updated_at'] = backend._iso_now()
@@ -380,6 +539,7 @@ def register(app, *, backend_module: Any) -> None:
                 except Exception:
                     xml_path_for_plan = None
             if not xml_path_for_plan or not backend.os.path.exists(xml_path_for_plan):
+                _flow_progress('Failed to persist sequence plan: XML path not found')
                 return jsonify({'ok': False, 'error': 'Failed to persist sequence plan: XML path not found.'}), 500
 
             plan_payload = {
@@ -388,6 +548,7 @@ def register(app, *, backend_module: Any) -> None:
             }
             ok, err = backend._update_plan_preview_in_xml(xml_path_for_plan, scenario_label or scenario_norm, plan_payload)
             if not ok:
+                _flow_progress(f'Failed to persist sequence plan: {err}')
                 return jsonify({'ok': False, 'error': f'Failed to persist sequence plan: {err}'}), 500
             try:
                 backend._update_flow_state_in_xml(xml_path_for_plan, scenario_label or scenario_norm, flow_meta)
@@ -398,10 +559,13 @@ def register(app, *, backend_module: Any) -> None:
             except Exception:
                 pass
             out_path = xml_path_for_plan
+            _flow_progress(f'Persisted sequence plan: {_short_path(out_path)}')
         except Exception as exc:
+            _flow_progress(f'Failed to persist sequence plan: {exc}')
             return jsonify({'ok': False, 'error': f'Failed to persist sequence plan: {exc}'}), 500
 
         response_flow_seed = backend._get_flow_seed(preview, flow_seed_param)
+        _flow_progress(f'Phase complete: sequencing preview ready ({max(0.0, time.monotonic() - started_at):.2f}s)')
 
         return jsonify(
             {
@@ -417,6 +581,9 @@ def register(app, *, backend_module: Any) -> None:
                 'flow_errors': list(flow_errors or []),
                 'flow_seed': response_flow_seed,
                 'dependency_level': dependency_level,
+                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'include_all_topology_pivots': bool(include_all_topology_pivots),
+                'topology_inclusion': dict(topology_inclusion_info or {}),
                 'preview_plan_path': out_path,
                 'base_preview_plan_path': preview_plan_path,
                 **({'warning': warning} if warning else {}),

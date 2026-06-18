@@ -7,10 +7,9 @@ services:
       network: host
     container_name: scenarioforge-web
     env_file:
-      # VM-mode HITL interface names come from these env files and must be
-      # resolved guest Linux ifnames, not Proxmox slot ids like net0/net1.
-      - path: ./.scenarioforge.env.example
-        required: true
+      # Use the same local runtime config as direct Python launches.
+      # VM-mode HITL interface names in this file must be resolved guest
+      # Linux ifnames, not Proxmox slot ids like net0/net1.
       - path: ./.scenarioforge.env
         required: false
     environment:

@@ -51,3 +51,21 @@ class SegmentationInfo:
     factor: float
     # When > 0, indicates an absolute number of segmentation slots to plan for this service.
     abs_count: int = 0
+
+@dataclass
+class PivotInfo:
+    name: str
+    factor: float = 1.0
+    pivot_node: str = ""
+    pivot_role: str = ""
+    target_node: str = ""
+    target_role: str = ""
+    target_ports: str = ""
+    target_protocols: str = ""
+    exposure: str = "pivot-only"
+    source_scope: str = "host"
+    access_provider: str = "random"
+    entry_ports: str = ""
+    produces: str = ""
+    requires: str = ""
+    abs_count: int = 0

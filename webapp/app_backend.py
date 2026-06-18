@@ -168,45 +168,11 @@ def _attack_graph_for_chain(
     except Exception:
         assignment_by_node_id = {}
 
-    nodes_out: list[dict[str, Any]] = []
-    edges_out: list[dict[str, Any]] = []
-
     def _node_ipv4(node: dict[str, Any]) -> str:
         try:
             return _first_valid_ipv4(node.get('ipv4') or node.get('ip4') or node.get('ip') or '')
         except Exception:
             return ''
-
-    def _outputs_for_assignment(assignment: dict[str, Any] | None) -> list[str]:
-        if not isinstance(assignment, dict):
-            return []
-        out: list[str] = []
-        try:
-            outputs = assignment.get('outputs')
-            if isinstance(outputs, list):
-                out.extend([str(item or '').strip() for item in outputs if str(item or '').strip()])
-        except Exception:
-            pass
-        try:
-            produces = assignment.get('produces')
-            if isinstance(produces, list):
-                out.extend([str(item or '').strip() for item in produces if str(item or '').strip()])
-        except Exception:
-            pass
-        try:
-            fields = assignment.get('output_fields')
-            if isinstance(fields, list):
-                out.extend([str(item or '').strip() for item in fields if str(item or '').strip()])
-        except Exception:
-            pass
-        seen: set[str] = set()
-        uniq: list[str] = []
-        for key in out:
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            uniq.append(key)
-        return uniq
 
     def _resolved_map(assignment: dict[str, Any] | None, key: str) -> dict[str, Any]:
         if not isinstance(assignment, dict):
@@ -235,12 +201,65 @@ def _attack_graph_for_chain(
             items.append(f"{key_str}={value_str}" if value_str else key_str)
         return items
 
-    for node in (chain_nodes or []):
+    def _normalize_fact_names(value: Any, preferred_keys: list[str] | None = None) -> list[str]:
+        keys = preferred_keys or ['artifact', 'name', 'field']
+        seen: set[str] = set()
+        out: list[str] = []
+
+        def _push(item: Any) -> None:
+            if item is None:
+                return
+            if isinstance(item, list):
+                for nested in item:
+                    _push(nested)
+                return
+            if isinstance(item, dict):
+                for key in keys:
+                    nested = item.get(key)
+                    if nested is not None and str(nested or '').strip():
+                        _push(nested)
+                        return
+                return
+            fact_name = str(item or '').strip()
+            if not fact_name or fact_name in seen:
+                return
+            seen.add(fact_name)
+            out.append(fact_name)
+
+        _push(value)
+        return out
+
+    def _requirements_for_assignment(assignment: dict[str, Any] | None, synthesized_set: set[str]) -> dict[str, list[str]]:
+        item = assignment if isinstance(assignment, dict) else {}
+        raw_artifacts = _normalize_fact_names(item.get('requires'), ['artifact', 'name'])
+        artifacts = [name for name in raw_artifacts if name and name not in synthesized_set]
+        field_base = _normalize_fact_names(item.get('input_fields_required'), ['name', 'field'])
+        if not field_base:
+            field_base = _normalize_fact_names(item.get('input_fields'), ['name', 'field'])
+        fields = field_base + [name for name in raw_artifacts if name and name in synthesized_set]
+        optional_fields = set(_normalize_fact_names(item.get('input_fields_optional'), ['name', 'field']))
+        return {
+            'artifacts': [name for name in artifacts if name and name not in optional_fields],
+            'fields': [name for name in fields if name and name not in optional_fields],
+        }
+
+    def _outputs_for_assignment(assignment: dict[str, Any] | None) -> dict[str, list[str]]:
+        item = assignment if isinstance(assignment, dict) else {}
+        return {
+            'artifacts': _normalize_fact_names(item.get('produces'), ['artifact', 'name']),
+            'fields': _normalize_fact_names(item.get('output_fields'), ['name', 'field']),
+            'effective': _normalize_fact_names(item.get('outputs'), ['name', 'artifact', 'field']),
+        }
+
+    nodes_out: list[dict[str, Any]] = []
+    chain_order: list[str] = []
+    for step_index, node in enumerate((chain_nodes or []), start=1):
         if not isinstance(node, dict):
             continue
         nid = str(node.get('id') or '').strip()
         if not nid:
             continue
+        chain_order.append(nid)
         assignment = assignment_by_node_id.get(nid)
         generator: dict[str, Any] = {}
         if isinstance(assignment, dict):
@@ -250,23 +269,14 @@ def _attack_graph_for_chain(
                 'kind': str(assignment.get('type') or ''),
                 'source': str(assignment.get('flag_generator') or ''),
                 'catalog': str(assignment.get('generator_catalog') or ''),
-                'chain': [
-                    {
-                        'id': str(n.get('id') or ''),
-                        'name': str(n.get('name') or ''),
-                        'type': str(n.get('type') or ''),
-                        'is_vuln': bool(n.get('is_vuln')),
-                        'ip4': str(n.get('ip4') or ''),
-                        'ipv4': str(n.get('ipv4') or ''),
-                        'interfaces': list(n.get('interfaces') or []) if isinstance(n.get('interfaces'), list) else [],
-                    }
-                    for n in chain_nodes
-                ],
+                'sequence_index': int(step_index),
+                'resolved_inputs': _resolved_map(assignment, 'resolved_inputs'),
                 'resolved_outputs': _resolved_map(assignment, 'resolved_outputs'),
                 'flag_value': assignment.get('flag_value'),
             }
         nodes_out.append({
             'id': nid,
+            'sequence_index': int(step_index),
             'label': str(node.get('name') or nid),
             'type': str(node.get('type') or ''),
             'is_vuln': bool(node.get('is_vuln')),
@@ -274,41 +284,117 @@ def _attack_graph_for_chain(
             'generator': generator or None,
         })
 
-    for i in range(len(chain_nodes) - 1):
-        src = chain_nodes[i]
-        tgt = chain_nodes[i + 1]
-        if not isinstance(src, dict) or not isinstance(tgt, dict):
+    synthesized_fields = ['seed', 'secret', 'env_name', 'challenge', 'flag_prefix', 'username_prefix', 'key_len', 'node_name']
+    synthesized_set = set(synthesized_fields)
+    initial_artifacts = {'Knowledge(ip)'}
+    initial_fields = set(synthesized_fields)
+
+    stage_by_index: list[int] = [0] * len(nodes_out)
+    last_artifact_provider: dict[str, int] = {}
+    last_field_provider: dict[str, int] = {}
+    edge_facts_by_pair: dict[tuple[int, int], list[str]] = {}
+
+    for node_index, node_meta in enumerate(nodes_out):
+        assignment = assignment_by_node_id.get(str(node_meta.get('id') or '').strip()) or {}
+        requirements = _requirements_for_assignment(assignment, synthesized_set)
+        provider_indexes: set[int] = set()
+        provider_facts_by_index: dict[int, list[str]] = {}
+
+        def _add_provider(provider_idx: int, fact_name: str) -> None:
+            if provider_idx < 0 or provider_idx >= len(nodes_out):
+                return
+            facts = provider_facts_by_index.setdefault(provider_idx, [])
+            if fact_name and fact_name not in facts:
+                facts.append(fact_name)
+            provider_indexes.add(provider_idx)
+
+        for fact_name in requirements.get('artifacts', []):
+            if not fact_name or fact_name in initial_artifacts:
+                continue
+            provider_idx = last_artifact_provider.get(fact_name)
+            if isinstance(provider_idx, int):
+                _add_provider(provider_idx, fact_name)
+
+        for fact_name in requirements.get('fields', []):
+            if not fact_name or fact_name in initial_fields:
+                continue
+            provider_idx = last_field_provider.get(fact_name)
+            if isinstance(provider_idx, int):
+                _add_provider(provider_idx, fact_name)
+
+        stage = 0
+        for provider_idx in provider_indexes:
+            stage = max(stage, (stage_by_index[provider_idx] or 0) + 1)
+            pair = (provider_idx, node_index)
+            edge_facts = edge_facts_by_pair.setdefault(pair, [])
+            for fact_name in provider_facts_by_index.get(provider_idx, []):
+                if fact_name and fact_name not in edge_facts:
+                    edge_facts.append(fact_name)
+        stage_by_index[node_index] = stage
+
+        outputs = _outputs_for_assignment(assignment)
+        for fact_name in outputs.get('artifacts', []):
+            if fact_name:
+                last_artifact_provider[fact_name] = node_index
+        for fact_name in outputs.get('fields', []):
+            if fact_name:
+                last_field_provider[fact_name] = node_index
+
+    edges_out: list[dict[str, Any]] = []
+    for (from_index, to_index), facts in edge_facts_by_pair.items():
+        if from_index < 0 or to_index < 0 or from_index >= len(nodes_out) or to_index >= len(nodes_out):
             continue
-        src_id = str(src.get('id') or '').strip()
-        tgt_id = str(tgt.get('id') or '').strip()
+        src_id = str(nodes_out[from_index].get('id') or '').strip()
+        tgt_id = str(nodes_out[to_index].get('id') or '').strip()
         if not src_id or not tgt_id:
             continue
         assignment = assignment_by_node_id.get(src_id)
         resolved_out = _resolved_map(assignment, 'resolved_outputs')
         edges_out.append({
+            'sequence_index': int(from_index + 1),
             'source': src_id,
             'target': tgt_id,
-            'artifacts': _outputs_for_assignment(assignment),
+            'facts': list(facts),
+            'artifacts': list(facts),
             'artifacts_resolved': resolved_out,
             'artifacts_resolved_kv': _resolved_kv_list(resolved_out),
         })
 
+    stage_map: dict[int, list[int]] = {}
+    for node_index, stage in enumerate(stage_by_index):
+        stage_key = int(stage) if isinstance(stage, int) else 0
+        stage_map.setdefault(stage_key, []).append(node_index)
+    stages = [
+        {'stage': stage, 'indices': indices}
+        for stage, indices in sorted(stage_map.items(), key=lambda item: item[0])
+    ]
+
     return {
         'schema_version': 1,
         'scenario': str(scenario_label or ''),
+        'chain_order': chain_order,
+        'assignment_order': [
+            str(assignment.get('node_id') or '').strip()
+            for assignment in (flag_assignments or [])
+            if isinstance(assignment, dict) and str(assignment.get('node_id') or '').strip()
+        ],
         'nodes': nodes_out,
         'edges': edges_out,
+        'stages': stages,
     }
 
 
 def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
-    """Return a Graphviz DOT representation of the attack graph."""
+    """Return a Graphviz DOT representation aligned with the Mermaid flow graph."""
     nodes = attack_graph.get('nodes') if isinstance(attack_graph, dict) else None
     edges = attack_graph.get('edges') if isinstance(attack_graph, dict) else None
+    stages = attack_graph.get('stages') if isinstance(attack_graph, dict) else None
     if not isinstance(nodes, list):
         nodes = []
     if not isinstance(edges, list):
         edges = []
+    if not isinstance(stages, list):
+        stages = []
 
     def _esc(text: Any) -> str:
         s = str(text or '')
@@ -316,62 +402,97 @@ def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
         s = s.replace('\n', '\\n')
         return s
 
-    lines: list[str] = ['digraph attack_graph {']
-    lines.append('  rankdir=LR;')
-    lines.append('  node [shape=box, fontsize=10];')
-    for n in nodes:
-        if not isinstance(n, dict):
+    def _to_roman(n: int) -> str:
+        if n <= 0:
+            return ''
+        vals = [
+            (1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),
+            (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),
+            (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I'),
+        ]
+        out: list[str] = []
+        rem = int(n)
+        for value, token in vals:
+            while rem >= value:
+                out.append(token)
+                rem -= value
+        return ''.join(out)
+
+    def _compact_edge_label(facts: list[Any]) -> str:
+        clean = [str(item or '').strip() for item in facts if str(item or '').strip()]
+        if not clean:
+            return ''
+        label = clean[0]
+        if len(clean) > 1:
+            label = f"{label} +{len(clean) - 1}"
+        return label if len(label) <= 56 else (label[:53] + '...')
+
+    node_by_id: dict[str, dict[str, Any]] = {}
+    for idx, node in enumerate(nodes):
+        if not isinstance(node, dict):
             continue
-        nid = str(n.get('id') or '').strip()
+        nid = str(node.get('id') or '').strip()
         if not nid:
             continue
+        node_by_id[nid] = node
+
+    ordered_node_ids = [str(n.get('id') or '').strip() for n in nodes if isinstance(n, dict) and str(n.get('id') or '').strip()]
+    dot_ref_by_id = {nid: f"N{idx}" for idx, nid in enumerate(ordered_node_ids)}
+
+    lines: list[str] = ['digraph attack_graph {']
+    lines.append('  rankdir=LR;')
+    lines.append('  graph [pad="0.25", nodesep="1.0", ranksep="1.6", splines=polyline, overlap=false];')
+    lines.append('  node [shape=box, style="rounded,filled", fillcolor="#f8fafc", color="#64748b", fontsize=11, fontname="Trebuchet MS"];')
+    lines.append('  edge [color="#2563eb", fontsize=10, fontname="Trebuchet MS", penwidth=1.4, arrowsize=0.8, decorate=false, labelfloat=false];')
+
+    for idx, nid in enumerate(ordered_node_ids):
+        n = node_by_id.get(nid)
+        if not isinstance(n, dict):
+            continue
         label = str(n.get('label') or nid)
-        gen = n.get('generator') if isinstance(n.get('generator'), dict) else None
-        gen_name = str((gen or {}).get('name') or '').strip()
-        gen_kind = str((gen or {}).get('kind') or '').strip()
-        ip = str(n.get('ipv4') or '').strip()
-        parts = [label]
-        if ip:
-            parts.append(f"@ {ip}")
-        if gen_name or gen_kind:
-            gline = gen_name if gen_name else ''
-            if gen_kind:
-                gline = f"{gline} [{gen_kind}]" if gline else f"[{gen_kind}]"
-            parts.append(gline)
-        try:
-            rin = (gen or {}).get('resolved_inputs') if isinstance(gen, dict) else None
-            if isinstance(rin, dict) and rin:
-                items = []
-                for k, v in list(rin.items())[:3]:
-                    try:
-                        vs = v.strip() if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                    except Exception:
-                        vs = str(v)
-                    kk = str(k or '').strip()
-                    if kk:
-                        items.append(f"{kk}={vs}" if vs else kk)
-                if items:
-                    parts.append("in: " + ", ".join(items))
-        except Exception:
-            pass
-        try:
-            rout = (gen or {}).get('resolved_outputs') if isinstance(gen, dict) else None
-            if isinstance(rout, dict) and rout:
-                items = []
-                for k, v in list(rout.items())[:3]:
-                    try:
-                        vs = v.strip() if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                    except Exception:
-                        vs = str(v)
-                    kk = str(k or '').strip()
-                    if kk:
-                        items.append(f"{kk}={vs}" if vs else kk)
-                if items:
-                    parts.append("out: " + ", ".join(items))
-        except Exception:
-            pass
-        node_label = "\\n".join([p for p in parts if p])
-        lines.append(f"  \"{_esc(nid)}\" [label=\"{_esc(node_label)}\"];" )
+        roman = _to_roman(idx + 1)
+        prefixed = f"{roman}. {label}" if roman else label
+        dot_ref = dot_ref_by_id.get(nid) or nid
+        is_vuln = bool(n.get('is_vuln'))
+        node_fill = '#fff4e6' if is_vuln else '#f8fafc'
+        node_stroke = '#d97706' if is_vuln else '#64748b'
+        lines.append(
+            f"  \"{_esc(dot_ref)}\" [label=\"{_esc(prefixed)}\", fillcolor=\"{node_fill}\", color=\"{node_stroke}\", penwidth=\"1.4\"];"
+        )
+
+    if stages:
+        stage_anchor_ids: list[str] = []
+        for stage_ord, stage_group in enumerate(stages):
+            if not isinstance(stage_group, dict):
+                continue
+            indices = stage_group.get('indices') if isinstance(stage_group.get('indices'), list) else []
+            valid_indices = [int(i) for i in indices if isinstance(i, int) and i >= 0 and i < len(nodes)]
+            if not valid_indices:
+                continue
+            stage_label = 'Parallel' if len(valid_indices) > 1 else 'Step'
+            stage_anchor = f"STAGE_{stage_ord}"
+            stage_anchor_ids.append(stage_anchor)
+            lines.append(f"  subgraph \"cluster_G{stage_ord}\" {{")
+            lines.append(f"    label=\"{_esc(stage_label + ' ' + str(stage_ord + 1))}\";")
+            lines.append('    color="#cbd5e1";')
+            lines.append('    style="rounded";')
+            lines.append('    penwidth=1.2;')
+            lines.append('    rank=same;')
+            lines.append(f"    \"{_esc(stage_anchor)}\" [label=\"\", shape=point, width=0, height=0, style=invis];")
+            for node_idx in valid_indices:
+                node = nodes[node_idx] if node_idx < len(nodes) else None
+                if not isinstance(node, dict):
+                    continue
+                nid = str(node.get('id') or '').strip()
+                if nid:
+                    dot_ref = dot_ref_by_id.get(nid) or nid
+                    lines.append(f"    \"{_esc(dot_ref)}\";")
+            lines.append('  }')
+        for idx in range(len(stage_anchor_ids) - 1):
+            left = stage_anchor_ids[idx]
+            right = stage_anchor_ids[idx + 1]
+            lines.append(f"  \"{_esc(left)}\" -> \"{_esc(right)}\" [style=invis, weight=100, minlen=2];")
+
     for e in edges:
         if not isinstance(e, dict):
             continue
@@ -379,22 +500,16 @@ def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
         tgt = str(e.get('target') or '').strip()
         if not src or not tgt:
             continue
-        artifacts = e.get('artifacts') if isinstance(e.get('artifacts'), list) else []
-        resolved_kv = e.get('artifacts_resolved_kv') if isinstance(e.get('artifacts_resolved_kv'), list) else []
-        label = ""
-        try:
-            items = [str(x or '').strip() for x in artifacts if str(x or '').strip()]
-            items = items + [str(x or '').strip() for x in resolved_kv if str(x or '').strip()]
-            if items:
-                label = "\\n".join(items[:6])
-                if len(items) > 6:
-                    label = label + "\\n..."
-        except Exception:
-            label = ""
+        src_ref = dot_ref_by_id.get(src) or src
+        tgt_ref = dot_ref_by_id.get(tgt) or tgt
+        facts = e.get('facts') if isinstance(e.get('facts'), list) else []
+        if not facts:
+            facts = e.get('artifacts') if isinstance(e.get('artifacts'), list) else []
+        label = _compact_edge_label(facts)
         if label:
-            lines.append(f"  \"{_esc(src)}\" -> \"{_esc(tgt)}\" [label=\"{_esc(label)}\"];" )
+            lines.append(f"  \"{_esc(src_ref)}\" -> \"{_esc(tgt_ref)}\" [label=\"{_esc(label)}\"];" )
         else:
-            lines.append(f"  \"{_esc(src)}\" -> \"{_esc(tgt)}\";" )
+            lines.append(f"  \"{_esc(src_ref)}\" -> \"{_esc(tgt_ref)}\";")
     lines.append('}')
     return "\n".join(lines)
 
@@ -6004,6 +6119,32 @@ def _select_remote_python_interpreter(client: Any, core_cfg: Dict[str, Any]) -> 
     raise RuntimeError(f"Unable to locate a python interpreter on the CORE host{detail}")
 
 
+def _is_core_daemon_socket_probe_failure(text: Any) -> bool:
+    lowered = str(text or '').strip().lower()
+    if not lowered:
+        return False
+    return any(token in lowered for token in (
+        'connection refused',
+        'timed out',
+        'timeout',
+        'no route to host',
+        'network is unreachable',
+        'connection reset',
+        'connection aborted',
+    ))
+
+
+def _summarize_core_daemon_probe_errors(errors: list[str], *, limit: int = 4) -> str:
+    cleaned = [str(error or '').strip() for error in (errors or []) if str(error or '').strip()]
+    if not cleaned:
+        return 'probe failed'
+    shown = cleaned[:max(1, limit)]
+    suffix = ''
+    if len(cleaned) > len(shown):
+        suffix = f'; ... {len(cleaned) - len(shown)} more interpreter candidate(s) failed'
+    return '; '.join(shown) + suffix
+
+
 def _resolve_remote_artifact_path(
     sftp: Any,
     candidate: str,
@@ -6401,13 +6542,10 @@ def _normalize_core_config(raw: Any, *, include_password: bool = True) -> Dict[s
 
     if _webui_local_mode():
         try:
-            local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or '127.0.0.1').strip() or '127.0.0.1'
+            local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or 'localhost').strip() or 'localhost'
         except Exception:
-            local_host = '127.0.0.1'
-        try:
-            local_port = int(os.getenv('CORETG_LOCAL_CORE_PORT') or CORE_PORT)
-        except Exception:
-            local_port = CORE_PORT
+            local_host = 'localhost'
+        local_port = 50051
         try:
             local_ssh_port = int(os.getenv('CORETG_LOCAL_SSH_PORT') or 22)
         except Exception:
@@ -9176,9 +9314,17 @@ def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 
                 combined = f'exit status {exit_code}'
             probe_errors.append(f'{interpreter}: {combined}')
             lower = combined.lower()
+            if _is_core_daemon_socket_probe_failure(combined):
+                raise RuntimeError(
+                    f'core-daemon is not accepting gRPC connections on {daemon_host}:{daemon_port}. '
+                    f'The Python probe ran via {interpreter}, but the daemon socket returned: {combined}. '
+                    'Test Venv only verifies that the CORE Python modules import; Save & Validate also requires '
+                    'a running core-daemon listening on the configured gRPC host/port. '
+                    'Check the configured gRPC port and run `systemctl status core-daemon` on the CORE host.'
+                )
             if 'not found' in lower or 'command not found' in lower:
                 continue
-        error_detail = '; '.join(probe_errors) if probe_errors else 'probe failed'
+        error_detail = _summarize_core_daemon_probe_errors(probe_errors)
         raise RuntimeError(f'core-daemon did not respond on {daemon_host}:{daemon_port} ({error_detail})')
     finally:
         try:
@@ -9823,6 +9969,18 @@ def _enrich_hitl_interfaces_with_ips(hitl_cfg: Dict[str, Any]) -> None:
     preview_routers: List[Dict[str, Any]] = []
     used_hitl_link_networks: set[str] = set()
     total_interfaces = len(interfaces)
+
+    def _ipv4_list_contains_ip(values: Any, ip: str) -> bool:
+        if not ip or not isinstance(values, list):
+            return False
+        for raw_value in values:
+            text = str(raw_value or '').strip()
+            if not text:
+                continue
+            if text.split('/', 1)[0].strip() == ip:
+                return True
+        return False
+
     for idx, iface in enumerate(list(interfaces)):
         if not isinstance(iface, dict):
             continue
@@ -9834,7 +9992,9 @@ def _enrich_hitl_interfaces_with_ips(hitl_cfg: Dict[str, Any]) -> None:
         iface['interface_count'] = total_interfaces
         ip_info: Optional[Dict[str, Any]] = None
         if attachment in {'new_router', 'existing_router'}:
-            ip_info = predict_hitl_link_ips_unique(scenario_key, iface.get('name'), idx, used_hitl_link_networks)
+            ip_info = preferred_hitl_link_ips(iface, used_hitl_link_networks)
+            if not ip_info:
+                ip_info = predict_hitl_link_ips_unique(scenario_key, iface.get('name'), idx, used_hitl_link_networks)
         if attachment in {'new_router', 'existing_router'} and ip_info:
             iface['link_network'] = ip_info.get('network')
             iface['link_network_cidr'] = ip_info.get('network_cidr') or ip_info.get('network')
@@ -9852,7 +10012,7 @@ def _enrich_hitl_interfaces_with_ips(hitl_cfg: Dict[str, Any]) -> None:
                 if not ipv4_current:
                     iface['ipv4'] = [rj45_ip]
                 else:
-                    if rj45_ip not in ipv4_current:
+                    if not _ipv4_list_contains_ip(ipv4_current, rj45_ip):
                         iface['ipv4'] = list(ipv4_current) + [rj45_ip]
                     else:
                         iface['ipv4'] = ipv4_current
@@ -10498,7 +10658,7 @@ except ModuleNotFoundError as exc:
         "Run webapp commands from the repository root so the in-repo package is importable."
     ) from exc
 
-from scenarioforge.utils.hitl import predict_hitl_link_ips, predict_hitl_link_ips_unique
+from scenarioforge.utils.hitl import collect_hitl_preview_ip_reservations, preferred_hitl_link_ips, predict_hitl_link_ips, predict_hitl_link_ips_unique
 
 # Proactively ensure the in-repo planning.full_preview module is available even if an
 # older site-packages installation of scenarioforge (without that module) is first on sys.path.
@@ -11400,6 +11560,14 @@ def _canonicalize_flow_state_paths(flow_state: dict[str, Any], *, xml_path: str 
         out['allow_node_duplicates'] = bool(_coerce_bool(out.get('allow_node_duplicates') or out.get('allow_duplicates')))
     except Exception:
         out['allow_node_duplicates'] = False
+    try:
+        out['include_all_topology_vulns'] = bool(_coerce_bool(out.get('include_all_topology_vulns')))
+    except Exception:
+        out['include_all_topology_vulns'] = False
+    try:
+        out['include_all_topology_pivots'] = bool(_coerce_bool(out.get('include_all_topology_pivots')))
+    except Exception:
+        out['include_all_topology_pivots'] = False
 
     # Keep FlowState chain fields consistent for readers that rely on chain_ids.
     try:
@@ -13494,10 +13662,7 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
         }
     )
 
-    single_ifx_name = str(
-        os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_NAME')
-        or ''
-    ).strip()
+    single_ifx_name = str(os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_NAME') or '').strip()
     single_ifx_attachment = str(
         os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT')
         or 'existing_router'
@@ -13506,16 +13671,25 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
         os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION')
         or 'Scenario HITL participant network'
     ).strip() or 'Scenario HITL participant network'
+    single_ifx_ipv4 = [
+        part.strip()
+        for part in str(
+            os.getenv('CORETG_HITL_CORE_IFX_IPV4')
+            or ''
+        ).split(',')
+        if part.strip()
+    ]
 
     interfaces_defaults: List[Dict[str, Any]] = []
     if single_ifx_name:
-        interfaces_defaults.append(
-            {
-                'name': single_ifx_name,
-                'attachment': single_ifx_attachment,
-                'description': single_ifx_description,
-            }
-        )
+        iface_defaults: Dict[str, Any] = {
+            'name': single_ifx_name,
+            'attachment': single_ifx_attachment,
+            'description': single_ifx_description,
+        }
+        if single_ifx_ipv4:
+            iface_defaults['ipv4'] = single_ifx_ipv4
+        interfaces_defaults.append(iface_defaults)
 
     return {
         'core': core_defaults,
@@ -13524,6 +13698,7 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
             'participant_ui_url': participant_url,
             'participant_pool': 'same-pool',
             'interfaces': interfaces_defaults,
+            'shared_core_ifx_ipv4': list(single_ifx_ipv4),
         },
     }
 
@@ -13624,17 +13799,13 @@ def _inject_ui_view_state() -> dict:
 
 @app.context_processor
 def _inject_runtime_flags() -> dict:
-    local_host = '127.0.0.1'
-    local_port = CORE_PORT
+    local_host = 'localhost'
+    local_port = 50051
     local_ssh_port = 22
     try:
-        local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or '127.0.0.1').strip() or '127.0.0.1'
+        local_host = str(os.getenv('CORETG_LOCAL_CORE_HOST') or 'localhost').strip() or 'localhost'
     except Exception:
-        local_host = '127.0.0.1'
-    try:
-        local_port = int(os.getenv('CORETG_LOCAL_CORE_PORT') or CORE_PORT)
-    except Exception:
-        local_port = CORE_PORT
+        local_host = 'localhost'
     try:
         local_ssh_port = int(os.getenv('CORETG_LOCAL_SSH_PORT') or 22)
     except Exception:
@@ -15748,7 +15919,7 @@ def _attack_flow_builder_afb_for_chain(
         gen_label = (gen_name or gen_id or '').strip()
         if not gen_label:
             gen_label = 'Unassigned generator'
-        action_title = f"Find Flag -- {gen_label}: {node_name}"
+        action_title = f"Step {idx}: Find Flag -- {gen_label}: {node_name}"
 
         action_instance = _new_uuid()
         flow_children.append(action_instance)
@@ -16560,6 +16731,8 @@ def _flow_compute_flag_assignments_for_preset(
     chain_nodes: list[dict[str, Any]],
     scenario_label: str,
     preset: str,
+    *,
+    pivot_context: Any | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     steps = _flow_preset_steps(preset)
     if not steps:
@@ -16852,7 +17025,13 @@ def _flow_compute_flag_assignments_for_preset(
             'next_node_name': str(id_to_name.get(str(next_id)) or ''),
         })
 
-    return out, None
+    return _flow_apply_pivot_context_to_assignments(
+        out,
+        chain_nodes,
+        preview=preview,
+        pivot_context=pivot_context,
+        scenario_label=scenario_label,
+    ), None
 
 
 @app.before_request
@@ -17239,6 +17418,36 @@ def _attach_latest_flow_into_full_preview(full_prev: dict, scenario: Optional[st
         return None
 
 
+def _flow_state_from_current_xml_for_preview(
+    full_prev: dict,
+    xml_path: str | None,
+    scenario: Optional[str],
+    *,
+    repair: bool = True,
+) -> dict | None:
+    """Load flow metadata only from the current scenario XML used for preview.
+
+    Preview and persist paths already know the concrete XML they are operating on.
+    Avoid scanning older scenario XMLs when that current document has no FlowState,
+    since the fallback adds latency and can attach stale flow metadata.
+    """
+
+    try:
+        if not isinstance(full_prev, dict) or not xml_path:
+            return None
+        flow_meta = _flow_state_from_xml_path(xml_path, scenario)
+        if not isinstance(flow_meta, dict):
+            return None
+        if repair:
+            repaired = _flow_repair_saved_flow_for_preview(full_prev, flow_meta)
+            if not isinstance(repaired, dict):
+                return None
+            flow_meta = repaired
+        return flow_meta
+    except Exception:
+        return None
+
+
 def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
     try:
         if not isinstance(node, dict):
@@ -17442,6 +17651,7 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
         is_vuln: bool = False,
         ip4: str = '',
         vulnerabilities: list[Any] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         if not nid or nid in by_id:
             return
@@ -17457,6 +17667,11 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             'interfaces': [],
             'services': [],
         }
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if value in (None, '', []):
+                    continue
+                rec[key] = value
         by_id[nid] = rec
         nodes_out.append(rec)
 
@@ -17545,6 +17760,30 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
                         break
             except Exception:
                 host_ip4 = ''
+        extra: dict[str, Any] = {}
+        for key in (
+            'PivotProduces',
+            'PivotRequires',
+            'PivotAccessProvider',
+            'PivotPlan',
+            'SegmentationExposure',
+            'SegmentationSources',
+            'SegmentationPorts',
+            'SegmentationProtocols',
+            'pivot_produces',
+            'pivot_requires',
+            'pivot_access_provider',
+            'pivot_plan',
+            'segmentation_exposure',
+            'segmentation_sources',
+            'segmentation_ports',
+            'segmentation_protocols',
+        ):
+            try:
+                if h.get(key) not in (None, '', []):
+                    extra[key] = h.get(key)
+            except Exception:
+                continue
         _add_node(
             hid,
             str(h.get('name') or f'host-{hid}'),
@@ -17554,6 +17793,7 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             is_vuln=is_vuln,
             ip4=host_ip4,
             vulnerabilities=vulns,
+            extra=extra,
         )
 
     # Router-to-router links
@@ -17837,6 +18077,7 @@ def _flow_compute_flag_assignments(
     seed_override: int | None = None,
     disallow_generator_reuse: bool = False,
     dependency_level: int | None = None,
+    pivot_context: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return a per-position list of flag assignments aligned to chain_ids.
 
@@ -18475,13 +18716,9 @@ def _flow_compute_flag_assignments(
             gen = _choose_candidate(candidates, state_known, i)
 
         try:
-            chain_produced_before = set(chain_produced)
-        except Exception:
-            chain_produced_before = set()
-        try:
             supplied_names_for_start = set(_flow_first_step_chain_supplied_input_names(gen))
             required_for_start = set(_required_inputs_of(gen)) - set(initial_facts) - supplied_names_for_start
-            supply_on_start = bool(i == 0 or not (required_for_start & chain_produced_before))
+            supply_on_start = bool(not required_for_start)
         except Exception:
             supply_on_start = bool(i == 0)
 
@@ -18607,7 +18844,13 @@ def _flow_compute_flag_assignments(
             supply_on_start=supply_on_start,
         )
         out.append(assignment_out)
-    return out
+    return _flow_apply_pivot_context_to_assignments(
+        out,
+        chain_nodes,
+        preview=preview,
+        pivot_context=pivot_context,
+        scenario_label=scenario_label,
+    )
 
 
 def _flow_synthesized_inputs() -> set[str]:
@@ -18830,10 +19073,18 @@ def _flow_parallel_start_assignment_indexes(
                 gen_def = gen_defs_by_id.get(gen_id)
         except Exception:
             gen_def = None
-        supplied_names = set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else assignment))
+        explicit_supplied_names = {
+            str(x or '').strip()
+            for x in (assignment.get('chain_supplied_inputs') or [])
+            if str(x or '').strip()
+        } if isinstance(assignment.get('chain_supplied_inputs'), list) else set()
+        supplied_names = set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else assignment)) | explicit_supplied_names
         required = _flow_assignment_fact_names(assignment, ('requires', 'input_fields_required', 'inputs'))
         required = {name for name in required if name and name not in available_initial and name not in supplied_names}
-        if not (required & provided_so_far):
+        if explicit_supplied_names:
+            if required.issubset(provided_so_far):
+                starts.add(index)
+        elif not (required & provided_so_far):
             starts.add(index)
         provided_so_far |= _flow_assignment_fact_names(assignment, ('produces', 'output_fields', 'outputs'))
     return starts
@@ -19167,6 +19418,1088 @@ def _flow_apply_first_step_chain_supplied_inputs_to_assignments(
             position=index,
             supply_on_start=(index in start_positions),
         ))
+    return out
+
+
+def _flow_split_top_level_list(value: Any) -> list[str]:
+    """Return strings from a list or comma text, ignoring commas inside facts."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                for key in ('artifact', 'name', 'field', 'value'):
+                    text = str(item.get(key) or '').strip()
+                    if text:
+                        out.append(text)
+                        break
+                continue
+            out.extend(_flow_split_top_level_list(item))
+        return list(dict.fromkeys([item for item in out if item]))
+    text = str(value or '').strip()
+    if not text:
+        return []
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text.replace(';', ',').replace('\n', ','):
+        if ch == '(':
+            depth += 1
+        elif ch == ')' and depth > 0:
+            depth -= 1
+        if ch == ',' and depth == 0:
+            part = ''.join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            continue
+        buf.append(ch)
+    part = ''.join(buf).strip()
+    if part:
+        parts.append(part)
+    return list(dict.fromkeys(parts))
+
+
+def _flow_append_unique_values(record: dict[str, Any], key: str, values: Any) -> None:
+    if not isinstance(record, dict):
+        return
+    additions = _flow_split_top_level_list(values)
+    if not additions:
+        return
+    existing = _flow_split_top_level_list(record.get(key))
+    merged = list(dict.fromkeys([*existing, *additions]))
+    record[key] = merged
+
+
+def _flow_pivot_provider_label(value: Any) -> str:
+    provider = str(value or '').strip().lower().replace('_', '-') or 'random'
+    aliases = {
+        'auto': 'random',
+        'random': 'random',
+        'vuln': 'vulnerability',
+        'flag-node': 'flag-node-generator',
+        'flagnode': 'flag-node-generator',
+        'flag-nodegen': 'flag-node-generator',
+        'ssh': 'ssh-fallback',
+        'ssh-server': 'ssh-fallback',
+        'fallback-ssh': 'ssh-fallback',
+    }
+    provider = aliases.get(provider, provider)
+    labels = {
+        'random': 'Random',
+        'auto': 'Random',
+        'vulnerability': 'Vulnerability',
+        'flag-node-generator': 'Flag-Node-Generator',
+        'ssh-fallback': 'Docker SSH',
+        'manual': 'Manual',
+        'none': 'Manual',
+    }
+    return labels.get(provider, provider or 'Random')
+
+
+def _flow_pivot_context_sources(pivot_context: Any, preview: Any) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, dict) and value not in sources:
+            sources.append(value)
+
+    _add(pivot_context)
+    _add(preview)
+    if isinstance(pivot_context, dict):
+        _add(pivot_context.get('full_preview'))
+        plan = pivot_context.get('plan')
+        _add(plan)
+        if isinstance(plan, dict):
+            _add(plan.get('breakdowns'))
+            _add(plan.get('pivoting_plan'))
+        meta = pivot_context.get('metadata')
+        _add(meta)
+        if isinstance(meta, dict):
+            _add(meta.get('generation_meta'))
+            _add(meta.get('flow'))
+    return sources
+
+
+def _flow_node_lookup_for_pivot(
+    preview: Any,
+    chain_nodes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    nodes: list[dict[str, Any]] = []
+    try:
+        if isinstance(preview, dict):
+            graph_nodes, _links, _adj = _build_topology_graph_from_preview_plan(preview)
+            if isinstance(graph_nodes, list):
+                nodes.extend([dict(n) for n in graph_nodes if isinstance(n, dict)])
+    except Exception:
+        nodes = []
+    try:
+        existing_ids = {str(n.get('id') or '').strip() for n in nodes if isinstance(n, dict)}
+        for node in (chain_nodes or []):
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get('id') or '').strip()
+            if not node_id:
+                continue
+            if node_id in existing_ids:
+                for existing in nodes:
+                    if str(existing.get('id') or '').strip() == node_id:
+                        existing.update({k: v for k, v in node.items() if v not in (None, '', [])})
+                        break
+            else:
+                nodes.append(dict(node))
+                existing_ids.add(node_id)
+    except Exception:
+        pass
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        for raw_key in (
+            node.get('id'),
+            node.get('node_id'),
+            node.get('name'),
+            node.get('label'),
+        ):
+            key = str(raw_key or '').strip()
+            if key:
+                by_key.setdefault(key.lower(), node)
+    return nodes, by_key
+
+
+def _flow_pivot_node_name(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ''
+    return str(node.get('name') or node.get('label') or node.get('id') or node.get('node_id') or '').strip()
+
+
+def _flow_pivot_node_id(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ''
+    return str(node.get('id') or node.get('node_id') or node.get('name') or '').strip()
+
+
+def _flow_pivot_fact_subject(value: Any) -> str:
+    text = str(value or '').strip()
+    if not text or '(' not in text or not text.endswith(')'):
+        return ''
+    prefix = text.split('(', 1)[0].strip().lower()
+    if prefix not in {'pivot', 'shell'}:
+        return ''
+    return text[text.find('(') + 1:-1].strip().lower()
+
+
+def _flow_pivot_source_name_candidates(value: Any) -> set[str]:
+    text = str(value or '').strip().lower()
+    if not text:
+        return set()
+    names: set[str] = set()
+
+    def _add(raw: str) -> None:
+        candidate = str(raw or '').strip().lower()
+        if not candidate:
+            return
+        names.add(candidate)
+        base = candidate.split(' @ ', 1)[0].strip() if ' @ ' in candidate else candidate
+        if base and base != candidate:
+            names.add(base)
+        if base.isdigit():
+            names.add(f'docker-{base}')
+        if base.startswith('docker-'):
+            suffix = base.split('docker-', 1)[1].strip()
+            if suffix.isdigit():
+                names.add(suffix)
+
+    _add(text)
+    return {name for name in names if name}
+
+
+def _flow_pivot_aliases_for_values(*values: Any) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        aliases |= _flow_pivot_source_name_candidates(value)
+    return aliases
+
+
+def _flow_pivot_aliases_for_node(node: dict[str, Any] | None) -> set[str]:
+    if not isinstance(node, dict):
+        return set()
+    return _flow_pivot_aliases_for_values(
+        node.get('id'),
+        node.get('node_id'),
+        node.get('name'),
+        node.get('label'),
+    )
+
+
+def _flow_pivot_aliases_for_assignment(assignment: dict[str, Any] | None) -> set[str]:
+    if not isinstance(assignment, dict):
+        return set()
+    return _flow_pivot_aliases_for_values(
+        assignment.get('node_id'),
+        assignment.get('node_name'),
+        assignment.get('name'),
+        assignment.get('label'),
+    )
+
+
+def _flow_chain_pivot_aliases(chain_nodes: list[dict[str, Any]] | Any) -> set[str]:
+    aliases: set[str] = set()
+    if not isinstance(chain_nodes, list):
+        return aliases
+    for node in chain_nodes:
+        aliases |= _flow_pivot_aliases_for_node(node if isinstance(node, dict) else None)
+    return aliases
+
+
+def _flow_prune_unavailable_or_self_pivot_facts(
+    values: Any,
+    chain_nodes: list[dict[str, Any]],
+    *,
+    current_node: dict[str, Any] | None = None,
+    current_assignment: dict[str, Any] | None = None,
+) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    chain_aliases = _flow_chain_pivot_aliases(chain_nodes)
+    current_aliases = _flow_pivot_aliases_for_node(current_node) | _flow_pivot_aliases_for_assignment(current_assignment)
+    out: list[str] = []
+    for raw in values:
+        value = str(raw or '').strip()
+        if not value:
+            continue
+        subject = _flow_pivot_fact_subject(value)
+        if subject:
+            source_aliases = _flow_pivot_source_name_candidates(subject)
+            if source_aliases and not (source_aliases & chain_aliases):
+                continue
+            if source_aliases and (source_aliases & current_aliases):
+                continue
+        if value not in out:
+            out.append(value)
+    return out
+
+
+def _flow_pivot_match_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    node_selector: Any = '',
+    role_selector: Any = '',
+) -> list[dict[str, Any]]:
+    node_tokens = _flow_split_top_level_list(node_selector)
+    role_tokens = [item.lower() for item in _flow_split_top_level_list(role_selector)]
+    if not node_tokens and not role_tokens:
+        return []
+    out: list[dict[str, Any]] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        node_values = [
+            str(node.get('id') or '').strip(),
+            str(node.get('node_id') or '').strip(),
+            str(node.get('name') or '').strip(),
+            str(node.get('label') or '').strip(),
+            str(node.get('role') or '').strip(),
+            str(node.get('type') or '').strip(),
+        ]
+        lowered_values = [value.lower() for value in node_values if value]
+        if node_tokens:
+            matched = False
+            for token in node_tokens:
+                token_low = token.lower()
+                if token_low in lowered_values:
+                    matched = True
+                    break
+                if any(fnmatch.fnmatchcase(value, token_low) for value in lowered_values):
+                    matched = True
+                    break
+            if not matched:
+                continue
+        if role_tokens:
+            role_value = str(node.get('role') or node.get('type') or '').strip().lower()
+            if role_value not in role_tokens:
+                continue
+        out.append(node)
+    return out
+
+
+def _flow_pivot_provider_for_node(node: dict[str, Any]) -> str:
+    if _flow_node_is_vuln(node):
+        return 'vulnerability'
+    if _flow_node_is_docker_role(node):
+        return 'ssh-fallback'
+    return 'manual'
+
+
+def _flow_pivot_requested_provider(value: Any) -> str:
+    provider = str(value or 'random').strip().lower().replace('_', '-') or 'random'
+    aliases = {
+        'auto': 'random',
+        'vuln': 'vulnerability',
+        'flag-node': 'flag-node-generator',
+        'flagnode': 'flag-node-generator',
+        'flag-nodegen': 'flag-node-generator',
+        'ssh': 'ssh-fallback',
+        'ssh-server': 'ssh-fallback',
+        'fallback-ssh': 'ssh-fallback',
+    }
+    return aliases.get(provider, provider)
+
+
+def _flow_infer_pivot_sources(
+    nodes: list[dict[str, Any]],
+    *,
+    provider: str,
+    excluded_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    excluded = set(excluded_ids or set())
+    candidates: list[tuple[int, str, dict[str, Any]]] = []
+    provider = _flow_pivot_requested_provider(provider)
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = _flow_pivot_node_id(node)
+        if not node_id or node_id in excluded:
+            continue
+        is_docker = _flow_node_is_docker_role(node)
+        is_vuln = _flow_node_is_vuln(node)
+        if provider == 'vulnerability' and not is_vuln:
+            continue
+        if provider in {'flag-node-generator', 'ssh-fallback'} and not (is_docker and not is_vuln):
+            continue
+        if provider in {'random', 'auto'} and not (is_vuln or is_docker):
+            continue
+        effective = _flow_pivot_provider_for_node(node)
+        if provider == 'flag-node-generator' and is_docker and not is_vuln:
+            effective = 'flag-node-generator'
+        priority_order = {'vulnerability': 0, 'flag-node-generator': 1, 'ssh-fallback': 2, 'manual': 9}
+        candidates.append((priority_order.get(effective, 5), _flow_pivot_node_name(node).lower(), node))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [candidates[0][2]] if candidates else []
+
+
+def _flow_pivot_rules_for_chain(
+    preview: Any,
+    chain_nodes: list[dict[str, Any]],
+    *,
+    pivot_context: Any | None = None,
+) -> list[dict[str, Any]]:
+    nodes, by_key = _flow_node_lookup_for_pivot(preview, chain_nodes)
+    if not nodes:
+        return []
+
+    rules: list[dict[str, Any]] = []
+
+    def _node_for_name(name: Any) -> dict[str, Any] | None:
+        text = str(name or '').strip()
+        if not text:
+            return None
+        return by_key.get(text.lower())
+
+    def _add_rule(
+        *,
+        name: str,
+        source_node: dict[str, Any],
+        target_node: dict[str, Any],
+        provider: Any,
+        produces: Any = None,
+        target_requires: Any = None,
+        target_ports: Any = None,
+        target_protocols: Any = None,
+        exposure: Any = 'pivot-only',
+    ) -> None:
+        source_name = _flow_pivot_node_name(source_node)
+        target_name = _flow_pivot_node_name(target_node)
+        source_id = _flow_pivot_node_id(source_node)
+        target_id = _flow_pivot_node_id(target_node)
+        if not source_name or not target_name or not source_id or not target_id or source_id == target_id:
+            return
+        prod = _flow_split_top_level_list(produces) or [f'Shell({source_name})', f'Pivot({source_name})']
+        req = _flow_split_top_level_list(target_requires) or [f'Pivot({source_name})']
+        rule = {
+            'name': str(name or 'Pivot').strip() or 'Pivot',
+            'source_id': source_id,
+            'source_name': source_name,
+            'target_id': target_id,
+            'target_name': target_name,
+            'target_ip': _first_valid_ipv4(target_node.get('ip4') or target_node.get('ipv4') or target_node.get('ip') or ''),
+            'provider': _flow_pivot_requested_provider(provider),
+            'provider_label': _flow_pivot_provider_label(provider),
+            'produces': prod,
+            'target_requires': req,
+            'target_ports': _flow_split_top_level_list(target_ports),
+            'target_protocols': _flow_split_top_level_list(target_protocols),
+            'exposure': str(exposure or 'pivot-only').strip() or 'pivot-only',
+        }
+        key = (rule['source_id'], rule['target_id'], tuple(rule['produces']), tuple(rule['target_requires']))
+        for existing in rules:
+            existing_key = (
+                existing.get('source_id'),
+                existing.get('target_id'),
+                tuple(existing.get('produces') or []),
+                tuple(existing.get('target_requires') or []),
+            )
+            if existing_key == key:
+                return
+        rules.append(rule)
+
+    def _candidate_pivot_dicts(source: Any) -> list[dict[str, Any]]:
+        if not isinstance(source, dict):
+            return []
+        candidates: list[dict[str, Any]] = []
+
+        def _add_candidate(value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            if value in candidates:
+                return
+            has_pivot_shape = any(
+                isinstance(value.get(key), list)
+                for key in ('rules', 'raw_items_serialized')
+            ) or isinstance(value.get('pivoting'), dict) or isinstance(value.get('pivoting_plan'), dict)
+            if has_pivot_shape:
+                candidates.append(value)
+
+        _add_candidate(source)
+        _add_candidate(source.get('pivoting'))
+        _add_candidate(source.get('pivoting_plan'))
+        breakdowns = source.get('breakdowns') if isinstance(source.get('breakdowns'), dict) else None
+        if isinstance(breakdowns, dict):
+            _add_candidate(breakdowns.get('pivoting'))
+        return candidates
+
+    def _fact_name_from_pivot_fact(value: Any) -> str:
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        low = text.lower()
+        if low.startswith('pivot(') and text.endswith(')'):
+            return text[text.find('(') + 1:-1].strip()
+        return ''
+
+    for source in _flow_pivot_context_sources(pivot_context, preview):
+        for pivot_meta in _candidate_pivot_dicts(source):
+            for raw_rule in (pivot_meta.get('rules') or []):
+                if not isinstance(raw_rule, dict):
+                    continue
+                target_node = _node_for_name(raw_rule.get('target_node'))
+                if not isinstance(target_node, dict):
+                    continue
+                pivot_nodes = raw_rule.get('pivot_nodes') if isinstance(raw_rule.get('pivot_nodes'), list) else []
+                for pivot_name in pivot_nodes:
+                    source_node = _node_for_name(pivot_name)
+                    if not isinstance(source_node, dict):
+                        continue
+                    _add_rule(
+                        name=str(raw_rule.get('name') or 'Pivot'),
+                        source_node=source_node,
+                        target_node=target_node,
+                        provider=raw_rule.get('access_provider') or raw_rule.get('provider') or raw_rule.get('requested_access_provider'),
+                        produces=raw_rule.get('produces'),
+                        target_requires=raw_rule.get('target_requires'),
+                        target_ports=raw_rule.get('target_ports'),
+                        target_protocols=raw_rule.get('target_protocols'),
+                        exposure=raw_rule.get('exposure'),
+                    )
+
+    if rules:
+        return rules
+
+    produces_by_fact: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        produces = _flow_split_top_level_list(
+            node.get('PivotProduces')
+            or node.get('pivot_produces')
+            or node.get('produces_pivot')
+            or node.get('pivot_outputs')
+        )
+        for fact in produces:
+            produces_by_fact.setdefault(fact, []).append(node)
+
+    for target_node in nodes or []:
+        if not isinstance(target_node, dict):
+            continue
+        target_requires = _flow_split_top_level_list(
+            target_node.get('PivotRequires')
+            or target_node.get('pivot_requires')
+            or target_node.get('requires_pivot')
+            or target_node.get('pivot_inputs')
+        )
+        if not target_requires:
+            continue
+        provider = (
+            target_node.get('PivotAccessProvider')
+            or target_node.get('pivot_access_provider')
+            or target_node.get('access_provider')
+            or target_node.get('provider')
+            or 'random'
+        )
+        for required_fact in target_requires:
+            source_nodes = list(produces_by_fact.get(required_fact) or [])
+            if not source_nodes:
+                pivot_name = _fact_name_from_pivot_fact(required_fact)
+                source_node = _node_for_name(pivot_name)
+                if isinstance(source_node, dict):
+                    source_nodes = [source_node]
+            for source_node in source_nodes:
+                source_produces = _flow_split_top_level_list(
+                    source_node.get('PivotProduces')
+                    or source_node.get('pivot_produces')
+                    or source_node.get('produces_pivot')
+                    or source_node.get('pivot_outputs')
+                )
+                _add_rule(
+                    name='Pivot',
+                    source_node=source_node,
+                    target_node=target_node,
+                    provider=provider,
+                    produces=source_produces,
+                    target_requires=target_requires,
+                    target_ports=target_node.get('SegmentationPorts') or target_node.get('segmentation_ports'),
+                    target_protocols=target_node.get('SegmentationProtocols') or target_node.get('segmentation_protocols'),
+                    exposure=target_node.get('SegmentationExposure') or target_node.get('segmentation_exposure') or 'pivot-only',
+                )
+
+    if rules:
+        return rules
+
+    pivot_items: list[dict[str, Any]] = []
+    for source in _flow_pivot_context_sources(pivot_context, preview):
+        for candidate in _candidate_pivot_dicts(source):
+            raw_items = candidate.get('raw_items_serialized') if isinstance(candidate.get('raw_items_serialized'), list) else []
+            for item in raw_items:
+                if isinstance(item, dict):
+                    pivot_items.append(item)
+
+    seen_item_keys: set[str] = set()
+    for item in pivot_items:
+        item_key = json.dumps(item, sort_keys=True, default=str)
+        if item_key in seen_item_keys:
+            continue
+        seen_item_keys.add(item_key)
+        provider = _flow_pivot_requested_provider(item.get('access_provider') or item.get('pivot_provider') or item.get('provider') or 'random')
+        explicit_targets = _flow_pivot_match_nodes(
+            nodes,
+            node_selector=item.get('target_node') or item.get('target'),
+            role_selector=item.get('target_role'),
+        )
+        explicit_target_ids = {_flow_pivot_node_id(node) for node in explicit_targets if isinstance(node, dict)}
+        source_nodes = _flow_pivot_match_nodes(
+            nodes,
+            node_selector=item.get('pivot_node') or item.get('source_node') or item.get('source'),
+            role_selector=item.get('pivot_role') or item.get('source_role'),
+        )
+        if not source_nodes:
+            source_nodes = _flow_infer_pivot_sources(nodes, provider=provider, excluded_ids=explicit_target_ids)
+        if not source_nodes:
+            continue
+        source_ids = {_flow_pivot_node_id(node) for node in source_nodes if isinstance(node, dict)}
+        target_nodes = explicit_targets
+        if not target_nodes:
+            target_nodes = [
+                node for node in nodes
+                if isinstance(node, dict)
+                and _flow_node_is_docker_role(node)
+                and _flow_pivot_node_id(node) not in source_ids
+            ]
+        for source_node in source_nodes:
+            for target_node in target_nodes:
+                _add_rule(
+                    name=str(item.get('selected') or item.get('name') or 'Pivot'),
+                    source_node=source_node,
+                    target_node=target_node,
+                    provider=provider,
+                    produces=item.get('produces'),
+                    target_requires=item.get('target_requires') or item.get('requires_target'),
+                    target_ports=item.get('target_ports') or item.get('ports'),
+                    target_protocols=item.get('target_protocols') or item.get('protocols'),
+                    exposure=item.get('exposure') or item.get('target_exposure') or 'pivot-only',
+                )
+    return rules
+
+
+def _flow_expand_chain_for_topology_requirements(
+    nodes: list[dict[str, Any]],
+    chain_nodes: list[dict[str, Any]],
+    preview: Any | None = None,
+    *,
+    include_all_topology_vulns: bool = False,
+    include_all_topology_pivots: bool = False,
+    pivot_context: Any | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Append topology-required Flow nodes without truncating the user's chain.
+
+    The caller still performs normal assignment and dependency ordering after this,
+    so this helper only guarantees that requested topology nodes are present once.
+    """
+    requested_vulns = bool(include_all_topology_vulns)
+    requested_pivots = bool(include_all_topology_pivots)
+    info: dict[str, Any] = {
+        'requested': {
+            'include_all_topology_vulns': requested_vulns,
+            'include_all_topology_pivots': requested_pivots,
+        },
+        'added_node_ids': [],
+        'added_vuln_node_ids': [],
+        'added_pivot_node_ids': [],
+        'effective_length': len(chain_nodes or []),
+    }
+    if not requested_vulns and not requested_pivots:
+        return list(chain_nodes or []), info
+
+    all_nodes = [node for node in (nodes or []) if isinstance(node, dict)]
+    if not all_nodes:
+        try:
+            built_nodes, _links, _adj = _build_topology_graph_from_preview_plan(preview) if isinstance(preview, dict) else ([], [], {})
+            all_nodes = [node for node in (built_nodes or []) if isinstance(node, dict)]
+        except Exception:
+            all_nodes = []
+
+    id_to_node: dict[str, dict[str, Any]] = {}
+    key_to_id: dict[str, str] = {}
+
+    def _index_node(node: dict[str, Any]) -> None:
+        node_id = _flow_pivot_node_id(node)
+        if not node_id:
+            return
+        if node_id not in id_to_node:
+            id_to_node[node_id] = node
+        for raw in (
+            node_id,
+            node.get('id'),
+            node.get('node_id'),
+            node.get('name'),
+            node.get('label'),
+            node.get('hostname'),
+        ):
+            key = str(raw or '').strip().lower()
+            if key and key not in key_to_id:
+                key_to_id[key] = node_id
+
+    for node in all_nodes:
+        _index_node(node)
+    for node in (chain_nodes or []):
+        if isinstance(node, dict):
+            _index_node(node)
+
+    expanded = list(chain_nodes or [])
+    present_ids = {
+        _flow_pivot_node_id(node)
+        for node in expanded
+        if isinstance(node, dict) and _flow_pivot_node_id(node)
+    }
+    added_ids: list[str] = []
+    added_vuln_ids: list[str] = []
+    added_pivot_ids: list[str] = []
+
+    def _resolve_id(raw: Any) -> str:
+        text = str(raw or '').strip()
+        if not text:
+            return ''
+        if text in id_to_node:
+            return text
+        return key_to_id.get(text.lower(), '')
+
+    def _append_node(node_id: str, bucket: list[str]) -> None:
+        resolved_id = _resolve_id(node_id)
+        if not resolved_id or resolved_id in present_ids:
+            return
+        node = id_to_node.get(resolved_id)
+        if not isinstance(node, dict):
+            return
+        expanded.append(node)
+        present_ids.add(resolved_id)
+        added_ids.append(resolved_id)
+        if resolved_id not in bucket:
+            bucket.append(resolved_id)
+
+    if requested_vulns:
+        for node in all_nodes:
+            node_id = _flow_pivot_node_id(node)
+            if node_id and _flow_node_is_vuln(node):
+                _append_node(node_id, added_vuln_ids)
+
+    if requested_pivots:
+        try:
+            pivot_rules = _flow_pivot_rules_for_chain(preview, expanded, pivot_context=pivot_context)
+        except Exception:
+            pivot_rules = []
+        for rule in pivot_rules or []:
+            if not isinstance(rule, dict):
+                continue
+            _append_node(str(rule.get('source_id') or ''), added_pivot_ids)
+            _append_node(str(rule.get('target_id') or ''), added_pivot_ids)
+        for rule in pivot_rules or []:
+            if not isinstance(rule, dict):
+                continue
+            source_id = _resolve_id(rule.get('source_id'))
+            target_id = _resolve_id(rule.get('target_id'))
+            if not source_id or not target_id or source_id == target_id:
+                continue
+            try:
+                source_index = next(
+                    idx for idx, node in enumerate(expanded)
+                    if isinstance(node, dict) and _flow_pivot_node_id(node) == source_id
+                )
+                target_index = next(
+                    idx for idx, node in enumerate(expanded)
+                    if isinstance(node, dict) and _flow_pivot_node_id(node) == target_id
+                )
+            except StopIteration:
+                continue
+            if source_index > target_index:
+                source_node = expanded.pop(source_index)
+                expanded.insert(target_index, source_node)
+
+    info['added_node_ids'] = added_ids
+    info['added_vuln_node_ids'] = added_vuln_ids
+    info['added_pivot_node_ids'] = added_pivot_ids
+    info['effective_length'] = len(expanded)
+    return expanded, info
+
+
+def _flow_add_assignment_hint(assignment: dict[str, Any], hint_text: str) -> None:
+    text = _flow_strip_ids_from_hint(str(hint_text or '').strip())
+    if not isinstance(assignment, dict) or not text:
+        return
+    for key in ('pivot_hints', 'hints'):
+        existing = [str(x or '').strip() for x in (assignment.get(key) or []) if str(x or '').strip()] if isinstance(assignment.get(key), list) else []
+        if text not in existing:
+            existing.append(text)
+        assignment[key] = existing
+    levels = assignment.get('hint_levels') if isinstance(assignment.get('hint_levels'), dict) else {}
+    levels = dict(levels or {})
+    low_values = [str(x or '').strip() for x in (levels.get('low') or []) if str(x or '').strip()] if isinstance(levels.get('low'), list) else []
+    if text not in low_values:
+        low_values.append(text)
+    levels['low'] = low_values
+    assignment['hint_levels'] = levels
+    if not str(assignment.get('hint') or '').strip():
+        assignment['hint'] = text
+
+
+def _flow_apply_pivot_context_to_assignments(
+    flag_assignments: list[dict[str, Any]],
+    chain_nodes: list[dict[str, Any]],
+    *,
+    preview: Any = None,
+    pivot_context: Any | None = None,
+    scenario_label: str = '',
+) -> list[dict[str, Any]]:
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return flag_assignments
+    if not isinstance(chain_nodes, list) or not chain_nodes:
+        return flag_assignments
+
+    try:
+        rules = _flow_pivot_rules_for_chain(preview, chain_nodes, pivot_context=pivot_context)
+    except Exception:
+        rules = []
+
+    node_by_id: dict[str, dict[str, Any]] = {}
+    # Build a comprehensive lookup of all chain node identifiers so we can
+    # detect when a pivot SOURCE node is absent from the chain entirely.
+    _chain_all_ids: set[str] = set()
+    for node in chain_nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = _flow_pivot_node_id(node)
+        if node_id:
+            node_by_id[node_id] = node
+        for _alias in _flow_pivot_aliases_for_node(node):
+            if _alias:
+                node_by_id.setdefault(_alias, node)
+                _chain_all_ids.add(_alias)
+
+    def _pivot_fact_subject(value: Any) -> str:
+        text = str(value or '').strip()
+        if not text or '(' not in text or not text.endswith(')'):
+            return ''
+        prefix = text.split('(', 1)[0].strip().lower()
+        if prefix not in {'pivot', 'shell'}:
+            return ''
+        return text[text.find('(') + 1:-1].strip().lower()
+
+    def _pivot_source_name_candidates(value: Any) -> set[str]:
+        text = str(value or '').strip().lower()
+        if not text:
+            return set()
+        names: set[str] = set()
+
+        def _add(raw: str) -> None:
+            candidate = str(raw or '').strip().lower()
+            if not candidate:
+                return
+            names.add(candidate)
+            base = candidate.split(' @ ', 1)[0].strip() if ' @ ' in candidate else candidate
+            if base and base != candidate:
+                names.add(base)
+            if base.isdigit():
+                names.add(f'docker-{base}')
+            if base.startswith('docker-'):
+                suffix = base.split('docker-', 1)[1].strip()
+                if suffix.isdigit():
+                    names.add(suffix)
+
+        _add(text)
+        return {name for name in names if name}
+
+    def _pivot_fact_source_in_chain(value: Any) -> bool:
+        subject = _pivot_fact_subject(value)
+        if not subject:
+            return True
+        source_names = _pivot_source_name_candidates(subject)
+        return any(source_name in _chain_all_ids for source_name in source_names)
+
+    def _rule_source_in_chain(rule: dict[str, Any], source_id: str) -> bool:
+        source_name = str(rule.get('source_name') or '').strip()
+        source_names = _pivot_source_name_candidates(source_id) | _pivot_source_name_candidates(source_name)
+        return any(source_name in _chain_all_ids for source_name in source_names)
+
+    def _rule_source_requires(rule: dict[str, Any], requires: list[str], source_id: str) -> list[str]:
+        produces = set(_flow_split_top_level_list(rule.get('produces')))
+        matched = [fact for fact in requires if fact in produces]
+        if matched:
+            return matched
+        source_names = _pivot_source_name_candidates(source_id) | _pivot_source_name_candidates(rule.get('source_name'))
+        matched = [fact for fact in requires if _pivot_fact_subject(fact) in source_names]
+        if matched:
+            return matched
+        synthetic_requires = [fact for fact in requires if _pivot_fact_subject(fact)]
+        return synthetic_requires or list(requires)
+
+    def _remove_assignment_values(target: dict[str, Any], key: str, values: list[str]) -> None:
+        remove = {str(value or '').strip() for value in (values or []) if str(value or '').strip()}
+        if not remove or not isinstance(target.get(key), list):
+            return
+        target[key] = [
+            item for item in (target.get(key) or [])
+            if str(item or '').strip() not in remove
+        ]
+
+    def _remove_absent_pivot_facts(target: dict[str, Any], key: str) -> None:
+        if not isinstance(target.get(key), list):
+            return
+        target[key] = [
+            item for item in (target.get(key) or [])
+            if not (_pivot_fact_subject(item) and not _pivot_fact_source_in_chain(item))
+        ]
+
+    def _remove_self_pivot_facts(target: dict[str, Any], key: str, current_names: set[str]) -> None:
+        if not isinstance(target.get(key), list) or not current_names:
+            return
+        target[key] = [
+            item for item in (target.get(key) or [])
+            if not (_pivot_fact_subject(item) and (_pivot_source_name_candidates(_pivot_fact_subject(item)) & current_names))
+        ]
+
+    def _pivot_provider_priority(value: Any) -> int:
+        provider = _flow_pivot_requested_provider(value)
+        return {
+            'vulnerability': 0,
+            'flag-node-generator': 1,
+            'ssh-fallback': 2,
+            'manual': 3,
+            'random': 4,
+            'auto': 4,
+        }.get(provider, 5)
+
+    chain_index_by_id: dict[str, int] = {}
+    for index, node in enumerate(chain_nodes or []):
+        if not isinstance(node, dict):
+            continue
+        node_id_for_index = _flow_pivot_node_id(node)
+        if node_id_for_index:
+            chain_index_by_id.setdefault(node_id_for_index, index)
+
+    cyclic_pivot_requires_by_target: dict[str, set[str]] = {}
+    try:
+        pair_rules: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for rule in rules or []:
+            if not isinstance(rule, dict):
+                continue
+            source_id = str(rule.get('source_id') or '').strip()
+            target_id = str(rule.get('target_id') or '').strip()
+            if not source_id or not target_id or source_id == target_id:
+                continue
+            pair_key = tuple(sorted((source_id, target_id)))
+            pair_rules.setdefault(pair_key, []).append(rule)
+        for (_left_id, _right_id), related_rules in pair_rules.items():
+            directions = {
+                (str(rule.get('source_id') or '').strip(), str(rule.get('target_id') or '').strip())
+                for rule in related_rules
+                if isinstance(rule, dict)
+            }
+            if (_left_id, _right_id) not in directions or (_right_id, _left_id) not in directions:
+                continue
+            source_priority: dict[str, int] = {}
+            for rule in related_rules:
+                source_id = str(rule.get('source_id') or '').strip()
+                if not source_id:
+                    continue
+                priority = _pivot_provider_priority(rule.get('provider'))
+                source_priority[source_id] = min(source_priority.get(source_id, priority), priority)
+            if not source_priority:
+                continue
+            bootstrap_id = min(
+                source_priority,
+                key=lambda node_id: (
+                    source_priority.get(node_id, 5),
+                    chain_index_by_id.get(node_id, 10**9),
+                    node_id,
+                ),
+            )
+            for rule in related_rules:
+                target_id = str(rule.get('target_id') or '').strip()
+                source_id = str(rule.get('source_id') or '').strip()
+                if target_id != bootstrap_id or source_id == bootstrap_id:
+                    continue
+                requires_to_prune = _flow_split_top_level_list(rule.get('target_requires'))
+                if requires_to_prune:
+                    cyclic_pivot_requires_by_target.setdefault(target_id, set()).update(requires_to_prune)
+    except Exception:
+        cyclic_pivot_requires_by_target = {}
+
+    out: list[dict[str, Any]] = []
+    for index, assignment in enumerate(flag_assignments):
+        if not isinstance(assignment, dict):
+            out.append(assignment)
+            continue
+        a2 = dict(assignment)
+        node_id = str(a2.get('node_id') or '').strip()
+        if not node_id and index < len(chain_nodes):
+            node_id = _flow_pivot_node_id(chain_nodes[index])
+            if node_id:
+                a2['node_id'] = node_id
+        node = (node_by_id.get(node_id) or node_by_id.get(node_id.lower())) if node_id else None
+        node_name = _flow_pivot_node_name(node) if isinstance(node, dict) else node_id
+        current_names: set[str] = set()
+        current_names |= _flow_pivot_aliases_for_node(node if isinstance(node, dict) else None)
+        current_names |= _flow_pivot_aliases_for_assignment(a2)
+        current_names |= _pivot_source_name_candidates(node_id)
+        current_names |= _pivot_source_name_candidates(node_name)
+        pivot_entries: list[dict[str, Any]] = [entry for entry in (a2.get('pivot') or []) if isinstance(entry, dict)] if isinstance(a2.get('pivot'), list) else []
+        # Collect target-side hint parts so all pivot sources for this node are
+        # consolidated into a single hint instead of one hint per source rule.
+        _pivot_target_hint_parts: list[tuple[str, list[str], str]] = []  # (source_name, requires, port_text)
+
+        for rule in rules:
+            source_id = str(rule.get('source_id') or '').strip()
+            target_id = str(rule.get('target_id') or '').strip()
+            if node_id and source_id and node_id == source_id:
+                produces = _flow_split_top_level_list(rule.get('produces'))
+                _flow_append_unique_values(a2, 'produces', produces)
+                _flow_append_unique_values(a2, 'outputs', produces)
+                source_targets = str(rule.get('target_name') or rule.get('target_id') or '').strip()
+                provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
+                hint = (
+                    f"Pivot source: establish access on {node_name or source_id} "
+                    f"using {provider_label} to unlock pivot-only target {source_targets}. "
+                    f"Produces: {', '.join(produces)}."
+                )
+                _flow_add_assignment_hint(a2, hint)
+                pivot_entries.append({
+                    'role': 'source',
+                    'provider': rule.get('provider'),
+                    'provider_label': provider_label,
+                    'source': rule.get('source_name') or source_id,
+                    'target': rule.get('target_name') or target_id,
+                    'produces': produces,
+                    'requires': [],
+                })
+            if node_id and target_id and node_id == target_id:
+                requires = _flow_split_top_level_list(rule.get('target_requires'))
+                source_requires = _rule_source_requires(rule, requires, source_id)
+                cyclic_pruned_requires = sorted(
+                    set(source_requires) & set(cyclic_pivot_requires_by_target.get(target_id) or set())
+                )
+                # Only treat the pivot fact as a hard generator dependency when the
+                # pivot source node is also present in this chain.  If it is absent
+                # the fact will never be produced and would permanently invalidate
+                # the chain order check, blocking all flag execution.
+                _source_in_chain = _rule_source_in_chain(rule, source_id)
+                if cyclic_pruned_requires:
+                    _remove_assignment_values(a2, 'requires', cyclic_pruned_requires)
+                    _remove_assignment_values(a2, 'inputs', cyclic_pruned_requires)
+                elif _source_in_chain:
+                    _flow_append_unique_values(a2, 'requires', source_requires)
+                    _flow_append_unique_values(a2, 'inputs', source_requires)
+                else:
+                    _remove_assignment_values(a2, 'requires', source_requires)
+                    _remove_assignment_values(a2, 'inputs', source_requires)
+                provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
+                source_name = str(rule.get('source_name') or rule.get('source_id') or '').strip()
+                ports = _flow_split_top_level_list(rule.get('target_ports'))
+                port_text = f" Ports: {', '.join(ports)}." if ports else ''
+                # Defer hint emission - collect parts and consolidate below.
+                if not cyclic_pruned_requires:
+                    _pivot_target_hint_parts.append((source_name, list(source_requires), port_text))
+                pivot_entries.append({
+                    'role': 'target',
+                    'provider': rule.get('provider'),
+                    'provider_label': provider_label,
+                    'source': source_name,
+                    'target': rule.get('target_name') or target_id,
+                    'requires': [fact for fact in source_requires if fact not in set(cyclic_pruned_requires)],
+                    'produces': [],
+                    'target_ports': ports,
+                    'target_protocols': _flow_split_top_level_list(rule.get('target_protocols')),
+                    'exposure': rule.get('exposure') or 'pivot-only',
+                })
+
+        # Emit a single consolidated "Pivot required" hint for this assignment.
+        if _pivot_target_hint_parts:
+            if len(_pivot_target_hint_parts) == 1:
+                s_name, s_requires, s_port_text = _pivot_target_hint_parts[0]
+                _fact_label = 'Required fact' if len(s_requires) == 1 else 'Required facts'
+                _flow_add_assignment_hint(
+                    a2,
+                    f"Pivot required: reach {node_name or node_id} through {s_name} "
+                    f"after the pivot source is solved. {_fact_label}: {', '.join(s_requires)}.{s_port_text}",
+                )
+            else:
+                _all_sources = ', '.join(p[0] for p in _pivot_target_hint_parts if p[0])
+                _all_facts: list[str] = []
+                _seen_facts: set[str] = set()
+                for _, _reqs, _ in _pivot_target_hint_parts:
+                    for _f in _reqs:
+                        if _f not in _seen_facts:
+                            _seen_facts.add(_f)
+                            _all_facts.append(_f)
+                _fact_label = 'Required fact' if len(_all_facts) == 1 else 'Required facts'
+                _flow_add_assignment_hint(
+                    a2,
+                    f"Pivot required: reach {node_name or node_id} through {_all_sources} "
+                    f"after the pivot sources are solved. {_fact_label}: {', '.join(_all_facts)}.",
+                )
+
+        _remove_absent_pivot_facts(a2, 'requires')
+        _remove_absent_pivot_facts(a2, 'inputs')
+        _remove_self_pivot_facts(a2, 'requires', current_names)
+        _remove_self_pivot_facts(a2, 'inputs', current_names)
+
+        if pivot_entries:
+            deduped: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for entry in pivot_entries:
+                key = json.dumps(entry, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(entry)
+            a2['pivot'] = deduped
+            a2['pivot_summary'] = [
+                f"{entry.get('role')}: {entry.get('source')} -> {entry.get('target')}"
+                for entry in deduped
+                if entry.get('source') or entry.get('target')
+            ]
+            a2['pivot_inputs'] = sorted(set(_flow_split_top_level_list(a2.get('requires'))) & {fact for rule in rules for fact in _flow_split_top_level_list(rule.get('target_requires'))})
+            a2['pivot_outputs'] = sorted(set(_flow_split_top_level_list(a2.get('produces'))) & {fact for rule in rules for fact in _flow_split_top_level_list(rule.get('produces'))})
+        out.append(a2)
     return out
 
 
@@ -19903,7 +21236,16 @@ def _flow_enrich_saved_flag_assignments(
             )
 
         out.append(a2)
-    return out
+    try:
+        return _flow_apply_pivot_context_to_assignments(
+            out,
+            chain_nodes,
+            preview=None,
+            pivot_context={},
+            scenario_label=scenario_label,
+        )
+    except Exception:
+        return out
 
 
 def _infer_flow_artifacts_dir_from_assignment(assignment: dict[str, Any], *, max_dirs: int = 60) -> dict[str, str]:
@@ -20521,6 +21863,14 @@ def _flow_validate_chain_order_by_requires_produces(
     else:
         plugins_by_id = _flow_enabled_plugin_contracts_by_id()
 
+    node_by_id: dict[str, dict[str, Any]] = {}
+    for node in chain_nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get('id') or '').strip()
+        if nid:
+            node_by_id[nid] = node
+
     # Best-effort: load enabled generator definitions so we can infer optional
     # input fields even if the assignment payload doesn't include them.
     gen_defs_by_id: dict[str, dict[str, Any]] = _flow_enabled_generator_defs_by_id()
@@ -20586,7 +21936,12 @@ def _flow_validate_chain_order_by_requires_produces(
             base_requires = {r for r in base_requires if r not in opt_set}
             inferred_requires = {r for r in inferred_requires if r not in opt_set}
 
-        requires = base_requires | inferred_requires
+        requires = set(_flow_prune_unavailable_or_self_pivot_facts(
+            sorted(base_requires | inferred_requires),
+            chain_nodes,
+            current_node=node_by_id.get(cid),
+            current_assignment=a,
+        ))
 
         base_prod: set[str] = set()
         try:
@@ -20672,6 +22027,7 @@ def _flow_reorder_chain_by_generator_dag(
     dependency_level: int | None = None,
     plugins_by_id_override: dict[str, dict[str, Any]] | None = None,
     return_debug: bool = False,
+    flow_progress: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Best-effort: reorder the chain using generator artifact dependencies.
 
@@ -20680,14 +22036,27 @@ def _flow_reorder_chain_by_generator_dag(
 
     If the DAG cannot be built, returns inputs unchanged.
     """
+    def _progress(message: str) -> None:
+        if flow_progress is None:
+            return
+        try:
+            flow_progress(f'DAG: {message}')
+        except Exception:
+            pass
+
     try:
+        _progress(f'start nodes={len(chain_nodes or [])} assignments={len(flag_assignments or [])} dependency_level={_flow_normalize_dependency_level(dependency_level)}')
         if not isinstance(chain_nodes, list) or not chain_nodes:
+            _progress('skipped: missing chain nodes')
             return chain_nodes, flag_assignments, None
         if not isinstance(flag_assignments, list) or not flag_assignments:
+            _progress('skipped: missing flag assignments')
             return chain_nodes, flag_assignments, None
 
+        _progress('loading sequencer DAG helpers')
         from scenarioforge.sequencer.dag import build_dag
         from scenarioforge.sequencer.chain import validate_chain_doc, validate_linear_chain
+        _progress('sequencer DAG helpers loaded')
 
         node_by_id: dict[str, dict[str, Any]] = {}
         for n in chain_nodes:
@@ -20708,13 +22077,39 @@ def _flow_reorder_chain_by_generator_dag(
         # Only reorder when we have a 1:1 mapping.
         chain_ids = [str(n.get('id') or '').strip() for n in chain_nodes if isinstance(n, dict) and str(n.get('id') or '').strip()]
         if not chain_ids:
+            _progress('skipped: chain has no ids')
             return chain_nodes, flag_assignments, None
         if any(cid not in assign_by_node for cid in chain_ids):
+            _progress('skipped: chain and assignments are not 1:1')
             return chain_nodes, flag_assignments, None
+
+        _progress(f'indexed chain ids={",".join(chain_ids)}')
+
+        gen_defs_by_id_for_reorder: dict[str, dict[str, Any]] = {}
+        try:
+            _progress('loading enabled generator definitions')
+            gen_defs_by_id_for_reorder = _flow_enabled_generator_defs_by_id()
+            _progress(f'loaded generator definitions count={len(gen_defs_by_id_for_reorder or {})}')
+        except Exception as exc:
+            gen_defs_by_id_for_reorder = {}
+            _progress(f'generator definition load failed: {type(exc).__name__}: {exc}')
+
+        plugins_by_id: dict[str, dict[str, Any]] = {}
+        if isinstance(plugins_by_id_override, dict) and plugins_by_id_override:
+            plugins_by_id = plugins_by_id_override
+            _progress(f'using provided plugin contracts count={len(plugins_by_id)}')
+        else:
+            try:
+                _progress('loading enabled plugin contracts')
+                plugins_by_id = _flow_enabled_plugin_contracts_by_id()
+                _progress(f'loaded plugin contracts count={len(plugins_by_id or {})}')
+            except Exception as exc:
+                plugins_by_id = {}
+                _progress(f'plugin contract load failed: {type(exc).__name__}: {exc}')
 
         initial_artifacts = set(_flow_synthesized_inputs())
         try:
-            gen_defs_by_id_for_initial = _flow_enabled_generator_defs_by_id()
+            gen_defs_by_id_for_initial = gen_defs_by_id_for_reorder
             ordered_for_initial = [assign_by_node.get(cid) or {} for cid in chain_ids]
             start_positions_for_initial = _flow_parallel_start_assignment_indexes(
                 ordered_for_initial,
@@ -20736,6 +22131,7 @@ def _flow_reorder_chain_by_generator_dag(
                 initial_artifacts |= set(_flow_first_step_chain_supplied_input_names(gen_def if isinstance(gen_def, dict) else start_assignment_for_initial))
         except Exception:
             pass
+            _progress(f'initial artifacts ready count={len(initial_artifacts)}')
 
         def _assignment_fact_list(assignment: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
             facts: set[str] = set()
@@ -20759,10 +22155,20 @@ def _flow_reorder_chain_by_generator_dag(
             return facts
 
         def _assignment_requires(assignment: dict[str, Any]) -> set[str]:
-            return _assignment_fact_list(
+            requires = _assignment_fact_list(
                 assignment,
                 ('requires', 'input_fields_required', 'inputs'),
             ) - initial_artifacts
+            try:
+                explicit_supplied = {
+                    str(x or '').strip()
+                    for x in (assignment.get('chain_supplied_inputs') or [])
+                    if str(x or '').strip()
+                } if isinstance(assignment.get('chain_supplied_inputs'), list) else set()
+                requires -= explicit_supplied
+            except Exception:
+                pass
+            return requires
 
         def _assignment_produces(assignment: dict[str, Any]) -> set[str]:
             return _assignment_fact_list(
@@ -20818,7 +22224,7 @@ def _flow_reorder_chain_by_generator_dag(
             try:
                 start_positions = _flow_parallel_start_assignment_indexes(
                     ordered_assignments,
-                    gen_defs_by_id=_flow_enabled_generator_defs_by_id(),
+                    gen_defs_by_id=gen_defs_by_id_for_reorder,
                 )
             except Exception:
                 start_positions = {0} if ordered_assignments else set()
@@ -20840,8 +22246,26 @@ def _flow_reorder_chain_by_generator_dag(
                     assignment['next_node_id'] = str(next_id)
                     assignment['next_node_name'] = str(id_to_name.get(str(next_id)) or '')
                     rendered = [_render_hint(t, this_id=this_id, next_id=str(next_id)) for t in (hint_templates or [tpl])]
+                    pivot_hints = [
+                        str(x or '').strip()
+                        for x in (assignment.get('pivot_hints') or [])
+                        if str(x or '').strip()
+                    ] if isinstance(assignment.get('pivot_hints'), list) else []
+                    rendered = [str(x or '').strip() for x in (rendered or []) if str(x or '').strip()]
+                    for pivot_hint in pivot_hints:
+                        if pivot_hint not in rendered:
+                            rendered.append(pivot_hint)
                     assignment['hint'] = rendered[0] if rendered else _render_hint(tpl, this_id=this_id, next_id=str(next_id))
                     assignment['hints'] = rendered
+                    if pivot_hints:
+                        levels = assignment.get('hint_levels') if isinstance(assignment.get('hint_levels'), dict) else {}
+                        levels = dict(levels or {})
+                        low_values = [str(x or '').strip() for x in (levels.get('low') or []) if str(x or '').strip()] if isinstance(levels.get('low'), list) else []
+                        for pivot_hint in pivot_hints:
+                            if pivot_hint not in low_values:
+                                low_values.append(pivot_hint)
+                        levels['low'] = low_values
+                        assignment['hint_levels'] = levels
                     try:
                         _flow_apply_first_step_chain_supplied_inputs(
                             assignment,
@@ -20857,14 +22281,17 @@ def _flow_reorder_chain_by_generator_dag(
             return ordered_nodes, ordered_assignments
 
         def _high_dependency_greedy_order() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None] | None:
+            _progress('high-dependency greedy ordering start')
             pairs: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
             for idx, node_id in enumerate(chain_ids):
                 node = node_by_id.get(node_id)
                 assignment = assign_by_node.get(node_id)
                 if not isinstance(node, dict) or not isinstance(assignment, dict):
+                    _progress(f'high-dependency greedy skipped: missing node or assignment for {node_id}')
                     return None
                 pairs.append((idx, node, assignment))
             if len(pairs) != len(chain_ids):
+                _progress('high-dependency greedy skipped: incomplete pair list')
                 return None
             remaining = list(pairs)
             ordered: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
@@ -20878,6 +22305,7 @@ def _flow_reorder_chain_by_generator_dag(
                     future_required |= _assignment_requires(assignment)
                 eligible = [item for item in remaining if _assignment_requires(item[2]).issubset(known)]
                 pool = eligible or list(remaining)
+                _progress(f'high-dependency greedy step={len(ordered) + 1}/{len(pairs)} eligible={len(eligible)} remaining={len(remaining)}')
 
                 def _score(item: tuple[int, dict[str, Any], dict[str, Any]]) -> tuple[int, int]:
                     original_index, _node, assignment = item
@@ -20905,66 +22333,99 @@ def _flow_reorder_chain_by_generator_dag(
             ordered_assignments = [assignment for _idx, _node, assignment in ordered]
             before_adjacent = _adjacent_dependency_count(flag_assignments)
             after_adjacent = _adjacent_dependency_count(ordered_assignments)
-            if after_adjacent <= before_adjacent:
-                if before_adjacent > 0:
-                    try:
-                        valid, _errors = _flow_validate_chain_order_by_requires_produces(
-                            chain_nodes,
-                            flag_assignments,
-                            scenario_label=scenario_label,
-                            plugins_by_id_override=plugins_by_id_override,
-                        )
-                        if valid:
-                            debug: dict[str, Any] | None = None
-                            if return_debug:
-                                debug = {
-                                    'ok': True,
-                                    'strategy': 'high_dependency_preserve',
-                                    'before_adjacent_dependencies': before_adjacent,
-                                    'after_adjacent_dependencies': before_adjacent,
-                                    'order': [str((node or {}).get('id') or '') for node in chain_nodes],
-                                }
-                            refreshed_nodes, refreshed_assignments = _refresh_next_fields(chain_nodes, flag_assignments)
-                            return refreshed_nodes, refreshed_assignments, debug
-                    except Exception:
-                        pass
-                return None
+            current_valid = False
             try:
+                _progress('validating current order before accepting greedy result')
+                current_valid, _errors = _flow_validate_chain_order_by_requires_produces(
+                    chain_nodes,
+                    flag_assignments,
+                    scenario_label=scenario_label,
+                    plugins_by_id_override=plugins_by_id,
+                )
+                _progress(f'current order validation valid={bool(current_valid)} errors={len(_errors or [])}')
+            except Exception:
+                current_valid = False
+            if after_adjacent <= before_adjacent and current_valid:
+                debug: dict[str, Any] | None = None
+                if return_debug:
+                    debug = {
+                        'ok': True,
+                        'strategy': 'high_dependency_preserve',
+                        'before_adjacent_dependencies': before_adjacent,
+                        'after_adjacent_dependencies': before_adjacent,
+                        'order': [str((node or {}).get('id') or '') for node in chain_nodes],
+                    }
+                refreshed_nodes, refreshed_assignments = _refresh_next_fields(chain_nodes, flag_assignments)
+                _progress('high-dependency greedy preserved current order')
+                _progress('DAG reorder complete strategy=high_dependency_preserve')
+                return refreshed_nodes, refreshed_assignments, debug
+            try:
+                _progress('validating greedy candidate order')
                 valid, _errors = _flow_validate_chain_order_by_requires_produces(
                     ordered_nodes,
                     ordered_assignments,
                     scenario_label=scenario_label,
-                    plugins_by_id_override=plugins_by_id_override,
+                    plugins_by_id_override=plugins_by_id,
                 )
                 if not valid:
+                    _progress(f'high-dependency greedy candidate invalid errors={len(_errors or [])}')
                     return None
+                _progress('high-dependency greedy candidate valid')
             except Exception:
                 pass
             debug: dict[str, Any] | None = None
             if return_debug:
+                _greedy_edges: list[dict[str, Any]] = []
+                for _gi, (_, _gni, _gai) in enumerate(ordered):
+                    _src = str((_gai or {}).get('node_id') or (_gni or {}).get('id') or '')
+                    _prod = _assignment_produces(_gai)
+                    for _gj, (_, _gnj, _gaj) in enumerate(ordered):
+                        if _gj <= _gi:
+                            continue
+                        _dst = str((_gaj or {}).get('node_id') or (_gnj or {}).get('id') or '')
+                        _req = _assignment_requires(_gaj)
+                        for _art in sorted(_prod & _req):
+                            _greedy_edges.append({'src': _src, 'dst': _dst, 'artifact': _art})
                 debug = {
                     'ok': True,
                     'strategy': 'high_dependency_greedy',
                     'before_adjacent_dependencies': before_adjacent,
                     'after_adjacent_dependencies': after_adjacent,
                     'order': [str((node or {}).get('id') or '') for node in ordered_nodes],
+                    'edges': _greedy_edges,
                 }
             refreshed_nodes, refreshed_assignments = _refresh_next_fields(ordered_nodes, ordered_assignments)
+            _progress(f'high-dependency greedy selected order={",".join([str((node or {}).get("id") or "") for node in ordered_nodes])}')
+            _progress('DAG reorder complete strategy=high_dependency_greedy')
             return refreshed_nodes, refreshed_assignments, debug
 
         try:
             if _flow_normalize_dependency_level(dependency_level) >= 5:
+                _progress('trying high-dependency greedy reorder')
                 greedy_result = _high_dependency_greedy_order()
                 if greedy_result is not None:
                     return greedy_result
+                _progress('high-dependency greedy did not produce an order')
         except Exception:
             pass
 
-        plugins_by_id: dict[str, dict[str, Any]] = {}
-        if isinstance(plugins_by_id_override, dict) and plugins_by_id_override:
-            plugins_by_id = plugins_by_id_override
-        else:
-            plugins_by_id = _flow_enabled_plugin_contracts_by_id()
+        try:
+            _progress('checking current chain order before DAG build')
+            current_valid, _current_errors = _flow_validate_chain_order_by_requires_produces(
+                chain_nodes,
+                flag_assignments,
+                scenario_label=scenario_label,
+                plugins_by_id_override=plugins_by_id,
+            )
+            _progress(f'current chain order valid={bool(current_valid)} errors={len(_current_errors or [])}')
+            if not current_valid:
+                _progress('trying greedy reorder for invalid current chain')
+                greedy_result = _high_dependency_greedy_order()
+                if greedy_result is not None:
+                    return greedy_result
+                _progress('greedy reorder for invalid current chain did not produce an order')
+        except Exception:
+            pass
 
         # Build a real sequencer chain instance (YAML-shape) from the current Flow chain.
         #
@@ -20983,14 +22444,17 @@ def _flow_reorder_chain_by_generator_dag(
 
         effective_plugins_by_id: dict[str, dict[str, Any]] = dict(plugins_by_id or {})
         challenges: list[dict[str, Any]] = []
-        for cid in chain_ids:
+        _progress(f'building DAG chain document challenges={len(chain_ids)}')
+        for index, cid in enumerate(chain_ids, 1):
             a = assign_by_node.get(cid) or {}
             plugin_id = str(a.get('id') or '').strip()
             if not plugin_id:
+                _progress(f'skipped DAG build: missing plugin id for node {cid}')
                 return chain_nodes, flag_assignments, None
             plugin = plugins_by_id.get(plugin_id)
             if not isinstance(plugin, dict):
                 # Without the plugin contract we can't build a correct artifact DAG.
+                _progress(f'skipped DAG build: missing plugin contract {plugin_id}')
                 return chain_nodes, flag_assignments, None
 
             inferred_requires = [str(x).strip() for x in (a.get('inputs') or []) if str(x).strip()]
@@ -21046,10 +22510,15 @@ def _flow_reorder_chain_by_generator_dag(
 
             # Also build the challenge instances for build_dag.
             challenges.append(ch)
+            _progress(f'DAG chain document challenge={index}/{len(chain_ids)} node={cid} plugin={plugin_id}')
 
+        _progress('validating DAG chain document')
         chain_ok, chain_errors, chain_norm = validate_chain_doc(chain_doc)
+        _progress(f'DAG chain document validation ok={bool(chain_ok)} errors={len(chain_errors or [])}')
 
+        _progress('building sequencer DAG')
         dag, errors = build_dag(challenges, plugins_by_id=effective_plugins_by_id, initial_artifacts=sorted(list(initial_artifacts)))
+        _progress(f'sequencer DAG build complete ok={bool(dag is not None)} errors={len(errors or [])}')
         debug: dict[str, Any] | None = None
         if return_debug:
             try:
@@ -21069,18 +22538,22 @@ def _flow_reorder_chain_by_generator_dag(
             except Exception:
                 debug = None
         if dag is None:
+            _progress('DAG build returned no order; keeping current chain')
             return chain_nodes, flag_assignments, debug
 
         order = [str(x) for x in (dag.order or ()) if str(x).strip()]
         if not order:
+            _progress('DAG order empty; keeping current chain')
             return chain_nodes, flag_assignments, debug
         if set(order) != set(chain_ids):
+            _progress('DAG order did not match chain ids; keeping current chain')
             return chain_nodes, flag_assignments, debug
 
         # Reorder nodes + assignments.
         new_chain_nodes = [node_by_id[cid] for cid in order if cid in node_by_id]
         new_assignments = [assign_by_node[cid] for cid in order if cid in assign_by_node]
         if len(new_chain_nodes) != len(chain_nodes) or len(new_assignments) != len(flag_assignments):
+            _progress('DAG ordered result length mismatch; keeping current chain')
             return chain_nodes, flag_assignments, debug
 
         # Optional: validate that the new order is linearly solvable by the chain spec.
@@ -21136,11 +22609,12 @@ def _flow_reorder_chain_by_generator_dag(
         try:
             dag_start_positions = _flow_parallel_start_assignment_indexes(
                 new_assignments,
-                gen_defs_by_id=_flow_enabled_generator_defs_by_id(),
+                gen_defs_by_id=gen_defs_by_id_for_reorder,
             )
         except Exception:
             dag_start_positions = {0} if new_assignments else set()
 
+        _progress(f'refreshing NEXT fields for DAG order={",".join(order)}')
         for i, a in enumerate(new_assignments):
             try:
                 this_id = str(a.get('node_id') or '').strip()
@@ -21168,8 +22642,16 @@ def _flow_reorder_chain_by_generator_dag(
             except Exception:
                 continue
 
+        _progress('DAG reorder complete')
         return new_chain_nodes, new_assignments, debug
-    except Exception:
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        _progress(f'failed: {type(exc).__name__}: {exc}')
+        try:
+            app.logger.exception('Flow DAG reorder failed; returning original chain.')
+        except Exception:
+            pass
         return chain_nodes, flag_assignments, None
 
 
@@ -22308,6 +23790,140 @@ def _scenario_names_from_xml(xml_path: str) -> list[str]:
     except Exception:
         pass
     return names
+
+
+def _scenario_payloads_from_xml_input(
+    xml_path: str | None,
+    session_xml_str: str | None,
+    *,
+    default_scenario_name: str = 'Scenario',
+) -> list[dict[str, Any]]:
+    if xml_path and os.path.exists(xml_path):
+        try:
+            parsed = _parse_scenarios_xml(xml_path)
+            scenarios = parsed.get('scenarios') if isinstance(parsed, dict) else None
+            if isinstance(scenarios, list):
+                return [sc for sc in scenarios if isinstance(sc, dict)]
+        except Exception:
+            return []
+
+    raw = str(session_xml_str or '').strip()
+    if not raw:
+        return []
+
+    try:
+        root = ET.fromstring(raw)
+    except Exception:
+        return []
+
+    scenarios: list[dict[str, Any]] = []
+    if root.tag == 'Scenarios':
+        for scen_el in root.findall('Scenario'):
+            if not isinstance(scen_el, ET.Element):
+                continue
+            se = scen_el.find('ScenarioEditor')
+            if se is None:
+                continue
+            scen = {'name': scen_el.get('name', default_scenario_name)}
+            scen.update(_parse_scenario_editor(se))
+            scenarios.append(scen)
+        return scenarios
+
+    if root.tag == 'ScenarioEditor':
+        scen = _parse_scenario_editor(root)
+        scen['name'] = default_scenario_name
+        scenarios.append(scen)
+    return scenarios
+
+
+def _required_builtin_core_services_for_xml_input(
+    xml_path: str | None,
+    session_xml_str: str | None,
+    *,
+    scenario_name: str | None = None,
+) -> set[str]:
+    scenarios = _scenario_payloads_from_xml_input(
+        xml_path,
+        session_xml_str,
+        default_scenario_name=str(scenario_name or 'Scenario').strip() or 'Scenario',
+    )
+    if not scenarios:
+        return set()
+
+    target_norm = _normalize_scenario_label(scenario_name or '')
+    scenario_payload: dict[str, Any] | None = None
+    if target_norm:
+        for candidate in scenarios:
+            name = str(candidate.get('name') or '').strip()
+            if _normalize_scenario_label(name) == target_norm:
+                scenario_payload = candidate
+                break
+    if scenario_payload is None:
+        scenario_payload = scenarios[0]
+
+    sections = scenario_payload.get('sections') if isinstance(scenario_payload, dict) else None
+    if not isinstance(sections, dict):
+        return set()
+    service_section = sections.get('Services') if isinstance(sections.get('Services'), dict) else None
+    if not isinstance(service_section, dict):
+        return set()
+    service_items = service_section.get('items') if isinstance(service_section.get('items'), list) else []
+    if not service_items:
+        return set()
+
+    try:
+        section_density = float(service_section.get('density') or 0.0)
+    except Exception:
+        section_density = 0.0
+    if section_density < 0:
+        section_density = 0.0
+
+    required: set[str] = set()
+    concrete: set[str] = set()
+    saw_random = False
+    canonical_services = set(_RANDOM_OPTIONS_BY_SECTION.get('Services') or [])
+
+    for raw_item in service_items:
+        if not isinstance(raw_item, dict):
+            continue
+
+        try:
+            factor = float(raw_item.get('factor') or 0.0)
+        except Exception:
+            factor = 0.0
+        if factor <= 0:
+            continue
+
+        count_override: int | None = None
+        try:
+            metric = str(raw_item.get('v_metric') or '').strip()
+            count_raw = str(raw_item.get('v_count') or '').strip()
+            if metric == 'Count' and count_raw:
+                parsed_count = int(count_raw)
+                if parsed_count >= 0:
+                    count_override = parsed_count
+        except Exception:
+            count_override = None
+
+        item_density = float(count_override) if count_override is not None else section_density
+        if item_density <= 0:
+            continue
+
+        normalized_selected = _normalize_service_item_selection(raw_item.get('selected'))
+        selected = str(normalized_selected or raw_item.get('selected') or '').strip()
+        if not selected:
+            continue
+        if selected == 'Random':
+            saw_random = True
+            continue
+        if selected in canonical_services:
+            concrete.add(selected)
+
+    if saw_random:
+        required.update(concrete or canonical_services)
+    else:
+        required.update(concrete)
+    return required
 
 
 def _normalize_scenario_label(value: Any) -> str:
@@ -26704,6 +28320,7 @@ def _default_scenario_payload(name: str) -> Dict[str, Any]:
 
 
 _ROUTING_RANDOM_PROTOCOL_DEFAULTS = ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3']
+_PIVOT_PROVIDER_OPTIONS: List[str] = ['vulnerability', 'flag-node-generator', 'ssh-fallback']
 _RANDOM_OPTIONS_BY_SECTION: Dict[str, List[str]] = {
     'Node Information': ['Server', 'Workstation', 'PC', 'Docker'],
     'Routing': ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3'],
@@ -26984,6 +28601,21 @@ def _normalize_scenario_section_semantics(scenario_payload: Any) -> Dict[str, An
         normalized_selected = _normalize_segmentation_item_selection(raw_selected)
         if normalized_selected and normalized_selected != 'CUSTOM':
             raw_item['selected'] = normalized_selected
+        if _coerce_bool(raw_item.get('pivot_enabled')):
+            raw_item['pivot_enabled'] = True
+            provider = str(raw_item.get('pivot_provider') or raw_item.get('access_provider') or 'random').strip().lower().replace('_', '-')
+            provider_aliases = {
+                'auto': 'random',
+                'none': 'random',
+                'manual': 'random',
+                'ssh': 'ssh-fallback',
+                'ssh-server': 'ssh-fallback',
+                'fallback-ssh': 'ssh-fallback',
+                'flag-node': 'flag-node-generator',
+                'flag-nodegen': 'flag-node-generator',
+                'vuln': 'vulnerability',
+            }
+            raw_item['pivot_provider'] = provider_aliases.get(provider, provider or 'random')
         _apply_count_defaults(raw_item)
 
     if not isinstance(node_section, dict):
@@ -27587,6 +29219,44 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
 
                     routing_section['items'] = next_items
                     sections['Routing'] = routing_section
+                    next_scenario['sections'] = sections
+
+                segmentation_section = sections.get('Segmentation') if isinstance(sections.get('Segmentation'), dict) else None
+                segmentation_items = segmentation_section.get('items') if isinstance(segmentation_section, dict) and isinstance(segmentation_section.get('items'), list) else None
+                if isinstance(segmentation_items, list):
+                    next_items = []
+                    for index, raw_item in enumerate(segmentation_items):
+                        if not isinstance(raw_item, dict):
+                            next_items.append(raw_item)
+                            continue
+
+                        item = copy.deepcopy(raw_item)
+                        if _coerce_bool(item.get('pivot_enabled')):
+                            provider = str(item.get('pivot_provider') or item.get('access_provider') or 'random').strip().lower().replace('_', '-')
+                            provider_aliases = {
+                                'auto': 'random',
+                                'none': 'random',
+                                'manual': 'random',
+                                'ssh': 'ssh-fallback',
+                                'ssh-server': 'ssh-fallback',
+                                'fallback-ssh': 'ssh-fallback',
+                                'flag-node': 'flag-node-generator',
+                                'flagnode': 'flag-node-generator',
+                                'flag-nodegen': 'flag-node-generator',
+                                'vuln': 'vulnerability',
+                            }
+                            provider = provider_aliases.get(provider, provider or 'random')
+                            if provider == 'random':
+                                provider = str(_deterministic_pick(
+                                    _PIVOT_PROVIDER_OPTIONS,
+                                    f'{seed_int}|{scenario_name}|Segmentation|{index}|pivot_provider{_random_reroll_salt(item, "pivot_provider")}|save-xml',
+                                ) or 'ssh-fallback')
+                            if provider in _PIVOT_PROVIDER_OPTIONS:
+                                item['pivot_provider'] = provider
+                        next_items.append(item)
+
+                    segmentation_section['items'] = next_items
+                    sections['Segmentation'] = segmentation_section
                     next_scenario['sections'] = sections
 
             concretized.append(next_scenario)
@@ -28422,6 +30092,27 @@ def _first_existing(path_candidates):
     return None
 
 
+def _normalize_remote_flow_path(path_value):
+    text = str(path_value or '').strip()
+    if not text:
+        return text
+    text = text.replace('\\', '/')
+    if text.startswith('/tmp/vulns/'):
+        return text
+    markers = (
+        ('/outputs/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+        ('/outputs/vulns/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/vulns/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+    )
+    for marker, remote_prefix in markers:
+        if marker not in text:
+            continue
+        suffix = text.split(marker, 1)[1].lstrip('/')
+        return (remote_prefix + suffix) if suffix else remote_prefix.rstrip('/')
+    return text
+
+
 def _read_json(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -28639,6 +30330,27 @@ def _first_existing(path_candidates):
     return None
 
 
+def _normalize_remote_flow_path(path_value):
+    text = str(path_value or '').strip()
+    if not text:
+        return text
+    text = text.replace('\\', '/')
+    if text.startswith('/tmp/vulns/'):
+        return text
+    markers = (
+        ('/outputs/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+        ('/outputs/vulns/flag_generators_runs/', '/tmp/vulns/flag_generators_runs/'),
+        ('/outputs/vulns/flag_node_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'),
+    )
+    for marker, remote_prefix in markers:
+        if marker not in text:
+            continue
+        suffix = text.split(marker, 1)[1].lstrip('/')
+        return (remote_prefix + suffix) if suffix else remote_prefix.rstrip('/')
+    return text
+
+
 def _read_json(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -28654,7 +30366,7 @@ def _docker_names():
 def _parse_flow_labels(txt: str):
     # Flow artifacts labels can appear as YAML dict entries (key: value) or as
     # docker-compose list labels (key=value). Use the generic extractor.
-    src = _extract_label_value(txt, 'coretg.flow_artifacts.src') or None
+    src = _normalize_remote_flow_path(_extract_label_value(txt, 'coretg.flow_artifacts.src') or '') or None
     dest = _extract_label_value(txt, 'coretg.flow_artifacts.dest') or None
     return src, dest
 
@@ -28678,14 +30390,22 @@ def _extract_label_value(txt: str, key: str):
 
 
 def _parse_inject_labels(txt: str):
-    source_dir = _extract_label_value(txt, 'coretg.inject.source_dir') or None
+    source_dir = _normalize_remote_flow_path(_extract_label_value(txt, 'coretg.inject.source_dir') or '') or None
     raw_map = _extract_label_value(txt, 'coretg.inject.map') or None
     items = []
     if raw_map:
         try:
             parsed = json.loads(raw_map)
             if isinstance(parsed, list):
-                items = [x for x in parsed if isinstance(x, dict)]
+                normalized = []
+                for x in parsed:
+                    if not isinstance(x, dict):
+                        continue
+                    item = dict(x)
+                    if 'src' in item:
+                        item['src'] = _normalize_remote_flow_path(item.get('src') or '')
+                    normalized.append(item)
+                items = normalized
         except Exception:
             items = []
     return source_dir, items
@@ -28772,7 +30492,7 @@ def _inject_mappings_from_assignment(entry):
 
     if not isinstance(entry, dict):
         return source_dir, out
-    source_dir = str(_entry_get('inject_source_dir', 'InjectSourceDir', 'artifacts_dir', 'ArtifactsDir') or '').strip()
+    source_dir = _normalize_remote_flow_path(str(_entry_get('inject_source_dir', 'InjectSourceDir', 'artifacts_dir', 'ArtifactsDir') or '').strip())
     is_flow_source = _is_flow_source_dir(source_dir)
 
     detail_value = _entry_get('inject_files_detail', 'InjectFilesDetail')
@@ -29010,6 +30730,7 @@ def main():
         targets = []
         last_err = ''
         project = f"{node_name}conf" if node_name else 'coretg'
+        fallback_targets = []
         for _ in range(6):
             names, err = _docker_names()
             last_err = err or last_err
@@ -29018,9 +30739,11 @@ def main():
                 break
             ids = _compose_container_ids(project, yml)
             if ids:
-                targets = list(ids)
-                break
+                fallback_targets = list(ids)
             time.sleep(2)
+
+        if not targets and fallback_targets:
+            targets = list(fallback_targets)
 
         if not targets:
             items.append({'node': node_name, 'compose': yml, 'src': src, 'dest': dest, 'ok': False, 'error': 'container not found', 'docker_error': last_err})
@@ -29064,7 +30787,7 @@ def main():
 
         # Apply inject mappings when present (independent of flow artifacts labels).
         if inject_items:
-            source_dir = inject_source or src
+            source_dir = _normalize_remote_flow_path(inject_source or src)
             if not source_dir:
                 # No usable base path for relative inject sources.
                 errs.append('inject mappings present but no inject source_dir and no flow src')
@@ -29076,10 +30799,11 @@ def main():
                     if not rel or not dest_dir or not dest_dir.startswith('/'):
                         continue
                     if os.path.isabs(rel):
-                        src_path = rel
-                        rel_path = os.path.basename(rel)
+                        src_path = _normalize_remote_flow_path(rel)
+                        rel_path = os.path.basename(str(src_path or rel).rstrip('/')) or os.path.basename(rel.rstrip('/'))
                     else:
                         src_path = os.path.join(source_dir, rel.lstrip('/')) if source_dir else rel
+                        src_path = _normalize_remote_flow_path(src_path)
                         rel_path = rel
                     if not src_path or not rel_path:
                         continue
@@ -30643,6 +32367,88 @@ def _canonicalize_payload_flow_from_xml(
         payload['metadata'] = meta
     return meta, (flow_state if isinstance(flow_state, dict) else None)
 
+
+def _flow_payload_has_pivoting_plan(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for source in _flow_pivot_context_sources(payload, payload.get('full_preview') if isinstance(payload.get('full_preview'), dict) else None):
+        if not isinstance(source, dict):
+            continue
+        for key in ('pivoting', 'pivoting_plan'):
+            candidate = source.get(key) if isinstance(source.get(key), dict) else None
+            if isinstance(candidate, dict):
+                if candidate.get('rules') or candidate.get('raw_items_serialized') or candidate.get('items_count'):
+                    return True
+        if source.get('rules') or source.get('raw_items_serialized') or source.get('items_count'):
+            return True
+        breakdowns = source.get('breakdowns') if isinstance(source.get('breakdowns'), dict) else None
+        pivoting = breakdowns.get('pivoting') if isinstance(breakdowns, dict) and isinstance(breakdowns.get('pivoting'), dict) else None
+        if isinstance(pivoting, dict) and (pivoting.get('rules') or pivoting.get('raw_items_serialized') or pivoting.get('items_count')):
+            return True
+    return False
+
+
+def _flow_attach_pivoting_plan_from_xml(
+    payload: dict[str, Any] | None,
+    *,
+    xml_path: str,
+    scenario_label: str | None,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if _flow_payload_has_pivoting_plan(payload):
+        return False
+    try:
+        xml_abs = os.path.abspath(str(xml_path or '').strip())
+    except Exception:
+        xml_abs = ''
+    if not xml_abs or not os.path.exists(xml_abs):
+        return False
+    try:
+        from scenarioforge.planning.orchestrator import compute_full_plan
+        seed = None
+        try:
+            full = payload.get('full_preview') if isinstance(payload.get('full_preview'), dict) else {}
+            meta = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
+            seed_raw = full.get('seed') if isinstance(full, dict) else None
+            if seed_raw is None and isinstance(meta, dict):
+                seed_raw = meta.get('seed')
+            if seed_raw is not None:
+                seed = int(seed_raw)
+        except Exception:
+            seed = None
+        plan = compute_full_plan(xml_abs, scenario=scenario_label, seed=seed, include_breakdowns=True)
+    except Exception:
+        return False
+    pivoting_plan = None
+    try:
+        if isinstance(plan.get('pivoting_plan'), dict):
+            pivoting_plan = plan.get('pivoting_plan')
+        if not isinstance(pivoting_plan, dict):
+            breakdowns = plan.get('breakdowns') if isinstance(plan.get('breakdowns'), dict) else {}
+            candidate = breakdowns.get('pivoting') if isinstance(breakdowns.get('pivoting'), dict) else None
+            if isinstance(candidate, dict):
+                pivoting_plan = candidate
+    except Exception:
+        pivoting_plan = None
+    if not isinstance(pivoting_plan, dict):
+        return False
+    if not (pivoting_plan.get('rules') or pivoting_plan.get('raw_items_serialized') or pivoting_plan.get('items_count')):
+        return False
+    full_preview = payload.get('full_preview') if isinstance(payload.get('full_preview'), dict) else None
+    if not isinstance(full_preview, dict):
+        full_preview = {}
+        payload['full_preview'] = full_preview
+    full_preview['pivoting_plan'] = pivoting_plan
+    try:
+        meta = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
+        meta = dict(meta or {})
+        meta['pivoting_plan_attached_from_xml'] = True
+        payload['metadata'] = meta
+    except Exception:
+        pass
+    return True
+
     scenario_norm = _normalize_scenario_label(scenario_label or '')
     scen_el = None
     try:
@@ -31166,6 +32972,32 @@ def _parse_scenario_editor(se):
                         d["v_count"] = 1
             except Exception:
                 pass
+            if name == "Segmentation":
+                pivot_enabled_raw = (item.get("pivot_enabled") or item.get("pivot_required") or item.get("pivot") or "").strip().lower()
+                if pivot_enabled_raw in ("1", "true", "yes", "on", "pivot", "pivot-only", "required"):
+                    d["pivot_enabled"] = True
+                for xml_attr, state_key in (
+                    ("pivot_provider", "pivot_provider"),
+                    ("access_provider", "pivot_provider"),
+                    ("provider", "pivot_provider"),
+                    ("pivot_node", "pivot_node"),
+                    ("pivot_role", "pivot_role"),
+                    ("target_node", "target_node"),
+                    ("target_role", "target_role"),
+                    ("target_ports", "target_ports"),
+                    ("target_protocols", "target_protocols"),
+                    ("target_exposure", "target_exposure"),
+                    ("exposure", "target_exposure"),
+                    ("source_scope", "source_scope"),
+                    ("requires", "requires"),
+                    ("produces", "produces"),
+                ):
+                    val = item.get(xml_attr)
+                    if val is not None and str(val).strip() != "" and state_key not in d:
+                        parsed_val = str(val).strip()
+                        if state_key == "pivot_provider" and parsed_val.lower().replace("_", "-") in {"auto", "none", "manual"}:
+                            parsed_val = "random"
+                        d[state_key] = parsed_val
             entry["items"].append(d)
         scen["sections"][name] = entry
         # Capture scenario-level density_count if present on Scenario element once
@@ -31685,6 +33517,17 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                             it.set('v_name', str(vn))
                         if vp:
                             it.set('v_path', str(vp))
+                if name == 'Segmentation':
+                    if _coerce_bool(item.get('pivot_enabled')):
+                        it.set('pivot_enabled', 'true')
+                        for state_key, xml_attr in (
+                            ('pivot_provider', 'pivot_provider'),
+                            ('requires', 'requires'),
+                            ('produces', 'produces'),
+                        ):
+                            val = item.get(state_key)
+                            if val is not None and str(val).strip() != '':
+                                it.set(xml_attr, str(val).strip())
                 vm_any = item.get('v_metric')
                 if vm_any:
                     it.set('v_metric', str(vm_any))
@@ -32979,12 +34822,6 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         except Exception:
             seed = None
 
-    full_prev = _build_full_preview_from_plan(plan, seed, [], [])
-    try:
-        flow_meta_from_plan = _attach_latest_flow_into_full_preview(full_prev, scenario)
-    except Exception:
-        flow_meta_from_plan = None
-
     try:
         xml_basename = os.path.basename(xml_path)
     except Exception:
@@ -33005,6 +34842,11 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         hitl_config = _sanitize_hitl_config(raw_hitl_config, scenario_name, xml_basename)
     except Exception:
         hitl_config = {"enabled": False, "interfaces": []}
+    full_prev = _build_full_preview_from_plan(plan, seed, [], [], hitl_config=hitl_config)
+    try:
+        flow_meta_from_plan = _flow_state_from_current_xml_for_preview(full_prev, xml_path, scenario_name or scenario)
+    except Exception:
+        flow_meta_from_plan = None
     try:
         _apply_hitl_config_to_full_preview(full_prev, hitl_config, scenario_name)
     except Exception:
@@ -33253,7 +35095,19 @@ def _summary_from_xml_plan(xml_path: str, scenario: str | None, seed: int | None
             effective_seed = int(plan.get('seed')) if plan.get('seed') is not None else _derive_default_seed(xml_hash)
         except Exception:
             effective_seed = None
-    full_prev = _build_full_preview_from_plan(plan, effective_seed, [], [])
+    try:
+        xml_basename = os.path.basename(xml_path)
+    except Exception:
+        xml_basename = None
+    try:
+        raw_hitl_config = parse_hitl_info(xml_path, scenario)
+    except Exception:
+        raw_hitl_config = {"enabled": False, "interfaces": []}
+    try:
+        hitl_config = _sanitize_hitl_config(raw_hitl_config, scenario, xml_basename)
+    except Exception:
+        hitl_config = {"enabled": False, "interfaces": []}
+    full_prev = _build_full_preview_from_plan(plan, effective_seed, [], [], hitl_config=hitl_config)
     summary = _plan_summary_from_full_preview(full_prev)
     return summary, effective_seed
 
@@ -33425,7 +35279,7 @@ def _attach_display_artifacts(full_preview: dict) -> dict:
     return artifacts
 
 
-def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s_hosts_max_list=None):
+def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s_hosts_max_list=None, hitl_config: dict | None = None):
     """Single source of truth to invoke build_full_preview using a compute_full_plan result."""
     try:
         from scenarioforge.planning.full_preview import build_full_preview  # lazy import
@@ -33453,6 +35307,10 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
     ip4_prefix = plan.get('ip4_prefix') or plan.get('ip_prefix') or '10.0.0.0/16'
     ip_mode = plan.get('ip_mode') or None
     ip_region = plan.get('ip_region') or None
+    try:
+        hitl_reservations = collect_hitl_preview_ip_reservations(hitl_config or {})
+    except Exception:
+        hitl_reservations = {'ip_addresses': set(), 'network_cidrs': set()}
     fp = build_full_preview(
         role_counts=role_counts,
         routers_planned=prelim_router_count,
@@ -33472,8 +35330,18 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
         r2s_hosts_min_list=r2s_hosts_min_list,
         r2s_hosts_max_list=r2s_hosts_max_list,
         base_scenario=plan.get('base_scenario'),
+        reserved_ipv4_addrs=sorted(hitl_reservations.get('ip_addresses') or []),
+        reserved_ipv4_networks=sorted(hitl_reservations.get('network_cidrs') or []),
     )
     fp['router_plan'] = plan.get('breakdowns', {}).get('router', {})
+    try:
+        pivoting_plan = plan.get('pivoting_plan') if isinstance(plan.get('pivoting_plan'), dict) else None
+        if not isinstance(pivoting_plan, dict):
+            pivoting_plan = plan.get('breakdowns', {}).get('pivoting') if isinstance(plan.get('breakdowns', {}).get('pivoting'), dict) else None
+        if isinstance(pivoting_plan, dict) and (pivoting_plan.get('raw_items_serialized') or pivoting_plan.get('rules') or pivoting_plan.get('items_count')):
+            fp['pivoting_plan'] = pivoting_plan
+    except Exception:
+        pass
     try:
         _attach_display_artifacts(fp)
     except Exception:
@@ -37015,6 +38883,46 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             extra={'error_code': 'custom_services_install_failed'},
         )
         return
+
+    try:
+        required_builtin_services = _required_builtin_core_services_for_xml_input(
+            xml_path,
+            session_xml_str,
+            scenario_name=scenario_name_hint,
+        )
+        if required_builtin_services:
+            discovered_builtin_services = _remote_core_service_names(
+                remote_client,
+                core_cfg=core_cfg,
+                require_custom_services_dir=False,
+            )
+            missing_builtin_services = sorted(
+                name for name in required_builtin_services if name not in discovered_builtin_services
+            )
+            if missing_builtin_services:
+                try:
+                    log_f.write(
+                        f"{log_prefix}Missing built-in CORE services on CORE VM ({', '.join(missing_builtin_services)}).\n"
+                    )
+                except Exception:
+                    pass
+                _fail_run(
+                    f"Required built-in CORE service(s) missing on remote host: {', '.join(missing_builtin_services)}. "
+                    "This usually means the CORE VM install is incomplete or core-daemon did not load its default services. "
+                    "If you also saw '/etc/core/logging.conf does not exist', repair the CORE daemon config on the VM and restart core-daemon before re-running Execute.",
+                    code=1,
+                    extra={
+                        'error_code': 'missing_builtin_services',
+                        'missing_services': missing_builtin_services,
+                        'required_services': sorted(required_builtin_services),
+                    },
+                )
+                return
+    except Exception as exc:
+        try:
+            log_f.write(f"{log_prefix}WARN: built-in CORE service preflight skipped: {exc}\n")
+        except Exception:
+            pass
 
     _sanitize_remote_compose_templates()
 
@@ -43966,7 +45874,10 @@ if __name__ == '__main__':
         port = 9090
     host = os.environ.get('CORETG_HOST') or '0.0.0.0'
     debug = _env_flag('CORETG_DEBUG', False) or _env_flag('FLASK_DEBUG', False)
-    use_reloader = _env_flag('CORETG_USE_RELOADER', debug)
+    # Generator/VM-mode workflows write plan, report, and artifact files under the repo.
+    # Werkzeug's reloader can treat those writes as source changes and restart the
+    # webapp mid-request, which appears in the browser as a fetch NetworkError.
+    use_reloader = _env_flag('CORETG_USE_RELOADER', False)
     try:
         did_scrub = _scrub_hitl_validation_usernames_in_scenario_catalog()
         if did_scrub:
@@ -43985,7 +45896,7 @@ if __name__ == '__main__':
             app.logger.info('[hitl_config] scrubbed unverified hitl_config entries from scenario_catalog.json')
     except Exception:
         pass
-    app.run(host=host, port=port, debug=debug, use_reloader=use_reloader)
+    app.run(host=host, port=port, debug=debug, use_reloader=use_reloader, threaded=True)
 
 def _remote_docker_exec_listener_snapshot_script(*, containers: List[str], sudo_password: str | None = None) -> str:
     containers_literal = json.dumps([str(value) for value in (containers or [])])

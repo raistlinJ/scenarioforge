@@ -879,7 +879,7 @@ core-python -m scenarioforge.cli --xml /abs/path/scenarios.xml --verbose
 
 - `--xml` (required): Scenario XML path.
 - `--scenario`: Scenario name (defaults to the first in the file).
-- `--host`, `--port`: CORE gRPC endpoint (defaults `127.0.0.1:50051`).
+- `--host`, `--port`: CORE gRPC endpoint (defaults `localhost:50051`).
 - `--prefix`: IPv4 prefix for auto-assigned addresses (default `10.0.0.0/24`).
 - `--ip-mode`: `private | mixed | public` (default `private`).
 - `--ip-region`: `all | na | eu | apac | latam | africa | middle-east` (default `all`).

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import ipaddress
 from types import SimpleNamespace
 from typing import Any
 
@@ -475,6 +476,121 @@ def test_hitl_preview_router_added_to_full_preview(monkeypatch) -> None:
     assert degree_preview.get(hitl_node_id) == 1
 
 
+def test_hitl_config_prefers_explicit_ipv4_for_new_router_preview() -> None:
+    from webapp import app_backend as backend
+
+    hitl_cfg = backend._sanitize_hitl_config(
+        {
+            'enabled': True,
+            'interfaces': [
+                {
+                    'name': 'uplink0',
+                    'attachment': 'new_router',
+                    'ipv4': ['192.0.2.10/24'],
+                },
+            ],
+        },
+        'PriorityScenario',
+        'priority_scenario',
+    )
+
+    iface_entry = hitl_cfg['interfaces'][0]
+    assert iface_entry.get('link_network_cidr') == '192.0.2.0/24'
+    assert iface_entry.get('existing_router_ip4') == '192.0.2.1'
+    assert iface_entry.get('new_router_ip4') == '192.0.2.2'
+    assert iface_entry.get('rj45_ip4') == '192.0.2.10'
+    assert iface_entry.get('ipv4') == ['192.0.2.10/24']
+
+    preview_routers = hitl_cfg.get('preview_routers') or []
+    assert preview_routers
+    assert preview_routers[0].get('ip4') == '192.0.2.2/24'
+
+
+def test_build_full_preview_reserves_explicit_hitl_subnet_and_ips() -> None:
+    from scenarioforge.planning.full_preview import build_full_preview
+    from webapp import app_backend as backend
+
+    hitl_cfg = backend._sanitize_hitl_config(
+        {
+            'enabled': True,
+            'interfaces': [
+                {
+                    'name': 'uplink0',
+                    'attachment': 'existing_router',
+                    'ipv4': ['10.1.5.10/24'],
+                },
+            ],
+        },
+        'ReservedScenario',
+        'reserved_scenario',
+    )
+
+    reservations = hitl_mod.collect_hitl_preview_ip_reservations(hitl_cfg)
+    preview = build_full_preview(
+        role_counts={'Host': 3},
+        routers_planned=1,
+        services_plan={},
+        vulnerabilities_plan={},
+        r2r_policy=None,
+        r2s_policy={'mode': 'Exact', 'target_per_router': 1},
+        routing_items=None,
+        routing_plan={},
+        segmentation_density=0.0,
+        segmentation_items=[],
+        traffic_plan=None,
+        seed=77,
+        ip4_prefix='10.1.5.0/24',
+        reserved_ipv4_addrs=sorted(reservations['ip_addresses']),
+        reserved_ipv4_networks=sorted(reservations['network_cidrs']),
+    )
+    backend._apply_hitl_config_to_full_preview(preview, hitl_cfg, 'ReservedScenario')
+
+    reserved_net = ipaddress.ip_network('10.1.5.0/24', strict=False)
+    reserved_ips = {'10.1.5.1', '10.1.5.2', '10.1.5.10'}
+
+    for router in preview.get('routers', []):
+        metadata = router.get('metadata') or {}
+        ip4 = router.get('ip4')
+        if not ip4 or metadata.get('hitl_preview'):
+            continue
+        iface = ipaddress.ip_interface(str(ip4))
+        assert iface.ip not in reserved_net
+        assert str(iface.ip) not in reserved_ips
+
+    for host in preview.get('hosts', []):
+        ip4 = host.get('ip4')
+        if not ip4:
+            continue
+        iface = ipaddress.ip_interface(str(ip4))
+        assert iface.ip not in reserved_net
+        assert str(iface.ip) not in reserved_ips
+
+    for detail in preview.get('switches_detail', []):
+        router_ip = detail.get('router_ip')
+        if router_ip:
+            iface = ipaddress.ip_interface(str(router_ip))
+            assert iface.ip not in reserved_net
+            assert str(iface.ip) not in reserved_ips
+        for cidr in (detail.get('host_if_ips') or {}).values():
+            iface = ipaddress.ip_interface(str(cidr))
+            assert iface.ip not in reserved_net
+            assert str(iface.ip) not in reserved_ips
+
+    for subnet_key in ('router_switch_subnets', 'lan_subnets', 'ptp_subnets'):
+        for subnet in preview.get(subnet_key, []):
+            assert not ipaddress.ip_network(str(subnet), strict=False).overlaps(reserved_net)
+
+    for link in preview.get('r2r_links_preview', []):
+        subnet = link.get('subnet')
+        if not subnet:
+            continue
+        link_net = ipaddress.ip_network(str(subnet), strict=False)
+        if link.get('hitl_preview'):
+            assert link_net == reserved_net
+            continue
+        assert not link_net.overlaps(reserved_net)
+
+
 def test_hitl_config_normalizes_new_switch_attachment() -> None:
     from webapp import app_backend as backend
 
@@ -648,6 +764,37 @@ def test_attach_hitl_rj45_nodes_assigns_ipv4_for_new_router(monkeypatch) -> None
 
     rj45_node = session.nodes[entry["rj45_node_id"]]
     assert any(getattr(iface, "ip4", None) == entry["rj45_ip4"] for iface in rj45_node.ifaces)
+
+
+def test_attach_hitl_rj45_nodes_prefers_explicit_ipv4_for_existing_router() -> None:
+    session = StubSession()
+    router_type = getattr(NodeType, "ROUTER", getattr(NodeType, "DEFAULT", None))
+    router = session.add_node(10, _type=router_type, position=Position(x=250, y=250), name="router-1")
+    router.ifaces.append(Interface(id=0, name="eth0"))
+
+    routers = [NodeInfo(node_id=router.id, ip4="10.0.0.1/24", role="Router")]
+    hitl_config = {
+        "enabled": True,
+        "interfaces": [
+            {
+                "name": "en0",
+                "attachment": "existing_router",
+                "ipv4": ["192.0.2.10/24"],
+            },
+        ],
+        "scenario_key": "PreferredIp",
+    }
+
+    summary = attach_hitl_rj45_nodes(session, routers, [], hitl_config)
+
+    entry = summary["interfaces"][0]
+    assert entry.get("link_network_cidr") == "192.0.2.0/24"
+    assert entry.get("existing_router_ip4") == "192.0.2.1"
+    assert entry.get("new_router_ip4") == "192.0.2.2"
+    assert entry.get("rj45_ip4") == "192.0.2.10"
+
+    rj45_node = session.nodes[entry["rj45_node_id"]]
+    assert any(getattr(iface, "ip4", None) == "192.0.2.10" for iface in rj45_node.ifaces)
 
 
 def test_attach_hitl_new_router_reuses_preview_router(monkeypatch) -> None:

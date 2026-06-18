@@ -82,7 +82,7 @@ def load_runtime_env_files(
     base_dir: Path | None = None,
     explicit_path: str | None = None,
     override: bool = False,
-    include_example: bool = True,
+    include_example: bool = False,
 ) -> list[Path]:
     loaded: list[Path] = []
     candidates = _env_file_candidates(base_dir=base_dir, explicit_path=explicit_path)

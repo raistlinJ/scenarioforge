@@ -19,6 +19,15 @@ def test_vm_mode_ui_seeds_runtime_managed_core_defaults() -> None:
         "const WEBUI_VM_MODE_DEFAULTS =",
         "function runtimeManagedVmCoreConfigured(hitlState) {",
         "function applyVmModeDefaultsToScenario(scen) {",
+        "const normalizeVmModeAddrList = (value) => {",
+        "const sharedCoreIfxIpv4 = normalizeVmModeAddrList(hitlDefaults.shared_core_ifx_ipv4);",
+        "const sharedIpv4Target = (Array.isArray(hitl.interfaces) ? hitl.interfaces : []).find((entry) => {",
+        "sharedIpv4Target.ipv4 = sharedCoreIfxIpv4.slice();",
+        "if (!WEBUI_VM_MODE) return;",
+        "normalized.ipv4 = normalizedIpv4;",
+        "function preferredHitlPreviewLinkMeta(iface, defaultPrefixLen = 24) {",
+        "const preferred = (attachment === 'new_router' || attachment === 'existing_router')",
+        "result.rj45Ip4 = preferred.rj45_ip4;",
         "function getConfiguredHitlInterfaceValidationForScenario(sidx) {",
         "Refresh CORE VM Interfaces to verify the configured HITL interface names.",
         "out of range for",
@@ -63,6 +72,7 @@ def test_vm_mode_ui_seeds_runtime_managed_core_defaults() -> None:
     assert "getConfiguredHitlInterfaceValidationForScenario(scenarioIdx)" in execute_body
     assert "const vmKey = (core?.vm_key ?? '').toString().trim();" in execute_body
     assert "entry.name || `net${idx}`" not in index_text
+    assert "if (!WEBUI_VM_MODE || !scen || typeof scen !== 'object') return;" not in index_text
 
     validate_match = re.search(
         r"async function validateCoreConnection\(sidx, options = \{\}\) \{(?P<body>.*?)\n    \}\n\n    async function hydrateCoreModalWithSecret",
@@ -124,3 +134,41 @@ def test_vm_mode_core_management_nav_allows_runtime_managed_defaults() -> None:
     modal_body = modal_match.group("body")
     assert "{% if webui_runtime_mode == 'vm' %}" in modal_body
     assert "VM mode CORE defaults are incomplete" in modal_body
+
+
+def test_hitl_summary_prefers_stored_bridge_mapping_over_inventory() -> None:
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected = [
+        "const mappedIfaceId = extIfaceId || extIfaceIdLive;",
+        "const extBridge = extBridgeStored || extBridgeLive;",
+    ]
+    missing = [snippet for snippet in expected if snippet not in index_text]
+    assert not missing, "Missing stored-bridge precedence snippets: " + "; ".join(missing)
+
+
+def test_hitl_verify_updates_bridge_metadata_with_canonical_name() -> None:
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected = [
+        "const resolvedBridgeName = (data && data.bridge_name)",
+        "hitlState.core.internal_bridge = resolvedBridgeName;",
+        "iface.core_bridge = resolvedBridgeName;",
+        "iface.proxmox_target.bridge = resolvedBridgeName;",
+        "ext.interface_bridge = resolvedBridgeName;",
+    ]
+    missing = [snippet for snippet in expected if snippet not in index_text]
+    assert not missing, "Missing verify bridge-sync snippets: " + "; ".join(missing)
+
+
+def test_builder_preview_inline_request_uses_active_scenario_only() -> None:
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected = [
+        "const { scenario: activeScenario } = getActiveScenarioContext();",
+        "const inlinePreviewScenarios = (IS_BUILDER_VIEW && activeScenario)",
+        "? [activeScenario]",
+        "? { scenarios: inlinePreviewScenarios, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) }",
+    ]
+    missing = [snippet for snippet in expected if snippet not in index_text]
+    assert not missing, "Missing builder preview active-scenario snippets: " + "; ".join(missing)

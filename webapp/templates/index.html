@@ -1611,6 +1611,7 @@
 {% endblock %}
 {% block extra_scripts %}
 <script id="payload-data" type="application/json">{{ payload | tojson }}</script>
+{% set current_user = current_user|default({'username': none, 'role': none, 'is_authenticated': false}) %}
 <script id="current-user-meta"
     type="application/json">{{ {'username': current_user.username, 'role': current_user.role}|tojson }}</script>
 <script>
@@ -2498,26 +2499,23 @@
     }
 
     function applyVmModeDefaultsToScenario(scen) {
-        if (!WEBUI_VM_MODE || !scen || typeof scen !== 'object') return;
+        if (!scen || typeof scen !== 'object') return;
         const hitl = scen.hitl && typeof scen.hitl === 'object'
             ? scen.hitl
             : (scen.hitl = { enabled: false, interfaces: [] });
         const { core: coreDefaults, hitl: hitlDefaults } = getVmModeDefaults();
 
-        hitl.runtime_mode = 'vm';
-        hitl.enabled = hitlDefaults.enabled !== false;
-        const participantUrl = (hitlDefaults.participant_ui_url ?? '').toString().trim();
-        if (participantUrl) {
-            hitl.participant_proxmox_url = participantUrl;
-        }
-        hitl.vm_mode_participant_pool = (hitlDefaults.participant_pool ?? 'same-pool').toString().trim() || 'same-pool';
-        hitl.vm_mode_participant_notes = hitlDefaults.participant_notes && typeof hitlDefaults.participant_notes === 'object'
-            ? { ...hitlDefaults.participant_notes }
-            : {};
-        hitl.vm_mode_participant_notes_json = (hitlDefaults.participant_notes_json ?? '').toString().trim();
+        const normalizeVmModeAddrList = (value) => {
+            if (Array.isArray(value)) {
+                return value.map(v => (v ?? '').toString().trim()).filter(Boolean);
+            }
+            const text = (value ?? '').toString().trim();
+            if (!text) return [];
+            return text.split(',').map(v => v.trim()).filter(Boolean);
+        };
 
         const rawInterfaces = Array.isArray(hitlDefaults.interfaces) ? hitlDefaults.interfaces : [];
-        hitl.interfaces = rawInterfaces.map((entry) => {
+        const normalizedInterfaces = rawInterfaces.map((entry) => {
             if (!entry || typeof entry !== 'object') return null;
             const selectorRaw = normalizeHostInterfaceName(
                 (entry.proxmox_target && typeof entry.proxmox_target === 'object'
@@ -2539,8 +2537,39 @@
             if (entry.description) {
                 normalized.description = String(entry.description).trim();
             }
+            const normalizedIpv4 = normalizeVmModeAddrList(entry.ipv4);
+            if (normalizedIpv4.length) {
+                normalized.ipv4 = normalizedIpv4;
+            }
             return normalized;
         }).filter(Boolean);
+        const sharedCoreIfxIpv4 = normalizeVmModeAddrList(hitlDefaults.shared_core_ifx_ipv4);
+
+        if (WEBUI_VM_MODE) {
+            hitl.enabled = hitlDefaults.enabled !== false;
+            hitl.interfaces = normalizedInterfaces;
+        } else if (sharedCoreIfxIpv4.length) {
+            const sharedIpv4Target = (Array.isArray(hitl.interfaces) ? hitl.interfaces : []).find((entry) => {
+                if (!entry || typeof entry !== 'object') return false;
+                return !Array.isArray(entry.ipv4) || entry.ipv4.length === 0;
+            });
+            if (sharedIpv4Target) {
+                sharedIpv4Target.ipv4 = sharedCoreIfxIpv4.slice();
+            }
+        }
+
+        if (!WEBUI_VM_MODE) return;
+
+        hitl.runtime_mode = 'vm';
+        const participantUrl = (hitlDefaults.participant_ui_url ?? '').toString().trim();
+        if (participantUrl) {
+            hitl.participant_proxmox_url = participantUrl;
+        }
+        hitl.vm_mode_participant_pool = (hitlDefaults.participant_pool ?? 'same-pool').toString().trim() || 'same-pool';
+        hitl.vm_mode_participant_notes = hitlDefaults.participant_notes && typeof hitlDefaults.participant_notes === 'object'
+            ? { ...hitlDefaults.participant_notes }
+            : {};
+        hitl.vm_mode_participant_notes_json = (hitlDefaults.participant_notes_json ?? '').toString().trim();
 
         const core = hitl.core && typeof hitl.core === 'object' ? hitl.core : (hitl.core = {});
         [
@@ -4091,6 +4120,83 @@
         return `${part1}.${part2}.${part3}.${part4}`;
     }
 
+    function ipv4ToInt(value) {
+        const text = (value ?? '').toString().trim();
+        const parts = text.split('.');
+        if (parts.length !== 4) return null;
+        let out = 0;
+        for (let idx = 0; idx < parts.length; idx += 1) {
+            const raw = parts[idx];
+            if (!/^\d+$/.test(raw)) return null;
+            const octet = parseInt(raw, 10);
+            if (!Number.isFinite(octet) || octet < 0 || octet > 255) return null;
+            out = ((out << 8) | octet) >>> 0;
+        }
+        return out >>> 0;
+    }
+
+    function preferredHitlPreviewLinkMeta(iface, defaultPrefixLen = 24) {
+        if (!iface || typeof iface !== 'object') return null;
+        const pickFirstIpv4 = (value) => {
+            if (Array.isArray(value)) {
+                for (let idx = 0; idx < value.length; idx += 1) {
+                    const candidate = (value[idx] ?? '').toString().trim();
+                    if (candidate) return candidate;
+                }
+                return '';
+            }
+            if (typeof value === 'string') {
+                const items = value.split(',').map(item => item.trim()).filter(Boolean);
+                return items.length ? items[0] : '';
+            }
+            return '';
+        };
+
+        const preferredRaw = pickFirstIpv4(iface.ipv4)
+            || (iface.rj45_ip4_cidr ?? iface.rj45_ip4 ?? '').toString().trim();
+        if (!preferredRaw) return null;
+
+        let prefixLen = Number.isFinite(iface.prefix_len) ? Number(iface.prefix_len) : defaultPrefixLen;
+        let ipText = preferredRaw;
+        if (preferredRaw.includes('/')) {
+            const parts = preferredRaw.split('/', 2);
+            ipText = (parts[0] ?? '').toString().trim();
+            const parsed = parseInt((parts[1] ?? '').toString().trim(), 10);
+            if (!Number.isNaN(parsed)) prefixLen = parsed;
+        }
+        prefixLen = Number.isFinite(prefixLen)
+            ? Math.min(Math.max(Math.trunc(prefixLen), 0), 32)
+            : 24;
+
+        const ipInt = ipv4ToInt(ipText);
+        if (ipInt === null) return null;
+        const hostBlock = prefixLen >= 32 ? 1 : Math.pow(2, Math.max(0, 32 - prefixLen));
+        if (hostBlock < 8) return null;
+        const networkInt = Math.floor(ipInt / hostBlock) * hostBlock;
+        const broadcastInt = (networkInt + hostBlock - 1) >>> 0;
+        if (ipInt === networkInt || ipInt === broadcastInt) return null;
+
+        const routerHosts = [];
+        for (let addr = (networkInt + 1) >>> 0; addr < broadcastInt; addr = (addr + 1) >>> 0) {
+            if (addr === ipInt) continue;
+            routerHosts.push(addr >>> 0);
+            if (routerHosts.length >= 2) break;
+        }
+        if (routerHosts.length < 2) return null;
+
+        const netmaskInt = prefixLen === 0 ? 0 : ((0xffffffff << (32 - prefixLen)) >>> 0);
+        return {
+            network: intToIpv4(networkInt),
+            network_cidr: `${intToIpv4(networkInt)}/${prefixLen}`,
+            prefix_len: prefixLen,
+            netmask: intToIpv4(netmaskInt),
+            broadcast_ip4: intToIpv4(broadcastInt),
+            existing_router_ip4: intToIpv4(routerHosts[0]),
+            new_router_ip4: intToIpv4(routerHosts[1]),
+            rj45_ip4: intToIpv4(ipInt),
+        };
+    }
+
     function slugifyHitlName(rawValue, fallback) {
         let value = '';
         if (typeof rawValue === 'string') {
@@ -4181,6 +4287,7 @@
         if (!iface || typeof iface !== 'object') {
             return {};
         }
+        const attachment = normalizeHitlAttachment(iface.attachment);
         const previewRouter = iface.preview_router || iface.previewRouter || null;
         const previewMetadata = (previewRouter && previewRouter.metadata) || {};
         const result = {
@@ -4213,6 +4320,19 @@
                     result.prefixLen = parsed;
                 }
             }
+        }
+        const preferred = (attachment === 'new_router' || attachment === 'existing_router')
+            ? preferredHitlPreviewLinkMeta(iface, result.prefixLen)
+            : null;
+        if (preferred) {
+            result.network = preferred.network;
+            result.networkCidr = preferred.network_cidr || preferred.network;
+            result.prefixLen = preferred.prefix_len;
+            result.netmask = preferred.netmask;
+            result.existingRouterIp4 = preferred.existing_router_ip4;
+            result.newRouterIp4 = preferred.new_router_ip4;
+            result.rj45Ip4 = preferred.rj45_ip4;
+            result.broadcastIp4 = preferred.broadcast_ip4;
         }
         if (!result.networkCidr && result.network && Number.isFinite(result.prefixLen)) {
             result.networkCidr = `${result.network}/${result.prefixLen}`;
@@ -7436,8 +7556,12 @@
                 coreState.last_validated_at = null;
                 coreState.stored_summary = null;
             } catch (e) { /* ignore */ }
+            const { scenario: activeScenario } = getActiveScenarioContext();
+            const inlinePreviewScenarios = (IS_BUILDER_VIEW && activeScenario)
+                ? [activeScenario]
+                : state.scenarios;
             const baseBody = IS_BUILDER_VIEW
-                ? { scenarios: state.scenarios, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) }
+                ? { scenarios: inlinePreviewScenarios, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) }
                 : { xml_path: newXmlPath, r2s_hosts_min_list: r2sHostsMinList, r2s_hosts_max_list: r2sHostsMaxList, core: getCoreConfig(true) };
             const body = enrichPayloadWithScenarioContext(baseBody);
 
@@ -7490,12 +7614,14 @@
                 } catch (e) { }
                 try {
                     const activeScenario = state?.scenarios?.[activeIdx];
+                    const currentPreviewSignature = buildXmlPreviewSignature();
                     if (activeScenario && typeof activeScenario === 'object') {
                         activeScenario.plan_preview = {
                             full_preview: previewState.fullPreview,
                             plan: data.plan || null,
                             breakdowns: data.breakdowns || null,
                             flow_meta: data.flow_meta || null,
+                            input_signature: currentPreviewSignature,
                             saved_at: new Date().toISOString(),
                         };
                     }
@@ -9110,6 +9236,17 @@
                     persistEditorState();
                 };
                 const persistFlowPlanAfterSave = async () => {
+                    const hasMeaningfulFlowState = (flowState) => {
+                        if (!flowState || typeof flowState !== 'object') return false;
+                        return Object.keys(flowState).some((key) => {
+                            const value = flowState[key];
+                            if (value === null || value === undefined) return false;
+                            if (typeof value === 'string') return value.trim().length > 0;
+                            if (Array.isArray(value)) return value.length > 0;
+                            if (typeof value === 'object') return Object.keys(value).length > 0;
+                            return true;
+                        });
+                    };
                     try {
                         const rp = String(state?.result_path || '').trim();
                 const clearSavedXmlState = () => {
@@ -9137,6 +9274,24 @@
                         const activeScenario = state?.scenarios?.[activeIdx];
                         const scenarioName = (activeScenario && activeScenario.name) ? String(activeScenario.name).trim() : '';
                         if (!scenarioName) return;
+                        const flowState = activeScenario && typeof activeScenario === 'object'
+                            ? (activeScenario.flow_state || activeScenario.flowState || null)
+                            : null;
+                        const planPreview = activeScenario && typeof activeScenario === 'object'
+                            ? _extractPlanPreviewPayload(activeScenario.plan_preview || activeScenario.planPreview || null)
+                            : null;
+                        const currentPreviewSignature = buildXmlPreviewSignature();
+                        const matchingCurrentPreview = !!(
+                            planPreview
+                            && planPreview.full_preview
+                            && typeof planPreview.full_preview === 'object'
+                            && activeScenario
+                            && activeScenario.plan_preview
+                            && activeScenario.plan_preview.input_signature
+                            && currentPreviewSignature
+                            && activeScenario.plan_preview.input_signature === currentPreviewSignature
+                        );
+                        if (!hasMeaningfulFlowState(flowState) && matchingCurrentPreview) return;
 
                         const payload = { xml_path: rp, scenario: scenarioName };
                         if (Number.isInteger(activeScenarioSeedForSave) && activeScenarioSeedForSave > 0) {
@@ -10134,6 +10289,41 @@
                                 bumpSection('Traffic');
                                 pushExample({ scenario: scenName, section: 'Traffic', row: i + 1, field: label, from: rawValue || 'Random', to: String(pickValue) });
                             });
+                        } catch (e) { }
+                    }
+
+                    // Segmentation Pivot Provider has its own Random option; freeze it on save.
+                    if (sectionName === 'Segmentation') {
+                        try {
+                            const pivotEnabledRaw = it.pivot_enabled;
+                            const pivotEnabled = pivotEnabledRaw === true || ['1', 'true', 'yes', 'on'].includes(String(pivotEnabledRaw || '').trim().toLowerCase());
+                            if (pivotEnabled) {
+                                const providerOptions = ['vulnerability', 'flag-node-generator', 'ssh-fallback'];
+                                const rawProvider = (it.pivot_provider !== undefined && it.pivot_provider !== null) ? String(it.pivot_provider).trim().toLowerCase().replace(/_/g, '-') : '';
+                                const providerAliases = {
+                                    auto: 'random',
+                                    none: 'random',
+                                    manual: 'random',
+                                    ssh: 'ssh-fallback',
+                                    'ssh-server': 'ssh-fallback',
+                                    'fallback-ssh': 'ssh-fallback',
+                                    'flag-node': 'flag-node-generator',
+                                    flagnode: 'flag-node-generator',
+                                    'flag-nodegen': 'flag-node-generator',
+                                    vuln: 'vulnerability',
+                                };
+                                const provider = providerAliases[rawProvider] || rawProvider || 'random';
+                                if (provider === 'random') {
+                                    const rngProvider = makeDeterministicRng(`${seedVal}|${scenName}|${sectionName}|${i}|pivot_provider${getRandomRerollSalt(it, 'pivot_provider')}|save-xml`);
+                                    const pickProvider = providerOptions[Math.floor(rngProvider() * providerOptions.length) % providerOptions.length];
+                                    it.pivot_provider = pickProvider;
+                                    resolvedCount += 1;
+                                    bumpSection('Segmentation');
+                                    pushExample({ scenario: scenName, section: 'Segmentation', row: i + 1, field: 'pivot_provider', from: rawProvider || 'Random', to: pickProvider });
+                                } else if (providerOptions.includes(provider)) {
+                                    it.pivot_provider = provider;
+                                }
+                            }
                         } catch (e) { }
                     }
                 }
@@ -12641,12 +12831,15 @@
                 return { ok: false, message: errMessage, data };
             }
 
+            const resolvedBridgeName = (data && data.bridge_name)
+                ? String(data.bridge_name).trim()
+                : bridgeName;
             const msg = data.message || 'HITL bridge settings verified.';
             try {
                 hitlState.bridge_validated = true;
                 hitlState.bridge_validated_at = new Date().toISOString();
                 if (hitlState.core && typeof hitlState.core === 'object') {
-                    hitlState.core.internal_bridge = bridgeName;
+                    hitlState.core.internal_bridge = resolvedBridgeName;
                 }
                 const ifaces = Array.isArray(hitlState.interfaces) ? hitlState.interfaces : [];
                 ifaces.forEach((iface) => {
@@ -12654,12 +12847,12 @@
                     const ext = iface.external_vm;
                     const hasMappedExternal = !!(ext && typeof ext === 'object' && ((ext.vm_key || '').toString().trim() || (ext.vmid || '').toString().trim() || (ext.vm_name || '').toString().trim()));
                     if (!hasMappedExternal) return;
-                    iface.core_bridge = bridgeName;
-                    if (iface.proxmox_target && typeof iface.proxmox_target === 'object' && !((iface.proxmox_target.bridge || '').toString().trim())) {
-                        iface.proxmox_target.bridge = bridgeName;
+                    iface.core_bridge = resolvedBridgeName;
+                    if (iface.proxmox_target && typeof iface.proxmox_target === 'object') {
+                        iface.proxmox_target.bridge = resolvedBridgeName;
                     }
-                    if (ext && typeof ext === 'object' && !((ext.interface_bridge || '').toString().trim())) {
-                        ext.interface_bridge = bridgeName;
+                    if (ext && typeof ext === 'object') {
+                        ext.interface_bridge = resolvedBridgeName;
                     }
                 });
                 persistEditorState();
@@ -12788,10 +12981,14 @@
         if (Number.isNaN(sidx) || !state.scenarios?.[sidx]) {
             return { ok: false, message: 'Scenario unavailable' };
         }
-        const logCoreTestLine = (message, level = 'INFO') => {
+        const revealCoreTestDock = () => {
+            try { revealDock(); } catch (_) { }
+        };
+        const logCoreTestLine = (message, level = 'INFO', { revealDock = false } = {}) => {
             const text = String(message ?? '').trim();
             if (!text) return;
             const scoped = `[core-test][scenario ${sidx + 1}] ${text}`;
+            if (revealDock) { try { revealCoreTestDock(); } catch (_) { } }
             try {
                 dockLog(scoped, level);
             } catch (e) {
@@ -13170,7 +13367,7 @@
                         logCoreTestLine(line, isFailed ? 'WARN' : 'INFO');
                     });
                 } catch (e) { }
-                warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN'));
+                warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN', { revealDock: true }));
                 if (closeModalOnSuccess && coreConnectionModal && window.bootstrap) {
                     try { bootstrap.Modal.getInstance(coreConnectionModal)?.hide(); } catch (e) { }
                 }
@@ -13277,7 +13474,7 @@
                     setCoreConnectionHint(message, 'danger');
                 }
             }
-            logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR');
+            logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR', { revealDock: true });
             if (data && data.daemon_conflict && Array.isArray(data.daemon_pids) && data.daemon_pids.length) {
                 logCoreTestLine(`Duplicate core-daemon PIDs: ${data.daemon_pids.join(', ')}`, 'WARN');
             }
@@ -13313,7 +13510,7 @@
                     setCoreConnectionHint(message, 'danger');
                 }
             }
-            logCoreTestLine(`FAILED: ${message}`, 'ERROR');
+            logCoreTestLine(`FAILED: ${message}`, 'ERROR', { revealDock: true });
             if (!suppressToasts) {
                 try { showToast(`CORE test failed: ${message}`, { autohide: false }); } catch (e) { }
             }
@@ -15229,8 +15426,10 @@
                         const extBridgeLive = (liveExternalIface?.bridge ?? '').toString().trim();
 
                         const coreBridge = coreBridgeHint || coreBridgeStored;
-                        const mappedIfaceId = extIfaceIdLive || extIfaceId;
-                        const extBridge = extBridgeLive || extBridgeStored;
+                        // Prefer persisted mapping written during Verify/Apply;
+                        // inventory can be stale until the next refresh.
+                        const mappedIfaceId = extIfaceId || extIfaceIdLive;
+                        const extBridge = extBridgeStored || extBridgeLive;
 
                         const name = (iface?.name ?? '').toString().trim();
                         return {
@@ -16456,15 +16655,31 @@
                 coreAdvAutoKillSessionsInput.checked = !!(coreState.adv_auto_kill_sessions);
                 coreAdvAutoKillSessionsInput.disabled = builderLocked || inputsDisabled;
             }
+            const coreSecretIdForDefaults = (coreState.core_secret_id || '').toString().trim();
+            const useStoredConnectionDefaults = !coreSecretIdForDefaults;
+            const modalDefaultGrpcHost = 'localhost';
+            const modalDefaultGrpcPort = 50051;
+            const modalDefaultSshPort = 22;
+            const grpcHostValue = useStoredConnectionDefaults
+                ? (coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost))
+                : modalDefaultGrpcHost;
+            const grpcPortValue = useStoredConnectionDefaults
+                ? (Number.isFinite(Number(coreState.grpc_port)) && Number(coreState.grpc_port) > 0 ? Number(coreState.grpc_port) : modalDefaultGrpcPort)
+                : modalDefaultGrpcPort;
+            const sshHostValue = useStoredConnectionDefaults
+                ? (coreState.ssh_host || coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost))
+                : modalDefaultGrpcHost;
+            const sshPortValue = useStoredConnectionDefaults
+                ? (Number.isFinite(Number(coreState.ssh_port)) && Number(coreState.ssh_port) > 0 ? Number(coreState.ssh_port) : modalDefaultSshPort)
+                : modalDefaultSshPort;
             if (coreModalInputs.grpc_host) {
-                coreModalInputs.grpc_host.value = coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : '');
+                coreModalInputs.grpc_host.value = grpcHostValue;
                 coreModalInputs.grpc_host.disabled = inputsDisabled;
                 coreModalInputs.grpc_host.readOnly = false;
                 coreModalInputs.grpc_host.setAttribute('data-scen-idx', String(sidx));
             }
             if (coreModalInputs.grpc_port) {
-                const port = Number.isFinite(Number(coreState.grpc_port)) && Number(coreState.grpc_port) > 0 ? Number(coreState.grpc_port) : 50051;
-                coreModalInputs.grpc_port.value = port || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_PORT : 50051);
+                coreModalInputs.grpc_port.value = grpcPortValue;
                 coreModalInputs.grpc_port.disabled = inputsDisabled;
                 coreModalInputs.grpc_port.readOnly = false;
                 coreModalInputs.grpc_port.setAttribute('data-scen-idx', String(sidx));
@@ -16475,14 +16690,13 @@
                 coreModalInputs.venv_bin.setAttribute('data-scen-idx', String(sidx));
             }
             if (coreModalInputs.ssh_host) {
-                coreModalInputs.ssh_host.value = coreState.ssh_host || coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : '');
+                coreModalInputs.ssh_host.value = sshHostValue;
                 coreModalInputs.ssh_host.disabled = inputsDisabled;
                 coreModalInputs.ssh_host.readOnly = false;
                 coreModalInputs.ssh_host.setAttribute('data-scen-idx', String(sidx));
             }
             if (coreModalInputs.ssh_port) {
-                const sshPort = Number.isFinite(Number(coreState.ssh_port)) && Number(coreState.ssh_port) > 0 ? Number(coreState.ssh_port) : 22;
-                coreModalInputs.ssh_port.value = sshPort || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_SSH_PORT : 22);
+                coreModalInputs.ssh_port.value = sshPortValue;
                 coreModalInputs.ssh_port.disabled = inputsDisabled;
                 coreModalInputs.ssh_port.readOnly = false;
                 coreModalInputs.ssh_port.setAttribute('data-scen-idx', String(sidx));
@@ -17471,6 +17685,12 @@
     function renderItemRow(sidx, secName, iidx, it) {
         // Build Selected options and current weight
         const weight = ((parseFloat(it.factor) || 0).toFixed(3));
+        const escAttr = (value) => (value ?? '').toString()
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
         let opts = '';
         if (secName === 'Vulnerabilities') {
             const curRaw = (it.selected || 'Random');
@@ -17617,6 +17837,34 @@
                     return `<span class="small" ${fullDesc ? `data-bs-toggle="tooltip" data-bs-title="${esc(fullDesc)}"` : ''}>${centerText}</span>${emptyHint}`;
                 }
                 return '';
+            }
+            if (secName === 'Segmentation') {
+                const pivotEnabledRaw = it.pivot_enabled;
+                const pivotEnabled = pivotEnabledRaw === true || ['1', 'true', 'yes', 'on'].includes(String(pivotEnabledRaw || '').trim().toLowerCase());
+                const disabled = pivotEnabled ? '' : ' disabled';
+                const providerRaw = (it.pivot_provider || 'random').toString().trim().toLowerCase().replace(/_/g, '-');
+                const providerNormalized = ['auto', 'none', 'manual'].includes(providerRaw) ? 'random' : providerRaw;
+                const allowedProviders = new Set(['random', 'vulnerability', 'flag-node-generator', 'ssh-fallback']);
+                const provider = allowedProviders.has(providerNormalized) ? providerNormalized : 'random';
+                const optionHtml = (values, current) => values.map(([value, label]) => `<option value="${escAttr(value)}" ${value === current ? 'selected' : ''}>${escAttr(label)}</option>`).join('');
+                return `
+                <div class="d-flex flex-wrap gap-2 align-items-end segmentation-pivot-controls">
+                    <div class="form-check form-switch mb-1" title="Let the planner require a pivot path for segmented targets.">
+                        <input class="form-check-input" type="checkbox" role="switch" ${pivotEnabled ? 'checked' : ''} data-field="pivot_enabled" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}">
+                        <label class="form-check-label small">Pivot-Accessible</label>
+                    </div>
+                    <div>
+                        <label class="form-label mb-0 small">Provider</label>
+                        <select class="form-select form-select-sm" style="width:150px" data-field="pivot_provider" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}"${disabled}>
+                            ${optionHtml([
+                                ['random', 'Random'],
+                                ['vulnerability', 'Vulnerability'],
+                                ['flag-node-generator', 'Flag-Node-Generator'],
+                                ['ssh-fallback', 'Docker SSH']
+                            ], provider)}
+                        </select>
+                    </div>
+                </div>`;
             }
             return '';
         })();
@@ -17796,6 +18044,14 @@
                 if (sec) {
                     if (rowIdx !== null && !Number.isNaN(rowIdx)) {
                         const item = state.scenarios[sidx].sections[sec].items[rowIdx];
+                        if (field === 'pivot_enabled') {
+                            item.pivot_enabled = !!el.checked;
+                            if (item.pivot_enabled) {
+                                const currentPivotProvider = (item.pivot_provider || '').toString().trim().toLowerCase().replace(/_/g, '-');
+                                if (!currentPivotProvider || ['auto', 'none', 'manual'].includes(currentPivotProvider)) item.pivot_provider = 'random';
+                            }
+                            renderMain();
+                        } else
                         if (['factor', 'rate_kbps', 'period_s', 'jitter_pct', 'total_nodes', 'density', 'r2r_edges', 'r2s_edges', 'r2s_hosts_min', 'r2s_hosts_max'].includes(field)) {
                             const parsedValue = parseFloat(el.value);
                             item ? (item[field] = parsedValue) : state.scenarios[sidx].sections[sec][field] = parsedValue;
@@ -17819,7 +18075,7 @@
                                 updateWeightWarning(sidx, sec);
                                 updateWeightInputsDisplay(sidx, sec, { skipElement: isInputEvent ? el : null });
                             }
-                        } else if (['pattern', 'content_type', 'selected', 'v_name', 'v_path', 'v_count', 'v_metric', 'r2r_mode', 'r2s_mode'].includes(field)) {
+                        } else if (['pattern', 'content_type', 'selected', 'v_name', 'v_path', 'v_count', 'v_metric', 'r2r_mode', 'r2s_mode', 'pivot_provider', 'requires', 'produces'].includes(field)) {
                             const prev = item[field];
                             if (field === 'v_count') {
                                 let n = clampNodeCountValue(el.value);
@@ -20346,9 +20602,11 @@
         return lines.join('\n');
     }
 
-    function showExecuteSummaryModal(success) {
+    function showExecuteSummaryModal(success, runId = null) {
         ensureExecuteSummaryElements();
+        const summaryRunId = runId || getLatestRunIdForSummary();
         try { dockLog(`[summary] showExecuteSummaryModal(${success ? 'success' : 'failure'})`, 'INFO'); } catch (e) { }
+        try { closeRunProgress(); } catch (e) { }
         renderExecuteSummary(!!success);
         if (executeSummaryModalEl && window.bootstrap) {
             try {
@@ -20358,13 +20616,13 @@
                 bootstrap.Modal.getOrCreateInstance(executeSummaryModalEl).show();
             } catch (e) { }
         }
-        try { refreshValidationSummaryFromRunStatus(); } catch (e) { }
+        try { refreshValidationSummaryFromRunStatus(summaryRunId); } catch (e) { }
         try {
             let pollCount = 0;
             const pollMax = 10;
             const pollTimer = setInterval(async () => {
                 pollCount += 1;
-                await refreshValidationSummaryFromRunStatus();
+                await refreshValidationSummaryFromRunStatus(summaryRunId);
                 const summary = executeProgressState?.validationSummary || {};
                 const dockerCount = Array.isArray(summary.docker_nodes) ? summary.docker_nodes.length : 0;
                 const actualCount = Array.isArray(summary.actual_nodes_detail) ? summary.actual_nodes_detail.length : 0;
@@ -21266,11 +21524,12 @@
         // Re-enable connection & advanced controls only after run completes.
         try { if (typeof setExecuteDialogControlsEnabled === 'function') setExecuteDialogControlsEnabled(true); } catch (e) { }
         try {
-            refreshValidationSummaryFromRunStatus().finally(() => {
-                try { showExecuteSummaryModal(success); } catch (e) { }
-            });
+            if (!executeProgressState.summaryShown) {
+                executeProgressState.summaryShown = true;
+                showExecuteSummaryModal(success, executeProgressState.runId);
+            }
         } catch (e) {
-            try { showExecuteSummaryModal(success); } catch (err) { }
+            try { showExecuteSummaryModal(success, executeProgressState.runId); } catch (err) { }
         }
     }
 
@@ -24450,13 +24709,9 @@
                     executeProgressState.summaryShown = true;
                     if (data.returncode === 0) {
                         queueExecuteSummaryRedirect("{{ url_for('reports_page') }}", 500);
-                        refreshValidationSummaryFromRunStatus(runId).finally(() => {
-                            showExecuteSummaryModal(true);
-                        });
+                        showExecuteSummaryModal(true, runId);
                     } else {
-                        refreshValidationSummaryFromRunStatus(runId).finally(() => {
-                            showExecuteSummaryModal(false);
-                        });
+                        showExecuteSummaryModal(false, runId);
                     }
                 }
             }
@@ -25914,13 +26169,9 @@
                                 executeProgressState.summaryShown = true;
                                 if (runSucceeded) {
                                     queueExecuteSummaryRedirect("{{ url_for('reports_page') }}", 500);
-                                    refreshValidationSummaryFromRunStatus(run_id).finally(() => {
-                                        showExecuteSummaryModal(true);
-                                    });
+                                    showExecuteSummaryModal(true, run_id);
                                 } else {
-                                    refreshValidationSummaryFromRunStatus(run_id).finally(() => {
-                                        showExecuteSummaryModal(false);
-                                    });
+                                    showExecuteSummaryModal(false, run_id);
                                 }
                             }
                         } catch (e) { }

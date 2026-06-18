@@ -451,6 +451,7 @@ def generate_traffic_scripts(hosts: List[NodeInfo], density: float, items: List[
             "src_id": host.node_id,
             "dst_id": rx_node_id,
             "protocol": proto_key,
+            "src_ip": _ip_only(host.ip4),
             "dst_ip": dst_ip,
             "dst_port": dst_port,
             "pattern": pattern or "",
@@ -616,6 +617,7 @@ def generate_traffic_scripts(hosts: List[NodeInfo], density: float, items: List[
                 "dst_id": rx_node_id,
                 # Record actual transport protocol used (TCP/UDP) for downstream tooling
                 "protocol": proto_key,
+                "src_ip": _ip_only(host.ip4),
                 "dst_ip": dst_ip,
                 "dst_port": dst_port,
                 "pattern": pattern or "",

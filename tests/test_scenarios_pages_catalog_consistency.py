@@ -151,3 +151,50 @@ def test_flow_and_preview_use_same_natural_scenario_order(monkeypatch, tmp_path)
     expected = ['Scenario2', 'Scenario3', 'Scenario10']
     assert _scenario_button_order(flow_resp.get_data(as_text=True)) == expected
     assert _scenario_button_order(preview_resp.get_data(as_text=True)) == expected
+
+
+def test_flow_page_parses_xml_once_and_lazy_loads_xml_preview(monkeypatch, tmp_path):
+    client = app.test_client()
+    _login(client)
+
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'Scenario1.xml'
+    marker = 'DO_NOT_EMBED_FLOW_XML_PREVIEW_MARKER'
+    xml_path.write_text(
+        f'<Scenarios><Scenario name="Scenario1"><ScenarioEditor><!-- {marker} --></ScenarioEditor></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(
+        backend,
+        '_scenario_catalog_for_user',
+        lambda _history, user=None: (
+            ['Scenario1'],
+            {'scenario1': {str(xml_path)}},
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        '_latest_xml_path_for_scenario',
+        lambda norm: str(xml_path) if norm == 'scenario1' else '',
+    )
+
+    original_parse = backend._parse_scenarios_xml
+    parse_count = {'value': 0}
+
+    def counted_parse(path):
+        if str(path) == str(xml_path):
+            parse_count['value'] += 1
+        return original_parse(path)
+
+    monkeypatch.setattr(backend, '_parse_scenarios_xml', counted_parse)
+
+    resp = client.get('/scenarios/flag-sequencing?scenario=Scenario1&xml_path=' + str(xml_path))
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+
+    assert parse_count['value'] == 1
+    assert marker not in body
+    assert 'id="xmlPre"' in body

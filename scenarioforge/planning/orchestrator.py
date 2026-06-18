@@ -21,6 +21,7 @@ from ..parsers.routing import parse_routing_info
 from ..parsers.services import parse_services
 from ..parsers.vulnerabilities import parse_vulnerabilities_info
 from ..parsers.segmentation import parse_segmentation_info
+from ..parsers.pivoting import parse_pivoting_info
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,29 @@ def compute_full_plan(
     segmentation_plan, seg_breakdown = compute_segmentation_plan(seg_density, seg_items, density_base)
     seg_breakdown['raw_items_serialized'] = [{'selected': si.name, 'factor': si.factor} for si in seg_items]
 
+    # --- Pivoting ---
+    pivot_density, pivot_items = parse_pivoting_info(xml_path, scenario)
+    pivot_breakdown = {
+        'density': pivot_density,
+        'items_count': len(pivot_items or []),
+        'raw_items_serialized': [
+            {
+                'selected': pi.name,
+                'factor': pi.factor,
+                'pivot_node': pi.pivot_node,
+                'pivot_role': pi.pivot_role,
+                'target_node': pi.target_node,
+                'target_role': pi.target_role,
+                'target_ports': pi.target_ports,
+                'target_protocols': pi.target_protocols,
+                'exposure': pi.exposure,
+                'source_scope': pi.source_scope,
+                'access_provider': getattr(pi, 'access_provider', ''),
+            }
+            for pi in (pivot_items or [])
+        ],
+    }
+
     # --- Traffic (optional, parse if module available) ---
     traffic_plan_out: List[Dict[str, Any]] | None = None
     traffic_breakdown: Dict[str, Any] | None = None
@@ -156,10 +180,12 @@ def compute_full_plan(
         'docker_capacity_repair': docker_capacity_repair,
         'vulnerability_flag_type': vuln_flag_type,
         'segmentation_plan': segmentation_plan,
+        'pivoting_plan': pivot_breakdown,
         'traffic_plan': traffic_plan_out,
         # raw items for build path reuse (not all JSON-serializable; caller should sanitize if emitting)
         'vulnerability_items_raw': vuln_items_xml,
         'segmentation_items_raw': seg_items,
+        'pivoting_items_raw': pivot_items,
     }
     try:
         base_ref = parse_base_reference(xml_path, scenario)
@@ -174,6 +200,7 @@ def compute_full_plan(
             'services': service_breakdown,
             'vulnerabilities': vuln_breakdown,
             'segmentation': seg_breakdown,
+            'pivoting': pivot_breakdown,
             'traffic': traffic_breakdown,
         }
     return plan

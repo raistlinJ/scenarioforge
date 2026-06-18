@@ -15,6 +15,19 @@ def register(app, *, backend_module: Any) -> None:
 
     backend = backend_module
 
+    def _current_flow_meta_for_preview(full_preview: Any, xml_path: str, scenario: str | None) -> dict[str, Any] | None:
+        try:
+            flow_meta = backend._flow_state_from_xml_path(xml_path, scenario)
+        except Exception:
+            flow_meta = None
+        if not isinstance(flow_meta, dict):
+            return None
+        try:
+            repaired = backend._flow_repair_saved_flow_for_preview(full_preview, flow_meta)
+        except Exception:
+            return None
+        return repaired if isinstance(repaired, dict) else None
+
     def _api_plan_preview_full():
         try:
             payload = request.get_json(silent=True) or {}
@@ -30,11 +43,32 @@ def register(app, *, backend_module: Any) -> None:
                     seed = int(seed)
             except Exception:
                 seed = None
+            preview_scenarios = scenarios_inline
+            if isinstance(scenarios_inline, list) and scenario:
+                try:
+                    scenario_norm = backend._normalize_scenario_label(scenario)
+                except Exception:
+                    scenario_norm = str(scenario or '').strip().lower()
+                if scenario_norm:
+                    try:
+                        matching_scenario = next(
+                            (
+                                sc
+                                for sc in scenarios_inline
+                                if isinstance(sc, dict)
+                                and backend._normalize_scenario_label(str(sc.get('name') or '')) == scenario_norm
+                            ),
+                            None,
+                        )
+                    except Exception:
+                        matching_scenario = None
+                    if isinstance(matching_scenario, dict):
+                        preview_scenarios = [matching_scenario]
             if not xml_path:
-                if isinstance(scenarios_inline, list):
+                if isinstance(preview_scenarios, list):
                     try:
                         normalized_core = backend._normalize_core_config(core_inline, include_password=True) if isinstance(core_inline, dict) else None
-                        tree = backend._build_scenarios_xml({'scenarios': scenarios_inline, 'core': normalized_core})
+                        tree = backend._build_scenarios_xml({'scenarios': preview_scenarios, 'core': normalized_core})
                         ts = backend._local_timestamp_safe()
                         tag = str(uuid.uuid4())[:8]
                         out_dir = os.path.join(backend._outputs_dir(), f'tmp-preview-{ts}-{tag}')
@@ -43,7 +77,7 @@ def register(app, *, backend_module: Any) -> None:
                         if not stem_raw:
                             try:
                                 first_name = None
-                                for sc in scenarios_inline:
+                                for sc in preview_scenarios:
                                     if isinstance(sc, dict) and sc.get('name'):
                                         first_name = sc.get('name')
                                         break
@@ -74,22 +108,7 @@ def register(app, *, backend_module: Any) -> None:
                 if isinstance(payload_from_xml, dict):
                     embedded_preview = payload_from_xml.get('full_preview') if isinstance(payload_from_xml.get('full_preview'), dict) else None
                     if isinstance(embedded_preview, dict):
-                        flow_meta = None
-                        try:
-                            flow_meta = backend._flow_state_from_xml_path(xml_path, scenario)
-                            if not isinstance(flow_meta, dict):
-                                flow_meta = backend._attach_latest_flow_into_full_preview(embedded_preview, scenario)
-                            elif isinstance(flow_meta, dict):
-                                try:
-                                    repaired = backend._flow_repair_saved_flow_for_preview(embedded_preview, flow_meta)
-                                    if isinstance(repaired, dict):
-                                        flow_meta = repaired
-                                    else:
-                                        flow_meta = None
-                                except Exception:
-                                    flow_meta = None
-                        except Exception:
-                            flow_meta = None
+                        flow_meta = _current_flow_meta_for_preview(embedded_preview, xml_path, scenario)
                         return jsonify({'ok': True, 'full_preview': embedded_preview, 'plan': {}, 'breakdowns': None, 'flow_meta': flow_meta or {}})
             except Exception:
                 pass
@@ -111,10 +130,6 @@ def register(app, *, backend_module: Any) -> None:
             from scenarioforge.planning.plan_cache import hash_xml_file
 
             xml_hash = hash_xml_file(xml_path)
-            plan = compute_full_plan(xml_path, scenario=scenario, seed=seed, include_breakdowns=True)
-            if seed is None:
-                seed = plan.get('seed') or backend._derive_default_seed(xml_hash)
-            full_prev = backend._build_full_preview_from_plan(plan, seed, r2s_hosts_min_list, r2s_hosts_max_list)
             xml_basename = os.path.splitext(os.path.basename(xml_path))[0]
             try:
                 raw_hitl_config = backend.parse_hitl_info(xml_path, scenario)
@@ -125,26 +140,21 @@ def register(app, *, backend_module: Any) -> None:
                     pass
                 raw_hitl_config = {'enabled': False, 'interfaces': []}
             hitl_config = backend._sanitize_hitl_config(raw_hitl_config, scenario, xml_basename)
+            plan = compute_full_plan(xml_path, scenario=scenario, seed=seed, include_breakdowns=True)
+            if seed is None:
+                seed = plan.get('seed') or backend._derive_default_seed(xml_hash)
+            full_prev = backend._build_full_preview_from_plan(
+                plan,
+                seed,
+                r2s_hosts_min_list,
+                r2s_hosts_max_list,
+                hitl_config=hitl_config,
+            )
             try:
                 backend._apply_hitl_config_to_full_preview(full_prev, hitl_config, scenario)
             except Exception:
                 pass
-            flow_meta = None
-            try:
-                flow_meta = backend._flow_state_from_xml_path(xml_path, scenario)
-                if not isinstance(flow_meta, dict):
-                    flow_meta = backend._attach_latest_flow_into_full_preview(full_prev, scenario)
-                elif isinstance(flow_meta, dict):
-                    try:
-                        repaired = backend._flow_repair_saved_flow_for_preview(full_prev, flow_meta)
-                        if isinstance(repaired, dict):
-                            flow_meta = repaired
-                        else:
-                            flow_meta = None
-                    except Exception:
-                        flow_meta = None
-            except Exception:
-                flow_meta = None
+            flow_meta = _current_flow_meta_for_preview(full_prev, xml_path, scenario)
             return jsonify({'ok': True, 'full_preview': full_prev, 'plan': plan, 'breakdowns': plan.get('breakdowns'), 'flow_meta': flow_meta or {}})
         except Exception as exc:
             app.logger.exception('[plan.preview_full] error: %s', exc)

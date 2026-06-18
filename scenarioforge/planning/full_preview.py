@@ -14,7 +14,7 @@ the same public return contract relied upon by the web UI, CLI and tests.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any, Optional, Set
+from typing import Dict, Iterable, List, Tuple, Any, Optional, Set
 import ipaddress
 import random
 import os
@@ -360,6 +360,8 @@ def build_full_preview(
     r2s_hosts_min_list: Optional[List[int]] = None,
     r2s_hosts_max_list: Optional[List[int]] = None,
     base_scenario: Optional[Dict[str, Any]] = None,
+    reserved_ipv4_addrs: Optional[Iterable[str]] = None,
+    reserved_ipv4_networks: Optional[Iterable[str]] = None,
 ):
     """Return a topology preview dictionary.
 
@@ -372,6 +374,48 @@ def build_full_preview(
         seed_generated = True
     rnd_seed = seed
     rnd = random.Random(rnd_seed)
+    reserved_ip_addrs: Set[str] = set()
+    for raw_reserved_ip in reserved_ipv4_addrs or []:
+        try:
+            text = str(raw_reserved_ip or '').strip()
+            if not text:
+                continue
+            if '/' in text:
+                reserved_ip_addrs.add(str(ipaddress.ip_interface(text).ip))
+            else:
+                reserved_ip_addrs.add(str(ipaddress.ip_address(text)))
+        except Exception:
+            continue
+    reserved_networks: List[ipaddress.IPv4Network] = []
+    reserved_network_keys: Set[str] = set()
+    for raw_reserved_net in reserved_ipv4_networks or []:
+        try:
+            reserved_net = ipaddress.ip_network(str(raw_reserved_net), strict=False)
+        except Exception:
+            continue
+        if getattr(reserved_net, 'version', None) != 4:
+            continue
+        reserved_key = str(reserved_net)
+        if reserved_key in reserved_network_keys:
+            continue
+        reserved_network_keys.add(reserved_key)
+        reserved_networks.append(reserved_net)
+
+    def _ip_conflicts_reserved(value: Any) -> bool:
+        try:
+            ip_obj = ipaddress.ip_address(str(value).split('/', 1)[0])
+        except Exception:
+            return False
+        if str(ip_obj) in reserved_ip_addrs:
+            return True
+        return any(ip_obj in net for net in reserved_networks)
+
+    def _subnet_conflicts_reserved(value: Any) -> bool:
+        try:
+            net_obj = value if isinstance(value, ipaddress.IPv4Network) else ipaddress.ip_network(str(value), strict=False)
+        except Exception:
+            return False
+        return any(net_obj.overlaps(net) for net in reserved_networks)
 
     # IP variety choices (seeded): pick a base private pool and subnet sizes
     _PRIVATE_POOLS = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
@@ -537,7 +581,7 @@ def build_full_preview(
             if uniq_alloc is not None:
                 try:
                     ip, mask = uniq_alloc.next_ip()
-                    if ip not in assigned_ips:
+                    if ip not in assigned_ips and not _ip_conflicts_reserved(ip):
                         assigned_ips.add(ip)
                         return f"{ip}/{mask}"
                 except Exception:
@@ -554,7 +598,7 @@ def build_full_preview(
             except StopIteration:
                 return None
             raw = str(addr)
-            if raw in assigned_ips:
+            if raw in assigned_ips or _ip_conflicts_reserved(raw):
                 continue
             assigned_ips.add(raw)
             return f"{raw}/{fallback_prefixlen}"
@@ -634,29 +678,42 @@ def build_full_preview(
         fallback_idx = 0
         link_details: List[Dict[str, Any]] = []
         subnets: List[str] = []
+
+        def _next_allocator_subnet(prefix_len: int) -> Optional[ipaddress.IPv4Network]:
+            if subnet_alloc is None:
+                return None
+            for _ in range(1024):
+                try:
+                    try:
+                        candidate = subnet_alloc.next_random_subnet(prefix_len, rnd=rnd)
+                    except TypeError:
+                        candidate = subnet_alloc.next_random_subnet(prefix_len)
+                except Exception:
+                    return None
+                if not _subnet_conflicts_reserved(candidate):
+                    return candidate
+            return None
+
         for edge_idx, (a, b) in enumerate(edges, start=1):
             subnet_obj = None
             if allocator is not None:
+                subnet_obj = _next_allocator_subnet(chosen_r2r_prefix)
+            if subnet_obj is None:
                 try:
-                    # Prefer a randomized subnet from the allocator for preview variety
-                    # Use allocator.next_random_subnet if available and pass our seeded RNG
-                    try:
-                        subnet_obj = allocator.next_random_subnet(chosen_r2r_prefix, rnd=rnd)
-                    except TypeError:
-                        # older allocator without rnd param
-                        subnet_obj = allocator.next_random_subnet(chosen_r2r_prefix)
+                    for _ in range(4096):
+                        base_addr = ipaddress.IPv4Address(fallback_base + (fallback_idx * (1 << (32 - chosen_r2r_prefix))))
+                        fallback_idx += 1
+                        candidate = ipaddress.ip_network((base_addr, chosen_r2r_prefix), strict=False)
+                        if _subnet_conflicts_reserved(candidate):
+                            continue
+                        subnet_obj = candidate
+                        break
                 except Exception:
                     subnet_obj = None
             if subnet_obj is None:
-                try:
-                    # fallback: pick a base range per-seed to scatter addresses across private ranges
-                    fallback_ranges = [int(ipaddress.IPv4Address('10.0.0.0')), int(ipaddress.IPv4Address('172.16.0.0')), int(ipaddress.IPv4Address('192.168.0.0'))]
-                    base_choice = rnd.choice(fallback_ranges)
-                    base_addr = ipaddress.IPv4Address(base_choice + (fallback_idx * (1 << (32 - chosen_r2r_prefix))))
-                    subnet_obj = ipaddress.ip_network((base_addr, chosen_r2r_prefix), strict=False)
-                    fallback_idx += 1
-                except Exception:
-                    subnet_obj = ipaddress.ip_network(f'10.254.0.0/{chosen_r2r_prefix}', strict=False)
+                subnet_obj = ipaddress.ip_network(f'10.254.0.0/{chosen_r2r_prefix}', strict=False)
+                if _subnet_conflicts_reserved(subnet_obj):
+                    raise RuntimeError('No non-reserved R2R preview subnet available')
             hosts = list(subnet_obj.hosts())
             ip_a = f"{hosts[0]}/{subnet_obj.prefixlen}" if len(hosts) >= 1 else None
             ip_b = f"{hosts[1]}/{subnet_obj.prefixlen}" if len(hosts) >= 2 else None
@@ -946,6 +1003,7 @@ def build_full_preview(
         ip_mode=ip_mode,
         ip_region=ip_region,
         subnet_alloc_override=shared_subnet_alloc,
+        reserved_ipv4_networks=[str(net) for net in reserved_networks],
     )
     grouping_preview = grouping_out['grouping_preview']
     computed_r2s_policy = grouping_out['computed_r2s_policy']

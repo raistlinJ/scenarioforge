@@ -226,6 +226,108 @@ def test_flow_dependent_non_start_optional_credential_stays_optional():
     assert not second.get("chain_supplied_input_hints")
 
 
+def test_flow_reorder_carries_explicit_supplied_input_after_pivot_source(monkeypatch: pytest.MonkeyPatch):
+    gen_defs = {
+        "deploy": {
+            "id": "deploy",
+            "inputs": [
+                {"name": "Credential(user, password)", "required": True, "flow_supply_when_first": True},
+            ],
+        },
+        "pivot": {"id": "pivot", "inputs": []},
+        "redis": {"id": "redis", "inputs": []},
+    }
+    plugins = {
+        "deploy": {
+            "plugin_id": "deploy",
+            "plugin_type": "flag-node-generator",
+            "requires": ["Credential(user, password)", "Pivot(docker-1)"],
+            "produces": [],
+        },
+        "pivot": {
+            "plugin_id": "pivot",
+            "plugin_type": "flag-generator",
+            "requires": [],
+            "produces": [{"artifact": "Shell(docker-1)"}, {"artifact": "Pivot(docker-1)"}],
+        },
+        "redis": {
+            "plugin_id": "redis",
+            "plugin_type": "flag-node-generator",
+            "requires": ["Pivot(docker-1)"],
+            "produces": [],
+        },
+    }
+    monkeypatch.setattr(app_backend, "_flow_enabled_generator_defs_by_id", lambda: gen_defs)
+
+    chain_nodes = [
+        {"id": "9", "name": "docker-4", "type": "docker", "is_vuln": False},
+        {"id": "6", "name": "docker-1", "type": "docker", "is_vuln": True},
+        {"id": "12", "name": "docker-7", "type": "docker", "is_vuln": False},
+    ]
+    assignments = [
+        {
+            "node_id": "9",
+            "id": "deploy",
+            "type": "flag-node-generator",
+            "requires": ["Credential(user, password)", "Pivot(docker-1)"],
+            "inputs": ["Credential(user, password)", "Pivot(docker-1)"],
+            "produces": [],
+            "outputs": [],
+            "input_fields_required": ["Credential(user, password)"],
+            "chain_supplied_inputs": ["Credential(user, password)"],
+            "config_overrides": {"Credential(user, password)": "user_x:pass_y"},
+            "resolved_inputs": {"Credential(user, password)": "user_x:pass_y"},
+        },
+        {
+            "node_id": "6",
+            "id": "pivot",
+            "type": "flag-generator",
+            "requires": [],
+            "inputs": [],
+            "produces": ["Shell(docker-1)", "Pivot(docker-1)"],
+            "outputs": ["Shell(docker-1)", "Pivot(docker-1)"],
+        },
+        {
+            "node_id": "12",
+            "id": "redis",
+            "type": "flag-node-generator",
+            "requires": ["Pivot(docker-1)"],
+            "inputs": ["Pivot(docker-1)"],
+            "produces": [],
+            "outputs": [],
+        },
+    ]
+
+    ok_before, errors_before = app_backend._flow_validate_chain_order_by_requires_produces(
+        chain_nodes,
+        assignments,
+        scenario_label="scenario1",
+        plugins_by_id_override=plugins,
+    )
+    assert not ok_before
+    assert any("before they are produced" in error for error in errors_before)
+
+    ordered_nodes, ordered_assignments, _debug = app_backend._flow_reorder_chain_by_generator_dag(
+        chain_nodes,
+        assignments,
+        scenario_label="scenario1",
+        plugins_by_id_override=plugins,
+    )
+
+    assert [node["id"] for node in ordered_nodes] == ["6", "9", "12"]
+    deploy_assignment = next(item for item in ordered_assignments if item.get("node_id") == "9")
+    assert "Credential(user, password)" in (deploy_assignment.get("chain_supplied_inputs") or [])
+    assert deploy_assignment.get("chain_supplied_sequence_index") == 2
+
+    ok_after, errors_after = app_backend._flow_validate_chain_order_by_requires_produces(
+        ordered_nodes,
+        ordered_assignments,
+        scenario_label="scenario1",
+        plugins_by_id_override=plugins,
+    )
+    assert ok_after, errors_after
+
+
 def test_flow_non_deploy_key_optional_credential_stays_optional(monkeypatch: pytest.MonkeyPatch):
     fake_gen = {
         "id": "opt_consumer",
