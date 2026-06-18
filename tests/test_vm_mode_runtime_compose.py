@@ -11,8 +11,6 @@ def test_vm_mode_compose_exposes_runtime_defaults() -> None:
 
     expected_snippets = [
         "env_file:",
-        "path: ./.scenarioforge.env.example",
-        "required: true",
         "path: ./.scenarioforge.env",
         "required: false",
         "CORETG_HOST=0.0.0.0",
@@ -22,6 +20,7 @@ def test_vm_mode_compose_exposes_runtime_defaults() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing VM-mode docker-compose snippets: " + "; ".join(missing)
+    assert "path: ./.scenarioforge.env.example" not in text
 
 
 def test_app_runner_keeps_reloader_opt_in_for_generator_workflows() -> None:

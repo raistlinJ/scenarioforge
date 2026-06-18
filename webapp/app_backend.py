@@ -13662,10 +13662,7 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
         }
     )
 
-    single_ifx_name = str(
-        os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_NAME')
-        or ''
-    ).strip()
+    single_ifx_name = str(os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_NAME') or '').strip()
     single_ifx_attachment = str(
         os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT')
         or 'existing_router'
@@ -13677,7 +13674,7 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
     single_ifx_ipv4 = [
         part.strip()
         for part in str(
-            os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_IPV4')
+            os.getenv('CORETG_HITL_CORE_IFX_IPV4')
             or ''
         ).split(',')
         if part.strip()
@@ -13701,6 +13698,7 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
             'participant_ui_url': participant_url,
             'participant_pool': 'same-pool',
             'interfaces': interfaces_defaults,
+            'shared_core_ifx_ipv4': list(single_ifx_ipv4),
         },
     }
 

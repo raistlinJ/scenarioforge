@@ -2499,23 +2499,11 @@
     }
 
     function applyVmModeDefaultsToScenario(scen) {
-        if (!WEBUI_VM_MODE || !scen || typeof scen !== 'object') return;
+        if (!scen || typeof scen !== 'object') return;
         const hitl = scen.hitl && typeof scen.hitl === 'object'
             ? scen.hitl
             : (scen.hitl = { enabled: false, interfaces: [] });
         const { core: coreDefaults, hitl: hitlDefaults } = getVmModeDefaults();
-
-        hitl.runtime_mode = 'vm';
-        hitl.enabled = hitlDefaults.enabled !== false;
-        const participantUrl = (hitlDefaults.participant_ui_url ?? '').toString().trim();
-        if (participantUrl) {
-            hitl.participant_proxmox_url = participantUrl;
-        }
-        hitl.vm_mode_participant_pool = (hitlDefaults.participant_pool ?? 'same-pool').toString().trim() || 'same-pool';
-        hitl.vm_mode_participant_notes = hitlDefaults.participant_notes && typeof hitlDefaults.participant_notes === 'object'
-            ? { ...hitlDefaults.participant_notes }
-            : {};
-        hitl.vm_mode_participant_notes_json = (hitlDefaults.participant_notes_json ?? '').toString().trim();
 
         const normalizeVmModeAddrList = (value) => {
             if (Array.isArray(value)) {
@@ -2527,7 +2515,7 @@
         };
 
         const rawInterfaces = Array.isArray(hitlDefaults.interfaces) ? hitlDefaults.interfaces : [];
-        hitl.interfaces = rawInterfaces.map((entry) => {
+        const normalizedInterfaces = rawInterfaces.map((entry) => {
             if (!entry || typeof entry !== 'object') return null;
             const selectorRaw = normalizeHostInterfaceName(
                 (entry.proxmox_target && typeof entry.proxmox_target === 'object'
@@ -2555,6 +2543,33 @@
             }
             return normalized;
         }).filter(Boolean);
+        const sharedCoreIfxIpv4 = normalizeVmModeAddrList(hitlDefaults.shared_core_ifx_ipv4);
+
+        if (WEBUI_VM_MODE) {
+            hitl.enabled = hitlDefaults.enabled !== false;
+            hitl.interfaces = normalizedInterfaces;
+        } else if (sharedCoreIfxIpv4.length) {
+            const sharedIpv4Target = (Array.isArray(hitl.interfaces) ? hitl.interfaces : []).find((entry) => {
+                if (!entry || typeof entry !== 'object') return false;
+                return !Array.isArray(entry.ipv4) || entry.ipv4.length === 0;
+            });
+            if (sharedIpv4Target) {
+                sharedIpv4Target.ipv4 = sharedCoreIfxIpv4.slice();
+            }
+        }
+
+        if (!WEBUI_VM_MODE) return;
+
+        hitl.runtime_mode = 'vm';
+        const participantUrl = (hitlDefaults.participant_ui_url ?? '').toString().trim();
+        if (participantUrl) {
+            hitl.participant_proxmox_url = participantUrl;
+        }
+        hitl.vm_mode_participant_pool = (hitlDefaults.participant_pool ?? 'same-pool').toString().trim() || 'same-pool';
+        hitl.vm_mode_participant_notes = hitlDefaults.participant_notes && typeof hitlDefaults.participant_notes === 'object'
+            ? { ...hitlDefaults.participant_notes }
+            : {};
+        hitl.vm_mode_participant_notes_json = (hitlDefaults.participant_notes_json ?? '').toString().trim();
 
         const core = hitl.core && typeof hitl.core === 'object' ? hitl.core : (hitl.core = {});
         [

@@ -4,7 +4,7 @@ from pathlib import Path
 ENV_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / ".scenarioforge.env.example"
 
 
-def test_env_example_includes_vm_mode_defaults_for_direct_python_and_compose() -> None:
+def test_env_example_includes_runtime_hitl_defaults_for_direct_python_and_compose() -> None:
     text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
@@ -21,7 +21,7 @@ def test_env_example_includes_vm_mode_defaults_for_direct_python_and_compose() -
         "CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19",
         "CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router",
         "CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION=Scenario HITL participant network",
-        "CORETG_VM_MODE_HITL_CORE_IFX_IPV4=10.254.200.3/24",
+        "CORETG_HITL_CORE_IFX_IPV4=10.254.200.3/24",
         "CORETG_VM_MODE_PARTICIPANT_URL=http://participant-ui.example",
     ]
 

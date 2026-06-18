@@ -20,6 +20,10 @@ def test_vm_mode_ui_seeds_runtime_managed_core_defaults() -> None:
         "function runtimeManagedVmCoreConfigured(hitlState) {",
         "function applyVmModeDefaultsToScenario(scen) {",
         "const normalizeVmModeAddrList = (value) => {",
+        "const sharedCoreIfxIpv4 = normalizeVmModeAddrList(hitlDefaults.shared_core_ifx_ipv4);",
+        "const sharedIpv4Target = (Array.isArray(hitl.interfaces) ? hitl.interfaces : []).find((entry) => {",
+        "sharedIpv4Target.ipv4 = sharedCoreIfxIpv4.slice();",
+        "if (!WEBUI_VM_MODE) return;",
         "normalized.ipv4 = normalizedIpv4;",
         "function preferredHitlPreviewLinkMeta(iface, defaultPrefixLen = 24) {",
         "const preferred = (attachment === 'new_router' || attachment === 'existing_router')",
@@ -68,6 +72,7 @@ def test_vm_mode_ui_seeds_runtime_managed_core_defaults() -> None:
     assert "getConfiguredHitlInterfaceValidationForScenario(scenarioIdx)" in execute_body
     assert "const vmKey = (core?.vm_key ?? '').toString().trim();" in execute_body
     assert "entry.name || `net${idx}`" not in index_text
+    assert "if (!WEBUI_VM_MODE || !scen || typeof scen !== 'object') return;" not in index_text
 
     validate_match = re.search(
         r"async function validateCoreConnection\(sidx, options = \{\}\) \{(?P<body>.*?)\n    \}\n\n    async function hydrateCoreModalWithSecret",
