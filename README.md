@@ -69,18 +69,19 @@ Copy the committed defaults and edit the local override file:
 cp .scenarioforge.env.example .scenarioforge.env
 ```
 
-The local `.scenarioforge.env` file is gitignored. Docker Compose loads `.scenarioforge.env.example` first and then `.scenarioforge.env`; direct Python launches read `.scenarioforge.env` when present and otherwise use built-in defaults. Real environment variables take precedence over file-based values.
+The local `.scenarioforge.env` file is gitignored. Docker Compose and direct Python launches both read `.scenarioforge.env` when present; otherwise the application uses built-in defaults. `.scenarioforge.env.example` is a versioned template and is not loaded automatically at runtime. Real environment variables take precedence over file-based values.
 
-Key VM-mode variables in [.scenarioforge.env.example](.scenarioforge.env.example):
+Key runtime variables in [.scenarioforge.env.example](.scenarioforge.env.example):
 
 - `CORE_HOST` / `CORE_PORT` – CORE gRPC endpoint for the CORE 9.2 VM, commonly `<core-vm-ip>:50051`.
 - `CORE_SSH_HOST` / `CORE_SSH_PORT` – SSH target used for remote setup, validation, file checks, and service operations. Usually the same host as `CORE_HOST`.
 - `CORE_SSH_USERNAME` / `CORE_SSH_PASSWORD` – SSH credentials for the CORE VM. Use local secrets or environment overrides for real deployments.
-- `CORETG_WEBUI_MODE` – set this to `vm` to pre-seed VM-oriented UI behavior and HITL defaults.
+- `CORETG_WEBUI_MODE` – set this to `vm` to pre-seed VM-oriented UI behavior and VM-mode HITL defaults.
+- `CORETG_HITL_CORE_IFX_IPV4` – optional IPv4 or CIDR to pre-seed on a HITL interface entry in either mode, such as `10.254.200.3/24`. In native mode it only fills the first existing HITL interface entry that does not already define an IPv4 value; it does not create a HITL interface or enable HITL by itself. In VM mode it also populates the runtime-managed HITL default interface, but that interface still requires `CORETG_VM_MODE_HITL_CORE_IFX_NAME` to be configured.
 - `CORETG_VM_MODE_HITL_ENABLED` – enables participant-facing HITL defaults in VM mode.
 - `CORETG_VM_MODE_HITL_CORE_IFX_NAME` – expected Linux interface name inside the CORE VM for the participant network, such as `ens18`.
-- `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
-- `CORETG_VM_MODE_HITL_CORE_IFX_IPV4` – optional IPv4 or CIDR to pre-seed on that HITL interface entry, such as `10.254.200.3/24`.
+- `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target for that VM-mode interface: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
+- `CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION` – optional label/description applied to that VM-mode HITL interface entry.
 - `CORETG_VM_MODE_PARTICIPANT_URL` – optional participant UI URL shown in VM-mode flows.
 
 Minimum VM-mode override example:
@@ -96,7 +97,7 @@ CORETG_WEBUI_MODE=vm
 CORETG_VM_MODE_HITL_ENABLED=true
 CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens18
 CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router
-CORETG_VM_MODE_HITL_CORE_IFX_IPV4=10.254.200.3/24
+CORETG_HITL_CORE_IFX_IPV4=10.254.200.3/24
 ```
 
 ### Run the Web UI
@@ -109,7 +110,7 @@ docker compose up -d --build
 
 - Open `https://localhost` and verify health with `curl -k https://localhost/healthz`.
 - The backend is also published at `http://localhost:9090` for direct health checks and local development.
-- Compose reads defaults from `.scenarioforge.env.example` and local overrides from `.scenarioforge.env`.
+- Compose and direct Python launches both use `.scenarioforge.env` for local runtime overrides.
 - The Docker image includes Graphviz, so attack graph PDF export works in Compose-based runs.
 - Compose publishes nginx on `80/443` and the web backend on `127.0.0.1:9090`. In native Docker bridge mode, container-local CORE targets such as `127.0.0.1` are treated as `host.docker.internal`; in VM mode, `127.0.0.1` is preserved because it means core-daemon on the remote CORE host reached over SSH. Set `CORETG_KEEP_CONTAINER_LOCAL_CORE=1` only when CORE really runs inside the web container.
 
