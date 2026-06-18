@@ -82,19 +82,11 @@ def register(app, *, backend_module: Any) -> None:
         try:
             def _best_xml_for_index() -> str:
                 try:
-                    if xml_query:
-                        cand = os.path.abspath(xml_query)
-                        if cand.lower().endswith('.xml') and os.path.exists(cand):
-                            return cand
+                    cand = backend._resolve_preexecute_xml_path(xml_query, scenario_query)
+                    if cand.lower().endswith('.xml') and os.path.exists(cand):
+                        return cand
                 except Exception:
                     pass
-                if scenario_query:
-                    try:
-                        cand = backend._latest_xml_path_for_scenario(backend._normalize_scenario_label(scenario_query)) or ''
-                        if cand and os.path.exists(cand):
-                            return cand
-                    except Exception:
-                        pass
                 return ''
 
             xml_hint = _best_xml_for_index()
@@ -106,7 +98,7 @@ def register(app, *, backend_module: Any) -> None:
                     snapshot_scenarios = editor_snapshot.get('scenarios') if isinstance(editor_snapshot, dict) else None
                     merged_from_snapshot = False
                     if (
-                        not xml_query
+                        not xml_hint
                         and isinstance(snapshot_scenarios, list)
                         and len(snapshot_scenarios) > len(parsed_scenarios)
                     ):
@@ -208,6 +200,8 @@ def register(app, *, backend_module: Any) -> None:
     def _run_cli():
         user = backend._current_user()
         xml_path = request.form.get('xml_path')
+        scenario_name_hint = request.form.get('scenario') or request.form.get('scenario_name') or None
+        xml_path = backend._resolve_preexecute_xml_path(xml_path, scenario_name_hint)
         if not xml_path:
             flash('XML path missing. Save XML first.')
             return redirect(url_for('index'))
@@ -256,7 +250,6 @@ def register(app, *, backend_module: Any) -> None:
                 scenario_core_override = json.loads(hitl_core_json)
         except Exception:
             scenario_core_override = None
-        scenario_name_hint = request.form.get('scenario') or request.form.get('scenario_name') or None
         docker_cleanup_before_run = backend._coerce_bool(request.form.get('docker_cleanup_before_run'))
         docker_remove_all_containers = backend._coerce_bool(request.form.get('docker_remove_all_containers')) or backend._coerce_bool(request.form.get('docker_nuke_all'))
         adv_deep_cleanup_after_run = backend._coerce_bool(request.form.get('adv_deep_cleanup_after_run'))
@@ -948,6 +941,7 @@ def register(app, *, backend_module: Any) -> None:
                 app.logger.warning('[async] Ignoring docker repair/cleanup toggles because web UI is running in Docker')
             except Exception:
                 pass
+        xml_path = backend._resolve_preexecute_xml_path(xml_path, scenario_name_hint)
         if not xml_path:
             if isinstance(scenarios_inline, list):
                 try:

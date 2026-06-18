@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -36,6 +37,24 @@ def register(
         return
 
     log = logger or getattr(app, "logger", None)
+
+    def _stable_cache_hash(value: Any) -> str:
+        try:
+            raw = json.dumps(value, sort_keys=True, separators=(',', ':'), default=str)
+        except Exception:
+            raw = repr(value)
+        return hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:24]
+
+    def _path_fingerprint(value: Any) -> str:
+        path = _existing_path(value)
+        if not path:
+            return ''
+        try:
+            st = os.stat(path)
+            mtime_ns = int(getattr(st, 'st_mtime_ns', 0) or 0)
+            return f"{path}|{int(getattr(st, 'st_size', 0) or 0)}|{mtime_ns}"
+        except Exception:
+            return path
 
     def _clean_str(value: Any) -> str:
         try:
@@ -460,11 +479,6 @@ def register(
             if isinstance(e.get('scenario_names'), list) and len(e['scenario_names']) > 1:
                 e['scenario_names'] = [e['scenario_names'][0]]
             _enrich_report_entry_paths(e)
-            try:
-                counts = load_summary_counts(e.get('summary_path'))
-                e['summary_output'] = summary_text_from_counts(counts)
-            except Exception:
-                e['summary_output'] = ''
             enriched.append(e)
         enriched = sorted(enriched, key=lambda x: x.get('timestamp', ''), reverse=True)
         user = current_user_getter()
@@ -487,11 +501,45 @@ def register(
         if scenario_norm:
             enriched = filter_history_by_scenario(enriched, scenario_norm)
         scenario_display = resolve_scenario_display(scenario_norm, scenario_names, scenario_query)
+        reports_data_cache_key = _stable_cache_hash(
+            {
+                'user': {
+                    'username': str((user or {}).get('username') or '') if isinstance(user, dict) else str(getattr(user, 'username', '') or ''),
+                    'role': str((user or {}).get('role') or '') if isinstance(user, dict) else str(getattr(user, 'role', '') or ''),
+                },
+                'history': enriched,
+                'scenarios': scenario_names,
+                'active_scenario': scenario_display,
+                'participant_url_flags': participant_url_flags,
+                'summary_refs': [
+                    {
+                        'summary_path': _path_fingerprint(entry.get('summary_path')),
+                        'report_path': _path_fingerprint(entry.get('report_path')),
+                        'scenario_xml_path': _path_fingerprint(entry.get('scenario_xml_path')),
+                        'xml_path': _path_fingerprint(entry.get('xml_path')),
+                        'single_scenario_xml_path': _path_fingerprint(entry.get('single_scenario_xml_path')),
+                        'preview_plan_path': _path_fingerprint(entry.get('preview_plan_path')),
+                    }
+                    for entry in enriched
+                ],
+            }
+        )
+        incoming_cache_key = (request.args.get('if_data_cache_key') or request.headers.get('X-Data-Cache-Key') or '').strip()
+        if incoming_cache_key and incoming_cache_key == reports_data_cache_key:
+            return jsonify({'ok': True, 'data_cache_key': reports_data_cache_key, 'not_modified': True})
+        for entry in enriched:
+            try:
+                counts = load_summary_counts(entry.get('summary_path'))
+                entry['summary_output'] = summary_text_from_counts(counts)
+            except Exception:
+                entry['summary_output'] = ''
         return jsonify({
+            'ok': True,
             'history': enriched,
             'scenarios': scenario_names,
             'active_scenario': scenario_display,
             'participant_url_flags': participant_url_flags,
+            'data_cache_key': reports_data_cache_key,
         })
 
     @app.route('/reports/delete', methods=['POST'])

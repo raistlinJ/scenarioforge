@@ -79,7 +79,8 @@ def test_scenarios_tabs_refreshes_latest_state_from_xml_on_load():
     expected_snippets = [
         "async function refreshScenarioStateFromXml(scenarioName, opts)",
         "latestStateUrl += '&xml_path=' + encodeURIComponent(explicitXmlPath);",
-        "const resp = await fetch(latestStateUrl, { credentials: 'same-origin' });",
+        "typeof window.CORETG_FETCH_LATEST_STATE === 'function'",
+        "await window.CORETG_FETCH_LATEST_STATE(scenario, { xmlPath: explicitXmlPath, forceXmlPath: options.forceXmlPath === true })",
         "setLatestXmlPathForScenario(scenario, xmlPath);",
         "window.coretgRefreshScenarioStateFromXml = refreshScenarioStateFromXml;",
         "await refreshScenarioStateFromXml(scen, { updateHidden: true });",
@@ -119,6 +120,39 @@ def test_layout_exposes_shared_navigation_loading_helper() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing shared navigation loading helper snippets: " + "; ".join(missing)
+
+
+def test_layout_exposes_shared_latest_state_cache_helper() -> None:
+    text = LAYOUT_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    expected_snippets = [
+        "const STORAGE_PREFIX = 'coretg_latest_state_cache_v1::';",
+        "window.CORETG_READ_LATEST_STATE_CACHE = function (scenarioName, options)",
+        "window.CORETG_WRITE_LATEST_STATE_CACHE = function (scenarioName, payload, options)",
+        "window.CORETG_FETCH_LATEST_STATE = async function (scenarioName, options)",
+        "query.set('if_xml_cache_key', cachedKey);",
+        "if (data.not_modified === true && cached && cached.payload && typeof cached.payload === 'object')",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing shared latest-state cache helper snippets: " + "; ".join(missing)
+
+
+def test_layout_exposes_shared_conditional_json_cache_helper() -> None:
+    text = LAYOUT_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    expected_snippets = [
+        "const CONDITIONAL_JSON_STORAGE_PREFIX = 'coretg_conditional_json_cache_v1::';",
+        "window.CORETG_READ_CONDITIONAL_JSON_CACHE = function (rawUrl, options)",
+        "window.CORETG_WRITE_CONDITIONAL_JSON_CACHE = function (rawUrl, payload, options)",
+        "window.CORETG_FETCH_CONDITIONAL_JSON = async function (rawUrl, options)",
+        "url.searchParams.set(versionQueryName, String(cached.data_cache_key));",
+        "if (data.not_modified === true && cached && cached.payload && typeof cached.payload === 'object')",
+        "cachedPayload.__notModified = true;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing shared conditional JSON cache helper snippets: " + "; ".join(missing)
 
 
 def test_core_template_uses_retrieving_page_details_text() -> None:

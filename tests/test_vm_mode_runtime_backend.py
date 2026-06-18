@@ -25,6 +25,7 @@ def test_vm_mode_backend_exposes_runtime_mode_defaults_and_env_only_route() -> N
         "'webui_vm_mode_defaults': _webui_vm_mode_defaults(include_password=True),",
         "def set_webui_runtime_mode():",
         "runtime_mode = _webui_runtime_mode()",
+        "Participant UI is unavailable in VM mode.",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
@@ -43,6 +44,7 @@ def test_vm_mode_backend_exposes_runtime_mode_defaults_and_env_only_route() -> N
         "os.getenv('CORETG_VM_MODE_CORE_VMID')",
         "os.getenv('CORETG_VM_MODE_CORE_VM_NAME')",
         "os.getenv('CORETG_VM_MODE_CORE_VM_KEY')",
+        "os.getenv('CORETG_VM_MODE_PARTICIPANT_URL')",
     ]
     present = [snippet for snippet in unexpected_snippets if snippet in text]
     assert not present, "Unexpected VM identity env snippets still present: " + "; ".join(present)
@@ -62,6 +64,7 @@ def test_vm_mode_backend_ignores_vm_identity_metadata_env_vars(monkeypatch) -> N
 
     vm_defaults = app_backend._webui_vm_mode_defaults(include_password=True)
     vm_core = vm_defaults["core"]
+    hitl_defaults = vm_defaults["hitl"]
     assert vm_core["host"] == "10.77.88.99"
     assert vm_core["ssh_host"] == "10.77.88.100"
     assert vm_core["ssh_username"] == "sampleuser"
@@ -71,6 +74,7 @@ def test_vm_mode_backend_ignores_vm_identity_metadata_env_vars(monkeypatch) -> N
     assert vm_core["vm_node"] == ""
     assert vm_core["vmid"] == ""
     assert vm_core["validated"] is True
+    assert "participant_ui_url" not in hitl_defaults
 
     monkeypatch.setattr(app_backend, "_webui_runtime_mode", lambda: "vm")
     merged = app_backend._core_backend_defaults(include_password=True)
@@ -154,6 +158,7 @@ def test_vm_mode_backend_defaults_leave_hitl_ifnames_blank_until_configured(monk
     vm_defaults = app_backend._webui_vm_mode_defaults(include_password=False)
     hitl_defaults = vm_defaults["hitl"]
     assert hitl_defaults["interfaces"] == []
+    assert "participant_ui_url" not in hitl_defaults
 
     monkeypatch.setenv("CORETG_VM_MODE_HITL_ENABLED", "true")
     monkeypatch.setenv("CORETG_VM_MODE_HITL_CORE_IFX_NAME", "ens18")
@@ -169,6 +174,7 @@ def test_vm_mode_backend_defaults_leave_hitl_ifnames_blank_until_configured(monk
     assert hitl_defaults["interfaces"][0]["ipv4"] == ["10.254.200.3/24"]
     assert "proxmox_target" not in hitl_defaults["interfaces"][0]
     assert hitl_defaults["shared_core_ifx_ipv4"] == ["10.254.200.3/24"]
+    assert "participant_ui_url" not in hitl_defaults
 
 
 def test_vm_mode_backend_defaults_ignore_non_vm_hitl_interface_names(monkeypatch) -> None:

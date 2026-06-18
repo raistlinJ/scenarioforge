@@ -21,6 +21,32 @@
     const flowNodeFlagModalTitleEl = document.getElementById('flowNodeFlagModalTitle');
     const flowNodeFlagModalBodyEl = document.getElementById('flowNodeFlagModalBody');
     const flowAlertEl = document.getElementById('fpFlowValidityAlert');
+    const savedXmlWarningEl = document.getElementById('fpSavedXmlWarning');
+
+    function syncSavedXmlGroundTruthAlert() {
+      try {
+        if (!savedXmlWarningEl) return;
+        const helper = (window.top || window).coretgGetSavedXmlGroundTruthWarningState;
+        if (typeof helper !== 'function') {
+          savedXmlWarningEl.classList.add('d-none');
+          return;
+        }
+        const warningState = helper({
+          scenario: '{{ scenario or "" }}',
+          xmlPath: '{{ xml_path or "" }}',
+          allowStored: true,
+        });
+        if (warningState && warningState.active === true) {
+          savedXmlWarningEl.classList.remove('d-none');
+        } else {
+          savedXmlWarningEl.classList.add('d-none');
+        }
+      } catch (e) {
+        try { savedXmlWarningEl?.classList.add('d-none'); } catch (_e) { }
+      }
+    }
+
+    syncSavedXmlGroundTruthAlert();
 
     function toRoman(num) {
       const n = Number(num);
@@ -3346,6 +3372,14 @@
         // Always delegate to the Topology Execute flow so the UX and backend path are consistent.
         try {
           const scen = (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '{{ (scenario or "")|e }}').trim();
+          const proceedWithSavedXml = await ((window.top || window).coretgConfirmSavedXmlGroundTruth?.('Execute', {
+            scenario: scen,
+            xmlPath: '{{ xml_path or "" }}',
+            allowStored: true,
+          }) ?? true);
+          if (!proceedWithSavedXml) {
+            return;
+          }
           const baseUrl = '{{ url_for("index") }}';
           const url = baseUrl
             + '?auto_execute=1'

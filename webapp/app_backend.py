@@ -13627,8 +13627,6 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
     vmid = ''
     vm_name = ''
     vm_key = ''
-    participant_url = str(os.getenv('CORETG_VM_MODE_PARTICIPANT_URL') or 'http://participant-ui.example').strip()
-
     core_defaults = _normalize_core_config(
         {
             'host': core_host,
@@ -13695,7 +13693,6 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
         'core': core_defaults,
         'hitl': {
             'enabled': _env_bool_flag('CORETG_VM_MODE_HITL_ENABLED', True),
-            'participant_ui_url': participant_url,
             'participant_pool': 'same-pool',
             'interfaces': interfaces_defaults,
             'shared_core_ifx_ipv4': list(single_ifx_ipv4),
@@ -13745,6 +13742,13 @@ def _inject_template_user() -> dict:
 @app.context_processor
 def _inject_nav_participant_link() -> dict:
     try:
+        if _webui_runtime_mode() == 'vm':
+            return {
+                'nav_participant_url': '',
+                'nav_participant_scenario': '',
+                'nav_participant_enabled': False,
+            }
+
         # If the current page is scoped to a scenario, the navbar Participant UI link
         # should reflect THAT scenario only. If that scenario has no participant URL,
         # hide the nav item instead of falling back to some other scenario that does.
@@ -13880,6 +13884,7 @@ try:
     _participant_ui_routes.register(
         app,
         participant_ui_state_getter=lambda: _participant_ui_state(),
+        participant_ui_enabled=lambda: _webui_runtime_mode() != 'vm',
         normalize_scenario_label=lambda value: _normalize_scenario_label(value),
         normalize_participant_proxmox_url=lambda value: _normalize_participant_proxmox_url(value),
         load_run_history=lambda: _load_run_history(),
@@ -14889,6 +14894,7 @@ try:
         planner_persist_flow_plan=lambda **kwargs: _planner_persist_flow_plan(**kwargs),
         normalize_scenario_label=lambda value: _normalize_scenario_label(value),
         latest_xml_path_for_scenario=lambda scenario_name: _latest_xml_path_for_scenario(scenario_name),
+        resolve_preexecute_xml_path=lambda xml_path, scenario_name: _resolve_preexecute_xml_path(xml_path, scenario_name),
     )
 except Exception:
     try:
@@ -26411,6 +26417,22 @@ def _participant_ui_state() -> Dict[str, Any]:
         cached = getattr(g, '_participant_ui_state', _G_PARTICIPANT_STATE_SENTINEL)
         if cached is not _G_PARTICIPANT_STATE_SENTINEL:
             return cached
+    if _webui_runtime_mode() == 'vm':
+        state = {
+            'selected_norm': '',
+            'selected_label': '',
+            'selected_url': '',
+            'selected_nearest_gateway': '',
+            'listing': [],
+            'listing_heading': 'Participant UI',
+            'listing_empty_message': 'Participant UI is unavailable in VM mode.',
+            'listing_hint': '',
+            'restrict_to_assigned': False,
+            'has_assignments': False,
+        }
+        if has_request_context():
+            setattr(g, '_participant_ui_state', state)
+        return state
     user = _current_user()
     user_role = _normalize_role_value(user.get('role')) if user else ''
     scenario_names, scenario_paths, scenario_url_hints = _scenario_catalog_for_user(
@@ -26595,6 +26617,7 @@ try:
         default_ui_view_mode_for_role=lambda role: _default_ui_view_mode_for_role(role),
         is_participant_role=lambda role: _is_participant_role(role),
         ui_view_session_key=_UI_VIEW_SESSION_KEY,
+        participant_ui_enabled=lambda: _webui_runtime_mode() != 'vm',
     )
 except Exception:
     try:
@@ -32181,6 +32204,26 @@ def _latest_xml_path_for_scenario(scenario_norm: str) -> str | None:
             return None
     except Exception:
         return None
+
+
+def _resolve_preexecute_xml_path(xml_path: Any, scenario_name: Any) -> str:
+    """Prefer the latest saved scenario XML during preview/plan/execute flows."""
+    try:
+        scenario_norm = _normalize_scenario_label(scenario_name or '')
+    except Exception:
+        scenario_norm = str(scenario_name or '').strip().lower()
+    if scenario_norm:
+        try:
+            latest_xml = _existing_xml_path_or_none(_latest_xml_path_for_scenario(scenario_norm) or '')
+        except Exception:
+            latest_xml = None
+        if latest_xml:
+            return latest_xml
+    try:
+        resolved = _abs_path_or_original(xml_path)
+    except Exception:
+        resolved = str(xml_path or '').strip()
+    return str(resolved or '').strip()
 
 
 def _is_autosave_xml_path(path_value: str) -> bool:

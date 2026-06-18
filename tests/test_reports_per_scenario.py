@@ -174,6 +174,50 @@ def test_reports_data_backfills_preview_plan_from_flow_validation_signal(tmp_pat
     assert entry.get('preview_plan_path') == str(xml_path)
 
 
+def test_reports_data_returns_not_modified_when_cache_key_matches(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    from webapp import app_backend as backend
+
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+    run_history_path = outdir / 'run_history.json'
+    xml_path = outdir / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Alpha"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    run_history_path.write_text(
+        json.dumps([
+            {
+                'timestamp': '2025-12-26T00:00:00Z',
+                'mode': 'async',
+                'scenario_name': 'Alpha',
+                'scenario_names': ['Alpha'],
+                'xml_path': str(xml_path),
+                'scenario_xml_path': str(xml_path),
+                'preview_plan_path': '',
+                'returncode': 0,
+            }
+        ]),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    monkeypatch.setattr(backend, 'RUN_HISTORY_PATH', str(run_history_path))
+
+    first = client.get('/reports_data')
+    assert first.status_code == 200
+    first_data = first.get_json() or {}
+    cache_key = str(first_data.get('data_cache_key') or '')
+    assert cache_key
+
+    second = client.get('/reports_data', query_string={'if_data_cache_key': cache_key})
+    assert second.status_code == 200
+    second_data = second.get_json() or {}
+    assert second_data.get('ok') is True
+    assert second_data.get('not_modified') is True
+    assert second_data.get('data_cache_key') == cache_key
+
+
 def test_reports_page_completed_run_without_report_has_downloads_and_no_summary_spinner(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)
