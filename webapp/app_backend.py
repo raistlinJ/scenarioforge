@@ -10658,7 +10658,7 @@ except ModuleNotFoundError as exc:
         "Run webapp commands from the repository root so the in-repo package is importable."
     ) from exc
 
-from scenarioforge.utils.hitl import preferred_hitl_link_ips, predict_hitl_link_ips, predict_hitl_link_ips_unique
+from scenarioforge.utils.hitl import collect_hitl_preview_ip_reservations, preferred_hitl_link_ips, predict_hitl_link_ips, predict_hitl_link_ips_unique
 
 # Proactively ensure the in-repo planning.full_preview module is available even if an
 # older site-packages installation of scenarioforge (without that module) is first on sys.path.
@@ -17413,6 +17413,36 @@ def _attach_latest_flow_into_full_preview(full_prev: dict, scenario: Optional[st
             except Exception:
                 return None
 
+        return flow_meta
+    except Exception:
+        return None
+
+
+def _flow_state_from_current_xml_for_preview(
+    full_prev: dict,
+    xml_path: str | None,
+    scenario: Optional[str],
+    *,
+    repair: bool = True,
+) -> dict | None:
+    """Load flow metadata only from the current scenario XML used for preview.
+
+    Preview and persist paths already know the concrete XML they are operating on.
+    Avoid scanning older scenario XMLs when that current document has no FlowState,
+    since the fallback adds latency and can attach stale flow metadata.
+    """
+
+    try:
+        if not isinstance(full_prev, dict) or not xml_path:
+            return None
+        flow_meta = _flow_state_from_xml_path(xml_path, scenario)
+        if not isinstance(flow_meta, dict):
+            return None
+        if repair:
+            repaired = _flow_repair_saved_flow_for_preview(full_prev, flow_meta)
+            if not isinstance(repaired, dict):
+                return None
+            flow_meta = repaired
         return flow_meta
     except Exception:
         return None
@@ -34792,12 +34822,6 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         except Exception:
             seed = None
 
-    full_prev = _build_full_preview_from_plan(plan, seed, [], [])
-    try:
-        flow_meta_from_plan = _attach_latest_flow_into_full_preview(full_prev, scenario)
-    except Exception:
-        flow_meta_from_plan = None
-
     try:
         xml_basename = os.path.basename(xml_path)
     except Exception:
@@ -34818,6 +34842,11 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         hitl_config = _sanitize_hitl_config(raw_hitl_config, scenario_name, xml_basename)
     except Exception:
         hitl_config = {"enabled": False, "interfaces": []}
+    full_prev = _build_full_preview_from_plan(plan, seed, [], [], hitl_config=hitl_config)
+    try:
+        flow_meta_from_plan = _flow_state_from_current_xml_for_preview(full_prev, xml_path, scenario_name or scenario)
+    except Exception:
+        flow_meta_from_plan = None
     try:
         _apply_hitl_config_to_full_preview(full_prev, hitl_config, scenario_name)
     except Exception:
@@ -35066,7 +35095,19 @@ def _summary_from_xml_plan(xml_path: str, scenario: str | None, seed: int | None
             effective_seed = int(plan.get('seed')) if plan.get('seed') is not None else _derive_default_seed(xml_hash)
         except Exception:
             effective_seed = None
-    full_prev = _build_full_preview_from_plan(plan, effective_seed, [], [])
+    try:
+        xml_basename = os.path.basename(xml_path)
+    except Exception:
+        xml_basename = None
+    try:
+        raw_hitl_config = parse_hitl_info(xml_path, scenario)
+    except Exception:
+        raw_hitl_config = {"enabled": False, "interfaces": []}
+    try:
+        hitl_config = _sanitize_hitl_config(raw_hitl_config, scenario, xml_basename)
+    except Exception:
+        hitl_config = {"enabled": False, "interfaces": []}
+    full_prev = _build_full_preview_from_plan(plan, effective_seed, [], [], hitl_config=hitl_config)
     summary = _plan_summary_from_full_preview(full_prev)
     return summary, effective_seed
 
@@ -35238,7 +35279,7 @@ def _attach_display_artifacts(full_preview: dict) -> dict:
     return artifacts
 
 
-def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s_hosts_max_list=None):
+def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s_hosts_max_list=None, hitl_config: dict | None = None):
     """Single source of truth to invoke build_full_preview using a compute_full_plan result."""
     try:
         from scenarioforge.planning.full_preview import build_full_preview  # lazy import
@@ -35266,6 +35307,10 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
     ip4_prefix = plan.get('ip4_prefix') or plan.get('ip_prefix') or '10.0.0.0/16'
     ip_mode = plan.get('ip_mode') or None
     ip_region = plan.get('ip_region') or None
+    try:
+        hitl_reservations = collect_hitl_preview_ip_reservations(hitl_config or {})
+    except Exception:
+        hitl_reservations = {'ip_addresses': set(), 'network_cidrs': set()}
     fp = build_full_preview(
         role_counts=role_counts,
         routers_planned=prelim_router_count,
@@ -35285,6 +35330,8 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
         r2s_hosts_min_list=r2s_hosts_min_list,
         r2s_hosts_max_list=r2s_hosts_max_list,
         base_scenario=plan.get('base_scenario'),
+        reserved_ipv4_addrs=sorted(hitl_reservations.get('ip_addresses') or []),
+        reserved_ipv4_networks=sorted(hitl_reservations.get('network_cidrs') or []),
     )
     fp['router_plan'] = plan.get('breakdowns', {}).get('router', {})
     try:

@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 _HITL_ROUTER_PEER_IFACE_RE = re.compile(r"^hitl-router-(?P<ifname>.+)-hitl\d+$", re.IGNORECASE)
 _IFNAME_ALLOWED_RE = re.compile(r"^[a-zA-Z0-9_.:-]{1,15}$")
+_HITL_ROUTER_ATTACHMENTS = {"existing_router", "new_router"}
+_HITL_ATTACHMENT_ALLOWED = _HITL_ROUTER_ATTACHMENTS.union({"existing_switch", "new_switch"})
 _PROXMOX_INTERFACE_ID_RE = re.compile(r"^net\d+$", re.IGNORECASE)
 
 
@@ -471,6 +473,112 @@ def _compute_hitl_link_ips_unique(
 
     # Fall back to the base allocation even if it collides.
     return _compute_hitl_link_ips(scenario_key, iface_name, base_ordinal, prefix_len=prefix_len)
+
+
+def _normalize_hitl_attachment(value: Any) -> str:
+    if value is None:
+        return "existing_router"
+    try:
+        normalized = str(value).strip().lower().replace('-', '_').replace(' ', '_')
+    except Exception:
+        return "existing_router"
+    if normalized in _HITL_ATTACHMENT_ALLOWED:
+        return normalized
+    return "existing_router"
+
+
+def _iface_link_ip_info_for_preview(
+    iface_entry: Dict[str, Any],
+    scenario_key: str,
+    ordinal: int,
+    used_network_cidrs: Optional[Set[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(iface_entry, dict):
+        return None
+
+    existing_router_ip4 = str(iface_entry.get("existing_router_ip4") or "").strip()
+    new_router_ip4 = str(iface_entry.get("new_router_ip4") or "").strip()
+    rj45_ip4 = str(iface_entry.get("rj45_ip4") or "").strip()
+    network_cidr = str(
+        iface_entry.get("link_network_cidr")
+        or iface_entry.get("network_cidr")
+        or iface_entry.get("link_network")
+        or iface_entry.get("network")
+        or ""
+    ).strip()
+    prefix_len = iface_entry.get("prefix_len")
+    if network_cidr or existing_router_ip4 or new_router_ip4 or rj45_ip4:
+        try:
+            if network_cidr:
+                network = ipaddress.ip_network(network_cidr, strict=False)
+            else:
+                base_ip = rj45_ip4 or existing_router_ip4 or new_router_ip4
+                if not base_ip:
+                    return None
+                if prefix_len in (None, ""):
+                    prefix_len = DEFAULT_IPV4_PREFIXLEN
+                network = ipaddress.ip_network(f"{base_ip}/{int(prefix_len)}", strict=False)
+        except Exception:
+            return None
+        info = {
+            "network": str(network.network_address),
+            "network_cidr": f"{network.network_address}/{network.prefixlen}",
+            "prefix_len": int(network.prefixlen),
+            "netmask": str(network.netmask),
+            "broadcast_ip4": str(network.broadcast_address),
+            "existing_router_ip4": existing_router_ip4 or None,
+            "new_router_ip4": new_router_ip4 or None,
+            "rj45_ip4": rj45_ip4 or None,
+        }
+        if used_network_cidrs is not None:
+            used_network_cidrs.add(str(info["network_cidr"]))
+        return info
+
+    attachment = _normalize_hitl_attachment(iface_entry.get("attachment"))
+    if attachment not in _HITL_ROUTER_ATTACHMENTS:
+        return None
+    info = preferred_hitl_link_ips(iface_entry, used_network_cidrs)
+    if info is not None:
+        return info
+    iface_name = str(iface_entry.get("name") or ordinal).strip() or str(ordinal)
+    return _compute_hitl_link_ips_unique(
+        scenario_key,
+        iface_name,
+        ordinal,
+        used_network_cidrs if used_network_cidrs is not None else set(),
+    )
+
+
+def collect_hitl_preview_ip_reservations(hitl_config: Dict[str, Any]) -> Dict[str, Set[str]]:
+    """Collect HITL IPs and subnets that preview allocation must avoid."""
+
+    reservations: Dict[str, Set[str]] = {
+        "ip_addresses": set(),
+        "network_cidrs": set(),
+    }
+    if not isinstance(hitl_config, dict):
+        return reservations
+
+    interfaces = hitl_config.get("interfaces")
+    if not isinstance(interfaces, list) or not interfaces:
+        return reservations
+
+    scenario_key = str(hitl_config.get("scenario_key") or hitl_config.get("scenario_name") or "__default__")
+    used_network_cidrs: Set[str] = set()
+    for ordinal, iface_entry in enumerate(interfaces):
+        if not isinstance(iface_entry, dict):
+            continue
+        info = _iface_link_ip_info_for_preview(iface_entry, scenario_key, ordinal, used_network_cidrs)
+        if not info:
+            continue
+        network_cidr = str(info.get("network_cidr") or "").strip()
+        if network_cidr:
+            reservations["network_cidrs"].add(network_cidr)
+        for key in ("existing_router_ip4", "new_router_ip4", "rj45_ip4"):
+            value = str(info.get(key) or "").strip()
+            if value:
+                reservations["ip_addresses"].add(value)
+    return reservations
 
 
 def preferred_hitl_link_ips(

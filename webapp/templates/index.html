@@ -7614,12 +7614,14 @@
                 } catch (e) { }
                 try {
                     const activeScenario = state?.scenarios?.[activeIdx];
+                    const currentPreviewSignature = buildXmlPreviewSignature();
                     if (activeScenario && typeof activeScenario === 'object') {
                         activeScenario.plan_preview = {
                             full_preview: previewState.fullPreview,
                             plan: data.plan || null,
                             breakdowns: data.breakdowns || null,
                             flow_meta: data.flow_meta || null,
+                            input_signature: currentPreviewSignature,
                             saved_at: new Date().toISOString(),
                         };
                     }
@@ -9234,6 +9236,17 @@
                     persistEditorState();
                 };
                 const persistFlowPlanAfterSave = async () => {
+                    const hasMeaningfulFlowState = (flowState) => {
+                        if (!flowState || typeof flowState !== 'object') return false;
+                        return Object.keys(flowState).some((key) => {
+                            const value = flowState[key];
+                            if (value === null || value === undefined) return false;
+                            if (typeof value === 'string') return value.trim().length > 0;
+                            if (Array.isArray(value)) return value.length > 0;
+                            if (typeof value === 'object') return Object.keys(value).length > 0;
+                            return true;
+                        });
+                    };
                     try {
                         const rp = String(state?.result_path || '').trim();
                 const clearSavedXmlState = () => {
@@ -9261,6 +9274,24 @@
                         const activeScenario = state?.scenarios?.[activeIdx];
                         const scenarioName = (activeScenario && activeScenario.name) ? String(activeScenario.name).trim() : '';
                         if (!scenarioName) return;
+                        const flowState = activeScenario && typeof activeScenario === 'object'
+                            ? (activeScenario.flow_state || activeScenario.flowState || null)
+                            : null;
+                        const planPreview = activeScenario && typeof activeScenario === 'object'
+                            ? _extractPlanPreviewPayload(activeScenario.plan_preview || activeScenario.planPreview || null)
+                            : null;
+                        const currentPreviewSignature = buildXmlPreviewSignature();
+                        const matchingCurrentPreview = !!(
+                            planPreview
+                            && planPreview.full_preview
+                            && typeof planPreview.full_preview === 'object'
+                            && activeScenario
+                            && activeScenario.plan_preview
+                            && activeScenario.plan_preview.input_signature
+                            && currentPreviewSignature
+                            && activeScenario.plan_preview.input_signature === currentPreviewSignature
+                        );
+                        if (!hasMeaningfulFlowState(flowState) && matchingCurrentPreview) return;
 
                         const payload = { xml_path: rp, scenario: scenarioName };
                         if (Number.isInteger(activeScenarioSeedForSave) && activeScenarioSeedForSave > 0) {
@@ -20571,9 +20602,11 @@
         return lines.join('\n');
     }
 
-    function showExecuteSummaryModal(success) {
+    function showExecuteSummaryModal(success, runId = null) {
         ensureExecuteSummaryElements();
+        const summaryRunId = runId || getLatestRunIdForSummary();
         try { dockLog(`[summary] showExecuteSummaryModal(${success ? 'success' : 'failure'})`, 'INFO'); } catch (e) { }
+        try { closeRunProgress(); } catch (e) { }
         renderExecuteSummary(!!success);
         if (executeSummaryModalEl && window.bootstrap) {
             try {
@@ -20583,13 +20616,13 @@
                 bootstrap.Modal.getOrCreateInstance(executeSummaryModalEl).show();
             } catch (e) { }
         }
-        try { refreshValidationSummaryFromRunStatus(); } catch (e) { }
+        try { refreshValidationSummaryFromRunStatus(summaryRunId); } catch (e) { }
         try {
             let pollCount = 0;
             const pollMax = 10;
             const pollTimer = setInterval(async () => {
                 pollCount += 1;
-                await refreshValidationSummaryFromRunStatus();
+                await refreshValidationSummaryFromRunStatus(summaryRunId);
                 const summary = executeProgressState?.validationSummary || {};
                 const dockerCount = Array.isArray(summary.docker_nodes) ? summary.docker_nodes.length : 0;
                 const actualCount = Array.isArray(summary.actual_nodes_detail) ? summary.actual_nodes_detail.length : 0;
@@ -21491,11 +21524,12 @@
         // Re-enable connection & advanced controls only after run completes.
         try { if (typeof setExecuteDialogControlsEnabled === 'function') setExecuteDialogControlsEnabled(true); } catch (e) { }
         try {
-            refreshValidationSummaryFromRunStatus().finally(() => {
-                try { showExecuteSummaryModal(success); } catch (e) { }
-            });
+            if (!executeProgressState.summaryShown) {
+                executeProgressState.summaryShown = true;
+                showExecuteSummaryModal(success, executeProgressState.runId);
+            }
         } catch (e) {
-            try { showExecuteSummaryModal(success); } catch (err) { }
+            try { showExecuteSummaryModal(success, executeProgressState.runId); } catch (err) { }
         }
     }
 
@@ -24675,13 +24709,9 @@
                     executeProgressState.summaryShown = true;
                     if (data.returncode === 0) {
                         queueExecuteSummaryRedirect("{{ url_for('reports_page') }}", 500);
-                        refreshValidationSummaryFromRunStatus(runId).finally(() => {
-                            showExecuteSummaryModal(true);
-                        });
+                        showExecuteSummaryModal(true, runId);
                     } else {
-                        refreshValidationSummaryFromRunStatus(runId).finally(() => {
-                            showExecuteSummaryModal(false);
-                        });
+                        showExecuteSummaryModal(false, runId);
                     }
                 }
             }
@@ -26139,13 +26169,9 @@
                                 executeProgressState.summaryShown = true;
                                 if (runSucceeded) {
                                     queueExecuteSummaryRedirect("{{ url_for('reports_page') }}", 500);
-                                    refreshValidationSummaryFromRunStatus(run_id).finally(() => {
-                                        showExecuteSummaryModal(true);
-                                    });
+                                    showExecuteSummaryModal(true, run_id);
                                 } else {
-                                    refreshValidationSummaryFromRunStatus(run_id).finally(() => {
-                                        showExecuteSummaryModal(false);
-                                    });
+                                    showExecuteSummaryModal(false, run_id);
                                 }
                             }
                         } catch (e) { }

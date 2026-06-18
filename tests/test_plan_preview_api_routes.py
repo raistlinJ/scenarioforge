@@ -159,3 +159,32 @@ def test_preview_full_route_limits_inline_builder_payload_to_requested_scenario(
     assert resp.status_code == 200
     assert resp.get_json()['ok'] is True
     assert captured['names'] == ['Beta']
+
+
+def test_preview_full_route_skips_latest_flow_lookup_when_current_xml_has_no_flow_state():
+    app = Flask(__name__)
+    plan_preview_api.register(
+        app,
+        backend_module=type(
+            'BackendModule',
+            (),
+            {
+                '_load_preview_payload_from_path': staticmethod(
+                    lambda xml_path, scenario=None: {
+                        'full_preview': {'seed': 13, 'hosts': [{'node_id': 1}]},
+                        'metadata': {'seed': 13},
+                    }
+                ),
+                '_flow_state_from_xml_path': staticmethod(lambda xml_path, scenario=None: None),
+            },
+        )(),
+    )
+
+    client = app.test_client()
+    resp = client.post('/api/plan/preview_full', json={'xml_path': __file__, 'scenario': 'Demo'})
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload['ok'] is True
+    assert payload['full_preview'] == {'seed': 13, 'hosts': [{'node_id': 1}]}
+    assert payload['flow_meta'] == {}
