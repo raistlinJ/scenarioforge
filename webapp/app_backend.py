@@ -30702,6 +30702,7 @@ def main():
         targets = []
         last_err = ''
         project = f"{node_name}conf" if node_name else 'coretg'
+        fallback_targets = []
         for _ in range(6):
             names, err = _docker_names()
             last_err = err or last_err
@@ -30710,9 +30711,11 @@ def main():
                 break
             ids = _compose_container_ids(project, yml)
             if ids:
-                targets = list(ids)
-                break
+                fallback_targets = list(ids)
             time.sleep(2)
+
+        if not targets and fallback_targets:
+            targets = list(fallback_targets)
 
         if not targets:
             items.append({'node': node_name, 'compose': yml, 'src': src, 'dest': dest, 'ok': False, 'error': 'container not found', 'docker_error': last_err})
