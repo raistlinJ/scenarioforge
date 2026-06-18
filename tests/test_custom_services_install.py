@@ -305,7 +305,7 @@ def test_required_builtin_core_services_for_xml_input_uses_selected_scenario(tmp
 
 
 def test_required_builtin_core_services_for_xml_input_expands_random_service_from_session_xml():
-        session_xml = """
+    session_xml = """
 <Scenarios>
     <Scenario name="Scenario Random">
         <ScenarioEditor>
@@ -317,19 +317,19 @@ def test_required_builtin_core_services_for_xml_input_expands_random_service_fro
 </Scenarios>
 """.strip()
 
-        required = backend._required_builtin_core_services_for_xml_input(
-                None,
-                session_xml,
-                scenario_name="Scenario Random",
-        )
+    required = backend._required_builtin_core_services_for_xml_input(
+        None,
+        session_xml,
+        scenario_name="Scenario Random",
+    )
 
-        assert required == {"SSH", "HTTP", "DHCPClient"}
+    assert required == {"SSH", "HTTP", "DHCPClient"}
 
 
 def test_required_builtin_core_services_for_xml_input_ignores_zero_density_and_factor(tmp_path):
-        xml_path = tmp_path / "scenario.xml"
-        xml_path.write_text(
-                """
+    xml_path = tmp_path / "scenario.xml"
+    xml_path.write_text(
+        """
 <Scenarios>
     <Scenario name="Scenario Zero">
         <ScenarioEditor>
@@ -341,13 +341,13 @@ def test_required_builtin_core_services_for_xml_input_ignores_zero_density_and_f
     </Scenario>
 </Scenarios>
 """.strip(),
-                encoding="utf-8",
-        )
+        encoding="utf-8",
+    )
 
-        required = backend._required_builtin_core_services_for_xml_input(
-                str(xml_path),
-                None,
-                scenario_name="Scenario Zero",
-        )
+    required = backend._required_builtin_core_services_for_xml_input(
+        str(xml_path),
+        None,
+        scenario_name="Scenario Zero",
+    )
 
-        assert required == set()
+    assert required == set()
