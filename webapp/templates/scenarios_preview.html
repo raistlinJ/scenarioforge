@@ -88,10 +88,18 @@
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-body d-flex align-items-center gap-3">
-        <div class="spinner-border" role="status" aria-label="Loading"></div>
-        <div>
-          <div class="fw-semibold">Loading preview…</div>
-          <div class="small text-muted">Rendering preview page.</div>
+        <div class="spinner-border flex-shrink-0" role="status" aria-label="Loading"></div>
+        <div class="flex-grow-1">
+          <div class="d-flex align-items-center justify-content-between gap-3">
+            <div class="fw-semibold">Loading preview…</div>
+            <div class="small fw-semibold text-body-secondary" id="scenariosPreviewLoadingPercent">0%</div>
+          </div>
+          <div class="small text-muted" id="scenariosPreviewLoadingDetail">Rendering preview page.</div>
+          <div class="progress mt-3" style="height: .65rem;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" id="scenariosPreviewLoadingBar"
+              role="progressbar" style="width: 0%;" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+              aria-valuetext="0%"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -111,8 +119,72 @@
 
 
     let previewLoadingHidden = false;
+    let previewLoadingTimer = null;
+    let previewLoadingProgress = 0;
+    let previewLoadingDetail = 'Rendering preview page.';
+    let previewLoadingStartedAt = 0;
+
+    function stopPreviewLoadingProgress() {
+      if (!previewLoadingTimer) return;
+      try { clearInterval(previewLoadingTimer); } catch (e) { }
+      previewLoadingTimer = null;
+    }
+
+    function setPreviewLoadingProgress(percent, detail) {
+      try {
+        const next = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+        previewLoadingProgress = next;
+        if (typeof detail === 'string' && detail.trim()) {
+          previewLoadingDetail = detail.trim();
+        }
+        const percentEl = document.getElementById('scenariosPreviewLoadingPercent');
+        if (percentEl) percentEl.textContent = next + '%';
+        const detailEl = document.getElementById('scenariosPreviewLoadingDetail');
+        if (detailEl) detailEl.textContent = previewLoadingDetail || 'Rendering preview page.';
+        const barEl = document.getElementById('scenariosPreviewLoadingBar');
+        if (barEl) {
+          barEl.style.width = next + '%';
+          barEl.setAttribute('aria-valuenow', String(next));
+          barEl.setAttribute('aria-valuetext', next + '%');
+        }
+      } catch (e) { }
+    }
+
+    function startPreviewLoadingProgress(initialPercent, detail) {
+      stopPreviewLoadingProgress();
+      previewLoadingStartedAt = Date.now();
+      setPreviewLoadingProgress(initialPercent, detail);
+      previewLoadingTimer = setInterval(() => {
+        try {
+          const elapsed = Date.now() - previewLoadingStartedAt;
+          let target = 12;
+          if (elapsed < 1200) {
+            target = 12 + Math.round((elapsed / 1200) * 18);
+          } else if (elapsed < 4000) {
+            target = 30 + Math.round(((elapsed - 1200) / 2800) * 35);
+          } else if (elapsed < 12000) {
+            target = 65 + Math.round(((elapsed - 4000) / 8000) * 27);
+          } else {
+            target = 92;
+          }
+          if (target > previewLoadingProgress) {
+            setPreviewLoadingProgress(Math.min(92, target));
+          }
+        } catch (e) { }
+      }, 200);
+    }
+
+    function completePreviewLoading(reason, detail) {
+      stopPreviewLoadingProgress();
+      setPreviewLoadingProgress(100, detail || 'Preview ready.');
+      setTimeout(() => {
+        try { hideLoading(reason); } catch (e) { }
+      }, 120);
+    }
+
     function showLoading() {
       previewLoadingHidden = false;
+      startPreviewLoadingProgress(8, 'Preparing preview request…');
       try {
         const el = document.getElementById('scenariosPreviewLoadingModal');
         if (!el) return null;
@@ -149,6 +221,7 @@
     function hideLoading(reason) {
       if (previewLoadingHidden) return;
       previewLoadingHidden = true;
+      stopPreviewLoadingProgress();
       try {
         const el = document.getElementById('scenariosPreviewLoadingModal');
         if (!el) return;
@@ -185,7 +258,7 @@
           const data = ev && ev.data ? ev.data : null;
           if (data && data.type === 'full-preview-ready') {
             try { console.debug('[preview] message full-preview-ready'); } catch (e) { }
-            hideLoading('postMessage');
+            completePreviewLoading('postMessage', 'Preview ready.');
           }
         } catch (e) { }
       });
@@ -193,6 +266,7 @@
 
     async function loadPreview() {
       const startTs = Date.now();
+      const modal = showLoading();
       const params = new URLSearchParams(window.location.search || '');
       // Prefer server-validated hidden inputs over query params. If a stale/invalid
       // xml_path is present in the URL, the backend will intentionally clear it and
@@ -209,9 +283,11 @@
 
       if (inXml) inXml.value = xmlPath;
       if (inSc) inSc.value = scenario;
+      setPreviewLoadingProgress(12, 'Refreshing preview inputs…');
 
       if (scenario) {
         try {
+          setPreviewLoadingProgress(18, 'Refreshing saved scenario state…');
           if (typeof window.coretgRefreshScenarioStateFromXml === 'function') {
             const latestState = await window.coretgRefreshScenarioStateFromXml(scenario, { updateHidden: true });
             const latestPath = (latestState && latestState.xml_path) ? String(latestState.xml_path || '').trim() : '';
@@ -221,6 +297,7 @@
             }
           }
           if (!xmlPath) {
+            setPreviewLoadingProgress(24, 'Checking latest saved XML…');
             const latestResp = await fetch('/api/scenario/latest_xml?scenario=' + encodeURIComponent(scenario), { credentials: 'same-origin' });
             const latestData = await latestResp.json();
             if (latestResp.ok && latestData && latestData.ok && latestData.xml_path) {
@@ -243,6 +320,7 @@
           if (inSeed && seed !== null && seed !== undefined) inSeed.value = String(seed);
         }
       } catch (e) { }
+      setPreviewLoadingProgress(30, 'Preparing preview request…');
 
       // XML is the source of truth for preview. Ignore preview_plan paths that redirect.
       const useXmlPreview = !!xmlPath;
@@ -250,6 +328,7 @@
         if (frame) {
           frame.srcdoc = '<div style="font-family: system-ui; padding: 16px; color: #6c757d;">Preview requires a saved XML. Use Topology → Save XML first.</div>';
         }
+        hideLoading('missing-xml');
         return;
       }
 
@@ -262,13 +341,14 @@
         console.debug('[preview] submit', { xmlPath, scenario, action: form && form.action });
       } catch (e) { }
 
-      const modal = showLoading();
+      setPreviewLoadingProgress(38, 'Submitting preview request…');
       if (frame) {
         // Clear previous content for immediate feedback.
         try { frame.srcdoc = '<div style="font-family: system-ui; padding: 16px; color: #6c757d;">Loading preview…</div>'; } catch (e) { }
+        setPreviewLoadingProgress(50, 'Waiting for preview response…');
         frame.addEventListener('load', async () => {
           try { modal && modal.hide(); } catch (e) { }
-          try { hideLoading('iframe-load'); } catch (e) { }
+          try { completePreviewLoading('iframe-load', 'Preview ready.'); } catch (e) { }
           try {
             const doc = frame.contentDocument || frame.contentWindow?.document;
             const title = doc && doc.title ? doc.title : '(no title)';
@@ -289,7 +369,10 @@
           const rs = doc && doc.readyState ? doc.readyState : '';
           if (rs === 'interactive' || rs === 'complete') {
             clearInterval(pollTimer);
-            hideLoading('readyState-' + rs);
+            if (rs === 'interactive') {
+              setPreviewLoadingProgress(96, 'Rendering preview page…');
+            }
+            completePreviewLoading('readyState-' + rs, 'Preview ready.');
             try { console.debug('[preview] readyState', rs, 'ms', Date.now() - startTs); } catch (e) { }
           }
         } catch (e) { }
@@ -300,6 +383,7 @@
 
       // Fallback: auto-hide if the iframe load event never fires.
       setTimeout(() => {
+        try { setPreviewLoadingProgress(95, 'Taking longer than expected…'); } catch (e) { }
         try { hideLoading('timeout'); } catch (e) { }
       }, 20000);
 
