@@ -535,6 +535,17 @@ def test_remote_execute_generator_image_cleanup_uses_shell_command() -> None:
     assert 'coretg-gen-' in source
 
 
+def test_remote_execute_builtin_service_preflight_has_session_xml_input_defined() -> None:
+    import inspect
+
+    from webapp import app_backend as backend
+
+    source = inspect.getsource(backend._run_cli_background_task)
+
+    assert "session_xml_str = job_spec.get('session_xml_str')" in source
+    assert "_required_builtin_core_services_for_xml_input(\n            xml_path,\n            session_xml_str," in source
+
+
 def test_run_cli_async_hitl_rewrite_keeps_preview_plan_path_aligned(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 

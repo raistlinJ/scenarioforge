@@ -30379,6 +30379,21 @@ def _read_json(path):
         return json.load(f)
 
 
+def _compose_node_names(assign_dir):
+    out = []
+    try:
+        for name in sorted(os.listdir(assign_dir or '')):
+            text = str(name or '').strip()
+            if not text.startswith('docker-compose-') or not text.endswith('.yml'):
+                continue
+            node_name = text[len('docker-compose-'):-len('.yml')]
+            if node_name:
+                out.append(node_name)
+    except Exception:
+        return []
+    return out
+
+
 def _docker_names():
     p = _run_docker(['ps', '-a', '--format', '{{.Names}}'], timeout=20, capture=True)
     if getattr(p, 'returncode', 1) != 0:
@@ -30650,8 +30665,23 @@ def main():
         assignments = {}
 
     assign_dir = os.path.dirname(assignments_path)
-    items = []
+    candidate_nodes = []
+    seen_nodes = set()
     for node_name in sorted(assignments.keys()):
+        name = str(node_name or '').strip()
+        if not name or name in seen_nodes:
+            continue
+        seen_nodes.add(name)
+        candidate_nodes.append(name)
+    for node_name in _compose_node_names(assign_dir):
+        name = str(node_name or '').strip()
+        if not name or name in seen_nodes:
+            continue
+        seen_nodes.add(name)
+        candidate_nodes.append(name)
+
+    items = []
+    for node_name in candidate_nodes:
         assignment_entry = assignments.get(node_name) if isinstance(assignments, dict) else None
         yml = os.path.join(assign_dir, f'docker-compose-{node_name}.yml')
         if not os.path.exists(yml):
@@ -30849,7 +30879,15 @@ def main():
                         errs.append(out)
         items.append({'node': node_name, 'compose': yml, 'src': src, 'dest': dest, 'targets': targets, 'ok': bool(copied_any), 'errors': errs, 'commands': commands, 'command_outputs': command_outputs})
 
-    print(json.dumps({'ok': True, 'items': items, 'timestamp': int(time.time()), 'assignments_count': len(assignments), 'assignments_keys': sorted(assignments.keys())}))
+    print(json.dumps({
+        'ok': True,
+        'items': items,
+        'timestamp': int(time.time()),
+        'assignments_count': len(assignments),
+        'assignments_keys': sorted(assignments.keys()),
+        'candidate_count': len(candidate_nodes),
+        'candidate_keys': candidate_nodes,
+    }))
 
 
 if __name__ == '__main__':
@@ -31794,6 +31832,21 @@ def _build_execute_error_logs(
     now = _local_timestamp_display()
     has_issue = not bool(validation.get('ok'))
 
+    def _filter_string_details_for_items(details: Any, item_values: Any) -> list[Any]:
+        if not isinstance(details, list) or not details:
+            return []
+        if not isinstance(item_values, list) or not item_values:
+            return []
+        item_names = [str(item or '').strip() for item in item_values if str(item or '').strip()]
+        if not item_names:
+            return []
+        filtered: list[Any] = []
+        for detail in details:
+            text = str(detail or '').strip()
+            if any(text.startswith(f"{name}:") for name in item_names):
+                filtered.append(detail)
+        return filtered
+
     for key, label, fname in categories:
         items = validation.get(key)
         if not isinstance(items, list) or not items:
@@ -31815,7 +31868,7 @@ def _build_execute_error_logs(
         if key == 'injects_missing':
             details = validation.get('injects_detail')
             if isinstance(details, list) and details:
-                payload['details'] = details
+                payload['details'] = _filter_string_details_for_items(details, items) or details
         if key in {'generator_outputs_missing', 'generator_injects_missing'}:
             details = validation.get('generator_validation_detail')
             if isinstance(details, list) and details:
@@ -37396,6 +37449,11 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
                     meta,
                     f"{log_prefix}docker.copy_flow_artifacts({stage}) assignments={payload.get('assignments_count')} keys={payload.get('assignments_keys')}",
                 )
+            if isinstance(payload, dict) and 'candidate_count' in payload:
+                _append_async_run_log_line(
+                    meta,
+                    f"{log_prefix}docker.copy_flow_artifacts({stage}) candidates={payload.get('candidate_count')} keys={payload.get('candidate_keys')}",
+                )
         except Exception:
             pass
         items = payload.get('items') if isinstance(payload, dict) else None
@@ -37915,6 +37973,7 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
     run_id_local = run_id
     seed = job_spec.get('seed')
     xml_path = job_spec.get('xml_path')
+    session_xml_str = job_spec.get('session_xml_str')
     preview_plan_path = job_spec.get('preview_plan_path')
     core_override = job_spec.get('core_override')
     scenario_core_override = job_spec.get('scenario_core_override')
