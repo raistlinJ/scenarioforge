@@ -8259,12 +8259,13 @@ def _install_custom_services_to_core_vm(
 
         # Discoverable scan across core.services.
         all_names = set()
-        for m in pkgutil.iter_modules(core.services.__path__):
+        prefix = core.services.__name__ + '.'
+        for m in pkgutil.walk_packages(core.services.__path__, prefix):
             name = getattr(m, 'name', None)
             if not name:
                 continue
             try:
-                mod = importlib.import_module(f"core.services.{{name}}")
+                mod = importlib.import_module(name)
             except Exception:
                 continue
             for svc_name in service_names_from_module(mod):
@@ -8408,12 +8409,13 @@ def _remote_core_service_names(
             return dirs
 
         package_names = set()
-        for m in pkgutil.iter_modules(core.services.__path__):
+        prefix = core.services.__name__ + '.'
+        for m in pkgutil.walk_packages(core.services.__path__, prefix):
             n = getattr(m, 'name', None)
             if not n:
                 continue
             try:
-                mod = importlib.import_module(f"core.services.{{n}}")
+                mod = importlib.import_module(n)
             except Exception:
                 continue
             package_names.update(service_names_from_module(mod))
