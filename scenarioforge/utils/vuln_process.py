@@ -2676,7 +2676,7 @@ def _split_inject_spec(raw: str) -> tuple[str, str]:
 	text = str(raw or '').strip()
 	if not text:
 		return '', ''
-	for sep in ('->', '=>'):
+	for sep in ('->', '=>', ':'):
 		if sep in text:
 			left, right = text.split(sep, 1)
 			return left.strip(), right.strip()
@@ -3129,18 +3129,15 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 				else:
 					svc['depends_on'] = {copy_service_name: {'condition': 'service_completed_successfully'}}
 			else:
-				if isinstance(dep, list):
-					dep = [x for x in dep if str(x) != copy_service_name]
-					if dep:
-						svc['depends_on'] = dep
-					else:
-						svc.pop('depends_on', None)
-				elif isinstance(dep, dict):
-					dep.pop(copy_service_name, None)
-					if dep:
-						svc['depends_on'] = dep
-					else:
-						svc.pop('depends_on', None)
+				if isinstance(dep, dict):
+					dep.setdefault(copy_service_name, {'condition': 'service_started'})
+					svc['depends_on'] = dep
+				elif isinstance(dep, list):
+					if copy_service_name not in dep:
+						dep.append(copy_service_name)
+					svc['depends_on'] = dep
+				else:
+					svc['depends_on'] = [copy_service_name]
 	except Exception:
 		pass
 
