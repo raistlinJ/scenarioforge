@@ -78,6 +78,28 @@ _PREPARED_DOCKER_NODE_COMPOSES: Set[str] = set()
 _PREFLIGHTED_DOCKER_NODE_COMPOSES: Set[str] = set()
 
 
+def _docker_node_compose_token(node_name: str) -> str:
+    raw = str(node_name or '').strip()
+    if not raw:
+        return 'node'
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in raw)
+    safe = safe.strip('-.')
+    return safe or 'node'
+
+
+def _docker_node_legacy_compose_path(node_name: str, out_base: str = '/tmp/vulns') -> str:
+    return os.path.join(out_base, f"docker-compose-{node_name}.yml")
+
+
+def _docker_node_compose_project_dir(node_name: str, out_base: str = '/tmp/vulns') -> str:
+    token = _docker_node_compose_token(node_name)
+    return os.path.join(out_base, '.compose-projects', token)
+
+
+def _docker_node_compose_path(node_name: str, out_base: str = '/tmp/vulns') -> str:
+    return os.path.join(_docker_node_compose_project_dir(node_name, out_base), 'docker-compose.yml')
+
+
 def _reset_docker_compose_prepare_caches(context: str = '') -> None:
     """Reset per-process docker compose prep/preflight caches.
 
@@ -920,10 +942,16 @@ def _resolve_compose_interpolations(text: str) -> str:
 
 
 def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str, str]]) -> None:
-    """Best-effort ensure /tmp/vulns/docker-compose-<node>.yml exists and is Mako-safe.
+    """Best-effort ensure a per-node compose project exists and is Mako-safe.
 
     CORE treats docker compose files as Mako templates. Unescaped `${...}` in compose YAML
     causes core-daemon startup to fail with NameError("Undefined").
+
+    We keep the legacy per-node file for diagnostics, but CORE itself must receive a compose
+    file actually named `docker-compose.yml`. Some CORE versions start the compose service with
+    `docker compose -f <file> up`, then resolve the runtime container later with bare
+    `docker compose ps -q <service>` from the node directory. If the compose file name is not
+    the default, that follow-up call fails with `no configuration file provided`.
 
     This is especially important because CORE starts Docker nodes immediately on add_node()
     (default start=True), and /tmp/vulns may contain stale files from earlier runs.
@@ -941,13 +969,17 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
             return
         out_base = "/tmp/vulns"
         os.makedirs(out_base, exist_ok=True)
-        out_path = os.path.join(out_base, f"docker-compose-{node_name}.yml")
+        legacy_out_path = _docker_node_legacy_compose_path(node_name, out_base)
+        project_dir = _docker_node_compose_project_dir(node_name, out_base)
+        out_path = _docker_node_compose_path(node_name, out_base)
+        os.makedirs(project_dir, exist_ok=True)
         # Remove any stale compose file so we don't accidentally reuse an older, unescaped version.
-        try:
-            if os.path.exists(out_path):
-                os.remove(out_path)
-        except Exception:
-            pass
+        for stale_path in (legacy_out_path, out_path):
+            try:
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+            except Exception:
+                pass
         rec_source = "provided"
         if rec is None:
             rec = _standard_docker_compose_record()
@@ -973,7 +1005,7 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
         # Ensure downstream helpers know the intended per-node output path.
         try:
             if isinstance(rec, dict):
-                rec['compose_path'] = out_path
+                rec['compose_path'] = legacy_out_path
         except Exception:
             pass
         # Pass scenario tag through so vuln wrapper images can be scoped per run/scenario.
@@ -1000,8 +1032,8 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
         # This catches cases where upstream generation fails, or where compose_path points
         # to a source file that couldn't be parsed/rewritten.
         try:
-            if os.path.exists(out_path):
-                with open(out_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            if os.path.exists(legacy_out_path):
+                with open(legacy_out_path, 'r', encoding='utf-8', errors='ignore') as fh:
                     txt = fh.read()
                 fixed = _resolve_compose_interpolations(txt)
                 # If any `${...}` survive, docker compose will likely fail; keep visible.
@@ -1011,12 +1043,20 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
                     except Exception:
                         pass
                 if fixed != txt:
-                    with open(out_path, 'w', encoding='utf-8') as fh:
+                    with open(legacy_out_path, 'w', encoding='utf-8') as fh:
                         fh.write(fixed)
                     try:
-                        logger.info("[vuln-node] compose sanitized for node=%s path=%s", node_name, out_path)
+                        logger.info("[vuln-node] compose sanitized for node=%s path=%s", node_name, legacy_out_path)
                     except Exception:
                         pass
+                with open(out_path, 'w', encoding='utf-8') as fh:
+                    fh.write(fixed)
+                try:
+                    if isinstance(rec, dict):
+                        rec['legacy_compose_path'] = legacy_out_path
+                        rec['compose_path'] = out_path
+                except Exception:
+                    pass
         except Exception:
             pass
         _PREPARED_DOCKER_NODE_COMPOSES.add(node_name)
@@ -1436,7 +1476,7 @@ def _docker_node_add_node_kwargs(node_name: str, rec: Optional[Dict[str, str]]) 
     n = str(node_name or '').strip()
     if not n:
         return {}
-    compose_path = f"/tmp/vulns/docker-compose-{n}.yml"
+    compose_path = _docker_node_compose_path(n)
     compose_name = _docker_compose_service_for_record(compose_path, rec)
     if not compose_name:
         compose_name = n
@@ -1924,7 +1964,7 @@ def _apply_docker_compose_meta(node, rec, session=None):
         # (e.g. `${UID:-1000}`), which causes NameError during Mako render unless we
         # sanitize/escape them. Our pipeline writes sanitized per-node compose files
         # to this fixed location.
-        default_per_node = f"/tmp/vulns/docker-compose-{n}.yml"
+        default_per_node = _docker_node_compose_path(n)
 
         compose_path = None
         source_compose_hint = None
