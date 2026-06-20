@@ -1156,6 +1156,140 @@ def _docker_traffic_service_enabled() -> bool:
     return str(val).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 
 
+def _node_is_docker_like(node_obj: object | None = None, node_type: object | None = None) -> bool:
+    try:
+        if _is_docker_node_type(node_type):
+            return True
+    except Exception:
+        pass
+    try:
+        if node_obj is not None and _is_docker_node_type(getattr(node_obj, 'type', None)):
+            return True
+    except Exception:
+        pass
+    try:
+        model = getattr(node_obj, 'model', None) if node_obj is not None else None
+        if isinstance(model, str) and model.strip().lower() == 'docker':
+            return True
+    except Exception:
+        pass
+    try:
+        type_text = str(node_type or '').strip().lower()
+        if type_text == 'docker' or type_text.endswith('.docker'):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _effective_host_role(role: object, node_type: object) -> str:
+    if _node_is_docker_like(node_type=node_type):
+        return 'Docker'
+    text = str(role or '').strip()
+    return text or 'Host'
+
+
+def _sanitize_services_for_node(
+    services: List[str],
+    *,
+    node_id: object,
+    node_obj: object | None = None,
+    node_type: object | None = None,
+    context: str = '',
+) -> List[str]:
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for raw in services or []:
+        if not raw:
+            continue
+        try:
+            name = str(raw).strip()
+        except Exception:
+            continue
+        if not name or name.lower() in ('auto', 'random'):
+            continue
+        if name in seen:
+            continue
+        ordered.append(name)
+        seen.add(name)
+
+    if not _node_is_docker_like(node_obj=node_obj, node_type=node_type):
+        return ordered
+
+    allowed: Set[str] = set()
+    route_service = _docker_default_route_service_name()
+    if _docker_default_route_enabled():
+        allowed.add('DefaultRoute')
+        allowed.add(route_service)
+        allowed.update(_docker_default_route_dependencies(route_service))
+    if _docker_traffic_service_enabled():
+        allowed.add('Traffic')
+
+    sanitized: List[str] = []
+    dropped: List[str] = []
+    for name in ordered:
+        normalized = route_service if name == 'DefaultRoute' else name
+        if normalized in allowed:
+            if normalized not in sanitized:
+                sanitized.append(normalized)
+        else:
+            dropped.append(name)
+
+    if dropped:
+        node_label = str(node_id or '').strip()
+        if not node_label and node_obj is not None:
+            try:
+                node_label = str(getattr(node_obj, 'id') or '').strip()
+            except Exception:
+                node_label = ''
+        if context:
+            logger.info(
+                '[%s] skipping unsupported CORE services on docker node %s: %s',
+                context,
+                node_label or '?',
+                ', '.join(sorted(dropped)),
+            )
+        else:
+            logger.info(
+                'Skipping unsupported CORE services on docker node %s: %s',
+                node_label or '?',
+                ', '.join(sorted(dropped)),
+            )
+
+    return sanitized
+
+
+def _ensure_services_with_policy(
+    session: object,
+    node_id: int,
+    services: List[str],
+    *,
+    node_obj: object | None = None,
+    context: str = '',
+) -> List[str]:
+    node_type = getattr(node_obj, 'type', None) if node_obj is not None else None
+    effective_services = _sanitize_services_for_node(
+        services,
+        node_id=node_id,
+        node_obj=node_obj,
+        node_type=node_type,
+        context=context,
+    )
+    applied: List[str] = []
+    for service_name in effective_services:
+        try:
+            if ensure_service(session, node_id, service_name, node_obj=node_obj):
+                applied.append(service_name)
+        except Exception as exc:
+            logger.debug('Failed to assign service %s to node %s: %s', service_name, node_id, exc)
+    if any(service_name in ROUTING_STACK_SERVICES for service_name in applied):
+        try:
+            ensure_service(session, node_id, 'zebra', node_obj=node_obj)
+        except Exception:
+            pass
+    return applied
+
+
 def _session_add_node(
     session: object,
     node_id: int,
@@ -2801,11 +2935,13 @@ def build_star_from_roles(core,
 
         _log_add_node_result(session, node, node_id, node_type, node_name, position=node_position)
 
+        effective_role = _effective_host_role(role, node_type)
+
         if node_type == NodeType.DEFAULT:
             host_ip, host_mask = mac_alloc.next_ip()
             host_mac = mac_alloc.next_mac()
             host_iface = Interface(id=0, name="eth0", ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
-            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=role))
+            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=effective_role))
             sw_iface = Interface(id=sw_ifid, name=f"sw{sw_ifid}", mac=mac_alloc.next_mac())
             sw_ifid += 1
             safe_add_link(session, node, switch, iface1=host_iface, iface2=sw_iface)
@@ -2825,7 +2961,7 @@ def build_star_from_roles(core,
                 host_ip, host_mask = mac_alloc.next_ip()
                 host_mac = mac_alloc.next_mac()
                 dev_iface = Interface(id=dev_ifid, name=dev_iface_name, ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
-                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=role))
+                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=effective_role))
             else:
                 dev_iface = Interface(id=dev_ifid, name=dev_iface_name)
             dev_next_ifid[node.id] = dev_ifid + 1
@@ -2849,55 +2985,18 @@ def build_star_from_roles(core,
     if created_docker:
         logger.info("Docker nodes created in star topology: %d", created_docker)
     if services:
-        service_assignments = distribute_services(node_infos, services)
-        for node_id, service_list in service_assignments.items():
-            for service_name in service_list:
-                assigned = False
-                try:
-                    if hasattr(session, "add_service"):
-                        session.add_service(node_id=node_id, service_name=service_name)
-                        assigned = True
-                except Exception:
-                    pass
-                if not assigned:
-                    try:
-                        if hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, service_name)
-                            except TypeError:
-                                node_obj_try = nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, service_name)
-                                else:
-                                    raise
-                            assigned = True
-                    except Exception:
-                        pass
-                if not assigned:
-                    node_obj = nodes_by_id.get(node_id)
-                    if node_obj is not None:
-                        try:
-                            if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
-                                node_obj.services.add(service_name)
-                                assigned = True
-                            elif hasattr(node_obj, "add_service"):
-                                node_obj.add_service(service_name)
-                                assigned = True
-                        except Exception:
-                            pass
-                if assigned and service_name in ROUTING_STACK_SERVICES:
-                    try:
-                        if hasattr(session, "add_service"):
-                            session.add_service(node_id=node_id, service_name="zebra")
-                        elif hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, "zebra")
-                            except TypeError:
-                                node_obj_try = nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, "zebra")
-                    except Exception:
-                        pass
+        planned_assignments = distribute_services(node_infos, services)
+        for node_id, service_list in planned_assignments.items():
+            node_obj = nodes_by_id.get(node_id)
+            assigned = _ensure_services_with_policy(
+                session,
+                node_id,
+                service_list,
+                node_obj=node_obj,
+                context='star',
+            )
+            if assigned:
+                service_assignments[node_id] = assigned
 
     # Final pass: ensure Docker nodes still have DefaultRoute after any other service operations.
     try:
@@ -3123,6 +3222,8 @@ def build_multi_switch_topology(core,
         nodes_by_id[node.id] = node
         next_id += 1
 
+        effective_role = _effective_host_role(role, node_type)
+
         if node_type == NodeType.DEFAULT:
             # Allocate a unique /24 LAN and assign a varied host IP (not always .2).
             lan = subnet_alloc.next_random_subnet(24)
@@ -3135,7 +3236,7 @@ def build_multi_switch_topology(core,
             sw_ifid[sw_node_id] += 1
             sw_if = Interface(id=sw_ifid[sw_node_id], name=f"sw{sw_node_id}-h{node.id}")
             safe_add_link(session, node, sw_node, iface1=host_if, iface2=sw_if)
-            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=role))
+            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=effective_role))
             try:
                 ensure_service(session, node.id, "DefaultRoute", node_obj=node)
             except Exception:
@@ -3155,7 +3256,7 @@ def build_multi_switch_topology(core,
                 dev_next_ifid[node.id] = dev_ifid + 1
                 dev_if = Interface(id=dev_ifid, name=f"eth{dev_ifid}", ip4=h_ip, ip4_mask=lan.prefixlen, mac=h_mac)
                 safe_add_link(session, node, sw_node, iface1=dev_if, iface2=sw_if)
-                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=role))
+                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=effective_role))
                 _ensure_default_route_for_docker(session, node)
             else:
                 safe_add_link(session, node, sw_node, iface2=sw_if)
@@ -3163,32 +3264,18 @@ def build_multi_switch_topology(core,
     if created_docker:
         logger.info("Docker nodes created in multi-switch topology: %d", created_docker)
     if services:
-        service_assignments = distribute_services(node_infos, services)
-        for node_id, svc_list in service_assignments.items():
-            for svc in svc_list:
-                try:
-                    if hasattr(session, "add_service"):
-                        session.add_service(node_id=node_id, service_name=svc)
-                    elif hasattr(session, "services") and hasattr(session.services, "add"):
-                        try:
-                            session.services.add(node_id, svc)
-                        except TypeError:
-                            node_obj_try = session.get_node(node_id)
-                            session.services.add(node_obj_try, svc)
-                except Exception:
-                    pass
-                if svc in ROUTING_STACK_SERVICES:
-                    try:
-                        if hasattr(session, "add_service"):
-                            session.add_service(node_id=node_id, service_name="zebra")
-                        elif hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, "zebra")
-                            except TypeError:
-                                node_obj_try = session.get_node(node_id)
-                                session.services.add(node_obj_try, "zebra")
-                    except Exception:
-                        pass
+        planned_assignments = distribute_services(node_infos, services)
+        for node_id, svc_list in planned_assignments.items():
+            node_obj = nodes_by_id.get(node_id)
+            assigned = _ensure_services_with_policy(
+                session,
+                node_id,
+                svc_list,
+                node_obj=node_obj,
+                context='multi-switch',
+            )
+            if assigned:
+                service_assignments[node_id] = assigned
 
     # Final pass: ensure Docker nodes still have DefaultRoute after any other service operations.
     try:
@@ -3661,7 +3748,7 @@ def _try_build_segmented_topology_from_preview(
 
         ip_hint = str(hdata.get('ip4') or "")
         if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
-            hosts_info.append(NodeInfo(node_id=hid, ip4=ip_hint, role=role))
+            hosts_info.append(NodeInfo(node_id=hid, ip4=ip_hint, role=_effective_host_role(role, node_type)))
 
     if docker_slot_plan:
         missing_slots = set(docker_slot_plan.keys()) - docker_slots_used
@@ -4070,15 +4157,13 @@ def _try_build_segmented_topology_from_preview(
         node = host_nodes_by_id.get(hid)
         if not node:
             continue
-        assigned: List[str] = []
-        for svc in svc_list or []:
-            if not svc:
-                continue
-            try:
-                ensure_service(session, hid, svc, node_obj=node)
-                assigned.append(svc)
-            except Exception as exc:
-                logger.debug("[preview] failed to assign service %s to host %s: %s", svc, hid, exc)
+        assigned = _ensure_services_with_policy(
+            session,
+            hid,
+            list(svc_list or []),
+            node_obj=node,
+            context='segmented-preview',
+        )
         if assigned:
             host_service_assignments[hid] = assigned
 
@@ -4892,7 +4977,7 @@ def build_segmented_topology(core,
             host_direct_link[host.id] = True
             logger.debug("Host %s <-> Router %s LAN /%s", host.id, router_node.id, lan_net.prefixlen)
             if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
-                hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=role))
+                hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=_effective_host_role(role, node_type)))
                 # Ensure default routing service on hosts
                 try:
                     ensure_service(session, host.id, "DefaultRoute", node_obj=host)
@@ -4997,7 +5082,7 @@ def build_segmented_topology(core,
                 host_router_map[host.id] = router_node.id
                 host_direct_link[host.id] = True
                 if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
-                    hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=role))
+                    hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=_effective_host_role(role, node_type)))
                     try:
                         ensure_service(session, host.id, "DefaultRoute", node_obj=host)
                     except Exception:
@@ -5710,53 +5795,18 @@ def build_segmented_topology(core,
 
     host_service_assignments: Dict[int, List[str]] = {}
     if services:
-        host_service_assignments = distribute_services(hosts, services)
-        for node_id, svc_list in host_service_assignments.items():
-            for svc in svc_list:
-                assigned = False
-                try:
-                    if hasattr(session, "add_service"):
-                        session.add_service(node_id=node_id, service_name=svc)
-                        assigned = True
-                except Exception:
-                    pass
-                if not assigned:
-                    try:
-                        if hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, svc)
-                            except TypeError:
-                                node_obj_try = host_nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, svc)
-                                    assigned = True
-                    except Exception:
-                        pass
-                if not assigned:
-                    node_obj = host_nodes_by_id.get(node_id)
-                    if node_obj is not None:
-                        try:
-                            if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
-                                node_obj.services.add(svc)
-                                assigned = True
-                            elif hasattr(node_obj, "add_service"):
-                                node_obj.add_service(svc)
-                                assigned = True
-                        except Exception:
-                            pass
-                if assigned and svc in ROUTING_STACK_SERVICES:
-                    try:
-                        if hasattr(session, "add_service"):
-                            session.add_service(node_id=node_id, service_name="zebra")
-                        elif hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, "zebra")
-                            except TypeError:
-                                node_obj_try = host_nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, "zebra")
-                    except Exception:
-                        pass
+        planned_assignments = distribute_services(hosts, services)
+        for node_id, svc_list in planned_assignments.items():
+            node_obj = host_nodes_by_id.get(node_id)
+            assigned = _ensure_services_with_policy(
+                session,
+                node_id,
+                svc_list,
+                node_obj=node_obj,
+                context='segmented',
+            )
+            if assigned:
+                host_service_assignments[node_id] = assigned
     # --- Post-build cleanup: remove any orphan switches (only connected to routers, no host endpoints) ---
     try:
         # Heuristic: a switch is orphan if (a) its model is 'switch'; (b) it has no directly connected DEFAULT or DOCKER hosts;

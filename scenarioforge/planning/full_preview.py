@@ -1133,7 +1133,15 @@ def build_full_preview(
     # (All pairs statistics already embedded by helper)
 
     # ---- Services & Vulnerabilities ----
-    service_assignments = _preview_services(services_plan, [h.node_id for h in host_nodes], rnd_seed)
+    service_assignments = _preview_services(
+        services_plan,
+        [
+            h.node_id
+            for h in host_nodes
+            if str(getattr(h, 'role', '') or '').strip().lower() != 'docker'
+        ],
+        rnd_seed,
+    )
     vuln_assignments: Dict[int, List[str]] = {}
     if vulnerabilities_plan:
         # Vulnerability-bearing slots are realized as Docker-role hosts.
