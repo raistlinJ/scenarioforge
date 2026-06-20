@@ -32,7 +32,12 @@ from .parsers.services import parse_services
 from .parsers.hitl import parse_hitl_info
 from .utils.segmentation import apply_preview_segmentation_rules
 from .utils.allocation import compute_role_counts
-from .builders.topology import build_star_from_roles, build_segmented_topology, build_multi_switch_topology
+from .builders.topology import (
+    _docker_node_compose_path,
+    build_star_from_roles,
+    build_segmented_topology,
+    build_multi_switch_topology,
+)
 from .utils.traffic import generate_traffic_scripts
 from .utils.report import write_report
 from .utils.vuln_process import (
@@ -2982,7 +2987,7 @@ def main():
                 # Keep detail at DEBUG to avoid noisy logs by default.
                 try:
                     for nm, rec in sorted(all_docker_nodes.items(), key=lambda x: str(x[0])):
-                        out_path = os.path.join('/tmp/vulns', f"docker-compose-{nm}.yml")
+                        out_path = _docker_node_compose_path(nm)
                         logging.debug(
                             "Docker node compose assignment node=%s Name=%s Path=%s Vector=%s out=%s exists=%s",
                             nm,
@@ -3162,7 +3167,7 @@ def main():
                     docker_names = []
                 docker_names = sorted(set([n for n in docker_names if n]))
                 if docker_names:
-                    compose_paths = [os.path.join('/tmp/vulns', f"docker-compose-{nm}.yml") for nm in docker_names]
+                    compose_paths = [_docker_node_compose_path(nm) for nm in docker_names]
                     compose_paths = [p for p in compose_paths if p and os.path.exists(p)]
                     # Detect conflicts from compose files (if present) AND from existing containers
                     # that match the docker node names themselves (CORE uses node name as container name).
@@ -3315,7 +3320,7 @@ def main():
                     mismatches: list[dict[str, Any]] = []
                     for nm in docker_names2:
                         # Generated per-node compose path (CORE host path).
-                        compose_path = f"/tmp/vulns/docker-compose-{nm}.yml"
+                        compose_path = _docker_node_compose_path(nm)
                         expected = _expected_container_config_from_compose(compose_path, service=str(nm))
                         actual = _docker_container_config(nm)
                         if expected is None:
@@ -3351,7 +3356,7 @@ def main():
                                 nm = str(m.get('name') or '').strip()
                                 if not nm:
                                     continue
-                                compose_path = f"/tmp/vulns/docker-compose-{nm}.yml"
+                                compose_path = _docker_node_compose_path(nm)
                                 rr = _docker_compose_restart_service(compose_path, nm, timeout_s=float(os.getenv('CORETG_DOCKER_RESTART_TIMEOUT_S') or 120))
                                 rr['node'] = nm
                                 restart_results.append(rr)
@@ -3375,7 +3380,7 @@ def main():
                                 nm = str(m.get('name') or '').strip()
                                 if not nm:
                                     continue
-                                compose_path = f"/tmp/vulns/docker-compose-{nm}.yml"
+                                compose_path = _docker_node_compose_path(nm)
                                 expected2 = _expected_container_config_from_compose(compose_path, service=str(nm))
                                 actual2 = _docker_container_config(nm)
                                 if expected2 is None:
