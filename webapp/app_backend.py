@@ -23375,15 +23375,17 @@ def _select_python_interpreter(preferred_venv_bin: Optional[str] = None) -> str:
     Priority order:
     1. Explicit environment override CORE_PY (absolute path wins, otherwise treated as first lookup candidate)
     2. Interpreter binaries that live inside the preferred/core-configured venv bin (falling back to CORE_VENV_BIN env var and /opt/core/venv/bin)
-    3. 'core-python', then 'python3', then 'python' discovered via PATH (with the venv bin prepended to PATH)
-    4. sys.executable as a final fallback
+    3. Named CORE_PY override discovered via PATH
+    4. The current process interpreter when it is executable (preserves the active environment)
+    5. 'core-python', then 'python3', then 'python' discovered via PATH (with the venv bin prepended to PATH)
+    6. sys.executable as a final fallback string
 
     Returns the chosen executable string (absolute path or name)."""
 
     override = os.environ.get('CORE_PY')
     venv_bin = _resolve_cli_venv_bin(preferred_venv_bin)
 
-    name_candidates: list[str] = []
+    override_name_candidates: list[str] = []
 
     if override:
         if os.path.isabs(override):
@@ -23393,20 +23395,34 @@ def _select_python_interpreter(preferred_venv_bin: Optional[str] = None) -> str:
             except Exception:
                 pass
         else:
-            name_candidates.append(override)
+            override_name_candidates.append(override)
 
     if venv_bin:
         preferred_python = _find_python_in_venv_bin(venv_bin)
         if preferred_python:
             return preferred_python
 
-    name_candidates.extend(PYTHON_EXECUTABLE_NAMES)
-
     search_path = os.environ.get('PATH') or ''
     if venv_bin:
         search_path = f"{venv_bin}:{search_path}" if search_path else venv_bin
 
-    for name in name_candidates:
+    for name in override_name_candidates:
+        try:
+            resolved = shutil.which(name, path=search_path)
+        except Exception:
+            resolved = None
+        if resolved:
+            return resolved
+
+    current_python = str(sys.executable or '').strip()
+    if current_python:
+        try:
+            if os.path.isabs(current_python) and os.access(current_python, os.X_OK):
+                return current_python
+        except Exception:
+            pass
+
+    for name in PYTHON_EXECUTABLE_NAMES:
         try:
             resolved = shutil.which(name, path=search_path)
         except Exception:
