@@ -32424,10 +32424,46 @@ def _update_flow_state_in_xml(xml_path: str, scenario_label: str | None, flow_st
                 fs_el.remove(child)
         st_el = ET.SubElement(fs_el, 'FlowState')
         st_el.text = json.dumps(flow_state, separators=(',', ':'), ensure_ascii=False)
-        tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+        _write_xml_tree_atomic(tree, xml_path)
         return True, 'ok'
     except Exception as e:
         return False, f'failed to update xml: {e}'
+
+
+def _write_xml_tree_atomic(tree: ET.ElementTree, xml_path: str) -> None:
+    """Persist XML by writing a sibling temp file and replacing the target.
+
+    This avoids opening the existing XML for in-place write, which can fail when
+    the file itself is read-only or owned by another user even though the parent
+    directory is writable.
+    """
+    xml_path = _abs_path_or_original(xml_path)
+    if not xml_path:
+        raise ValueError('xml_path not found')
+    target_dir = os.path.dirname(xml_path) or '.'
+    original_mode: int | None = None
+    try:
+        original_mode = os.stat(xml_path).st_mode & 0o777
+    except Exception:
+        original_mode = None
+
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix='.coretg-xml-', suffix='.tmp', dir=target_dir)
+    os.close(tmp_fd)
+    try:
+        tree.write(tmp_path, encoding='utf-8', xml_declaration=True)
+        if original_mode is not None:
+            try:
+                os.chmod(tmp_path, original_mode)
+            except Exception:
+                pass
+        os.replace(tmp_path, xml_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
 
 
 def _read_flow_state_from_xml_path(xml_path: str, scenario_label: str | None) -> dict[str, Any] | None:
@@ -32625,7 +32661,7 @@ def _clear_flow_state_in_xml(xml_path: str, scenario_label: str | None) -> tuple
                 fs_el.remove(child)
                 removed = True
         if removed:
-            tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+            _write_xml_tree_atomic(tree, xml_path)
         return True, 'ok'
     except Exception as e:
         return False, f'failed to update xml: {e}'
@@ -32694,7 +32730,7 @@ def _update_plan_preview_in_xml(
         if plan_el is None:
             plan_el = ET.SubElement(se_target, 'PlanPreview')
         plan_el.text = json.dumps(plan_payload, separators=(',', ':'), ensure_ascii=False)
-        tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+        _write_xml_tree_atomic(tree, xml_path)
         return True, 'ok'
     except Exception as e:
         return False, f'failed to update xml: {e}'
