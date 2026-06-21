@@ -3,7 +3,10 @@ from scenarioforge import cli
 
 def test_new_phase_help_hides_flow_and_execute_only_flags() -> None:
     help_text = cli._build_cli_help_parser('new').format_help()
+    core_defaults = cli._cli_core_argument_defaults()
+    new_defaults = cli._cli_new_argument_defaults()
 
+    assert '--density-count' in help_text
     assert '--seed-role' in help_text
     assert '--seed-service' in help_text
     assert '--seed-segmentation' in help_text
@@ -12,7 +15,8 @@ def test_new_phase_help_hides_flow_and_execute_only_flags() -> None:
     assert '--flow-mode' not in help_text
     assert '--preview-full' not in help_text
     assert '--prefix' not in help_text
-    assert '(default: localhost)' in help_text
+    assert f"(default: {core_defaults['host']})" in help_text
+    assert f"(default: {new_defaults['density_count']})" in help_text
 
 
 def test_flag_sequencing_help_shows_flow_defaults() -> None:

@@ -909,11 +909,18 @@ core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenari
 - `--xml` (required): Scenario XML path.
 - `--scenario`: Scenario name (defaults to the first in the file).
 - `--force`: Overwrite an existing XML file when used with the `new` phase.
+- `--density-count`: Scenario-level Count for Density base host pool for density-driven planning in the `new` phase.
 - `--seed-role`: Repeatable `ROLE=COUNT` seeding for the `new` phase.
-- `--seed-routing`: Seed a routing row for the `new` phase.
+- `--seed-routing`: Repeatable routing-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
 - `--seed-routing-density`: Density used with `--seed-routing`.
-- `--seed-traffic`: Seed a traffic row for the `new` phase.
+- `--seed-service`: Repeatable services-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-service-density`: Density used with `--seed-service`.
+- `--seed-traffic`: Repeatable traffic-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
 - `--seed-traffic-density`: Density used with `--seed-traffic`.
+- `--seed-segmentation`: Repeatable segmentation-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-segmentation-density`: Density used with `--seed-segmentation`.
+- `--seed-vulnerability`: Repeatable specific-vulnerability seeding for the `new` phase. Accepts an active catalog entry name or path as `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-vulnerability-density`: Density used with `--seed-vulnerability` when count is omitted or set to density.
 - `--seed-random-vulnerability-count`: Seed random vulnerability targets for the `new` phase.
 - `--ssh-host`, `--ssh-port`, `--ssh-username`, `--ssh-password`: Persist CORE SSH connection details directly in the XML.
 - `--venv-bin`: Persist the remote CORE Python `venv/bin` path directly in the XML.
@@ -927,6 +934,8 @@ core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenari
 - `--plan-output`: Optional file path for JSON output from phase commands.
 - `--layout-density`: `compact | normal | spacious` (default `normal`).
 - `--router-mesh-style`: `full | ring | tree` (fallback when routing items omit `r2r_mode`).
+
+For Routing, Services, Traffic, Segmentation, and specific Vulnerabilities, multiple density-style seed rows in the same section are written with equal `factor` values that sum to `1.0` for that section. Count rows remain additive.
 
 ### Flag-Sequencing Phase Arguments
 
