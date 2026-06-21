@@ -3349,16 +3349,32 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     if chain_ids:
         sequence_payload['chain_ids'] = chain_ids
 
-    sequence_client = backend.app.test_client()
-    sequence_http_response = sequence_client.post(
-        '/api/flag-sequencing/sequence_preview_plan',
-        json=sequence_payload,
-    )
-    sequence_status = int(sequence_http_response.status_code)
+    sequence_view = None
     try:
-        sequence_payload_out = sequence_http_response.get_json(silent=True)
+        sequence_view = backend.app.view_functions.get('api_flow_sequence_preview_plan')
     except Exception:
-        sequence_payload_out = None
+        sequence_view = None
+    if sequence_view is None:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'flag-sequencing',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': 'Flag sequencing sequence_preview_plan route is not registered.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    with backend.app.test_request_context(
+        '/api/flag-sequencing/sequence_preview_plan',
+        method='POST',
+        json=sequence_payload,
+    ):
+        sequence_http_response = sequence_view()
+    sequence_status, sequence_payload_out = _response_payload_and_status(sequence_http_response)
     if sequence_status >= 400:
         if not isinstance(sequence_payload_out, dict):
             sequence_payload_out = {'ok': False, 'status': sequence_status, 'payload': sequence_payload_out}
