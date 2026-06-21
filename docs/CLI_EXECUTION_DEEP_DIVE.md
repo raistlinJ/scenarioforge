@@ -149,7 +149,9 @@ Important behavior:
 - If no explicit `--flow-chain-id` values are provided, the helper can pick a chain automatically from the preview plan.
 - If saved Flow chain ids already exist in the XML, they may be reused before a fresh chain is picked.
 - In `resolve`-style modes, generator outputs are materialized and persisted back into `FlagSequencing/FlowState`.
-- If remote CORE execution is configured, Flow generator runs can also use that remote context.
+- If remote CORE execution is configured, Flow generator runs use that remote context by default unless you explicitly pass `--flow-run-local`.
+- In generator-running modes, remote-capable CLI runs now fail fast on remote sync/SSH/runtime problems instead of silently falling back to local generator execution.
+- Success payloads include `generator_execution_requested` and `generator_execution_mode` so you can verify whether the generator runtime was `remote` or `local`.
 
 Useful flags:
 
@@ -157,7 +159,7 @@ Useful flags:
 - `--flow-mode preview`: pick or reuse a chain without resolving generator outputs.
 - `--flow-chain-id`: force one or more explicit chain node ids.
 - `--flow-run-remote`: force remote generator execution.
-- `--flow-run-local`: force local generator execution.
+- `--flow-run-local`: force local generator execution even when remote-capable CORE config exists.
 - `--flow-best-effort`: allow the helper to clamp to available eligible nodes.
 
 Preview prerequisite behavior:

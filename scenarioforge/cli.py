@@ -3181,7 +3181,10 @@ def _run_flag_sequencing_phase(args: Any) -> int:
             backend,
             _core_config_from_xml_path=lambda *_a, **_k: dict(resolved_core_cfg),
         )
-        if env_remote_source and (not args.flow_run_local) and ('run_remote' not in payload):
+        flow_mode_norm = str(args.flow_mode or '').strip().lower()
+        generators_expected = flow_mode_norm in {'resolve', 'resolve_hints', 'hint', 'hint_only'}
+        remote_execution_expected = _cli_should_delegate_remote(resolved_core_cfg) or env_remote_source
+        if generators_expected and remote_execution_expected and (not args.flow_run_local) and ('run_remote' not in payload):
             payload['run_remote'] = True
 
     from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
@@ -3198,6 +3201,9 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     response_payload.setdefault('phase', 'flag-sequencing')
     response_payload.setdefault('xml_path', xml_path)
     response_payload.setdefault('scenario', scenario_name)
+    if str(args.flow_mode or '').strip().lower() in {'resolve', 'resolve_hints', 'hint', 'hint_only'}:
+        response_payload.setdefault('generator_execution_requested', True)
+        response_payload.setdefault('generator_execution_mode', 'remote' if bool(payload.get('run_remote')) else 'local')
     _emit_phase_json(
         response_payload,
         output_path=args.plan_output,
@@ -3298,7 +3304,14 @@ def _cli_core_argument_defaults() -> dict[str, Any]:
 
 
 def _cli_new_argument_defaults() -> dict[str, Any]:
-    defaults = {'density_count': 10}
+    defaults = {
+        'density_count': 10,
+        'seed_routing_density': 0.5,
+        'seed_service_density': 0.5,
+        'seed_traffic_density': 0.5,
+        'seed_segmentation_density': 0.5,
+        'seed_vulnerability_density': 0.5,
+    }
     try:
         backend = _load_web_backend_module()
     except Exception:
@@ -3308,8 +3321,25 @@ def _cli_new_argument_defaults() -> dict[str, Any]:
             payload = backend._default_scenarios_payload_for_names(['Scenario 1'])
             scenarios = payload.get('scenarios') if isinstance(payload, dict) else None
             scenario = scenarios[0] if isinstance(scenarios, list) and scenarios else None
-            if isinstance(scenario, dict) and scenario.get('density_count') is not None:
-                defaults['density_count'] = int(scenario.get('density_count'))
+            if isinstance(scenario, dict):
+                if scenario.get('density_count') is not None:
+                    defaults['density_count'] = int(scenario.get('density_count'))
+                sections = scenario.get('sections') if isinstance(scenario.get('sections'), dict) else {}
+
+                def _density(section_name: str, fallback: float) -> float:
+                    try:
+                        section = sections.get(section_name) if isinstance(sections, dict) else None
+                        if isinstance(section, dict) and section.get('density') is not None:
+                            return float(section.get('density'))
+                    except Exception:
+                        pass
+                    return fallback
+
+                defaults['seed_routing_density'] = _density('Routing', defaults['seed_routing_density'])
+                defaults['seed_service_density'] = _density('Services', defaults['seed_service_density'])
+                defaults['seed_traffic_density'] = _density('Traffic', defaults['seed_traffic_density'])
+                defaults['seed_segmentation_density'] = _density('Segmentation', defaults['seed_segmentation_density'])
+                defaults['seed_vulnerability_density'] = _density('Vulnerabilities', defaults['seed_vulnerability_density'])
         except Exception:
             pass
     return defaults
@@ -3332,15 +3362,15 @@ def _add_cli_new_args(container: Any) -> None:
     container.add_argument('--density-count', type=int, default=defaults['density_count'], help='Scenario-level Count for Density base host pool for density-based planning in the new phase')
     container.add_argument('--seed-role', dest='seed_roles', action='append', help='Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable)')
     container.add_argument('--seed-routing', dest='seed_routing_specs', action='append', help='Seed a Routing row for the new phase (repeatable; density rows are equal-weighted, for example OSPFv2, BGP=density, or OSPFv2=3)')
-    container.add_argument('--seed-routing-density', type=float, default=0.5, help='Routing density to use with --seed-routing (default: 0.5)')
+    container.add_argument('--seed-routing-density', type=float, default=defaults['seed_routing_density'], help='Routing density to use with --seed-routing')
     container.add_argument('--seed-service', dest='seed_service_specs', action='append', help='Seed a Services row for the new phase (repeatable; density rows are equal-weighted, for example SSH, HTTP=density, or SSH=4)')
-    container.add_argument('--seed-service-density', type=float, default=0.5, help='Services density to use with --seed-service (default: 0.5)')
+    container.add_argument('--seed-service-density', type=float, default=defaults['seed_service_density'], help='Services density to use with --seed-service')
     container.add_argument('--seed-traffic', dest='seed_traffic_specs', action='append', help='Seed a Traffic row for the new phase (repeatable; density rows are equal-weighted, for example TCP, UDP=density, or TCP=10)')
-    container.add_argument('--seed-traffic-density', type=float, default=0.5, help='Traffic density to use with --seed-traffic (default: 0.5)')
+    container.add_argument('--seed-traffic-density', type=float, default=defaults['seed_traffic_density'], help='Traffic density to use with --seed-traffic')
     container.add_argument('--seed-segmentation', dest='seed_segmentation_specs', action='append', help='Seed a Segmentation row for the new phase (repeatable; density rows are equal-weighted, for example Firewall, NAT=density, or Firewall=2)')
-    container.add_argument('--seed-segmentation-density', type=float, default=0.5, help='Segmentation density to use with --seed-segmentation (default: 0.5)')
+    container.add_argument('--seed-segmentation-density', type=float, default=defaults['seed_segmentation_density'], help='Segmentation density to use with --seed-segmentation')
     container.add_argument('--seed-vulnerability', dest='seed_vulnerabilities', action='append', help='Seed a specific Vulnerabilities row for the new phase using an active catalog entry name or path (repeatable; density rows are equal-weighted, for example jboss/CVE-2017-12149, weblogic/CVE-2017-10271=density, or jboss/CVE-2017-12149=2)')
-    container.add_argument('--seed-vulnerability-density', type=float, default=0.5, help='Vulnerabilities density to use with --seed-vulnerability when count is omitted or set to density (default: 0.5)')
+    container.add_argument('--seed-vulnerability-density', type=float, default=defaults['seed_vulnerability_density'], help='Vulnerabilities density to use with --seed-vulnerability when count is omitted or set to density')
     container.add_argument('--seed-random-vulnerability-count', type=int, default=0, help='Seed this many random vulnerability targets for the new phase')
 
 

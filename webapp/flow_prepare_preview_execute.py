@@ -1633,6 +1633,8 @@ def _finalize_prepare_preview_response(
         dag_debug=dag_debug,
         warning=warning,
         backend=backend,
+        flow_run_remote=bool(flow_run_remote),
+        run_generators=bool(run_generators),
     )
     success_payload['dependency_level'] = dependency_level
     return jsonify(success_payload), (422 if generation_failures and not best_effort else 200)

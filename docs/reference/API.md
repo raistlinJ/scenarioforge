@@ -950,9 +950,11 @@ CLI help defaults now reflect these same Web UI/backend defaults rather than onl
 - `--flow-allow-node-duplicates`: Allow duplicate nodes in the chain.
 - `--flow-timeout-s`: Optional timeout in seconds.
 - `--flow-run-remote`: Force remote generator execution when CORE SSH config is available.
-- `--flow-run-local`: Force local generator execution.
+- `--flow-run-local`: Force local generator execution even when remote-capable CORE config exists.
 - `--flow-cleanup-generated-artifacts`: Delete temporary generator run directories after completion.
 - `--flow-dependency-level`: Dependency strictness level (1-5).
+
+For CLI `flag-sequencing`, generator-running modes such as `resolve` now require remote execution when the saved or environment-derived CORE configuration is remote-capable, unless `--flow-run-local` is explicitly set. In that case, remote setup failures are returned as errors instead of silently falling back to local execution. The JSON payload also reports `generator_execution_requested` and `generator_execution_mode`.
 
 ### Traffic Overrides
 
