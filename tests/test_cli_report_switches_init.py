@@ -33,6 +33,7 @@ def test_cli_report_handles_segmented_build_without_router_nodes(tmp_path, monke
     try:
         cli.sys.argv = ['scenarioforge.cli', '--xml', str(xml_path), '--scenario', 's']
         monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
+        monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: None)
         monkeypatch.setattr(cli, '_load_preview_plan', fake_load_preview_plan)
         monkeypatch.setattr(cli, '_export_flow_assignments_to_env', lambda *a, **k: None)
         monkeypatch.setattr(cli, 'parse_node_info', lambda *a, **k: (1, [('Host', 1.0)], [], []))

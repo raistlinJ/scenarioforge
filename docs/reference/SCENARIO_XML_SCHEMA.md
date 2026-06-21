@@ -21,7 +21,7 @@ Wraps a base scenario reference and a sequence of planning sections.
 
 Child elements:
 * `<BaseScenario filepath=""/>` (filepath may be empty or an absolute/relative path to a CORE session XML used as a base layout).
-* `<PlanPreview>` (optional) JSON payload containing the latest full preview/plan data from the Web UI (round‑trip only; not used by CLI parsing).
+* `<PlanPreview>` (optional) JSON payload containing the latest full preview/plan data from the Web UI. The Web UI writes it for round-tripping, and the CLI execute path also consumes it for preview parity checks and runtime slot/vulnerability alignment.
 * `<section ...>` repeated for each planning domain.
 
 ### `<section>` Attributes

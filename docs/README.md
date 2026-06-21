@@ -9,6 +9,7 @@ Use this page to navigate the main project documentation.
 - [Screenshots](screenshots.md)
 
 ## Core workflows
+- [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md)
 - [AI Generator Workflow](AI_GENERATOR_WORKFLOW.md)
 - [Full Preview Workflow](FULL_PREVIEW_WORKFLOW.md)
 - [Feature Deep Dive](FEATURE_DEEP_DIVE.md)

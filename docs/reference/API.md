@@ -875,10 +875,48 @@ Invoke from the repo root to ensure generated reports land in `./reports/`:
 core-python -m scenarioforge.cli --xml /abs/path/scenarios.xml --verbose
 ```
 
+Saved XML exported or edited through the Web UI is a supported input to the CLI execute path. When the XML already contains embedded `PlanPreview` and `FlagSequencing/FlowState` data, the CLI uses those sections during execute preflight so standalone runs fail early on the same stale-preview or missing-Flow-runtime conditions that `/run_cli` and `/run_cli_async` reject in the Web UI.
+
+### Phase Commands
+
+The CLI now accepts an optional first positional phase name. If omitted, `execute` is used.
+
+- `new`: Creates a starter ScenarioForge XML file with one scenario and canonical section keys.
+- `execute`: Full legacy/default run. Equivalent to `python -m scenarioforge.cli --xml ...`.
+- `preview-plan`: Persists planner-owned `PlanPreview` metadata into the XML and prints the preview payload as JSON.
+- `flag-sequencing`: Runs the same Flow prepare/resolve helper used by the Web UI and persists updated `FlowState` into the XML.
+- `topo`: Builds the topology in CORE and stops before segmentation, traffic, report generation, and session start.
+
+Saved-XML config parity:
+
+- Direct CLI launches load `.scenarioforge.env` via the same env loader the web backend uses.
+- `execute` and `topo` resolve `CoreConnection`/scenario HITL core settings from the XML, then merge env/default values and any saved secret-backed SSH credentials before connecting.
+- If the resolved scenario points at a remote CORE VM, the CLI delegates the run to a remote CLI process over SSH so the uploaded XML and generated `/tmp/vulns` artifacts are available on the host running `core-daemon`.
+- If the XML has no saved `CoreConnection`, env-only defaults from `.scenarioforge.env` can still drive remote `execute`, `topo`, and `flag-sequencing` behavior.
+
+Examples:
+
+```bash
+core-python -m scenarioforge.cli new --xml /abs/path/scenarios.xml --scenario "Scenario 1"
+core-python -m scenarioforge.cli preview-plan --xml /abs/path/scenarios.xml --scenario "Scenario 1"
+core-python -m scenarioforge.cli flag-sequencing --xml /abs/path/scenarios.xml --scenario "Scenario 1" --flow-mode resolve --flow-length 3
+core-python -m scenarioforge.cli topo --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
+core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
+```
+
 ### Core Arguments
 
 - `--xml` (required): Scenario XML path.
 - `--scenario`: Scenario name (defaults to the first in the file).
+- `--force`: Overwrite an existing XML file when used with the `new` phase.
+- `--seed-role`: Repeatable `ROLE=COUNT` seeding for the `new` phase.
+- `--seed-routing`: Seed a routing row for the `new` phase.
+- `--seed-routing-density`: Density used with `--seed-routing`.
+- `--seed-traffic`: Seed a traffic row for the `new` phase.
+- `--seed-traffic-density`: Density used with `--seed-traffic`.
+- `--seed-random-vulnerability-count`: Seed random vulnerability targets for the `new` phase.
+- `--ssh-host`, `--ssh-port`, `--ssh-username`, `--ssh-password`: Persist CORE SSH connection details directly in the XML.
+- `--venv-bin`: Persist the remote CORE Python `venv/bin` path directly in the XML.
 - `--host`, `--port`: CORE gRPC endpoint (defaults `localhost:50051`).
 - `--prefix`: IPv4 prefix for auto-assigned addresses (default `10.0.0.0/24`).
 - `--ip-mode`: `private | mixed | public` (default `private`).
@@ -886,8 +924,24 @@ core-python -m scenarioforge.cli --xml /abs/path/scenarios.xml --verbose
 - `--max-nodes`: Hard cap on node creation.
 - `--verbose`: Enables debug logging.
 - `--seed`: RNG seed for deterministic randomness.
+- `--plan-output`: Optional file path for JSON output from phase commands.
 - `--layout-density`: `compact | normal | spacious` (default `normal`).
 - `--router-mesh-style`: `full | ring | tree` (fallback when routing items omit `r2r_mode`).
+
+### Flag-Sequencing Phase Arguments
+
+- `--flow-mode`: `preview | resolve | resolve_hints | hint | hint_only` (default `resolve`)
+- `--flow-length`: Requested chain length.
+- `--flow-preset`: Optional preset name.
+- `--flow-chain-id`: Repeatable explicit chain node id.
+- `--flow-chain-ids`: Comma-separated explicit chain node ids.
+- `--flow-best-effort`: Clamp to eligible nodes when necessary.
+- `--flow-allow-node-duplicates`: Allow duplicate nodes in the chain.
+- `--flow-timeout-s`: Optional timeout in seconds.
+- `--flow-run-remote`: Force remote generator execution when CORE SSH config is available.
+- `--flow-run-local`: Force local generator execution.
+- `--flow-cleanup-generated-artifacts`: Delete temporary generator run directories after completion.
+- `--flow-dependency-level`: Dependency strictness level (1-5).
 
 ### Traffic Overrides
 
