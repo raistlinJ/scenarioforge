@@ -970,6 +970,19 @@ def _flow_assignments_have_runtime(flag_assignments: Any) -> bool:
     return False
 
 
+def _flow_state_requires_cli_execute_runtime(flow_state: Any) -> bool:
+    if not isinstance(flow_state, dict):
+        return False
+    if flow_state.get('flow_enabled') is False:
+        return False
+    flag_assignments = flow_state.get('flag_assignments') if isinstance(flow_state.get('flag_assignments'), list) else None
+    if isinstance(flag_assignments, list) and flag_assignments:
+        return True
+    chain_ids = flow_state.get('chain_ids') if isinstance(flow_state.get('chain_ids'), list) else []
+    chain = flow_state.get('chain') if isinstance(flow_state.get('chain'), list) else []
+    return bool(chain_ids or chain or ('flag_assignments' in flow_state))
+
+
 def _inject_source_for_precheck(inject_value: Any) -> str:
     text = str(inject_value or '').strip()
     if not text:
@@ -995,7 +1008,11 @@ def _plan_supports_flow(role_counts: Any, vulnerabilities_plan: Any) -> bool:
     return docker_hosts > 0 or vuln_targets > 0
 
 
-def _validate_flow_state_for_cli_execute(flow_state: Any) -> tuple[bool, str | None, list[dict[str, Any]]]:
+def _validate_flow_state_for_cli_execute(
+    flow_state: Any,
+    *,
+    remote_execution_expected: bool = False,
+) -> tuple[bool, str | None, list[dict[str, Any]]]:
     if not isinstance(flow_state, dict):
         return True, None, []
     if flow_state.get('flow_enabled') is False:
@@ -1003,13 +1020,20 @@ def _validate_flow_state_for_cli_execute(flow_state: Any) -> tuple[bool, str | N
 
     flag_assignments = flow_state.get('flag_assignments') if isinstance(flow_state.get('flag_assignments'), list) else None
     if not isinstance(flag_assignments, list) or not flag_assignments:
+        if _flow_state_requires_cli_execute_runtime(flow_state):
+            return (
+                False,
+                'Flow is enabled, but XML has no resolved Flow runtime values. '
+                'Run Generate (resolve) and Save XML before Execute.',
+                [],
+            )
         return True, None, []
 
     if not _flow_assignments_have_runtime(flag_assignments):
         return (
             False,
-            'FlowState exists in the saved XML, but it has no resolved runtime values. '
-            'Run Generate (resolve) and save the XML before executing via CLI.',
+            'Flow is enabled, but XML has no resolved Flow runtime values. '
+            'Run Generate (resolve) and Save XML before Execute.',
             [],
         )
 
@@ -1032,10 +1056,13 @@ def _validate_flow_state_for_cli_execute(flow_state: Any) -> tuple[bool, str | N
         artifacts_dir = str(assignment.get('artifacts_dir') or assignment.get('run_dir') or '').strip()
         has_outputs = False
         if artifacts_dir:
-            try:
-                has_outputs = bool(_flow_read_outputs_map_from_artifacts_dir(artifacts_dir))
-            except Exception:
-                has_outputs = False
+            if remote_execution_expected:
+                has_outputs = True
+            else:
+                try:
+                    has_outputs = bool(_flow_read_outputs_map_from_artifacts_dir(artifacts_dir))
+                except Exception:
+                    has_outputs = False
         if (not has_outputs) and isinstance(outputs, dict) and outputs:
             has_outputs = True
         if not flag_value and not has_outputs:
@@ -1045,7 +1072,7 @@ def _validate_flow_state_for_cli_execute(flow_state: Any) -> tuple[bool, str | N
                 'generator_id': generator_id,
                 'reason': 'missing flag outputs',
             })
-        elif artifacts_dir and (not os.path.isdir(artifacts_dir)):
+        elif artifacts_dir and (not remote_execution_expected) and (not os.path.isdir(artifacts_dir)):
             missing_values.append({
                 'index': idx,
                 'node_id': node_id,
@@ -1057,6 +1084,8 @@ def _validate_flow_state_for_cli_execute(flow_state: Any) -> tuple[bool, str | N
         def _add_missing_flow_path(path_type: str, path_value: str) -> None:
             candidate = str(path_value or '').strip()
             if not candidate or not os.path.isabs(candidate):
+                return
+            if remote_execution_expected:
                 return
             if os.path.exists(candidate):
                 return
@@ -2090,6 +2119,124 @@ def _resolve_cli_core_context(args: Any, *, backend: Any, scenario_name: str | N
     except Exception:
         pass
     return scenario_norm, (merged if isinstance(merged, dict) else {}), bool(has_saved_core_source)
+
+
+def _resolve_cli_authoritative_xml_path(args: Any, *, backend: Any) -> None:
+    if str(getattr(args, 'phase', '') or '').strip().lower() not in {'execute', 'topo'}:
+        return
+    try:
+        resolved = backend._resolve_preexecute_xml_path(
+            getattr(args, 'xml', None),
+            getattr(args, 'scenario', None),
+        )
+    except Exception:
+        return
+    resolved_text = str(resolved or '').strip()
+    if not resolved_text:
+        return
+    try:
+        args.xml = os.path.abspath(resolved_text)
+    except Exception:
+        args.xml = resolved_text
+
+
+def _maybe_prepare_cli_execute_hitl_xml(
+    args: Any,
+    *,
+    backend: Any,
+    scenario_name: str | None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    if str(getattr(args, 'phase', '') or '').strip().lower() != 'execute':
+        return [], []
+    try:
+        xml_path = os.path.abspath(str(getattr(args, 'xml', '') or '').strip())
+    except Exception:
+        xml_path = str(getattr(args, 'xml', '') or '').strip()
+    if not xml_path:
+        return [], []
+
+    try:
+        payload_for_core = backend._parse_scenarios_xml(xml_path)
+    except Exception:
+        return [], []
+    if not isinstance(payload_for_core, dict):
+        return [], []
+
+    scenario_payload = None
+    scen_list = payload_for_core.get('scenarios') if isinstance(payload_for_core.get('scenarios'), list) else None
+    if isinstance(scen_list, list) and scen_list:
+        if scenario_name:
+            scenario_name_text = str(scenario_name or '').strip()
+            for scen_entry in scen_list:
+                if not isinstance(scen_entry, dict):
+                    continue
+                if str(scen_entry.get('name') or '').strip() == scenario_name_text:
+                    scenario_payload = scen_entry
+                    break
+        if scenario_payload is None:
+            scenario_payload = next((entry for entry in scen_list if isinstance(entry, dict)), None)
+    if not isinstance(scenario_payload, dict):
+        return [], []
+
+    hitl_cfg = scenario_payload.get('hitl') if isinstance(scenario_payload.get('hitl'), dict) else None
+    if not isinstance(hitl_cfg, dict) or not hitl_cfg:
+        return [], []
+
+    try:
+        _scenario_norm, effective_core_cfg, _has_saved_core_source = _resolve_cli_core_context(
+            args,
+            backend=backend,
+            scenario_name=scenario_name,
+        )
+    except Exception:
+        effective_core_cfg = {}
+
+    try:
+        validated_hitl_cfg, hitl_errors, hitl_changes = backend._validate_hitl_interface_names_for_execute(
+            hitl_cfg,
+            effective_core_cfg,
+        )
+    except Exception as exc:
+        return [f'Failed to validate HITL interface names before execute: {exc}'], []
+
+    if hitl_errors or not hitl_changes:
+        return list(hitl_errors or []), list(hitl_changes or [])
+
+    if not hasattr(backend, '_build_scenarios_xml'):
+        return [], list(hitl_changes or [])
+
+    try:
+        scenario_copy = dict(scenario_payload)
+        scenario_copy['hitl'] = validated_hitl_cfg
+        temp_tree = backend._build_scenarios_xml({
+            'scenarios': [scenario_copy],
+            'core': payload_for_core.get('core') if isinstance(payload_for_core.get('core'), dict) else None,
+        })
+        ts = backend._local_timestamp_safe() if hasattr(backend, '_local_timestamp_safe') else datetime.datetime.now().strftime('%m-%d-%y-%H-%M-%S')
+        run_tag = str(uuid.uuid4())[:8]
+        outputs_dir = backend._outputs_dir() if hasattr(backend, '_outputs_dir') else (os.path.dirname(xml_path) or os.getcwd())
+        out_dir = os.path.join(outputs_dir, f'tmp-cli-exec-hitl-{ts}-{run_tag}')
+        os.makedirs(out_dir, exist_ok=True)
+        previous_xml_path = xml_path
+        stem = os.path.splitext(os.path.basename(xml_path))[0].strip() or 'scenario'
+        resolved_xml_path = os.path.join(out_dir, f'{stem}.xml')
+        temp_tree.write(resolved_xml_path, encoding='utf-8', xml_declaration=True)
+        args.xml = resolved_xml_path
+        try:
+            preview_plan_arg = str(getattr(args, 'preview_plan', '') or '').strip()
+        except Exception:
+            preview_plan_arg = ''
+        if preview_plan_arg:
+            try:
+                if os.path.abspath(preview_plan_arg) == os.path.abspath(previous_xml_path):
+                    args.preview_plan = resolved_xml_path
+            except Exception:
+                if preview_plan_arg == previous_xml_path:
+                    args.preview_plan = resolved_xml_path
+    except Exception as exc:
+        return [f'Failed to materialize validated HITL execute XML: {exc}'], []
+
+    return [], list(hitl_changes or [])
 
 
 def _cli_has_env_remote_source(backend: Any, core_cfg: dict[str, Any]) -> bool:
@@ -3189,6 +3336,61 @@ def _run_flag_sequencing_phase(args: Any) -> int:
 
     from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
 
+    sequence_payload = {
+        'scenario': scenario_name,
+        'preview_plan': xml_path,
+        'length': int(args.flow_length),
+        'best_effort': bool(args.flow_best_effort),
+        'allow_node_duplicates': bool(args.flow_allow_node_duplicates),
+        'dependency_level': int(args.flow_dependency_level),
+    }
+    if preset:
+        sequence_payload['preset'] = preset
+    if chain_ids:
+        sequence_payload['chain_ids'] = chain_ids
+
+    sequence_client = backend.app.test_client()
+    sequence_http_response = sequence_client.post(
+        '/api/flag-sequencing/sequence_preview_plan',
+        json=sequence_payload,
+    )
+    sequence_status = int(sequence_http_response.status_code)
+    try:
+        sequence_payload_out = sequence_http_response.get_json(silent=True)
+    except Exception:
+        sequence_payload_out = None
+    if sequence_status >= 400:
+        if not isinstance(sequence_payload_out, dict):
+            sequence_payload_out = {'ok': False, 'status': sequence_status, 'payload': sequence_payload_out}
+        sequence_payload_out.setdefault('phase', 'flag-sequencing')
+        sequence_payload_out.setdefault('xml_path', xml_path)
+        sequence_payload_out.setdefault('scenario', scenario_name)
+        _emit_phase_json(sequence_payload_out, output_path=args.plan_output, stream=sys.stderr)
+        return 1
+
+    flow_mode_norm = str(args.flow_mode or '').strip().lower()
+    if flow_mode_norm in {'preview'}:
+        if not isinstance(sequence_payload_out, dict):
+            sequence_payload_out = {'ok': True, 'status': sequence_status, 'payload': sequence_payload_out}
+        sequence_payload_out.setdefault('phase', 'flag-sequencing')
+        sequence_payload_out.setdefault('xml_path', xml_path)
+        sequence_payload_out.setdefault('scenario', scenario_name)
+        sequence_payload_out.setdefault('generator_execution_requested', False)
+        sequence_payload_out.setdefault('generator_execution_mode', 'none')
+        _emit_phase_json(sequence_payload_out, output_path=args.plan_output)
+        return 0
+
+    if isinstance(sequence_payload_out, dict):
+        seq_chain_ids = [
+            str(node.get('id') or '').strip()
+            for node in (sequence_payload_out.get('chain') or [])
+            if isinstance(node, dict) and str(node.get('id') or '').strip()
+        ]
+        if seq_chain_ids:
+            payload['chain_ids'] = seq_chain_ids
+        if sequence_payload_out.get('preview_plan_path'):
+            payload['preview_plan'] = str(sequence_payload_out.get('preview_plan_path'))
+
     with backend.app.test_request_context(
         '/api/flag-sequencing/prepare_preview_for_execute',
         method='POST',
@@ -3572,8 +3774,30 @@ def main():
                 args.scenario = resolved_scenario_name
         except Exception:
             resolved_scenario_name = args.scenario
+        try:
+            _resolve_cli_authoritative_xml_path(args, backend=backend_for_cli)
+        except Exception:
+            pass
+        try:
+            resolved_scenario_name = _cli_phase_scenario(args, backend=backend_for_cli)
+            if resolved_scenario_name and not args.scenario:
+                args.scenario = resolved_scenario_name
+        except Exception:
+            resolved_scenario_name = args.scenario
     else:
         resolved_scenario_name = args.scenario
+
+    execute_hitl_errors: list[str] = []
+    execute_hitl_changes: list[dict[str, Any]] = []
+    if backend_for_cli is not None and str(args.phase or '').strip().lower() == 'execute':
+        try:
+            execute_hitl_errors, execute_hitl_changes = _maybe_prepare_cli_execute_hitl_xml(
+                args,
+                backend=backend_for_cli,
+                scenario_name=resolved_scenario_name,
+            )
+        except Exception as exc:
+            execute_hitl_errors = [f'Failed to validate HITL interface names before execute: {exc}']
 
     preview_payload: Dict[str, Any] | None = None
     preview_full: Dict[str, Any] | None = None
@@ -3609,6 +3833,23 @@ def main():
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
+
+    if execute_hitl_errors:
+        logging.error('HITL interface validation failed before execute.')
+        for detail in execute_hitl_errors:
+            logging.error('%s', detail)
+        return 1
+    if execute_hitl_changes:
+        try:
+            mappings = ', '.join(
+                f"{entry.get('from')}->{entry.get('to')}"
+                for entry in execute_hitl_changes
+                if entry.get('from') and entry.get('to')
+            )
+            if mappings:
+                logging.info('Resolved HITL interface selectors for execute: %s', mappings)
+        except Exception:
+            pass
 
     prefetched_hitl_config: dict[str, Any] | None = None
     if args.phase in {'execute', 'topo'}:
@@ -3794,14 +4035,26 @@ def main():
     traffic_plan_preview = orchestrated_plan.get('traffic_plan') if isinstance(orchestrated_plan, dict) else None
     flow_state = _flow_state_from_xml(args.xml, args.scenario)
 
-    flow_execute_active = bool(
-        isinstance(flow_state, dict)
-        and flow_state.get('flow_enabled') is not False
-        and list(flow_state.get('flag_assignments') or [])
-    )
+    flow_execute_active = _flow_state_requires_cli_execute_runtime(flow_state)
+    flow_remote_expected = False
+    if args.phase == 'execute' and backend_for_cli is not None:
+        try:
+            _scenario_norm, flow_core_cfg, _has_saved_core_source = _resolve_cli_core_context(
+                args,
+                backend=backend_for_cli,
+                scenario_name=resolved_scenario_name,
+            )
+            if isinstance(flow_core_cfg, dict):
+                coerce_bool = getattr(backend_for_cli, '_coerce_bool', lambda value: bool(value))
+                flow_remote_expected = bool(coerce_bool(flow_core_cfg.get('ssh_enabled')))
+        except Exception:
+            flow_remote_expected = False
 
     if flow_execute_active:
-        flow_ok, flow_error, flow_details = _validate_flow_state_for_cli_execute(flow_state)
+        flow_ok, flow_error, flow_details = _validate_flow_state_for_cli_execute(
+            flow_state,
+            remote_execution_expected=flow_remote_expected,
+        )
         if not flow_ok:
             logging.error("%s", flow_error)
             if flow_details:

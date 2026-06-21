@@ -9,6 +9,7 @@ import scenarioforge.planning.orchestrator as orchestrator
 def _patch_basic_cli_execute_dependencies(monkeypatch, *, flow_state=None):
     monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
     monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: None)
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: None)
     monkeypatch.setattr(cli, '_export_flow_assignments_to_env', lambda *a, **k: None)
     monkeypatch.setattr(cli, 'parse_node_info', lambda *a, **k: (1, [('Host', 1.0)], [], []))
     monkeypatch.setattr(cli, 'parse_planning_metadata', lambda *a, **k: {})
@@ -143,3 +144,66 @@ def test_cli_execute_saved_xml_rejects_missing_flow_runtime_paths(tmp_path, monk
     assert any('Execute requires pre-generated Flow values saved in the XML' in rec.message for rec in caplog.records)
     assert any('missing artifacts_dir' in rec.message for rec in caplog.records)
     assert any('missing inject_source' in rec.message for rec in caplog.records)
+
+
+def test_cli_execute_saved_xml_rejects_enabled_flow_without_resolved_assignments(tmp_path, monkeypatch, caplog):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    flow_state = {
+        'flow_enabled': True,
+        'chain_ids': ['1'],
+        'flag_assignments': [],
+    }
+    plan = {
+        'routers_planned': 0,
+        'role_counts': {'Docker': 1},
+        'service_plan': {},
+        'vulnerability_plan': {},
+        'traffic_plan': None,
+        'breakdowns': {
+            'router': {'simple_plan': {}},
+            'segmentation': {'density': 0.0, 'raw_items_serialized': []},
+        },
+    }
+    argv0 = cli.sys.argv[:]
+
+    _patch_basic_cli_execute_dependencies(monkeypatch, flow_state=flow_state)
+    monkeypatch.setattr(cli, '_load_preview_plan', lambda *_a, **_k: ({'metadata': {}}, None))
+    monkeypatch.setattr(orchestrator, 'compute_full_plan', lambda *a, **k: dict(plan))
+
+    caplog.set_level(logging.ERROR)
+    try:
+        cli.sys.argv = ['scenarioforge.cli', '--xml', str(xml_path), '--scenario', 's']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    assert any(
+        'Flow is enabled, but XML has no resolved Flow runtime values. Run Generate (resolve) and Save XML before Execute.' in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_validate_flow_state_for_cli_execute_allows_remote_runtime_paths():
+    flow_state = {
+        'flow_enabled': True,
+        'flag_assignments': [
+            {
+                'node_id': '7',
+                'id': 'nfs_sensitive_file',
+                'artifacts_dir': '/tmp/remote/missing/artifacts',
+                'inject_files': ['/tmp/remote/missing/exports.txt -> /tmp/seed'],
+            }
+        ],
+    }
+
+    ok, error, details = cli._validate_flow_state_for_cli_execute(
+        flow_state,
+        remote_execution_expected=True,
+    )
+
+    assert ok is True
+    assert error is None
+    assert details == []

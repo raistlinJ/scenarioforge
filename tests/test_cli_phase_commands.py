@@ -885,6 +885,17 @@ def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monk
     captured: dict[str, object] = {}
     app = Flask(__name__)
 
+    sequence_calls: list[dict[str, object]] = []
+
+    @app.route('/api/flag-sequencing/sequence_preview_plan', methods=['POST'])
+    def api_flow_sequence_preview_plan():
+        sequence_calls.append(request.get_json() or {})
+        return jsonify({
+            'ok': True,
+            'chain': [{'id': 'node-a'}, {'id': 'node-b'}],
+            'preview_plan_path': str(xml_path.resolve()),
+        })
+
     def _fake_prepare(*, backend):
         captured['payload'] = request.get_json()
         return jsonify({'ok': True, 'flow_valid': True, 'flag_assignments': [], 'phase_result': 'resolved'})
@@ -945,6 +956,7 @@ def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monk
     assert sent['length'] == 2
     assert sent['chain_ids'] == ['node-a', 'node-b']
     assert sent['run_local'] is True
+    assert len(sequence_calls) == 1
 
 
 def test_cli_flag_sequencing_phase_forces_remote_when_saved_remote_core_config_exists(tmp_path, monkeypatch, capsys):
@@ -953,6 +965,14 @@ def test_cli_flag_sequencing_phase_forces_remote_when_saved_remote_core_config_e
 
     captured: dict[str, object] = {}
     app = Flask(__name__)
+
+    @app.route('/api/flag-sequencing/sequence_preview_plan', methods=['POST'])
+    def api_flow_sequence_preview_plan():
+        return jsonify({
+            'ok': True,
+            'chain': [{'id': 'node-a'}],
+            'preview_plan_path': str(xml_path.resolve()),
+        })
 
     def _fake_prepare(*, backend):
         captured['payload'] = request.get_json()
@@ -1089,6 +1109,162 @@ def test_cli_topo_phase_stops_after_topology_build(tmp_path, monkeypatch, capsys
     assert payload['routers_count'] == 1
     assert payload['hosts_count'] == 1
     assert payload['docker_nodes'] == ['docker-1']
+
+
+def test_cli_topo_phase_prefers_resolved_saved_xml(tmp_path, monkeypatch, capsys):
+    raw_xml_path = tmp_path / 'raw.xml'
+    latest_xml_path = tmp_path / 'latest.xml'
+    raw_xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    latest_xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    argv0 = cli.sys.argv[:]
+    captured: dict[str, str] = {}
+
+    fake_backend = SimpleNamespace(
+        _resolve_preexecute_xml_path=lambda _xml_path, _scenario: str(latest_xml_path.resolve()),
+        _scenario_names_from_xml=lambda _path: ['s'],
+        _sanitize_hitl_config=lambda cfg, *_args: cfg,
+    )
+
+    def _capture_parse_node_info(xml_path, *args, **kwargs):
+        captured['xml_path'] = str(xml_path)
+        return (1, [('Host', 1.0)], [], [])
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
+    monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: None)
+    monkeypatch.setattr(cli, '_export_flow_assignments_to_env', lambda *a, **k: None)
+    monkeypatch.setattr(cli, 'parse_node_info', _capture_parse_node_info)
+    monkeypatch.setattr(cli, 'parse_planning_metadata', lambda *a, **k: {})
+    monkeypatch.setattr(cli, 'parse_hitl_info', lambda *a, **k: {'enabled': False, 'interfaces': []})
+    monkeypatch.setattr(cli, 'compute_role_counts', lambda *a, **k: {'Host': 1})
+    monkeypatch.setattr(cli, 'parse_routing_info', lambda *a, **k: (0.1, []))
+    monkeypatch.setattr(cli, 'parse_segmentation_info', lambda *a, **k: (0.0, []))
+    monkeypatch.setattr(cli, 'parse_traffic_info', lambda *a, **k: (0.0, []))
+    monkeypatch.setattr(cli, 'parse_vulnerabilities_info', lambda *a, **k: (0.0, [], None))
+    monkeypatch.setattr(cli, 'parse_pivoting_info', lambda *a, **k: (0.0, []))
+    monkeypatch.setattr(cli, 'load_vuln_catalog', lambda *a, **k: [])
+    monkeypatch.setattr(cli, 'assign_compose_to_nodes', lambda *a, **k: {})
+    monkeypatch.setattr(cli, '_flow_state_from_xml', lambda *a, **k: None)
+    monkeypatch.setattr(cli, 'collect_hitl_preview_ip_reservations', lambda *_a, **_k: {'ip_addresses': set(), 'network_cidrs': set()})
+    monkeypatch.setattr(cli, 'build_full_preview', lambda *a, **k: {'hosts': [], 'routers': [], 'switches_detail': []})
+    monkeypatch.setattr(cli, 'attach_hitl_rj45_nodes', lambda *a, **k: {'enabled': False, 'interfaces': []})
+    monkeypatch.setattr(cli, '_core_session_id', lambda *_a, **_k: 77)
+    monkeypatch.setattr(cli, 'write_report', lambda *a, **k: pytest.fail('topo phase should stop before report generation'))
+    monkeypatch.setattr(cli, 'CORE_GRPC_AVAILABLE', True)
+    monkeypatch.setattr(cli, 'client', SimpleNamespace(CoreGrpcClient=lambda address: _FakeCoreClient()))
+    monkeypatch.setattr(
+        cli,
+        'build_segmented_topology',
+        lambda *a, **k: (
+            _FakeSession(),
+            [SimpleNamespace(node_id=1)],
+            [SimpleNamespace(node_id=2)],
+            {'2': ['HTTP']},
+            {'1': ['OSPF']},
+            {'docker-1': {'Type': 'docker-compose'}},
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        'compute_full_plan',
+        lambda *a, **k: {
+            'routers_planned': 1,
+            'role_counts': {'Host': 1},
+            'service_plan': {},
+            'vulnerability_plan': {},
+            'traffic_plan': None,
+            'breakdowns': {
+                'router': {'simple_plan': {}},
+                'segmentation': {'density': 0.0, 'raw_items_serialized': []},
+            },
+        },
+    )
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'topo', '--xml', str(raw_xml_path), '--scenario', 's']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert captured['xml_path'] == str(latest_xml_path.resolve())
+    assert payload['xml_path'] == str(latest_xml_path.resolve())
+
+
+def test_cli_execute_phase_validates_hitl_interfaces_before_remote_delegate(tmp_path, monkeypatch):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario A"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    argv0 = cli.sys.argv[:]
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
+    monkeypatch.setattr(backend, '_resolve_preexecute_xml_path', lambda path, _scenario: str(path))
+    monkeypatch.setattr(backend, '_scenario_names_from_xml', lambda _path: ['Scenario A'])
+    monkeypatch.setattr(
+        backend,
+        '_parse_scenarios_xml',
+        lambda _path: {
+            'scenarios': [
+                {
+                    'name': 'Scenario A',
+                    'hitl': {
+                        'enabled': True,
+                        'interfaces': [
+                            {'name': 'net1', 'proxmox_target': {'interface_id': 'net1'}},
+                        ],
+                    },
+                }
+            ],
+            'core': {'ssh_enabled': True},
+        },
+    )
+    monkeypatch.setattr(backend, '_core_config_from_xml_path', lambda *_a, **_k: {'ssh_enabled': True, 'core_secret_id': 'core-secret-1'})
+    monkeypatch.setattr(backend, '_select_core_config_for_page', lambda *_a, **_k: {'ssh_enabled': True, 'ssh_password': 'pw'})
+    monkeypatch.setattr(
+        backend,
+        '_merge_core_configs',
+        lambda *configs, include_password=True: {k: v for cfg in configs if isinstance(cfg, dict) for k, v in cfg.items()},
+    )
+    monkeypatch.setattr(backend, '_prefer_explicit_or_ssh_core_host', lambda cfg, *_a, **_k: cfg)
+    monkeypatch.setattr(backend, '_apply_core_secret_to_config', lambda cfg, _norm: dict(cfg))
+    monkeypatch.setattr(backend, '_normalize_core_config', lambda cfg, include_password=True: dict(cfg))
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(tmp_path))
+    monkeypatch.setattr(
+        backend,
+        '_validate_hitl_interface_names_for_execute',
+        lambda _hitl_cfg, _core_cfg: (
+            {
+                'enabled': True,
+                'interfaces': [
+                    {'name': 'ens19', 'proxmox_target': {'interface_id': 'net1'}},
+                ],
+            },
+            [],
+            [{'index': 0, 'from': 'net1', 'to': 'ens19', 'selector': 'net1'}],
+        ),
+    )
+
+    def _capture_delegate(args, *, backend, scenario_name):
+        captured['xml_path'] = str(args.xml)
+        return 0
+
+    monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', _capture_delegate)
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario A']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    assert captured['xml_path'] != str(xml_path.resolve())
+    rewritten_text = open(captured['xml_path'], 'r', encoding='utf-8').read()
+    assert 'name="ens19"' in rewritten_text
 
 
 def test_cli_resolve_core_context_uses_saved_xml_core_and_cli_overrides(tmp_path):
