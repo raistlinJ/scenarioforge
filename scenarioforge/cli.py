@@ -2929,154 +2929,255 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     )
     return 0 if status_code < 400 else 1
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
+
+CLI_PHASES = ('execute', 'new', 'preview-plan', 'flag-sequencing', 'topo')
+
+
+class _CliHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    def _get_help_string(self, action: argparse.Action) -> str:
+        help_text = action.help or ''
+        if not help_text:
+            return help_text
+        if '%(default)' in help_text or 'default:' in help_text.lower():
+            return help_text
+        default = action.default
+        if default in (None, '', False, argparse.SUPPRESS):
+            return help_text
+        if isinstance(action, argparse._StoreTrueAction):
+            return help_text
+        return f'{help_text} (default: %(default)s)'
+
+
+def _cli_help_requested(argv: list[str]) -> bool:
+    return any(token in {'-h', '--help'} for token in (argv or []))
+
+
+def _cli_phase_token(argv: list[str]) -> str | None:
+    if not argv:
+        return None
+    token = str(argv[0] or '').strip()
+    return token if token in CLI_PHASES else None
+
+
+def _add_cli_phase_arg(container: Any) -> None:
+    container.add_argument(
         'phase',
         nargs='?',
-        choices=['execute', 'new', 'preview-plan', 'flag-sequencing', 'topo'],
+        choices=list(CLI_PHASES),
         default='execute',
-        help='Phase to run: execute (default), new, preview-plan, flag-sequencing, or topo',
+        help='Phase to run: execute, new, preview-plan, flag-sequencing, or topo',
     )
-    ap.add_argument("--xml", required=True, help="Path to XML scenario file")
-    ap.add_argument("--scenario", default=None, help="Scenario name to use (defaults to first)")
-    ap.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
-    ap.add_argument('--seed-role', dest='seed_roles', action='append', help='Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable)')
-    ap.add_argument('--seed-routing', default='', help='Seed a Routing row for the new phase (for example Random, RIP, RIPNG, BGP, OSPFv2, OSPFv3)')
-    ap.add_argument('--seed-routing-density', type=float, default=0.5, help='Routing density to use with --seed-routing (default: 0.5)')
-    ap.add_argument('--seed-traffic', default='', help='Seed a Traffic row for the new phase (for example Random, TCP, UDP)')
-    ap.add_argument('--seed-traffic-density', type=float, default=0.5, help='Traffic density to use with --seed-traffic (default: 0.5)')
-    ap.add_argument('--seed-random-vulnerability-count', type=int, default=0, help='Seed this many random vulnerability targets for the new phase')
-    ap.add_argument("--host", default="localhost", help="core-daemon gRPC host")
-    ap.add_argument("--port", type=int, default=50051, help="core-daemon gRPC port")
-    ap.add_argument('--ssh-host', default='', help='CORE SSH host to persist in XML or override at runtime')
-    ap.add_argument('--ssh-port', type=int, default=22, help='CORE SSH port to persist in XML or override at runtime')
-    ap.add_argument('--ssh-username', default='', help='CORE SSH username to persist in XML or override at runtime')
-    ap.add_argument('--ssh-password', default='', help='CORE SSH password to persist in XML or override at runtime')
-    ap.add_argument('--venv-bin', default='', help='Remote CORE Python venv/bin path to persist in XML or override at runtime')
-    ap.add_argument("--prefix", default="10.0.0.0/24", help="IPv4 prefix for auto-assigned addresses")
-    ap.add_argument(
-        "--ip-mode",
-        choices=["private", "mixed", "public"],
-        default="private",
-        help="IP address pool mode: private (RFC1918), mixed (private+public), or public",
-    )
-    ap.add_argument(
-        "--ip-region",
-        choices=["all", "na", "eu", "apac", "latam", "africa", "middle-east"],
-        default="all",
-        help="Region for public pools when ip-mode is mixed/public (default: all)",
-    )
-    ap.add_argument("--max-nodes", type=int, default=None, help="Optional cap on hosts to create")
-    ap.add_argument("--verbose", action="store_true", help="Enable debug logging")
-    ap.add_argument(
-        "--start-timeout-s",
-        type=float,
-        default=None,
-        help="Max seconds to wait for CORE session to reach RUNTIME (default: 120; env: CORETG_CORE_START_TIMEOUT_S)",
-    )
-    ap.add_argument(
-        "--docker-wait-s",
-        type=float,
-        default=None,
-        help="Max seconds to wait for Docker containers to become running (default: 45; env: CORETG_DOCKER_WAIT_RUNNING_S)",
-    )
-    ap.add_argument("--seed", type=int, default=None, help="Optional RNG seed for reproducible topology randomness")
-    ap.add_argument("--preview", action="store_true", help="Parse and plan only; output plan summary JSON and exit 0")
-    ap.add_argument("--preview-full", action="store_true", help="Generate a full dry-run plan (routers, hosts, IPs, services, vulnerabilities, segmentation) without contacting CORE; implies --preview style output")
-    ap.add_argument("--plan-output", help="Path to write computed phase JSON output (preview, topo, flow, or build)")
-    ap.add_argument("--preview-plan", help="Path to a persisted full preview JSON to reuse during build")
-    ap.add_argument(
+
+
+def _add_cli_common_args(container: Any) -> None:
+    container.add_argument('--xml', required=True, help='Path to XML scenario file')
+    container.add_argument('--scenario', default=None, help='Scenario name to use (defaults to first)')
+    container.add_argument('--verbose', action='store_true', help='Enable debug logging')
+    container.add_argument('--plan-output', help='Path to write computed phase JSON output (preview, topo, flow, or build)')
+    container.add_argument('--seed', type=int, default=None, help='Optional RNG seed for reproducible topology randomness')
+
+
+def _add_cli_core_connection_args(container: Any) -> None:
+    container.add_argument('--host', default='localhost', help='core-daemon gRPC host')
+    container.add_argument('--port', type=int, default=50051, help='core-daemon gRPC port')
+    container.add_argument('--ssh-host', default='', help='CORE SSH host to persist in XML or override at runtime')
+    container.add_argument('--ssh-port', type=int, default=22, help='CORE SSH port to persist in XML or override at runtime')
+    container.add_argument('--ssh-username', default='', help='CORE SSH username to persist in XML or override at runtime')
+    container.add_argument('--ssh-password', default='', help='CORE SSH password to persist in XML or override at runtime')
+    container.add_argument('--venv-bin', default='', help='Remote CORE Python venv/bin path to persist in XML or override at runtime')
+
+
+def _add_cli_new_args(container: Any) -> None:
+    container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
+    container.add_argument('--seed-role', dest='seed_roles', action='append', help='Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable)')
+    container.add_argument('--seed-routing', default='', help='Seed a Routing row for the new phase (for example Random, RIP, RIPNG, BGP, OSPFv2, OSPFv3)')
+    container.add_argument('--seed-routing-density', type=float, default=0.5, help='Routing density to use with --seed-routing (default: 0.5)')
+    container.add_argument('--seed-traffic', default='', help='Seed a Traffic row for the new phase (for example Random, TCP, UDP)')
+    container.add_argument('--seed-traffic-density', type=float, default=0.5, help='Traffic density to use with --seed-traffic (default: 0.5)')
+    container.add_argument('--seed-random-vulnerability-count', type=int, default=0, help='Seed this many random vulnerability targets for the new phase')
+
+
+def _add_cli_preview_plan_args(container: Any) -> None:
+    return None
+
+
+def _add_cli_flag_sequencing_args(container: Any) -> None:
+    container.add_argument(
         '--flow-mode',
         choices=['preview', 'resolve', 'resolve_hints', 'hint', 'hint_only'],
         default='resolve',
         help='Flag-sequencing mode for the flag-sequencing phase (default: resolve)',
     )
-    ap.add_argument('--flow-length', type=int, default=5, help='Requested chain length for the flag-sequencing phase')
-    ap.add_argument('--flow-preset', default='', help='Optional flow preset name for the flag-sequencing phase')
-    ap.add_argument('--flow-chain-id', dest='flow_chain_ids', action='append', help='Explicit flow chain node id (repeatable)')
-    ap.add_argument('--flow-chain-ids', dest='flow_chain_ids_csv', default='', help='Comma-separated explicit flow chain node ids')
-    ap.add_argument('--flow-best-effort', action='store_true', help='Allow the flag-sequencing phase to clamp to available eligible nodes')
-    ap.add_argument('--flow-allow-node-duplicates', action='store_true', help='Allow duplicate nodes in the flag-sequencing chain')
-    ap.add_argument('--flow-timeout-s', type=int, default=None, help='Optional total timeout in seconds for the flag-sequencing phase')
-    ap.add_argument('--flow-run-remote', action='store_true', help='Force remote flag-sequencing generator execution when CORE SSH config is available')
-    ap.add_argument('--flow-run-local', action='store_true', help='Force local flag-sequencing generator execution even when CORE SSH config exists')
-    ap.add_argument('--flow-cleanup-generated-artifacts', action='store_true', help='Delete temporary flag-sequencing generator run directories after completion')
-    ap.add_argument('--flow-dependency-level', type=int, default=3, help='Flag-sequencing dependency strictness level (1-5)')
-    # Preview always recomputes (plan reuse removed)
-    ap.add_argument(
-        "--router-mesh",
-        choices=["full", "ring", "tree"],
-        default="full",
-        help="Protocol adjacency mesh style among routers sharing a protocol: full (complete), ring (cycle), tree (chain)")
-    ap.add_argument(
-        "--layout-density",
-        choices=["compact", "normal", "spacious"],
-        default="normal",
-        help="Layout spacing for visual clarity (affects node positions)",
+    container.add_argument('--flow-length', type=int, default=5, help='Requested chain length for the flag-sequencing phase')
+    container.add_argument('--flow-preset', default='', help='Optional flow preset name for the flag-sequencing phase')
+    container.add_argument('--flow-chain-id', dest='flow_chain_ids', action='append', help='Explicit flow chain node id (repeatable)')
+    container.add_argument('--flow-chain-ids', dest='flow_chain_ids_csv', default='', help='Comma-separated explicit flow chain node ids')
+    container.add_argument('--flow-best-effort', action='store_true', help='Allow the flag-sequencing phase to clamp to available eligible nodes')
+    container.add_argument('--flow-allow-node-duplicates', action='store_true', help='Allow duplicate nodes in the flag-sequencing chain')
+    container.add_argument('--flow-timeout-s', type=int, default=None, help='Optional total timeout in seconds for the flag-sequencing phase')
+    container.add_argument('--flow-run-remote', action='store_true', help='Force remote flag-sequencing generator execution when CORE SSH config is available')
+    container.add_argument('--flow-run-local', action='store_true', help='Force local flag-sequencing generator execution even when CORE SSH config exists')
+    container.add_argument('--flow-cleanup-generated-artifacts', action='store_true', help='Delete temporary flag-sequencing generator run directories after completion')
+    container.add_argument('--flow-dependency-level', type=int, default=3, help='Flag-sequencing dependency strictness level (1-5)')
+
+
+def _add_cli_execute_topo_args(container: Any) -> None:
+    container.add_argument('--prefix', default='10.0.0.0/24', help='IPv4 prefix for auto-assigned addresses')
+    container.add_argument(
+        '--ip-mode',
+        choices=['private', 'mixed', 'public'],
+        default='private',
+        help='IP address pool mode: private (RFC1918), mixed (private+public), or public',
     )
-    # Optional overrides for traffic generation
-    ap.add_argument("--traffic-pattern", choices=["continuous", "burst", "periodic", "poisson", "ramp"], help="Override traffic pattern for all items")
-    ap.add_argument("--traffic-rate", type=float, help="Override traffic rate for all items (KB/s)")
-    ap.add_argument("--traffic-period", type=float, help="Override traffic period for all items (seconds)")
-    ap.add_argument("--traffic-jitter", type=float, help="Override traffic jitter for all items (percent 0-100)")
-    ap.add_argument(
-        "--traffic-content",
-        choices=["text", "photo", "audio", "video"],
-        help="Override traffic content type for all items (text/photo/audio/video)",
+    container.add_argument(
+        '--ip-region',
+        choices=['all', 'na', 'eu', 'apac', 'latam', 'africa', 'middle-east'],
+        default='all',
+        help='Region for public pools when ip-mode is mixed/public (default: all)',
     )
-    ap.add_argument(
-        "--allow-src-subnet-prob",
+    container.add_argument('--max-nodes', type=int, default=None, help='Optional cap on hosts to create')
+    container.add_argument(
+        '--start-timeout-s',
+        type=float,
+        default=None,
+        help='Max seconds to wait for CORE session to reach RUNTIME (default: 120; env: CORETG_CORE_START_TIMEOUT_S)',
+    )
+    container.add_argument(
+        '--docker-wait-s',
+        type=float,
+        default=None,
+        help='Max seconds to wait for Docker containers to become running (default: 45; env: CORETG_DOCKER_WAIT_RUNNING_S)',
+    )
+    container.add_argument('--preview', action='store_true', help='Parse and plan only; output plan summary JSON and exit 0')
+    container.add_argument('--preview-full', action='store_true', help='Generate a full dry-run plan (routers, hosts, IPs, services, vulnerabilities, segmentation) without contacting CORE; implies --preview style output')
+    container.add_argument('--preview-plan', help='Path to a persisted full preview JSON to reuse during build')
+    container.add_argument(
+        '--router-mesh',
+        choices=['full', 'ring', 'tree'],
+        default='full',
+        help='Protocol adjacency mesh style among routers sharing a protocol: full (complete), ring (cycle), tree (chain)',
+    )
+    container.add_argument(
+        '--layout-density',
+        choices=['compact', 'normal', 'spacious'],
+        default='normal',
+        help='Layout spacing for visual clarity (affects node positions)',
+    )
+    container.add_argument('--traffic-pattern', choices=['continuous', 'burst', 'periodic', 'poisson', 'ramp'], help='Override traffic pattern for all items')
+    container.add_argument('--traffic-rate', type=float, help='Override traffic rate for all items (KB/s)')
+    container.add_argument('--traffic-period', type=float, help='Override traffic period for all items (seconds)')
+    container.add_argument('--traffic-jitter', type=float, help='Override traffic jitter for all items (percent 0-100)')
+    container.add_argument(
+        '--traffic-content',
+        choices=['text', 'photo', 'audio', 'video'],
+        help='Override traffic content type for all items (text/photo/audio/video)',
+    )
+    container.add_argument(
+        '--allow-src-subnet-prob',
         type=float,
         default=0.3,
-        help="Probability [0..1] to widen firewall allow rules to the source subnet",
+        help='Probability [0..1] to widen firewall allow rules to the source subnet',
     )
-    ap.add_argument(
-        "--allow-dst-subnet-prob",
+    container.add_argument(
+        '--allow-dst-subnet-prob',
         type=float,
         default=0.3,
-        help="Probability [0..1] to widen firewall allow rules to the destination subnet",
+        help='Probability [0..1] to widen firewall allow rules to the destination subnet',
     )
-    ap.add_argument(
-        "--nat-mode",
-        choices=["SNAT", "MASQUERADE"],
-        default="SNAT",
-        help="NAT mode when segmentation selects NAT (routers): SNAT or MASQUERADE",
+    container.add_argument(
+        '--nat-mode',
+        choices=['SNAT', 'MASQUERADE'],
+        default='SNAT',
+        help='NAT mode when segmentation selects NAT (routers): SNAT or MASQUERADE',
     )
-    ap.add_argument(
-        "--dnat-prob",
+    container.add_argument(
+        '--dnat-prob',
         type=float,
         default=0.0,
-        help="Probability [0..1] to create DNAT (port-forward) on routers for generated flows",
+        help='Probability [0..1] to create DNAT (port-forward) on routers for generated flows',
     )
-    ap.add_argument(
-        "--seg-include-hosts",
-        action="store_true",
-        help="Include host nodes as candidates for segmentation placement (default: routers only)",
+    container.add_argument(
+        '--seg-include-hosts',
+        action='store_true',
+        help='Include host nodes as candidates for segmentation placement (default: routers only)',
     )
-    ap.add_argument(
-        "--seg-allow-docker-ports",
-        action="store_true",
-        help="Allow docker-compose container ports through host INPUT chains when segmentation enforces default-deny",
+    container.add_argument(
+        '--seg-allow-docker-ports',
+        action='store_true',
+        help='Allow docker-compose container ports through host INPUT chains when segmentation enforces default-deny',
+    )
+    container.add_argument(
+        '--docker-check-conflicts',
+        action='store_true',
+        default=True,
+        help='Check for existing Docker containers/images that could conflict with compose-based Docker nodes (default: on)',
+    )
+    container.add_argument(
+        '--no-docker-check-conflicts',
+        dest='docker_check_conflicts',
+        action='store_false',
+        help='Disable Docker conflict checks',
+    )
+    container.add_argument(
+        '--docker-remove-conflicts',
+        action='store_true',
+        help='Automatically remove conflicting Docker containers/images instead of prompting',
     )
 
-    ap.add_argument(
-        "--docker-check-conflicts",
-        action="store_true",
-        default=True,
-        help="Check for existing Docker containers/images that could conflict with compose-based Docker nodes (default: on)",
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(formatter_class=_CliHelpFormatter)
+    _add_cli_phase_arg(ap)
+    _add_cli_common_args(ap)
+    _add_cli_new_args(ap)
+    _add_cli_core_connection_args(ap)
+    _add_cli_execute_topo_args(ap)
+    _add_cli_flag_sequencing_args(ap)
+    return ap
+
+
+def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
+    if phase is None:
+        ap = argparse.ArgumentParser(
+            formatter_class=_CliHelpFormatter,
+            description='ScenarioForge CLI. Omit phase to run execute.',
+            epilog='Use "cli.py <phase> --help" to view phase-specific options.',
+        )
+        _add_cli_phase_arg(ap)
+        _add_cli_common_args(ap)
+        return ap
+
+    ap = argparse.ArgumentParser(
+        prog=f'cli.py {phase}',
+        formatter_class=_CliHelpFormatter,
+        description=f'ScenarioForge CLI help for the {phase} phase.',
     )
-    ap.add_argument(
-        "--no-docker-check-conflicts",
-        dest="docker_check_conflicts",
-        action="store_false",
-        help="Disable Docker conflict checks",
-    )
-    ap.add_argument(
-        "--docker-remove-conflicts",
-        action="store_true",
-        help="Automatically remove conflicting Docker containers/images instead of prompting",
-    )
+    _add_cli_common_args(ap)
+    if phase == 'new':
+        _add_cli_new_args(ap)
+        _add_cli_core_connection_args(ap)
+    elif phase == 'preview-plan':
+        _add_cli_preview_plan_args(ap)
+    elif phase == 'flag-sequencing':
+        _add_cli_core_connection_args(ap)
+        _add_cli_flag_sequencing_args(ap)
+    elif phase in {'execute', 'topo'}:
+        _add_cli_core_connection_args(ap)
+        _add_cli_execute_topo_args(ap)
+    else:
+        _add_cli_core_connection_args(ap)
+        _add_cli_execute_topo_args(ap)
+    return ap
+
+def main():
+    argv = sys.argv[1:]
+    if _cli_help_requested(argv):
+        help_phase = _cli_phase_token(argv)
+        help_parser = _build_cli_help_parser(help_phase)
+        help_parser.print_help()
+        return 0
+
+    ap = _build_cli_parser()
     args = ap.parse_args()
 
     # Remote SSH runner may provide sudo password on stdin; make it available to
