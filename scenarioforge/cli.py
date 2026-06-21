@@ -2122,7 +2122,7 @@ def _resolve_cli_core_context(args: Any, *, backend: Any, scenario_name: str | N
 
 
 def _resolve_cli_authoritative_xml_path(args: Any, *, backend: Any) -> None:
-    if str(getattr(args, 'phase', '') or '').strip().lower() not in {'execute', 'topo'}:
+    if str(getattr(args, 'phase', '') or '').strip().lower() not in {'execute', 'topo', 'flag-sequencing'}:
         return
     try:
         resolved = backend._resolve_preexecute_xml_path(
