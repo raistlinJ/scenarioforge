@@ -61,6 +61,7 @@ from .utils.vuln_process import (
     prepare_compose_for_nodes,
     prepare_compose_for_assignments,
     assign_compose_to_nodes,
+    resolve_vulnerability_catalog_entry,
     detect_docker_conflicts_for_compose_files,
     remove_docker_conflicts,
 )
@@ -2575,6 +2576,40 @@ def _run_new_phase(args: Any) -> int:
 
     seeded_any = False
     role_specs = list(getattr(args, 'seed_roles', None) or [])
+
+    def _parse_seed_selection_spec(raw_spec: Any, *, option_name: str) -> tuple[str, int | None]:
+        text = str(raw_spec or '').strip()
+        if not text:
+            raise ValueError(f'Invalid {option_name} value: empty string.')
+        if '=' not in text:
+            return text, None
+        selected_raw, count_raw = text.rsplit('=', 1)
+        selected_name = str(selected_raw or '').strip()
+        if not selected_name:
+            raise ValueError(f'Invalid {option_name} value: {text!r}. Expected NAME=COUNT.')
+        count_token = str(count_raw or '').strip()
+        if count_token.lower() == 'density':
+            return selected_name, None
+        try:
+            count_value = int(count_token)
+        except Exception as exc:
+            raise ValueError(f'Invalid {option_name} value: {text!r}. Expected NAME=COUNT or NAME=density.') from exc
+        if count_value < 0:
+            raise ValueError(f'Invalid {option_name} value: {text!r}. Count must be non-negative.')
+        return selected_name, count_value
+
+    def _equalize_density_item_factors(items: list[dict[str, Any]]) -> None:
+        density_items = [
+            item
+            for item in (items or [])
+            if isinstance(item, dict) and str(item.get('v_metric') or '').strip().lower() != 'count'
+        ]
+        if not density_items:
+            return
+        equal_factor = 1.0 / float(len(density_items))
+        for item in density_items:
+            item['factor'] = equal_factor
+
     if role_specs:
         normalize_role = getattr(backend, '_normalize_node_information_role', None)
         node_items: list[dict[str, Any]] = []
@@ -2631,50 +2666,270 @@ def _run_new_phase(args: Any) -> int:
         sections['Node Information'] = node_section
         seeded_any = True
 
-    routing_seed = str(getattr(args, 'seed_routing', '') or '').strip()
-    if routing_seed:
+    routing_specs = list(getattr(args, 'seed_routing_specs', None) or [])
+    if routing_specs:
         normalize_routing = getattr(backend, '_normalize_routing_item_selection', None)
-        routing_name = routing_seed
-        if callable(normalize_routing):
+        routing_items_seeded: list[dict[str, Any]] = []
+        for raw_spec in routing_specs:
             try:
-                routing_name = normalize_routing(routing_seed) or routing_seed
-            except Exception:
-                pass
-        routing_section = sections.get('Routing') if isinstance(sections.get('Routing'), dict) else {}
-        routing_section['density'] = float(getattr(args, 'seed_routing_density', 0.5) or 0.5)
-        routing_section['items'] = [{'selected': routing_name, 'factor': 1.0}]
-        sections['Routing'] = routing_section
-        seeded_any = True
+                routing_seed_name, routing_seed_count = _parse_seed_selection_spec(
+                    raw_spec,
+                    option_name='--seed-routing',
+                )
+            except ValueError as exc:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': str(exc),
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            routing_name = routing_seed_name
+            if callable(normalize_routing):
+                try:
+                    routing_name = normalize_routing(routing_seed_name) or routing_seed_name
+                except Exception:
+                    pass
+            if routing_seed_count == 0:
+                continue
+            routing_item: dict[str, Any] = {'selected': routing_name, 'factor': 1.0}
+            if routing_seed_count is not None:
+                routing_item['v_metric'] = 'Count'
+                routing_item['v_count'] = routing_seed_count
+            routing_items_seeded.append(routing_item)
+        if routing_items_seeded:
+            _equalize_density_item_factors(routing_items_seeded)
+            routing_section = sections.get('Routing') if isinstance(sections.get('Routing'), dict) else {}
+            routing_section['density'] = float(getattr(args, 'seed_routing_density', 0.5) or 0.5)
+            routing_section['items'] = routing_items_seeded
+            sections['Routing'] = routing_section
+            seeded_any = True
 
-    traffic_seed = str(getattr(args, 'seed_traffic', '') or '').strip()
-    if traffic_seed:
+    traffic_specs = list(getattr(args, 'seed_traffic_specs', None) or [])
+    if traffic_specs:
         normalize_traffic = getattr(backend, '_normalize_traffic_item_selection', None)
-        traffic_name = traffic_seed
-        if callable(normalize_traffic):
+        traffic_items_seeded: list[dict[str, Any]] = []
+        for raw_spec in traffic_specs:
             try:
-                traffic_name = normalize_traffic(traffic_seed) or traffic_seed
-            except Exception:
-                pass
-        traffic_section = sections.get('Traffic') if isinstance(sections.get('Traffic'), dict) else {}
-        traffic_section['density'] = float(getattr(args, 'seed_traffic_density', 0.5) or 0.5)
-        traffic_section['items'] = [{
-            'selected': traffic_name,
-            'factor': 1.0,
-            'pattern': 'Random',
-            'content_type': 'Random',
-            'rate_kbps': 'Random',
-            'period_s': 'Random',
-            'jitter_pct': 'Random',
-        }]
-        sections['Traffic'] = traffic_section
-        seeded_any = True
+                traffic_seed_name, traffic_seed_count = _parse_seed_selection_spec(
+                    raw_spec,
+                    option_name='--seed-traffic',
+                )
+            except ValueError as exc:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': str(exc),
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            traffic_name = traffic_seed_name
+            if callable(normalize_traffic):
+                try:
+                    traffic_name = normalize_traffic(traffic_seed_name) or traffic_seed_name
+                except Exception:
+                    pass
+            if traffic_seed_count == 0:
+                continue
+            traffic_item: dict[str, Any] = {
+                'selected': traffic_name,
+                'factor': 1.0,
+                'pattern': 'Random',
+                'content_type': 'Random',
+                'rate_kbps': 'Random',
+                'period_s': 'Random',
+                'jitter_pct': 'Random',
+            }
+            if traffic_seed_count is not None:
+                traffic_item['v_metric'] = 'Count'
+                traffic_item['v_count'] = traffic_seed_count
+            traffic_items_seeded.append(traffic_item)
+        if traffic_items_seeded:
+            _equalize_density_item_factors(traffic_items_seeded)
+            traffic_section = sections.get('Traffic') if isinstance(sections.get('Traffic'), dict) else {}
+            traffic_section['density'] = float(getattr(args, 'seed_traffic_density', 0.5) or 0.5)
+            traffic_section['items'] = traffic_items_seeded
+            sections['Traffic'] = traffic_section
+            seeded_any = True
+
+    service_specs = list(getattr(args, 'seed_service_specs', None) or [])
+    if service_specs:
+        normalize_service = getattr(backend, '_normalize_service_item_selection', None)
+        service_items_seeded: list[dict[str, Any]] = []
+        for raw_spec in service_specs:
+            try:
+                service_seed_name, service_seed_count = _parse_seed_selection_spec(
+                    raw_spec,
+                    option_name='--seed-service',
+                )
+            except ValueError as exc:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': str(exc),
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            service_name = service_seed_name
+            if callable(normalize_service):
+                try:
+                    service_name = normalize_service(service_seed_name) or service_seed_name
+                except Exception:
+                    pass
+            if service_seed_count == 0:
+                continue
+            service_item: dict[str, Any] = {'selected': service_name, 'factor': 1.0}
+            if service_seed_count is not None:
+                service_item['v_metric'] = 'Count'
+                service_item['v_count'] = service_seed_count
+            service_items_seeded.append(service_item)
+        if service_items_seeded:
+            _equalize_density_item_factors(service_items_seeded)
+            service_section = sections.get('Services') if isinstance(sections.get('Services'), dict) else {}
+            service_section['density'] = float(getattr(args, 'seed_service_density', 0.5) or 0.5)
+            service_section['items'] = service_items_seeded
+            sections['Services'] = service_section
+            seeded_any = True
+
+    segmentation_specs = list(getattr(args, 'seed_segmentation_specs', None) or [])
+    if segmentation_specs:
+        normalize_segmentation = getattr(backend, '_normalize_segmentation_item_selection', None)
+        segmentation_items_seeded: list[dict[str, Any]] = []
+        for raw_spec in segmentation_specs:
+            try:
+                segmentation_seed_name, segmentation_seed_count = _parse_seed_selection_spec(
+                    raw_spec,
+                    option_name='--seed-segmentation',
+                )
+            except ValueError as exc:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': str(exc),
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            segmentation_name = segmentation_seed_name
+            if callable(normalize_segmentation):
+                try:
+                    segmentation_name = normalize_segmentation(segmentation_seed_name) or segmentation_seed_name
+                except Exception:
+                    pass
+            if segmentation_seed_count == 0:
+                continue
+            segmentation_item: dict[str, Any] = {'selected': segmentation_name, 'factor': 1.0}
+            if segmentation_seed_count is not None:
+                segmentation_item['v_metric'] = 'Count'
+                segmentation_item['v_count'] = segmentation_seed_count
+            segmentation_items_seeded.append(segmentation_item)
+        if segmentation_items_seeded:
+            _equalize_density_item_factors(segmentation_items_seeded)
+            segmentation_section = sections.get('Segmentation') if isinstance(sections.get('Segmentation'), dict) else {}
+            segmentation_section['density'] = float(getattr(args, 'seed_segmentation_density', 0.5) or 0.5)
+            segmentation_section['items'] = segmentation_items_seeded
+            sections['Segmentation'] = segmentation_section
+            seeded_any = True
+
+    vulnerability_specs = list(getattr(args, 'seed_vulnerabilities', None) or [])
+    if vulnerability_specs:
+        try:
+            catalog_items = backend._load_backend_vuln_catalog_items()
+        except Exception:
+            catalog_items = []
+        if not isinstance(catalog_items, list):
+            catalog_items = []
+
+        vulnerability_items: list[dict[str, Any]] = []
+        for raw_spec in vulnerability_specs:
+            try:
+                vuln_seed_name, vuln_seed_count = _parse_seed_selection_spec(
+                    raw_spec,
+                    option_name='--seed-vulnerability',
+                )
+            except ValueError as exc:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': str(exc),
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            if vuln_seed_count == 0:
+                continue
+
+            resolved = resolve_vulnerability_catalog_entry(
+                catalog_items,
+                v_name=vuln_seed_name,
+                v_path=vuln_seed_name,
+            )
+            if not resolved:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': f'Invalid --seed-vulnerability value: {str(raw_spec)!r}. Specific vulnerability must match an enabled catalog entry by v_path or v_name.',
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+
+            vuln_item: dict[str, Any] = {
+                'selected': 'Specific',
+                'factor': 1.0,
+                'v_name': str(resolved.get('name') or '').strip(),
+                'v_path': str(resolved.get('path') or '').strip(),
+            }
+            if vuln_seed_count is not None:
+                vuln_item['v_metric'] = 'Count'
+                vuln_item['v_count'] = vuln_seed_count
+            vulnerability_items.append(vuln_item)
+
+        if vulnerability_items:
+            _equalize_density_item_factors(vulnerability_items)
+            vuln_section = sections.get('Vulnerabilities') if isinstance(sections.get('Vulnerabilities'), dict) else {}
+            vuln_items_existing = list(vuln_section.get('items') or []) if isinstance(vuln_section.get('items'), list) else []
+            vuln_section['density'] = float(getattr(args, 'seed_vulnerability_density', 0.5) or 0.5)
+            vuln_section['flag_type'] = str(vuln_section.get('flag_type') or 'text')
+            vuln_section['items'] = [*vuln_items_existing, *vulnerability_items]
+            sections['Vulnerabilities'] = vuln_section
+            seeded_any = True
 
     random_vuln_count = int(getattr(args, 'seed_random_vulnerability_count', 0) or 0)
     if random_vuln_count > 0:
         vuln_section = sections.get('Vulnerabilities') if isinstance(sections.get('Vulnerabilities'), dict) else {}
-        vuln_section['density'] = 0.0
+        if 'density' not in vuln_section:
+            vuln_section['density'] = 0.0
         vuln_section['flag_type'] = str(vuln_section.get('flag_type') or 'text')
-        vuln_section['items'] = [{
+        vuln_items_existing = list(vuln_section.get('items') or []) if isinstance(vuln_section.get('items'), list) else []
+        vuln_section['items'] = [*vuln_items_existing, {
             'selected': 'Random',
             'factor': 1.0,
             'v_metric': 'Count',
@@ -2990,10 +3245,16 @@ def _add_cli_core_connection_args(container: Any) -> None:
 def _add_cli_new_args(container: Any) -> None:
     container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
     container.add_argument('--seed-role', dest='seed_roles', action='append', help='Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable)')
-    container.add_argument('--seed-routing', default='', help='Seed a Routing row for the new phase (for example Random, RIP, RIPNG, BGP, OSPFv2, OSPFv3)')
+    container.add_argument('--seed-routing', dest='seed_routing_specs', action='append', help='Seed a Routing row for the new phase (repeatable; density rows are equal-weighted, for example OSPFv2, BGP=density, or OSPFv2=3)')
     container.add_argument('--seed-routing-density', type=float, default=0.5, help='Routing density to use with --seed-routing (default: 0.5)')
-    container.add_argument('--seed-traffic', default='', help='Seed a Traffic row for the new phase (for example Random, TCP, UDP)')
+    container.add_argument('--seed-service', dest='seed_service_specs', action='append', help='Seed a Services row for the new phase (repeatable; density rows are equal-weighted, for example SSH, HTTP=density, or SSH=4)')
+    container.add_argument('--seed-service-density', type=float, default=0.5, help='Services density to use with --seed-service (default: 0.5)')
+    container.add_argument('--seed-traffic', dest='seed_traffic_specs', action='append', help='Seed a Traffic row for the new phase (repeatable; density rows are equal-weighted, for example TCP, UDP=density, or TCP=10)')
     container.add_argument('--seed-traffic-density', type=float, default=0.5, help='Traffic density to use with --seed-traffic (default: 0.5)')
+    container.add_argument('--seed-segmentation', dest='seed_segmentation_specs', action='append', help='Seed a Segmentation row for the new phase (repeatable; density rows are equal-weighted, for example Firewall, NAT=density, or Firewall=2)')
+    container.add_argument('--seed-segmentation-density', type=float, default=0.5, help='Segmentation density to use with --seed-segmentation (default: 0.5)')
+    container.add_argument('--seed-vulnerability', dest='seed_vulnerabilities', action='append', help='Seed a specific Vulnerabilities row for the new phase using an active catalog entry name or path (repeatable; density rows are equal-weighted, for example jboss/CVE-2017-12149, weblogic/CVE-2017-10271=density, or jboss/CVE-2017-12149=2)')
+    container.add_argument('--seed-vulnerability-density', type=float, default=0.5, help='Vulnerabilities density to use with --seed-vulnerability when count is omitted or set to density (default: 0.5)')
     container.add_argument('--seed-random-vulnerability-count', type=int, default=0, help='Seed this many random vulnerability targets for the new phase')
 
 
@@ -3164,10 +3425,8 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     elif phase in {'execute', 'topo'}:
         _add_cli_core_connection_args(ap)
         _add_cli_execute_topo_args(ap)
-    else:
-        _add_cli_core_connection_args(ap)
-        _add_cli_execute_topo_args(ap)
     return ap
+
 
 def main():
     argv = sys.argv[1:]

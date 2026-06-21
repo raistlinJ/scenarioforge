@@ -5,6 +5,9 @@ def test_new_phase_help_hides_flow_and_execute_only_flags() -> None:
     help_text = cli._build_cli_help_parser('new').format_help()
 
     assert '--seed-role' in help_text
+    assert '--seed-service' in help_text
+    assert '--seed-segmentation' in help_text
+    assert '--seed-vulnerability' in help_text
     assert '--host' in help_text
     assert '--flow-mode' not in help_text
     assert '--preview-full' not in help_text
