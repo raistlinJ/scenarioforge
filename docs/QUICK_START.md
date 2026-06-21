@@ -130,6 +130,8 @@ Phase command notes:
 - `new` can also embed top-level CORE SSH connection details directly into the XML with `--ssh-host`, `--ssh-port`, `--ssh-username`, and `--ssh-password`.
 - `preview-plan` persists embedded `PlanPreview` metadata back into the XML and prints the resulting preview payload as JSON.
 - `flag-sequencing` runs the same preview/resolve helper used by the Web UI and persists the resulting `FlowState` back into the XML.
+- In generator-running Flow modes such as `resolve`, the CLI now treats remote-capable CORE VM execution as required unless you explicitly pass `--flow-run-local`; it no longer silently falls back to local generator execution when remote setup fails.
+- `flag-sequencing` JSON output now includes `generator_execution_requested` and `generator_execution_mode` so you can confirm whether generator work ran in `remote` or `local` mode.
 - `topo` builds the topology in CORE and stops before segmentation, traffic, report generation, and session start.
 - `execute` is the full default run; the phase name is optional.
 - `python -m scenarioforge.cli <phase> --help` now shows phase-specific help instead of every flag for every phase.

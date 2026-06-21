@@ -947,6 +947,77 @@ def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monk
     assert sent['run_local'] is True
 
 
+def test_cli_flag_sequencing_phase_forces_remote_when_saved_remote_core_config_exists(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    captured: dict[str, object] = {}
+    app = Flask(__name__)
+
+    def _fake_prepare(*, backend):
+        captured['payload'] = request.get_json()
+        return jsonify({'ok': True, 'flow_valid': True, 'flag_assignments': [], 'phase_result': 'resolved'})
+
+    fake_backend = SimpleNamespace(
+        app=app,
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+        _planner_persist_flow_plan=lambda **kwargs: {
+            'xml_path': kwargs['xml_path'],
+            'scenario': kwargs['scenario'],
+            'seed': 7,
+            'preview_plan_path': kwargs['xml_path'],
+            'full_preview': {},
+            'plan': {},
+        },
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+            'ssh_enabled': True,
+        },
+        _select_core_config_for_page=lambda *_a, **_k: None,
+        _load_run_history=lambda: [],
+        _merge_core_configs=lambda *configs, include_password=True: {
+            key: value for cfg in configs if isinstance(cfg, dict) for key, value in cfg.items()
+        },
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: cfg,
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg or {}),
+        _core_backend_defaults=lambda include_password=True: {},
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    monkeypatch.setattr(flow_prepare_preview_execute, 'execute', _fake_prepare)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'flag-sequencing',
+            '--xml',
+            str(xml_path),
+            '--flow-mode',
+            'resolve',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert payload['generator_execution_requested'] is True
+    assert payload['generator_execution_mode'] == 'remote'
+    sent = captured['payload']
+    assert isinstance(sent, dict)
+    assert sent['run_remote'] is True
+
+
 def test_cli_topo_phase_stops_after_topology_build(tmp_path, monkeypatch, capsys):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
