@@ -109,7 +109,7 @@ python -m scenarioforge.cli new \
 Popular options:
 - Replace `examples/sample.xml` with your own ScenarioForge XML file when you are ready to run a custom scenario.
 - `--scenario NAME` pick a specific scenario entry
-- `--host / --port` override the CORE gRPC endpoint (defaults `localhost:50051`)
+- `--host / --port` override the CORE gRPC endpoint. If omitted, the CLI uses the same env-/backend-backed defaults as the Web UI, typically `localhost:50051` unless overridden by `.scenarioforge.env` or real environment variables.
 - `--layout-density {compact|normal|spacious}` adjust map spacing
 - `--seg-include-hosts`, `--seg-allow-docker-ports`, `--nat-mode`, `--dnat-prob` fine-tune segmentation
 - `--traffic-pattern`, `--traffic-rate`, `--traffic-content` override traffic defaults
@@ -121,7 +121,7 @@ Saved-XML execute notes:
 
 Phase command notes:
 - `new` creates a starter ScenarioForge XML with one scenario and canonical section keys using the same XML builder as the Web UI.
-- `--density-count` sets the scenario-level Count for Density base host pool used by density-based planning for routing, services, traffic, segmentation, and vulnerabilities.
+- `--density-count` sets the scenario-level Count for Density base host pool used by density-based planning for routing, services, traffic, segmentation, and vulnerabilities. If omitted, it defaults to the same starter value used by the Web UI (`10`).
 - `new` can also seed basic scenario rows with `--seed-role`, `--seed-routing`, `--seed-service`, `--seed-traffic`, `--seed-segmentation`, `--seed-vulnerability`, and `--seed-random-vulnerability-count`.
 - `--seed-role` is repeatable and always uses `ROLE=COUNT` semantics for Node Information rows.
 - `--seed-routing`, `--seed-service`, `--seed-traffic`, `--seed-segmentation`, and `--seed-vulnerability` are repeatable and accept `NAME`, `NAME=density`, or `NAME=COUNT`.
@@ -133,6 +133,7 @@ Phase command notes:
 - `topo` builds the topology in CORE and stops before segmentation, traffic, report generation, and session start.
 - `execute` is the full default run; the phase name is optional.
 - `python -m scenarioforge.cli <phase> --help` now shows phase-specific help instead of every flag for every phase.
+- Core connection defaults shown in CLI help are computed the same way as the Web UI defaults, including values loaded from `.scenarioforge.env` and real environment variables.
 
 Need more detail: see [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md).
 
