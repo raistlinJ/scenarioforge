@@ -1038,6 +1038,89 @@ def test_cli_flag_sequencing_phase_forces_remote_when_saved_remote_core_config_e
     assert sent['run_remote'] is True
 
 
+def test_cli_flag_sequencing_phase_prefers_resolved_saved_xml_for_remote_core_config(tmp_path, monkeypatch, capsys):
+    raw_xml_path = tmp_path / 'raw.xml'
+    latest_xml_path = tmp_path / 'latest.xml'
+    raw_xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    latest_xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    captured: dict[str, object] = {}
+    persist_calls: list[str] = []
+    app = Flask(__name__)
+
+    @app.route('/api/flag-sequencing/sequence_preview_plan', methods=['POST'])
+    def api_flow_sequence_preview_plan():
+        return jsonify({
+            'ok': True,
+            'chain': [{'id': 'node-a'}],
+            'preview_plan_path': str(latest_xml_path.resolve()),
+        })
+
+    def _fake_prepare(*, backend):
+        captured['payload'] = request.get_json()
+        return jsonify({'ok': True, 'flow_valid': True, 'flag_assignments': [], 'phase_result': 'resolved'})
+
+    fake_backend = SimpleNamespace(
+        app=app,
+        _resolve_preexecute_xml_path=lambda _xml_path, _scenario: str(latest_xml_path.resolve()),
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+        _planner_persist_flow_plan=lambda **kwargs: persist_calls.append(str(kwargs['xml_path'])) or {
+            'xml_path': kwargs['xml_path'],
+            'scenario': kwargs['scenario'],
+            'seed': 7,
+            'preview_plan_path': kwargs['xml_path'],
+            'full_preview': {},
+            'plan': {},
+        },
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda xml_path, *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+            'ssh_enabled': True,
+        } if str(xml_path) == str(latest_xml_path.resolve()) else None,
+        _select_core_config_for_page=lambda *_a, **_k: None,
+        _load_run_history=lambda: [],
+        _merge_core_configs=lambda *configs, include_password=True: {
+            key: value for cfg in configs if isinstance(cfg, dict) for key, value in cfg.items()
+        },
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: cfg,
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg or {}),
+        _core_backend_defaults=lambda include_password=True: {},
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    monkeypatch.setattr(flow_prepare_preview_execute, 'execute', _fake_prepare)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'flag-sequencing',
+            '--xml',
+            str(raw_xml_path),
+            '--flow-mode',
+            'resolve',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert persist_calls == [str(latest_xml_path.resolve())]
+    sent = captured['payload']
+    assert isinstance(sent, dict)
+    assert sent['preview_plan'] == str(latest_xml_path.resolve())
+    assert sent['run_remote'] is True
+
+
 def test_cli_flag_sequencing_phase_bypasses_login_gate_for_internal_sequence_route(tmp_path, monkeypatch, capsys):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
