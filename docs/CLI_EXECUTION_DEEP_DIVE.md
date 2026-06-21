@@ -77,7 +77,7 @@ Behavior:
 
 Useful `new` seeding flags:
 
-- `--density-count N`: set the scenario-level Count for Density base host pool used by density-based planning.
+- `--density-count N`: set the scenario-level Count for Density base host pool used by density-based planning. If omitted, the CLI uses the same starter default as the Web UI (`10`).
 - `--seed-role ROLE=COUNT`: add Node Information count rows, for example `Workstation=2` or `Docker=3`.
 - `--seed-routing NAME`, `NAME=density`, or `NAME=COUNT`: add one Routing row; repeat the flag to add multiple rows.
 - `--seed-service NAME`, `NAME=density`, or `NAME=COUNT`: add one Services row; repeat the flag to add multiple rows.
@@ -98,10 +98,10 @@ Seed semantics:
 
 Useful CORE connection flags for `new`:
 
-- `--host` / `--port`: top-level CORE gRPC endpoint stored in XML.
-- `--ssh-host` / `--ssh-port`: CORE SSH endpoint stored in XML.
-- `--ssh-username` / `--ssh-password`: CORE SSH credentials stored in XML.
-- `--venv-bin`: remote CORE Python environment path stored in XML.
+- `--host` / `--port`: top-level CORE gRPC endpoint stored in XML. If omitted, defaults come from the same env-/backend-backed sources as the Web UI, usually `localhost:50051` unless overridden.
+- `--ssh-host` / `--ssh-port`: CORE SSH endpoint stored in XML. If omitted, defaults come from the same Web UI/core backend defaults and environment variables.
+- `--ssh-username` / `--ssh-password`: CORE SSH credentials stored in XML. If omitted, defaults come from the same Web UI/core backend defaults and environment variables.
+- `--venv-bin`: remote CORE Python environment path stored in XML. If omitted, the CLI uses the same Web UI/core backend default resolution, including `CORE_VENV_BIN` and the standard CORE venv path.
 
 If `--scenario` is omitted, the CLI uses the XML file stem as the initial scenario name.
 
@@ -127,7 +127,7 @@ This is the normal prerequisite for Flow work when the XML does not already cont
 Help note:
 
 - `python -m scenarioforge.cli --help` shows shared options.
-- `python -m scenarioforge.cli <phase> --help` shows only the flags relevant to that phase, with defaults rendered in the help output.
+- `python -m scenarioforge.cli <phase> --help` shows only the flags relevant to that phase, with defaults rendered in the help output from the same env-/backend-backed sources the Web UI uses.
 
 ## Flag-Sequencing Phase
 

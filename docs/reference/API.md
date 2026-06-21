@@ -909,7 +909,7 @@ core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenari
 - `--xml` (required): Scenario XML path.
 - `--scenario`: Scenario name (defaults to the first in the file).
 - `--force`: Overwrite an existing XML file when used with the `new` phase.
-- `--density-count`: Scenario-level Count for Density base host pool for density-driven planning in the `new` phase.
+- `--density-count`: Scenario-level Count for Density base host pool for density-driven planning in the `new` phase. Defaults to `10`, matching the Web UI starter payload.
 - `--seed-role`: Repeatable `ROLE=COUNT` seeding for the `new` phase.
 - `--seed-routing`: Repeatable routing-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
 - `--seed-routing-density`: Density used with `--seed-routing`.
@@ -924,7 +924,7 @@ core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenari
 - `--seed-random-vulnerability-count`: Seed random vulnerability targets for the `new` phase.
 - `--ssh-host`, `--ssh-port`, `--ssh-username`, `--ssh-password`: Persist CORE SSH connection details directly in the XML.
 - `--venv-bin`: Persist the remote CORE Python `venv/bin` path directly in the XML.
-- `--host`, `--port`: CORE gRPC endpoint (defaults `localhost:50051`).
+- `--host`, `--port`: CORE gRPC endpoint. Defaults come from the same env-/backend-backed sources as the Web UI, commonly `localhost:50051` unless overridden by `.scenarioforge.env` or real environment variables.
 - `--prefix`: IPv4 prefix for auto-assigned addresses (default `10.0.0.0/24`).
 - `--ip-mode`: `private | mixed | public` (default `private`).
 - `--ip-region`: `all | na | eu | apac | latam | africa | middle-east` (default `all`).
@@ -936,6 +936,8 @@ core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenari
 - `--router-mesh-style`: `full | ring | tree` (fallback when routing items omit `r2r_mode`).
 
 For Routing, Services, Traffic, Segmentation, and specific Vulnerabilities, multiple density-style seed rows in the same section are written with equal `factor` values that sum to `1.0` for that section. Count rows remain additive.
+
+CLI help defaults now reflect these same Web UI/backend defaults rather than only static parser literals.
 
 ### Flag-Sequencing Phase Arguments
 
