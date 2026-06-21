@@ -316,6 +316,430 @@ def test_cli_new_phase_seeds_basic_scenario_rows(tmp_path, monkeypatch, capsys):
     assert vuln_item.get('v_name') == 'demo/random-vuln'
 
 
+def test_cli_new_phase_supports_count_seed_specs_for_routing_and_traffic(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'count-seeds.xml'
+    argv0 = cli.sys.argv[:]
+
+    def _fake_concretize(scenarios, *, seed=None):
+        scenario = dict((scenarios or [])[0])
+        sections = dict(scenario.get('sections') or {})
+        routing_section = dict(sections.get('Routing') or {})
+        routing_items = list(routing_section.get('items') or [])
+        if routing_items:
+            routing_items[0] = dict(routing_items[0])
+            routing_items[0]['selected'] = 'OSPFv2'
+            routing_section['items'] = routing_items
+            sections['Routing'] = routing_section
+
+        traffic_section = dict(sections.get('Traffic') or {})
+        traffic_items = list(traffic_section.get('items') or [])
+        if traffic_items:
+            traffic_items[0] = dict(traffic_items[0])
+            traffic_items[0].update({
+                'selected': 'TCP',
+                'pattern': 'periodic',
+                'content_type': 'text',
+                'rate_kbps': 128.0,
+                'period_s': 2.0,
+                'jitter_pct': 15.0,
+            })
+            traffic_section['items'] = traffic_items
+            sections['Traffic'] = traffic_section
+
+        scenario['sections'] = sections
+        return [scenario]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(backend, '_concretize_scenarios_for_save', _fake_concretize)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'count-seeds',
+            '--seed-routing',
+            'OSPFv2=3',
+            '--seed-traffic',
+            'TCP=7',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+
+    root = ET.parse(xml_path).getroot()
+    scenario_el = root.find('Scenario')
+    assert scenario_el is not None
+    se = scenario_el.find('ScenarioEditor')
+    assert se is not None
+
+    routing_item = se.find("section[@name='Routing']/item")
+    assert routing_item is not None
+    assert routing_item.get('selected') == 'OSPFv2'
+    assert routing_item.get('v_metric') == 'Count'
+    assert routing_item.get('v_count') == '3'
+
+    traffic_item = se.find("section[@name='Traffic']/item")
+    assert traffic_item is not None
+    assert traffic_item.get('selected') == 'TCP'
+    assert traffic_item.get('v_metric') == 'Count'
+    assert traffic_item.get('v_count') == '7'
+
+
+def test_cli_new_phase_supports_density_seed_specs_for_routing_and_traffic(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'density-seeds.xml'
+    argv0 = cli.sys.argv[:]
+
+    def _fake_concretize(scenarios, *, seed=None):
+        scenario = dict((scenarios or [])[0])
+        sections = dict(scenario.get('sections') or {})
+        routing_section = dict(sections.get('Routing') or {})
+        routing_items = list(routing_section.get('items') or [])
+        if routing_items:
+            routing_items[0] = dict(routing_items[0])
+            routing_items[0]['selected'] = 'OSPFv2'
+            routing_section['items'] = routing_items
+            sections['Routing'] = routing_section
+
+        traffic_section = dict(sections.get('Traffic') or {})
+        traffic_items = list(traffic_section.get('items') or [])
+        if traffic_items:
+            traffic_items[0] = dict(traffic_items[0])
+            traffic_items[0].update({
+                'selected': 'TCP',
+                'pattern': 'periodic',
+                'content_type': 'text',
+                'rate_kbps': 128.0,
+                'period_s': 2.0,
+                'jitter_pct': 15.0,
+            })
+            traffic_section['items'] = traffic_items
+            sections['Traffic'] = traffic_section
+
+        scenario['sections'] = sections
+        return [scenario]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(backend, '_concretize_scenarios_for_save', _fake_concretize)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'density-seeds',
+            '--seed-routing',
+            'OSPFv2=density',
+            '--seed-traffic',
+            'TCP=density',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+
+    root = ET.parse(xml_path).getroot()
+    scenario_el = root.find('Scenario')
+    assert scenario_el is not None
+    se = scenario_el.find('ScenarioEditor')
+    assert se is not None
+
+    routing_item = se.find("section[@name='Routing']/item")
+    assert routing_item is not None
+    assert routing_item.get('selected') == 'OSPFv2'
+    assert routing_item.get('v_metric') is None
+    assert routing_item.get('v_count') is None
+
+    traffic_item = se.find("section[@name='Traffic']/item")
+    assert traffic_item is not None
+    assert traffic_item.get('selected') == 'TCP'
+    assert traffic_item.get('v_metric') is None
+    assert traffic_item.get('v_count') is None
+
+
+def test_cli_new_phase_rejects_invalid_count_seed_specs(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'invalid-count-seeds.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'invalid-count-seeds',
+            '--seed-routing',
+            'OSPFv2=abc',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload['ok'] is False
+    assert 'Invalid --seed-routing value' in payload['error']
+
+
+def test_cli_new_phase_supports_service_and_segmentation_seed_specs(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'service-seg-seeds.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(backend, '_concretize_scenarios_for_save', lambda scenarios, *, seed=None: scenarios)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'service-seg-seeds',
+            '--seed-service',
+            'SSH=4',
+            '--seed-segmentation',
+            'Firewall=density',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+
+    root = ET.parse(xml_path).getroot()
+    scenario_el = root.find('Scenario')
+    assert scenario_el is not None
+    se = scenario_el.find('ScenarioEditor')
+    assert se is not None
+
+    service_item = se.find("section[@name='Services']/item")
+    assert service_item is not None
+    assert service_item.get('selected') == 'SSH'
+    assert service_item.get('v_metric') == 'Count'
+    assert service_item.get('v_count') == '4'
+
+    segmentation_item = se.find("section[@name='Segmentation']/item")
+    assert segmentation_item is not None
+    assert segmentation_item.get('selected') == 'Firewall'
+    assert segmentation_item.get('v_metric') is None
+    assert segmentation_item.get('v_count') is None
+
+
+def test_cli_new_phase_supports_specific_vulnerability_seed_specs(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'specific-vuln-seeds.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(backend, '_concretize_scenarios_for_save', lambda scenarios, *, seed=None: scenarios)
+    monkeypatch.setattr(
+        backend,
+        '_load_backend_vuln_catalog_items',
+        lambda: [
+            {'Name': 'jboss/CVE-2017-12149', 'Path': '/catalog/jboss/CVE-2017-12149/docker-compose.yml'},
+            {'Name': 'weblogic/CVE-2017-10271', 'Path': '/catalog/weblogic/CVE-2017-10271/docker-compose.yml'},
+        ],
+    )
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'specific-vuln-seeds',
+            '--seed-vulnerability',
+            'jboss/CVE-2017-12149=2',
+            '--seed-vulnerability',
+            'weblogic/CVE-2017-10271=density',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+
+    root = ET.parse(xml_path).getroot()
+    scenario_el = root.find('Scenario')
+    assert scenario_el is not None
+    se = scenario_el.find('ScenarioEditor')
+    assert se is not None
+
+    vuln_items = se.findall("section[@name='Vulnerabilities']/item")
+    assert len(vuln_items) == 2
+
+    first = vuln_items[0]
+    assert first.get('selected') == 'Specific'
+    assert first.get('v_name') == 'jboss/CVE-2017-12149'
+    assert first.get('v_path') == '/catalog/jboss/CVE-2017-12149/docker-compose.yml'
+    assert first.get('v_metric') == 'Count'
+    assert first.get('v_count') == '2'
+
+    second = vuln_items[1]
+    assert second.get('selected') == 'Specific'
+    assert second.get('v_name') == 'weblogic/CVE-2017-10271'
+    assert second.get('v_path') == '/catalog/weblogic/CVE-2017-10271/docker-compose.yml'
+    assert second.get('v_metric') is None
+    assert second.get('v_count') is None
+
+
+def test_cli_new_phase_equalizes_multiple_density_seed_rows(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'multi-density-seeds.xml'
+    argv0 = cli.sys.argv[:]
+
+    def _fake_concretize(scenarios, *, seed=None):
+        scenario = dict((scenarios or [])[0])
+        sections = dict(scenario.get('sections') or {})
+
+        traffic_section = dict(sections.get('Traffic') or {})
+        traffic_items = list(traffic_section.get('items') or [])
+        for item in traffic_items:
+            if not isinstance(item, dict):
+                continue
+            item.update({
+                'pattern': 'periodic',
+                'content_type': 'text',
+                'rate_kbps': 128.0,
+                'period_s': 2.0,
+                'jitter_pct': 15.0,
+            })
+        if traffic_items:
+            traffic_section['items'] = traffic_items
+            sections['Traffic'] = traffic_section
+
+        scenario['sections'] = sections
+        return [scenario]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(backend, '_concretize_scenarios_for_save', _fake_concretize)
+    monkeypatch.setattr(
+        backend,
+        '_load_backend_vuln_catalog_items',
+        lambda: [
+            {'Name': 'jboss/CVE-2017-12149', 'Path': '/catalog/jboss/CVE-2017-12149/docker-compose.yml'},
+            {'Name': 'weblogic/CVE-2017-10271', 'Path': '/catalog/weblogic/CVE-2017-10271/docker-compose.yml'},
+        ],
+    )
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'multi-density-seeds',
+            '--seed-routing',
+            'OSPFv2',
+            '--seed-routing',
+            'BGP=density',
+            '--seed-service',
+            'SSH',
+            '--seed-service',
+            'HTTP=density',
+            '--seed-traffic',
+            'TCP',
+            '--seed-traffic',
+            'UDP=density',
+            '--seed-segmentation',
+            'Firewall',
+            '--seed-segmentation',
+            'NAT=density',
+            '--seed-vulnerability',
+            'jboss/CVE-2017-12149',
+            '--seed-vulnerability',
+            'weblogic/CVE-2017-10271=density',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+
+    root = ET.parse(xml_path).getroot()
+    se = root.find('./Scenario/ScenarioEditor')
+    assert se is not None
+
+    for section_name in ('Routing', 'Services', 'Traffic', 'Segmentation', 'Vulnerabilities'):
+        items = se.findall(f"section[@name='{section_name}']/item")
+        assert len(items) == 2
+        factors = [float(item.get('factor') or 0.0) for item in items]
+        assert factors == pytest.approx([0.5, 0.5])
+        for item in items:
+            assert item.get('v_metric') is None
+            assert item.get('v_count') is None
+
+
+def test_cli_new_phase_rejects_unknown_specific_vulnerability_seed(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'unknown-specific-vuln-seed.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(backend, '_load_backend_vuln_catalog_items', lambda: [])
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'unknown-specific-vuln-seed',
+            '--seed-vulnerability',
+            'jboss/CVE-2017-12149=1',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload['ok'] is False
+    assert 'Invalid --seed-vulnerability value' in payload['error']
+
+
 def test_cli_new_phase_vm_mode_errors_when_vm_defaults_missing(tmp_path, monkeypatch, capsys):
     fake_backend = SimpleNamespace(
         _webui_runtime_mode=lambda: 'vm',
