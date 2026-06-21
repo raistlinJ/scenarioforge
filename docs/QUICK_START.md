@@ -60,6 +60,47 @@ With **pip**:
 ```bash
 python -m scenarioforge.cli --xml examples/sample.xml --seed 42 --verbose
 ```
+Saved XML from the Web UI can be executed directly the same way:
+```bash
+python -m scenarioforge.cli --xml /abs/path/outputs/scenarios-06-04-26-16-31-25/scenarios.xml --scenario "Scenario 1" --verbose
+```
+Explicit phase commands are also available:
+```bash
+python -m scenarioforge.cli new --xml /abs/path/scenarios.xml --scenario "Scenario 1"
+python -m scenarioforge.cli preview-plan --xml /abs/path/scenarios.xml --scenario "Scenario 1"
+python -m scenarioforge.cli flag-sequencing --xml /abs/path/scenarios.xml --scenario "Scenario 1" --flow-mode resolve --flow-length 3
+python -m scenarioforge.cli topo --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
+python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
+```
+
+Seed a starter scenario in one command:
+
+```bash
+python -m scenarioforge.cli new \
+	--xml /abs/path/myscen.xml \
+	--scenario "myscen" \
+	--seed-role Workstation=2 \
+	--seed-role Docker=3 \
+	--seed-routing Random \
+	--seed-traffic Random \
+	--seed-random-vulnerability-count 1 \
+	--seed 42
+```
+
+Seed a starter scenario and embed CORE SSH credentials in the XML:
+
+```bash
+python -m scenarioforge.cli new \
+	--xml /abs/path/myscen.xml \
+	--scenario "myscen" \
+	--host 10.0.0.50 \
+	--port 50051 \
+	--ssh-host 10.0.0.50 \
+	--ssh-port 22 \
+	--ssh-username corevm \
+	--ssh-password change-me \
+	--venv-bin /opt/core/venv/bin
+```
 Popular options:
 - Replace `examples/sample.xml` with your own ScenarioForge XML file when you are ready to run a custom scenario.
 - `--scenario NAME` pick a specific scenario entry
@@ -67,6 +108,31 @@ Popular options:
 - `--layout-density {compact|normal|spacious}` adjust map spacing
 - `--seg-include-hosts`, `--seg-allow-docker-ports`, `--nat-mode`, `--dnat-prob` fine-tune segmentation
 - `--traffic-pattern`, `--traffic-rate`, `--traffic-content` override traffic defaults
+
+Saved-XML execute notes:
+- If the XML contains embedded `PlanPreview`, the CLI uses it for the same preview/slot alignment that the Web UI execute path expects.
+- If the XML contains `FlagSequencing/FlowState`, the CLI now enforces the same prerequisite as Web Execute: resolved Flow runtime values and referenced local artifacts must already exist before the run starts.
+- If the embedded preview metadata no longer matches the current XML-derived plan, the CLI stops early and asks you to regenerate/save preview metadata first instead of executing a stale plan.
+
+Phase command notes:
+- `new` creates a starter ScenarioForge XML with one scenario and canonical section keys using the same XML builder as the Web UI.
+- `new` can also seed basic scenario rows with `--seed-role`, `--seed-routing`, `--seed-traffic`, and `--seed-random-vulnerability-count`.
+- `new` can also embed top-level CORE SSH connection details directly into the XML with `--ssh-host`, `--ssh-port`, `--ssh-username`, and `--ssh-password`.
+- `preview-plan` persists embedded `PlanPreview` metadata back into the XML and prints the resulting preview payload as JSON.
+- `flag-sequencing` runs the same preview/resolve helper used by the Web UI and persists the resulting `FlowState` back into the XML.
+- `topo` builds the topology in CORE and stops before segmentation, traffic, report generation, and session start.
+- `execute` is the full default run; the phase name is optional.
+
+Need more detail: see [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md).
+
+Saved XML parity notes:
+- Direct CLI launches load `.scenarioforge.env` from the repo root when present, so the same default CORE host, SSH endpoint, VM-mode settings, and HITL-related env values used by the Web UI are available to the CLI.
+- For `execute` and `topo`, the CLI now resolves the saved scenario CORE connection from the XML first, fills missing fields from env/defaults, applies any saved CORE secret reference, and uses that configuration automatically.
+- When that saved scenario targets a remote CORE VM, the terminal CLI delegates the run to a remote CLI process over SSH so uploaded XML, compose files, and Flow artifacts live on the same host as `core-daemon`.
+- If the XML does not carry a saved `CoreConnection`, the CLI can still use env-only remote defaults from `.scenarioforge.env` for `execute`, `topo`, and remote `flag-sequencing` generator runs.
+
+VM mode note:
+- When `CORETG_WEBUI_MODE=vm`, the CLI now errors early if required CORE VM connection data is missing or still using template placeholder values. In VM mode, saved XML should carry the scenario’s CORE connection info.
 
 ## Runtime validation
 Runtime validation is built into Execute and CLI runs.

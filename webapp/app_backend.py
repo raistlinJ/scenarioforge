@@ -31981,15 +31981,8 @@ def _parse_scenarios_xml(path):
         raise ValueError("Root element must be <Scenarios> or <ScenarioEditor>")
     core_el = root.find('CoreConnection')
     if core_el is not None:
-        core_meta = {
-            'host': core_el.get('host'),
-            'port': core_el.get('port'),
-            'ssh_enabled': core_el.get('ssh_enabled'),
-            'ssh_host': core_el.get('ssh_host'),
-            'ssh_port': core_el.get('ssh_port'),
-            'ssh_username': core_el.get('ssh_username'),
-        }
-        data['core'] = _normalize_core_config(core_meta, include_password=False)
+        core_meta = _extract_optional_core_config(dict(core_el.attrib), include_password=True)
+        data['core'] = core_meta if isinstance(core_meta, dict) else _normalize_core_config({}, include_password=True)
     else:
         data['core'] = _default_core_dict()
 
@@ -32882,7 +32875,7 @@ def _parse_scenario_editor(se):
         hitl_info["interfaces"] = interfaces
         core_el = hitl_el.find("CoreConnection")
         if core_el is not None:
-            core_cfg = _extract_optional_core_config(dict(core_el.attrib), include_password=False)
+            core_cfg = _extract_optional_core_config(dict(core_el.attrib), include_password=True)
             if core_cfg:
                 if "validated" in core_cfg:
                     core_cfg["validated"] = _coerce_bool(core_cfg.get("validated"))
@@ -33133,7 +33126,7 @@ def _parse_scenario_editor(se):
 
 def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
     root = ET.Element("Scenarios")
-    core_cfg = _normalize_core_config(data_dict.get('core'), include_password=False)
+    core_cfg = _extract_optional_core_config(data_dict.get('core'), include_password=True) or _normalize_core_config(data_dict.get('core'), include_password=True)
     core_el = ET.SubElement(root, 'CoreConnection')
     core_host = core_cfg.get('grpc_host') or core_cfg.get('host') or ''
     core_port = core_cfg.get('grpc_port') if core_cfg.get('grpc_port') not in (None, '') else core_cfg.get('port')
@@ -33143,6 +33136,16 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
     core_el.set('ssh_host', str(core_cfg.get('ssh_host') or core_host or ''))
     core_el.set('ssh_port', str(core_cfg.get('ssh_port') or ''))
     core_el.set('ssh_username', str(core_cfg.get('ssh_username') or ''))
+    if core_cfg.get('ssh_password') not in (None, ''):
+        core_el.set('ssh_password', str(core_cfg.get('ssh_password') or ''))
+    for extra_key, extra_val in core_cfg.items():
+        if extra_key in {'host', 'port', 'grpc_host', 'grpc_port', 'ssh_enabled', 'ssh_host', 'ssh_port', 'ssh_username', 'ssh_password', 'ssh'}:
+            continue
+        try:
+            if extra_val not in (None, ''):
+                core_el.set(str(extra_key), str(extra_val))
+        except Exception:
+            continue
     for idx, scen in enumerate(data_dict.get("scenarios", [])):
         scen = _normalize_scenario_section_semantics(scen)
         scen_el = ET.SubElement(root, "Scenario")
@@ -33281,7 +33284,7 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                     hitl_el.set("bridge_validated_at", bridge_validated_at)
             if participant_url:
                 hitl_el.set('participant_proxmox_url', participant_url)
-            hitl_core_cfg = _extract_optional_core_config(hitl.get("core"), include_password=False)
+            hitl_core_cfg = _extract_optional_core_config(hitl.get("core"), include_password=True)
             if hitl_core_cfg:
                 hitl_core_el = ET.SubElement(hitl_el, "CoreConnection")
                 hitl_core_host = hitl_core_cfg.get("grpc_host") or hitl_core_cfg.get("host") or ""
@@ -33292,8 +33295,10 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                 hitl_core_el.set("ssh_host", str(hitl_core_cfg.get("ssh_host") or hitl_core_host or ""))
                 hitl_core_el.set("ssh_port", str(hitl_core_cfg.get("ssh_port") or ""))
                 hitl_core_el.set("ssh_username", str(hitl_core_cfg.get("ssh_username") or ""))
+                if hitl_core_cfg.get('ssh_password') not in (None, ''):
+                    hitl_core_el.set('ssh_password', str(hitl_core_cfg.get('ssh_password') or ''))
                 for extra_key, extra_val in hitl_core_cfg.items():
-                    if extra_key in {"host", "port", "ssh_enabled", "ssh_host", "ssh_port", "ssh_username", "ssh_password"}:
+                    if extra_key in {"host", "port", "grpc_host", "grpc_port", "ssh_enabled", "ssh_host", "ssh_port", "ssh_username", "ssh_password", "ssh"}:
                         continue
                     try:
                         hitl_core_el.set(str(extra_key), str(extra_val))

@@ -1,0 +1,715 @@
+import json
+from types import SimpleNamespace
+import xml.etree.ElementTree as ET
+
+import pytest
+from flask import Flask, jsonify, request
+
+import scenarioforge.cli as cli
+import scenarioforge.planning.orchestrator as orchestrator
+from webapp import flow_prepare_preview_execute
+
+
+class _FakeCoreClient:
+    def connect(self):
+        return None
+
+
+class _FakeSession:
+    topo_stats = {'preview_realized': True}
+
+
+class _FakeExecStdin:
+    def __init__(self):
+        self.sent = []
+
+    def write(self, data):
+        self.sent.append(data)
+
+    def flush(self):
+        return None
+
+    def close(self):
+        return None
+
+
+class _FakeExecChannel:
+    def __init__(self, exit_code=0):
+        self.exit_code = exit_code
+
+    def recv_exit_status(self):
+        return self.exit_code
+
+
+class _FakeExecStdout:
+    def __init__(self, channel):
+        self.channel = channel
+
+
+class _FakeSshClient:
+    def __init__(self, exit_code=0):
+        self.stdin = _FakeExecStdin()
+        self.channel = _FakeExecChannel(exit_code=exit_code)
+        self.command = None
+
+    def exec_command(self, command, get_pty=False, timeout=None):
+        self.command = command
+        return self.stdin, _FakeExecStdout(self.channel), object()
+
+    def close(self):
+        return None
+
+
+def test_cli_preview_plan_phase_persists_preview_metadata(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    fake_backend = SimpleNamespace(
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+        _planner_persist_flow_plan=lambda **kwargs: {
+            'xml_path': kwargs['xml_path'],
+            'scenario': kwargs['scenario'],
+            'seed': 42,
+            'preview_plan_path': kwargs['xml_path'],
+            'full_preview': {'seed': 42, 'hosts': [], 'routers': []},
+            'plan': {'routers_planned': 0, 'role_counts': {'Host': 1}},
+        },
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'preview-plan', '--xml', str(xml_path)]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert payload['phase'] == 'preview-plan'
+    assert payload['scenario'] == 'Scenario One'
+    assert payload['preview_plan_path'] == str(xml_path.resolve())
+
+
+def test_cli_new_phase_writes_starter_xml(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'starter.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'new', '--xml', str(xml_path), '--scenario', 'My Scenario']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert payload['phase'] == 'new'
+    assert payload['scenario'] == 'MyScenario'
+    assert xml_path.exists()
+
+    root = ET.parse(xml_path).getroot()
+    assert root.tag == 'Scenarios'
+    scenario_el = root.find('Scenario')
+    assert scenario_el is not None
+    assert scenario_el.get('name') == 'MyScenario'
+    assert root.find('CoreConnection') is not None
+    se = scenario_el.find('ScenarioEditor')
+    assert se is not None
+    section_names = [sec.get('name') for sec in se.findall('section')]
+    assert 'Node Information' in section_names
+    assert 'Routing' in section_names
+    assert 'Vulnerabilities' in section_names
+
+
+def test_cli_new_phase_persists_core_ssh_credentials_when_provided(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'starter.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli', 'new', '--xml', str(xml_path), '--scenario', 'CredScenario',
+            '--host', '10.0.0.10', '--port', '50051',
+            '--ssh-host', '10.0.0.11', '--ssh-port', '22',
+            '--ssh-username', 'corevm', '--ssh-password', 'pw123',
+            '--venv-bin', '/opt/core/venv/bin',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+
+    root = ET.parse(xml_path).getroot()
+    core_el = root.find('CoreConnection')
+    assert core_el is not None
+    assert core_el.get('host') == '10.0.0.10'
+    assert core_el.get('ssh_host') == '10.0.0.11'
+    assert core_el.get('ssh_username') == 'corevm'
+    assert core_el.get('ssh_password') == 'pw123'
+    assert core_el.get('venv_bin') == '/opt/core/venv/bin'
+
+
+def test_cli_new_phase_uses_xml_stem_when_scenario_missing(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'starter.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'new', '--xml', str(xml_path)]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['scenario'] == 'starter'
+    scenario_el = ET.parse(xml_path).getroot().find('Scenario')
+    assert scenario_el is not None
+    assert scenario_el.get('name') == 'starter'
+
+
+def test_cli_new_phase_refuses_overwrite_without_force(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'starter.xml'
+    xml_path.write_text('<Scenarios><Scenario name="existing" /></Scenarios>', encoding='utf-8')
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'new', '--xml', str(xml_path), '--scenario', 'My Scenario']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload['ok'] is False
+    assert 'already exists' in payload['error']
+    assert 'existing' in xml_path.read_text(encoding='utf-8')
+
+
+def test_cli_new_phase_seeds_basic_scenario_rows(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'myscen.xml'
+    argv0 = cli.sys.argv[:]
+
+    def _fake_concretize(scenarios, *, seed=None):
+        scenario = dict((scenarios or [])[0])
+        sections = dict(scenario.get('sections') or {})
+        sections['Routing'] = {
+            'density': 0.5,
+            'items': [{'selected': 'OSPFv2', 'factor': 1.0, 'r2r_mode': 'Uniform'}],
+        }
+        sections['Traffic'] = {
+            'density': 0.5,
+            'items': [{
+                'selected': 'TCP',
+                'factor': 1.0,
+                'pattern': 'periodic',
+                'content_type': 'text',
+                'rate_kbps': 128.0,
+                'period_s': 2.0,
+                'jitter_pct': 15.0,
+            }],
+        }
+        sections['Vulnerabilities'] = {
+            'density': 0.0,
+            'flag_type': 'text',
+            'items': [{
+                'selected': 'Specific',
+                'factor': 1.0,
+                'v_metric': 'Count',
+                'v_count': 1,
+                'v_name': 'demo/random-vuln',
+                'v_path': '/catalog/demo/random-vuln/docker-compose.yml',
+            }],
+        }
+        scenario['sections'] = sections
+        return [scenario]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(backend, '_concretize_scenarios_for_save', _fake_concretize)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'myscen',
+            '--seed-role',
+            'Workstation=2',
+            '--seed-role',
+            'Docker=3',
+            '--seed-routing',
+            'Random',
+            '--seed-traffic',
+            'Random',
+            '--seed-random-vulnerability-count',
+            '1',
+            '--seed',
+            '42',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert payload['scenario'] == 'myscen'
+
+    root = ET.parse(xml_path).getroot()
+    scenario_el = root.find('Scenario')
+    assert scenario_el is not None
+    se = scenario_el.find('ScenarioEditor')
+    assert se is not None
+
+    node_section = se.find("section[@name='Node Information']")
+    assert node_section is not None
+    node_items = node_section.findall('item')
+    assert len(node_items) == 2
+    assert {(item.get('selected'), item.get('v_count')) for item in node_items} == {('Workstation', '2'), ('Docker', '3')}
+
+    routing_section = se.find("section[@name='Routing']")
+    assert routing_section is not None
+    routing_item = routing_section.find('item')
+    assert routing_item is not None
+    assert routing_item.get('selected') == 'OSPFv2'
+
+    traffic_section = se.find("section[@name='Traffic']")
+    assert traffic_section is not None
+    traffic_item = traffic_section.find('item')
+    assert traffic_item is not None
+    assert traffic_item.get('selected') == 'TCP'
+
+    vuln_section = se.find("section[@name='Vulnerabilities']")
+    assert vuln_section is not None
+    vuln_item = vuln_section.find('item')
+    assert vuln_item is not None
+    assert vuln_item.get('selected') == 'Specific'
+    assert vuln_item.get('v_name') == 'demo/random-vuln'
+
+
+def test_cli_new_phase_vm_mode_errors_when_vm_defaults_missing(tmp_path, monkeypatch, capsys):
+    fake_backend = SimpleNamespace(
+        _webui_runtime_mode=lambda: 'vm',
+        _default_scenarios_payload_for_names=lambda names: {'scenarios': [{'name': list(names)[0], 'sections': {}, 'hitl': {'enabled': False, 'interfaces': []}}], 'core': {}},
+        _core_backend_defaults=lambda include_password=True: {
+            'host': '',
+            'port': 0,
+            'ssh_host': '',
+            'ssh_port': 0,
+            'ssh_username': '',
+            'ssh_password': '' if include_password else '',
+        },
+        _normalize_core_config=lambda cfg, include_password=False: dict(cfg or {}),
+        _webui_vm_mode_defaults=lambda include_password=False: {'hitl': {'enabled': True, 'interfaces': []}},
+    )
+    xml_path = tmp_path / 'starter.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'new', '--xml', str(xml_path), '--scenario', 'vmtest']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload['ok'] is False
+    assert 'VM mode requires additional configuration' in payload['error']
+    missing = payload.get('missing') if isinstance(payload.get('missing'), list) else []
+    assert 'CORE_HOST / grpc host' in missing
+    assert 'CORETG_VM_MODE_HITL_CORE_IFX_NAME (vm-mode HITL interface name)' in missing
+
+
+def test_cli_flag_sequencing_vm_mode_requires_saved_core_connection(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    fake_backend = SimpleNamespace(
+        app=Flask(__name__),
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+        _planner_persist_flow_plan=lambda **kwargs: {'xml_path': kwargs['xml_path'], 'scenario': kwargs['scenario']},
+        _webui_runtime_mode=lambda: 'vm',
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: None,
+        _merge_core_configs=lambda *configs, include_password=True: {'host': '', 'port': 0, 'ssh_host': '', 'ssh_port': 0, 'ssh_username': '', 'ssh_password': ''},
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: cfg,
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg or {}),
+        _core_backend_defaults=lambda include_password=True: {'host': '', 'port': 0, 'ssh_host': '', 'ssh_port': 0, 'ssh_username': '', 'ssh_password': ''},
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'flag-sequencing', '--xml', str(xml_path), '--scenario', 'Scenario One']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload['ok'] is False
+    missing = payload.get('missing') if isinstance(payload.get('missing'), list) else []
+    assert 'scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)' in missing
+
+
+def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    captured: dict[str, object] = {}
+    app = Flask(__name__)
+
+    def _fake_prepare(*, backend):
+        captured['payload'] = request.get_json()
+        return jsonify({'ok': True, 'flow_valid': True, 'flag_assignments': [], 'phase_result': 'resolved'})
+
+    fake_backend = SimpleNamespace(
+        app=app,
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+        _planner_persist_flow_plan=lambda **kwargs: {
+            'xml_path': kwargs['xml_path'],
+            'scenario': kwargs['scenario'],
+            'seed': 7,
+            'preview_plan_path': kwargs['xml_path'],
+            'full_preview': {},
+            'plan': {},
+        },
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: None,
+        _merge_core_configs=lambda *configs, include_password=True: {},
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: cfg,
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg or {}),
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    monkeypatch.setattr(flow_prepare_preview_execute, 'execute', _fake_prepare)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'flag-sequencing',
+            '--xml',
+            str(xml_path),
+            '--flow-mode',
+            'resolve',
+            '--flow-length',
+            '2',
+            '--flow-chain-id',
+            'node-a',
+            '--flow-chain-id',
+            'node-b',
+            '--flow-run-local',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert payload['phase'] == 'flag-sequencing'
+    sent = captured['payload']
+    assert isinstance(sent, dict)
+    assert sent['scenario'] == 'Scenario One'
+    assert sent['preview_plan'] == str(xml_path.resolve())
+    assert sent['mode'] == 'resolve'
+    assert sent['length'] == 2
+    assert sent['chain_ids'] == ['node-a', 'node-b']
+    assert sent['run_local'] is True
+
+
+def test_cli_topo_phase_stops_after_topology_build(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
+    monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: None)
+    monkeypatch.setattr(cli, '_export_flow_assignments_to_env', lambda *a, **k: None)
+    monkeypatch.setattr(cli, 'parse_node_info', lambda *a, **k: (1, [('Host', 1.0)], [], []))
+    monkeypatch.setattr(cli, 'parse_planning_metadata', lambda *a, **k: {})
+    monkeypatch.setattr(cli, 'parse_hitl_info', lambda *a, **k: {'enabled': False, 'interfaces': []})
+    monkeypatch.setattr(cli, 'compute_role_counts', lambda *a, **k: {'Host': 1})
+    monkeypatch.setattr(cli, 'parse_routing_info', lambda *a, **k: (0.1, []))
+    monkeypatch.setattr(cli, 'parse_segmentation_info', lambda *a, **k: (0.0, []))
+    monkeypatch.setattr(cli, 'parse_traffic_info', lambda *a, **k: (0.0, []))
+    monkeypatch.setattr(cli, 'parse_vulnerabilities_info', lambda *a, **k: (0.0, [], None))
+    monkeypatch.setattr(cli, 'parse_pivoting_info', lambda *a, **k: (0.0, []))
+    monkeypatch.setattr(cli, 'load_vuln_catalog', lambda *a, **k: [])
+    monkeypatch.setattr(cli, 'assign_compose_to_nodes', lambda *a, **k: {})
+    monkeypatch.setattr(cli, '_flow_state_from_xml', lambda *a, **k: None)
+    monkeypatch.setattr(cli, 'collect_hitl_preview_ip_reservations', lambda *_a, **_k: {'ip_addresses': set(), 'network_cidrs': set()})
+    monkeypatch.setattr(cli, 'build_full_preview', lambda *a, **k: {'hosts': [], 'routers': [], 'switches_detail': []})
+    monkeypatch.setattr(cli, 'attach_hitl_rj45_nodes', lambda *a, **k: {'enabled': False, 'interfaces': []})
+    monkeypatch.setattr(cli, '_core_session_id', lambda *_a, **_k: 77)
+    monkeypatch.setattr(cli, 'write_report', lambda *a, **k: pytest.fail('topo phase should stop before report generation'))
+    monkeypatch.setattr(cli, 'CORE_GRPC_AVAILABLE', True)
+    monkeypatch.setattr(cli, 'client', SimpleNamespace(CoreGrpcClient=lambda address: _FakeCoreClient()))
+    monkeypatch.setattr(
+        cli,
+        'build_segmented_topology',
+        lambda *a, **k: (
+            _FakeSession(),
+            [SimpleNamespace(node_id=1)],
+            [SimpleNamespace(node_id=2)],
+            {'2': ['HTTP']},
+            {'1': ['OSPF']},
+            {'docker-1': {'Type': 'docker-compose'}},
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        'compute_full_plan',
+        lambda *a, **k: {
+            'routers_planned': 1,
+            'role_counts': {'Host': 1},
+            'service_plan': {},
+            'vulnerability_plan': {},
+            'traffic_plan': None,
+            'breakdowns': {
+                'router': {'simple_plan': {}},
+                'segmentation': {'density': 0.0, 'raw_items_serialized': []},
+            },
+        },
+    )
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'topo', '--xml', str(xml_path), '--scenario', 's']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert payload['phase'] == 'topo'
+    assert payload['scenario'] == 's'
+    assert payload['session_id'] == 77
+    assert payload['session_started'] is False
+    assert payload['routers_count'] == 1
+    assert payload['hosts_count'] == 1
+    assert payload['docker_nodes'] == ['docker-1']
+
+
+def test_cli_resolve_core_context_uses_saved_xml_core_and_cli_overrides(tmp_path):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    def _merge_core_configs(*configs, include_password=True):
+        merged = {}
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '10.0.0.9',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_username': 'core',
+            'core_secret_id': 'sec-1',
+        },
+        _select_core_config_for_page=lambda *_a, **_k: {
+            'ssh_password': 'pw',
+            'venv_bin': '/opt/core/venv/bin',
+        },
+        _load_run_history=lambda: [],
+        _merge_core_configs=_merge_core_configs,
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: dict(cfg, ssh_password=cfg.get('ssh_password') or 'pw'),
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg),
+    )
+    args = SimpleNamespace(xml=str(xml_path), host='198.51.100.4', port=50051)
+    argv0 = cli.sys.argv[:]
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--host', '198.51.100.4']
+        scenario_norm, cfg, has_saved_core_source = cli._resolve_cli_core_context(
+            args,
+            backend=fake_backend,
+            scenario_name='Scenario One',
+        )
+    finally:
+        cli.sys.argv = argv0
+
+    assert scenario_norm == 'scenario-one'
+    assert has_saved_core_source is True
+    assert cfg['host'] == '198.51.100.4'
+    assert cfg['port'] == 50051
+    assert cfg['ssh_host'] == '12.0.0.100'
+    assert cfg['ssh_username'] == 'core'
+    assert cfg['ssh_password'] == 'pw'
+
+
+def test_cli_execute_delegates_to_remote_cli_for_saved_remote_core_config(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    fake_client = _FakeSshClient(exit_code=0)
+
+    def _merge_core_configs(*configs, include_password=True):
+        merged = {}
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        },
+        _select_core_config_for_page=lambda *_a, **_k: {},
+        _load_run_history=lambda: [],
+        _merge_core_configs=_merge_core_configs,
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: dict(cfg),
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg),
+        _require_core_ssh_credentials=lambda cfg: dict(cfg),
+        _open_ssh_client=lambda cfg: fake_client,
+        _prepare_remote_cli_context=lambda **kwargs: {
+            'xml_path': '/tmp/remote/scenario.xml',
+            'preview_plan_path': None,
+            'repo_dir': '/tmp/remote/repo',
+            'base_dir': '/tmp/remote',
+        },
+        _select_remote_python_interpreter=lambda *_a, **_k: '/opt/core/venv/bin/python',
+        _remote_core_target_host=lambda *_a, **_k: '127.0.0.1',
+        _coerce_bool=lambda value: bool(value),
+        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write('REMOTE CLI OK\n'),
+    )
+    args = SimpleNamespace(
+        phase='execute',
+        xml=str(xml_path),
+        preview_plan=None,
+        host='localhost',
+        port=50051,
+    )
+    argv0 = cli.sys.argv[:]
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario One']
+        ret = cli._maybe_delegate_cli_to_remote(args, backend=fake_backend, scenario_name='Scenario One')
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    assert fake_client.command is not None
+    assert 'CORETG_CLI_REMOTE_DELEGATED=1' in fake_client.command
+    assert 'scenarioforge.cli execute --xml /tmp/remote/scenario.xml' in fake_client.command
+    assert '--host 127.0.0.1' in fake_client.command
+    assert '--port 50051' in fake_client.command
+    assert fake_client.stdin.sent == ['pw\n']
+    assert 'REMOTE CLI OK' in capsys.readouterr().out
+
+
+def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote_exists(tmp_path, monkeypatch, caplog):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    fake_client = _FakeSshClient(exit_code=0)
+
+    def _merge_core_configs(*configs, include_password=True):
+        merged = {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.200',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        }
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: None,
+        _core_backend_defaults=lambda include_password=True: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.200',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        },
+        _select_core_config_for_page=lambda *_a, **_k: {},
+        _load_run_history=lambda: [],
+        _merge_core_configs=_merge_core_configs,
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: dict(cfg),
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg),
+        _require_core_ssh_credentials=lambda cfg: dict(cfg),
+        _open_ssh_client=lambda cfg: fake_client,
+        _prepare_remote_cli_context=lambda **kwargs: {
+            'xml_path': '/tmp/remote-env/scenario.xml',
+            'preview_plan_path': None,
+            'repo_dir': '/tmp/remote-env/repo',
+            'base_dir': '/tmp/remote-env',
+        },
+        _select_remote_python_interpreter=lambda *_a, **_k: '/opt/core/venv/bin/python',
+        _remote_core_target_host=lambda *_a, **_k: '127.0.0.1',
+        _coerce_bool=lambda value: bool(value),
+        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write('REMOTE ENV CLI OK\n'),
+        _webui_runtime_mode=lambda: 'vm',
+    )
+    args = SimpleNamespace(
+        phase='execute',
+        xml=str(xml_path),
+        preview_plan=None,
+        host='localhost',
+        port=50051,
+    )
+    argv0 = cli.sys.argv[:]
+
+    try:
+        caplog.set_level('ERROR')
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario One']
+        ret = cli._maybe_delegate_cli_to_remote(args, backend=fake_backend, scenario_name='Scenario One')
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    assert any('VM mode requires additional configuration before the execute phase can run.' in rec.message for rec in caplog.records)
+    assert any('scenario XML is missing saved CORE VM connection data' in rec.message for rec in caplog.records)

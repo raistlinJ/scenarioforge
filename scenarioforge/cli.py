@@ -1,11 +1,14 @@
 from __future__ import annotations
 import argparse
+from copy import deepcopy
 import datetime
+import importlib
 import json
 import logging
 import random
 import uuid
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -13,6 +16,17 @@ import shutil
 import select
 from xml.etree import ElementTree as ET
 from typing import Any, Dict, Tuple
+
+try:  # pragma: no cover - env bootstrap is exercised indirectly in integration paths
+    from webapp.env_loader import load_runtime_env_files as _load_runtime_env_files
+except Exception:  # pragma: no cover - keep CLI usable even if web helpers are unavailable
+    _load_runtime_env_files = None  # type: ignore
+
+if _load_runtime_env_files is not None:
+    try:
+        _load_runtime_env_files(include_example=False)
+    except Exception:
+        pass
 
 try:  # pragma: no cover - exercised indirectly via CLI subprocess tests
     from core.api.grpc import client  # type: ignore
@@ -914,6 +928,349 @@ def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) ->
         pass
 
 
+def _flow_read_outputs_map_from_artifacts_dir(artifacts_dir: str) -> dict[str, Any]:
+    """Read realized generator outputs from a staged Flow artifacts directory."""
+    try:
+        directory = str(artifacts_dir or '').strip()
+        if not directory:
+            return {}
+        base_dir = os.path.abspath(os.path.join('/tmp', 'vulns'))
+        resolved_dir = os.path.abspath(directory)
+        if os.path.commonpath([resolved_dir, base_dir]) != base_dir:
+            return {}
+        if not os.path.isdir(resolved_dir):
+            return {}
+        outputs_path = os.path.join(resolved_dir, 'outputs.json')
+        if not os.path.isfile(outputs_path):
+            return {}
+        with open(outputs_path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle) or {}
+        outputs = payload.get('outputs') if isinstance(payload, dict) else None
+        return outputs if isinstance(outputs, dict) else {}
+    except Exception:
+        return {}
+
+
+def _flow_assignments_have_runtime(flag_assignments: Any) -> bool:
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return False
+    for assignment in flag_assignments:
+        if not isinstance(assignment, dict):
+            continue
+        flag_value = str(assignment.get('flag_value') or '').strip()
+        outputs = assignment.get('resolved_outputs') if isinstance(assignment.get('resolved_outputs'), dict) else None
+        has_outputs = bool(isinstance(outputs, dict) and outputs)
+        if not flag_value and isinstance(outputs, dict):
+            flag_value = str(outputs.get('Flag(flag_id)') or outputs.get('flag') or '').strip()
+        if flag_value or has_outputs:
+            return True
+        if str(assignment.get('artifacts_dir') or assignment.get('run_dir') or '').strip():
+            return True
+    return False
+
+
+def _inject_source_for_precheck(inject_value: Any) -> str:
+    text = str(inject_value or '').strip()
+    if not text:
+        return ''
+    for sep in ('->', '=>'):
+        if sep in text:
+            return text.split(sep, 1)[0].strip()
+    return text
+
+
+def _plan_supports_flow(role_counts: Any, vulnerabilities_plan: Any) -> bool:
+    try:
+        docker_hosts = int((role_counts or {}).get('Docker') or 0)
+    except Exception:
+        docker_hosts = 0
+    vuln_targets = 0
+    if isinstance(vulnerabilities_plan, dict):
+        for value in vulnerabilities_plan.values():
+            try:
+                vuln_targets += max(0, int(value or 0))
+            except Exception:
+                continue
+    return docker_hosts > 0 or vuln_targets > 0
+
+
+def _validate_flow_state_for_cli_execute(flow_state: Any) -> tuple[bool, str | None, list[dict[str, Any]]]:
+    if not isinstance(flow_state, dict):
+        return True, None, []
+    if flow_state.get('flow_enabled') is False:
+        return True, None, []
+
+    flag_assignments = flow_state.get('flag_assignments') if isinstance(flow_state.get('flag_assignments'), list) else None
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return True, None, []
+
+    if not _flow_assignments_have_runtime(flag_assignments):
+        return (
+            False,
+            'FlowState exists in the saved XML, but it has no resolved runtime values. '
+            'Run Generate (resolve) and save the XML before executing via CLI.',
+            [],
+        )
+
+    missing_values: list[dict[str, Any]] = []
+    missing_flow_paths: list[dict[str, Any]] = []
+    seen_missing_flow_paths: set[tuple[str, str, str]] = set()
+
+    for idx, assignment in enumerate(flag_assignments):
+        if not isinstance(assignment, dict):
+            continue
+        generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+        node_id = str(assignment.get('node_id') or '').strip()
+        outputs = assignment.get('resolved_outputs') if isinstance(assignment.get('resolved_outputs'), dict) else None
+        flag_value = str(assignment.get('flag_value') or '').strip()
+        if not flag_value and isinstance(outputs, dict):
+            try:
+                flag_value = str(outputs.get('Flag(flag_id)') or outputs.get('flag') or '').strip()
+            except Exception:
+                flag_value = ''
+        artifacts_dir = str(assignment.get('artifacts_dir') or assignment.get('run_dir') or '').strip()
+        has_outputs = False
+        if artifacts_dir:
+            try:
+                has_outputs = bool(_flow_read_outputs_map_from_artifacts_dir(artifacts_dir))
+            except Exception:
+                has_outputs = False
+        if (not has_outputs) and isinstance(outputs, dict) and outputs:
+            has_outputs = True
+        if not flag_value and not has_outputs:
+            missing_values.append({
+                'index': idx,
+                'node_id': node_id,
+                'generator_id': generator_id,
+                'reason': 'missing flag outputs',
+            })
+        elif artifacts_dir and (not os.path.isdir(artifacts_dir)):
+            missing_values.append({
+                'index': idx,
+                'node_id': node_id,
+                'generator_id': generator_id,
+                'reason': 'missing artifacts_dir',
+                'artifacts_dir': artifacts_dir,
+            })
+
+        def _add_missing_flow_path(path_type: str, path_value: str) -> None:
+            candidate = str(path_value or '').strip()
+            if not candidate or not os.path.isabs(candidate):
+                return
+            if os.path.exists(candidate):
+                return
+            key = (str(idx), path_type, candidate)
+            if key in seen_missing_flow_paths:
+                return
+            seen_missing_flow_paths.add(key)
+            missing_flow_paths.append({
+                'index': idx,
+                'node_id': node_id,
+                'generator_id': generator_id,
+                'reason': f'missing {path_type}',
+                'path_type': path_type,
+                'path': candidate,
+            })
+
+        _add_missing_flow_path('artifacts_dir', artifacts_dir)
+        inject_files = assignment.get('inject_files') if isinstance(assignment.get('inject_files'), list) else []
+        for inject_raw in inject_files:
+            _add_missing_flow_path('inject_source', _inject_source_for_precheck(inject_raw))
+
+    details = list(missing_values)
+    details.extend(missing_flow_paths)
+    if details:
+        return (
+            False,
+            'Execute requires pre-generated Flow values saved in the XML. '
+            'Run Generate (resolve) and save the XML before executing via CLI.',
+            details,
+        )
+    return True, None, []
+
+
+def _plan_summary_from_full_preview(full_prev: dict[str, Any]) -> dict[str, Any]:
+    try:
+        role_counts = full_prev.get('role_counts') or {}
+    except Exception:
+        role_counts = {}
+    hosts_total = len(full_prev.get('hosts') or [])
+    routers_planned = len(full_prev.get('routers') or [])
+    switches = full_prev.get('switches_detail') or []
+    services_plan = full_prev.get('services_plan') or full_prev.get('services_preview') or {}
+    vuln_plan = full_prev.get('vulnerabilities_plan') or {}
+    if not vuln_plan:
+        try:
+            preview = full_prev.get('vulnerabilities_preview') or {}
+            if isinstance(preview, dict):
+                counts: dict[str, int] = {}
+                for value in preview.values():
+                    if not isinstance(value, list):
+                        continue
+                    for name in value:
+                        item = str(name or '').strip()
+                        if item:
+                            counts[item] = counts.get(item, 0) + 1
+                if counts:
+                    vuln_plan = counts
+        except Exception:
+            pass
+    return {
+        'hosts_total': hosts_total,
+        'routers_planned': routers_planned,
+        'hosts_allocated': 0,
+        'routers_allocated': 0,
+        'role_counts': role_counts,
+        'services_plan': services_plan,
+        'services_assigned': {},
+        'vulnerabilities_plan': vuln_plan,
+        'vulnerabilities_assigned': 0,
+        'r2r_policy': full_prev.get('r2r_policy_preview') or {},
+        'r2s_policy': full_prev.get('r2s_policy_preview') or {},
+        'switches_allocated': len(switches),
+        'notes': ['generated_from_full_preview'],
+        'full_preview_seed': full_prev.get('seed'),
+    }
+
+
+def _normalize_plan_count_dict(raw: Any) -> dict[str, int]:
+    if isinstance(raw, dict):
+        normalized: dict[str, int] = {}
+        for key, value in raw.items():
+            text = str(key or '').strip()
+            if not text:
+                continue
+            try:
+                normalized[text] = int(value) if value is not None else 0
+            except Exception:
+                try:
+                    normalized[text] = int(float(value))
+                except Exception:
+                    normalized[text] = 0
+        return normalized
+    if isinstance(raw, list):
+        counts: dict[str, int] = {}
+        for item in raw:
+            text = str(item or '').strip()
+            if not text:
+                continue
+            counts[text] = counts.get(text, 0) + 1
+        return counts
+    return {}
+
+
+def _canonicalize_jsonish_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _canonicalize_jsonish_keys(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonicalize_jsonish_keys(item) for item in value]
+    return value
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, '__dict__'):
+        try:
+            return {key: _json_ready(item) for key, item in vars(value).items() if not key.startswith('_')}
+        except Exception:
+            pass
+    try:
+        return str(value)
+    except Exception:
+        return repr(value)
+
+
+def _normalize_plan_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    normalized = dict(summary)
+    normalized['role_counts'] = _normalize_plan_count_dict(summary.get('role_counts'))
+    normalized['services_plan'] = _normalize_plan_count_dict(summary.get('services_plan'))
+    normalized['vulnerabilities_plan'] = _normalize_plan_count_dict(summary.get('vulnerabilities_plan'))
+    try:
+        normalized['r2r_policy'] = _canonicalize_jsonish_keys(_json_ready(summary.get('r2r_policy')))
+    except Exception:
+        normalized['r2r_policy'] = _canonicalize_jsonish_keys(summary.get('r2r_policy'))
+    try:
+        normalized['r2s_policy'] = _canonicalize_jsonish_keys(_json_ready(summary.get('r2s_policy')))
+    except Exception:
+        normalized['r2s_policy'] = _canonicalize_jsonish_keys(summary.get('r2s_policy'))
+    return normalized
+
+
+def _diff_plan_summaries(flow_summary: dict[str, Any], xml_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    diffs: list[dict[str, Any]] = []
+    flow_norm = _normalize_plan_summary(flow_summary)
+    xml_norm = _normalize_plan_summary(xml_summary)
+
+    for key in ['hosts_total', 'routers_planned', 'switches_allocated']:
+        flow_value = flow_norm.get(key)
+        xml_value = xml_norm.get(key)
+        if flow_value != xml_value:
+            diffs.append({'field': key, 'flow': flow_value, 'xml': xml_value})
+
+    for key in ['role_counts', 'services_plan', 'vulnerabilities_plan']:
+        flow_map = flow_norm.get(key) if isinstance(flow_norm.get(key), dict) else {}
+        xml_map = xml_norm.get(key) if isinstance(xml_norm.get(key), dict) else {}
+        for subkey in sorted(set(flow_map.keys()) | set(xml_map.keys())):
+            flow_value = flow_map.get(subkey, 0)
+            xml_value = xml_map.get(subkey, 0)
+            if flow_value != xml_value:
+                diffs.append({'field': f'{key}.{subkey}', 'flow': flow_value, 'xml': xml_value})
+
+    for key in ['r2r_policy', 'r2s_policy']:
+        flow_value = flow_norm.get(key)
+        xml_value = xml_norm.get(key)
+        if flow_value != xml_value:
+            diffs.append({'field': key, 'flow': flow_value, 'xml': xml_value})
+
+    return diffs
+
+
+def _current_plan_summary_for_execute(
+    *,
+    orchestrated_plan: dict[str, Any],
+    r2r_policy: dict[str, Any] | None,
+    r2s_policy: dict[str, Any] | None,
+    routing_items: list[Any],
+    routing_plan: dict[str, Any] | None,
+    segmentation_density: Any,
+    segmentation_items: Any,
+    traffic_plan: Any,
+    seed: int | None,
+    ip4_prefix: str,
+    ip_mode: str,
+    ip_region: str,
+    hitl_preview_reservations: dict[str, Any] | None,
+) -> dict[str, Any]:
+    full_prev = build_full_preview(
+        role_counts=orchestrated_plan.get('role_counts') or {},
+        routers_planned=int(orchestrated_plan.get('routers_planned') or 0),
+        services_plan=orchestrated_plan.get('service_plan') or {},
+        vulnerabilities_plan=orchestrated_plan.get('vulnerability_plan'),
+        r2r_policy=r2r_policy,
+        r2s_policy=r2s_policy,
+        routing_items=routing_items,
+        routing_plan=routing_plan or {},
+        segmentation_density=segmentation_density,
+        segmentation_items=segmentation_items,
+        traffic_plan=traffic_plan,
+        seed=seed,
+        ip4_prefix=ip4_prefix,
+        ip_mode=ip_mode,
+        ip_region=ip_region,
+        base_scenario=orchestrated_plan.get('base_scenario'),
+        reserved_ipv4_addrs=sorted((hitl_preview_reservations or {}).get('ip_addresses') or []),
+        reserved_ipv4_networks=sorted((hitl_preview_reservations or {}).get('network_cidrs') or []),
+    )
+    return _plan_summary_from_full_preview(full_prev)
+
+
 def _csv_values(value: Any) -> list[str]:
     if value is None:
         return []
@@ -1513,12 +1870,1090 @@ def _run_offline_report(
             pass
     return 0
 
+
+def _load_web_backend_module() -> Any:
+    return importlib.import_module('webapp.app_backend')
+
+
+def _cli_option_provided(*option_names: str) -> bool:
+    try:
+        argv_tokens = list(sys.argv[1:])
+    except Exception:
+        argv_tokens = []
+    for token in argv_tokens:
+        for option_name in option_names:
+            if token == option_name or token.startswith(f'{option_name}='):
+                return True
+    return False
+
+
+def _is_loopback_host(value: Any) -> bool:
+    try:
+        text = str(value or '').strip().lower()
+    except Exception:
+        return False
+    return text in {'', 'localhost', '127.0.0.1', '::1'}
+
+
+def _cli_runtime_mode(backend: Any | None = None) -> str:
+    if backend is not None:
+        try:
+            mode = str(backend._webui_runtime_mode() or '').strip().lower()
+        except Exception:
+            mode = ''
+        if mode:
+            return mode
+    try:
+        mode = str(
+            os.environ.get('CORETG_WEBUI_MODE')
+            or os.environ.get('CORETG_RUNTIME_MODE')
+            or ''
+        ).strip().lower()
+    except Exception:
+        mode = ''
+    return mode or 'native'
+
+
+def _cli_vm_mode_config_issues(
+    backend: Any,
+    *,
+    phase: str,
+    core_cfg: dict[str, Any],
+    has_saved_core_source: bool,
+    hitl_config: dict[str, Any] | None = None,
+) -> list[str]:
+    if _cli_runtime_mode(backend) != 'vm':
+        return []
+
+    issues: list[str] = []
+    if phase in {'execute', 'topo', 'flag-sequencing'} and not has_saved_core_source:
+        issues.append('scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)')
+
+    host = str(core_cfg.get('host') or '').strip()
+    try:
+        port = int(core_cfg.get('port') or 0)
+    except Exception:
+        port = 0
+    ssh_host = str(core_cfg.get('ssh_host') or '').strip()
+    try:
+        ssh_port = int(core_cfg.get('ssh_port') or 0)
+    except Exception:
+        ssh_port = 0
+    ssh_username = str(core_cfg.get('ssh_username') or '').strip()
+    ssh_password = str(core_cfg.get('ssh_password') or '').strip()
+
+    if not host:
+        issues.append('CORE_HOST / grpc host')
+    if port <= 0:
+        issues.append('CORE_PORT / grpc port')
+    if not ssh_host:
+        issues.append('CORE_SSH_HOST')
+    if ssh_port <= 0:
+        issues.append('CORE_SSH_PORT')
+    if not ssh_username:
+        issues.append('CORE_SSH_USERNAME')
+    if not ssh_password:
+        issues.append('CORE_SSH_PASSWORD')
+
+    if ssh_host == '12.0.0.100' and ssh_username == 'sampleuser' and ssh_password == 'samplepassword':
+        issues.append('CORE_SSH_HOST / CORE_SSH_USERNAME / CORE_SSH_PASSWORD still use the template values from .scenarioforge.env(.example)')
+
+    try:
+        vm_defaults = backend._webui_vm_mode_defaults(include_password=False)
+    except Exception:
+        vm_defaults = {}
+    vm_hitl = vm_defaults.get('hitl') if isinstance(vm_defaults, dict) and isinstance(vm_defaults.get('hitl'), dict) else {}
+    vm_hitl_enabled = bool(vm_hitl.get('enabled'))
+
+    if phase == 'new' and vm_hitl_enabled:
+        vm_ifaces = vm_hitl.get('interfaces') if isinstance(vm_hitl.get('interfaces'), list) else []
+        if not any(isinstance(iface, dict) and str(iface.get('name') or '').strip() for iface in vm_ifaces):
+            issues.append('CORETG_VM_MODE_HITL_CORE_IFX_NAME (vm-mode HITL interface name)')
+
+    if phase in {'execute', 'topo'} and vm_hitl_enabled:
+        cfg = hitl_config if isinstance(hitl_config, dict) else {}
+        hitl_enabled = bool(cfg.get('enabled'))
+        hitl_ifaces = cfg.get('interfaces') if isinstance(cfg.get('interfaces'), list) else []
+        if not hitl_enabled or not any(isinstance(iface, dict) and str(iface.get('name') or '').strip() for iface in hitl_ifaces):
+            issues.append('scenario XML HardwareInLoop interface configuration required by vm mode')
+
+    return issues
+
+
+def _emit_vm_mode_cli_error(
+    *,
+    phase: str,
+    xml_path: str,
+    scenario_name: str | None,
+    issues: list[str],
+    output_path: str | None = None,
+    json_output: bool = True,
+) -> int:
+    if json_output:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': phase,
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': f'VM mode requires additional configuration before the {phase} phase can run.',
+                'missing': list(issues or []),
+            },
+            output_path=output_path,
+            stream=sys.stderr,
+        )
+    else:
+        logging.error('VM mode requires additional configuration before the %s phase can run.', phase)
+        for issue in issues or []:
+            logging.error('Missing or unconfigured: %s', issue)
+    return 1
+
+
+def _resolve_cli_core_context(args: Any, *, backend: Any, scenario_name: str | None) -> tuple[str, dict[str, Any], bool]:
+    scenario_norm = ''
+    try:
+        scenario_norm = backend._normalize_scenario_label(scenario_name or '')
+    except Exception:
+        scenario_norm = str(scenario_name or '').strip().lower().replace(' ', '-')
+
+    xml_core_cfg = None
+    try:
+        xml_core_cfg = backend._core_config_from_xml_path(
+            os.path.abspath(args.xml),
+            scenario_norm,
+            include_password=True,
+        )
+    except Exception:
+        xml_core_cfg = None
+
+    saved_core_cfg: dict[str, Any] | None = None
+    has_saved_core_source = isinstance(xml_core_cfg, dict) and bool(xml_core_cfg)
+    if scenario_norm and has_saved_core_source:
+        try:
+            saved_core_cfg = backend._select_core_config_for_page(
+                scenario_norm,
+                include_password=True,
+            )
+        except TypeError:
+            try:
+                saved_core_cfg = backend._select_core_config_for_page(
+                    scenario_norm,
+                    backend._load_run_history(),
+                    include_password=True,
+                )
+            except Exception:
+                saved_core_cfg = None
+        except Exception:
+            saved_core_cfg = None
+
+    cli_override: dict[str, Any] = {}
+    if _cli_option_provided('--host'):
+        cli_override['host'] = args.host
+        cli_override['grpc_host'] = args.host
+    if _cli_option_provided('--port'):
+        cli_override['port'] = args.port
+        cli_override['grpc_port'] = args.port
+    if _cli_option_provided('--ssh-host'):
+        cli_override['ssh_host'] = args.ssh_host
+    if _cli_option_provided('--ssh-port'):
+        cli_override['ssh_port'] = args.ssh_port
+    if _cli_option_provided('--ssh-username'):
+        cli_override['ssh_username'] = args.ssh_username
+    if _cli_option_provided('--ssh-password'):
+        cli_override['ssh_password'] = args.ssh_password
+    if _cli_option_provided('--venv-bin'):
+        cli_override['venv_bin'] = args.venv_bin
+
+    merged = backend._merge_core_configs(
+        xml_core_cfg,
+        saved_core_cfg,
+        cli_override if cli_override else None,
+        include_password=True,
+    )
+    try:
+        merged = backend._prefer_explicit_or_ssh_core_host(
+            merged,
+            xml_core_cfg,
+            saved_core_cfg,
+            cli_override if cli_override else None,
+        )
+    except Exception:
+        pass
+    if scenario_norm:
+        try:
+            merged = backend._apply_core_secret_to_config(merged, scenario_norm)
+        except Exception:
+            pass
+    try:
+        merged = backend._normalize_core_config(merged, include_password=True)
+    except Exception:
+        pass
+    return scenario_norm, (merged if isinstance(merged, dict) else {}), bool(has_saved_core_source)
+
+
+def _cli_has_env_remote_source(backend: Any, core_cfg: dict[str, Any]) -> bool:
+    if _cli_runtime_mode(backend) != 'vm':
+        return False
+    if str(os.environ.get('CORETG_CLI_DISABLE_REMOTE_DELEGATION') or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}:
+        return False
+    try:
+        env_cfg = backend._core_backend_defaults(include_password=True)
+    except Exception:
+        env_cfg = None
+    if not isinstance(env_cfg, dict) or not env_cfg:
+        return False
+    ssh_host = str(core_cfg.get('ssh_host') or env_cfg.get('ssh_host') or '').strip()
+    ssh_username = str(core_cfg.get('ssh_username') or env_cfg.get('ssh_username') or '').strip()
+    ssh_password = str(core_cfg.get('ssh_password') or env_cfg.get('ssh_password') or '').strip()
+    target_host = str(core_cfg.get('host') or env_cfg.get('host') or '').strip()
+    if not ssh_host or not ssh_username or not ssh_password:
+        return False
+    return not (_is_loopback_host(ssh_host) and _is_loopback_host(target_host))
+
+
+class _BackendProxy:
+    def __init__(self, base: Any, **overrides: Any) -> None:
+        self._base = base
+        self._overrides = dict(overrides)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._base, name)
+
+
+def _cli_should_delegate_remote(core_cfg: dict[str, Any]) -> bool:
+    if str(os.environ.get('CORETG_CLI_REMOTE_DELEGATED') or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}:
+        return False
+    if not isinstance(core_cfg, dict) or not core_cfg:
+        return False
+    ssh_host = str(core_cfg.get('ssh_host') or '').strip()
+    ssh_username = str(core_cfg.get('ssh_username') or '').strip()
+    ssh_password = str(core_cfg.get('ssh_password') or '').strip()
+    target_host = str(core_cfg.get('host') or '').strip()
+    if not ssh_host or not ssh_username or not ssh_password:
+        return False
+    return not (_is_loopback_host(ssh_host) and _is_loopback_host(target_host))
+
+
+def _build_remote_cli_tokens(
+    *,
+    remote_xml_path: str,
+    remote_preview_plan_path: str | None,
+    remote_host: str,
+    remote_port: int,
+) -> list[str]:
+    try:
+        source_tokens = list(sys.argv[1:])
+    except Exception:
+        source_tokens = []
+
+    out_tokens: list[str] = []
+    saw_xml = False
+    saw_preview = False
+    saw_host = False
+    saw_port = False
+    idx = 0
+    while idx < len(source_tokens):
+        token = source_tokens[idx]
+        if token == '--xml':
+            out_tokens.extend(['--xml', remote_xml_path])
+            saw_xml = True
+            idx += 2
+            continue
+        if token == '--preview-plan':
+            replacement = remote_preview_plan_path or remote_xml_path
+            out_tokens.extend(['--preview-plan', replacement])
+            saw_preview = True
+            idx += 2
+            continue
+        if token == '--host':
+            out_tokens.extend(['--host', remote_host])
+            saw_host = True
+            idx += 2
+            continue
+        if token == '--port':
+            out_tokens.extend(['--port', str(remote_port)])
+            saw_port = True
+            idx += 2
+            continue
+        if token.startswith('--xml='):
+            out_tokens.append(f'--xml={remote_xml_path}')
+            saw_xml = True
+            idx += 1
+            continue
+        if token.startswith('--preview-plan='):
+            replacement = remote_preview_plan_path or remote_xml_path
+            out_tokens.append(f'--preview-plan={replacement}')
+            saw_preview = True
+            idx += 1
+            continue
+        if token.startswith('--host='):
+            out_tokens.append(f'--host={remote_host}')
+            saw_host = True
+            idx += 1
+            continue
+        if token.startswith('--port='):
+            out_tokens.append(f'--port={int(remote_port)}')
+            saw_port = True
+            idx += 1
+            continue
+        out_tokens.append(token)
+        idx += 1
+
+    if not saw_xml:
+        out_tokens.extend(['--xml', remote_xml_path])
+    if remote_preview_plan_path and _cli_option_provided('--preview-plan') and not saw_preview:
+        out_tokens.extend(['--preview-plan', remote_preview_plan_path])
+    if not saw_host:
+        out_tokens.extend(['--host', remote_host])
+    if not saw_port:
+        out_tokens.extend(['--port', str(int(remote_port))])
+    return out_tokens
+
+
+def _scenario_tag_for_cli(xml_path: str, scenario_name: str | None) -> str:
+    try:
+        out_dir_for_tag = os.path.dirname(xml_path) if xml_path else ''
+        upload_base = os.path.basename(out_dir_for_tag) if out_dir_for_tag else ''
+        parts = []
+        if upload_base:
+            parts.append(upload_base)
+        if scenario_name:
+            parts.append(str(scenario_name))
+        candidate = '-'.join(parts) if parts else (str(scenario_name or 'scenario') or 'scenario')
+    except Exception:
+        candidate = str(scenario_name or 'scenario') or 'scenario'
+    safe = []
+    for char in candidate:
+        safe.append(char if (char.isalnum() or char in {'-', '_'}) else '-')
+    normalized = ''.join(safe).strip('-_') or 'scenario'
+    while '--' in normalized:
+        normalized = normalized.replace('--', '-')
+    return normalized[:80] or 'scenario'
+
+
+def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str | None) -> int | None:
+    if args.phase not in {'execute', 'topo'}:
+        return None
+
+    scenario_norm, core_cfg, has_saved_core_source = _resolve_cli_core_context(
+        args,
+        backend=backend,
+        scenario_name=scenario_name,
+    )
+    env_remote_source = _cli_has_env_remote_source(backend, core_cfg)
+
+    if not _cli_option_provided('--host'):
+        try:
+            args.host = str(core_cfg.get('host') or args.host)
+        except Exception:
+            pass
+    if not _cli_option_provided('--port'):
+        try:
+            args.port = int(core_cfg.get('port') or args.port)
+        except Exception:
+            pass
+
+    vm_mode_issues = _cli_vm_mode_config_issues(
+        backend,
+        phase=str(args.phase or 'execute'),
+        core_cfg=core_cfg,
+        has_saved_core_source=has_saved_core_source,
+        hitl_config=getattr(args, '_prefetched_hitl_config', None),
+    )
+    if vm_mode_issues:
+        return _emit_vm_mode_cli_error(
+            phase=str(args.phase or 'execute'),
+            xml_path=os.path.abspath(args.xml),
+            scenario_name=scenario_name,
+            issues=vm_mode_issues,
+            json_output=False,
+        )
+
+    if (not has_saved_core_source and not env_remote_source) or not _cli_should_delegate_remote(core_cfg):
+        return None
+
+    core_cfg = backend._require_core_ssh_credentials(core_cfg)
+    xml_path = os.path.abspath(args.xml)
+    preview_plan_path = os.path.abspath(args.preview_plan) if args.preview_plan else None
+    run_id = f'cli-{uuid.uuid4().hex[:8]}'
+    remote_client = backend._open_ssh_client(core_cfg)
+    try:
+        remote_ctx = backend._prepare_remote_cli_context(
+            client=remote_client,
+            run_id=run_id,
+            xml_path=xml_path,
+            preview_plan_path=preview_plan_path,
+            log_handle=sys.stderr,
+            upload_only_injected_artifacts=False,
+            core_cfg=core_cfg,
+        )
+
+        remote_python = backend._select_remote_python_interpreter(remote_client, core_cfg)
+        remote_host = backend._remote_core_target_host(core_cfg, default='127.0.0.1')
+        try:
+            remote_port = int(core_cfg.get('port') or 50051)
+        except Exception:
+            remote_port = 50051
+
+        remote_tokens = _build_remote_cli_tokens(
+            remote_xml_path=remote_ctx['xml_path'],
+            remote_preview_plan_path=remote_ctx.get('preview_plan_path'),
+            remote_host=remote_host,
+            remote_port=remote_port,
+        )
+        cli_cmd = ' '.join(
+            shlex.quote(arg)
+            for arg in [remote_python, '-u', '-m', 'scenarioforge.cli', *remote_tokens]
+        )
+
+        docker_env_parts: list[str] = []
+        docker_use_sudo = core_cfg.get('docker_use_sudo')
+        docker_strict_pull = core_cfg.get('docker_strict_pull')
+        docker_build_pull = core_cfg.get('docker_build_pull')
+        if docker_use_sudo is None:
+            docker_use_sudo = True
+        if docker_strict_pull is None:
+            docker_strict_pull = True
+        if docker_build_pull is None:
+            docker_build_pull = False
+        if getattr(backend, '_coerce_bool', lambda v: bool(v))(docker_use_sudo):
+            docker_env_parts.append('CORETG_DOCKER_USE_SUDO=1')
+        if getattr(backend, '_coerce_bool', lambda v: bool(v))(docker_strict_pull):
+            docker_env_parts.append('CORETG_DOCKER_STRICT_PULL=1')
+        docker_env_parts.append(
+            'CORETG_DOCKER_BUILD_PULL=1'
+            if getattr(backend, '_coerce_bool', lambda v: bool(v))(docker_build_pull)
+            else 'CORETG_DOCKER_BUILD_PULL=0'
+        )
+        docker_env_parts.append('CORETG_COMPOSE_SET_CONTAINER_NAME=1')
+        if core_cfg.get('ssh_password') and getattr(backend, '_coerce_bool', lambda v: bool(v))(docker_use_sudo):
+            docker_env_parts.append('CORETG_DOCKER_SUDO_PASSWORD_STDIN=1')
+
+        flow_env_parts = [
+            'CORETG_FLOW_ARTIFACTS_MODE=copy',
+            'CORETG_CLI_REMOTE_DELEGATED=1',
+        ]
+        if remote_ctx.get('base_dir'):
+            flow_env_parts.append(f"CORE_REMOTE_BASE_DIR={shlex.quote(str(remote_ctx.get('base_dir')))}")
+
+        scenario_tag = _scenario_tag_for_cli(xml_path, scenario_name)
+        docker_env_prefix = (' '.join(docker_env_parts) + ' ') if docker_env_parts else ''
+        flow_env_prefix = (' '.join(flow_env_parts) + ' ') if flow_env_parts else ''
+        remote_command = (
+            f"cd {shlex.quote(str(remote_ctx['repo_dir']))} && "
+            f"CORETG_SCENARIO_TAG={shlex.quote(scenario_tag)} {flow_env_prefix}{docker_env_prefix}PYTHONUNBUFFERED=1 {cli_cmd}"
+        )
+
+        logging.info(
+            'Delegating CLI %s to remote CORE host via SSH %s:%s (scenario=%s, core=%s:%s)',
+            args.phase,
+            core_cfg.get('ssh_host'),
+            core_cfg.get('ssh_port'),
+            scenario_name or scenario_norm,
+            remote_host,
+            remote_port,
+        )
+
+        stdin, stdout, stderr = remote_client.exec_command(remote_command, get_pty=True, timeout=None)
+        if 'CORETG_DOCKER_SUDO_PASSWORD_STDIN=1' in docker_env_parts:
+            try:
+                stdin.write(str(core_cfg.get('ssh_password') or '') + '\n')
+                stdin.flush()
+            except Exception:
+                pass
+        try:
+            stdin.close()
+        except Exception:
+            pass
+        backend._relay_remote_channel_to_log(
+            stdout.channel,
+            sys.stdout,
+            redact_tokens=[str(core_cfg.get('ssh_password') or '')],
+        )
+        return int(stdout.channel.recv_exit_status())
+    finally:
+        try:
+            remote_client.close()
+        except Exception:
+            pass
+
+
+def _emit_phase_json(payload: Any, *, output_path: str | None = None, stream: Any = None) -> None:
+    text = json.dumps(_json_ready(payload), indent=2, sort_keys=True, ensure_ascii=False)
+    target = stream if stream is not None else sys.stdout
+    print(text, file=target)
+    if output_path:
+        with open(output_path, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+            handle.write('\n')
+
+
+def _response_payload_and_status(response: Any) -> tuple[int, Any]:
+    status_code = 200
+    payload = None
+    raw = response
+    if isinstance(response, tuple):
+        raw = response[0]
+        if len(response) >= 2:
+            try:
+                status_code = int(response[1])
+            except Exception:
+                status_code = 200
+    if hasattr(raw, 'status_code'):
+        try:
+            status_code = int(getattr(raw, 'status_code'))
+        except Exception:
+            pass
+    if hasattr(raw, 'get_json'):
+        try:
+            payload = raw.get_json(silent=True)
+        except TypeError:
+            try:
+                payload = raw.get_json()
+            except Exception:
+                payload = None
+        except Exception:
+            payload = None
+    if payload is None and hasattr(raw, 'get_data'):
+        try:
+            text = raw.get_data(as_text=True)
+        except Exception:
+            text = ''
+        if text:
+            try:
+                payload = json.loads(text)
+            except Exception:
+                payload = {'raw': text}
+    return status_code, payload
+
+
+def _cli_phase_scenario(args: Any, *, backend: Any | None = None) -> str | None:
+    scenario_name = str(getattr(args, 'scenario', '') or '').strip()
+    if scenario_name:
+        return scenario_name
+    backend_module = backend
+    if backend_module is None:
+        try:
+            backend_module = _load_web_backend_module()
+        except Exception:
+            backend_module = None
+    if backend_module is not None:
+        try:
+            names = backend_module._scenario_names_from_xml(os.path.abspath(args.xml))
+            if isinstance(names, list) and names:
+                return str(names[0] or '').strip() or None
+        except Exception:
+            pass
+    return None
+
+
+def _cli_phase_chain_ids(args: Any) -> list[str]:
+    chain_ids: list[str] = []
+    multi = getattr(args, 'flow_chain_ids', None)
+    if isinstance(multi, list):
+        for item in multi:
+            text = str(item or '').strip()
+            if text:
+                chain_ids.append(text)
+    csv_value = str(getattr(args, 'flow_chain_ids_csv', '') or '').strip()
+    if csv_value:
+        for item in csv_value.split(','):
+            text = str(item or '').strip()
+            if text:
+                chain_ids.append(text)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in chain_ids:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def _run_preview_plan_phase(args: Any) -> int:
+    backend = _load_web_backend_module()
+    xml_path = os.path.abspath(args.xml)
+    scenario_name = _cli_phase_scenario(args, backend=backend)
+    try:
+        result = backend._planner_persist_flow_plan(
+            xml_path=xml_path,
+            scenario=scenario_name,
+            seed=args.seed,
+            persist_plan_file=False,
+        )
+    except Exception as exc:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'preview-plan',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': str(exc),
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    payload = {
+        'ok': True,
+        'phase': 'preview-plan',
+        'xml_path': result.get('xml_path') or xml_path,
+        'scenario': result.get('scenario') or scenario_name,
+        'seed': result.get('seed'),
+        'preview_plan_path': result.get('preview_plan_path') or xml_path,
+        'full_preview': result.get('full_preview'),
+        'plan': result.get('plan'),
+    }
+    _emit_phase_json(payload, output_path=args.plan_output)
+    return 0
+
+
+def _run_new_phase(args: Any) -> int:
+    backend = _load_web_backend_module()
+    xml_path = os.path.abspath(args.xml)
+    parent_dir = os.path.dirname(xml_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    existed_before = os.path.exists(xml_path)
+
+    if existed_before and not getattr(args, 'force', False):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'new',
+                'xml_path': xml_path,
+                'error': 'XML file already exists. Re-run with --force to overwrite it.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+    if os.path.isdir(xml_path):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'new',
+                'xml_path': xml_path,
+                'error': 'XML path points to a directory, not a file.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    scenario_name = str(getattr(args, 'scenario', '') or '').strip()
+    if not scenario_name:
+        try:
+            scenario_name = os.path.splitext(os.path.basename(xml_path))[0].strip()
+        except Exception:
+            scenario_name = ''
+    if not scenario_name:
+        scenario_name = 'Scenario 1'
+
+    payload = backend._default_scenarios_payload_for_names([scenario_name])
+    if not isinstance(payload, dict):
+        payload = {'scenarios': [{'name': scenario_name}], 'core': {}}
+
+    scenario_payload = None
+    try:
+        scenarios_list = payload.get('scenarios') if isinstance(payload.get('scenarios'), list) else None
+        if isinstance(scenarios_list, list) and scenarios_list:
+            scenario_payload = scenarios_list[0]
+    except Exception:
+        scenario_payload = None
+    if not isinstance(scenario_payload, dict):
+        scenario_payload = {'name': scenario_name, 'sections': {}}
+        payload['scenarios'] = [scenario_payload]
+
+    sections = scenario_payload.get('sections') if isinstance(scenario_payload.get('sections'), dict) else {}
+    scenario_payload['sections'] = sections
+
+    seeded_any = False
+    role_specs = list(getattr(args, 'seed_roles', None) or [])
+    if role_specs:
+        normalize_role = getattr(backend, '_normalize_node_information_role', None)
+        node_items: list[dict[str, Any]] = []
+        for raw_spec in role_specs:
+            text = str(raw_spec or '').strip()
+            if not text or '=' not in text:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': f'Invalid --seed-role value: {text!r}. Expected ROLE=COUNT.',
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            role_raw, count_raw = text.split('=', 1)
+            role_name = str(role_raw or '').strip()
+            if callable(normalize_role):
+                try:
+                    role_name = normalize_role(role_name) or role_name
+                except Exception:
+                    pass
+            try:
+                count_value = int(str(count_raw or '').strip())
+            except Exception:
+                count_value = -1
+            if role_name not in {'Server', 'Workstation', 'PC', 'Docker'} or count_value < 0:
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': f'Invalid --seed-role value: {text!r}. Allowed roles are Server, Workstation, PC, Docker with non-negative counts.',
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            if count_value == 0:
+                continue
+            node_items.append({
+                'selected': role_name,
+                'factor': 1.0,
+                'v_metric': 'Count',
+                'v_count': count_value,
+            })
+        node_section = sections.get('Node Information') if isinstance(sections.get('Node Information'), dict) else {}
+        node_section['total_nodes'] = 0
+        node_section['items'] = node_items
+        sections['Node Information'] = node_section
+        seeded_any = True
+
+    routing_seed = str(getattr(args, 'seed_routing', '') or '').strip()
+    if routing_seed:
+        normalize_routing = getattr(backend, '_normalize_routing_item_selection', None)
+        routing_name = routing_seed
+        if callable(normalize_routing):
+            try:
+                routing_name = normalize_routing(routing_seed) or routing_seed
+            except Exception:
+                pass
+        routing_section = sections.get('Routing') if isinstance(sections.get('Routing'), dict) else {}
+        routing_section['density'] = float(getattr(args, 'seed_routing_density', 0.5) or 0.5)
+        routing_section['items'] = [{'selected': routing_name, 'factor': 1.0}]
+        sections['Routing'] = routing_section
+        seeded_any = True
+
+    traffic_seed = str(getattr(args, 'seed_traffic', '') or '').strip()
+    if traffic_seed:
+        normalize_traffic = getattr(backend, '_normalize_traffic_item_selection', None)
+        traffic_name = traffic_seed
+        if callable(normalize_traffic):
+            try:
+                traffic_name = normalize_traffic(traffic_seed) or traffic_seed
+            except Exception:
+                pass
+        traffic_section = sections.get('Traffic') if isinstance(sections.get('Traffic'), dict) else {}
+        traffic_section['density'] = float(getattr(args, 'seed_traffic_density', 0.5) or 0.5)
+        traffic_section['items'] = [{
+            'selected': traffic_name,
+            'factor': 1.0,
+            'pattern': 'Random',
+            'content_type': 'Random',
+            'rate_kbps': 'Random',
+            'period_s': 'Random',
+            'jitter_pct': 'Random',
+        }]
+        sections['Traffic'] = traffic_section
+        seeded_any = True
+
+    random_vuln_count = int(getattr(args, 'seed_random_vulnerability_count', 0) or 0)
+    if random_vuln_count > 0:
+        vuln_section = sections.get('Vulnerabilities') if isinstance(sections.get('Vulnerabilities'), dict) else {}
+        vuln_section['density'] = 0.0
+        vuln_section['flag_type'] = str(vuln_section.get('flag_type') or 'text')
+        vuln_section['items'] = [{
+            'selected': 'Random',
+            'factor': 1.0,
+            'v_metric': 'Count',
+            'v_count': random_vuln_count,
+        }]
+        sections['Vulnerabilities'] = vuln_section
+        seeded_any = True
+
+    if seeded_any:
+        try:
+            scenario_payload['sections'] = sections
+            concretized = backend._concretize_scenarios_for_save([scenario_payload], seed=args.seed)
+            if isinstance(concretized, list) and concretized:
+                payload['scenarios'][0] = concretized[0]
+                scenario_payload = payload['scenarios'][0]
+        except Exception:
+            pass
+
+    core_override: dict[str, Any] = {}
+    if _cli_option_provided('--host'):
+        core_override['host'] = args.host
+        core_override['grpc_host'] = args.host
+    if _cli_option_provided('--port'):
+        core_override['port'] = args.port
+        core_override['grpc_port'] = args.port
+    if _cli_option_provided('--ssh-host'):
+        core_override['ssh_host'] = args.ssh_host
+    if _cli_option_provided('--ssh-port'):
+        core_override['ssh_port'] = args.ssh_port
+    if _cli_option_provided('--ssh-username'):
+        core_override['ssh_username'] = args.ssh_username
+    if _cli_option_provided('--ssh-password'):
+        core_override['ssh_password'] = args.ssh_password
+    if _cli_option_provided('--venv-bin'):
+        core_override['venv_bin'] = args.venv_bin
+
+    if core_override and not _cli_option_provided('--host') and str(core_override.get('ssh_host') or '').strip() and _cli_runtime_mode(backend) == 'vm':
+        core_override.setdefault('host', core_override.get('ssh_host'))
+        core_override.setdefault('grpc_host', core_override.get('ssh_host'))
+
+    if core_override:
+        try:
+            payload['core'] = backend._merge_core_configs(payload.get('core'), core_override, include_password=True)
+        except Exception:
+            merged_core = dict(payload.get('core') or {})
+            merged_core.update(core_override)
+            payload['core'] = merged_core
+
+    if _cli_runtime_mode(backend) == 'vm':
+        try:
+            core_cfg_with_password = backend._core_backend_defaults(include_password=True)
+            if core_override:
+                core_cfg_with_password = backend._merge_core_configs(core_cfg_with_password, core_override, include_password=True)
+            core_cfg_xml = backend._normalize_core_config(core_cfg_with_password, include_password=True)
+        except Exception:
+            core_cfg_with_password = dict(core_override)
+            core_cfg_xml = dict(core_override)
+
+        vm_mode_issues = _cli_vm_mode_config_issues(
+            backend,
+            phase='new',
+            core_cfg=core_cfg_with_password if isinstance(core_cfg_with_password, dict) else {},
+            has_saved_core_source=False,
+            hitl_config=None,
+        )
+        if vm_mode_issues:
+            return _emit_vm_mode_cli_error(
+                phase='new',
+                xml_path=xml_path,
+                scenario_name=scenario_name,
+                issues=vm_mode_issues,
+                output_path=args.plan_output,
+                json_output=True,
+            )
+
+        payload['core'] = core_cfg_xml
+        try:
+            vm_defaults = backend._webui_vm_mode_defaults(include_password=False)
+        except Exception:
+            vm_defaults = {}
+        scenario_hitl = deepcopy((vm_defaults.get('hitl') if isinstance(vm_defaults, dict) else {}) or {})
+        if not isinstance(scenario_hitl, dict):
+            scenario_hitl = {}
+        scenario_hitl['core'] = deepcopy(core_cfg_xml)
+        scenario_payload['hitl'] = scenario_hitl
+
+    try:
+        tree = backend._build_scenarios_xml(payload)
+        try:
+            from lxml import etree as LET  # type: ignore
+
+            raw = ET.tostring(tree.getroot(), encoding='utf-8')
+            lroot = LET.fromstring(raw)
+            pretty = LET.tostring(lroot, pretty_print=True, xml_declaration=True, encoding='utf-8')
+            with open(xml_path, 'wb') as handle:
+                handle.write(pretty)
+        except Exception:
+            tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+    except Exception as exc:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'new',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': f'Failed to create starter XML: {exc}',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    effective_scenario_name = scenario_name
+    try:
+        parsed_root = ET.parse(xml_path).getroot()
+        parsed_scenario = parsed_root.find('Scenario')
+        parsed_name = str(parsed_scenario.get('name') or '').strip() if parsed_scenario is not None else ''
+        if parsed_name:
+            effective_scenario_name = parsed_name
+    except Exception:
+        pass
+
+    _emit_phase_json(
+        {
+            'ok': True,
+            'phase': 'new',
+            'xml_path': xml_path,
+            'scenario': effective_scenario_name,
+            'overwritten': bool(getattr(args, 'force', False) and existed_before),
+            'next_steps': [
+                'Edit the scenario sections in the Web UI or by hand.',
+                'Run preview-plan to persist PlanPreview.',
+                'Run flag-sequencing if you want Flow state embedded.',
+                'Run topo or execute against the same XML.',
+            ],
+        },
+        output_path=args.plan_output,
+    )
+    return 0
+
+
+def _run_flag_sequencing_phase(args: Any) -> int:
+    backend = _load_web_backend_module()
+    xml_path = os.path.abspath(args.xml)
+    scenario_name = _cli_phase_scenario(args, backend=backend)
+    if not scenario_name:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'flag-sequencing',
+                'xml_path': xml_path,
+                'error': 'No scenario specified.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    try:
+        backend._planner_persist_flow_plan(
+            xml_path=xml_path,
+            scenario=scenario_name,
+            seed=args.seed,
+            persist_plan_file=False,
+        )
+    except Exception as exc:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'flag-sequencing',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': f'Failed to prepare preview plan: {exc}',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    payload: dict[str, Any] = {
+        'scenario': scenario_name,
+        'preview_plan': xml_path,
+        'mode': args.flow_mode,
+        'length': int(args.flow_length),
+        'best_effort': bool(args.flow_best_effort),
+        'allow_node_duplicates': bool(args.flow_allow_node_duplicates),
+        'cleanup_generated_artifacts': bool(args.flow_cleanup_generated_artifacts),
+        'dependency_level': int(args.flow_dependency_level),
+    }
+    chain_ids = _cli_phase_chain_ids(args)
+    if chain_ids:
+        payload['chain_ids'] = chain_ids
+    preset = str(args.flow_preset or '').strip()
+    if preset:
+        payload['preset'] = preset
+    if args.flow_timeout_s is not None:
+        payload['timeout_s'] = int(args.flow_timeout_s)
+    if args.flow_run_remote:
+        payload['run_remote'] = True
+    if args.flow_run_local:
+        payload['run_local'] = True
+
+    scenario_norm, resolved_core_cfg, has_saved_core_source = _resolve_cli_core_context(
+        args,
+        backend=backend,
+        scenario_name=scenario_name,
+    )
+    vm_mode_issues = _cli_vm_mode_config_issues(
+        backend,
+        phase='flag-sequencing',
+        core_cfg=resolved_core_cfg,
+        has_saved_core_source=has_saved_core_source,
+        hitl_config=None,
+    )
+    if vm_mode_issues:
+        return _emit_vm_mode_cli_error(
+            phase='flag-sequencing',
+            xml_path=xml_path,
+            scenario_name=scenario_name,
+            issues=vm_mode_issues,
+            output_path=args.plan_output,
+            json_output=True,
+        )
+    env_remote_source = _cli_has_env_remote_source(backend, resolved_core_cfg)
+    flow_backend: Any = backend
+    if (has_saved_core_source or env_remote_source) and isinstance(resolved_core_cfg, dict) and resolved_core_cfg:
+        flow_backend = _BackendProxy(
+            backend,
+            _core_config_from_xml_path=lambda *_a, **_k: dict(resolved_core_cfg),
+        )
+        if env_remote_source and (not args.flow_run_local) and ('run_remote' not in payload):
+            payload['run_remote'] = True
+
+    from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
+
+    with backend.app.test_request_context(
+        '/api/flag-sequencing/prepare_preview_for_execute',
+        method='POST',
+        json=payload,
+    ):
+        response = _flow_prepare_preview_execute.execute(backend=flow_backend)
+    status_code, response_payload = _response_payload_and_status(response)
+    if not isinstance(response_payload, dict):
+        response_payload = {'ok': status_code < 400, 'status': status_code, 'payload': response_payload}
+    response_payload.setdefault('phase', 'flag-sequencing')
+    response_payload.setdefault('xml_path', xml_path)
+    response_payload.setdefault('scenario', scenario_name)
+    _emit_phase_json(
+        response_payload,
+        output_path=args.plan_output,
+        stream=(sys.stdout if status_code < 400 else sys.stderr),
+    )
+    return 0 if status_code < 400 else 1
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument(
+        'phase',
+        nargs='?',
+        choices=['execute', 'new', 'preview-plan', 'flag-sequencing', 'topo'],
+        default='execute',
+        help='Phase to run: execute (default), new, preview-plan, flag-sequencing, or topo',
+    )
     ap.add_argument("--xml", required=True, help="Path to XML scenario file")
     ap.add_argument("--scenario", default=None, help="Scenario name to use (defaults to first)")
+    ap.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
+    ap.add_argument('--seed-role', dest='seed_roles', action='append', help='Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable)')
+    ap.add_argument('--seed-routing', default='', help='Seed a Routing row for the new phase (for example Random, RIP, RIPNG, BGP, OSPFv2, OSPFv3)')
+    ap.add_argument('--seed-routing-density', type=float, default=0.5, help='Routing density to use with --seed-routing (default: 0.5)')
+    ap.add_argument('--seed-traffic', default='', help='Seed a Traffic row for the new phase (for example Random, TCP, UDP)')
+    ap.add_argument('--seed-traffic-density', type=float, default=0.5, help='Traffic density to use with --seed-traffic (default: 0.5)')
+    ap.add_argument('--seed-random-vulnerability-count', type=int, default=0, help='Seed this many random vulnerability targets for the new phase')
     ap.add_argument("--host", default="localhost", help="core-daemon gRPC host")
     ap.add_argument("--port", type=int, default=50051, help="core-daemon gRPC port")
+    ap.add_argument('--ssh-host', default='', help='CORE SSH host to persist in XML or override at runtime')
+    ap.add_argument('--ssh-port', type=int, default=22, help='CORE SSH port to persist in XML or override at runtime')
+    ap.add_argument('--ssh-username', default='', help='CORE SSH username to persist in XML or override at runtime')
+    ap.add_argument('--ssh-password', default='', help='CORE SSH password to persist in XML or override at runtime')
+    ap.add_argument('--venv-bin', default='', help='Remote CORE Python venv/bin path to persist in XML or override at runtime')
     ap.add_argument("--prefix", default="10.0.0.0/24", help="IPv4 prefix for auto-assigned addresses")
     ap.add_argument(
         "--ip-mode",
@@ -1549,8 +2984,25 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="Optional RNG seed for reproducible topology randomness")
     ap.add_argument("--preview", action="store_true", help="Parse and plan only; output plan summary JSON and exit 0")
     ap.add_argument("--preview-full", action="store_true", help="Generate a full dry-run plan (routers, hosts, IPs, services, vulnerabilities, segmentation) without contacting CORE; implies --preview style output")
-    ap.add_argument("--plan-output", help="Path to write computed plan JSON (preview or build)")
+    ap.add_argument("--plan-output", help="Path to write computed phase JSON output (preview, topo, flow, or build)")
     ap.add_argument("--preview-plan", help="Path to a persisted full preview JSON to reuse during build")
+    ap.add_argument(
+        '--flow-mode',
+        choices=['preview', 'resolve', 'resolve_hints', 'hint', 'hint_only'],
+        default='resolve',
+        help='Flag-sequencing mode for the flag-sequencing phase (default: resolve)',
+    )
+    ap.add_argument('--flow-length', type=int, default=5, help='Requested chain length for the flag-sequencing phase')
+    ap.add_argument('--flow-preset', default='', help='Optional flow preset name for the flag-sequencing phase')
+    ap.add_argument('--flow-chain-id', dest='flow_chain_ids', action='append', help='Explicit flow chain node id (repeatable)')
+    ap.add_argument('--flow-chain-ids', dest='flow_chain_ids_csv', default='', help='Comma-separated explicit flow chain node ids')
+    ap.add_argument('--flow-best-effort', action='store_true', help='Allow the flag-sequencing phase to clamp to available eligible nodes')
+    ap.add_argument('--flow-allow-node-duplicates', action='store_true', help='Allow duplicate nodes in the flag-sequencing chain')
+    ap.add_argument('--flow-timeout-s', type=int, default=None, help='Optional total timeout in seconds for the flag-sequencing phase')
+    ap.add_argument('--flow-run-remote', action='store_true', help='Force remote flag-sequencing generator execution when CORE SSH config is available')
+    ap.add_argument('--flow-run-local', action='store_true', help='Force local flag-sequencing generator execution even when CORE SSH config exists')
+    ap.add_argument('--flow-cleanup-generated-artifacts', action='store_true', help='Delete temporary flag-sequencing generator run directories after completion')
+    ap.add_argument('--flow-dependency-level', type=int, default=3, help='Flag-sequencing dependency strictness level (1-5)')
     # Preview always recomputes (plan reuse removed)
     ap.add_argument(
         "--router-mesh",
@@ -1631,6 +3083,22 @@ def main():
     # docker-invoking subprocesses (e.g. flag-node-generators) via env.
     _maybe_seed_docker_sudo_password_from_stdin()
 
+    backend_for_cli = None
+    try:
+        backend_for_cli = _load_web_backend_module()
+    except Exception:
+        backend_for_cli = None
+
+    if backend_for_cli is not None:
+        try:
+            resolved_scenario_name = _cli_phase_scenario(args, backend=backend_for_cli)
+            if resolved_scenario_name and not args.scenario:
+                args.scenario = resolved_scenario_name
+        except Exception:
+            resolved_scenario_name = args.scenario
+    else:
+        resolved_scenario_name = args.scenario
+
     preview_payload: Dict[str, Any] | None = None
     preview_full: Dict[str, Any] | None = None
     preview_plan_path: str | None = None
@@ -1666,6 +3134,42 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
 
+    prefetched_hitl_config: dict[str, Any] | None = None
+    if args.phase in {'execute', 'topo'}:
+        try:
+            prefetched_hitl_config = parse_hitl_info(args.xml, args.scenario) or {"enabled": False, "interfaces": []}
+        except Exception:
+            prefetched_hitl_config = {"enabled": False, "interfaces": []}
+        if backend_for_cli is not None:
+            try:
+                xml_basename = os.path.basename(os.path.abspath(args.xml))
+            except Exception:
+                xml_basename = os.path.basename(args.xml)
+            try:
+                prefetched_hitl_config = backend_for_cli._sanitize_hitl_config(prefetched_hitl_config, args.scenario, xml_basename)
+            except Exception:
+                pass
+        try:
+            setattr(args, '_prefetched_hitl_config', prefetched_hitl_config)
+        except Exception:
+            pass
+
+    if backend_for_cli is not None:
+        delegated_exit_code = _maybe_delegate_cli_to_remote(
+            args,
+            backend=backend_for_cli,
+            scenario_name=resolved_scenario_name,
+        )
+        if delegated_exit_code is not None:
+            return delegated_exit_code
+
+    if args.phase == 'preview-plan':
+        return _run_preview_plan_phase(args)
+    if args.phase == 'new':
+        return _run_new_phase(args)
+    if args.phase == 'flag-sequencing':
+        return _run_flag_sequencing_phase(args)
+
     # Expose FlowState assignments so compose prep can overlay flow artifacts.
     try:
         _export_flow_assignments_to_env(args.xml, args.scenario)
@@ -1692,9 +3196,24 @@ def main():
     except Exception:
         planning_meta = {}
     try:
-        hitl_config = parse_hitl_info(args.xml, args.scenario) or {"enabled": False, "interfaces": []}
+        if prefetched_hitl_config is not None:
+            hitl_config = prefetched_hitl_config
+        else:
+            hitl_config = parse_hitl_info(args.xml, args.scenario) or {"enabled": False, "interfaces": []}
     except Exception:
         hitl_config = {"enabled": False, "interfaces": []}
+    if backend_for_cli is not None:
+        if prefetched_hitl_config is not None:
+            pass
+        else:
+            try:
+                xml_basename = os.path.basename(os.path.abspath(args.xml))
+            except Exception:
+                xml_basename = os.path.basename(args.xml)
+            try:
+                hitl_config = backend_for_cli._sanitize_hitl_config(hitl_config, args.scenario, xml_basename)
+            except Exception:
+                pass
     scenario_key = args.scenario
     if not scenario_key:
         try:
@@ -1797,6 +3316,68 @@ def main():
     seg_density_plan = seg_breakdown.get('density') if isinstance(seg_breakdown, dict) else None
     seg_items_serialized = seg_breakdown.get('raw_items_serialized') if isinstance(seg_breakdown, dict) else None
     traffic_plan_preview = orchestrated_plan.get('traffic_plan') if isinstance(orchestrated_plan, dict) else None
+    flow_state = _flow_state_from_xml(args.xml, args.scenario)
+
+    flow_execute_active = bool(
+        isinstance(flow_state, dict)
+        and flow_state.get('flow_enabled') is not False
+        and list(flow_state.get('flag_assignments') or [])
+    )
+
+    if flow_execute_active:
+        flow_ok, flow_error, flow_details = _validate_flow_state_for_cli_execute(flow_state)
+        if not flow_ok:
+            logging.error("%s", flow_error)
+            if flow_details:
+                logging.error(
+                    "FLOW_EXECUTE_PREFLIGHT_DETAILS: %s",
+                    json.dumps(flow_details, indent=2, sort_keys=True),
+                )
+            return 1
+    elif isinstance(flow_state, dict) and list(flow_state.get('flag_assignments') or []):
+        logging.info(
+            "FlowState present in XML but the current XML-derived plan has no Docker or vulnerability targets; skipping Flow execute preflight"
+        )
+
+    if flow_execute_active and not _plan_supports_flow(orchestrated_plan.get('role_counts') or {}, vulnerabilities_plan):
+        logging.info(
+            "FlowState runtime values were validated, but the current XML-derived plan has no Docker or vulnerability targets; downstream Flow-specific execution behavior may be skipped"
+        )
+
+    if preview_full is not None and flow_execute_active:
+        try:
+            preview_summary = _plan_summary_from_full_preview(preview_full)
+            current_summary = _current_plan_summary_for_execute(
+                orchestrated_plan=orchestrated_plan,
+                r2r_policy=r2r_policy_plan,
+                r2s_policy=r2s_policy_plan,
+                routing_items=routing_items,
+                routing_plan=routing_plan,
+                segmentation_density=seg_density_plan,
+                segmentation_items=seg_items_serialized,
+                traffic_plan=traffic_plan_preview,
+                seed=args.seed,
+                ip4_prefix=args.prefix,
+                ip_mode=args.ip_mode,
+                ip_region=args.ip_region,
+                hitl_preview_reservations=hitl_preview_reservations,
+            )
+            diffs = _diff_plan_summaries(preview_summary, current_summary)
+            if diffs:
+                logging.error(
+                    "Saved PlanPreview does not match the current XML-derived plan. Regenerate preview metadata and save the XML before executing via CLI."
+                )
+                for entry in diffs:
+                    logging.error(
+                        "PlanPreview mismatch: %s flow=%s xml=%s",
+                        entry.get('field'),
+                        json.dumps(_json_ready(entry.get('flow')), sort_keys=True),
+                        json.dumps(_json_ready(entry.get('xml')), sort_keys=True),
+                    )
+                return 1
+        except Exception as exc:
+            logging.warning("Failed validating saved PlanPreview against the current XML: %s", exc)
+
     if preview_full is None:
         try:
             preview_full = build_full_preview(
@@ -2007,6 +3588,10 @@ def main():
     except Exception:
         pass
 
+    if args.phase == 'topo' and not CORE_GRPC_AVAILABLE:
+        logging.error("The topo phase requires CORE gRPC availability in this Python environment.")
+        return 1
+
     if not CORE_GRPC_AVAILABLE:
         return _run_offline_report(
             args,
@@ -2060,7 +3645,6 @@ def main():
     # Pre-parse vulnerabilities to plan docker-compose assignments mapped to host slots (reuse orchestrator raw)
     docker_slot_plan: dict | None = None
     preview_vuln_slots: list[str] = []
-    flow_state = _flow_state_from_xml(args.xml, args.scenario)
     try:
         pivot_density, pivot_items = parse_pivoting_info(args.xml, args.scenario)
     except Exception:
@@ -2373,6 +3957,29 @@ def main():
             logging.info("HITL: enabled but no RJ45 nodes created (see hitl_attachment metadata)")
     except Exception as exc:
         logging.warning("HITL attachment failed: %s", exc)
+
+    if args.phase == 'topo':
+        topo_summary = {
+            'ok': True,
+            'phase': 'topo',
+            'xml_path': os.path.abspath(args.xml),
+            'scenario': scenario_name,
+            'preview_plan_path': preview_plan_path,
+            'core': {'host': args.host, 'port': args.port},
+            'session_id': _core_session_id(session),
+            'session_started': False,
+            'routers_count': len(routers or []),
+            'hosts_count': len(hosts or []),
+            'switches_count': len(switches or []),
+            'docker_nodes': sorted(docker_by_name.keys()) if isinstance(docker_by_name, dict) else [],
+            'service_assignment_count': len(service_assignments or {}),
+            'preview_attached': bool(preview_full),
+            'preview_realized': bool(generation_meta.get('preview_realized')),
+            'pivoting': generation_meta.get('pivoting'),
+            'hitl_attachment': generation_meta.get('hitl_attachment'),
+        }
+        _emit_phase_json(topo_summary, output_path=args.plan_output)
+        return 0
 
     # Parse segmentation config OR fallback to preview segmentation if available
     seg_summary = None

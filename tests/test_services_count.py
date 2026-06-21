@@ -46,3 +46,39 @@ def test_full_preview_services_skip_docker_hosts():
     )
 
     assert preview["services_preview"] == {}
+
+
+def test_full_preview_repairs_docker_capacity_for_vuln_hosts_without_explicit_docker():
+    preview = build_full_preview(
+        role_counts={"Workstation": 10},
+        routers_planned=0,
+        services_plan={"HTTP": 3},
+        vulnerabilities_plan={"SSHCreds": 1},
+        r2r_policy=None,
+        r2s_policy=None,
+        routing_items=None,
+        routing_plan={},
+        segmentation_density=0.0,
+        segmentation_items=[],
+        seed=123,
+    )
+
+    repair = preview["docker_capacity_repair"]
+    assert repair["required_docker_hosts"] == 1
+    assert repair["added_docker_hosts"] == 1
+
+    hosts = preview["hosts"]
+    docker_ids = {
+        int(host["node_id"])
+        for host in hosts
+        if str(host.get("role") or "").strip().lower() == "docker"
+    }
+    assert docker_ids
+
+    vuln_ids = {int(node_id) for node_id in (preview["vulnerabilities_by_node"] or {}).keys()}
+    assert vuln_ids
+    assert vuln_ids.issubset(docker_ids)
+
+    service_ids = {int(node_id) for node_id in (preview["services_preview"] or {}).keys()}
+    assert service_ids
+    assert service_ids.isdisjoint(docker_ids)
