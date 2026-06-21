@@ -79,10 +79,15 @@ Seed a starter scenario in one command:
 python -m scenarioforge.cli new \
 	--xml /abs/path/myscen.xml \
 	--scenario "myscen" \
+	--density-count 10 \
 	--seed-role Workstation=2 \
 	--seed-role Docker=3 \
-	--seed-routing Random \
-	--seed-traffic Random \
+	--seed-routing OSPFv2=2 \
+	--seed-service SSH=2 \
+	--seed-traffic TCP \
+	--seed-traffic UDP=density \
+	--seed-segmentation Firewall=density \
+	--seed-vulnerability jboss/CVE-2017-12149=1 \
 	--seed-random-vulnerability-count 1 \
 	--seed 42
 ```
@@ -116,12 +121,18 @@ Saved-XML execute notes:
 
 Phase command notes:
 - `new` creates a starter ScenarioForge XML with one scenario and canonical section keys using the same XML builder as the Web UI.
-- `new` can also seed basic scenario rows with `--seed-role`, `--seed-routing`, `--seed-traffic`, and `--seed-random-vulnerability-count`.
+- `--density-count` sets the scenario-level Count for Density base host pool used by density-based planning for routing, services, traffic, segmentation, and vulnerabilities.
+- `new` can also seed basic scenario rows with `--seed-role`, `--seed-routing`, `--seed-service`, `--seed-traffic`, `--seed-segmentation`, `--seed-vulnerability`, and `--seed-random-vulnerability-count`.
+- `--seed-role` is repeatable and always uses `ROLE=COUNT` semantics for Node Information rows.
+- `--seed-routing`, `--seed-service`, `--seed-traffic`, `--seed-segmentation`, and `--seed-vulnerability` are repeatable and accept `NAME`, `NAME=density`, or `NAME=COUNT`.
+- Omitting `=COUNT` on those section seed flags uses density semantics; `=density` is an explicit alias for the same behavior.
+- When you provide multiple density-style seed rows in the same section, the CLI assigns equal `factor` weights that add up to `1.0` for that section.
 - `new` can also embed top-level CORE SSH connection details directly into the XML with `--ssh-host`, `--ssh-port`, `--ssh-username`, and `--ssh-password`.
 - `preview-plan` persists embedded `PlanPreview` metadata back into the XML and prints the resulting preview payload as JSON.
 - `flag-sequencing` runs the same preview/resolve helper used by the Web UI and persists the resulting `FlowState` back into the XML.
 - `topo` builds the topology in CORE and stops before segmentation, traffic, report generation, and session start.
 - `execute` is the full default run; the phase name is optional.
+- `python -m scenarioforge.cli <phase> --help` now shows phase-specific help instead of every flag for every phase.
 
 Need more detail: see [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md).
 

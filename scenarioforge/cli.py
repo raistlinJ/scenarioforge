@@ -2574,6 +2574,27 @@ def _run_new_phase(args: Any) -> int:
     sections = scenario_payload.get('sections') if isinstance(scenario_payload.get('sections'), dict) else {}
     scenario_payload['sections'] = sections
 
+    density_count_value = getattr(args, 'density_count', None)
+    if density_count_value is not None:
+        try:
+            density_count_value = int(density_count_value)
+        except Exception:
+            density_count_value = -1
+        if density_count_value < 0:
+            _emit_phase_json(
+                {
+                    'ok': False,
+                    'phase': 'new',
+                    'xml_path': xml_path,
+                    'scenario': scenario_name,
+                    'error': 'Invalid --density-count value. Expected a non-negative integer.',
+                },
+                output_path=args.plan_output,
+                stream=sys.stderr,
+            )
+            return 1
+        scenario_payload['density_count'] = density_count_value
+
     seeded_any = False
     role_specs = list(getattr(args, 'seed_roles', None) or [])
 
@@ -3232,18 +3253,83 @@ def _add_cli_common_args(container: Any) -> None:
     container.add_argument('--seed', type=int, default=None, help='Optional RNG seed for reproducible topology randomness')
 
 
+def _cli_core_argument_defaults() -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        'host': str(os.environ.get('CORE_HOST') or 'localhost'),
+        'port': 50051,
+        'ssh_host': str(os.environ.get('CORE_SSH_HOST') or ''),
+        'ssh_port': 22,
+        'ssh_username': str(os.environ.get('CORE_SSH_USERNAME') or ''),
+        'venv_bin': str(os.environ.get('CORE_VENV_BIN') or ''),
+    }
+    try:
+        defaults['port'] = int(str(os.environ.get('CORE_PORT') or '50051').strip() or 50051)
+    except Exception:
+        defaults['port'] = 50051
+    try:
+        defaults['ssh_port'] = int(str(os.environ.get('CORE_SSH_PORT') or '22').strip() or 22)
+    except Exception:
+        defaults['ssh_port'] = 22
+
+    try:
+        backend = _load_web_backend_module()
+    except Exception:
+        backend = None
+    if backend is not None:
+        try:
+            core_cfg = backend._default_core_dict()
+            normalized = backend._normalize_core_config(core_cfg, include_password=False)
+            host = str(normalized.get('host') or defaults['host']).strip()
+            defaults['host'] = host or defaults['host']
+            defaults['port'] = int(normalized.get('port') or defaults['port'])
+            ssh_host = str(normalized.get('ssh_host') or '').strip()
+            if ssh_host:
+                defaults['ssh_host'] = ssh_host
+            defaults['ssh_port'] = int(normalized.get('ssh_port') or defaults['ssh_port'])
+            ssh_username = str(normalized.get('ssh_username') or '').strip()
+            if ssh_username:
+                defaults['ssh_username'] = ssh_username
+            venv_bin = str(normalized.get('venv_bin') or '').strip()
+            if venv_bin:
+                defaults['venv_bin'] = venv_bin
+        except Exception:
+            pass
+    return defaults
+
+
+def _cli_new_argument_defaults() -> dict[str, Any]:
+    defaults = {'density_count': 10}
+    try:
+        backend = _load_web_backend_module()
+    except Exception:
+        backend = None
+    if backend is not None:
+        try:
+            payload = backend._default_scenarios_payload_for_names(['Scenario 1'])
+            scenarios = payload.get('scenarios') if isinstance(payload, dict) else None
+            scenario = scenarios[0] if isinstance(scenarios, list) and scenarios else None
+            if isinstance(scenario, dict) and scenario.get('density_count') is not None:
+                defaults['density_count'] = int(scenario.get('density_count'))
+        except Exception:
+            pass
+    return defaults
+
+
 def _add_cli_core_connection_args(container: Any) -> None:
-    container.add_argument('--host', default='localhost', help='core-daemon gRPC host')
-    container.add_argument('--port', type=int, default=50051, help='core-daemon gRPC port')
-    container.add_argument('--ssh-host', default='', help='CORE SSH host to persist in XML or override at runtime')
-    container.add_argument('--ssh-port', type=int, default=22, help='CORE SSH port to persist in XML or override at runtime')
-    container.add_argument('--ssh-username', default='', help='CORE SSH username to persist in XML or override at runtime')
+    defaults = _cli_core_argument_defaults()
+    container.add_argument('--host', default=defaults['host'], help='core-daemon gRPC host')
+    container.add_argument('--port', type=int, default=defaults['port'], help='core-daemon gRPC port')
+    container.add_argument('--ssh-host', default=defaults['ssh_host'], help='CORE SSH host to persist in XML or override at runtime')
+    container.add_argument('--ssh-port', type=int, default=defaults['ssh_port'], help='CORE SSH port to persist in XML or override at runtime')
+    container.add_argument('--ssh-username', default=defaults['ssh_username'], help='CORE SSH username to persist in XML or override at runtime')
     container.add_argument('--ssh-password', default='', help='CORE SSH password to persist in XML or override at runtime')
-    container.add_argument('--venv-bin', default='', help='Remote CORE Python venv/bin path to persist in XML or override at runtime')
+    container.add_argument('--venv-bin', default=defaults['venv_bin'], help='Remote CORE Python venv/bin path to persist in XML or override at runtime')
 
 
 def _add_cli_new_args(container: Any) -> None:
+    defaults = _cli_new_argument_defaults()
     container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
+    container.add_argument('--density-count', type=int, default=defaults['density_count'], help='Scenario-level Count for Density base host pool for density-based planning in the new phase')
     container.add_argument('--seed-role', dest='seed_roles', action='append', help='Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable)')
     container.add_argument('--seed-routing', dest='seed_routing_specs', action='append', help='Seed a Routing row for the new phase (repeatable; density rows are equal-weighted, for example OSPFv2, BGP=density, or OSPFv2=3)')
     container.add_argument('--seed-routing-density', type=float, default=0.5, help='Routing density to use with --seed-routing (default: 0.5)')

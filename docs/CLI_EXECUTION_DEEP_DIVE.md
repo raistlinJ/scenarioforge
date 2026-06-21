@@ -38,10 +38,15 @@ Seeded example:
 python -m scenarioforge.cli new \
   --xml /abs/path/labs/myscen.xml \
   --scenario "myscen" \
+  --density-count 10 \
   --seed-role Workstation=2 \
   --seed-role Docker=3 \
-  --seed-routing Random \
-  --seed-traffic Random \
+  --seed-routing OSPFv2=2 \
+  --seed-service SSH=2 \
+  --seed-traffic TCP \
+  --seed-traffic UDP=density \
+  --seed-segmentation Firewall=density \
+  --seed-vulnerability jboss/CVE-2017-12149=1 \
   --seed-random-vulnerability-count 1 \
   --seed 42
 ```
@@ -72,11 +77,24 @@ Behavior:
 
 Useful `new` seeding flags:
 
+- `--density-count N`: set the scenario-level Count for Density base host pool used by density-based planning.
 - `--seed-role ROLE=COUNT`: add Node Information count rows, for example `Workstation=2` or `Docker=3`.
-- `--seed-routing Random`: add a Routing row, optionally with `--seed-routing-density`.
-- `--seed-traffic Random`: add a Traffic row, optionally with `--seed-traffic-density`.
+- `--seed-routing NAME`, `NAME=density`, or `NAME=COUNT`: add one Routing row; repeat the flag to add multiple rows.
+- `--seed-service NAME`, `NAME=density`, or `NAME=COUNT`: add one Services row; repeat the flag to add multiple rows.
+- `--seed-traffic NAME`, `NAME=density`, or `NAME=COUNT`: add one Traffic row; repeat the flag to add multiple rows.
+- `--seed-segmentation NAME`, `NAME=density`, or `NAME=COUNT`: add one Segmentation row; repeat the flag to add multiple rows.
+- `--seed-vulnerability NAME`, `NAME=density`, or `NAME=COUNT`: add one Specific vulnerability row resolved against the active enabled catalog; repeat the flag to add multiple rows.
 - `--seed-random-vulnerability-count 1`: add one or more random vulnerability targets.
 - `--seed`: use a deterministic seed when concretizing random placeholders.
+
+Seed semantics:
+
+- `--density-count` is the base pool multiplied by density-style rows. For example, routing density uses roughly `floor(routing_density * density_count)` routers before additive Count rows are applied.
+- `--seed-role` always uses Count semantics because Node Information host-role seeding is count-only.
+- For Routing, Services, Traffic, Segmentation, and specific Vulnerabilities, omitting `=COUNT` uses density semantics.
+- `NAME=density` is an explicit alias for the same density behavior.
+- If you seed multiple density rows in the same section, their `factor` values are equalized so the rows in that section sum to `1.0`.
+- Count rows (`NAME=COUNT`) remain additive and do not participate in that density-weight split.
 
 Useful CORE connection flags for `new`:
 
@@ -105,6 +123,11 @@ Behavior:
 - Prints the resulting preview payload as JSON.
 
 This is the normal prerequisite for Flow work when the XML does not already contain a preview.
+
+Help note:
+
+- `python -m scenarioforge.cli --help` shows shared options.
+- `python -m scenarioforge.cli <phase> --help` shows only the flags relevant to that phase, with defaults rendered in the help output.
 
 ## Flag-Sequencing Phase
 
@@ -137,9 +160,10 @@ Useful flags:
 - `--flow-run-local`: force local generator execution.
 - `--flow-best-effort`: allow the helper to clamp to available eligible nodes.
 
-Prerequisite:
+Preview prerequisite behavior:
 
-- The XML must already contain an embedded preview plan, or `flag-sequencing` will fail and ask you to run `preview-plan` first.
+- The CLI `flag-sequencing` phase first asks the planner to persist `PlanPreview` into the XML, so a separate `preview-plan` run is usually not required.
+- An explicit `preview-plan` run is still useful when you want to inspect or save preview metadata before moving on to Flow work.
 
 ## Topo Phase
 

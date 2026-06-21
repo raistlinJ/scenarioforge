@@ -187,6 +187,76 @@ def test_cli_new_phase_uses_xml_stem_when_scenario_missing(tmp_path, monkeypatch
     assert scenario_el.get('name') == 'starter'
 
 
+def test_cli_new_phase_persists_density_count_when_provided(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+    from scenarioforge.parsers.node_info import parse_node_info
+
+    xml_path = tmp_path / 'density-count.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'DensityCountScenario',
+            '--density-count',
+            '17',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+
+    scenario_el = ET.parse(xml_path).getroot().find('Scenario')
+    assert scenario_el is not None
+    assert scenario_el.get('density_count') == '17'
+
+    density_base, weight_items, count_items, services = parse_node_info(str(xml_path), 'DensityCountScenario')
+    assert density_base == 17
+    assert weight_items == []
+    assert count_items == []
+    assert services == []
+
+
+def test_cli_new_phase_rejects_invalid_density_count(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'density-count-invalid.xml'
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'new',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'DensityCountScenario',
+            '--density-count',
+            '-1',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload['ok'] is False
+    assert 'Invalid --density-count value' in payload['error']
+
+
 def test_cli_new_phase_refuses_overwrite_without_force(tmp_path, monkeypatch, capsys):
     from webapp import app_backend as backend
 
