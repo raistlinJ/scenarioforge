@@ -266,6 +266,35 @@ def test_cli_execute_parser_cleanup_opt_outs_disable_remove_actions():
     assert args.overwrite_existing_images is False
 
 
+def test_cli_flag_sequencing_parser_defaults_enable_cleanup():
+    parser = cli._build_cli_parser()
+    args = parser.parse_args(['flag-sequencing', '--xml', '/tmp/scenario.xml'])
+
+    assert args.flow_cleanup_before_run is True
+
+
+def test_cli_flag_sequencing_parser_cleanup_opt_out_disables_cleanup():
+    parser = cli._build_cli_parser()
+    args = parser.parse_args([
+        'flag-sequencing',
+        '--xml', '/tmp/scenario.xml',
+        '--no-flow-cleanup-before-run',
+    ])
+
+    assert args.flow_cleanup_before_run is False
+
+
+def test_cli_flag_sequencing_parser_rejects_preview_mode():
+    parser = cli._build_cli_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            'flag-sequencing',
+            '--xml', '/tmp/scenario.xml',
+            '--flow-mode', 'preview',
+        ])
+
+
 def test_cli_execute_cleanup_runs_default_remove_actions(monkeypatch, caplog):
     args = SimpleNamespace(
         phase='execute',
@@ -288,6 +317,41 @@ def test_cli_execute_cleanup_runs_default_remove_actions(monkeypatch, caplog):
 
     assert reconnect is True
     assert ['core-cleanup'] in local_calls
+    assert ['docker', 'container', 'prune', '-f'] in docker_calls
+    assert ['docker', 'image', 'prune', '-f'] in docker_calls
+    assert any(cmd[:2] == ['sh', '-lc'] and 'coretg-gen-' in cmd[2] for cmd in local_calls)
+    assert any(cmd[:2] == ['sh', '-lc'] and '_wrapper' in cmd[2] for cmd in local_calls)
+
+
+def test_cli_flag_sequencing_cleanup_runs_default_remove_actions(monkeypatch, caplog):
+    args = SimpleNamespace(
+        phase='flag-sequencing',
+        flow_mode='resolve',
+        flow_cleanup_before_run=True,
+    )
+    local_calls: list[list[str]] = []
+    docker_calls: list[list[str]] = []
+    removed_roots: list[str] = []
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+    )
+
+    monkeypatch.setattr(cli, '_run_local_cmd', lambda cmd, **kwargs: local_calls.append(list(cmd)) or SimpleNamespace(returncode=0, stdout='ok'))
+    monkeypatch.setattr(cli, '_run_docker_cmd', lambda cmd, **kwargs: docker_calls.append(list(cmd)) or SimpleNamespace(returncode=0, stdout='ok'))
+    monkeypatch.setattr(cli, '_cleanup_stale_vuln_temp_files', lambda: ['/tmp/vulns/docker-compose-old.yml'])
+    monkeypatch.setattr(cli, '_remove_local_flow_scenario_roots', lambda scenario_norm: removed_roots.append(str(scenario_norm)) or ['/tmp/vulns/flag_generators_runs/flow-scenario-one'])
+    monkeypatch.setattr(cli.shutil, 'which', lambda name: '/usr/bin/docker' if name == 'docker' else '/usr/bin/sudo')
+
+    caplog.set_level('INFO')
+    cli._best_effort_cli_flag_sequencing_cleanup(
+        args,
+        backend=fake_backend,
+        core_cfg=None,
+        scenario_name='Scenario One',
+        run_remote=False,
+    )
+
+    assert removed_roots == ['scenario-one']
     assert ['docker', 'container', 'prune', '-f'] in docker_calls
     assert ['docker', 'image', 'prune', '-f'] in docker_calls
     assert any(cmd[:2] == ['sh', '-lc'] and 'coretg-gen-' in cmd[2] for cmd in local_calls)
@@ -1103,6 +1167,88 @@ def test_cli_flag_sequencing_phase_forces_remote_when_saved_remote_core_config_e
     sent = captured['payload']
     assert isinstance(sent, dict)
     assert sent['run_remote'] is True
+
+
+def test_cli_flag_sequencing_phase_runs_cleanup_by_default(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    captured: dict[str, object] = {}
+    cleanup_calls: list[dict[str, object]] = []
+    app = Flask(__name__)
+
+    @app.route('/api/flag-sequencing/sequence_preview_plan', methods=['POST'])
+    def api_flow_sequence_preview_plan():
+        return jsonify({
+            'ok': True,
+            'chain': [{'id': 'node-a'}],
+            'preview_plan_path': str(xml_path.resolve()),
+        })
+
+    def _fake_prepare(*, backend):
+        captured['payload'] = request.get_json()
+        return jsonify({'ok': True, 'flow_valid': True, 'flag_assignments': [], 'phase_result': 'resolved'})
+
+    fake_backend = SimpleNamespace(
+        app=app,
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+        _planner_persist_flow_plan=lambda **kwargs: {
+            'xml_path': kwargs['xml_path'],
+            'scenario': kwargs['scenario'],
+            'seed': 7,
+            'preview_plan_path': kwargs['xml_path'],
+            'full_preview': {},
+            'plan': {},
+        },
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+            'ssh_enabled': True,
+        },
+        _select_core_config_for_page=lambda *_a, **_k: None,
+        _load_run_history=lambda: [],
+        _merge_core_configs=lambda *configs, include_password=True: {
+            key: value for cfg in configs if isinstance(cfg, dict) for key, value in cfg.items()
+        },
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: cfg,
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg or {}),
+        _core_backend_defaults=lambda include_password=True: {},
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    monkeypatch.setattr(flow_prepare_preview_execute, 'execute', _fake_prepare)
+    monkeypatch.setattr(
+        cli,
+        '_best_effort_cli_flag_sequencing_cleanup',
+        lambda args, **kwargs: cleanup_calls.append({'phase': args.phase, **kwargs}),
+    )
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'flag-sequencing',
+            '--xml',
+            str(xml_path),
+            '--flow-mode',
+            'resolve',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert cleanup_calls
+    assert cleanup_calls[0]['run_remote'] is True
 
 
 def test_cli_flag_sequencing_phase_prefers_resolved_saved_xml_for_remote_core_config(tmp_path, monkeypatch, capsys):

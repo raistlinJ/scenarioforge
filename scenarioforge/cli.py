@@ -622,6 +622,152 @@ def _best_effort_cli_execute_cleanup(args: Any, core: Any) -> bool:
     return reconnect_required
 
 
+def _remove_local_flow_scenario_roots(scenario_norm: str) -> list[str]:
+    removed: list[str] = []
+    scenario_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', str(scenario_norm or '').strip())
+    if not scenario_safe:
+        return removed
+    for subdir in ('flag_generators_runs', 'flag_node_generators_runs'):
+        root = os.path.join('/tmp/vulns', subdir, f'flow-{scenario_safe}')
+        try:
+            if os.path.isdir(root):
+                shutil.rmtree(root, ignore_errors=True)
+                removed.append(root)
+        except Exception:
+            continue
+    return removed
+
+
+def _best_effort_cli_flag_sequencing_cleanup(
+    args: Any,
+    *,
+    backend: Any,
+    core_cfg: dict[str, Any] | None,
+    scenario_name: str | None,
+    run_remote: bool,
+) -> None:
+    if str(getattr(args, 'phase', '') or '').strip().lower() != 'flag-sequencing':
+        return
+    if not bool(getattr(args, 'flow_cleanup_before_run', True)):
+        return
+    flow_mode_norm = str(getattr(args, 'flow_mode', '') or '').strip().lower()
+    if flow_mode_norm in {'preview'}:
+        return
+
+    scenario_norm = ''
+    try:
+        scenario_norm = backend._normalize_scenario_label(scenario_name or '')
+    except Exception:
+        scenario_norm = str(scenario_name or '').strip().lower().replace(' ', '-')
+
+    if run_remote and isinstance(core_cfg, dict):
+        try:
+            core_cfg = backend._require_core_ssh_credentials(core_cfg)
+        except Exception as exc:
+            logging.warning('Flow cleanup: remote cleanup skipped because SSH credentials are unavailable: %s', exc)
+            return
+        try:
+            sudo_pw = str(core_cfg.get('ssh_password') or '').strip()
+        except Exception:
+            sudo_pw = ''
+        script = (
+            "import glob, json, os, re, shutil, subprocess\n"
+            f"SCEN={json.dumps(str(scenario_norm or ''))}\n"
+            f"SUDO_PW={json.dumps(str(sudo_pw or ''))}\n"
+            "scenario_safe=re.sub(r'[^a-zA-Z0-9_-]', '_', SCEN)\n"
+            "removed=[]\n"
+            "for subdir in ('flag_generators_runs','flag_node_generators_runs'):\n"
+            "  root=os.path.join('/tmp/vulns', subdir, f'flow-{scenario_safe}')\n"
+            "  if root and os.path.isdir(root):\n"
+            "    shutil.rmtree(root, ignore_errors=True)\n"
+            "    removed.append(root)\n"
+            "for pattern in ('/tmp/vulns/docker-compose-*.yml','/tmp/vulns/docker-compose-*.orig.yml','/tmp/vulns/compose_assignments.json','/tmp/vulns/docker-wrap-*'):\n"
+            "  for path in glob.glob(pattern):\n"
+            "    try:\n"
+            "      if os.path.isdir(path) and not os.path.islink(path):\n"
+            "        shutil.rmtree(path, ignore_errors=True)\n"
+            "      else:\n"
+            "        os.remove(path)\n"
+            "      removed.append(path)\n"
+            "    except FileNotFoundError:\n"
+            "      pass\n"
+            "    except Exception:\n"
+            "      pass\n"
+            "def _run(cmd):\n"
+            "  full=list(cmd)\n"
+            "  stdin=None\n"
+            "  if SUDO_PW:\n"
+            "    full=['sudo','-E','-S','-p','','-k'] + full\n"
+            "    stdin=SUDO_PW + '\\n'\n"
+            "  p=subprocess.run(full, check=False, capture_output=True, text=True, input=stdin, timeout=120)\n"
+            "  return {'cmd': full, 'rc': int(p.returncode or 0), 'out': (p.stdout or '')[-800:], 'err': (p.stderr or '')[-800:]}\n"
+            "def _run_shell(text):\n"
+            "  return _run(['sh','-lc',text])\n"
+            "docker_ok=shutil.which('docker') is not None or os.path.exists('/usr/bin/docker')\n"
+            "results=[]\n"
+            "if docker_ok:\n"
+            "  results.append(_run(['docker','container','prune','-f']))\n"
+            "  results.append(_run(['docker','image','prune','-f']))\n"
+            "  results.append(_run(['docker','network','prune','-f']))\n"
+            "  results.append(_run(['docker','volume','prune','-f']))\n"
+            "  results.append(_run_shell(\"docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f\"))\n"
+            "  results.append(_run_shell(\"docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f\"))\n"
+            "print(json.dumps({'removed': removed, 'results': results, 'docker_ok': docker_ok}))\n"
+        )
+        try:
+            payload = backend._run_remote_python_json(
+                core_cfg,
+                script,
+                logger=backend.app.logger,
+                label='flow.cleanup.remote',
+                timeout=180.0,
+            )
+            removed = payload.get('removed') if isinstance(payload, dict) and isinstance(payload.get('removed'), list) else []
+            logging.info('Flow cleanup: remote preclean complete (removed=%d)', len(removed))
+        except Exception as exc:
+            logging.warning('Flow cleanup: remote cleanup failed: %s', exc)
+        return
+
+    try:
+        removed_roots = _remove_local_flow_scenario_roots(scenario_norm)
+        if removed_roots:
+            logging.info('Flow cleanup: removed %d stale local flow run directories', len(removed_roots))
+    except Exception:
+        pass
+    try:
+        removed = _cleanup_stale_vuln_temp_files()
+        if removed:
+            logging.info('Flow cleanup: removed %d stale /tmp/vulns artifacts', len(removed))
+    except Exception:
+        pass
+    if not shutil.which('docker'):
+        return
+    for cmd in (
+        ['docker', 'container', 'prune', '-f'],
+        ['docker', 'image', 'prune', '-f'],
+        ['docker', 'network', 'prune', '-f'],
+        ['docker', 'volume', 'prune', '-f'],
+    ):
+        try:
+            proc = _run_docker_cmd(cmd, timeout_s=120.0, allow_sudo_retry=True)
+            if proc.returncode != 0:
+                logging.warning('Flow cleanup: %s exited %s: %s', ' '.join(cmd), proc.returncode, (proc.stdout or '').strip()[-1200:])
+        except Exception as exc:
+            logging.warning('Flow cleanup: %s failed: %s', ' '.join(cmd), exc)
+    for script_text, label in (
+        ("docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f", 'old generator images'),
+        ("docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f", 'wrapper images'),
+    ):
+        try:
+            proc = _run_local_cmd(['sh', '-lc', script_text], timeout_s=120.0, allow_sudo_retry=True)
+            if proc.returncode == 0:
+                logging.info('Flow cleanup: cleaned %s', label)
+            else:
+                logging.warning('Flow cleanup: cleanup for %s exited %s: %s', label, proc.returncode, (proc.stdout or '').strip()[-1200:])
+        except Exception as exc:
+            logging.warning('Flow cleanup: cleanup for %s failed: %s', label, exc)
+
+
 def _docker_container_state(name: str) -> dict[str, Any]:
     """Best-effort docker inspect state for a container name."""
     name = str(name or '').strip()
@@ -3520,6 +3666,17 @@ def _run_flag_sequencing_phase(args: Any) -> int:
         if generators_expected and remote_execution_expected and (not args.flow_run_local) and ('run_remote' not in payload):
             payload['run_remote'] = True
 
+    try:
+        _best_effort_cli_flag_sequencing_cleanup(
+            args,
+            backend=backend,
+            core_cfg=resolved_core_cfg if isinstance(resolved_core_cfg, dict) else None,
+            scenario_name=scenario_name,
+            run_remote=bool(payload.get('run_remote')),
+        )
+    except Exception as cleanup_exc:
+        logging.warning('Flow cleanup failed: %s', cleanup_exc)
+
     from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
 
     sequence_payload = {
@@ -3569,18 +3726,6 @@ def _run_flag_sequencing_phase(args: Any) -> int:
         sequence_payload_out.setdefault('scenario', scenario_name)
         _emit_phase_json(sequence_payload_out, output_path=args.plan_output, stream=sys.stderr)
         return 1
-
-    flow_mode_norm = str(args.flow_mode or '').strip().lower()
-    if flow_mode_norm in {'preview'}:
-        if not isinstance(sequence_payload_out, dict):
-            sequence_payload_out = {'ok': True, 'status': sequence_status, 'payload': sequence_payload_out}
-        sequence_payload_out.setdefault('phase', 'flag-sequencing')
-        sequence_payload_out.setdefault('xml_path', xml_path)
-        sequence_payload_out.setdefault('scenario', scenario_name)
-        sequence_payload_out.setdefault('generator_execution_requested', False)
-        sequence_payload_out.setdefault('generator_execution_mode', 'none')
-        _emit_phase_json(sequence_payload_out, output_path=args.plan_output)
-        return 0
 
     if isinstance(sequence_payload_out, dict):
         seq_chain_ids = [
@@ -3785,7 +3930,7 @@ def _add_cli_preview_plan_args(container: Any) -> None:
 def _add_cli_flag_sequencing_args(container: Any) -> None:
     container.add_argument(
         '--flow-mode',
-        choices=['preview', 'resolve', 'resolve_hints', 'hint', 'hint_only'],
+        choices=['resolve', 'resolve_hints', 'hint', 'hint_only'],
         default='resolve',
         help='Flag-sequencing mode for the flag-sequencing phase (default: resolve)',
     )
@@ -3798,6 +3943,19 @@ def _add_cli_flag_sequencing_args(container: Any) -> None:
     container.add_argument('--flow-timeout-s', type=int, default=None, help='Optional total timeout in seconds for the flag-sequencing phase')
     container.add_argument('--flow-run-remote', action='store_true', help='Force remote flag-sequencing generator execution when CORE SSH config is available')
     container.add_argument('--flow-run-local', action='store_true', help='Force local flag-sequencing generator execution even when CORE SSH config exists')
+    container.add_argument(
+        '--flow-cleanup-before-run',
+        dest='flow_cleanup_before_run',
+        action='store_true',
+        default=True,
+        help='Best-effort cleanup of stale generator Docker state and flow artifacts before resolve (default: on)',
+    )
+    container.add_argument(
+        '--no-flow-cleanup-before-run',
+        dest='flow_cleanup_before_run',
+        action='store_false',
+        help='Disable pre-run cleanup before flag-sequencing resolve',
+    )
     container.add_argument('--flow-cleanup-generated-artifacts', action='store_true', help='Delete temporary flag-sequencing generator run directories after completion')
     container.add_argument('--flow-dependency-level', type=int, default=3, help='Flag-sequencing dependency strictness level (1-5)')
 
