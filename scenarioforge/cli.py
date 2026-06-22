@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import datetime
+import fnmatch
 import importlib
 import json
 import logging
@@ -434,6 +435,191 @@ def _run_docker_cmd(args: list[str], *, timeout_s: float = 20.0, allow_sudo_retr
             )
             return proc2
     return proc
+
+
+def _run_local_cmd(args: list[str], *, timeout_s: float = 30.0, allow_sudo_retry: bool = False) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=float(timeout_s or 30.0),
+    )
+    if proc.returncode == 0:
+        return proc
+    if not allow_sudo_retry:
+        return proc
+    if args and str(args[0]).strip() == 'sudo':
+        return proc
+    out_text = str(proc.stdout or '').lower()
+    if ('permission denied' not in out_text) and ('must be root' not in out_text) and ('operation not permitted' not in out_text):
+        return proc
+    prefix, stdin_input = _docker_sudo_prefix()
+    if not prefix:
+        return proc
+    return subprocess.run(
+        prefix + args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=float(timeout_s or 30.0),
+        input=stdin_input,
+    )
+
+
+def _cleanup_stale_vuln_temp_files() -> list[str]:
+    removed: list[str] = []
+    root = '/tmp/vulns'
+    try:
+        if not os.path.isdir(root):
+            return removed
+    except Exception:
+        return removed
+    patterns = (
+        'docker-compose-*.yml',
+        'docker-compose-*.orig.yml',
+        'compose_assignments.json',
+        'docker-wrap-*',
+    )
+    try:
+        entries = os.listdir(root)
+    except Exception:
+        return removed
+    for name in entries:
+        if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
+            continue
+        path = os.path.join(root, name)
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+            removed.append(path)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    return removed
+
+
+def _best_effort_cli_execute_cleanup(args: Any, core: Any) -> bool:
+    if str(getattr(args, 'phase', '') or '').strip().lower() != 'execute':
+        return False
+
+    core_cleanup_before_run = bool(getattr(args, 'core_cleanup_before_run', True))
+    docker_cleanup_before_run = bool(getattr(args, 'docker_cleanup_before_run', True))
+    overwrite_existing_images = bool(getattr(args, 'overwrite_existing_images', True))
+    docker_remove_all_containers = bool(getattr(args, 'docker_remove_all_containers', False))
+    reconnect_required = False
+
+    if core_cleanup_before_run:
+        blocking_ids: list[int] = []
+        try:
+            sessions = core.get_sessions() or []
+        except Exception:
+            sessions = []
+        for sess in sessions:
+            sid = _core_session_id(sess)
+            if sid is None:
+                continue
+            state = _core_state_str(getattr(sess, 'state', None))
+            if _is_shutdown_state(state):
+                continue
+            try:
+                blocking_ids.append(int(sid))
+            except Exception:
+                continue
+        if blocking_ids:
+            logging.info('Execute cleanup: active CORE sessions detected: %s', ', '.join(str(x) for x in blocking_ids))
+        try:
+            proc = _run_local_cmd(['core-cleanup'], timeout_s=45.0, allow_sudo_retry=True)
+            if proc.returncode == 0:
+                reconnect_required = True
+                logging.info('Execute cleanup: core-cleanup completed')
+            else:
+                logging.warning('Execute cleanup: core-cleanup exited %s: %s', proc.returncode, (proc.stdout or '').strip()[-1200:])
+        except Exception as exc:
+            logging.warning('Execute cleanup: core-cleanup failed: %s', exc)
+        for cmd in (
+            ['sh', '-lc', "find /var/lib/core -name '*.conf' -mtime +1 -delete 2>/dev/null || true"],
+            ['sh', '-lc', "find /tmp -name 'pycore.*' -mtime +1 -delete 2>/dev/null || true"],
+        ):
+            try:
+                _run_local_cmd(cmd, timeout_s=25.0, allow_sudo_retry=True)
+            except Exception:
+                pass
+
+    if docker_cleanup_before_run or docker_remove_all_containers or overwrite_existing_images:
+        if not shutil.which('docker'):
+            logging.warning('Execute cleanup: docker not found; skipping docker cleanup')
+            return reconnect_required
+
+        if docker_remove_all_containers:
+            remove_all_script = (
+                "ids=$(docker ps -a --format '{{.ID}} {{.Names}}' | "
+                "grep -vE ' core-daemon$| registry:2$' | awk '{print $1}'); "
+                "if [ -n \"$ids\" ]; then "
+                "imgs=$(docker inspect -f '{{.Image}}' $ids 2>/dev/null | sort -u); "
+                "echo \"$ids\" | xargs -r docker rm -f; "
+                "if [ -n \"$imgs\" ]; then echo \"$imgs\" | xargs -r docker rmi -f || true; fi; "
+                "fi"
+            )
+            try:
+                proc = _run_local_cmd(['sh', '-lc', remove_all_script], timeout_s=120.0, allow_sudo_retry=True)
+                if proc.returncode == 0:
+                    logging.info('Execute cleanup: removed non-essential Docker containers')
+                else:
+                    logging.warning('Execute cleanup: remove-all-containers exited %s: %s', proc.returncode, (proc.stdout or '').strip()[-1200:])
+            except Exception as exc:
+                logging.warning('Execute cleanup: remove-all-containers failed: %s', exc)
+
+        if docker_cleanup_before_run:
+            for cmd in (
+                ['docker', 'container', 'prune', '-f'],
+                ['docker', 'image', 'prune', '-f'],
+                ['docker', 'network', 'prune', '-f'],
+                ['docker', 'volume', 'prune', '-f'],
+            ):
+                try:
+                    proc = _run_docker_cmd(cmd, timeout_s=120.0, allow_sudo_retry=True)
+                    if proc.returncode != 0:
+                        logging.warning('Execute cleanup: %s exited %s: %s', ' '.join(cmd), proc.returncode, (proc.stdout or '').strip()[-1200:])
+                except Exception as exc:
+                    logging.warning('Execute cleanup: %s failed: %s', ' '.join(cmd), exc)
+            try:
+                removed = _cleanup_stale_vuln_temp_files()
+                if removed:
+                    logging.info('Execute cleanup: removed %d stale /tmp/vulns artifacts', len(removed))
+            except Exception:
+                pass
+            for script, label in (
+                ("docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f", 'old generator images'),
+                ("docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f", 'wrapper images'),
+            ):
+                try:
+                    proc = _run_local_cmd(['sh', '-lc', script], timeout_s=120.0, allow_sudo_retry=True)
+                    if proc.returncode == 0:
+                        logging.info('Execute cleanup: cleaned %s', label)
+                    else:
+                        logging.warning('Execute cleanup: cleanup for %s exited %s: %s', label, proc.returncode, (proc.stdout or '').strip()[-1200:])
+                except Exception as exc:
+                    logging.warning('Execute cleanup: cleanup for %s failed: %s', label, exc)
+
+        elif overwrite_existing_images:
+            try:
+                proc = _run_local_cmd(
+                    ['sh', '-lc', "docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f"],
+                    timeout_s=120.0,
+                    allow_sudo_retry=True,
+                )
+                if proc.returncode == 0:
+                    logging.info('Execute cleanup: removed wrapper images')
+                else:
+                    logging.warning('Execute cleanup: wrapper image cleanup exited %s: %s', proc.returncode, (proc.stdout or '').strip()[-1200:])
+            except Exception as exc:
+                logging.warning('Execute cleanup: wrapper image cleanup failed: %s', exc)
+
+    return reconnect_required
 
 
 def _docker_container_state(name: str) -> dict[str, Any]:
@@ -3716,7 +3902,59 @@ def _add_cli_execute_topo_args(container: Any) -> None:
     container.add_argument(
         '--docker-remove-conflicts',
         action='store_true',
-        help='Automatically remove conflicting Docker containers/images instead of prompting',
+        default=True,
+        help='Automatically remove conflicting Docker containers/images before execute (default: on)',
+    )
+    container.add_argument(
+        '--no-docker-remove-conflicts',
+        dest='docker_remove_conflicts',
+        action='store_false',
+        help='Disable automatic Docker conflict removal during execute',
+    )
+    container.add_argument(
+        '--core-cleanup-before-run',
+        dest='core_cleanup_before_run',
+        action='store_true',
+        default=True,
+        help='Run core-cleanup and stale CORE runtime cleanup before execute (default: on)',
+    )
+    container.add_argument(
+        '--no-core-cleanup-before-run',
+        dest='core_cleanup_before_run',
+        action='store_false',
+        help='Disable core-cleanup and stale CORE runtime cleanup before execute',
+    )
+    container.add_argument(
+        '--docker-cleanup-before-run',
+        dest='docker_cleanup_before_run',
+        action='store_true',
+        default=True,
+        help='Prune Docker artifacts and stale /tmp/vulns files before execute (default: on)',
+    )
+    container.add_argument(
+        '--no-docker-cleanup-before-run',
+        dest='docker_cleanup_before_run',
+        action='store_false',
+        help='Disable Docker prune and stale /tmp/vulns cleanup before execute',
+    )
+    container.add_argument(
+        '--overwrite-existing-images',
+        dest='overwrite_existing_images',
+        action='store_true',
+        default=True,
+        help='Remove wrapper/generator images before execute when cleaning up (default: on)',
+    )
+    container.add_argument(
+        '--no-overwrite-existing-images',
+        dest='overwrite_existing_images',
+        action='store_false',
+        help='Disable wrapper/generator image removal before execute',
+    )
+    container.add_argument(
+        '--docker-remove-all-containers',
+        action='store_true',
+        default=False,
+        help='Remove all non-essential Docker containers/images before execute (default: off)',
     )
 
 
@@ -4356,6 +4594,16 @@ def main():
         pass
     logging.info("[grpc] CoreGrpcClient.connect() -> %s:%s", args.host, args.port)
     core.connect()
+    reconnect_after_cleanup = False
+    try:
+        reconnect_after_cleanup = _best_effort_cli_execute_cleanup(args, core)
+    except Exception as cleanup_exc:
+        logging.warning('Execute cleanup failed: %s', cleanup_exc)
+    if reconnect_after_cleanup:
+        try:
+            core.connect()
+        except Exception as reconnect_exc:
+            logging.warning('Reconnect after execute cleanup failed: %s', reconnect_exc)
     try:
         from .utils.grpc_helpers import start_grpc_keepalive
         # IMPORTANT: start keepalive before applying any gRPC logging proxy.

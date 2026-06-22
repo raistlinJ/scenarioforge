@@ -14,6 +14,9 @@ class _FakeCoreClient:
     def connect(self):
         return None
 
+    def get_sessions(self):
+        return []
+
 
 class _FakeSession:
     topo_stats = {'preview_realized': True}
@@ -58,6 +61,14 @@ class _FakeSshClient:
 
     def close(self):
         return None
+
+
+class _CleanupCoreClient:
+    def __init__(self, sessions=None):
+        self._sessions = list(sessions or [])
+
+    def get_sessions(self):
+        return list(self._sessions)
 
 
 def test_cli_preview_plan_phase_persists_preview_metadata(tmp_path, monkeypatch, capsys):
@@ -225,6 +236,62 @@ def test_cli_new_phase_persists_density_count_when_provided(tmp_path, monkeypatc
     assert weight_items == []
     assert count_items == []
     assert services == []
+
+
+def test_cli_execute_parser_defaults_enable_cleanup_actions():
+    parser = cli._build_cli_parser()
+    args = parser.parse_args(['execute', '--xml', '/tmp/scenario.xml'])
+
+    assert args.core_cleanup_before_run is True
+    assert args.docker_cleanup_before_run is True
+    assert args.docker_remove_conflicts is True
+    assert args.overwrite_existing_images is True
+    assert args.docker_remove_all_containers is False
+
+
+def test_cli_execute_parser_cleanup_opt_outs_disable_remove_actions():
+    parser = cli._build_cli_parser()
+    args = parser.parse_args([
+        'execute',
+        '--xml', '/tmp/scenario.xml',
+        '--no-core-cleanup-before-run',
+        '--no-docker-cleanup-before-run',
+        '--no-docker-remove-conflicts',
+        '--no-overwrite-existing-images',
+    ])
+
+    assert args.core_cleanup_before_run is False
+    assert args.docker_cleanup_before_run is False
+    assert args.docker_remove_conflicts is False
+    assert args.overwrite_existing_images is False
+
+
+def test_cli_execute_cleanup_runs_default_remove_actions(monkeypatch, caplog):
+    args = SimpleNamespace(
+        phase='execute',
+        core_cleanup_before_run=True,
+        docker_cleanup_before_run=True,
+        overwrite_existing_images=True,
+        docker_remove_all_containers=False,
+    )
+    core = _CleanupCoreClient([SimpleNamespace(id=7, state='runtime')])
+    local_calls: list[list[str]] = []
+    docker_calls: list[list[str]] = []
+
+    monkeypatch.setattr(cli, '_run_local_cmd', lambda cmd, **kwargs: local_calls.append(list(cmd)) or SimpleNamespace(returncode=0, stdout='ok'))
+    monkeypatch.setattr(cli, '_run_docker_cmd', lambda cmd, **kwargs: docker_calls.append(list(cmd)) or SimpleNamespace(returncode=0, stdout='ok'))
+    monkeypatch.setattr(cli, '_cleanup_stale_vuln_temp_files', lambda: ['/tmp/vulns/docker-compose-old.yml'])
+    monkeypatch.setattr(cli.shutil, 'which', lambda name: '/usr/bin/docker' if name == 'docker' else '/usr/bin/sudo')
+
+    caplog.set_level('INFO')
+    reconnect = cli._best_effort_cli_execute_cleanup(args, core)
+
+    assert reconnect is True
+    assert ['core-cleanup'] in local_calls
+    assert ['docker', 'container', 'prune', '-f'] in docker_calls
+    assert ['docker', 'image', 'prune', '-f'] in docker_calls
+    assert any(cmd[:2] == ['sh', '-lc'] and 'coretg-gen-' in cmd[2] for cmd in local_calls)
+    assert any(cmd[:2] == ['sh', '-lc'] and '_wrapper' in cmd[2] for cmd in local_calls)
 
 
 def test_cli_new_phase_rejects_invalid_density_count(tmp_path, monkeypatch, capsys):
