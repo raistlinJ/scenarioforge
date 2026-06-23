@@ -9,6 +9,7 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 - [Other operating modes](#other-operating-modes)
 - [Quick start](docs/QUICK_START.md)
 - [CLI execution deep dive](docs/CLI_EXECUTION_DEEP_DIVE.md)
+- [Evaluator compatibility contract](docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md)
 - [Full Preview workflow](docs/FULL_PREVIEW_WORKFLOW.md)
 - [Feature deep dive](docs/FEATURE_DEEP_DIVE.md)
 - [Architecture overview](docs/ARCHITECTURE_OVERVIEW.md)
@@ -146,6 +147,7 @@ See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with loca
 ## Additional documentation
 - [docs/README.md](docs/README.md) – Index of project documentation pages
 - [docs/CLI_EXECUTION_DEEP_DIVE.md](docs/CLI_EXECUTION_DEEP_DIVE.md) – End-to-end CLI phases, remote CORE delegation, Flow behavior, and starter XML workflow
+- [docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md](docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md) – Integration contract for CLI-driven batch evaluators
 - [docs/reference/API.md](docs/reference/API.md) – REST endpoints exposed by the Web UI backend
 - Flag Sequencing (Flow) endpoints and Attack Flow Builder `.afb` export are documented in [docs/reference/API.md](docs/reference/API.md) and the OpenAPI spec at [`docs/openapi.yaml`](docs/openapi.yaml).
 - Participant UI selection behavior is deterministic: incoming `?scenario=...` selection is prioritized, then remembered last selection, then the first listed scenario.
