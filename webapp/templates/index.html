@@ -14281,10 +14281,13 @@
             ].map(v => (v || '').toString().trim()).filter(Boolean);
             const preferredXmlPath = pathCandidates.find(p => p.toLowerCase().endsWith('.xml')) || '';
             const query = new URLSearchParams({ scenario: scenLabel });
-            // Let the server resolve the latest saved XML for this scenario.
-            // The explicit path is only a cache hint, not the source of truth.
+            if (preferredXmlPath) {
+                query.set('xml_path', preferredXmlPath);
+            }
+            // When a scenario entry already carries a saved XML path, rehydrate from that
+            // exact project source instead of re-resolving by scenario name.
             const data = (typeof window.CORETG_FETCH_LATEST_STATE === 'function')
-                ? await window.CORETG_FETCH_LATEST_STATE(scenLabel, preferredXmlPath ? { xmlPath: preferredXmlPath } : {})
+                ? await window.CORETG_FETCH_LATEST_STATE(scenLabel, preferredXmlPath ? { xmlPath: preferredXmlPath, forceXmlPath: true } : {})
                 : await (async () => {
                     const resp = await fetch(`/api/scenario/latest_state?${query.toString()}`, {
                         method: 'GET',

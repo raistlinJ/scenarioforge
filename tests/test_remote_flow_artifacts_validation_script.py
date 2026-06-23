@@ -144,7 +144,7 @@ def test_remote_copy_flow_artifacts_script_prefers_node_alias_over_compose_sidec
     script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
 
     assert "if node_name in names:" in script
-    assert "targets = [node_name]" in script
+    assert "return [node_name], last_err" in script
     assert script.index("if node_name in names:") < script.index("ids = _compose_container_ids(project, yml)")
 
 
@@ -216,6 +216,81 @@ def test_remote_copy_flow_artifacts_script_waits_for_node_alias_before_fallback(
     assert ps_calls['count'] >= 3
     assert cp_calls[0][-1] == 'docker-1:/flow_injects/service'
     assert 'abcdef123456:/flow_injects/service' not in cp_calls[0][-1]
+
+
+def test_remote_copy_flow_artifacts_retries_when_container_is_replaced(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / 'flag_node_generators_runs' / 'flow-scenario1' / '02_generator_docker-1'
+    service_dir = source_dir / 'service'
+    service_dir.mkdir(parents=True, exist_ok=True)
+    (service_dir / 'secret.txt').write_text('demo', encoding='utf-8')
+
+    compose_path = assign_dir / 'docker-compose-docker-1.yml'
+    compose_path.write_text('services:\n  docker-1:\n    image: demo\n', encoding='utf-8')
+    (assign_dir / 'compose_assignments.json').write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-1': {
+                        'InjectFiles': ['service -> /flow_injects'],
+                        'InjectSourceDir': str(source_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    old_id = 'a' * 64
+    new_id = 'b' * 64
+    inspect_ids = iter([old_id, old_id, new_id, new_id, new_id, new_id])
+    cp_calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-1\n')
+        if docker_cmd[:3] == ['inspect', '--format', '{{.Id}}|{{.State.Running}}|{{.State.Status}}']:
+            return subprocess.CompletedProcess(
+                cmd_list,
+                0,
+                stdout=f'{next(inspect_ids)}|true|running\n',
+            )
+        if docker_cmd[:2] == ['exec', 'docker-1']:
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            cp_calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setenv('CORETG_FLOW_COPY_SETTLE_S', '0')
+    monkeypatch.setenv('CORETG_FLOW_COPY_RETRY_S', '0')
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    namespace = {'__name__': '__main__'}
+    output = io.StringIO()
+    with redirect_stdout(output):
+        exec(script, namespace, namespace)
+    payload = json.loads(output.getvalue().strip())
+
+    item = (payload.get('items') or [])[0]
+    attempts = item.get('copy_attempts') or []
+    assert item.get('ok') is True
+    assert item.get('container_replaced') is True
+    assert item.get('stable_container_id') == new_id
+    assert len(cp_calls) == 2
+    assert attempts[0].get('ok') is False
+    assert attempts[1].get('ok') is True
+    assert item.get('verified_paths') == ['/flow_injects/service']
 
 
 def test_remote_copy_flow_artifacts_script_falls_back_to_resolved_inject_sources():

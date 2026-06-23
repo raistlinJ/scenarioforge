@@ -121,6 +121,13 @@ Behavior:
 - Builds the embedded `PlanPreview` payload.
 - Writes the preview back into the same XML.
 - Prints the resulting preview payload as JSON.
+- `execute` and `topo` later reuse that embedded preview automatically when `--preview-plan` is omitted, so a separate persisted JSON preview file is usually unnecessary.
+
+Seed note:
+
+- `--seed` controls planner/build randomness for preview generation, topology layout, routing/vulnerability placement, and other seeded decisions.
+- If you pass an explicit `--preview-plan` and omit `--seed`, the CLI reuses the seed saved in that preview payload when available.
+- If you want separate CLI runs to recompute the same planner-owned decisions, reuse the same `--seed` across `preview-plan`, `flag-sequencing`, `topo`, and `execute`.
 
 This is the normal prerequisite for Flow work when the XML does not already contain a preview.
 
@@ -196,6 +203,11 @@ Examples:
 python -m scenarioforge.cli execute --xml /abs/path/labs/my-lab.xml --scenario "MyLab" --verbose
 
 python -m scenarioforge.cli --xml /abs/path/labs/my-lab.xml --scenario "MyLab" --verbose
+
+python -m scenarioforge.cli execute \
+  --xml /abs/path/labs/my-lab.xml \
+  --scenario "MyLab" \
+  --post-execution-validation
 ```
 
 Behavior:
@@ -208,6 +220,17 @@ Behavior:
 - Generates traffic.
 - Writes the report.
 - Starts and validates the CORE session.
+- With `-post-execution-validation` or `--post-execution-validation`, exports the started CORE session and runs the same node, Docker, Flow, generator, and inject validation used by the Web UI.
+
+Before validating, the CLI performs the same post-run Flow artifact copy as the Web UI so generated injects are populated inside running containers. Copy success requires a stable container identity and verified destination paths; container replacement or missing destinations trigger bounded retries. If validation still detects missing injects, CLI and WebUI perform one repair-and-revalidate pass. Post-execution validation then prints a terminal summary, emits the complete `VALIDATION_SUMMARY_JSON`, and writes `core-post/validation-session-<id>.json` beside the scenario XML. Errors are red and return a nonzero CLI status. WebUI-style warnings, such as unexpected extra nodes, are yellow and preserve the successful execute status. Set `NO_COLOR=1` to disable ANSI colors.
+
+Execute parity notes:
+
+- If `--preview-plan` is omitted and `--xml` already contains embedded `PlanPreview`, the CLI automatically reuses that embedded preview during `execute` and `topo`.
+- `--xml` is authoritative. Direct CLI runs use exactly that file and do not silently substitute a newer catalog XML or a different saved CORE VM. The WebUI updates its selected validated CORE connection in the XML before launching execute.
+- `--seed` is still the clearest way to force deterministic recomputation across separate CLI runs. Embedded `PlanPreview` helps with saved preview alignment, but it does not replace an explicit seed when you want repeatable planner randomness end to end.
+- If the resolved CORE target is remote, the terminal CLI delegates to a remote CLI process and now forwards the resolved scenario name and effective preview-plan source to that remote process, matching the Web UI path more closely.
+- Avoid using `outputs/tmp-preview-*` XMLs as long-lived execute targets. They are temporary staging artifacts; use a saved scenario XML under `outputs/scenarios-*` or rerun preview/Flow resolve and Save before executing.
 
 ## Recommended Workflows
 
@@ -237,6 +260,11 @@ If the XML already came from the Web UI and already contains `PlanPreview` and `
 python -m scenarioforge.cli execute --xml /abs/path/outputs/scenarios-06-04-26-16-31-25/scenarios.xml --scenario "Scenario 1" --verbose
 ```
 
+Notes:
+
+- You usually do not need `--preview-plan` for those saved XMLs because the CLI automatically reuses the embedded `PlanPreview` from the XML itself.
+- Prefer saved `outputs/scenarios-*` XMLs for standalone CLI runs. `outputs/tmp-preview-*` files are ephemeral and may no longer point at valid Flow runtime artifacts by the time you execute them later.
+
 ### Topology-Only Bring-Up
 
 ```bash
@@ -260,6 +288,7 @@ For CLI execution, config resolution works like this:
 - If the XML contains saved `CoreConnection` or scenario HITL core settings, use those.
 - Fill missing SSH and runtime fields from saved secret-backed CORE credentials when available.
 - Apply explicit CLI `--host` and `--port` overrides when provided.
+- If execution is delegated to a remote CORE VM, forward the resolved scenario name and preview-plan source so the remote CLI sees the same effective execute context as the local CLI.
 
 This gives the terminal CLI the same practical target selection model as the Web UI.
 

@@ -7,6 +7,8 @@ def test_docker_default_route_service_uses_absolute_paths() -> None:
     assert 'name: str = "DockerDefaultRoute"' in txt
     assert 'files: list[str] = ["/defaultroute.sh"]' in txt
     assert 'startup: list[str] = ["/bin/sh /defaultroute.sh"]' in txt
+    assert 'validate: list[str] = []' in txt
+    assert "grep -q '^default '" not in txt
 
 
 def test_docker_default_route_prefers_core_attached_interface() -> None:

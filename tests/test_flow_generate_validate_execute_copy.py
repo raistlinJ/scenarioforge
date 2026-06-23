@@ -686,3 +686,34 @@ def test_maybe_copy_flow_artifacts_retries_after_zero_success_attempt(monkeypatc
     backend._maybe_copy_flow_artifacts_into_containers(meta, stage='postrun')
     assert meta.get('flow_artifacts_copied') is True
 
+
+def test_maybe_copy_flow_artifacts_requires_at_least_one_target_when_requested(monkeypatch):
+    meta = {
+        'remote': True,
+        'core_cfg': {'ssh_password': 'pw'},
+        'flow_copy_required': True,
+    }
+
+    monkeypatch.setattr(backend, '_log_remote_vulns_inventory', lambda *a, **k: None)
+    monkeypatch.setattr(backend, '_append_async_run_log_line', lambda *a, **k: None)
+    monkeypatch.setattr(
+        backend,
+        '_run_remote_python_json',
+        lambda *_a, **_k: {
+            'ok': True,
+            'assignments_count': 0,
+            'candidate_count': 0,
+            'items': [],
+        },
+    )
+
+    backend._maybe_copy_flow_artifacts_into_containers(meta, stage='cli-postrun')
+
+    assert meta.get('flow_artifacts_copied') is not True
+    assert meta.get('flow_artifact_copy_error') == 'no Flow artifact copy targets were found'
+
+
+def test_remote_flow_copy_ignores_original_compose_backups():
+    script = backend._remote_copy_flow_artifacts_into_containers_script('pw')
+
+    assert "if text.endswith('.orig.yml'):" in script

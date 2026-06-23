@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import contextlib
 
+import pytest
+
 from webapp import app_backend as backend
 
 
@@ -125,3 +127,65 @@ def test_grpc_save_current_session_xml_reraises_when_fallback_unavailable(tmp_pa
         assert False, "expected helper to re-raise original exception"
     except RuntimeError as exc:
         assert str(exc) == "local grpc failed"
+
+
+def test_core_connection_via_ssh_does_not_label_body_error_as_tunnel_failure(monkeypatch, caplog):
+    closed = []
+
+    class _Tunnel:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            return "127.0.0.1", 43210
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(backend, "_SshTunnel", _Tunnel)
+
+    with pytest.raises(ModuleNotFoundError, match="No module named 'core'"):
+        with backend._core_connection_via_ssh(
+            {
+                "host": "localhost",
+                "port": 50051,
+                "ssh_host": "core-vm",
+                "ssh_port": 22,
+                "ssh_username": "core",
+                "ssh_password": "pw",
+            }
+        ):
+            raise ModuleNotFoundError("No module named 'core'")
+
+    assert closed == [True]
+    assert "SSH tunnel" not in caplog.text
+
+
+def test_core_connection_via_ssh_logs_actual_setup_failure(monkeypatch, caplog):
+    class _Tunnel:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("authentication failed")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backend, "_SshTunnel", _Tunnel)
+
+    with pytest.raises(RuntimeError, match="authentication failed"):
+        with backend._core_connection_via_ssh(
+            {
+                "host": "localhost",
+                "port": 50051,
+                "ssh_host": "core-vm",
+                "ssh_port": 22,
+                "ssh_username": "core",
+                "ssh_password": "pw",
+            }
+        ):
+            pass
+
+    assert "SSH tunnel setup failed: authentication failed" in caplog.text
+    assert "Did you mean" not in caplog.text

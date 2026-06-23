@@ -109,15 +109,21 @@ python -m scenarioforge.cli new \
 Popular options:
 - Replace `examples/sample.xml` with your own ScenarioForge XML file when you are ready to run a custom scenario.
 - `--scenario NAME` pick a specific scenario entry
+- `--seed N` make planner/build randomness deterministic. Reuse the same seed across `preview-plan`, `flag-sequencing`, `topo`, and `execute` when you want repeatable results.
 - `--host / --port` override the CORE gRPC endpoint. If omitted, the CLI uses the same env-/backend-backed defaults as the Web UI, typically `localhost:50051` unless overridden by `.scenarioforge.env` or real environment variables.
+- `--preview-plan PATH` override the preview source for `execute`/`topo`. If omitted, the CLI automatically reuses embedded `PlanPreview` from `--xml` when present.
+- The file passed with `--xml` is the execution ground truth, including the CORE VM identity. WebUI Execute synchronizes its validated CORE selection into that XML before invoking the runner.
 - `--layout-density {compact|normal|spacious}` adjust map spacing
 - `--seg-include-hosts`, `--seg-allow-docker-ports`, `--nat-mode`, `--dnat-prob` fine-tune segmentation
 - `--traffic-pattern`, `--traffic-rate`, `--traffic-content` override traffic defaults
 
 Saved-XML execute notes:
+- `execute` and `topo` usually do not need `--preview-plan` when the scenario XML already embeds `PlanPreview`; the CLI now reuses that embedded preview automatically.
+- If you need separate CLI runs to recompute the same planner-owned randomness, keep the same `--seed` you used when persisting `PlanPreview` or resolving Flow.
 - If the XML contains embedded `PlanPreview`, the CLI uses it for the same preview/slot alignment that the Web UI execute path expects.
 - If the XML contains `FlagSequencing/FlowState`, the CLI now enforces the same prerequisite as Web Execute: resolved Flow runtime values and referenced local artifacts must already exist before the run starts.
 - If the embedded preview metadata no longer matches the current XML-derived plan, the CLI stops early and asks you to regenerate/save preview metadata first instead of executing a stale plan.
+- Avoid long-lived CLI execute runs against `outputs/tmp-preview-*` XMLs. Those files are temporary staging artifacts; use a saved scenario XML under `outputs/scenarios-*` or rerun Generate/resolve and Save before executing.
 
 Phase command notes:
 - `new` creates a starter ScenarioForge XML with one scenario and canonical section keys using the same XML builder as the Web UI.
@@ -129,6 +135,7 @@ Phase command notes:
 - When you provide multiple density-style seed rows in the same section, the CLI assigns equal `factor` weights that add up to `1.0` for that section.
 - `new` can also embed top-level CORE SSH connection details directly into the XML with `--ssh-host`, `--ssh-port`, `--ssh-username`, and `--ssh-password`.
 - `preview-plan` persists embedded `PlanPreview` metadata back into the XML and prints the resulting preview payload as JSON.
+- During remote `execute`/`topo`, the CLI now forwards the resolved scenario name and preview-plan context to the delegated remote CLI so the remote path matches the Web UI more closely.
 - `flag-sequencing` runs the same preview/resolve helper used by the Web UI and persists the resulting `FlowState` back into the XML.
 - In generator-running Flow modes such as `resolve`, the CLI now treats remote-capable CORE VM execution as required unless you explicitly pass `--flow-run-local`; it no longer silently falls back to local generator execution when remote setup fails.
 - `flag-sequencing` JSON output now includes `generator_execution_requested` and `generator_execution_mode` so you can confirm whether generator work ran in `remote` or `local` mode.
@@ -142,6 +149,7 @@ Need more detail: see [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md).
 Saved XML parity notes:
 - Direct CLI launches load `.scenarioforge.env` from the repo root when present, so the same default CORE host, SSH endpoint, VM-mode settings, and HITL-related env values used by the Web UI are available to the CLI.
 - For `execute` and `topo`, the CLI now resolves the saved scenario CORE connection from the XML first, fills missing fields from env/defaults, applies any saved CORE secret reference, and uses that configuration automatically.
+- When `execute` or `topo` delegates to a remote CORE VM, the CLI forwards the resolved scenario name plus the effective preview-plan source, including the implicit embedded-`PlanPreview` case, to the remote CLI process.
 - When that saved scenario targets a remote CORE VM, the terminal CLI delegates the run to a remote CLI process over SSH so uploaded XML, compose files, and Flow artifacts live on the same host as `core-daemon`.
 - If the XML does not carry a saved `CoreConnection`, the CLI can still use env-only remote defaults from `.scenarioforge.env` for `execute`, `topo`, and remote `flag-sequencing` generator runs.
 
@@ -151,6 +159,7 @@ VM mode note:
 ## Runtime validation
 Runtime validation is built into Execute and CLI runs.
 
+- Add `--post-execution-validation` (or `-post-execution-validation`) to CLI `execute` to copy Flow injects into stable running containers, verify each destination, export the live CORE session, and run the same detailed post-run validation used by the Web UI. Container replacement triggers copy retries, and a remaining missing-inject result triggers one automatic repair/revalidation pass. The CLI prints red errors, yellow warnings, emits `VALIDATION_SUMMARY_JSON`, and saves the complete result under `core-post/validation-session-<id>.json` beside the scenario XML.
 - Web runs expose validation details in `GET /run_status/<run_id>` as `validation_summary` while the run is retained in memory.
 - Report artifacts under `./reports/` persist validation details for later review.
 - A healthy strict validation has `validation_summary.ok == true` and zero issue counters such as `missing_nodes`, `docker_not_running`, `injects_missing`, `generator_outputs_missing`, and `generator_injects_missing`.

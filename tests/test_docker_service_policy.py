@@ -88,5 +88,34 @@ def test_ensure_services_with_policy_skips_invalid_docker_services(monkeypatch):
         context="test",
     )
 
-    assert assigned == ["DockerDefaultRoute"]
-    assert calls == [(11, "DockerDefaultRoute")]
+    assert assigned == ["CoreTGPrereqs", "DockerDefaultRoute"]
+    assert calls == [(11, "CoreTGPrereqs"), (11, "DockerDefaultRoute")]
+
+
+def test_ensure_services_with_policy_adds_coretgprereqs_for_docker_traffic(monkeypatch):
+    calls = []
+
+    monkeypatch.setenv("CORETG_DOCKER_ADD_DEFAULTROUTE", "0")
+    monkeypatch.setenv("CORETG_DOCKER_ADD_TRAFFIC", "1")
+
+    def fake_ensure_service(session, node_id, service_name, node_obj=None):
+        calls.append((int(node_id), service_name))
+        return True
+
+    monkeypatch.setattr(topology, "ensure_service", fake_ensure_service)
+
+    class _Node:
+        id = 12
+        type = topology.NodeType.DOCKER
+        model = "docker"
+
+    assigned = topology._ensure_services_with_policy(
+        object(),
+        12,
+        ["Traffic"],
+        node_obj=_Node(),
+        context="test",
+    )
+
+    assert assigned == ["CoreTGPrereqs", "Traffic"]
+    assert calls == [(12, "CoreTGPrereqs"), (12, "Traffic")]

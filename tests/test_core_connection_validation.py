@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -444,7 +445,7 @@ def test_test_core_allows_stale_secret_when_password_reentered(client, monkeypat
     assert saved_payloads[0]['vm_key'] == 'pve1::303'
 
 
-def test_test_core_success_includes_vm_metadata(client, monkeypatch):
+def test_test_core_success_includes_vm_metadata(client, monkeypatch, tmp_path):
     monkeypatch.setattr(backend, '_core_connection', _fake_core_connection)
     monkeypatch.setattr(backend.socket, 'socket', _FakeSocket)
     monkeypatch.setattr(backend, '_load_core_credentials', lambda *_args, **_kwargs: None)
@@ -473,6 +474,12 @@ def test_test_core_success_includes_vm_metadata(client, monkeypatch):
         }
 
     monkeypatch.setattr(backend, '_save_core_credentials', _fake_save)
+    xml_path = tmp_path / 'scenario-gamma.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="Scenario Gamma"><ScenarioEditor/></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _scenario: str(xml_path))
 
     payload = {
         'core': {
@@ -500,8 +507,18 @@ def test_test_core_success_includes_vm_metadata(client, monkeypatch):
     assert data['core_summary']['vm_key'] == 'pve1::101'
     assert data['core_summary']['vmid'] == 101 or data['core_summary']['vmid'] == '101'
     assert 'VM CORE VM' in data['message']
+    assert data['xml_sync']['ok'] is True
+    assert data['xml_sync']['xml_path'] == str(xml_path)
     assert saved_payloads and saved_payloads[0]['vm_key'] == 'pve1::101'
     assert saved_payloads[0]['vmid'] == 101
+    scenario_core = ET.parse(xml_path).getroot().find(
+        './Scenario/ScenarioEditor/HardwareInLoop/CoreConnection'
+    )
+    assert scenario_core is not None
+    assert scenario_core.get('ssh_host') == 'core-host'
+    assert scenario_core.get('core_secret_id') == 'secret-success'
+    assert scenario_core.get('vm_key') == 'pve1::101'
+    assert scenario_core.get('ssh_password') == 'pw'
 
 
 def test_test_core_uses_dialog_core_fields_only(client, monkeypatch):
