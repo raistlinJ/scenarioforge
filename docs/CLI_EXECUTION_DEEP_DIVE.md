@@ -159,6 +159,7 @@ Important behavior:
 - If remote CORE execution is configured, Flow generator runs use that remote context by default unless you explicitly pass `--flow-run-local`.
 - In generator-running modes, remote-capable CLI runs now fail fast on remote sync/SSH/runtime problems instead of silently falling back to local generator execution.
 - Success payloads include `generator_execution_requested` and `generator_execution_mode` so you can verify whether the generator runtime was `remote` or `local`.
+- Legacy embedded previews that contain `Routing` as a protocol/service placeholder are repaired to an unset protocol before topology creation; ScenarioForge does not invent a protocol unless the input explicitly requests one.
 
 Useful flags:
 
@@ -223,6 +224,12 @@ Behavior:
 - With `-post-execution-validation` or `--post-execution-validation`, exports the started CORE session and runs the same node, Docker, Flow, generator, and inject validation used by the Web UI.
 
 Before validating, the CLI performs the same post-run Flow artifact copy as the Web UI so generated injects are populated inside running containers. Copy success requires a stable container identity and verified destination paths; container replacement or missing destinations trigger bounded retries. If validation still detects missing injects, CLI and WebUI perform one repair-and-revalidate pass. Post-execution validation then prints a terminal summary, emits the complete `VALIDATION_SUMMARY_JSON`, and writes `core-post/validation-session-<id>.json` beside the scenario XML. Errors are red and return a nonzero CLI status. WebUI-style warnings, such as unexpected extra nodes, are yellow and preserve the successful execute status. Set `NO_COLOR=1` to disable ANSI colors.
+
+The configured CORE start timeout is honored up to 600 seconds; the default is
+120 seconds. If session startup fails before the detailed validator can run,
+`execute --post-execution-validation` still emits a final
+`VALIDATION_SUMMARY_JSON` with `validation_unavailable=true`, the startup error,
+the session id when known, and any recognized `core-daemon` runtime hint.
 
 Execute parity notes:
 

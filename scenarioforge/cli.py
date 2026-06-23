@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import random
+import re
 import uuid
 import os
 import shlex
@@ -343,14 +344,21 @@ def _core_state_str(value: Any) -> str:
 
 
 def _is_runtime_state(state: str) -> bool:
-    s = str(state or '').strip().lower().replace('-', '_').replace(' ', '_')
+    s = _core_state_str(state).replace('-', '_').replace(' ', '_')
     while '__' in s:
         s = s.replace('__', '_')
     return s in {'runtime', 'runtime_state'}
 
 
+def _is_configuration_state(state: str) -> bool:
+    s = _core_state_str(state).replace('-', '_').replace(' ', '_')
+    while '__' in s:
+        s = s.replace('__', '_')
+    return s in {'configuration', 'configuration_state'}
+
+
 def _is_shutdown_state(state: str) -> bool:
-    s = str(state or '').strip().lower().replace('-', '_').replace(' ', '_')
+    s = _core_state_str(state).replace('-', '_').replace(' ', '_')
     while '__' in s:
         s = s.replace('__', '_')
     return s in {'shutdown', 'shutdown_state'}
@@ -1138,6 +1146,20 @@ def _extract_core_daemon_runtime_hint(journal_tail: str) -> str | None:
     for ln in reversed(lines):
         if 'core.errors.coreerror:' in ln.lower():
             return ln
+    for ln in reversed(lines):
+        lowered = ln.lower()
+        if (
+            'thread pool exception' in lowered
+            or 'corecommanderror:' in lowered
+            or 'traceback (most recent call last)' in lowered
+            or 'failed to validate' in lowered
+            or 'operation not permitted' in lowered
+        ):
+            return ln
+    for ln in reversed(lines):
+        lowered = ln.lower()
+        if ' error ' in f' {lowered} ' or ' exception ' in f' {lowered} ':
+            return ln
     return None
 
 
@@ -1211,7 +1233,7 @@ def _latest_core_daemon_session_state(session_id: int, *, lines: int = 300, sinc
 
 
 def _wait_for_core_runtime(core: Any, session_id: int, *, timeout_s: float = 30.0, poll_s: float = 0.5) -> tuple[bool, str]:
-    effective_timeout = max(0.1, min(float(timeout_s), 40.0))
+    effective_timeout = max(0.1, min(float(timeout_s), 600.0))
     deadline = time.time() + effective_timeout
     journal_poll_s = 5.0
     next_journal_check = 0.0
@@ -1285,7 +1307,7 @@ def _should_tolerate_configuration_state_for_docker(
     *,
     mismatches: list[dict[str, Any]] | None = None,
 ) -> bool:
-    if str(session_state or '').strip().lower() != 'configuration':
+    if not _is_configuration_state(session_state):
         return False
     if not docker_names:
         return False
@@ -2117,6 +2139,36 @@ except ModuleNotFoundError:
     pass
 
 
+def _canonicalize_legacy_routing_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove the retired Routing placeholder without inventing a protocol."""
+
+    def _repair(value: Any, *, parent_key: str = '') -> Any:
+        if isinstance(value, list):
+            return [_repair(item, parent_key=parent_key) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        repaired: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if (
+                key_text == 'Routing'
+                and parent_key in {'routing_plan', 'simple_plan'}
+            ):
+                continue
+            next_item = item
+            if (
+                key_text == 'protocol'
+                and str(item or '').strip().lower() == 'routing'
+            ):
+                next_item = ''
+            repaired[key_text] = _repair(next_item, parent_key=key_text)
+        return repaired
+
+    repaired_payload = _repair(payload)
+    return repaired_payload if isinstance(repaired_payload, dict) else payload
+
+
 def _load_preview_plan_from_xml(preview_plan_path: str, scenario_label: str | None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Load a preview/flow plan from ScenarioEditor/PlanPreview embedded in XML."""
     if not os.path.exists(preview_plan_path):
@@ -2158,6 +2210,7 @@ def _load_preview_plan_from_xml(preview_plan_path: str, scenario_label: str | No
     if not isinstance(payload, dict):
         raise ValueError('preview plan must be a JSON object')
 
+    payload = _canonicalize_legacy_routing_preview(payload)
     full_preview = payload.get('full_preview')
     if isinstance(full_preview, dict):
         return payload, full_preview
@@ -2179,6 +2232,7 @@ def _load_preview_plan(preview_plan_path: str, scenario_label: str | None = None
     if not isinstance(payload, dict):
         raise ValueError('preview plan must be a JSON object')
 
+    payload = _canonicalize_legacy_routing_preview(payload)
     full_preview = payload.get('full_preview')
     if isinstance(full_preview, dict):
         return payload, full_preview
@@ -2882,6 +2936,68 @@ def _print_post_execution_validation_summary(
     return not errors
 
 
+def _print_post_execution_validation_unavailable(
+    error: str,
+    *,
+    stream: Any = None,
+    session_id: int | None = None,
+    details: list[str] | None = None,
+) -> bool:
+    summary: dict[str, Any] = {
+        'ok': False,
+        'error': str(error or 'post-execution validation could not run'),
+        'validation_unavailable': True,
+        'cli_post_execution_validation': True,
+    }
+    if session_id is not None:
+        summary['session_id'] = int(session_id)
+    clean_details = [
+        str(value).strip()
+        for value in (details or [])
+        if str(value).strip()
+    ]
+    if clean_details:
+        summary['validation_unavailable_details'] = clean_details
+    return _print_post_execution_validation_summary(summary, stream=stream)
+
+
+def _extract_last_json_marker(text: str, marker: str) -> dict[str, Any] | None:
+    for raw_line in reversed(str(text or '').splitlines()):
+        line = str(raw_line or '').strip()
+        if marker not in line:
+            continue
+        try:
+            payload = json.loads(line.split(marker, 1)[1].strip())
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _remote_execute_failure_detail(output_text: str) -> str | None:
+    lines = [
+        str(raw_line or '').strip()
+        for raw_line in str(output_text or '').splitlines()
+        if str(raw_line or '').strip()
+    ]
+    priority_markers = (
+        'Start validation failed:',
+        'CORE daemon node boot failure:',
+        'CORE daemon runtime hint:',
+        'Failed to start/validate CORE session:',
+    )
+    for marker in priority_markers:
+        for line in reversed(lines):
+            if marker.lower() in line.lower():
+                return line[-2000:]
+    for line in reversed(lines):
+        lowered = line.lower()
+        if ' error ' in f' {lowered} ' or 'exception' in lowered or 'failed' in lowered:
+            return line[-2000:]
+    return lines[-1][-2000:] if lines else None
+
+
 def _run_cli_post_execution_validation(
     *,
     backend: Any,
@@ -3343,10 +3459,39 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
             redact_tokens=[str(core_cfg.get('ssh_password') or '')],
         )
         exit_code = int(stdout.channel.recv_exit_status())
-        if exit_code != 0 or args.phase != 'execute':
+        output_text = progress_stream.getvalue()
+        child_session_validation = _extract_last_json_marker(
+            output_text,
+            'CORE_SESSION_VALIDATION_JSON:',
+        )
+        if exit_code != 0:
+            if args.phase == 'execute' and bool(getattr(args, 'post_execution_validation', False)):
+                detail = _remote_execute_failure_detail(output_text)
+                message = f'remote execute failed before post-execution validation (exit code {exit_code})'
+                if detail:
+                    message = f'{message}: {detail}'
+                failure_session_id = None
+                if isinstance(child_session_validation, dict):
+                    try:
+                        failure_session_id = int(child_session_validation.get('session_id'))
+                    except Exception:
+                        failure_session_id = None
+                if failure_session_id is None:
+                    match = re.search(r'CORE_SESSION_ID:\s*(\d+)', output_text)
+                    try:
+                        failure_session_id = int(match.group(1)) if match else None
+                    except Exception:
+                        failure_session_id = None
+                _print_post_execution_validation_unavailable(
+                    message,
+                    stream=progress_stream,
+                    session_id=failure_session_id,
+                    details=[detail] if detail else None,
+                )
+            return exit_code
+        if args.phase != 'execute':
             return exit_code
 
-        output_text = progress_stream.getvalue()
         session_id = None
         extract_session_id = getattr(backend, '_extract_session_id_from_text', None)
         if callable(extract_session_id):
@@ -3354,6 +3499,8 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
                 session_id = extract_session_id(output_text)
             except Exception:
                 session_id = None
+        if session_id in (None, '') and isinstance(child_session_validation, dict):
+            session_id = child_session_validation.get('session_id')
         if session_id in (None, ''):
             match = re.search(r'CORE_SESSION_ID:\s*(\d+)', output_text)
             session_id = match.group(1) if match else None
@@ -3362,26 +3509,45 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
         except Exception:
             session_id_int = None
         if session_id_int is None:
-            logging.error(
+            message = (
                 'Remote execute exited successfully but did not report a CORE session id; '
                 'treating the run as failed.'
             )
+            logging.error(message)
+            if bool(getattr(args, 'post_execution_validation', False)):
+                _print_post_execution_validation_unavailable(
+                    message,
+                    stream=progress_stream,
+                )
             return 1
 
         list_sessions = getattr(backend, '_list_active_core_sessions_via_remote_python', None)
         if not callable(list_sessions):
-            logging.error(
+            message = (
                 'Remote execute reported CORE session %s, but session verification is unavailable; '
-                'treating the run as failed.',
-                session_id_int,
+                'treating the run as failed.'
             )
+            logging.error(message, session_id_int)
+            if bool(getattr(args, 'post_execution_validation', False)):
+                _print_post_execution_validation_unavailable(
+                    message % session_id_int,
+                    stream=progress_stream,
+                    session_id=session_id_int,
+                )
             return 1
         try:
             sessions = list_sessions(core_cfg, errors=[], logger=logging.getLogger(__name__)) or []
         except TypeError:
             sessions = list_sessions(core_cfg) or []
         except Exception as exc:
-            logging.error('Failed to verify remote CORE session %s: %s', session_id_int, exc)
+            message = f'Failed to verify remote CORE session {session_id_int}: {exc}'
+            logging.error('%s', message)
+            if bool(getattr(args, 'post_execution_validation', False)):
+                _print_post_execution_validation_unavailable(
+                    message,
+                    stream=progress_stream,
+                    session_id=session_id_int,
+                )
             return 1
 
         verified = None
@@ -3395,15 +3561,41 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
             except Exception:
                 continue
         state = str((verified or {}).get('state') or '').strip()
-        if verified is None or 'runtime' not in state.lower():
-            logging.error(
+        normalized_state = _core_state_str(state)
+        child_configuration_tolerated = bool(
+            isinstance(child_session_validation, dict)
+            and child_session_validation.get('validation_ok') is True
+            and child_session_validation.get('configuration_tolerated') is True
+        )
+        state_is_runtime = _is_runtime_state(normalized_state)
+        state_is_tolerated_configuration = (
+            child_configuration_tolerated
+            and _is_configuration_state(normalized_state)
+        )
+        if verified is None or not (state_is_runtime or state_is_tolerated_configuration):
+            message = (
                 'Remote execute reported CORE session %s, but it is not present in runtime state '
-                'on %s:%s (state=%s).',
+                'on %s:%s (state=%s).'
+            )
+            logging.error(
+                message,
                 session_id_int,
                 core_cfg.get('ssh_host'),
                 core_cfg.get('ssh_port'),
                 state or 'missing',
             )
+            if bool(getattr(args, 'post_execution_validation', False)):
+                rendered = message % (
+                    session_id_int,
+                    core_cfg.get('ssh_host'),
+                    core_cfg.get('ssh_port'),
+                    state or 'missing',
+                )
+                _print_post_execution_validation_unavailable(
+                    rendered,
+                    stream=progress_stream,
+                    session_id=session_id_int,
+                )
             return 1
 
         progress_stream.write(
@@ -6501,6 +6693,7 @@ def main():
     core_daemon_journal_started_at: float | None = None
     core_daemon_journal_tail: str | None = None
     core_daemon_boot_error: str | None = None
+    core_daemon_runtime_hint: str | None = None
 
     # Timeouts: allow overrides for slow CORE startups / slow docker pulls.
     try:
@@ -6664,13 +6857,13 @@ def main():
             session_state = st
             if not ok_runtime:
                 _st_text = str(st or 'unknown').strip().lower()
-                if _st_text == 'configuration' and docker_names2:
+                if _is_configuration_state(_st_text) and docker_names2:
                     configuration_state_pending_docker_validation = True
                     logging.warning(
                         'CORE session stayed in configuration; deferring failure pending docker-compose runtime validation for nodes: %s',
                         ', '.join(docker_names2),
                     )
-                elif _st_text == 'configuration':
+                elif _is_configuration_state(_st_text):
                     start_ok = False
                     start_error = 'CORE session stayed in "configuration"'
                 else:
@@ -6847,6 +7040,15 @@ def main():
                     start_ok = False
                     start_error = f"core-daemon node boot failure: {core_daemon_boot_error}"
                     logging.error("CORE daemon node boot failure: %s", core_daemon_boot_error)
+                elif core_daemon_journal_tail and not start_ok:
+                    core_daemon_runtime_hint = _extract_core_daemon_runtime_hint(
+                        core_daemon_journal_tail
+                    )
+                    if core_daemon_runtime_hint:
+                        logging.error(
+                            "CORE daemon runtime hint: %s",
+                            core_daemon_runtime_hint,
+                        )
             except Exception:
                 pass
     except Exception as e:
@@ -6879,6 +7081,8 @@ def main():
                 generation_meta['core_daemon_journal_tail'] = core_daemon_journal_tail
             if core_daemon_boot_error:
                 generation_meta['core_daemon_runtime_hint'] = core_daemon_boot_error
+            elif core_daemon_runtime_hint:
+                generation_meta['core_daemon_runtime_hint'] = core_daemon_runtime_hint
 
             # Diagnostics: if runtime validation failed, include recent core-daemon logs when available.
             try:
@@ -6893,6 +7097,7 @@ def main():
                         hint = _extract_core_daemon_runtime_hint(tail)
                         if hint:
                             generation_meta['core_daemon_runtime_hint'] = hint
+                            core_daemon_runtime_hint = hint
                             logging.error("CORE daemon runtime hint: %s", hint)
             except Exception:
                 pass
@@ -6932,9 +7137,44 @@ def main():
     if not start_ok:
         if start_error:
             logging.error("Start validation failed: %s", start_error)
+        if (
+            args.phase == 'execute'
+            and bool(getattr(args, 'post_execution_validation', False))
+        ):
+            details = []
+            if core_daemon_runtime_hint:
+                details.append(core_daemon_runtime_hint)
+            elif core_daemon_boot_error:
+                details.append(core_daemon_boot_error)
+            _print_post_execution_validation_unavailable(
+                start_error or 'CORE session start validation failed',
+                session_id=session_id,
+                details=details,
+            )
         return 1
 
     logging.info("CORE session started and validated")
+    configuration_tolerated = bool(
+        start_ok
+        and not _is_runtime_state(session_state)
+        and _is_configuration_state(session_state)
+    )
+    print(
+        'CORE_SESSION_VALIDATION_JSON: '
+        + json.dumps(
+            {
+                'session_id': session_id,
+                'state': session_state,
+                'runtime_ok': bool(_is_runtime_state(session_state)),
+                'validation_ok': True,
+                'configuration_tolerated': configuration_tolerated,
+            },
+            sort_keys=True,
+            separators=(',', ':'),
+            default=str,
+        ),
+        flush=True,
+    )
     if (
         args.phase == 'execute'
         and bool(getattr(args, 'post_execution_validation', False))

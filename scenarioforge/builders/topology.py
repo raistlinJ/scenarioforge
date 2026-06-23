@@ -2790,6 +2790,27 @@ def _router_node_type():
     return NodeType.DEFAULT
 
 
+def _canonicalize_routing_protocol(protocol: Any) -> str:
+    value = str(protocol or '').strip()
+    return '' if value.lower() == 'routing' else value
+
+
+def _canonicalize_routing_items(routing_items: List[RoutingInfo] | None) -> List[RoutingInfo]:
+    """Repair the retired count-only placeholder before CORE service assignment."""
+    for item in routing_items or []:
+        try:
+            current = str(getattr(item, 'protocol', '') or '').strip()
+            canonical = _canonicalize_routing_protocol(current)
+            if canonical != current:
+                logger.warning(
+                    "Ignoring legacy routing protocol placeholder 'Routing'"
+                )
+                item.protocol = canonical
+        except Exception:
+            continue
+    return list(routing_items or [])
+
+
 def build_star_from_roles(core,
                           role_counts: Dict[str, int],
                           services: Optional[List[ServiceInfo]] = None,
@@ -4081,7 +4102,7 @@ def _try_build_segmented_topology_from_preview(
             rid = int(entry.get('router_id'))
         except Exception:
             continue
-        proto = entry.get('protocol')
+        proto = _canonicalize_routing_protocol(entry.get('protocol'))
         if rid and proto:
             router_protocols[rid].append(proto)
 
@@ -4256,6 +4277,7 @@ def build_segmented_topology(core,
                              preview_plan: Optional[Dict[str, Any]] = None,
                              enable_traffic_mount: bool = False,
                              enable_segmentation_mount: bool = False):
+    routing_items = _canonicalize_routing_items(routing_items)
     _reset_docker_compose_prepare_caches('segmented')
     logger.info("Docker CORE interfaces start at eth%s (CORETG_DOCKER_IFID_START)", _docker_ifid_start())
     def _preview_payload_present(payload: Optional[Dict[str, Any]]) -> bool:
@@ -5637,12 +5659,13 @@ def build_segmented_topology(core,
         logger.info("Docker nodes created in segmented topology: %d", created_docker)
     router_protocols: Dict[int, List[str]] = {r.node_id: [] for r in routers}
     if routing_items:
-        # Only allow protocols explicitly selected by user (excluding Random). If only Random provided, default to OSPFv2.
+        # Only assign protocols explicitly selected by the user. Random remains an
+        # explicit request and resolves from the selected pool or the GUI defaults.
         concrete_protocols = [ri.protocol for ri in routing_items if ri.protocol and ri.protocol.lower() != 'random']
         fallback_pool = concrete_protocols or ["OSPFv2"]
         for ri in routing_items:
             try:
-                if (not ri.protocol) or (ri.protocol.lower() == 'random'):
+                if ri.protocol and ri.protocol.lower() == 'random':
                     ri.protocol = random.choice(fallback_pool)
             except Exception:
                 pass
@@ -5665,7 +5688,8 @@ def build_segmented_topology(core,
             rid = rnode.id
             if i < len(expanded_protocols):
                 proto = expanded_protocols[i]
-                router_protocols[rid].append(proto)
+                if proto:
+                    router_protocols[rid].append(proto)
                 # IMPORTANT: earlier during router creation we applied mandatory router services (IPForward + zebra).
                 # This protocol-assignment pass overwrites the router service set, so ensure the mandatory services remain
                 # present before appending protocol-specific daemons.

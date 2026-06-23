@@ -100,6 +100,11 @@ def _normalize_requested_services_for_node(
         service_name = str(raw or '').strip()
         if not service_name:
             continue
+        if service_name.lower() == 'routing':
+            logger.warning(
+                "Ignoring legacy service placeholder 'Routing'"
+            )
+            continue
         normalized = route_service if is_docker_like and service_name == 'DefaultRoute' else service_name
         _add_with_dependencies(normalized)
     return ordered

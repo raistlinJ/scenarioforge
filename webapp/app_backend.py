@@ -6093,9 +6093,12 @@ def _prepare_remote_cli_context(
             _sync_runtime_subset_to_remote_repo(repo_dir, sftp, log_handle)
         except Exception as sync_exc:
             try:
-                log_handle.write(f"[remote] runtime subset sync skipped/failed: {sync_exc}\n")
+                log_handle.write(f"[remote] runtime subset sync failed: {sync_exc}\n")
             except Exception:
                 pass
+            raise RuntimeError(
+                f'Failed to synchronize ScenarioForge runtime code to CORE host: {sync_exc}'
+            ) from sync_exc
         # Ensure reports/outputs/uploads directories exist for CLI outputs
         for subdir in ('reports', 'outputs', 'uploads'):
             _remote_mkdirs(client, _remote_path_join(repo_dir, subdir))
