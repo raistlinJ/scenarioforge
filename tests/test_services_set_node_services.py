@@ -41,13 +41,13 @@ def test_set_node_services_retries_with_node_obj_when_id_noops() -> None:
     assert set(session.services.get(123)) == {"IPForward", "zebra", "RIP"}
 
 
-def test_set_node_services_keeps_defaultroute_for_docker_nodes() -> None:
+def test_set_node_services_normalizes_docker_defaultroute_dependency() -> None:
     session = _Session()
     node = SimpleNamespace(id=321, type="DOCKER")
 
     ok = set_node_services(session, 321, ["DefaultRoute"], node_obj=node)
     assert ok is True
-    assert set(session.services.get(321)) == {"DefaultRoute"}
+    assert set(session.services.get(321)) == {"CoreTGPrereqs", "DockerDefaultRoute"}
 
 
 def test_ensure_service_retries_with_node_obj_when_id_noops() -> None:
@@ -56,4 +56,45 @@ def test_ensure_service_retries_with_node_obj_when_id_noops() -> None:
 
     ok = ensure_service(session, 999, "DefaultRoute", node_obj=node)
     assert ok is True
-    assert set(session.services.get(999)) == {"DefaultRoute"}
+    assert set(session.services.get(999)) == {"CoreTGPrereqs", "DockerDefaultRoute"}
+
+
+def test_ensure_service_adds_coretgprereqs_for_docker_traffic() -> None:
+    session = _Session()
+    node = SimpleNamespace(id=1001, type="DOCKER")
+
+    ok = ensure_service(session, 1001, "Traffic", node_obj=node)
+    assert ok is True
+    assert set(session.services.get(1001)) == {"CoreTGPrereqs", "Traffic"}
+
+
+def test_ensure_service_adds_coretgprereqs_for_host_traffic() -> None:
+    session = _Session()
+    node = SimpleNamespace(id=1002, type="DEFAULT")
+
+    ok = ensure_service(session, 1002, "Traffic", node_obj=node)
+    assert ok is True
+    assert set(session.services.get(1002)) == {"CoreTGPrereqs", "Traffic"}
+
+
+def test_ensure_service_adds_coretgprereqs_for_segmentation_without_node_obj() -> None:
+    session = _Session()
+    node = SimpleNamespace(id=1003)
+    session.get_node = lambda node_id: node if int(node_id) == node.id else None
+
+    ok = ensure_service(session, 1003, "Segmentation")
+    assert ok is True
+    assert set(session.services.get(1003)) == {"CoreTGPrereqs", "Segmentation"}
+
+
+def test_set_node_services_expands_custom_service_dependencies() -> None:
+    session = _Session()
+    node = SimpleNamespace(id=1004)
+
+    ok = set_node_services(session, 1004, ["Traffic", "Segmentation"], node_obj=node)
+    assert ok is True
+    assert list(session.services.get(1004)) == [
+        "CoreTGPrereqs",
+        "Traffic",
+        "Segmentation",
+    ]

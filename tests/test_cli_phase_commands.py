@@ -1,3 +1,4 @@
+import io
 import json
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
@@ -264,6 +265,76 @@ def test_cli_execute_parser_cleanup_opt_outs_disable_remove_actions():
     assert args.docker_cleanup_before_run is False
     assert args.docker_remove_conflicts is False
     assert args.overwrite_existing_images is False
+
+
+@pytest.mark.parametrize(
+    'option',
+    ['-post-execution-validation', '--post-execution-validation'],
+)
+def test_cli_execute_parser_accepts_post_execution_validation_aliases(option):
+    parser = cli._build_cli_parser()
+    args = parser.parse_args(['execute', '--xml', '/tmp/scenario.xml', option])
+
+    assert args.post_execution_validation is True
+
+
+def test_post_execution_validation_summary_colors_errors_and_warnings(monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.delenv('NO_COLOR', raising=False)
+    monkeypatch.setenv('FORCE_COLOR', '1')
+
+    ok = cli._print_post_execution_validation_summary(
+        {
+            'ok': False,
+            'missing_nodes': ['docker-9'],
+            'injects_missing': ['docker-3'],
+        },
+        stream=stream,
+    )
+
+    output = stream.getvalue()
+    assert ok is False
+    assert '\033[31mERROR: Missing scenario nodes (1)\033[0m' in output
+    assert '\033[33mWARNING: Missing container injects (1)\033[0m' in output
+    assert 'VALIDATION_SUMMARY_JSON:' in output
+
+
+def test_post_execution_validation_warning_does_not_fail_execute(monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.delenv('NO_COLOR', raising=False)
+    monkeypatch.setenv('FORCE_COLOR', '1')
+
+    ok = cli._print_post_execution_validation_summary(
+        {'ok': False, 'injects_missing': ['docker-3']},
+        stream=stream,
+    )
+
+    assert ok is True
+    assert '\033[33mPASSED WITH WARNINGS\033[0m' in stream.getvalue()
+
+
+def test_post_execution_validation_unclassified_failure_is_an_error():
+    stream = io.StringIO()
+
+    ok = cli._print_post_execution_validation_summary({'ok': False}, stream=stream)
+
+    assert ok is False
+    assert 'ERROR: Validation failed (1)' in stream.getvalue()
+
+
+def test_post_execution_validation_flow_copy_failure_is_an_error():
+    stream = io.StringIO()
+
+    ok = cli._print_post_execution_validation_summary(
+        {
+            'ok': False,
+            'flow_artifact_copy_error': 'copy incomplete',
+        },
+        stream=stream,
+    )
+
+    assert ok is False
+    assert 'ERROR: Flow artifact copy failed (1)' in stream.getvalue()
 
 
 def test_cli_flag_sequencing_parser_defaults_enable_cleanup():
@@ -1251,7 +1322,7 @@ def test_cli_flag_sequencing_phase_runs_cleanup_by_default(tmp_path, monkeypatch
     assert cleanup_calls[0]['run_remote'] is True
 
 
-def test_cli_flag_sequencing_phase_prefers_resolved_saved_xml_for_remote_core_config(tmp_path, monkeypatch, capsys):
+def test_cli_flag_sequencing_phase_uses_explicit_xml_for_remote_core_config(tmp_path, monkeypatch, capsys):
     raw_xml_path = tmp_path / 'raw.xml'
     latest_xml_path = tmp_path / 'latest.xml'
     raw_xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
@@ -1294,7 +1365,7 @@ def test_cli_flag_sequencing_phase_prefers_resolved_saved_xml_for_remote_core_co
             'ssh_username': 'core',
             'ssh_password': 'pw',
             'ssh_enabled': True,
-        } if str(xml_path) == str(latest_xml_path.resolve()) else None,
+        } if str(xml_path) == str(raw_xml_path.resolve()) else None,
         _select_core_config_for_page=lambda *_a, **_k: None,
         _load_run_history=lambda: [],
         _merge_core_configs=lambda *configs, include_password=True: {
@@ -1327,7 +1398,7 @@ def test_cli_flag_sequencing_phase_prefers_resolved_saved_xml_for_remote_core_co
     assert ret == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload['ok'] is True
-    assert persist_calls == [str(latest_xml_path.resolve())]
+    assert persist_calls == [str(raw_xml_path.resolve())]
     sent = captured['payload']
     assert isinstance(sent, dict)
     assert sent['preview_plan'] == str(latest_xml_path.resolve())
@@ -1476,7 +1547,7 @@ def test_cli_topo_phase_stops_after_topology_build(tmp_path, monkeypatch, capsys
     assert payload['docker_nodes'] == ['docker-1']
 
 
-def test_cli_topo_phase_prefers_resolved_saved_xml(tmp_path, monkeypatch, capsys):
+def test_cli_topo_phase_uses_explicit_xml_as_ground_truth(tmp_path, monkeypatch, capsys):
     raw_xml_path = tmp_path / 'raw.xml'
     latest_xml_path = tmp_path / 'latest.xml'
     raw_xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
@@ -1554,8 +1625,8 @@ def test_cli_topo_phase_prefers_resolved_saved_xml(tmp_path, monkeypatch, capsys
     assert ret == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload['ok'] is True
-    assert captured['xml_path'] == str(latest_xml_path.resolve())
-    assert payload['xml_path'] == str(latest_xml_path.resolve())
+    assert captured['xml_path'] == str(raw_xml_path.resolve())
+    assert payload['xml_path'] == str(raw_xml_path.resolve())
 
 
 def test_cli_execute_phase_validates_hitl_interfaces_before_remote_delegate(tmp_path, monkeypatch):
@@ -1632,6 +1703,63 @@ def test_cli_execute_phase_validates_hitl_interfaces_before_remote_delegate(tmp_
     assert 'name="ens19"' in rewritten_text
 
 
+def test_cli_execute_remote_delegated_skips_repeat_hitl_validation(tmp_path, monkeypatch):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario A"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    argv0 = cli.sys.argv[:]
+
+    fake_backend = SimpleNamespace(
+        _resolve_preexecute_xml_path=lambda path, _scenario: str(path),
+        _scenario_names_from_xml=lambda _path: ['Scenario A'],
+    )
+
+    def _fail_repeat_hitl(*args, **kwargs):
+        raise AssertionError('remote delegated CLI should not repeat HITL validation')
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
+    monkeypatch.setattr(cli, '_maybe_prepare_cli_execute_hitl_xml', _fail_repeat_hitl)
+    monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: 0)
+    monkeypatch.setattr(cli, 'parse_hitl_info', lambda *a, **k: {'enabled': False, 'interfaces': []})
+    monkeypatch.setenv('CORETG_CLI_REMOTE_DELEGATED', '1')
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario A']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+        monkeypatch.delenv('CORETG_CLI_REMOTE_DELEGATED', raising=False)
+
+    assert ret == 0
+
+
+def test_cli_execute_remote_delegated_skips_repeat_saved_xml_resolution(tmp_path, monkeypatch):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario A"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    argv0 = cli.sys.argv[:]
+
+    fake_backend = SimpleNamespace(
+        _scenario_names_from_xml=lambda _path: ['Scenario A'],
+        _resolve_preexecute_xml_path=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('remote delegated CLI should not repeat saved XML resolution')),
+    )
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
+    monkeypatch.setattr(cli, '_maybe_prepare_cli_execute_hitl_xml', lambda *a, **k: ([], []))
+    monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: 0)
+    monkeypatch.setattr(cli, 'parse_hitl_info', lambda *a, **k: {'enabled': False, 'interfaces': []})
+    monkeypatch.setenv('CORETG_CLI_REMOTE_DELEGATED', '1')
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario A']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+        monkeypatch.delenv('CORETG_CLI_REMOTE_DELEGATED', raising=False)
+
+    assert ret == 0
+
+
 def test_cli_resolve_core_context_uses_saved_xml_core_and_cli_overrides(tmp_path):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
@@ -1649,12 +1777,20 @@ def test_cli_resolve_core_context_uses_saved_xml_core_and_cli_overrides(tmp_path
             'host': '10.0.0.9',
             'port': 50051,
             'ssh_host': '12.0.0.100',
+            'ssh_port': 9001,
             'ssh_username': 'core',
             'core_secret_id': 'sec-1',
         },
         _select_core_config_for_page=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50052,
+            'ssh_host': 'saved.example.test',
+            'ssh_port': 2222,
+            'ssh_username': 'saved-user',
             'ssh_password': 'pw',
             'venv_bin': '/opt/core/venv/bin',
+            'core_secret_id': 'saved-secret',
+            'vm_key': 'saved::vm',
         },
         _load_run_history=lambda: [],
         _merge_core_configs=_merge_core_configs,
@@ -1680,11 +1816,156 @@ def test_cli_resolve_core_context_uses_saved_xml_core_and_cli_overrides(tmp_path
     assert cfg['host'] == '198.51.100.4'
     assert cfg['port'] == 50051
     assert cfg['ssh_host'] == '12.0.0.100'
+    assert cfg['ssh_port'] == 9001
     assert cfg['ssh_username'] == 'core'
     assert cfg['ssh_password'] == 'pw'
+    assert cfg['core_secret_id'] == 'sec-1'
+    assert cfg.get('vm_key') is None
 
 
 def test_cli_execute_delegates_to_remote_cli_for_saved_remote_core_config(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    fake_client = _FakeSshClient(exit_code=0)
+    custom_service_installs = []
+    validation_calls = []
+    copy_calls = []
+
+    def _merge_core_configs(*configs, include_password=True):
+        merged = {}
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        },
+        _select_core_config_for_page=lambda *_a, **_k: {},
+        _load_run_history=lambda: [],
+        _merge_core_configs=_merge_core_configs,
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: dict(cfg),
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg),
+        _require_core_ssh_credentials=lambda cfg: dict(cfg),
+        _open_ssh_client=lambda cfg: fake_client,
+        _install_custom_services_to_core_vm=lambda client, **kwargs: custom_service_installs.append(
+            (client, kwargs.get('sudo_password'))
+        ),
+        _prepare_remote_cli_context=lambda **kwargs: {
+            'xml_path': '/tmp/remote/scenario.xml',
+            'preview_plan_path': None,
+            'repo_dir': '/tmp/remote/repo',
+            'base_dir': '/tmp/remote',
+        },
+        _select_remote_python_interpreter=lambda *_a, **_k: '/opt/core/venv/bin/python',
+        _remote_core_target_host=lambda *_a, **_k: '127.0.0.1',
+        _coerce_bool=lambda value: bool(value),
+        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write(
+            'CORE_SESSION_ID: 41\nREMOTE CLI OK\n'
+        ),
+        _extract_session_id_from_text=lambda text: 41 if 'CORE_SESSION_ID: 41' in text else None,
+        _list_active_core_sessions_via_remote_python=lambda *_a, **_k: [
+            {'id': 41, 'state': 'RUNTIME', 'nodes': 3}
+        ],
+        _grpc_save_current_session_xml_with_config=lambda _cfg, _out_dir, session_id=None: str(
+            tmp_path / f'session-{session_id}.xml'
+        ),
+        _validate_session_nodes_and_injects=lambda **kwargs: (
+            validation_calls.append(kwargs)
+            or (
+                {
+                    'ok': False,
+                    'injects_missing': ['docker-3'],
+                    'expected_nodes': ['router-1', 'docker-3'],
+                    'docker_running': ['docker-3'],
+                }
+                if len(validation_calls) == 1
+                else {
+                    'ok': True,
+                    'injects_missing': [],
+                    'expected_nodes': ['router-1', 'docker-3'],
+                    'docker_running': ['docker-3'],
+                }
+            )
+        ),
+        _maybe_copy_flow_artifacts_into_containers=lambda meta, **kwargs: (
+            copy_calls.append((meta, kwargs)),
+            meta.__setitem__('flow_artifacts_copied', True),
+        ),
+    )
+    args = SimpleNamespace(
+        phase='execute',
+        xml=str(xml_path),
+        preview_plan=None,
+        scenario='Scenario One',
+        host='localhost',
+        port=50051,
+        post_execution_validation=True,
+    )
+    argv0 = cli.sys.argv[:]
+    monkeypatch.setattr(
+        cli,
+        '_flow_state_from_xml',
+        lambda *_a, **_k: {
+            'flow_enabled': True,
+            'chain_ids': ['3'],
+            'flag_assignments': [{'node_id': '3', 'inject_files': ['service']}],
+        },
+    )
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'execute',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'Scenario One',
+            '-post-execution-validation',
+        ]
+        ret = cli._maybe_delegate_cli_to_remote(args, backend=fake_backend, scenario_name='Scenario One')
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    assert custom_service_installs == [(fake_client, 'pw')]
+    assert fake_client.command is not None
+    assert 'CORETG_CLI_REMOTE_DELEGATED=1' in fake_client.command
+    assert 'scenarioforge.cli execute --xml /tmp/remote/scenario.xml' in fake_client.command
+    assert '--host 127.0.0.1' in fake_client.command
+    assert '--port 50051' in fake_client.command
+    assert 'post-execution-validation' not in fake_client.command
+    assert fake_client.stdin.sent == ['pw\n']
+    assert len(validation_calls) == 2
+    assert len(copy_calls) == 2
+    assert copy_calls[0][1]['stage'] == 'cli-postrun'
+    assert copy_calls[1][1]['stage'] == 'cli-validation-retry'
+    assert validation_calls[0]['scenario_xml_path'] == str(xml_path.resolve())
+    assert validation_calls[0]['session_xml_path'].endswith('session-41.xml')
+    validation_artifact = tmp_path / 'core-post' / 'validation-session-41.json'
+    assert validation_artifact.exists()
+    validation_payload = json.loads(validation_artifact.read_text(encoding='utf-8'))
+    assert validation_payload['injects_missing'] == []
+    assert validation_payload['flow_copy_retried_after_validation'] is True
+    captured = capsys.readouterr()
+    assert '[remote] Preparing remote workspace and uploads...' in captured.out
+    assert '[remote] Refreshing custom CORE services...' in captured.out
+    assert '[remote] Starting CLI execution...' in captured.out
+    assert '[remote] Verified CORE session 41 is RUNTIME' in captured.out
+    assert 'REMOTE CLI OK' in captured.out
+    assert 'Missing injects detected after copy; repairing once and revalidating' in captured.out
+    assert 'Post-execution validation: PASSED' in captured.out
+
+
+def test_cli_execute_remote_delegate_includes_resolved_scenario_and_preview_plan(tmp_path, monkeypatch):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
     fake_client = _FakeSshClient(exit_code=0)
@@ -1716,38 +1997,43 @@ def test_cli_execute_delegates_to_remote_cli_for_saved_remote_core_config(tmp_pa
         _open_ssh_client=lambda cfg: fake_client,
         _prepare_remote_cli_context=lambda **kwargs: {
             'xml_path': '/tmp/remote/scenario.xml',
-            'preview_plan_path': None,
+            'preview_plan_path': '/tmp/remote/preview.xml',
             'repo_dir': '/tmp/remote/repo',
             'base_dir': '/tmp/remote',
         },
         _select_remote_python_interpreter=lambda *_a, **_k: '/opt/core/venv/bin/python',
         _remote_core_target_host=lambda *_a, **_k: '127.0.0.1',
         _coerce_bool=lambda value: bool(value),
-        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write('REMOTE CLI OK\n'),
+        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write(
+            'CORE_SESSION_ID: 42\nREMOTE CLI OK\n'
+        ),
+        _extract_session_id_from_text=lambda text: 42 if 'CORE_SESSION_ID: 42' in text else None,
+        _list_active_core_sessions_via_remote_python=lambda *_a, **_k: [
+            {'id': 42, 'state': 'RUNTIME', 'nodes': 3}
+        ],
     )
     args = SimpleNamespace(
         phase='execute',
         xml=str(xml_path),
         preview_plan=None,
+        scenario='Scenario One',
         host='localhost',
         port=50051,
+        _resolved_preview_plan_path=str(xml_path),
     )
     argv0 = cli.sys.argv[:]
 
     try:
-        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario One']
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path)]
         ret = cli._maybe_delegate_cli_to_remote(args, backend=fake_backend, scenario_name='Scenario One')
     finally:
         cli.sys.argv = argv0
 
     assert ret == 0
     assert fake_client.command is not None
-    assert 'CORETG_CLI_REMOTE_DELEGATED=1' in fake_client.command
-    assert 'scenarioforge.cli execute --xml /tmp/remote/scenario.xml' in fake_client.command
-    assert '--host 127.0.0.1' in fake_client.command
-    assert '--port 50051' in fake_client.command
-    assert fake_client.stdin.sent == ['pw\n']
-    assert 'REMOTE CLI OK' in capsys.readouterr().out
+    assert '--scenario ' in fake_client.command
+    assert 'Scenario One' in fake_client.command
+    assert '--preview-plan /tmp/remote/preview.xml' in fake_client.command
 
 
 def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote_exists(tmp_path, monkeypatch, caplog):

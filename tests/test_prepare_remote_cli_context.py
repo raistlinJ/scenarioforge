@@ -1,5 +1,6 @@
 import io
 import json
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -13,12 +14,18 @@ class _FakeSFTP:
         self.put_calls = []
         self.uploaded_bytes = {}
 
-    def put(self, localpath, remotepath):
+    def put(self, localpath, remotepath, callback=None):
         local_path = Path(localpath)
         remote_path = str(remotepath)
         self.put_calls.append((str(local_path), remote_path))
-        self.uploaded_bytes[remote_path] = local_path.read_bytes()
+        payload = local_path.read_bytes()
+        self.uploaded_bytes[remote_path] = payload
         self._existing_paths.add(remote_path)
+        if callback is not None:
+            try:
+                callback(len(payload), len(payload))
+            except Exception:
+                pass
 
     def stat(self, path):
         if str(path) not in self._existing_paths:
@@ -32,9 +39,55 @@ class _FakeSFTP:
 class _FakeSSHClient:
     def __init__(self, sftp):
         self._sftp = sftp
+        self.commands = []
 
     def open_sftp(self):
         return self._sftp
+
+    def exec_command(self, command):
+        self.commands.append(str(command))
+
+        class _Channel:
+            def __init__(self):
+                self.closed = False
+
+            def settimeout(self, _timeout):
+                return None
+
+            def recv_ready(self):
+                return False
+
+            def recv_stderr_ready(self):
+                return False
+
+            def exit_status_ready(self):
+                return True
+
+            def recv(self, _size):
+                return b''
+
+            def recv_stderr(self, _size):
+                return b''
+
+            def recv_exit_status(self):
+                return 0
+
+            def close(self):
+                self.closed = True
+
+        class _Stream:
+            def __init__(self, channel):
+                self.channel = channel
+
+            def close(self):
+                return None
+
+        class _Stdin:
+            def close(self):
+                return None
+
+        channel = _Channel()
+        return _Stdin(), _Stream(channel), _Stream(channel)
 
 
 def test_prepare_remote_cli_context_keeps_rewritten_xml_when_preview_matches_xml(tmp_path, monkeypatch):
@@ -275,6 +328,7 @@ def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeyp
     (repo_root / 'scenarioforge' / 'cli.py').write_text('CLI = True\n', encoding='utf-8')
     (repo_root / 'scenarioforge' / 'generator_manifests.py').write_text('MANIFESTS = {}\n', encoding='utf-8')
     (repo_root / 'scenarioforge' / 'builders' / 'topology.py').write_text('PRE = True\n', encoding='utf-8')
+    (repo_root / 'scenarioforge' / 'utils' / 'services.py').write_text('DEPENDENCIES = {}\n', encoding='utf-8')
     (repo_root / 'scenarioforge' / 'utils' / 'vuln_process.py').write_text('INJECT = True\n', encoding='utf-8')
     (repo_root / 'scripts' / 'run_flag_generator.py').write_text('print("runner")\n', encoding='utf-8')
 
@@ -297,19 +351,82 @@ def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeyp
     monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **_kwargs: None)
     monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
 
+    log_handle = io.StringIO()
+
     backend._prepare_remote_cli_context(
         client=client,
         run_id='run-sync',
         xml_path=str(xml_path),
         preview_plan_path=str(xml_path),
+        log_handle=log_handle,
+    )
+
+    archive_uploads = [remote for _local, remote in fake_sftp.put_calls if remote.endswith('.tar.gz')]
+    assert archive_uploads
+    archive_payload = fake_sftp.uploaded_bytes[archive_uploads[-1]]
+    with tarfile.open(fileobj=io.BytesIO(archive_payload), mode='r:gz') as tar:
+        archive_names = set(tar.getnames())
+
+    assert 'repo/scenarioforge/cli.py' in archive_names
+    assert 'repo/scenarioforge/builders/topology.py' in archive_names
+    assert 'repo/scenarioforge/utils/services.py' in archive_names
+    assert 'repo/scenarioforge/utils/vuln_process.py' in archive_names
+    assert 'repo/scripts/run_flag_generator.py' in archive_names
+    assert any('tar -xzf' in command for command in client.commands)
+
+    log_text = log_handle.getvalue()
+    assert '[remote] runtime subset sync plan: files=' in log_text
+    assert '[remote] runtime subset sync progress: 100%' in log_text
+
+
+def test_prepare_remote_cli_context_runtime_subset_reuses_remote_mkdirs(tmp_path, monkeypatch):
+    repo_root = tmp_path / 'repo'
+    (repo_root / 'scenarioforge' / 'builders').mkdir(parents=True)
+    (repo_root / 'scripts').mkdir(parents=True)
+    (repo_root / 'scenarioforge' / '__init__.py').write_text('', encoding='utf-8')
+    (repo_root / 'scenarioforge' / 'cli.py').write_text('CLI = True\n', encoding='utf-8')
+    (repo_root / 'scenarioforge' / 'builders' / 'topology.py').write_text('PRE = True\n', encoding='utf-8')
+    (repo_root / 'scripts' / 'run_flag_generator.py').write_text('print("runner")\n', encoding='utf-8')
+
+    xml_path = tmp_path / 'ephemeral.xml'
+    xml_path.write_text('<Scenarios />\n', encoding='utf-8')
+
+    remote_repo = '/remote/repo'
+    fake_sftp = _FakeSFTP(
+        {
+            remote_repo,
+            f'{remote_repo}/scenarioforge',
+            f'{remote_repo}/scenarioforge/__init__.py',
+        }
+    )
+    client = _FakeSSHClient(fake_sftp)
+
+    mkdir_calls = []
+
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _sftp: remote_repo)
+    monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **_kwargs: None)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda _client, path: mkdir_calls.append(path))
+
+    backend._prepare_remote_cli_context(
+        client=client,
+        run_id='run-mkdir-cache',
+        xml_path=str(xml_path),
+        preview_plan_path=str(xml_path),
         log_handle=io.StringIO(),
     )
 
-    uploaded_remote_paths = {remote for _local, remote in fake_sftp.put_calls}
-    assert f'{remote_repo}/scenarioforge/cli.py' in uploaded_remote_paths
-    assert f'{remote_repo}/scenarioforge/builders/topology.py' in uploaded_remote_paths
-    assert f'{remote_repo}/scenarioforge/utils/vuln_process.py' in uploaded_remote_paths
-    assert f'{remote_repo}/scripts/run_flag_generator.py' in uploaded_remote_paths
+    fixed_repo_dirs = {
+        f'{remote_repo}/reports',
+        f'{remote_repo}/outputs',
+        f'{remote_repo}/uploads',
+    }
+    runtime_subset_dirs = [
+        path for path in mkdir_calls
+        if str(path).startswith(f'{remote_repo}/') and str(path) not in fixed_repo_dirs
+    ]
+    assert runtime_subset_dirs == []
 
 
 def test_prepare_remote_cli_context_reports_missing_preview_plan_path(tmp_path, monkeypatch):

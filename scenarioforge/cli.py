@@ -467,6 +467,43 @@ def _run_local_cmd(args: list[str], *, timeout_s: float = 30.0, allow_sudo_retry
     )
 
 
+class _AutoFlushTextStream:
+    def __init__(self, handle: Any):
+        self._handle = handle
+
+    def write(self, text: str) -> Any:
+        result = self._handle.write(text)
+        try:
+            self._handle.flush()
+        except Exception:
+            pass
+        return result
+
+    def flush(self) -> None:
+        try:
+            self._handle.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+
+class _CaptureTextStream(_AutoFlushTextStream):
+    def __init__(self, handle: Any, *, max_chars: int = 1_000_000):
+        super().__init__(handle)
+        self._max_chars = max(1, int(max_chars))
+        self._captured = ''
+
+    def write(self, text: str) -> Any:
+        value = str(text or '')
+        self._captured = (self._captured + value)[-self._max_chars:]
+        return super().write(value)
+
+    def getvalue(self) -> str:
+        return self._captured
+
+
 def _cleanup_stale_vuln_temp_files() -> list[str]:
     removed: list[str] = []
     root = '/tmp/vulns'
@@ -1011,7 +1048,12 @@ def _wait_for_docker_running(
     return {'total': len(names), 'running': running2, 'not_running': not_running2, 'items': last_items}
 
 
-def _tail_core_daemon_journal(*, lines: int = 200, since_seconds: int = 300) -> str | None:
+def _tail_core_daemon_journal(
+    *,
+    lines: int = 200,
+    since_seconds: int = 300,
+    since_epoch: float | None = None,
+) -> str | None:
     """Best-effort capture of recent core-daemon logs when running on the CORE VM.
 
     This is a diagnostic fallback only. gRPC session state is still the primary signal.
@@ -1029,11 +1071,19 @@ def _tail_core_daemon_journal(*, lines: int = 200, since_seconds: int = 300) -> 
     except Exception:
         n = 200
     n = max(50, min(n, 2000))
-    try:
-        since_s = int(since_seconds)
-    except Exception:
-        since_s = 300
-    since_s = max(30, min(since_s, 3600))
+    since_arg = ''
+    if since_epoch is not None:
+        try:
+            since_arg = f"@{float(since_epoch):.3f}"
+        except Exception:
+            since_arg = ''
+    if not since_arg:
+        try:
+            since_s = int(since_seconds)
+        except Exception:
+            since_s = 300
+        since_s = max(30, min(since_s, 3600))
+        since_arg = f"-{since_s} seconds"
 
     cmd = [
         'journalctl',
@@ -1043,7 +1093,7 @@ def _tail_core_daemon_journal(*, lines: int = 200, since_seconds: int = 300) -> 
         '-n',
         str(n),
         '--since',
-        f"-{since_s} seconds",
+        since_arg,
     ]
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=10)
@@ -1077,9 +1127,42 @@ def _extract_core_daemon_runtime_hint(journal_tail: str) -> str | None:
         if 'service does not exist' in ln.lower():
             return ln
     for ln in reversed(lines):
+        if 'ast constructor recursion depth mismatch' in ln.lower():
+            return ln
+    for ln in reversed(lines):
+        if 'mako.exceptions.syntaxexception:' in ln.lower():
+            return ln
+    for ln in reversed(lines):
+        if 'servicebooterror:' in ln.lower():
+            return ln
+    for ln in reversed(lines):
         if 'core.errors.coreerror:' in ln.lower():
             return ln
     return None
+
+
+def _extract_core_daemon_boot_error(journal_tail: str) -> str | None:
+    """Return a node boot error only when CORE reported a thread-pool failure."""
+    try:
+        text = str(journal_tail or '')
+    except Exception:
+        return None
+    if 'thread pool exception' not in text.lower():
+        return None
+
+    markers = (
+        'ast constructor recursion depth mismatch',
+        'mako.exceptions.syntaxexception:',
+        'servicebooterror:',
+        'corecommanderror:',
+        'required dependency was not included in node services',
+    )
+    lines = [str(line or '').strip() for line in text.splitlines() if str(line or '').strip()]
+    for marker in markers:
+        for line in reversed(lines):
+            if marker in line.lower():
+                return line
+    return 'core-daemon reported a node boot thread-pool exception'
 
 
 def _get_core_session_state(core: Any, session_id: int) -> str:
@@ -1340,10 +1423,26 @@ def _plan_supports_flow(role_counts: Any, vulnerabilities_plan: Any) -> bool:
     return docker_hosts > 0 or vuln_targets > 0
 
 
+def _is_temporary_preview_xml_path(path_value: Any) -> bool:
+    try:
+        resolved = os.path.abspath(str(path_value or '').strip())
+    except Exception:
+        resolved = str(path_value or '').strip()
+    if not resolved:
+        return False
+    norm = resolved.replace('\\', '/').lower()
+    try:
+        parent = os.path.basename(os.path.dirname(resolved)).lower()
+    except Exception:
+        parent = ''
+    return '/outputs/tmp-preview-' in norm or parent.startswith('tmp-preview-')
+
+
 def _validate_flow_state_for_cli_execute(
     flow_state: Any,
     *,
     remote_execution_expected: bool = False,
+    require_local_runtime_paths: bool = False,
 ) -> tuple[bool, str | None, list[dict[str, Any]]]:
     if not isinstance(flow_state, dict):
         return True, None, []
@@ -1388,7 +1487,7 @@ def _validate_flow_state_for_cli_execute(
         artifacts_dir = str(assignment.get('artifacts_dir') or assignment.get('run_dir') or '').strip()
         has_outputs = False
         if artifacts_dir:
-            if remote_execution_expected:
+            if remote_execution_expected and not require_local_runtime_paths:
                 has_outputs = True
             else:
                 try:
@@ -1404,7 +1503,7 @@ def _validate_flow_state_for_cli_execute(
                 'generator_id': generator_id,
                 'reason': 'missing flag outputs',
             })
-        elif artifacts_dir and (not remote_execution_expected) and (not os.path.isdir(artifacts_dir)):
+        elif artifacts_dir and ((not remote_execution_expected) or require_local_runtime_paths) and (not os.path.isdir(artifacts_dir)):
             missing_values.append({
                 'index': idx,
                 'node_id': node_id,
@@ -1417,7 +1516,7 @@ def _validate_flow_state_for_cli_execute(
             candidate = str(path_value or '').strip()
             if not candidate or not os.path.isabs(candidate):
                 return
-            if remote_execution_expected:
+            if remote_execution_expected and not require_local_runtime_paths:
                 return
             if os.path.exists(candidate):
                 return
@@ -2426,9 +2525,32 @@ def _resolve_cli_core_context(args: Any, *, backend: Any, scenario_name: str | N
     if _cli_option_provided('--venv-bin'):
         cli_override['venv_bin'] = args.venv_bin
 
+    credential_fill: dict[str, Any] | None = None
+    fill_matching_credentials = getattr(backend, '_fill_matching_core_credentials', None)
+    if callable(fill_matching_credentials) and isinstance(xml_core_cfg, dict):
+        try:
+            credential_fill = fill_matching_credentials(xml_core_cfg, saved_core_cfg)
+        except Exception:
+            credential_fill = None
+    if credential_fill is None:
+        credential_fill = dict(xml_core_cfg or {})
+        if isinstance(saved_core_cfg, dict):
+            xml_secret_id = str(credential_fill.get('core_secret_id') or '').strip()
+            saved_secret_id = str(saved_core_cfg.get('core_secret_id') or '').strip()
+            same_secret = bool(xml_secret_id and saved_secret_id and xml_secret_id == saved_secret_id)
+            same_target = all(
+                str(credential_fill.get(key) or '').strip()
+                and str(credential_fill.get(key) or '').strip() == str(saved_core_cfg.get(key) or '').strip()
+                for key in ('ssh_host', 'ssh_port', 'ssh_username')
+            )
+            if same_secret or same_target:
+                if credential_fill.get('ssh_password') in (None, ''):
+                    credential_fill['ssh_password'] = saved_core_cfg.get('ssh_password')
+
+    # The XML is the connection ground truth. Saved WebUI state may provide a
+    # matching password, while explicit CLI options remain the final override.
     merged = backend._merge_core_configs(
-        xml_core_cfg,
-        saved_core_cfg,
+        credential_fill,
         cli_override if cli_override else None,
         include_password=True,
     )
@@ -2436,18 +2558,22 @@ def _resolve_cli_core_context(args: Any, *, backend: Any, scenario_name: str | N
         merged = backend._prefer_explicit_or_ssh_core_host(
             merged,
             xml_core_cfg,
-            saved_core_cfg,
             cli_override if cli_override else None,
         )
     except Exception:
         pass
-    if scenario_norm:
+    if scenario_norm and str(merged.get('core_secret_id') or '').strip():
         try:
             merged = backend._apply_core_secret_to_config(merged, scenario_norm)
         except Exception:
             pass
     try:
-        merged = backend._normalize_core_config(merged, include_password=True)
+        normalized = backend._normalize_core_config(merged, include_password=True)
+        if isinstance(normalized, dict) and isinstance(merged, dict):
+            for key, value in merged.items():
+                if key not in normalized:
+                    normalized[key] = value
+        merged = normalized
     except Exception:
         pass
     return scenario_norm, (merged if isinstance(merged, dict) else {}), bool(has_saved_core_source)
@@ -2455,6 +2581,15 @@ def _resolve_cli_core_context(args: Any, *, backend: Any, scenario_name: str | N
 
 def _resolve_cli_authoritative_xml_path(args: Any, *, backend: Any) -> None:
     if str(getattr(args, 'phase', '') or '').strip().lower() not in {'execute', 'topo', 'flag-sequencing'}:
+        return
+    # A direct CLI invocation must execute the exact file named by --xml.
+    # WebUI callers resolve and synchronize their authoritative XML before
+    # launching the CLI.
+    if _cli_option_provided('--xml'):
+        try:
+            args.xml = os.path.abspath(str(args.xml))
+        except Exception:
+            pass
         return
     try:
         resolved = backend._resolve_preexecute_xml_path(
@@ -2616,12 +2751,302 @@ def _cli_should_delegate_remote(core_cfg: dict[str, Any]) -> bool:
     return not (_is_loopback_host(ssh_host) and _is_loopback_host(target_host))
 
 
+_POST_EXECUTION_VALIDATION_OPTIONS = {
+    '-post-execution-validation',
+    '--post-execution-validation',
+}
+
+_POST_EXECUTION_ERROR_FIELDS = (
+    ('missing_nodes', 'Missing scenario nodes'),
+    ('missing_docker_nodes', 'Missing expected Docker nodes'),
+    ('missing_vuln_nodes', 'Missing expected vulnerability nodes'),
+    ('docker_missing', 'Missing Docker containers'),
+    ('docker_not_running', 'Docker containers not running'),
+    ('generator_outputs_missing', 'Missing generator outputs'),
+    ('flow_live_paths_missing', 'Missing Flow runtime paths'),
+)
+
+_POST_EXECUTION_WARNING_FIELDS = (
+    ('extra_nodes', 'Unexpected scenario nodes'),
+    ('extra_docker_nodes', 'Unexpected Docker nodes'),
+    ('docker_start_pending', 'Docker containers still starting'),
+    ('injects_missing', 'Missing container injects'),
+    ('generator_injects_missing', 'Missing generator inject sources'),
+)
+
+
+def _cli_color_enabled(stream: Any) -> bool:
+    if str(os.environ.get('NO_COLOR') or '').strip():
+        return False
+    force_color = str(os.environ.get('FORCE_COLOR') or '').strip().lower()
+    if force_color and force_color not in {'0', 'false', 'no', 'off'}:
+        return True
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        return False
+
+
+def _cli_colored(text: str, color_code: str, *, stream: Any) -> str:
+    if not _cli_color_enabled(stream):
+        return text
+    return f'\033[{color_code}m{text}\033[0m'
+
+
+def _post_execution_validation_issues(
+    summary: dict[str, Any] | None,
+) -> tuple[list[tuple[str, list[str]]], list[tuple[str, list[str]]]]:
+    errors: list[tuple[str, list[str]]] = []
+    warnings: list[tuple[str, list[str]]] = []
+    if not isinstance(summary, dict):
+        return [('Validation unavailable', ['no validation summary returned'])], warnings
+
+    validation_error = str(summary.get('error') or '').strip()
+    flow_copy_error = str(summary.get('flow_artifact_copy_error') or '').strip()
+    if summary.get('validation_unavailable') is True:
+        details = summary.get('validation_unavailable_details')
+        values = [str(value) for value in details] if isinstance(details, list) else []
+        if validation_error:
+            values.insert(0, validation_error)
+        errors.append(('Validation unavailable', values or ['post-execution validation could not run']))
+    elif validation_error:
+        errors.append(('Validation error', [validation_error]))
+    if flow_copy_error:
+        errors.append(('Flow artifact copy failed', [flow_copy_error]))
+
+    def _collect(
+        fields: tuple[tuple[str, str], ...],
+        target: list[tuple[str, list[str]]],
+    ) -> None:
+        for key, label in fields:
+            raw_values = summary.get(key)
+            if not isinstance(raw_values, list):
+                continue
+            values = [str(value).strip() for value in raw_values if str(value).strip()]
+            if values:
+                target.append((label, values))
+
+    _collect(_POST_EXECUTION_ERROR_FIELDS, errors)
+    _collect(_POST_EXECUTION_WARNING_FIELDS, warnings)
+    if summary.get('ok') is False and not errors and not warnings:
+        errors.append(('Validation failed', ['validator reported an unsuccessful result']))
+    return errors, warnings
+
+
+def _print_post_execution_validation_summary(
+    summary: dict[str, Any],
+    *,
+    stream: Any = None,
+    artifact_path: str | None = None,
+) -> bool:
+    target = stream if stream is not None else sys.stdout
+    errors, warnings = _post_execution_validation_issues(summary)
+    if errors:
+        status = _cli_colored('FAILED', '31', stream=target)
+    elif warnings:
+        status = _cli_colored('PASSED WITH WARNINGS', '33', stream=target)
+    else:
+        status = _cli_colored('PASSED', '32', stream=target)
+
+    print('', file=target)
+    print(f'Post-execution validation: {status}', file=target)
+    for label, values in errors:
+        heading = _cli_colored(f'ERROR: {label} ({len(values)})', '31', stream=target)
+        print(f'  {heading}', file=target)
+        for value in values[:10]:
+            print(_cli_colored(f'    - {value}', '31', stream=target), file=target)
+        if len(values) > 10:
+            print(_cli_colored(f'    - ... and {len(values) - 10} more', '31', stream=target), file=target)
+    for label, values in warnings:
+        heading = _cli_colored(f'WARNING: {label} ({len(values)})', '33', stream=target)
+        print(f'  {heading}', file=target)
+        for value in values[:10]:
+            print(_cli_colored(f'    - {value}', '33', stream=target), file=target)
+        if len(values) > 10:
+            print(_cli_colored(f'    - ... and {len(values) - 10} more', '33', stream=target), file=target)
+    if not errors and not warnings:
+        expected_count = len(summary.get('expected_nodes') or [])
+        docker_count = len(summary.get('docker_running') or [])
+        print(f'  Nodes validated: {expected_count}; Docker containers running: {docker_count}', file=target)
+    if artifact_path:
+        print(f'  Validation summary: {artifact_path}', file=target)
+    print(
+        'VALIDATION_SUMMARY_JSON: '
+        + json.dumps(summary, sort_keys=True, separators=(',', ':'), default=str),
+        file=target,
+    )
+    try:
+        target.flush()
+    except Exception:
+        pass
+    return not errors
+
+
+def _run_cli_post_execution_validation(
+    *,
+    backend: Any,
+    args: Any,
+    core_cfg: dict[str, Any],
+    session_id: int,
+    stream: Any = None,
+) -> bool:
+    target = stream if stream is not None else sys.stdout
+    xml_path = os.path.abspath(str(getattr(args, 'xml', '') or '').strip())
+    scenario_name = str(getattr(args, 'scenario', '') or '').strip() or None
+    preview_plan_path = str(
+        getattr(args, 'preview_plan', '')
+        or getattr(args, '_resolved_preview_plan_path', '')
+        or xml_path
+    ).strip()
+    flow_state = _flow_state_from_xml(xml_path, scenario_name)
+    flow_enabled = _flow_state_requires_cli_execute_runtime(flow_state)
+    out_dir = os.path.join(os.path.dirname(xml_path) or os.getcwd(), 'core-post')
+    copy_error = ''
+    copy_meta: dict[str, Any] | None = None
+
+    if flow_enabled:
+        copy_meta = {
+            'remote': True,
+            'core_cfg': core_cfg,
+            'remote_base_dir': str(os.environ.get('CORE_REMOTE_BASE_DIR') or '/tmp/scenarioforge'),
+            'flow_copy_required': True,
+        }
+        try:
+            print('[validate] Copying Flow artifacts into running containers...', file=target)
+            backend._maybe_copy_flow_artifacts_into_containers(
+                copy_meta,
+                stage='cli-postrun',
+                log_prefix='[validate] ',
+            )
+            if not copy_meta.get('flow_artifacts_copied'):
+                copy_error = str(copy_meta.get('flow_artifact_copy_error') or '').strip()
+                if not copy_error:
+                    copy_error = (
+                        'Flow artifact copy did not complete. '
+                        'Check compose_assignments.json and Docker copy diagnostics on the CORE VM.'
+                    )
+            copy_summary = copy_meta.get('flow_artifact_copy_summary')
+            if isinstance(copy_summary, dict):
+                items = copy_summary.get('items')
+                if isinstance(items, list):
+                    copied_ok = sum(
+                        1 for item in items
+                        if isinstance(item, dict) and item.get('ok')
+                    )
+                    print(
+                        f'[validate] Flow artifact copy targets: {copied_ok}/{len(items)} succeeded.',
+                        file=target,
+                    )
+                    for item in items:
+                        if not isinstance(item, dict) or item.get('ok'):
+                            continue
+                        node = str(item.get('node') or 'unknown')
+                        error = str(item.get('error') or '').strip()
+                        errors = item.get('errors') if isinstance(item.get('errors'), list) else []
+                        detail = error or (str(errors[0]) if errors else 'copy failed')
+                        print(f'[validate] Flow artifact copy failed for {node}: {detail}', file=target)
+        except Exception as exc:
+            copy_error = f'Flow artifact copy failed: {exc}'
+
+    try:
+        session_xml_path = backend._grpc_save_current_session_xml_with_config(
+            core_cfg,
+            out_dir,
+            session_id=str(session_id),
+        )
+        if not session_xml_path:
+            raise RuntimeError('CORE session XML export returned no path')
+        summary = backend._validate_session_nodes_and_injects(
+            scenario_xml_path=xml_path,
+            session_xml_path=session_xml_path,
+            core_cfg=core_cfg,
+            preview_plan_path=preview_plan_path or None,
+            scenario_label=scenario_name,
+            flow_enabled=flow_enabled,
+        )
+        if not isinstance(summary, dict):
+            raise RuntimeError('validator returned no summary')
+    except Exception as exc:
+        summary = {
+            'ok': False,
+            'error': str(exc),
+            'validation_unavailable': True,
+        }
+        session_xml_path = None
+
+    if (
+        flow_enabled
+        and isinstance(summary, dict)
+        and bool(summary.get('injects_missing'))
+        and session_xml_path
+    ):
+        try:
+            print(
+                '[validate] Missing injects detected after copy; repairing once and revalidating...',
+                file=target,
+            )
+            retry_meta = {
+                'remote': True,
+                'core_cfg': core_cfg,
+                'remote_base_dir': str(os.environ.get('CORE_REMOTE_BASE_DIR') or '/tmp/scenarioforge'),
+                'flow_copy_required': True,
+            }
+            backend._maybe_copy_flow_artifacts_into_containers(
+                retry_meta,
+                stage='cli-validation-retry',
+                log_prefix='[validate] ',
+            )
+            if retry_meta.get('flow_artifacts_copied'):
+                retry_summary = backend._validate_session_nodes_and_injects(
+                    scenario_xml_path=xml_path,
+                    session_xml_path=session_xml_path,
+                    core_cfg=core_cfg,
+                    preview_plan_path=preview_plan_path or None,
+                    scenario_label=scenario_name,
+                    flow_enabled=flow_enabled,
+                )
+                if isinstance(retry_summary, dict):
+                    summary = retry_summary
+                    summary['flow_copy_retried_after_validation'] = True
+                    copy_error = ''
+            else:
+                copy_error = str(retry_meta.get('flow_artifact_copy_error') or copy_error).strip()
+        except Exception as exc:
+            copy_error = f'Flow artifact repair retry failed: {exc}'
+
+    if copy_error:
+        summary['flow_artifact_copy_error'] = copy_error
+        summary['ok'] = False
+    summary['cli_post_execution_validation'] = True
+    summary['session_id'] = int(session_id)
+    summary['scenario_xml_path'] = xml_path
+    if session_xml_path:
+        summary['session_xml_path'] = str(session_xml_path)
+
+    artifact_path = os.path.join(out_dir, f'validation-session-{int(session_id)}.json')
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(artifact_path, 'w', encoding='utf-8') as handle:
+            json.dump(summary, handle, indent=2, sort_keys=True, default=str)
+            handle.write('\n')
+    except Exception:
+        artifact_path = None
+
+    return _print_post_execution_validation_summary(
+        summary,
+        stream=target,
+        artifact_path=artifact_path,
+    )
+
+
 def _build_remote_cli_tokens(
     *,
     remote_xml_path: str,
     remote_preview_plan_path: str | None,
     remote_host: str,
     remote_port: int,
+    remote_scenario_name: str | None = None,
+    include_preview_plan: bool = False,
 ) -> list[str]:
     try:
         source_tokens = list(sys.argv[1:])
@@ -2633,9 +3058,13 @@ def _build_remote_cli_tokens(
     saw_preview = False
     saw_host = False
     saw_port = False
+    saw_scenario = False
     idx = 0
     while idx < len(source_tokens):
         token = source_tokens[idx]
+        if token in _POST_EXECUTION_VALIDATION_OPTIONS:
+            idx += 1
+            continue
         if token == '--xml':
             out_tokens.extend(['--xml', remote_xml_path])
             saw_xml = True
@@ -2655,6 +3084,15 @@ def _build_remote_cli_tokens(
         if token == '--port':
             out_tokens.extend(['--port', str(remote_port)])
             saw_port = True
+            idx += 2
+            continue
+        if token == '--scenario':
+            replacement = str(remote_scenario_name or '').strip()
+            if replacement:
+                out_tokens.extend(['--scenario', replacement])
+            else:
+                out_tokens.extend(source_tokens[idx:idx + 2])
+            saw_scenario = True
             idx += 2
             continue
         if token.startswith('--xml='):
@@ -2678,17 +3116,29 @@ def _build_remote_cli_tokens(
             saw_port = True
             idx += 1
             continue
+        if token.startswith('--scenario='):
+            replacement = str(remote_scenario_name or '').strip()
+            if replacement:
+                out_tokens.append(f'--scenario={replacement}')
+            else:
+                out_tokens.append(token)
+            saw_scenario = True
+            idx += 1
+            continue
         out_tokens.append(token)
         idx += 1
 
     if not saw_xml:
         out_tokens.extend(['--xml', remote_xml_path])
-    if remote_preview_plan_path and _cli_option_provided('--preview-plan') and not saw_preview:
+    if remote_preview_plan_path and include_preview_plan and not saw_preview:
         out_tokens.extend(['--preview-plan', remote_preview_plan_path])
     if not saw_host:
         out_tokens.extend(['--host', remote_host])
     if not saw_port:
         out_tokens.extend(['--port', str(int(remote_port))])
+    scenario_name = str(remote_scenario_name or '').strip()
+    if scenario_name and not saw_scenario:
+        out_tokens.extend(['--scenario', scenario_name])
     return out_tokens
 
 
@@ -2757,15 +3207,47 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
     core_cfg = backend._require_core_ssh_credentials(core_cfg)
     xml_path = os.path.abspath(args.xml)
     preview_plan_path = os.path.abspath(args.preview_plan) if args.preview_plan else None
+    resolved_preview_plan_path = str(getattr(args, '_resolved_preview_plan_path', '') or '').strip() or None
+    if resolved_preview_plan_path:
+        try:
+            resolved_preview_plan_path = os.path.abspath(resolved_preview_plan_path)
+        except Exception:
+            pass
+    if preview_plan_path is None:
+        preview_plan_path = resolved_preview_plan_path
     run_id = f'cli-{uuid.uuid4().hex[:8]}'
+    progress_stream = _CaptureTextStream(sys.stdout)
+    remote_output_stream = progress_stream
     remote_client = backend._open_ssh_client(core_cfg)
     try:
+        target_label = str(core_cfg.get('vm_name') or core_cfg.get('vm_key') or '').strip()
+        target_suffix = f' ({target_label})' if target_label else ''
+        progress_stream.write(
+            f"[remote] Target: {core_cfg.get('ssh_username')}@{core_cfg.get('ssh_host')}:"
+            f"{core_cfg.get('ssh_port')}{target_suffix}; CORE {core_cfg.get('host')}:{core_cfg.get('port')}\n"
+        )
+        install_custom_services = getattr(backend, '_install_custom_services_to_core_vm', None)
+        if args.phase == 'execute' and callable(install_custom_services) and core_cfg.get('ssh_password'):
+            try:
+                progress_stream.write('[remote] Refreshing custom CORE services...\n')
+            except Exception:
+                pass
+            install_custom_services(
+                remote_client,
+                sudo_password=core_cfg.get('ssh_password'),
+                logger=logging.getLogger(__name__),
+                core_cfg=core_cfg,
+            )
+        try:
+            progress_stream.write('[remote] Preparing remote workspace and uploads...\n')
+        except Exception:
+            pass
         remote_ctx = backend._prepare_remote_cli_context(
             client=remote_client,
             run_id=run_id,
             xml_path=xml_path,
             preview_plan_path=preview_plan_path,
-            log_handle=sys.stderr,
+            log_handle=progress_stream,
             upload_only_injected_artifacts=False,
             core_cfg=core_cfg,
         )
@@ -2782,6 +3264,8 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
             remote_preview_plan_path=remote_ctx.get('preview_plan_path'),
             remote_host=remote_host,
             remote_port=remote_port,
+            remote_scenario_name=str(getattr(args, 'scenario', None) or scenario_name or '').strip() or None,
+            include_preview_plan=bool(preview_plan_path),
         )
         cli_cmd = ' '.join(
             shlex.quote(arg)
@@ -2835,6 +3319,12 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
             remote_host,
             remote_port,
         )
+        try:
+            progress_stream.write('[remote] Starting CLI execution...\n')
+            if getattr(args, 'verbose', False):
+                progress_stream.write(f'[remote] Command: {cli_cmd}\n')
+        except Exception:
+            pass
 
         stdin, stdout, stderr = remote_client.exec_command(remote_command, get_pty=True, timeout=None)
         if 'CORETG_DOCKER_SUDO_PASSWORD_STDIN=1' in docker_env_parts:
@@ -2849,10 +3339,88 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
             pass
         backend._relay_remote_channel_to_log(
             stdout.channel,
-            sys.stdout,
+            remote_output_stream,
             redact_tokens=[str(core_cfg.get('ssh_password') or '')],
         )
-        return int(stdout.channel.recv_exit_status())
+        exit_code = int(stdout.channel.recv_exit_status())
+        if exit_code != 0 or args.phase != 'execute':
+            return exit_code
+
+        output_text = progress_stream.getvalue()
+        session_id = None
+        extract_session_id = getattr(backend, '_extract_session_id_from_text', None)
+        if callable(extract_session_id):
+            try:
+                session_id = extract_session_id(output_text)
+            except Exception:
+                session_id = None
+        if session_id in (None, ''):
+            match = re.search(r'CORE_SESSION_ID:\s*(\d+)', output_text)
+            session_id = match.group(1) if match else None
+        try:
+            session_id_int = int(session_id) if session_id not in (None, '') else None
+        except Exception:
+            session_id_int = None
+        if session_id_int is None:
+            logging.error(
+                'Remote execute exited successfully but did not report a CORE session id; '
+                'treating the run as failed.'
+            )
+            return 1
+
+        list_sessions = getattr(backend, '_list_active_core_sessions_via_remote_python', None)
+        if not callable(list_sessions):
+            logging.error(
+                'Remote execute reported CORE session %s, but session verification is unavailable; '
+                'treating the run as failed.',
+                session_id_int,
+            )
+            return 1
+        try:
+            sessions = list_sessions(core_cfg, errors=[], logger=logging.getLogger(__name__)) or []
+        except TypeError:
+            sessions = list_sessions(core_cfg) or []
+        except Exception as exc:
+            logging.error('Failed to verify remote CORE session %s: %s', session_id_int, exc)
+            return 1
+
+        verified = None
+        for item in sessions:
+            if not isinstance(item, dict):
+                continue
+            try:
+                if int(item.get('id')) == session_id_int:
+                    verified = item
+                    break
+            except Exception:
+                continue
+        state = str((verified or {}).get('state') or '').strip()
+        if verified is None or 'runtime' not in state.lower():
+            logging.error(
+                'Remote execute reported CORE session %s, but it is not present in runtime state '
+                'on %s:%s (state=%s).',
+                session_id_int,
+                core_cfg.get('ssh_host'),
+                core_cfg.get('ssh_port'),
+                state or 'missing',
+            )
+            return 1
+
+        progress_stream.write(
+            f"[remote] Verified CORE session {session_id_int} is {state} on "
+            f"{core_cfg.get('ssh_host')}:{core_cfg.get('ssh_port')}{target_suffix}.\n"
+        )
+        if bool(getattr(args, 'post_execution_validation', False)):
+            validation_ok = _run_cli_post_execution_validation(
+                backend=backend,
+                args=args,
+                core_cfg=core_cfg,
+                session_id=session_id_int,
+                stream=progress_stream,
+            )
+            if not validation_ok:
+                return 1
+        return 0
     finally:
         try:
             remote_client.close()
@@ -3802,10 +4370,10 @@ def _add_cli_phase_arg(container: Any) -> None:
 
 def _add_cli_common_args(container: Any) -> None:
     container.add_argument('--xml', required=True, help='Path to XML scenario file')
-    container.add_argument('--scenario', default=None, help='Scenario name to use (defaults to first)')
+    container.add_argument('--scenario', default=None, help='Scenario name to use (defaults to the first scenario; execute/topo forward the resolved value during remote delegation)')
     container.add_argument('--verbose', action='store_true', help='Enable debug logging')
     container.add_argument('--plan-output', help='Path to write computed phase JSON output (preview, topo, flow, or build)')
-    container.add_argument('--seed', type=int, default=None, help='Optional RNG seed for reproducible topology randomness')
+    container.add_argument('--seed', type=int, default=None, help='Optional RNG seed for reproducible planning/build randomness. Reuse the same value across preview-plan, flag-sequencing, topo, and execute when you want repeatable results; explicit --preview-plan can also supply a saved seed when --seed is omitted')
 
 
 def _cli_core_argument_defaults() -> dict[str, Any]:
@@ -3989,7 +4557,7 @@ def _add_cli_execute_topo_args(container: Any) -> None:
     )
     container.add_argument('--preview', action='store_true', help='Parse and plan only; output plan summary JSON and exit 0')
     container.add_argument('--preview-full', action='store_true', help='Generate a full dry-run plan (routers, hosts, IPs, services, vulnerabilities, segmentation) without contacting CORE; implies --preview style output')
-    container.add_argument('--preview-plan', help='Path to a persisted full preview JSON to reuse during build')
+    container.add_argument('--preview-plan', help='Optional persisted preview source (JSON or XML with embedded PlanPreview). If omitted, execute/topo reuse PlanPreview embedded in --xml when available')
     container.add_argument(
         '--router-mesh',
         choices=['full', 'ring', 'tree'],
@@ -4114,6 +4682,13 @@ def _add_cli_execute_topo_args(container: Any) -> None:
         default=False,
         help='Remove all non-essential Docker containers/images before execute (default: off)',
     )
+    container.add_argument(
+        '-post-execution-validation',
+        '--post-execution-validation',
+        dest='post_execution_validation',
+        action='store_true',
+        help='After execute, export the CORE session and run WebUI-equivalent node, Docker, Flow, and inject validation',
+    )
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
@@ -4179,6 +4754,8 @@ def main():
     except Exception:
         backend_for_cli = None
 
+    remote_delegated_cli = str(os.environ.get('CORETG_CLI_REMOTE_DELEGATED') or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
     if backend_for_cli is not None:
         try:
             resolved_scenario_name = _cli_phase_scenario(args, backend=backend_for_cli)
@@ -4186,10 +4763,11 @@ def main():
                 args.scenario = resolved_scenario_name
         except Exception:
             resolved_scenario_name = args.scenario
-        try:
-            _resolve_cli_authoritative_xml_path(args, backend=backend_for_cli)
-        except Exception:
-            pass
+        if not remote_delegated_cli:
+            try:
+                _resolve_cli_authoritative_xml_path(args, backend=backend_for_cli)
+            except Exception:
+                pass
         try:
             resolved_scenario_name = _cli_phase_scenario(args, backend=backend_for_cli)
             if resolved_scenario_name and not args.scenario:
@@ -4199,9 +4777,18 @@ def main():
     else:
         resolved_scenario_name = args.scenario
 
+    execute_preflight_source_xml = ''
+    execute_tmp_preview_source = False
+    if str(args.phase or '').strip().lower() == 'execute':
+        try:
+            execute_preflight_source_xml = os.path.abspath(str(getattr(args, 'xml', '') or '').strip())
+        except Exception:
+            execute_preflight_source_xml = str(getattr(args, 'xml', '') or '').strip()
+        execute_tmp_preview_source = _is_temporary_preview_xml_path(execute_preflight_source_xml)
+
     execute_hitl_errors: list[str] = []
     execute_hitl_changes: list[dict[str, Any]] = []
-    if backend_for_cli is not None and str(args.phase or '').strip().lower() == 'execute':
+    if backend_for_cli is not None and str(args.phase or '').strip().lower() == 'execute' and not remote_delegated_cli:
         try:
             execute_hitl_errors, execute_hitl_changes = _maybe_prepare_cli_execute_hitl_xml(
                 args,
@@ -4219,6 +4806,10 @@ def main():
         try:
             preview_payload, preview_full = _load_preview_plan(preview_plan_path, args.scenario)
             logging.getLogger(__name__).info("Loaded preview plan from %s", preview_plan_path)
+            try:
+                setattr(args, '_resolved_preview_plan_path', preview_plan_path)
+            except Exception:
+                pass
         except Exception as e:
             logging.getLogger(__name__).error("Failed loading preview plan %s: %s", preview_plan_path, e)
             raise SystemExit(1)
@@ -4238,6 +4829,10 @@ def main():
         try:
             preview_payload, preview_full = _load_preview_plan(args.xml, args.scenario)
             preview_plan_path = os.path.abspath(args.xml)
+            try:
+                setattr(args, '_resolved_preview_plan_path', preview_plan_path)
+            except Exception:
+                pass
         except Exception:
             preview_payload, preview_full = None, None
 
@@ -4466,9 +5061,21 @@ def main():
         flow_ok, flow_error, flow_details = _validate_flow_state_for_cli_execute(
             flow_state,
             remote_execution_expected=flow_remote_expected,
+            require_local_runtime_paths=execute_tmp_preview_source,
         )
         if not flow_ok:
+            if execute_tmp_preview_source and any(
+                isinstance(detail, dict)
+                and str(detail.get('reason') or '').strip() in {'missing artifacts_dir', 'missing inject_source'}
+                for detail in (flow_details or [])
+            ):
+                flow_error = (
+                    'Execute was given a temporary preview XML whose Flow artifacts are no longer present. '
+                    'Use the saved scenario XML under outputs/scenarios-* or rerun Generate (resolve) and Save before executing via CLI.'
+                )
             logging.error("%s", flow_error)
+            if execute_tmp_preview_source and execute_preflight_source_xml:
+                logging.error('Temporary preview XML source: %s', execute_preflight_source_xml)
             if flow_details:
                 logging.error(
                     "FLOW_EXECUTE_PREFLIGHT_DETAILS: %s",
@@ -4729,11 +5336,16 @@ def main():
     except Exception:
         pass
 
-    if args.phase == 'topo' and not CORE_GRPC_AVAILABLE:
-        logging.error("The topo phase requires CORE gRPC availability in this Python environment.")
-        return 1
-
     if not CORE_GRPC_AVAILABLE:
+        if args.phase in {'execute', 'topo'} and str(
+            os.environ.get('CORETG_CLI_ALLOW_OFFLINE_REPORT') or ''
+        ).strip().lower() not in {'1', 'true', 'yes', 'y', 'on'}:
+            logging.error(
+                "The %s phase requires CORE gRPC availability or successful remote delegation; "
+                "no CORE session was started.",
+                args.phase,
+            )
+            return 1
         return _run_offline_report(
             args,
             role_counts,
@@ -5886,6 +6498,9 @@ def main():
     session_state = ''
     docker_runtime: dict[str, Any] | None = None
     start_error: str | None = None
+    core_daemon_journal_started_at: float | None = None
+    core_daemon_journal_tail: str | None = None
+    core_daemon_boot_error: str | None = None
 
     # Timeouts: allow overrides for slow CORE startups / slow docker pulls.
     try:
@@ -6036,6 +6651,7 @@ def main():
 
         if start_ok:
             # CORE client expects the session object (uses session.to_proto()).
+            core_daemon_journal_started_at = time.time()
             core.start_session(session)
             logging.info("CORE session start requested")
 
@@ -6214,6 +6830,25 @@ def main():
                     start_ok = False
                     configuration_state_pending_docker_validation = False
                     start_error = 'CORE session stayed in "configuration"'
+
+        # CORE can swallow per-node boot exceptions from its thread pool while the
+        # session or Docker containers still appear to be running. Inspect only the
+        # journal entries emitted after this start_session() request so CLI and WebUI
+        # report the same daemon-side failure.
+        if core_daemon_journal_started_at is not None:
+            try:
+                core_daemon_journal_tail = _tail_core_daemon_journal(
+                    lines=300,
+                    since_epoch=core_daemon_journal_started_at,
+                )
+                if core_daemon_journal_tail:
+                    core_daemon_boot_error = _extract_core_daemon_boot_error(core_daemon_journal_tail)
+                if core_daemon_boot_error:
+                    start_ok = False
+                    start_error = f"core-daemon node boot failure: {core_daemon_boot_error}"
+                    logging.error("CORE daemon node boot failure: %s", core_daemon_boot_error)
+            except Exception:
+                pass
     except Exception as e:
         start_ok = False
         start_error = f"{e.__class__.__name__}: {e}"
@@ -6240,10 +6875,18 @@ def main():
             if docker_runtime is not None:
                 generation_meta['docker_nodes_runtime'] = docker_runtime
             generation_meta['docker_nodes_runtime_timeout_s'] = docker_wait_s
+            if core_daemon_journal_tail:
+                generation_meta['core_daemon_journal_tail'] = core_daemon_journal_tail
+            if core_daemon_boot_error:
+                generation_meta['core_daemon_runtime_hint'] = core_daemon_boot_error
 
             # Diagnostics: if runtime validation failed, include recent core-daemon logs when available.
             try:
-                if (not start_ok) and _should_collect_core_daemon_runtime_diag(start_error):
+                if (
+                    (not core_daemon_journal_tail)
+                    and (not start_ok)
+                    and _should_collect_core_daemon_runtime_diag(start_error)
+                ):
                     tail = _tail_core_daemon_journal(lines=200, since_seconds=int(core_start_timeout_s) + 60)
                     if tail:
                         generation_meta['core_daemon_journal_tail'] = tail
@@ -6292,6 +6935,45 @@ def main():
         return 1
 
     logging.info("CORE session started and validated")
+    if (
+        args.phase == 'execute'
+        and bool(getattr(args, 'post_execution_validation', False))
+        and session_id is not None
+    ):
+        if backend_for_cli is None:
+            _print_post_execution_validation_summary(
+                {
+                    'ok': False,
+                    'error': 'WebUI validation backend is unavailable',
+                    'validation_unavailable': True,
+                    'session_id': int(session_id),
+                }
+            )
+            return 1
+        try:
+            _scenario_norm, validation_core_cfg, _has_saved_core_source = _resolve_cli_core_context(
+                args,
+                backend=backend_for_cli,
+                scenario_name=args.scenario,
+            )
+        except Exception as exc:
+            _print_post_execution_validation_summary(
+                {
+                    'ok': False,
+                    'error': f'failed resolving CORE validation connection: {exc}',
+                    'validation_unavailable': True,
+                    'session_id': int(session_id),
+                }
+            )
+            return 1
+        validation_ok = _run_cli_post_execution_validation(
+            backend=backend_for_cli,
+            args=args,
+            core_cfg=validation_core_cfg,
+            session_id=int(session_id),
+        )
+        if not validation_ok:
+            return 1
     return 0
 
 

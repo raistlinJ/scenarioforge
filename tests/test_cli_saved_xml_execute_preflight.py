@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,3 +208,86 @@ def test_validate_flow_state_for_cli_execute_allows_remote_runtime_paths():
     assert ok is True
     assert error is None
     assert details == []
+
+
+def test_validate_flow_state_for_cli_execute_tmp_preview_requires_local_runtime_paths(tmp_path):
+    missing_artifacts = str(tmp_path / 'missing' / 'artifacts')
+    missing_inject = str(tmp_path / 'missing' / 'inject' / 'exports.txt')
+    flow_state = {
+        'flow_enabled': True,
+        'flag_assignments': [
+            {
+                'node_id': '7',
+                'id': 'nfs_sensitive_file',
+                'artifacts_dir': missing_artifacts,
+                'inject_files': [f'{missing_inject} -> /tmp/seed'],
+                'resolved_outputs': {'Flag(flag_id)': 'FLAG{abc}'},
+            }
+        ],
+    }
+
+    ok, error, details = cli._validate_flow_state_for_cli_execute(
+        flow_state,
+        remote_execution_expected=True,
+        require_local_runtime_paths=True,
+    )
+
+    assert ok is False
+    assert error == 'Execute requires pre-generated Flow values saved in the XML. Run Generate (resolve) and save the XML before executing via CLI.'
+    assert any(detail.get('reason') == 'missing artifacts_dir' for detail in details)
+    assert any(detail.get('reason') == 'missing inject_source' for detail in details)
+
+
+def test_cli_execute_remote_tmp_preview_xml_rejects_missing_flow_artifacts(tmp_path, monkeypatch, caplog):
+    xml_path = tmp_path / 'outputs' / 'tmp-preview-06-18-26-00-34-51-ebe24f21' / 'Scenario1.xml'
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    missing_artifacts = str(tmp_path / 'missing' / 'artifacts')
+    missing_inject = str(tmp_path / 'missing' / 'inject' / 'exports.txt')
+    flow_state = {
+        'flag_assignments': [
+            {
+                'node_id': '7',
+                'id': 'nfs_sensitive_file',
+                'artifacts_dir': missing_artifacts,
+                'inject_files': [f'{missing_inject} -> /tmp/seed'],
+                'resolved_outputs': {'Flag(flag_id)': 'FLAG{abc}'},
+            }
+        ]
+    }
+    plan = {
+        'routers_planned': 0,
+        'role_counts': {'Docker': 1},
+        'service_plan': {},
+        'vulnerability_plan': {},
+        'traffic_plan': None,
+        'breakdowns': {
+            'router': {'simple_plan': {}},
+            'segmentation': {'density': 0.0, 'raw_items_serialized': []},
+        },
+    }
+    argv0 = cli.sys.argv[:]
+
+    _patch_basic_cli_execute_dependencies(monkeypatch, flow_state=flow_state)
+    backend = SimpleNamespace(
+        _resolve_preexecute_xml_path=lambda xml_arg, _scenario_name: str(xml_arg),
+        _coerce_bool=lambda value: bool(value),
+    )
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(cli, '_maybe_prepare_cli_execute_hitl_xml', lambda *_a, **_k: ([], []))
+    monkeypatch.setattr(cli, '_resolve_cli_core_context', lambda *_a, **_k: ('s', {'ssh_enabled': True}, True))
+    monkeypatch.setattr(cli, '_load_preview_plan', lambda *_a, **_k: ({'metadata': {}}, None))
+    monkeypatch.setattr(orchestrator, 'compute_full_plan', lambda *a, **k: dict(plan))
+
+    caplog.set_level(logging.ERROR)
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 's']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    assert any('temporary preview XML whose Flow artifacts are no longer present' in rec.message for rec in caplog.records)
+    assert any('Temporary preview XML source:' in rec.message for rec in caplog.records)
+    assert any('missing artifacts_dir' in rec.message for rec in caplog.records)

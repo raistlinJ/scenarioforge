@@ -34,6 +34,77 @@ DEFAULT_SERVICE_POOL: List[str] = [
     "DHCPClient",
 ]
 
+SERVICE_DEPENDENCIES: Dict[str, List[str]] = {
+    "DockerDefaultRoute": ["CoreTGPrereqs"],
+    "Segmentation": ["CoreTGPrereqs"],
+    "Traffic": ["CoreTGPrereqs"],
+}
+
+
+def _node_is_docker_like(node_obj: Optional[object]) -> bool:
+    if node_obj is None:
+        return False
+    try:
+        node_type = getattr(node_obj, "type", None)
+        if hasattr(NodeType, "DOCKER") and node_type == getattr(NodeType, "DOCKER"):
+            return True
+        if str(node_type or "").strip().upper() == "DOCKER":
+            return True
+    except Exception:
+        pass
+    try:
+        return str(getattr(node_obj, "model", "") or "").strip().lower() == "docker"
+    except Exception:
+        return False
+
+
+def _docker_default_route_service_name() -> str:
+    raw = os.getenv('CORETG_DOCKER_DEFAULT_ROUTE_SERVICE')
+    if raw is None:
+        return 'DockerDefaultRoute'
+    name = str(raw).strip()
+    return name if name else 'DockerDefaultRoute'
+
+
+def _normalize_requested_services_for_node(
+    services: List[str],
+    *,
+    node_obj: Optional[object],
+) -> List[str]:
+    ordered: List[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        service_name = str(name or '').strip()
+        if not service_name or service_name in seen:
+            return
+        ordered.append(service_name)
+        seen.add(service_name)
+
+    is_docker_like = _node_is_docker_like(node_obj)
+    route_service = _docker_default_route_service_name()
+
+    def _add_with_dependencies(service_name: str, visiting: Optional[set[str]] = None) -> None:
+        name = str(service_name or '').strip()
+        if not name:
+            return
+        active = set(visiting or ())
+        if name in active:
+            return
+        active.add(name)
+        for dependency in SERVICE_DEPENDENCIES.get(name, []):
+            _add_with_dependencies(dependency, active)
+        _add(name)
+
+    for raw in services:
+        service_name = str(raw or '').strip()
+        if not service_name:
+            continue
+        normalized = route_service if is_docker_like and service_name == 'DefaultRoute' else service_name
+        _add_with_dependencies(normalized)
+    return ordered
+
+
 def remove_service(session: object, node_id: int, service_name: str, node_obj: Optional[object] = None) -> bool:
     """Attempt to remove a service from a node.
 
@@ -174,6 +245,10 @@ def ensure_service(session: object, node_id: int, service_name: str, node_obj: O
         except Exception:
             node_obj = None
 
+    requested_services = _normalize_requested_services_for_node([str(service_name or '')], node_obj=node_obj)
+    if not requested_services:
+        return False
+
     # First, attempt to read existing and set with union
     current = None
     try:
@@ -196,15 +271,16 @@ def ensure_service(session: object, node_id: int, service_name: str, node_obj: O
             current = None
 
     if current is not None:
-        if service_name not in current:
-            current.append(service_name)
+        for requested_service in requested_services:
+            if requested_service not in current:
+                current.append(requested_service)
         try:
             if hasattr(session, "services") and hasattr(session.services, "set"):
                 # Some CORE wrapper versions accept node_id, others require a node object.
                 # Worse: some accept an int but silently no-op. Verify after setting.
                 try:
                     session.services.set(node_id, tuple(current))
-                    if has_service(session, node_id, service_name, node_obj=node_obj):
+                    if all(has_service(session, node_id, requested_service, node_obj=node_obj) for requested_service in requested_services):
                         logger.info("services.set: updated node %s -> %s", node_id, ", ".join(current))
                         return True
                 except TypeError:
@@ -212,7 +288,7 @@ def ensure_service(session: object, node_id: int, service_name: str, node_obj: O
                 if node_obj is not None:
                     try:
                         session.services.set(node_obj, tuple(current))
-                        if has_service(session, node_id, service_name, node_obj=node_obj):
+                        if all(has_service(session, node_id, requested_service, node_obj=node_obj) for requested_service in requested_services):
                             logger.info("services.set(node_obj): updated node %s -> %s", node_id, ", ".join(current))
                             return True
                     except Exception as e:
@@ -220,44 +296,58 @@ def ensure_service(session: object, node_id: int, service_name: str, node_obj: O
         except Exception as e:
             logger.debug("services.set failed for node %s: %s", node_id, e)
 
-    # Fallback: direct additive methods
-    try:
-        if hasattr(session, "add_service"):
-            logger.debug("add_service(node_id=%s, %s)", node_id, service_name)
-            session.add_service(node_id=node_id, service_name=service_name)
-            return True
-    except Exception as e:
-        logger.debug("session.add_service failed for node %s: %s", node_id, e)
-
-    try:
-        if hasattr(session, "services") and hasattr(session.services, "add"):
-            try:
-                logger.debug("services.add(node_id=%s, %s)", node_id, service_name)
-                session.services.add(node_id, service_name)
-                return True
-            except TypeError:
-                if node_obj is not None:
-                    logger.debug("services.add(node_obj for node_id=%s, %s)", node_id, service_name)
-                    session.services.add(node_obj, service_name)
-                    return True
-    except Exception as e:
-        logger.debug("session.services.add failed for node %s: %s", node_id, e)
-
-    if node_obj is not None:
+    success_all = True
+    for requested_service in requested_services:
         try:
-            if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
-                logger.debug("node_obj.services.add(node_id=%s, %s)", node_id, service_name)
-                node_obj.services.add(service_name)
-                return True
-            if hasattr(node_obj, "add_service"):
-                logger.debug("node_obj.add_service(node_id=%s, %s)", node_id, service_name)
-                node_obj.add_service(service_name)
-                return True
-        except Exception as e:
-            logger.debug("node_obj add service failed for node %s: %s", node_id, e)
+            if has_service(session, node_id, requested_service, node_obj=node_obj):
+                continue
+        except Exception:
+            pass
 
-    logger.warning("Failed to ensure service '%s' on node %s", service_name, node_id)
-    return False
+        added = False
+        try:
+            if hasattr(session, "add_service"):
+                logger.debug("add_service(node_id=%s, %s)", node_id, requested_service)
+                session.add_service(node_id=node_id, service_name=requested_service)
+                added = True
+        except Exception as e:
+            logger.debug("session.add_service failed for node %s: %s", node_id, e)
+
+        if not added:
+            try:
+                if hasattr(session, "services") and hasattr(session.services, "add"):
+                    try:
+                        logger.debug("services.add(node_id=%s, %s)", node_id, requested_service)
+                        session.services.add(node_id, requested_service)
+                        added = True
+                    except TypeError:
+                        if node_obj is not None:
+                            logger.debug("services.add(node_obj for node_id=%s, %s)", node_id, requested_service)
+                            session.services.add(node_obj, requested_service)
+                            added = True
+                        else:
+                            raise
+            except Exception as e:
+                logger.debug("session.services.add failed for node %s: %s", node_id, e)
+
+        if not added and node_obj is not None:
+            try:
+                if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
+                    logger.debug("node_obj.services.add(node_id=%s, %s)", node_id, requested_service)
+                    node_obj.services.add(requested_service)
+                    added = True
+                if not added and hasattr(node_obj, "add_service"):
+                    logger.debug("node_obj.add_service(node_id=%s, %s)", node_id, requested_service)
+                    node_obj.add_service(requested_service)
+                    added = True
+            except Exception as e:
+                logger.debug("node_obj add service failed for node %s: %s", node_id, e)
+
+        if not added:
+            logger.warning("Failed to ensure service '%s' on node %s", requested_service, node_id)
+            success_all = False
+
+    return success_all
 
 def map_role_to_node_type(role: str) -> NodeType:
     low = role.lower()
@@ -310,6 +400,7 @@ def set_node_services(session: object, node_id: int, services: List[str], node_o
         if s not in seen:
             ordered.append(s)
             seen.add(s)
+    ordered = _normalize_requested_services_for_node(ordered, node_obj=node_obj)
     # NOTE: DefaultRoute is allowed on Docker nodes.
     def _read_back() -> List[str]:
         cur: List[str] = []

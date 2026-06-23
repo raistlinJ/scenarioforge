@@ -63,9 +63,12 @@ services:
     if yaml is not None:
         obj = yaml.safe_load(open(expected_path, encoding="utf-8"))
         svc = obj["services"]["app"]
+        node_svc = obj["services"]["host-1"]
 
         # Option B: no Docker-managed networking, so no docker eth0/default route.
         assert svc.get("network_mode") == "none"
+        assert str(svc.get("user") or "") == "0:0"
+        assert str(node_svc.get("user") or "") == "0:0"
         # With network_mode none we should not be publishing ports at all.
         assert "ports" not in svc
         # Preserve container-side port intent for reporting/metadata.
@@ -283,7 +286,43 @@ services:
     assert "build" not in svc
     assert "NET_ADMIN" in (svc.get("cap_add") or [])
     assert "NET_RAW" in (svc.get("cap_add") or [])
+    assert str(svc.get("user") or "") == "0:0"
     assert svc.get("working_dir") == "/"
+
+
+def test_prepare_compose_overrides_image_or_compose_non_root_user_for_core(tmp_path, monkeypatch):
+    compose_src = tmp_path / "docker-compose.yml"
+    compose_src.write_text(
+        """
+services:
+  app:
+    image: example/nonroot:latest
+    user: "1000:1000"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "Non-root example",
+        "Path": str(compose_src),
+        "SkipIproute2Wrapper": "true",
+    }
+
+    created = prepare_compose_for_assignments({"docker-1": record}, out_base=str(tmp_path))
+    assert created
+
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    obj = yaml.safe_load((tmp_path / "docker-compose-docker-1.yml").read_text("utf-8"))
+    services = (obj or {}).get("services") or {}
+
+    assert str((services.get("app") or {}).get("user") or "") == "0:0"
+    assert str((services.get("docker-1") or {}).get("user") or "") == "0:0"
 
 
 def test_prepare_compose_repairs_known_bad_aiohttp_image_to_local_build_context(tmp_path):
@@ -1814,5 +1853,3 @@ def test_prepare_compose_can_disable_root_workdir_with_env(tmp_path, monkeypatch
     target = services.get("docker-1")
     assert isinstance(target, dict)
     assert "working_dir" not in target
-
-

@@ -486,6 +486,7 @@
     const participantUrlFlags = {{ (participant_url_flags or { })| tojson
   }};
   const flowStateByScenario = {{ (flow_state_by_scenario or { })| tojson }};
+  const scenarioXmlByName = {{ (scenario_xml_by_name or { })| tojson }};
   const scenarioNamesCache = {{ (scenarios or[])| tojson }};
   const initialScenario = {{ (active_scenario or '')| tojson }};
   let activeScenario = (initialScenario || (Array.isArray(scenarioNamesCache) && scenarioNamesCache.length ? String(scenarioNamesCache[0]) : '')).trim();
@@ -1666,7 +1667,7 @@
         const xmlPath = (typeof window.coretgGetLatestXmlPathForScenario === 'function')
           ? String(window.coretgGetLatestXmlPathForScenario(scenarioName) || '').trim()
           : '';
-        const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath });
+        const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath, forceXmlPath: true });
         const scenState = (latest && latest.scenario_state && typeof latest.scenario_state === 'object') ? latest.scenario_state : null;
         const fs = (scenState && scenState.flow_state && typeof scenState.flow_state === 'object') ? scenState.flow_state : null;
         try {
@@ -2768,6 +2769,43 @@
 
   function defaultScenarioName() {
     return (Array.isArray(scenarioNamesCache) && scenarioNamesCache.length) ? String(scenarioNamesCache[0]) : null;
+  }
+
+  function resolveScenarioPageXmlPath(scenarioName) {
+    const scen = (scenarioName || '').toString().trim();
+    if (!scen) return '';
+    try {
+      const mapped = (scenarioXmlByName && typeof scenarioXmlByName === 'object') ? scenarioXmlByName[scen] : '';
+      if (mapped) return String(mapped || '').trim();
+    } catch (e) { }
+    try {
+      if (typeof window.coretgGetLatestXmlPathForScenario === 'function') {
+        const latest = String(window.coretgGetLatestXmlPathForScenario(scen) || '').trim();
+        if (latest) return latest;
+      }
+    } catch (e) { }
+    try {
+      return (document.getElementById('scenariosPreviewXmlPath')?.value || '').toString().trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function navigateToScenarioPage(scenarioName) {
+    const scen = (scenarioName || '').toString().trim();
+    if (!scen) return false;
+    const xmlPath = resolveScenarioPageXmlPath(scen);
+    if (!xmlPath) return false;
+    const url = '/scenarios/flag-sequencing?xml_path=' + encodeURIComponent(xmlPath) + '&scenario=' + encodeURIComponent(scen);
+    if (typeof window.CORETG_NAVIGATE_WITH_LOADING === 'function') {
+      window.CORETG_NAVIGATE_WITH_LOADING(url, {
+        title: 'Retrieving Page Details',
+        message: 'Retrieving page details…',
+      });
+    } else {
+      window.location.href = url;
+    }
+    return true;
   }
 
   function updateScenarioQueryParam() {
@@ -13805,6 +13843,7 @@ ${out.join('\n')}
       btn.addEventListener('click', async () => {
         const name = btn.getAttribute('data-scen-name') || '';
         if (!name || name === activeScenario) return;
+        if (navigateToScenarioPage(name)) return;
         await setScenario(name);
       });
     });
@@ -13812,7 +13851,9 @@ ${out.join('\n')}
   if (clearScenarioBtn) {
     clearScenarioBtn.addEventListener('click', async () => {
       const def = defaultScenarioName();
-      if (def && def !== activeScenario) await setScenario(def);
+      if (!def || def === activeScenario) return;
+      if (navigateToScenarioPage(def)) return;
+      await setScenario(def);
     });
   }
 

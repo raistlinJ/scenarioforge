@@ -877,6 +877,8 @@ core-python -m scenarioforge.cli --xml /abs/path/scenarios.xml --verbose
 
 Saved XML exported or edited through the Web UI is a supported input to the CLI execute path. When the XML already contains embedded `PlanPreview` and `FlagSequencing/FlowState` data, the CLI uses those sections during execute preflight so standalone runs fail early on the same stale-preview or missing-Flow-runtime conditions that `/run_cli` and `/run_cli_async` reject in the Web UI.
 
+For `execute` and `topo`, `--preview-plan` is now optional when the XML already embeds `PlanPreview`; the CLI reuses that embedded preview automatically. Prefer saved scenario XML under `outputs/scenarios-*` for later CLI runs rather than `outputs/tmp-preview-*`, which are temporary staging artifacts and may no longer reference valid Flow runtime files.
+
 ### Phase Commands
 
 The CLI now accepts an optional first positional phase name. If omitted, `execute` is used.
@@ -891,6 +893,7 @@ Saved-XML config parity:
 
 - Direct CLI launches load `.scenarioforge.env` via the same env loader the web backend uses.
 - `execute` and `topo` resolve `CoreConnection`/scenario HITL core settings from the XML, then merge env/default values and any saved secret-backed SSH credentials before connecting.
+- When remote delegation is required, the CLI forwards the resolved scenario name and effective preview-plan source, including the implicit embedded-`PlanPreview` case, to the remote CLI process.
 - If the resolved scenario points at a remote CORE VM, the CLI delegates the run to a remote CLI process over SSH so the uploaded XML and generated `/tmp/vulns` artifacts are available on the host running `core-daemon`.
 - If the XML has no saved `CoreConnection`, env-only defaults from `.scenarioforge.env` can still drive remote `execute`, `topo`, and `flag-sequencing` behavior.
 
@@ -901,12 +904,13 @@ core-python -m scenarioforge.cli new --xml /abs/path/scenarios.xml --scenario "S
 core-python -m scenarioforge.cli preview-plan --xml /abs/path/scenarios.xml --scenario "Scenario 1"
 core-python -m scenarioforge.cli flag-sequencing --xml /abs/path/scenarios.xml --scenario "Scenario 1" --flow-mode resolve --flow-length 3
 core-python -m scenarioforge.cli topo --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
-core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
+core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051 --post-execution-validation
 ```
 
 ### Core Arguments
 
 - `--xml` (required): Scenario XML path.
+- Direct CLI execution uses the exact `--xml` file as ground truth. WebUI execution first persists its validated CORE connection into the selected scenario XML; saved page state is not allowed to redirect the CLI to another VM.
 - `--scenario`: Scenario name (defaults to the first in the file).
 - `--force`: Overwrite an existing XML file when used with the `new` phase.
 - `--density-count`: Scenario-level Count for Density base host pool for density-driven planning in the `new` phase. Defaults to `10`, matching the Web UI starter payload.
@@ -930,7 +934,8 @@ core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenari
 - `--ip-region`: `all | na | eu | apac | latam | africa | middle-east` (default `all`).
 - `--max-nodes`: Hard cap on node creation.
 - `--verbose`: Enables debug logging.
-- `--seed`: RNG seed for deterministic randomness.
+- `--seed`: RNG seed for deterministic planner/build randomness. Reuse the same value across `preview-plan`, `flag-sequencing`, `topo`, and `execute` when you want repeatable results. If an explicit `--preview-plan` carries a saved seed and `--seed` is omitted, the CLI reuses that saved seed when available.
+- `-post-execution-validation`, `--post-execution-validation`: After `execute`, export the live CORE session and run the WebUI-equivalent node, Docker, Flow, generator, and inject validator. The CLI prints red errors, yellow warnings, emits `VALIDATION_SUMMARY_JSON`, and saves `core-post/validation-session-<id>.json` beside the scenario XML.
 - `--plan-output`: Optional file path for JSON output from phase commands.
 - `--layout-density`: `compact | normal | spacious` (default `normal`).
 - `--router-mesh-style`: `full | ring | tree` (fallback when routing items omit `r2r_mode`).
@@ -1028,4 +1033,3 @@ print(meta["node_info"]["combined_nodes"])
 
 - Currently expose structural placeholders (`explicit_count`, `weight_rows`, `count_rows`, `weight_sum`).
 - Derived totals may be added in future releases as semantics mature.
-

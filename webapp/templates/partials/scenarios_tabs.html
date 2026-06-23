@@ -130,6 +130,14 @@
     }
   }
 
+  function getCurrentStateSourceXmlPath(){
+    try {
+      return (document.getElementById('scenariosPreviewXmlPath')?.value || '').toString().trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
   function updateStateSourceBadge(opts){
     try {
       const badge = document.getElementById('coretgStateSourceBadge');
@@ -598,27 +606,31 @@
       };
       const liveScenarioSignatureBeforeFetch = getLiveScenarioRefreshSignature();
       let explicitXmlPath = '';
+      let explicitXmlPathIsPageSource = false;
       try {
         explicitXmlPath = (options.xmlPath || options.xml_path || '').toString().trim();
       } catch (e) { explicitXmlPath = ''; }
       if (!explicitXmlPath) {
         try {
-          explicitXmlPath = (getLatestXmlPathForScenario(scenario) || '').toString().trim();
+          explicitXmlPath = getCurrentStateSourceXmlPath();
+          explicitXmlPathIsPageSource = !!explicitXmlPath;
         } catch (e) { explicitXmlPath = ''; }
       }
       if (!explicitXmlPath) {
         try {
-          explicitXmlPath = (document.getElementById('scenariosPreviewXmlPath')?.value || '').toString().trim();
+          explicitXmlPath = (getLatestXmlPathForScenario(scenario) || '').toString().trim();
         } catch (e) { explicitXmlPath = ''; }
       }
 
+      const useExplicitXmlPath = !!explicitXmlPath && (options.forceXmlPath === true || explicitXmlPathIsPageSource);
+
       let latestStateUrl = '/api/scenario/latest_state?scenario=' + encodeURIComponent(scenario);
-      if (explicitXmlPath && options.forceXmlPath === true) {
+      if (useExplicitXmlPath) {
         latestStateUrl += '&xml_path=' + encodeURIComponent(explicitXmlPath);
       }
 
       const data = (typeof window.CORETG_FETCH_LATEST_STATE === 'function')
-        ? await window.CORETG_FETCH_LATEST_STATE(scenario, { xmlPath: explicitXmlPath, forceXmlPath: options.forceXmlPath === true })
+        ? await window.CORETG_FETCH_LATEST_STATE(scenario, { xmlPath: explicitXmlPath, forceXmlPath: useExplicitXmlPath })
         : await (async () => {
             const resp = await fetch(latestStateUrl, { credentials: 'same-origin' });
             let payload = null;

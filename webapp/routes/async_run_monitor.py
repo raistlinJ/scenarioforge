@@ -313,6 +313,30 @@ def register(
                             scenario_label=scenario_label,
                             flow_enabled=coerce_bool(meta.get('flow_enabled')),
                         )
+                        if (
+                            isinstance(validation, dict)
+                            and bool(validation.get('injects_missing'))
+                            and coerce_bool(meta.get('flow_enabled'))
+                        ):
+                            append_async_run_log_line(
+                                meta,
+                                '[validate] Missing injects detected after copy; repairing once and revalidating.',
+                            )
+                            meta.pop('flow_artifacts_copied', None)
+                            meta.pop('flow_artifact_copy_error', None)
+                            maybe_copy_flow_artifacts_into_containers(meta, stage='validation-retry')
+                            if meta.get('flow_artifacts_copied'):
+                                retry_validation = validate_session_nodes_and_injects(
+                                    scenario_xml_path=xml_path_local,
+                                    session_xml_path=post_saved,
+                                    core_cfg=meta.get('core_cfg') if isinstance(meta.get('core_cfg'), dict) else None,
+                                    preview_plan_path=meta.get('preview_plan_path'),
+                                    scenario_label=scenario_label,
+                                    flow_enabled=True,
+                                )
+                                if isinstance(retry_validation, dict):
+                                    validation = retry_validation
+                                    validation['flow_copy_retried_after_validation'] = True
                         meta['validation_summary'] = validation
                         append_async_run_log_line(meta, '[validate] VALIDATION_SUMMARY_JSON: ' + json.dumps(validation))
                         persist_execute_validation_artifacts(report_md, summary_json, validation)

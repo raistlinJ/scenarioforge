@@ -1275,6 +1275,28 @@ def _ensure_services_with_policy(
         node_type=node_type,
         context=context,
     )
+
+    if _node_is_docker_like(node_obj=node_obj, node_type=node_type) and effective_services:
+        expanded_services: List[str] = []
+        expanded_seen: Set[str] = set()
+
+        def _add_expanded(service_name: str) -> None:
+            name = str(service_name or '').strip()
+            if not name or name in expanded_seen:
+                return
+            expanded_services.append(name)
+            expanded_seen.add(name)
+
+        route_service = _docker_default_route_service_name()
+        for service_name in effective_services:
+            if service_name == route_service:
+                for dep_service in _docker_default_route_dependencies(route_service):
+                    _add_expanded(dep_service)
+            elif service_name == 'Traffic':
+                _add_expanded('CoreTGPrereqs')
+            _add_expanded(service_name)
+        effective_services = expanded_services
+
     applied: List[str] = []
     for service_name in effective_services:
         try:

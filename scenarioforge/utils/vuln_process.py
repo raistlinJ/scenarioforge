@@ -1568,6 +1568,18 @@ def _compose_force_root_workdir_enabled() -> bool:
 	return mode != 'off'
 
 
+def _force_service_root_user_for_core(service: Dict[str, object]) -> None:
+	"""Force a compose service to use root for CORE file/service operations.
+
+	CORE creates and chmods service files with ``docker exec``. Removing a compose
+	``user`` override is insufficient because the image may still declare a
+	non-root Dockerfile USER.
+	"""
+	if not isinstance(service, dict):
+		return
+	service['user'] = '0:0'
+
+
 def _compose_force_root_workdir_mode() -> str:
 	"""Return root-workdir forcing mode: off | auto | all."""
 	val = os.getenv('CORETG_COMPOSE_FORCE_ROOT_WORKDIR')
@@ -4633,14 +4645,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						except Exception:
 							pass
 						try:
-							u = svc.get('user')
-							u_s = str(u).strip() if u is not None else ''
-							if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
-								svc.pop('user', None)
-								try:
-									logger.info('[vuln] removed non-root user (already wrapped) node=%s service=%s user=%s', node_name, svc_key, u_s)
-								except Exception:
-									pass
+							_force_service_root_user_for_core(svc)
 						except Exception:
 							pass
 						try:
@@ -4670,10 +4675,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 							except Exception:
 								pass
 							try:
-								u = svc.get('user')
-								u_s = str(u).strip() if u is not None else ''
-								if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
-									svc.pop('user', None)
+								_force_service_root_user_for_core(svc)
 							except Exception:
 								pass
 							try:
@@ -4733,21 +4735,10 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 							# DefaultRoute needs iproute2 + NET_ADMIN in many images.
 							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
 							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
-							# IMPORTANT: Many upstream vuln stacks pin a non-root `user:` (e.g., airflow
-							# `50000:50000`). CORE's DefaultRoute service writes and chmods scripts inside
-							# the container using `docker exec <node> chmod ...`. When the container runs
-							# as non-root, this fails with "Operation not permitted".
-							#
-							# For CORE DockerNodes, prefer running the wrapped service as root.
+							# Image Dockerfiles may declare a non-root USER even when compose has
+							# no user override. CORE needs root for docker-exec chmod/create_file.
 							try:
-								u = svc.get('user')
-								u_s = str(u).strip() if u is not None else ''
-								if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
-									svc.pop('user', None)
-									try:
-										logger.info('[vuln] removed non-root user for CORE docker wrapper node=%s service=%s user=%s', node_name, svc_key, u_s)
-									except Exception:
-										pass
+								_force_service_root_user_for_core(svc)
 							except Exception:
 								pass
 							# CORE services often manipulate files using relative paths; force root workdir.
@@ -4780,6 +4771,13 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						services = obj.get('services') if isinstance(obj, dict) else None
 						if svc_key and isinstance(services, dict) and isinstance(services.get(svc_key), dict):
 							_maybe_force_service_workdir_root(services.get(svc_key))
+				except Exception:
+					pass
+				try:
+					svc_key = _select_service_key(obj, prefer_service=prefer)
+					services = obj.get('services') if isinstance(obj, dict) else None
+					if svc_key and isinstance(services, dict) and isinstance(services.get(svc_key), dict):
+						_force_service_root_user_for_core(services.get(svc_key))
 				except Exception:
 					pass
 			# Apply published-port pruning late so overlays/wrappers can't reintroduce
@@ -4838,6 +4836,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						services = obj.get('services') if isinstance(obj, dict) else None
 						node_svc = services.get(node_name) if isinstance(services, dict) else None
 						if isinstance(node_svc, dict):
+							_force_service_root_user_for_core(node_svc)
 							node_svc['restart'] = 'unless-stopped'
 					except Exception:
 						pass
