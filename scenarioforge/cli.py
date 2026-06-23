@@ -2485,11 +2485,11 @@ def _cli_vm_mode_config_issues(
         if not any(isinstance(iface, dict) and str(iface.get('name') or '').strip() for iface in vm_ifaces):
             issues.append('CORETG_VM_MODE_HITL_CORE_IFX_NAME (vm-mode HITL interface name)')
 
-    if phase in {'execute', 'topo'} and vm_hitl_enabled:
+    if phase in {'execute', 'topo'}:
         cfg = hitl_config if isinstance(hitl_config, dict) else {}
-        hitl_enabled = bool(cfg.get('enabled'))
+        scenario_hitl_enabled = bool(cfg.get('enabled'))
         hitl_ifaces = cfg.get('interfaces') if isinstance(cfg.get('interfaces'), list) else []
-        if not hitl_enabled or not any(isinstance(iface, dict) and str(iface.get('name') or '').strip() for iface in hitl_ifaces):
+        if scenario_hitl_enabled and not any(isinstance(iface, dict) and str(iface.get('name') or '').strip() for iface in hitl_ifaces):
             issues.append('scenario XML HardwareInLoop interface configuration required by vm mode')
 
     return issues
@@ -2503,6 +2503,7 @@ def _emit_vm_mode_cli_error(
     issues: list[str],
     output_path: str | None = None,
     json_output: bool = True,
+    emit_validation_marker: bool = False,
 ) -> int:
     if json_output:
         _emit_phase_json(
@@ -2521,6 +2522,18 @@ def _emit_vm_mode_cli_error(
         logging.error('VM mode requires additional configuration before the %s phase can run.', phase)
         for issue in issues or []:
             logging.error('Missing or unconfigured: %s', issue)
+        if phase == 'execute' and emit_validation_marker:
+            _print_post_execution_validation_summary(
+                {
+                    'ok': False,
+                    'error': f'VM mode requires additional configuration before the {phase} phase can run.',
+                    'validation_unavailable': True,
+                    'validation_unavailable_details': list(issues or []),
+                    'cli_post_execution_validation': True,
+                    'scenario_xml_path': xml_path,
+                },
+                stream=sys.stderr,
+            )
     return 1
 
 
@@ -3315,6 +3328,7 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
             scenario_name=scenario_name,
             issues=vm_mode_issues,
             json_output=False,
+            emit_validation_marker=bool(getattr(args, 'post_execution_validation', False)),
         )
 
     if (not has_saved_core_source and not env_remote_source) or not _cli_should_delegate_remote(core_cfg):

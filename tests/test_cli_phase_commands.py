@@ -1145,6 +1145,88 @@ def test_cli_flag_sequencing_vm_mode_requires_saved_core_connection(tmp_path, mo
     assert 'scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)' in missing
 
 
+def test_cli_vm_mode_execute_honors_xml_hitl_disabled_even_when_env_hitl_enabled():
+    fake_backend = SimpleNamespace(
+        _webui_runtime_mode=lambda: 'vm',
+        _webui_vm_mode_defaults=lambda include_password=False: {
+            'hitl': {
+                'enabled': True,
+                'interfaces': [{'name': 'ens19'}],
+            },
+        },
+    )
+    core_cfg = {
+        'host': '127.0.0.1',
+        'port': 50051,
+        'ssh_host': '12.0.0.200',
+        'ssh_port': 22,
+        'ssh_username': 'core',
+        'ssh_password': 'pw',
+    }
+
+    issues = cli._cli_vm_mode_config_issues(
+        fake_backend,
+        phase='execute',
+        core_cfg=core_cfg,
+        has_saved_core_source=True,
+        hitl_config={'enabled': False, 'interfaces': []},
+    )
+
+    assert issues == []
+
+
+def test_cli_vm_mode_execute_requires_interfaces_when_xml_hitl_enabled():
+    fake_backend = SimpleNamespace(
+        _webui_runtime_mode=lambda: 'vm',
+        _webui_vm_mode_defaults=lambda include_password=False: {
+            'hitl': {
+                'enabled': False,
+                'interfaces': [],
+            },
+        },
+    )
+    core_cfg = {
+        'host': '127.0.0.1',
+        'port': 50051,
+        'ssh_host': '12.0.0.200',
+        'ssh_port': 22,
+        'ssh_username': 'core',
+        'ssh_password': 'pw',
+    }
+
+    issues = cli._cli_vm_mode_config_issues(
+        fake_backend,
+        phase='execute',
+        core_cfg=core_cfg,
+        has_saved_core_source=True,
+        hitl_config={'enabled': True, 'interfaces': []},
+    )
+
+    assert 'scenario XML HardwareInLoop interface configuration required by vm mode' in issues
+
+
+def test_cli_vm_mode_execute_preflight_failure_emits_validation_summary(tmp_path, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+
+    ret = cli._emit_vm_mode_cli_error(
+        phase='execute',
+        xml_path=str(xml_path),
+        scenario_name='Scenario One',
+        issues=['scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)'],
+        json_output=False,
+        emit_validation_marker=True,
+    )
+
+    assert ret == 1
+    summary = cli._extract_last_json_marker(capsys.readouterr().err, 'VALIDATION_SUMMARY_JSON:')
+    assert summary is not None
+    assert summary['ok'] is False
+    assert summary['validation_unavailable'] is True
+    assert summary['validation_unavailable_details'] == [
+        'scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)'
+    ]
+
+
 def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monkeypatch, capsys):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
@@ -2271,7 +2353,7 @@ def test_cli_execute_remote_delegate_includes_resolved_scenario_and_preview_plan
     assert '--preview-plan /tmp/remote/preview.xml' in fake_client.command
 
 
-def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote_exists(tmp_path, monkeypatch, caplog):
+def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote_exists(tmp_path, monkeypatch, caplog, capsys):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
     fake_client = _FakeSshClient(exit_code=0)
@@ -2327,6 +2409,7 @@ def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote
         preview_plan=None,
         host='localhost',
         port=50051,
+        post_execution_validation=True,
     )
     argv0 = cli.sys.argv[:]
 
@@ -2338,5 +2421,8 @@ def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote
         cli.sys.argv = argv0
 
     assert ret == 1
+    summary = cli._extract_last_json_marker(capsys.readouterr().err, 'VALIDATION_SUMMARY_JSON:')
+    assert summary is not None
+    assert summary['validation_unavailable'] is True
     assert any('VM mode requires additional configuration before the execute phase can run.' in rec.message for rec in caplog.records)
     assert any('scenario XML is missing saved CORE VM connection data' in rec.message for rec in caplog.records)
