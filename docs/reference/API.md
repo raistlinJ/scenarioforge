@@ -875,6 +875,12 @@ Invoke from the repo root to ensure generated reports land in `./reports/`:
 core-python -m scenarioforge.cli --xml /abs/path/scenarios.xml --verbose
 ```
 
+Batch harnesses and `scenarioforge-eval` integrations should also follow the
+[ScenarioForge Eval Compatibility Contract](../SCENARIOFORGE_EVAL_COMPATIBILITY.md).
+It defines the authoritative XML lifecycle, common seed, post-execution
+validation marker, artifact set, shared-VM locking, and credential-redaction
+requirements.
+
 Saved XML exported or edited through the Web UI is a supported input to the CLI execute path. When the XML already contains embedded `PlanPreview` and `FlagSequencing/FlowState` data, the CLI uses those sections during execute preflight so standalone runs fail early on the same stale-preview or missing-Flow-runtime conditions that `/run_cli` and `/run_cli_async` reject in the Web UI.
 
 For `execute` and `topo`, `--preview-plan` is now optional when the XML already embeds `PlanPreview`; the CLI reuses that embedded preview automatically. Prefer saved scenario XML under `outputs/scenarios-*` for later CLI runs rather than `outputs/tmp-preview-*`, which are temporary staging artifacts and may no longer reference valid Flow runtime files.
