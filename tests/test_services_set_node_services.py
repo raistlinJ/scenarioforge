@@ -41,6 +41,17 @@ def test_set_node_services_retries_with_node_obj_when_id_noops() -> None:
     assert set(session.services.get(123)) == {"IPForward", "zebra", "RIP"}
 
 
+def test_set_node_services_repairs_legacy_routing_placeholder() -> None:
+    session = _Session()
+    node = SimpleNamespace(id=124)
+
+    ok = set_node_services(session, 124, ["IPForward", "zebra", "Routing"], node_obj=node)
+
+    assert ok is True
+    assert set(session.services.get(124)) == {"IPForward", "zebra"}
+    assert "Routing" not in session.services.get(124)
+
+
 def test_set_node_services_normalizes_docker_defaultroute_dependency() -> None:
     session = _Session()
     node = SimpleNamespace(id=321, type="DOCKER")

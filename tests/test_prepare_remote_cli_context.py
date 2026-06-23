@@ -36,6 +36,13 @@ class _FakeSFTP:
         return None
 
 
+class _FailingArchiveSFTP(_FakeSFTP):
+    def put(self, localpath, remotepath, callback=None):
+        if str(remotepath).endswith('.tar.gz'):
+            raise OSError('runtime archive upload failed')
+        return super().put(localpath, remotepath, callback=callback)
+
+
 class _FakeSSHClient:
     def __init__(self, sftp):
         self._sftp = sftp
@@ -377,6 +384,47 @@ def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeyp
     log_text = log_handle.getvalue()
     assert '[remote] runtime subset sync plan: files=' in log_text
     assert '[remote] runtime subset sync progress: 100%' in log_text
+
+
+def test_prepare_remote_cli_context_fails_when_runtime_sync_fails(tmp_path, monkeypatch):
+    repo_root = tmp_path / 'repo'
+    (repo_root / 'scenarioforge').mkdir(parents=True)
+    (repo_root / 'scenarioforge' / '__init__.py').write_text('', encoding='utf-8')
+    (repo_root / 'scenarioforge' / 'cli.py').write_text('CLI = True\n', encoding='utf-8')
+
+    xml_path = tmp_path / 'ephemeral.xml'
+    xml_path.write_text('<Scenarios />\n', encoding='utf-8')
+
+    remote_repo = '/remote/repo'
+    fake_sftp = _FailingArchiveSFTP(
+        {
+            remote_repo,
+            f'{remote_repo}/scenarioforge',
+            f'{remote_repo}/scenarioforge/__init__.py',
+        }
+    )
+    client = _FakeSSHClient(fake_sftp)
+
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _sftp: remote_repo)
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **_kwargs: None)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
+
+    log_handle = io.StringIO()
+    with pytest.raises(
+        RuntimeError,
+        match='Failed to synchronize ScenarioForge runtime code to CORE host',
+    ):
+        backend._prepare_remote_cli_context(
+            client=client,
+            run_id='run-sync-failure',
+            xml_path=str(xml_path),
+            preview_plan_path=str(xml_path),
+            log_handle=log_handle,
+        )
+
+    assert '[remote] runtime subset sync failed: runtime archive upload failed' in log_handle.getvalue()
 
 
 def test_prepare_remote_cli_context_runtime_subset_reuses_remote_mkdirs(tmp_path, monkeypatch):

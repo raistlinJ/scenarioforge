@@ -48,6 +48,7 @@ def test_count_only_routing_parsing_exact():
     assert density == 0.0
     # Expect exactly one count-based routing item with abs_count=1
     assert any(getattr(i, 'abs_count', 0) == 1 for i in ritems), ritems
+    assert {i.protocol for i in ritems} == {'OSPF'}
 
 
 def test_no_routing_section():

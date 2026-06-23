@@ -105,6 +105,34 @@ def test_cli_preview_plan_phase_persists_preview_metadata(tmp_path, monkeypatch,
     assert payload['preview_plan_path'] == str(xml_path.resolve())
 
 
+def test_load_preview_plan_from_xml_repairs_legacy_routing_placeholder(tmp_path):
+    preview_payload = {
+        'full_preview': {
+            'routing_plan': {'Routing': 1},
+            'r2s_grouping_preview': [{'protocol': 'Routing'}],
+            'router_plan': {
+                'simple_plan': {'Routing': 1},
+                'items': [{'protocol': 'Routing'}],
+            },
+        },
+    }
+    xml_path = tmp_path / 'legacy-preview.xml'
+    root = ET.Element('Scenarios')
+    scenario_el = ET.SubElement(root, 'Scenario', {'name': 'Legacy'})
+    editor_el = ET.SubElement(scenario_el, 'ScenarioEditor')
+    plan_el = ET.SubElement(editor_el, 'PlanPreview')
+    plan_el.text = json.dumps(preview_payload)
+    ET.ElementTree(root).write(xml_path, encoding='utf-8', xml_declaration=True)
+
+    payload, full_preview = cli._load_preview_plan(str(xml_path), 'Legacy')
+
+    assert payload['full_preview'] == full_preview
+    assert full_preview['routing_plan'] == {}
+    assert full_preview['r2s_grouping_preview'][0]['protocol'] == ''
+    assert full_preview['router_plan']['simple_plan'] == {}
+    assert full_preview['router_plan']['items'][0]['protocol'] == ''
+
+
 def test_cli_new_phase_writes_starter_xml(tmp_path, monkeypatch, capsys):
     from webapp import app_backend as backend
 
@@ -335,6 +363,43 @@ def test_post_execution_validation_flow_copy_failure_is_an_error():
 
     assert ok is False
     assert 'ERROR: Flow artifact copy failed (1)' in stream.getvalue()
+
+
+def test_post_execution_validation_unavailable_emits_machine_summary():
+    stream = io.StringIO()
+
+    ok = cli._print_post_execution_validation_unavailable(
+        'CORE session stayed in configuration',
+        stream=stream,
+        session_id=17,
+        details=['core-daemon reported a service validation failure'],
+    )
+
+    assert ok is False
+    summary = cli._extract_last_json_marker(
+        stream.getvalue(),
+        'VALIDATION_SUMMARY_JSON:',
+    )
+    assert summary is not None
+    assert summary['ok'] is False
+    assert summary['validation_unavailable'] is True
+    assert summary['session_id'] == 17
+    assert summary['validation_unavailable_details'] == [
+        'core-daemon reported a service validation failure'
+    ]
+
+
+def test_remote_execute_failure_detail_prefers_start_validation_error():
+    output = """
+2026-06-22 ERROR root - CORE daemon runtime hint: service failed
+2026-06-22 ERROR root - Start validation failed: CORE session stayed in "configuration"
+[remote] cleanup complete
+"""
+
+    detail = cli._remote_execute_failure_detail(output)
+
+    assert detail is not None
+    assert 'Start validation failed' in detail
 
 
 def test_cli_flag_sequencing_parser_defaults_enable_cleanup():
@@ -1963,6 +2028,176 @@ def test_cli_execute_delegates_to_remote_cli_for_saved_remote_core_config(tmp_pa
     assert 'REMOTE CLI OK' in captured.out
     assert 'Missing injects detected after copy; repairing once and revalidating' in captured.out
     assert 'Post-execution validation: PASSED' in captured.out
+
+
+def test_cli_remote_execute_start_failure_emits_validation_summary(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    fake_client = _FakeSshClient(exit_code=1)
+
+    def _merge_core_configs(*configs, include_password=True):
+        merged = {}
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        },
+        _select_core_config_for_page=lambda *_a, **_k: {},
+        _load_run_history=lambda: [],
+        _merge_core_configs=_merge_core_configs,
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: dict(cfg),
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg),
+        _require_core_ssh_credentials=lambda cfg: dict(cfg),
+        _open_ssh_client=lambda cfg: fake_client,
+        _prepare_remote_cli_context=lambda **kwargs: {
+            'xml_path': '/tmp/remote/scenario.xml',
+            'preview_plan_path': None,
+            'repo_dir': '/tmp/remote/repo',
+            'base_dir': '/tmp/remote',
+        },
+        _select_remote_python_interpreter=lambda *_a, **_k: '/opt/core/venv/bin/python',
+        _remote_core_target_host=lambda *_a, **_k: '127.0.0.1',
+        _coerce_bool=lambda value: bool(value),
+        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write(
+            'CORE_SESSION_ID: 41\n'
+            '2026-06-22 ERROR root - Start validation failed: '
+            'CORE session stayed in "configuration"\n'
+        ),
+    )
+    args = SimpleNamespace(
+        phase='execute',
+        xml=str(xml_path),
+        preview_plan=None,
+        scenario='Scenario One',
+        host='localhost',
+        port=50051,
+        post_execution_validation=True,
+    )
+    argv0 = cli.sys.argv[:]
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'execute',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'Scenario One',
+            '--post-execution-validation',
+        ]
+        ret = cli._maybe_delegate_cli_to_remote(
+            args,
+            backend=fake_backend,
+            scenario_name='Scenario One',
+        )
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    output = capsys.readouterr().out
+    summary = cli._extract_last_json_marker(output, 'VALIDATION_SUMMARY_JSON:')
+    assert summary is not None
+    assert summary['validation_unavailable'] is True
+    assert 'CORE session stayed in' in summary['error']
+
+
+def test_cli_remote_parent_accepts_child_validated_configuration_session(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    fake_client = _FakeSshClient(exit_code=0)
+
+    def _merge_core_configs(*configs, include_password=True):
+        merged = {}
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        },
+        _select_core_config_for_page=lambda *_a, **_k: {},
+        _load_run_history=lambda: [],
+        _merge_core_configs=_merge_core_configs,
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: dict(cfg),
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg),
+        _require_core_ssh_credentials=lambda cfg: dict(cfg),
+        _open_ssh_client=lambda cfg: fake_client,
+        _prepare_remote_cli_context=lambda **kwargs: {
+            'xml_path': '/tmp/remote/scenario.xml',
+            'preview_plan_path': None,
+            'repo_dir': '/tmp/remote/repo',
+            'base_dir': '/tmp/remote',
+        },
+        _select_remote_python_interpreter=lambda *_a, **_k: '/opt/core/venv/bin/python',
+        _remote_core_target_host=lambda *_a, **_k: '127.0.0.1',
+        _coerce_bool=lambda value: bool(value),
+        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write(
+            'CORE_SESSION_ID: 42\n'
+            'CORE_SESSION_VALIDATION_JSON: '
+            '{"configuration_tolerated":true,"runtime_ok":false,'
+            '"session_id":42,"state":"configuration","validation_ok":true}\n'
+        ),
+        _extract_session_id_from_text=lambda text: 42,
+        _list_active_core_sessions_via_remote_python=lambda *_a, **_k: [
+            {'id': 42, 'state': 'CONFIGURATION', 'nodes': 2}
+        ],
+    )
+    args = SimpleNamespace(
+        phase='execute',
+        xml=str(xml_path),
+        preview_plan=None,
+        scenario='Scenario One',
+        host='localhost',
+        port=50051,
+        post_execution_validation=False,
+    )
+    argv0 = cli.sys.argv[:]
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'execute',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'Scenario One',
+        ]
+        ret = cli._maybe_delegate_cli_to_remote(
+            args,
+            backend=fake_backend,
+            scenario_name='Scenario One',
+        )
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    assert 'Verified CORE session 42 is CONFIGURATION' in capsys.readouterr().out
 
 
 def test_cli_execute_remote_delegate_includes_resolved_scenario_and_preview_plan(tmp_path, monkeypatch):

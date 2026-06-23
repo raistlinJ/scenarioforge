@@ -112,6 +112,10 @@ The containing iteration directory should normally use mode `0700`.
 
 `preview-plan` persists `ScenarioEditor/PlanPreview` into the XML. Execute and
 topo automatically reuse that embedded preview when `--preview-plan` is omitted.
+Legacy previews that used the section label `Routing` as if it were a CORE
+service are canonicalized to an unset protocol when loaded. A protocol is only
+assigned when the input explicitly selects one, including an explicit `Random`
+selection.
 
 `flag-sequencing` persists `ScenarioEditor/FlagSequencing/FlowState`. In resolve
 mode, generator output paths, inject source paths, and flag assignments become
@@ -138,6 +142,10 @@ When XML contains complete remote CORE SSH settings, the parent CLI:
 
 The evaluator must not set `CORETG_CLI_REMOTE_DELEGATED`; it is an internal
 recursion guard used by ScenarioForge.
+
+Runtime package synchronization is mandatory. If ScenarioForge cannot upload and
+extract the current runtime subset on the CORE VM, execution fails before
+starting a session instead of silently using an older remote checkout.
 
 The local evaluator environment does not need the `core` Python package for this
 remote VM path. System-site packages are only required when the evaluator is
@@ -222,6 +230,12 @@ artifact contract clear.
 
 Parse the marker before raising for a nonzero return code. A validation failure
 often contains the most precise explanation for the failed run.
+
+The marker is also emitted when CORE session startup fails before the detailed
+validator can run. In that case it contains `validation_unavailable=true`, the
+startup error, the session id when known, and any recognized `core-daemon`
+runtime hint. Evaluators should save and report that payload instead of reducing
+the failure to "validation marker missing."
 
 ### Errors And Warnings
 
@@ -360,6 +374,8 @@ ssh_host:ssh_port:ssh_username:vmid
 Remote staging, image setup, container stabilization, Flow copies, session
 export, and post-run validation can take several minutes. Use a configurable
 subprocess timeout of at least 15 to 20 minutes for broad integration cases.
+ScenarioForge's `--start-timeout-s` defaults to 120 seconds and is honored up to
+600 seconds.
 
 On timeout:
 
