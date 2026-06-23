@@ -85,6 +85,13 @@ later CLI invocation targets the same VM as the WebUI. Saved environment values
 may fill compatible defaults or credentials, but they must not redirect an XML
 that already identifies its CORE target.
 
+HITL is also XML-scoped. If an eval spec sets HITL off, write either no
+`HardwareInLoop` section or `HardwareInLoop enabled="false"`; the CLI will not
+force VM-mode HITL interfaces from ambient environment defaults. If a spec wants
+HITL, the XML must carry `HardwareInLoop enabled="true"` and at least one saved
+`Interface` entry, usually by explicitly opting into environment-backed HITL
+when the evaluator builds the XML.
+
 Use durable saved XML such as `outputs/scenarios-*/Scenario1.xml`. Do not use
 `outputs/tmp-preview-*` as a long-lived execution input. Temporary preview XML
 may reference Flow artifacts that no longer exist.

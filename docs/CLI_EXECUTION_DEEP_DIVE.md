@@ -305,6 +305,7 @@ VM mode is treated more strictly than native mode.
 
 - If `CORETG_WEBUI_MODE=vm`, the CLI expects scenario XML used for `execute`, `topo`, and `flag-sequencing` to carry saved CORE VM connection data, typically through `CoreConnection` or `HardwareInLoop/CoreConnection`.
 - In VM mode, the CLI does not silently fall back to env-only placeholder values when required VM connection data is missing from the XML.
+- HITL is controlled by the scenario XML. `execute` and `topo` require a saved `HardwareInLoop/Interface` only when that XML has `HardwareInLoop enabled="true"`. A missing or disabled HITL section means no HITL attachment, even if VM-mode HITL defaults exist in the environment.
 - If required VM connection fields are missing, the CLI stops early and reports what is missing.
 
 Examples of required VM-mode data:
@@ -312,12 +313,12 @@ Examples of required VM-mode data:
 - CORE gRPC host and port
 - SSH host and port
 - SSH username and password
-- for VM-mode HITL defaults, a configured `CORETG_VM_MODE_HITL_CORE_IFX_NAME`
+- for `new` XML generation when VM-mode HITL defaults are enabled, a configured `CORETG_VM_MODE_HITL_CORE_IFX_NAME`
 
 Native mode behaves differently:
 
 - native mode can still rely on `.scenarioforge.env` defaults without requiring saved VM-specific XML metadata
-- missing HITL config in native mode does not block normal CLI topology or execute phases; it just means no HITL attachment is created
+- missing or disabled HITL config in native mode does not block normal CLI topology or execute phases; it just means no HITL attachment is created
 
 ## Remote CORE Behavior
 
