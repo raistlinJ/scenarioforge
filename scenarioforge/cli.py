@@ -353,9 +353,9 @@ def _core_state_str(value: Any) -> str:
     # Numeric states: try mapping via core_pb2 if available.
     if text.isdigit():
         try:
-            from core.api.grpc import core_pb2  # type: ignore
-
-            return str(core_pb2.SessionState.Name(int(text))).strip().lower()
+            core_pb2_ok, core_pb2_mod, _core_pb2_err = _quiet_import('core.api.grpc.core_pb2')
+            if core_pb2_ok:
+                return str(core_pb2_mod.SessionState.Name(int(text))).strip().lower()  # type: ignore[union-attr]
         except Exception:
             pass
     try:
@@ -5829,8 +5829,9 @@ def main():
 
     # Log DOCKER availability in this CORE wrapper
     try:
-        from core.api.grpc.wrappers import NodeType as _NT  # type: ignore
-        logging.info("CORE Docker node type available: %s", hasattr(_NT, 'DOCKER'))
+        wrappers_ok, wrappers_mod, _wrappers_err = _quiet_import('core.api.grpc.wrappers')
+        if wrappers_ok:
+            logging.info("CORE Docker node type available: %s", hasattr(getattr(wrappers_mod, 'NodeType', None), 'DOCKER'))
     except Exception:
         pass
     # If any routing item carries abs_count>0, we should build a segmented topology even if density==0
