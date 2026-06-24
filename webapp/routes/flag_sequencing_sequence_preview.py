@@ -551,9 +551,13 @@ def register(app, *, backend_module: Any) -> None:
                 _flow_progress(f'Failed to persist sequence plan: {err}')
                 return jsonify({'ok': False, 'error': f'Failed to persist sequence plan: {err}'}), 500
             try:
-                backend._update_flow_state_in_xml(xml_path_for_plan, scenario_label or scenario_norm, flow_meta)
-            except Exception:
-                pass
+                flow_ok, flow_err = backend._update_flow_state_in_xml(xml_path_for_plan, scenario_label or scenario_norm, flow_meta)
+            except Exception as exc:
+                _flow_progress(f'Failed to persist sequence FlowState: {exc}')
+                return jsonify({'ok': False, 'error': f'Failed to persist sequence FlowState: {exc}'}), 500
+            if not flow_ok:
+                _flow_progress(f'Failed to persist sequence FlowState: {flow_err}')
+                return jsonify({'ok': False, 'error': f'Failed to persist sequence FlowState: {flow_err}'}), 500
             try:
                 backend._planner_set_plan(scenario_norm, plan_path=xml_path_for_plan, xml_path=xml_path_for_plan, seed=(metadata or {}).get('seed'))
             except Exception:
