@@ -13,11 +13,18 @@ import select
 import os
 import json
 
-try:  # pragma: no cover - offline mode exercised via CLI tests
-    from core.api.grpc import client  # type: ignore
-    from core.api.grpc.wrappers import NodeType, Position, Interface  # type: ignore
+from ..utils.core_imports import quiet_import
+
+_core_client_ok, _core_client_mod, CORE_GRPC_IMPORT_ERROR = quiet_import('core.api.grpc.client')
+_core_wrappers_ok, _core_wrappers_mod, _core_wrappers_error = quiet_import('core.api.grpc.wrappers')
+if _core_client_ok and _core_wrappers_ok:  # pragma: no cover - offline mode exercised via CLI tests
+    client = _core_client_mod  # type: ignore
+    NodeType = getattr(_core_wrappers_mod, 'NodeType')  # type: ignore
+    Position = getattr(_core_wrappers_mod, 'Position')  # type: ignore
+    Interface = getattr(_core_wrappers_mod, 'Interface')  # type: ignore
     CORE_GRPC_AVAILABLE = True
-except ModuleNotFoundError:  # pragma: no cover
+else:  # pragma: no cover
+    CORE_GRPC_IMPORT_ERROR = CORE_GRPC_IMPORT_ERROR or _core_wrappers_error
     CORE_GRPC_AVAILABLE = False
 
     class _DummyCoreClient:

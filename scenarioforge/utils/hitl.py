@@ -9,10 +9,14 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 from ..constants import DEFAULT_IPV4_PREFIXLEN
 from ..types import NodeInfo
 from ..utils.services import mark_node_as_router, set_node_services
+from ..utils.core_imports import quiet_import
 
-try:  # pragma: no cover - exercised with real CORE installs
-    from core.api.grpc.wrappers import NodeType, Position, Interface  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover - fallback used in tests/offline
+_core_wrappers_ok, _core_wrappers_mod, CORE_GRPC_IMPORT_ERROR = quiet_import('core.api.grpc.wrappers')
+if _core_wrappers_ok:  # pragma: no cover - exercised with real CORE installs
+    NodeType = getattr(_core_wrappers_mod, 'NodeType')  # type: ignore
+    Position = getattr(_core_wrappers_mod, 'Position')  # type: ignore
+    Interface = getattr(_core_wrappers_mod, 'Interface')  # type: ignore
+else:  # pragma: no cover - fallback used in tests/offline
     # Reuse the fallback definitions from the topology builder to ensure identical behaviour.
     from ..builders.topology import NodeType, Position, Interface  # type: ignore  # noqa: F401
 
