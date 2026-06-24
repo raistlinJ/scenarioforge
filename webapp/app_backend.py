@@ -30629,6 +30629,19 @@ def _compose_node_names(assign_dir):
     return out
 
 
+def _first_compose_dir(path_candidates):
+    for directory in path_candidates:
+        d = str(directory or '').strip()
+        if not d:
+            continue
+        try:
+            if _compose_node_names(d):
+                return d
+        except Exception:
+            continue
+    return None
+
+
 def _docker_names():
     p = _run_docker(['ps', '-a', '--format', '{{.Names}}'], timeout=20, capture=True)
     if getattr(p, 'returncode', 1) != 0:
@@ -30929,28 +30942,39 @@ def _container_path_exists(target: str, path: str):
 
 def main():
     base = os.environ.get('CORE_REMOTE_BASE_DIR', '/tmp/scenarioforge')
-    candidates = [
+    assignment_candidates = [
         os.path.join(base, 'vulns', 'compose_assignments.json'),
         os.path.join(base, 'outputs', 'vulns', 'compose_assignments.json'),
         os.path.join(base, 'compose_assignments.json'),
         '/tmp/vulns/compose_assignments.json',
     ]
-    assignments_path = _first_existing(candidates)
-    if not assignments_path:
-        print(json.dumps({'ok': False, 'items': [], 'error': 'compose_assignments.json not found on CORE VM'}))
-        return
-
-    try:
-        data = _read_json(assignments_path)
-    except Exception as e:
-        print(json.dumps({'ok': False, 'items': [], 'error': f'failed reading assignments: {e}'}))
-        return
+    compose_dir_candidates = [
+        os.path.join(base, 'vulns'),
+        os.path.join(base, 'outputs', 'vulns'),
+        base,
+        '/tmp/vulns',
+    ]
+    assignments_path = _first_existing(assignment_candidates)
+    assignments_missing = False
+    if assignments_path:
+        try:
+            data = _read_json(assignments_path)
+        except Exception as e:
+            print(json.dumps({'ok': False, 'items': [], 'error': f'failed reading assignments: {e}'}))
+            return
+        assign_dir = os.path.dirname(assignments_path)
+    else:
+        assignments_missing = True
+        data = {'assignments': {}}
+        assign_dir = _first_compose_dir(compose_dir_candidates)
+        if not assign_dir:
+            print(json.dumps({'ok': False, 'items': [], 'error': 'compose_assignments.json not found on CORE VM and no docker-compose-*.yml files were found'}))
+            return
 
     assignments = data.get('assignments', {}) if isinstance(data, dict) else {}
     if not isinstance(assignments, dict):
         assignments = {}
 
-    assign_dir = os.path.dirname(assignments_path)
     candidate_nodes = []
     seen_nodes = set()
     for node_name in sorted(assignments.keys()):
@@ -31271,6 +31295,9 @@ def main():
         'timestamp': int(time.time()),
         'assignments_count': len(assignments),
         'assignments_keys': sorted(assignments.keys()),
+        'assignments_path': assignments_path,
+        'assignments_missing': bool(assignments_missing),
+        'assign_dir': assign_dir,
         'candidate_count': len(candidate_nodes),
         'candidate_keys': candidate_nodes,
     }))
