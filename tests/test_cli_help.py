@@ -34,4 +34,8 @@ def test_general_help_points_to_phase_specific_help() -> None:
 
     assert 'flag-sequencing' in help_text
     assert 'Use "cli.py <phase> --help" to view phase-specific options.' in help_text
+    assert 'cleanup-scenarioforge-docker --dry-run' in help_text
+    assert 'cleanup-scenarioforge-docker --force' in help_text
+    assert 'removes all Docker' in help_text
+    assert 'containers/images/build cache' in help_text
     assert '--flow-mode' not in help_text
