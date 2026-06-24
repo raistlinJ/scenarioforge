@@ -4573,6 +4573,11 @@ def _run_flag_sequencing_phase(args: Any) -> int:
 
 
 CLI_PHASES = ('execute', 'new', 'preview-plan', 'flag-sequencing', 'topo')
+CLI_HELP_EPILOG = (
+    'Use "cli.py <phase> --help" to view phase-specific options.\n'
+    'Maintenance command: cleanup-scenarioforge-docker --dry-run inspects the configured remote CORE host; '
+    'cleanup-scenarioforge-docker --force removes all Docker containers/images/build cache on that remote host.'
+)
 
 
 class _CliHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
@@ -4950,7 +4955,7 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
         ap = argparse.ArgumentParser(
             formatter_class=_CliHelpFormatter,
             description='ScenarioForge CLI. Omit phase to run execute.',
-            epilog='Use "cli.py <phase> --help" to view phase-specific options.',
+            epilog=CLI_HELP_EPILOG,
         )
         _add_cli_phase_arg(ap)
         _add_cli_common_args(ap)
