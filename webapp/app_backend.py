@@ -8299,6 +8299,61 @@ def _install_custom_services_to_core_vm(
         finally:
             _close_ssh_command_streams(stdin, stdout, stderr)
 
+    def _remote_file_size(sftp: Any, remote_path: str) -> Optional[int]:
+        try:
+            st = sftp.stat(remote_path)
+            return int(getattr(st, 'st_size'))
+        except Exception:
+            return None
+
+    def _sftp_put_compat(sftp: Any, local_path: str, remote_path: str) -> None:
+        try:
+            sftp.put(local_path, remote_path, confirm=False)
+        except TypeError:
+            sftp.put(local_path, remote_path)
+
+    def _sftp_stream_upload(sftp: Any, local_path: str, remote_path: str) -> None:
+        opener = getattr(sftp, 'open', None) or getattr(sftp, 'file', None)
+        if not callable(opener):
+            _sftp_put_compat(sftp, local_path, remote_path)
+            return
+        remote_fh = opener(remote_path, 'wb')
+        try:
+            with open(local_path, 'rb') as local_fh:
+                shutil.copyfileobj(local_fh, remote_fh)
+            flush = getattr(remote_fh, 'flush', None)
+            if callable(flush):
+                flush()
+        finally:
+            try:
+                remote_fh.close()
+            except Exception:
+                pass
+
+    def _upload_custom_service_file(sftp: Any, local_path: str, remote_path: str) -> None:
+        expected_size = os.path.getsize(local_path)
+        errors: list[str] = []
+        for attempt in range(1, 4):
+            try:
+                if attempt == 1:
+                    _sftp_put_compat(sftp, local_path, remote_path)
+                else:
+                    _sftp_stream_upload(sftp, local_path, remote_path)
+                actual_size = _remote_file_size(sftp, remote_path)
+                if actual_size is None or actual_size == expected_size:
+                    return
+                errors.append(f'attempt {attempt}: remote size {actual_size} != local size {expected_size}')
+            except Exception as exc:
+                errors.append(f'attempt {attempt}: {exc}')
+            try:
+                time.sleep(0.15 * attempt)
+            except Exception:
+                pass
+        detail = '; '.join(errors[-3:]) if errors else 'unknown upload failure'
+        raise RuntimeError(
+            f'Failed uploading custom service {os.path.basename(local_path)} to {remote_path}: {detail}'
+        )
+
     # Discover the remote core.services directory (where CORE loads service modules).
     candidates: list[str] = []
     try:
@@ -8478,7 +8533,7 @@ def _install_custom_services_to_core_vm(
         sftp = ssh_client.open_sftp()
         for lp in local_files:
             rp = f"{tmp_dir}/{os.path.basename(lp)}"
-            sftp.put(lp, rp)
+            _upload_custom_service_file(sftp, lp, rp)
     finally:
         try:
             if sftp:

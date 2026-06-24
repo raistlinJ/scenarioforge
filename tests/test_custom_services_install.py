@@ -47,6 +47,48 @@ class _FakeSFTP:
         return None
 
 
+class _MemoryRemoteFile:
+    def __init__(self, sftp, remote_path):
+        self.sftp = sftp
+        self.remote_path = str(remote_path)
+        self.chunks = []
+
+    def write(self, data):
+        self.chunks.append(bytes(data))
+
+    def flush(self):
+        return None
+
+    def close(self):
+        self.sftp.files[self.remote_path] = b"".join(self.chunks)
+
+
+class _FlakySFTP(_FakeSFTP):
+    def __init__(self):
+        super().__init__()
+        self.files = {}
+        self.fail_first_put = True
+        self.stream_uploads = []
+
+    def put(self, localpath, remotepath, confirm=True):
+        self.put_calls.append((str(localpath), str(remotepath)))
+        if self.fail_first_put:
+            self.fail_first_put = False
+            self.files[str(remotepath)] = b""
+            size = __import__("os").path.getsize(localpath)
+            raise OSError(f"size mismatch in put!  0 != {size}")
+        with open(localpath, "rb") as handle:
+            self.files[str(remotepath)] = handle.read()
+
+    def open(self, remotepath, mode="r"):
+        assert "w" in mode
+        self.stream_uploads.append(str(remotepath))
+        return _MemoryRemoteFile(self, remotepath)
+
+    def stat(self, remotepath):
+        return types.SimpleNamespace(st_size=len(self.files.get(str(remotepath), b"")))
+
+
 class _FakeSSHClient:
     def __init__(
         self,
@@ -142,6 +184,27 @@ def test_install_custom_services_to_core_vm_copies_and_verifies(tmp_path, monkey
     assert any("install -m 0644" in cmd for cmd in client.commands)
     assert any("systemctl restart core-daemon" in cmd for cmd in client.commands)
     assert any(("SERVICESCHECK" in cmd or "coretg-services-verify" in cmd) for cmd in client.commands)
+
+
+def test_install_custom_services_recovers_from_sftp_put_size_mismatch(tmp_path, monkeypatch):
+    p = tmp_path / "DockerDefaultRoute.py"
+    p.write_text("# test service\nVALUE = 'x'\n", encoding="utf-8")
+    monkeypatch.setattr(backend, "_local_custom_service_files", lambda: [str(p)])
+
+    client = _FakeSSHClient()
+    client.sftp = _FlakySFTP()
+
+    meta = backend._install_custom_services_to_core_vm(
+        client,
+        sudo_password="pw",
+        logger=types.SimpleNamespace(info=lambda *_a, **_k: None),
+    )
+
+    remote_path = "/tmp/coretg_custom_services/DockerDefaultRoute.py"
+    assert meta["services_dir"] == client.services_dir
+    assert client.sftp.put_calls
+    assert client.sftp.stream_uploads == [remote_path]
+    assert client.sftp.files[remote_path] == p.read_bytes()
 
 
 def test_local_custom_service_names_reads_declared_service_names(tmp_path, monkeypatch):

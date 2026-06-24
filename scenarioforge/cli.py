@@ -3382,12 +3382,23 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
                 progress_stream.write('[remote] Refreshing custom CORE services...\n')
             except Exception:
                 pass
-            install_custom_services(
-                remote_client,
-                sudo_password=core_cfg.get('ssh_password'),
-                logger=logging.getLogger(__name__),
-                core_cfg=core_cfg,
-            )
+            try:
+                install_custom_services(
+                    remote_client,
+                    sudo_password=core_cfg.get('ssh_password'),
+                    logger=logging.getLogger(__name__),
+                    core_cfg=core_cfg,
+                )
+            except Exception as exc:
+                message = f'Failed to refresh custom CORE services before remote execute: {exc}'
+                logging.error('%s', message)
+                if bool(getattr(args, 'post_execution_validation', False)):
+                    _print_post_execution_validation_unavailable(
+                        message,
+                        stream=progress_stream,
+                        details=[str(exc)],
+                    )
+                return 1
         try:
             progress_stream.write('[remote] Preparing remote workspace and uploads...\n')
         except Exception:
