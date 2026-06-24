@@ -761,7 +761,72 @@ def test_remote_copy_flow_artifacts_script_collapses_duplicate_artifacts_prefix(
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert cp_calls[0][-2] == str(artifacts_dir / 'operator_pin.hash')
-    assert cp_calls[0][-1] == 'docker-2:/flow_injects/artifacts/operator_pin.hash'
+    assert cp_calls[0][-1] == 'docker-2:/flow_injects/operator_pin.hash'
+
+
+def test_remote_copy_flow_artifacts_script_copies_run_root_artifact_to_basename(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    run_dir = tmp_path / 'flag_generators_runs' / 'flow-sanitycheck' / '01_formatted_csv_user_export_docker-2'
+    artifacts_dir = run_dir / 'artifacts'
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / 'user-export.csv').write_text('demo', encoding='utf-8')
+
+    (assign_dir / 'docker-compose-docker-2.yml').write_text(
+        'services:\n  docker-2:\n    image: demo\n',
+        encoding='utf-8',
+    )
+    (assign_dir / 'compose_assignments.json').write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-2': {
+                        'InjectFiles': ['artifacts/user-export.csv -> /flow_injects'],
+                        'InjectSourceDir': str(run_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-2\n')
+        if docker_cmd[:2] == ['exec', 'docker-2']:
+            calls.append(docker_cmd)
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    ns = {'__name__': '__main__'}
+    out = io.StringIO()
+    with redirect_stdout(out):
+        exec(script, ns, ns)
+    payload = json.loads(out.getvalue().strip())
+
+    assert payload.get('ok') is True
+    items = payload.get('items') or []
+    assert items and items[0].get('ok') is True
+    cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
+    assert cp_calls
+    assert cp_calls[0][-2] == str(artifacts_dir / 'user-export.csv')
+    assert cp_calls[0][-1] == 'docker-2:/flow_injects/user-export.csv'
 
 
 def test_remote_validator_maps_numeric_node_id_to_docker_alias():
