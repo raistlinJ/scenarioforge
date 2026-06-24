@@ -2,9 +2,13 @@ from __future__ import annotations
 import os
 import logging
 from typing import Dict, List, Optional
-try:
-    from core.api.grpc.wrappers import NodeType
-except Exception:  # pragma: no cover - fallback for test environment without CORE
+
+from ..utils.core_imports import quiet_import
+
+_core_wrappers_ok, _core_wrappers_mod, CORE_GRPC_IMPORT_ERROR = quiet_import('core.api.grpc.wrappers')
+if _core_wrappers_ok:
+    NodeType = getattr(_core_wrappers_mod, 'NodeType')  # type: ignore
+else:  # pragma: no cover - fallback for test environment without CORE
     class NodeType:
         DEFAULT = "DEFAULT"
         ROUTER = "ROUTER"

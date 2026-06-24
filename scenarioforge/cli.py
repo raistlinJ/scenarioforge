@@ -31,9 +31,15 @@ if _load_runtime_env_files is not None:
         pass
 
 try:  # pragma: no cover - exercised indirectly via CLI subprocess tests
-    from core.api.grpc import client  # type: ignore
+    from .utils.core_imports import quiet_import as _quiet_import
+except Exception:  # pragma: no cover - package-relative import fallback for unusual launchers
+    from scenarioforge.utils.core_imports import quiet_import as _quiet_import  # type: ignore
+
+_core_grpc_ok, _core_grpc_mod, CORE_GRPC_IMPORT_ERROR = _quiet_import('core.api.grpc.client')
+if _core_grpc_ok:
+    client = _core_grpc_mod  # type: ignore
     CORE_GRPC_AVAILABLE = True
-except ModuleNotFoundError:  # pragma: no cover - fallback path executed in CI without CORE
+else:  # pragma: no cover - fallback path executed in CI without CORE
     client = None  # type: ignore
     CORE_GRPC_AVAILABLE = False
 from .types import NodeInfo
