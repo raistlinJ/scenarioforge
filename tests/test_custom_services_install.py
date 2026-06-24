@@ -89,6 +89,13 @@ class _FlakySFTP(_FakeSFTP):
         return types.SimpleNamespace(st_size=len(self.files.get(str(remotepath), b"")))
 
 
+class _BrokenStreamSFTP(_FlakySFTP):
+    def open(self, remotepath, mode="r"):
+        assert "w" in mode
+        self.stream_uploads.append(str(remotepath))
+        raise OSError("Failure")
+
+
 class _FakeSSHClient:
     def __init__(
         self,
@@ -154,6 +161,24 @@ class _FakeSSHClient:
         return stdin, _FakeStream(stdout_data, 0), _FakeStream(stderr_data, 0)
 
 
+class _CommandUploadFallbackSSHClient(_FakeSSHClient):
+    def __init__(self, *, expected_upload_size: int, **kwargs):
+        super().__init__(**kwargs)
+        self.expected_upload_size = expected_upload_size
+        self.command_uploads = []
+        self.command_upload_stdin = []
+
+    def exec_command(self, cmd, timeout=None, get_pty=None):
+        if "<coretg-custom-service-upload>" in str(cmd):
+            self.commands.append(str(cmd))
+            stdin = _FakeStdin()
+            self.command_uploads.append(str(cmd))
+            self.command_upload_stdin.append(stdin)
+            stdout = _FakeStream(f"{self.expected_upload_size}\n".encode("utf-8"), 0)
+            return stdin, stdout, _FakeStream(b"", 0)
+        return super().exec_command(cmd, timeout=timeout, get_pty=get_pty)
+
+
 def test_install_custom_services_to_core_vm_copies_and_verifies(tmp_path, monkeypatch):
     # Provide temp custom services so the test does not depend on repo files.
     files = []
@@ -205,6 +230,32 @@ def test_install_custom_services_recovers_from_sftp_put_size_mismatch(tmp_path, 
     assert client.sftp.put_calls
     assert client.sftp.stream_uploads == [remote_path]
     assert client.sftp.files[remote_path] == p.read_bytes()
+
+
+def test_install_custom_services_uses_command_upload_when_sftp_stream_fails(tmp_path, monkeypatch):
+    p = tmp_path / "DockerDefaultRoute.py"
+    p.write_text("# test service\nVALUE = 'x'\n", encoding="utf-8")
+    monkeypatch.setattr(backend, "_local_custom_service_files", lambda: [str(p)])
+
+    client = _CommandUploadFallbackSSHClient(expected_upload_size=p.stat().st_size)
+    client.sftp = _BrokenStreamSFTP()
+
+    meta = backend._install_custom_services_to_core_vm(
+        client,
+        sudo_password="pw",
+        logger=types.SimpleNamespace(info=lambda *_a, **_k: None),
+    )
+
+    assert meta["services_dir"] == client.services_dir
+    assert client.sftp.put_calls
+    assert client.sftp.stream_uploads == [
+        "/tmp/coretg_custom_services/DockerDefaultRoute.py",
+        "/tmp/coretg_custom_services/DockerDefaultRoute.py",
+    ]
+    assert len(client.command_uploads) == 1
+    assert "base64.b64decode" in client.command_uploads[0]
+    written = "".join(str(chunk) for chunk in client.command_upload_stdin[0].writes)
+    assert __import__("base64").b64decode(written.encode("ascii")) == p.read_bytes()
 
 
 def test_local_custom_service_names_reads_declared_service_names(tmp_path, monkeypatch):

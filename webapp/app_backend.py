@@ -8299,6 +8299,21 @@ def _install_custom_services_to_core_vm(
         finally:
             _close_ssh_command_streams(stdin, stdout, stderr)
 
+    def _remote_python_candidates() -> list[str]:
+        candidates: list[str] = []
+        try:
+            if core_cfg:
+                for cand in _candidate_remote_python_interpreters(core_cfg):
+                    c = str(cand or '').strip()
+                    if c and c not in candidates:
+                        candidates.append(c)
+        except Exception:
+            pass
+        for c in ('core-python', '/opt/core/venv/bin/python', 'python3', 'python'):
+            if c not in candidates:
+                candidates.append(c)
+        return candidates
+
     def _remote_file_size(sftp: Any, remote_path: str) -> Optional[int]:
         try:
             st = sftp.stat(remote_path)
@@ -8330,6 +8345,116 @@ def _install_custom_services_to_core_vm(
             except Exception:
                 pass
 
+    def _upload_custom_service_file_via_command(local_path: str, remote_path: str) -> None:
+        expected_size = os.path.getsize(local_path)
+        with open(local_path, 'rb') as handle:
+            payload_b64 = base64.b64encode(handle.read()).decode('ascii')
+
+        remote_path_literal = json.dumps(remote_path)
+        upload_script = textwrap.dedent(
+            f"""
+            import base64
+            import os
+            import sys
+
+            path = {remote_path_literal}
+            expected_size = {int(expected_size)}
+            tmp_path = f"{{path}}.tmp-{{os.getpid()}}"
+
+            try:
+                encoded = sys.stdin.read()
+                if isinstance(encoded, bytes):
+                    encoded = encoded.decode("ascii")
+                payload = base64.b64decode(str(encoded or "").encode("ascii"), validate=True)
+                if len(payload) != expected_size:
+                    raise RuntimeError(f"decoded size {{len(payload)}} != expected {{expected_size}}")
+
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+
+                with open(tmp_path, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    try:
+                        os.fsync(handle.fileno())
+                    except OSError:
+                        pass
+
+                actual_size = os.path.getsize(tmp_path)
+                if actual_size != expected_size:
+                    raise RuntimeError(f"remote temp size {{actual_size}} != expected {{expected_size}}")
+                os.replace(tmp_path, path)
+                print(actual_size)
+            except Exception as exc:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                except Exception:
+                    pass
+                print(exc, file=sys.stderr)
+                sys.exit(1)
+            """
+        )
+        upload_script_b64 = base64.b64encode(upload_script.encode('utf-8')).decode('ascii')
+        loader = (
+            "import base64; "
+            f"exec(compile(base64.b64decode('{upload_script_b64}').decode('utf-8'), "
+            "'<coretg-custom-service-upload>', 'exec'))"
+        )
+
+        failures: list[str] = []
+        for interpreter in _remote_python_candidates():
+            cmd = f"{shlex.quote(interpreter)} -c {shlex.quote(loader)}"
+            stdin = stdout = stderr = None
+            try:
+                stdin, stdout, stderr = ssh_client.exec_command(cmd, timeout=30.0, get_pty=False)
+                if stdin:
+                    try:
+                        stdin.write(payload_b64)
+                    except TypeError:
+                        stdin.write(payload_b64.encode('ascii'))
+                    try:
+                        stdin.flush()
+                    except Exception:
+                        pass
+                    try:
+                        stdin.close()
+                    except Exception:
+                        pass
+                    stdin = None
+                out = stdout.read() if stdout else b''
+                err = stderr.read() if stderr else b''
+                try:
+                    exit_code = stdout.channel.recv_exit_status() if (stdout and hasattr(stdout, 'channel')) else 0
+                except Exception:
+                    exit_code = 0
+                out_text = out.decode('utf-8', 'ignore') if isinstance(out, (bytes, bytearray)) else str(out or '')
+                err_text = err.decode('utf-8', 'ignore') if isinstance(err, (bytes, bytearray)) else str(err or '')
+                if exit_code == 0:
+                    last_line = out_text.strip().splitlines()[-1].strip() if out_text.strip() else ''
+                    try:
+                        actual_size = int(last_line)
+                    except (TypeError, ValueError):
+                        actual_size = expected_size if not last_line else -1
+                    if actual_size == expected_size:
+                        return
+                    failures.append(
+                        f"{interpreter}: exit=0 but reported size {last_line or 'n/a'} != {expected_size}"
+                    )
+                else:
+                    detail = (err_text or out_text or f'exit={exit_code}').strip()
+                    failures.append(
+                        f"{interpreter}: exit={exit_code} detail={_summarize_for_log(detail, limit=160)}"
+                    )
+            except Exception as exc:
+                failures.append(f"{interpreter}: {exc}")
+            finally:
+                _close_ssh_command_streams(stdin, stdout, stderr)
+
+        detail = '; '.join(failures[-4:]) if failures else 'no remote python candidates'
+        raise RuntimeError(f'command-channel fallback failed: {detail}')
+
     def _upload_custom_service_file(sftp: Any, local_path: str, remote_path: str) -> None:
         expected_size = os.path.getsize(local_path)
         errors: list[str] = []
@@ -8349,24 +8474,18 @@ def _install_custom_services_to_core_vm(
                 time.sleep(0.15 * attempt)
             except Exception:
                 pass
-        detail = '; '.join(errors[-3:]) if errors else 'unknown upload failure'
+        try:
+            _upload_custom_service_file_via_command(local_path, remote_path)
+            return
+        except Exception as exc:
+            errors.append(str(exc))
+        detail = '; '.join(errors[-4:]) if errors else 'unknown upload failure'
         raise RuntimeError(
             f'Failed uploading custom service {os.path.basename(local_path)} to {remote_path}: {detail}'
         )
 
     # Discover the remote core.services directory (where CORE loads service modules).
-    candidates: list[str] = []
-    try:
-        if core_cfg:
-            for cand in _candidate_remote_python_interpreters(core_cfg):
-                c = str(cand or '').strip()
-                if c and c not in candidates:
-                    candidates.append(c)
-    except Exception:
-        pass
-    for c in ('core-python', '/opt/core/venv/bin/python', 'python3', 'python'):
-        if c not in candidates:
-            candidates.append(c)
+    candidates = _remote_python_candidates()
 
     services_dirs: list[str] = []
     core_conf_custom_services_dirs: list[str] = []
