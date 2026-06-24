@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import subprocess
 
 import pytest
 
@@ -111,6 +113,96 @@ def test_grpc_save_current_session_xml_falls_back_to_remote_python(tmp_path, mon
     assert downloaded["remote_path"] == "/tmp/scenarioforge/core-post/session-1.xml"
     assert downloaded["local_path"] == str(tmp_path / "session-1.xml")
     assert removed == ["/tmp/scenarioforge/core-post/session-1.xml"]
+
+
+def test_grpc_save_current_session_xml_falls_back_to_local_core_python(tmp_path, monkeypatch):
+    @contextlib.contextmanager
+    def _missing_local_core(_cfg):
+        raise ModuleNotFoundError("No module named 'core'")
+        yield
+
+    calls = []
+
+    monkeypatch.setattr(backend, "_core_connection", _missing_local_core)
+    monkeypatch.setattr(
+        backend,
+        "_require_core_ssh_credentials",
+        lambda cfg: (_ for _ in ()).throw(RuntimeError("missing ssh")),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_candidate_remote_python_interpreters",
+        lambda _cfg: ["/opt/core/venv/bin/python"],
+    )
+
+    def _fake_run(cmd, stdout=None, stderr=None, text=None, timeout=None):
+        calls.append(list(cmd))
+        assert cmd[:2] == ["/opt/core/venv/bin/python", "-c"]
+        out_path = tmp_path / "session-7.xml"
+        out_path.write_text("<scenario />\n", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps({"session_id": "7", "output_path": str(out_path)}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(backend.subprocess, "run", _fake_run)
+
+    out = backend._grpc_save_current_session_xml_with_config(
+        {"host": "localhost", "port": 50051, "venv_bin": "/opt/core/venv/bin"},
+        str(tmp_path),
+        session_id="7",
+    )
+
+    assert out == str(tmp_path / "session-7.xml")
+    assert calls
+    script = str(calls[0][2])
+    assert "127.0.0.1:50051" in script
+    assert "CoreGrpcClient" in script
+
+
+def test_grpc_save_current_session_xml_uses_local_core_python_when_remote_fallback_fails(tmp_path, monkeypatch):
+    @contextlib.contextmanager
+    def _missing_local_core(_cfg):
+        raise ModuleNotFoundError("No module named 'core'")
+        yield
+
+    monkeypatch.setattr(backend, "_core_connection", _missing_local_core)
+    monkeypatch.setattr(backend, "_require_core_ssh_credentials", lambda cfg: dict(cfg, ssh_username="core", ssh_password="pw"))
+    monkeypatch.setattr(backend, "_run_remote_python_json", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ssh failed")))
+    monkeypatch.setattr(
+        backend,
+        "_candidate_remote_python_interpreters",
+        lambda _cfg: ["/opt/core/venv/bin/python"],
+    )
+
+    def _fake_run(cmd, stdout=None, stderr=None, text=None, timeout=None):
+        out_path = tmp_path / "session-9.xml"
+        out_path.write_text("<scenario />\n", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps({"session_id": "9", "output_path": str(out_path)}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(backend.subprocess, "run", _fake_run)
+
+    out = backend._grpc_save_current_session_xml_with_config(
+        {
+            "host": "127.0.0.1",
+            "port": 50051,
+            "ssh_host": "127.0.0.1",
+            "ssh_username": "core",
+            "ssh_password": "pw",
+            "venv_bin": "/opt/core/venv/bin",
+        },
+        str(tmp_path),
+        session_id="9",
+    )
+
+    assert out == str(tmp_path / "session-9.xml")
 
 
 def test_grpc_save_current_session_xml_reraises_when_fallback_unavailable(tmp_path, monkeypatch):

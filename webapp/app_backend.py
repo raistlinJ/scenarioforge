@@ -6517,6 +6517,92 @@ def _grpc_save_current_session_xml_with_config(
 
     cfg = _normalize_core_config(core_cfg, include_password=True)
     os.makedirs(out_dir, exist_ok=True)
+
+    def _missing_core_module(exc: BaseException) -> bool:
+        try:
+            if isinstance(exc, ModuleNotFoundError):
+                missing_name = str(getattr(exc, 'name', '') or '').strip()
+                if missing_name == 'core' or missing_name.startswith('core.'):
+                    return True
+        except Exception:
+            pass
+        return "No module named 'core'" in str(exc)
+
+    def _local_core_grpc_host() -> str:
+        host = str(cfg.get('host') or cfg.get('grpc_host') or 'localhost').strip() or 'localhost'
+        if host in {'localhost', '::1'}:
+            return '127.0.0.1'
+        return host
+
+    def _try_local_core_python_save_xml() -> Optional[str]:
+        try:
+            target_port = int(cfg.get('port') or cfg.get('grpc_port') or CORE_PORT)
+        except Exception:
+            target_port = CORE_PORT
+        target_id_text = str(session_id).strip() if session_id not in (None, '') else None
+        local_filename = (
+            f'session-{target_id_text}.xml'
+            if target_id_text
+            else f'core-session-{_local_timestamp_safe()}.xml'
+        )
+        local_path = os.path.join(out_dir, local_filename)
+        script = _remote_core_save_xml_script(
+            f'{_local_core_grpc_host()}:{target_port}',
+            target_id_text,
+            local_path,
+        )
+        errors: List[str] = []
+        for interpreter in _candidate_remote_python_interpreters(cfg):
+            exe = str(interpreter or '').strip()
+            if not exe:
+                continue
+            try:
+                proc = subprocess.run(
+                    [exe, '-c', script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120.0,
+                )
+            except Exception as exc:
+                errors.append(f'{exe}: {exc}')
+                continue
+            stdout_text = str(proc.stdout or '').strip()
+            stderr_text = str(proc.stderr or '').strip()
+            if proc.returncode != 0:
+                errors.append(
+                    f'{exe}: exit={proc.returncode} stdout={_summarize_for_log(stdout_text)} stderr={_summarize_for_log(stderr_text)}'
+                )
+                continue
+            if not stdout_text:
+                errors.append(f'{exe}: empty stdout')
+                continue
+            try:
+                payload = json.loads(stdout_text)
+            except Exception:
+                try:
+                    last_line = [ln for ln in stdout_text.splitlines() if ln.strip()][-1]
+                    payload = json.loads(last_line)
+                except Exception as exc:
+                    errors.append(f'{exe}: invalid JSON: {exc}')
+                    continue
+            if not isinstance(payload, dict):
+                errors.append(f'{exe}: non-object JSON payload')
+                continue
+            error_text = str(payload.get('error') or '').strip()
+            if error_text:
+                errors.append(f'{exe}: {error_text}')
+                if "No module named 'core'" in error_text:
+                    continue
+                raise RuntimeError(error_text)
+            output_path = str(payload.get('output_path') or '').strip()
+            if not output_path:
+                errors.append(f'{exe}: missing output_path')
+                continue
+            return output_path
+        detail = '; '.join(errors[-4:]) if errors else 'no interpreter candidates'
+        raise RuntimeError(f'local CORE Python save_xml fallback failed: {detail}')
+
     try:
         with _core_connection(cfg) as (conn_host, conn_port):
             from core.api.grpc.client import CoreGrpcClient
@@ -6567,6 +6653,8 @@ def _grpc_save_current_session_xml_with_config(
     try:
         ssh_cfg = _require_core_ssh_credentials(cfg)
     except Exception:
+        if _missing_core_module(original_exc):
+            return _try_local_core_python_save_xml()
         raise original_exc
 
     try:
@@ -6605,7 +6693,16 @@ def _grpc_save_current_session_xml_with_config(
         except Exception:
             pass
         return out_path
-    except Exception:
+    except Exception as remote_exc:
+        if _missing_core_module(original_exc):
+            try:
+                return _try_local_core_python_save_xml()
+            except Exception as local_exc:
+                raise RuntimeError(
+                    'CORE session XML export failed because the current Python environment '
+                    f'cannot import core.api.grpc, remote save_xml fallback failed ({remote_exc}), '
+                    f'and local CORE Python fallback failed ({local_exc})'
+                ) from original_exc
         raise original_exc
 
 
