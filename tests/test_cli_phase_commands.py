@@ -2112,6 +2112,81 @@ def test_cli_execute_delegates_to_remote_cli_for_saved_remote_core_config(tmp_pa
     assert 'Post-execution validation: PASSED' in captured.out
 
 
+def test_cli_remote_execute_custom_service_install_failure_emits_validation_summary(tmp_path, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    fake_client = _FakeSshClient(exit_code=0)
+
+    def _merge_core_configs(*configs, include_password=True):
+        merged = {}
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
+    fake_backend = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower().replace(' ', '-'),
+        _core_config_from_xml_path=lambda *_a, **_k: {
+            'host': '127.0.0.1',
+            'port': 50051,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'core',
+            'ssh_password': 'pw',
+        },
+        _select_core_config_for_page=lambda *_a, **_k: {},
+        _load_run_history=lambda: [],
+        _merge_core_configs=_merge_core_configs,
+        _prefer_explicit_or_ssh_core_host=lambda cfg, *_a, **_k: cfg,
+        _apply_core_secret_to_config=lambda cfg, _norm: dict(cfg),
+        _normalize_core_config=lambda cfg, include_password=True: dict(cfg),
+        _require_core_ssh_credentials=lambda cfg: dict(cfg),
+        _open_ssh_client=lambda cfg: fake_client,
+        _install_custom_services_to_core_vm=lambda *a, **k: (_ for _ in ()).throw(
+            OSError('size mismatch in put!  0 != 4221')
+        ),
+    )
+    args = SimpleNamespace(
+        phase='execute',
+        xml=str(xml_path),
+        preview_plan=None,
+        scenario='Scenario One',
+        host='localhost',
+        port=50051,
+        post_execution_validation=True,
+    )
+    argv0 = cli.sys.argv[:]
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'execute',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'Scenario One',
+            '--post-execution-validation',
+        ]
+        ret = cli._maybe_delegate_cli_to_remote(
+            args,
+            backend=fake_backend,
+            scenario_name='Scenario One',
+        )
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    output = capsys.readouterr().out
+    summary = cli._extract_last_json_marker(output, 'VALIDATION_SUMMARY_JSON:')
+    assert summary is not None
+    assert summary['validation_unavailable'] is True
+    assert 'Failed to refresh custom CORE services' in summary['error']
+    assert 'size mismatch in put' in summary['error']
+
+
 def test_cli_remote_execute_start_failure_emits_validation_summary(tmp_path, monkeypatch, capsys):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text(
