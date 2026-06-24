@@ -1,5 +1,6 @@
 import io
 import json
+import shutil
 import subprocess
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -214,8 +215,8 @@ def test_remote_copy_flow_artifacts_script_waits_for_node_alias_before_fallback(
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert ps_calls['count'] >= 3
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/service'
-    assert 'abcdef123456:/flow_injects/service' not in cp_calls[0][-1]
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
+    assert 'abcdef123456:/flow_injects' not in cp_calls[0][-1]
 
 
 def test_remote_copy_flow_artifacts_retries_when_container_is_replaced(tmp_path, monkeypatch):
@@ -376,7 +377,15 @@ def test_remote_copy_flow_artifacts_script_rewrites_local_outputs_paths_to_remot
     compose_path = assign_dir / 'docker-compose-docker-1.yml'
     compose_path.write_text('services:\n  docker-1:\n    image: demo\n', encoding='utf-8')
 
-    stale_source_dir = '/Users/sampleuser/Documents/scenarioforge/outputs/flag_node_generators_runs/flow-scenario1/02_git_deploy_key_repo_docker-1'
+    remote_flow_root = Path('/tmp/vulns/flag_node_generators_runs') / f'flow-{tmp_path.name}'
+    remote_source_dir = remote_flow_root / '02_git_deploy_key_repo_docker-1'
+    remote_service_dir = remote_source_dir / 'service'
+    remote_service_dir.mkdir(parents=True, exist_ok=True)
+    (remote_service_dir / 'README.md').write_text('demo', encoding='utf-8')
+    stale_source_dir = (
+        '/Users/sampleuser/Documents/scenarioforge/outputs/flag_node_generators_runs/'
+        f'{remote_flow_root.name}/02_git_deploy_key_repo_docker-1'
+    )
 
     assignments_path = assign_dir / 'compose_assignments.json'
     assignments_path.write_text(
@@ -414,18 +423,21 @@ def test_remote_copy_flow_artifacts_script_rewrites_local_outputs_paths_to_remot
     monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
     monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
 
-    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
-    ns = {'__name__': '__main__'}
-    out = io.StringIO()
-    with redirect_stdout(out):
-        exec(script, ns, ns)
-    payload = json.loads(out.getvalue().strip())
+    try:
+        script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+        ns = {'__name__': '__main__'}
+        out = io.StringIO()
+        with redirect_stdout(out):
+            exec(script, ns, ns)
+        payload = json.loads(out.getvalue().strip())
+    finally:
+        shutil.rmtree(remote_flow_root, ignore_errors=True)
 
     assert payload.get('ok') is True
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
-    assert cp_calls[0][-2] == '/tmp/vulns/flag_node_generators_runs/flow-scenario1/02_git_deploy_key_repo_docker-1/service'
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/service'
+    assert cp_calls[0][-2] == str(remote_service_dir)
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
 
 
 def test_remote_copy_flow_artifacts_script_recovers_stale_flow_injects_source(tmp_path, monkeypatch):
@@ -488,7 +500,7 @@ def test_remote_copy_flow_artifacts_script_recovers_stale_flow_injects_source(tm
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert cp_calls[0][-2] == str(source_dir / 'workspace')
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/workspace'
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
 
 
 def test_remote_copy_flow_artifacts_script_maps_source_side_detail_to_flow_injects(tmp_path, monkeypatch):
@@ -553,7 +565,7 @@ def test_remote_copy_flow_artifacts_script_maps_source_side_detail_to_flow_injec
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert cp_calls[0][-2] == str(site_dir)
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/site'
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
 
 
 def test_remote_copy_flow_artifacts_script_uses_compose_nodes_not_only_assignment_keys(tmp_path, monkeypatch):
@@ -620,7 +632,7 @@ def test_remote_copy_flow_artifacts_script_uses_compose_nodes_not_only_assignmen
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert cp_calls[0][-2] == str(site_dir)
-    assert cp_calls[0][-1] == 'docker-11:/flow_injects/site'
+    assert cp_calls[0][-1] == 'docker-11:/flow_injects'
 
 
 def test_remote_copy_flow_artifacts_script_falls_back_to_compose_files_without_manifest(tmp_path, monkeypatch):
@@ -684,7 +696,7 @@ def test_remote_copy_flow_artifacts_script_falls_back_to_compose_files_without_m
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert cp_calls[0][-2] == str(service_dir)
-    assert cp_calls[0][-1] == 'docker-2:/flow_injects/service'
+    assert cp_calls[0][-1] == 'docker-2:/flow_injects'
 
 
 def test_remote_validator_maps_numeric_node_id_to_docker_alias():
