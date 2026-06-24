@@ -31195,11 +31195,35 @@ def main():
                         rel_path = str(planned.get('rel_path') or '')
                         dest_dir = str(planned.get('dest_dir') or '')
                         dest_path = str(planned.get('dest_path') or '')
-                        rel_dir = os.path.dirname(rel_path)
-                        if rel_dir:
-                            mkdir_cmd = f"mkdir -p {dest_dir.rstrip('/')}/{rel_dir}"
+                        try:
+                            src_exists = os.path.exists(src_path)
+                            src_is_dir = os.path.isdir(src_path)
+                        except Exception:
+                            src_exists = False
+                            src_is_dir = False
+                        dest_parent = os.path.dirname(dest_path.rstrip('/')) or dest_dir.rstrip('/') or '/'
+                        if src_is_dir:
+                            mkdir_path = dest_parent
+                            copy_dest = dest_parent
                         else:
-                            mkdir_cmd = f"mkdir -p {dest_dir.rstrip('/')}"
+                            mkdir_path = dest_parent
+                            copy_dest = dest_path
+                        if not src_exists:
+                            target_ok = False
+                            attempt_errors.append(f'{t}: source missing for {dest_path}: {src_path}')
+                            command_outputs.append({
+                                'attempt': attempt,
+                                'target': t,
+                                'container_id': before_id,
+                                'rc': 1,
+                                'out': 'source missing',
+                                'src': src_path,
+                                'dest': dest_path,
+                                'copy_dest': copy_dest,
+                                'src_is_dir': bool(src_is_dir),
+                            })
+                            continue
+                        mkdir_cmd = f"mkdir -p {shlex.quote(mkdir_path)}"
                         commands.append(f"docker exec {t} sh -lc {mkdir_cmd}")
                         mkdir_result = _docker_exec_sh(t, mkdir_cmd, timeout=30)
                         if getattr(mkdir_result, 'returncode', 1) != 0:
@@ -31209,8 +31233,8 @@ def main():
                                 + str(getattr(mkdir_result, 'stdout', '') or '').strip()
                             )
                             continue
-                        commands.append(f"docker cp {src_path} {t}:{dest_path}")
-                        p = _run_docker(['cp', src_path, f"{t}:{dest_path}"], timeout=60, capture=True)
+                        commands.append(f"docker cp {src_path} {t}:{copy_dest}")
+                        p = _run_docker(['cp', src_path, f"{t}:{copy_dest}"], timeout=60, capture=True)
                         out = (getattr(p, 'stdout', '') or '').strip()
                         rc = int(getattr(p, 'returncode', 1) or 0)
                         command_outputs.append({
@@ -31219,11 +31243,16 @@ def main():
                             'container_id': before_id,
                             'rc': rc,
                             'out': out,
+                            'src': src_path,
                             'dest': dest_path,
+                            'copy_dest': copy_dest,
+                            'src_is_dir': bool(src_is_dir),
                         })
                         if getattr(p, 'returncode', 1) != 0:
                             target_ok = False
-                            attempt_errors.append(f'{t}: docker cp failed for {dest_path}: {out or "unknown error"}')
+                            attempt_errors.append(
+                                f'{t}: docker cp failed for {dest_path} via {copy_dest}: {out or "unknown error"}'
+                            )
 
                     if before_id and COPY_SETTLE_S > 0:
                         time.sleep(COPY_SETTLE_S)
@@ -38043,6 +38072,54 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
             if isinstance(items, list)
             else 0
         )
+
+        def _first_copy_failure_detail() -> str:
+            if not isinstance(items, list):
+                return ''
+            for it in items:
+                if not isinstance(it, dict) or it.get('ok'):
+                    continue
+                direct = str(it.get('error') or '').strip()
+                if direct:
+                    return _summarize_for_log(direct)
+                errs = it.get('errors') if isinstance(it.get('errors'), list) else []
+                for raw in errs:
+                    detail = str(raw or '').strip()
+                    if detail:
+                        return _summarize_for_log(detail)
+                attempts = it.get('copy_attempts') if isinstance(it.get('copy_attempts'), list) else []
+                for attempt in reversed(attempts):
+                    if not isinstance(attempt, dict) or attempt.get('ok'):
+                        continue
+                    attempt_errors = attempt.get('errors') if isinstance(attempt.get('errors'), list) else []
+                    for raw in attempt_errors:
+                        detail = str(raw or '').strip()
+                        if detail:
+                            return _summarize_for_log(detail)
+                cmd_outs = it.get('command_outputs') if isinstance(it.get('command_outputs'), list) else []
+                for entry in reversed(cmd_outs):
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        rc = int(entry.get('rc') or 0)
+                    except Exception:
+                        rc = 0
+                    if rc == 0:
+                        continue
+                    out = str(entry.get('out') or '').strip()
+                    dest_path = str(entry.get('dest') or '').strip()
+                    copy_dest = str(entry.get('copy_dest') or '').strip()
+                    parts = []
+                    if dest_path:
+                        parts.append(f'dest={dest_path}')
+                    if copy_dest and copy_dest != dest_path:
+                        parts.append(f'copy_dest={copy_dest}')
+                    if out:
+                        parts.append(out)
+                    if parts:
+                        return _summarize_for_log('; '.join(parts))
+            return ''
+
         _append_async_run_log_line(
             meta,
             f"{log_prefix}docker.copy_flow_artifacts({stage}) complete ok={int(copied_ok)} total={int(copied_total)}",
@@ -38243,9 +38320,11 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
             elif payload_error:
                 meta['flow_artifact_copy_error'] = payload_error
             elif copied_ok != copied_total:
-                meta['flow_artifact_copy_error'] = (
-                    f'only {int(copied_ok)} of {int(copied_total)} Flow artifact copy targets succeeded'
-                )
+                detail = _first_copy_failure_detail()
+                message = f'only {int(copied_ok)} of {int(copied_total)} Flow artifact copy targets succeeded'
+                if detail:
+                    message += f'; first_error={detail}'
+                meta['flow_artifact_copy_error'] = message
             _append_async_run_log_line(
                 meta,
                 f"{log_prefix}docker.copy_flow_artifacts({stage}) pending retry ok={int(copied_ok)} total={int(copied_total)}",
