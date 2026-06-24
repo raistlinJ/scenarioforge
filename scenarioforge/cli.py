@@ -88,6 +88,26 @@ def _compose_assignments_summary(
     }
 
 
+def _write_compose_assignments_summary(
+    prepared_assignments: Dict[str, Dict[str, Any]] | None,
+    files: list[str] | None,
+    *,
+    out_base: str = '/tmp/vulns',
+    timestamp: int | None = None,
+) -> str:
+    os.makedirs(out_base, exist_ok=True)
+    path = os.path.join(out_base, 'compose_assignments.json')
+    summary = _compose_assignments_summary(
+        prepared_assignments,
+        files,
+        timestamp=timestamp,
+    )
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(summary, handle, indent=2)
+        handle.write('\n')
+    return path
+
+
 def _preview_vuln_slot_overrides(
     preview_full: Any,
     *,
@@ -6230,10 +6250,11 @@ def main():
                         # This avoids container name conflicts when CORE brings up containers automatically.
                         # Write a small summary for web/ops
                         try:
-                            import json as _json
-                            summary = _compose_assignments_summary(prepared_name_to_vuln, created)
-                            with open('/tmp/vulns/compose_assignments.json', 'w', encoding='utf-8') as f:
-                                _json.dump(summary, f, indent=2)
+                            _write_compose_assignments_summary(
+                                prepared_name_to_vuln,
+                                created,
+                                out_base='/tmp/vulns',
+                            )
                             logging.info("Compose assignments prepared for %d docker nodes; startup deferred to CORE session", len(created))
                         except Exception:
                             pass
@@ -6541,6 +6562,18 @@ def main():
                     pass
                 created = prepare_compose_for_assignments(all_docker_nodes, out_base="/tmp/vulns")
                 logging.info("Prepared docker compose files (all docker nodes): %d for %d docker nodes", len(created), len(all_docker_nodes))
+                try:
+                    _write_compose_assignments_summary(
+                        all_docker_nodes,
+                        created,
+                        out_base='/tmp/vulns',
+                    )
+                    logging.info(
+                        "Compose assignments summary written for %d docker nodes",
+                        len(all_docker_nodes),
+                    )
+                except Exception as e_summary:
+                    logging.warning("Failed writing compose assignments summary: %s", e_summary)
 
                 if segmentation_active:
                     try:
