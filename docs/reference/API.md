@@ -913,6 +913,20 @@ core-python -m scenarioforge.cli topo --xml /abs/path/scenarios.xml --scenario "
 core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051 --post-execution-validation
 ```
 
+### Dangerous Docker Maintenance Command
+
+`cleanup-scenarioforge-docker` is a standalone maintenance command for disposable remote CORE VMs used by ScenarioForge batch/eval runs. It reads `CORE_SSH_HOST`, `CORE_SSH_PORT`, `CORE_SSH_USERNAME`, and `CORE_SSH_PASSWORD` from `.scenarioforge.env` or the environment unless overridden by `--ssh-*` flags.
+
+```bash
+# Safe inspection only.
+uv run cleanup-scenarioforge-docker --dry-run
+
+# Dangerous: removes every Docker container, image, build cache, and unused Docker volume/network on the remote host.
+uv run cleanup-scenarioforge-docker --force
+```
+
+Without `--force`, the command requires typing `DELETE ALL REMOTE DOCKER` exactly. Do not run it against shared Docker hosts or machines with non-ScenarioForge workloads.
+
 ### Core Arguments
 
 - `--xml` (required): Scenario XML path.
