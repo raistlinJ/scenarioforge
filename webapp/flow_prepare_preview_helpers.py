@@ -3458,9 +3458,17 @@ def persist_prepare_preview_plan(
         if not ok:
             return {'ok': False, 'error': f'Failed to persist flow-modified preview plan: {err}'}
         try:
-            backend._update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
-        except Exception:
-            pass
+            flow_ok, flow_err = backend._update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
+        except Exception as exc:
+            return {
+                'ok': False,
+                'error': f'Failed to persist flow-modified preview plan FlowState: {exc}',
+            }
+        if not flow_ok:
+            return {
+                'ok': False,
+                'error': f'Failed to persist flow-modified preview plan FlowState: {flow_err}',
+            }
         out_path = xml_target
         try:
             backend._planner_set_plan(scenario_norm, plan_path=xml_target, xml_path=xml_target, seed=(meta_out or {}).get('seed'))
