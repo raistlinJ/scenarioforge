@@ -1024,6 +1024,103 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
     return {'ok': True, 'compose_path': p, 'service': svc, 'cmd': cmd, 'output': out[-2400:]}
 
 
+def _restart_not_running_docker_nodes(
+    names: list[str],
+    *,
+    restart_timeout_s: float = 120.0,
+) -> list[dict[str, Any]]:
+    """Best-effort compose restart for Docker nodes that failed to reach running.
+
+    CORE can occasionally create a Docker node but leave its container exited or
+    absent after start_session. A targeted `docker compose up -d <service>` gives
+    the generated compose service one more chance before CLI start validation
+    reports failure.
+    """
+    attempts: list[dict[str, Any]] = []
+    for raw_name in names or []:
+        name = str(raw_name or '').strip()
+        if not name:
+            continue
+        compose_path = _docker_node_compose_path(name)
+        before = _docker_container_state(name)
+        result = _docker_compose_restart_service(
+            compose_path,
+            name,
+            timeout_s=float(restart_timeout_s or 120.0),
+        )
+        result['node'] = name
+        result['before'] = before
+        try:
+            result['after'] = _docker_container_state(name)
+        except Exception:
+            pass
+        attempts.append(result)
+        try:
+            if result.get('ok'):
+                logging.info(
+                    "Restarted not-running docker compose node=%s via %s",
+                    name,
+                    compose_path,
+                )
+            else:
+                logging.warning(
+                    "Failed restarting not-running docker compose node=%s via %s: %s",
+                    name,
+                    compose_path,
+                    result.get('error'),
+                )
+        except Exception:
+            pass
+    return attempts
+
+
+def _ensure_docker_nodes_running(
+    names: list[str],
+    *,
+    docker_wait_s: float,
+    poll_s: float = 0.5,
+    generation_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
+    not_running_names = [
+        str(name or '').strip()
+        for name in (docker_runtime.get('not_running') or [])
+        if str(name or '').strip()
+    ]
+    if not not_running_names:
+        return docker_runtime
+
+    try:
+        val = os.getenv('CORETG_DOCKER_RESTART_NOT_RUNNING')
+        restart_enabled = True if val is None else (str(val).strip().lower() not in ('0', 'false', 'no', 'off', ''))
+    except Exception:
+        restart_enabled = True
+    if not restart_enabled:
+        return docker_runtime
+
+    try:
+        restart_timeout = float(os.getenv('CORETG_DOCKER_RESTART_TIMEOUT_S') or 120.0)
+    except Exception:
+        restart_timeout = 120.0
+    logging.warning(
+        "Docker node(s) not running after %.1fs; attempting compose restart: %s",
+        docker_wait_s,
+        ', '.join(not_running_names),
+    )
+    restart_attempts = _restart_not_running_docker_nodes(
+        not_running_names,
+        restart_timeout_s=restart_timeout,
+    )
+    try:
+        if generation_meta is not None:
+            generation_meta.setdefault('docker_nodes_start_recovery_attempts', restart_attempts)
+    except Exception:
+        pass
+    if any(bool(item.get('ok')) for item in restart_attempts):
+        docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
+    return docker_runtime
+
+
 def _wait_for_docker_running(
     names: list[str],
     *,
@@ -4576,7 +4673,7 @@ CLI_PHASES = ('execute', 'new', 'preview-plan', 'flag-sequencing', 'topo')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
     'Maintenance command: cleanup-scenarioforge-docker --dry-run inspects the configured remote CORE host; '
-    'cleanup-scenarioforge-docker --force removes all Docker containers/images/build cache on that remote host.'
+    'cleanup-scenarioforge-docker --force removes all Docker containers/images/build cache and unused volumes/networks on that remote host.'
 )
 
 
@@ -6943,7 +7040,12 @@ def main():
         # Validate docker-compose nodes are actually running (not merely created in config).
         if start_ok or configuration_state_pending_docker_validation:
             if docker_names2:
-                docker_runtime = _wait_for_docker_running(docker_names2, timeout_s=docker_wait_s, poll_s=0.5)
+                docker_runtime = _ensure_docker_nodes_running(
+                    docker_names2,
+                    docker_wait_s=docker_wait_s,
+                    poll_s=0.5,
+                    generation_meta=generation_meta if isinstance(generation_meta, dict) else None,
+                )
                 if docker_runtime.get('not_running'):
                     start_ok = False
                     configuration_state_pending_docker_validation = False

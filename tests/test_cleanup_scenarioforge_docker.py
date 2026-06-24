@@ -57,6 +57,35 @@ class _FakeSSHClient:
         self.closed = True
 
 
+class _StreamingChannel:
+    def __init__(self, chunks, err_chunks=None, exit_status=0):
+        self.chunks = list(chunks)
+        self.err_chunks = list(err_chunks or [])
+        self.exit_status = exit_status
+        self.closed = False
+
+    def recv_ready(self):
+        return bool(self.chunks)
+
+    def recv(self, _size):
+        return self.chunks.pop(0)
+
+    def recv_stderr_ready(self):
+        return bool(self.err_chunks)
+
+    def recv_stderr(self, _size):
+        return self.err_chunks.pop(0)
+
+    def exit_status_ready(self):
+        return not self.chunks and not self.err_chunks
+
+    def recv_exit_status(self):
+        return self.exit_status
+
+    def close(self):
+        self.closed = True
+
+
 def test_confirmation_requires_exact_phrase():
     cfg = {"ssh_username": "corevm", "ssh_host": "10.0.0.50", "ssh_port": 22}
     output = io.StringIO()
@@ -112,8 +141,12 @@ def test_force_cleanup_runs_remote_destructive_docker_commands(monkeypatch, caps
     assert "docker rmi -f" in command
     assert "docker builder prune -af" in command
     assert "docker volume prune -f" in command
+    assert "[cleanup] removing all containers" in command
+    assert "[cleanup] pruning unused volumes" in command
     captured = capsys.readouterr()
     assert "DANGER" in captured.err
+    assert "[cleanup] connecting to corevm@10.0.0.50:2222" in captured.err
+    assert "cleanup output" in captured.out
     assert "Remote ScenarioForge Docker cleanup complete." in captured.out
 
 
@@ -137,11 +170,40 @@ def test_dry_run_skips_force_and_uses_inspection_only(monkeypatch, capsys):
     command = client.commands[0]["command"]
     assert "docker system df" in command
     assert "docker ps -aq" in command
+    assert "[cleanup] starting dry run" in command
+    assert "[cleanup] counting Docker resources" in command
     assert "docker rm -f" not in command
     assert "docker rmi -f" not in command
     captured = capsys.readouterr()
     assert "DRY RUN" in captured.err
+    assert "[cleanup] connected; starting dry run" in captured.err
+    assert "cleanup output" in captured.out
     assert "Dry run complete" in captured.out
+
+
+def test_stream_channel_output_writes_progress_as_chunks_arrive():
+    channel = _StreamingChannel(
+        [b"[cleanup] step one\n", b"[cleanup] step two\n"],
+        [b"warning line\n"],
+        exit_status=7,
+    )
+    stdout = SimpleNamespace(channel=channel)
+    out = io.StringIO()
+    err = io.StringIO()
+
+    code, out_text, err_text = cleanup._stream_channel_output(
+        stdout,
+        None,
+        timeout=5,
+        output_stream=out,
+        error_stream=err,
+    )
+
+    assert code == 7
+    assert out_text == "[cleanup] step one\n[cleanup] step two\n"
+    assert err_text == "warning line\n"
+    assert out.getvalue() == out_text
+    assert err.getvalue() == err_text
 
 
 def test_resolved_config_loads_env_file_from_current_directory(tmp_path, monkeypatch):

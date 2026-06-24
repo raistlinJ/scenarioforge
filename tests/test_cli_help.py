@@ -38,4 +38,5 @@ def test_general_help_points_to_phase_specific_help() -> None:
     assert 'cleanup-scenarioforge-docker --force' in help_text
     assert 'removes all Docker' in help_text
     assert 'containers/images/build cache' in help_text
+    assert 'unused volumes/networks' in help_text
     assert '--flow-mode' not in help_text
