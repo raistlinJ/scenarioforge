@@ -1,22 +1,97 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
+import re
 import shlex
 import sys
+from pathlib import Path
 from typing import Any
 
 
 CONFIRMATION_PHRASE = "DELETE ALL REMOTE DOCKER"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _load_runtime_env() -> None:
+def _env_file_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    explicit = str(os.environ.get("CORETG_ENV_FILE") or "").strip()
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    candidates.append(Path.cwd() / ".scenarioforge.env")
+    candidates.append(Path(__file__).resolve().parent.parent / ".scenarioforge.env")
+
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(resolved)
+    return deduped
+
+
+def _parse_env_value(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        return ""
+    if value[0] in {'"', "'"} and value[-1:] == value[0]:
+        try:
+            return str(ast.literal_eval(value))
+        except Exception:
+            return value[1:-1]
+    comment_index = value.find(" #")
+    if comment_index >= 0:
+        value = value[:comment_index].rstrip()
+    return value
+
+
+def _load_env_file(path: str | Path, *, override: bool = False) -> list[str]:
+    env_path = Path(path).expanduser().resolve(strict=False)
+    if not env_path.is_file():
+        return []
+    try:
+        lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return []
+
+    loaded: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if not _ENV_KEY_RE.match(key):
+            continue
+        if override or key not in os.environ:
+            os.environ[key] = _parse_env_value(value)
+        loaded.append(key)
+    return loaded
+
+
+def _load_runtime_env() -> list[Path]:
+    loaded: list[Path] = []
+    for candidate in _env_file_candidates():
+        if _load_env_file(candidate, override=False):
+            loaded.append(candidate)
+    if loaded:
+        return loaded
+
+    # Backward-compatible fallback for source-tree runs that already have webapp
+    # importable. The cleanup command itself remains self-contained above.
     try:
         from webapp.env_loader import load_runtime_env_files
 
-        load_runtime_env_files(include_example=False)
+        return list(load_runtime_env_files(include_example=False))
     except Exception:
-        return
+        return []
 
 
 def _env_int(name: str, default: int) -> int:
@@ -32,6 +107,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Dangerous maintenance command: remove all Docker containers, images, "
             "build cache, and unused Docker volumes/networks from a remote CORE host."
+        ),
+        epilog=(
+            "Configuration is read from exported environment variables, CORETG_ENV_FILE, "
+            ".scenarioforge.env in the current directory, or .scenarioforge.env in the ScenarioForge source root."
         ),
     )
     parser.add_argument("--ssh-host", default=None, help="Remote CORE SSH host. Defaults to CORE_SSH_HOST, then CORE_HOST.")

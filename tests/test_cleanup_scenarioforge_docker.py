@@ -1,4 +1,5 @@
 import io
+from types import SimpleNamespace
 
 from scenarioforge import cleanup_scenarioforge_docker as cleanup
 
@@ -141,3 +142,61 @@ def test_dry_run_skips_force_and_uses_inspection_only(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "DRY RUN" in captured.err
     assert "Dry run complete" in captured.out
+
+
+def test_resolved_config_loads_env_file_from_current_directory(tmp_path, monkeypatch):
+    env_path = tmp_path / ".scenarioforge.env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "CORE_SSH_HOST=10.0.0.77",
+                "CORE_SSH_PORT=2207",
+                "CORE_SSH_USERNAME=file-user",
+                "CORE_SSH_PASSWORD='file password'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for key in ("CORETG_ENV_FILE", "CORE_HOST", "CORE_SSH_HOST", "CORE_SSH_PORT", "CORE_SSH_USERNAME", "CORE_SSH_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    cfg = cleanup._resolved_config(
+        SimpleNamespace(ssh_host=None, ssh_port=None, ssh_username=None, ssh_password=None)
+    )
+
+    assert cfg == {
+        "ssh_host": "10.0.0.77",
+        "ssh_port": 2207,
+        "ssh_username": "file-user",
+        "ssh_password": "file password",
+    }
+
+
+def test_resolved_config_keeps_exported_env_over_env_file(tmp_path, monkeypatch):
+    env_path = tmp_path / ".scenarioforge.env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "CORE_SSH_HOST=10.0.0.77",
+                "CORE_SSH_PORT=2207",
+                "CORE_SSH_USERNAME=file-user",
+                "CORE_SSH_PASSWORD=file-password",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for key in ("CORETG_ENV_FILE", "CORE_HOST", "CORE_SSH_HOST", "CORE_SSH_PORT", "CORE_SSH_USERNAME", "CORE_SSH_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CORE_SSH_HOST", "10.0.0.88")
+    monkeypatch.setenv("CORE_SSH_USERNAME", "exported-user")
+
+    cfg = cleanup._resolved_config(
+        SimpleNamespace(ssh_host=None, ssh_port=None, ssh_username=None, ssh_password=None)
+    )
+
+    assert cfg["ssh_host"] == "10.0.0.88"
+    assert cfg["ssh_port"] == 2207
+    assert cfg["ssh_username"] == "exported-user"
+    assert cfg["ssh_password"] == "file-password"
