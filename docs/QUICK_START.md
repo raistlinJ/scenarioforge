@@ -153,6 +153,10 @@ Saved XML parity notes:
 - When that saved scenario targets a remote CORE VM, the terminal CLI delegates the run to a remote CLI process over SSH so uploaded XML, compose files, and Flow artifacts live on the same host as `core-daemon`.
 - If the XML does not carry a saved `CoreConnection`, the CLI can still use env-only remote defaults from `.scenarioforge.env` for `execute`, `topo`, and remote `flag-sequencing` generator runs.
 
+Dangerous remote Docker cleanup:
+- `uv run cleanup-scenarioforge-docker --dry-run` inspects Docker usage on the configured remote CORE SSH host.
+- `uv run cleanup-scenarioforge-docker --force` removes every Docker container, image, build cache, and unused Docker volume/network on that remote host. Use this only for disposable ScenarioForge/CORE VMs used by batch evaluation; it is not safe for shared Docker hosts.
+
 VM mode note:
 - When `CORETG_WEBUI_MODE=vm`, the CLI now errors early if required CORE VM connection data is missing or still using template placeholder values. In VM mode, saved XML should carry the scenario’s CORE connection info.
 

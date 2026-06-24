@@ -364,6 +364,13 @@ Execute defaults include CORE session cleanup, Docker cleanup, conflict removal,
 and wrapper/generator image refresh. Two evaluator iterations using the same VM
 can therefore remove or replace each other's sessions and containers.
 
+For disposable remote CORE VMs that accumulate Docker state during large eval
+batches, use `cleanup-scenarioforge-docker --dry-run` to inspect usage and
+`cleanup-scenarioforge-docker --force` only when you intentionally want to
+remove every Docker container, image, build cache, and unused Docker
+volume/network on that remote host. This is dangerous and should not be used on
+shared Docker machines.
+
 Use one per-VM lock across `flag-sequencing` when it runs generators remotely,
 `topo`, and `execute`. Keeping the lock across Flow resolution and execute also
 protects the resolved `/tmp/vulns` artifacts from another run's cleanup.

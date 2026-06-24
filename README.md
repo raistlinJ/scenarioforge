@@ -125,6 +125,18 @@ uv run python webapp/app_backend.py
 
 After launch, use the CORE Management and Execute views to validate CORE connectivity, save VM/Proxmox credentials, apply participant bridge wiring, preview the scenario, and execute it.
 
+Remote Docker cleanup for batch/eval hosts:
+
+```bash
+# Inspect remote Docker usage without deleting anything.
+uv run cleanup-scenarioforge-docker --dry-run
+
+# Dangerous: removes every Docker container, image, build cache, and unused Docker volume/network on the configured remote CORE SSH host.
+uv run cleanup-scenarioforge-docker --force
+```
+
+`cleanup-scenarioforge-docker` reads `CORE_SSH_HOST`, `CORE_SSH_PORT`, `CORE_SSH_USERNAME`, and `CORE_SSH_PASSWORD` from `.scenarioforge.env` or the environment. Use it only against disposable ScenarioForge/CORE VMs, not shared Docker hosts.
+
 ### DeployForge
 
 A ready-to-deploy DeployForge file is coming soon: [docs/DEPLOYFORGE.md](docs/DEPLOYFORGE.md).
