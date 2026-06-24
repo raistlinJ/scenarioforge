@@ -30976,6 +30976,22 @@ def _resolve_relative_inject_source(source_dir: str, rel_path: str):
     return fallback or _normalize_remote_flow_path(os.path.join(source_dir, rel))
 
 
+def _runtime_dest_rel_for_inject(rel_path: str):
+    rel = str(rel_path or '').replace('\\', '/').strip()
+    while rel.startswith('./'):
+        rel = rel[2:]
+    rel = rel.lstrip('/')
+    original_base = os.path.basename(rel.rstrip('/'))
+    for prefix in ('flow_artifacts/', 'artifacts/'):
+        if rel.startswith(prefix):
+            rel = rel.split(prefix, 1)[1].lstrip('/')
+            break
+    rel = rel.strip('/')
+    if rel:
+        return rel
+    return original_base
+
+
 def main():
     base = os.environ.get('CORE_REMOTE_BASE_DIR', '/tmp/scenarioforge')
     assignment_candidates = [
@@ -31186,7 +31202,7 @@ def main():
                     rel_path = os.path.basename(str(src_path or rel).rstrip('/')) or os.path.basename(rel.rstrip('/'))
                 else:
                     src_path = _resolve_relative_inject_source(source_dir, rel)
-                    rel_path = rel
+                    rel_path = _runtime_dest_rel_for_inject(rel)
                 if not src_path or not rel_path:
                     continue
                 dest_path = dest_dir.rstrip('/') + '/' + rel_path.lstrip('/')
