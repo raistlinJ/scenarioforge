@@ -30940,6 +30940,42 @@ def _container_path_exists(target: str, path: str):
     return bool(ok), str(getattr(p, 'stdout', '') or '').strip()
 
 
+def _resolve_relative_inject_source(source_dir: str, rel_path: str):
+    source_dir = _normalize_remote_flow_path(str(source_dir or '').strip())
+    rel = str(rel_path or '').replace('\\', '/').strip().lstrip('/')
+    if not source_dir or not rel:
+        return _normalize_remote_flow_path(os.path.join(source_dir, rel) if source_dir else rel)
+
+    candidates = []
+    try:
+        base_name = os.path.basename(source_dir.rstrip('/')).lower()
+    except Exception:
+        base_name = ''
+    if base_name in ('artifacts', 'flow_artifacts'):
+        for prefix in ('artifacts/', 'flow_artifacts/'):
+            if rel.startswith(prefix):
+                stripped = rel.split(prefix, 1)[1].lstrip('/')
+                if stripped:
+                    candidates.append(os.path.join(source_dir, stripped))
+    candidates.append(os.path.join(source_dir, rel))
+
+    seen = set()
+    fallback = ''
+    for cand in candidates:
+        normalized = _normalize_remote_flow_path(cand)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if not fallback:
+            fallback = normalized
+        try:
+            if os.path.exists(normalized):
+                return normalized
+        except Exception:
+            continue
+    return fallback or _normalize_remote_flow_path(os.path.join(source_dir, rel))
+
+
 def main():
     base = os.environ.get('CORE_REMOTE_BASE_DIR', '/tmp/scenarioforge')
     assignment_candidates = [
@@ -31149,8 +31185,7 @@ def main():
                     src_path = _normalize_remote_flow_path(rel)
                     rel_path = os.path.basename(str(src_path or rel).rstrip('/')) or os.path.basename(rel.rstrip('/'))
                 else:
-                    src_path = os.path.join(source_dir, rel.lstrip('/')) if source_dir else rel
-                    src_path = _normalize_remote_flow_path(src_path)
+                    src_path = _resolve_relative_inject_source(source_dir, rel)
                     rel_path = rel
                 if not src_path or not rel_path:
                     continue
