@@ -442,8 +442,13 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
 
     # Build wrapper images declared via labels (no `build:` stanza) first.
     # This ensures core-daemon will not attempt to build/pull when it later starts nodes.
+    #
+    # Treat wrapper build failures as fatal even outside strict pull mode. Wrapper
+    # image tags are local-only and scenario/node scoped, so falling through after
+    # a failed build can accidentally start a stale image from an earlier run.
     try:
         compose_dir = os.path.dirname(os.path.abspath(compose_path))
+        wrapper_build_failures: List[str] = []
         for svc_name, image, ctx in wrapper_builds:
             df_path = os.path.join(ctx, 'Dockerfile')
             if not os.path.isabs(df_path):
@@ -460,11 +465,24 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             if build_pull:
                 args.append('--pull')
             args += ['-t', image, '-f', df_path, ctx_path]
-            rc, _tail = _run(args, timeout=1800)
+            rc, tail = _run(args, timeout=1800)
             if rc == 0:
                 built_any = True
+            else:
+                wrapper_build_failures.append(
+                    (
+                        f"service={svc_name} image={image} rc={rc} "
+                        f"context={ctx_path} dockerfile={df_path}"
+                        + (f"\n{tail}" if tail else "")
+                    ).strip()
+                )
+        if wrapper_build_failures:
+            raise RuntimeError(
+                "docker wrapper image build failed; refusing to use an existing/stale local image\n"
+                + "\n---\n".join(wrapper_build_failures)
+            )
     except Exception:
-        pass
+        raise
 
     # Build any services that declare a `build:` stanza using host networking.
     # This avoids reliance on Docker's default bridge network (which may be disabled

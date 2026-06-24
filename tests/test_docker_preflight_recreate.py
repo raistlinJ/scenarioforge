@@ -144,6 +144,64 @@ def test_docker_compose_preflight_builds_build_only_dependency_without_explicit_
     assert ['docker', 'compose', '-p', 'docker-1conf', '-f', str(compose_path), 'build'] not in calls
 
 
+def test_docker_compose_preflight_fails_on_wrapper_build_failure(tmp_path, monkeypatch):
+    compose_path = tmp_path / 'docker-compose.yml'
+    wrapper_ctx = tmp_path / 'wrapper'
+    wrapper_ctx.mkdir()
+    (wrapper_ctx / 'Dockerfile').write_text('FROM vulhub/appweb:7.0.1\n', encoding='utf-8')
+
+    compose_path.write_text(
+        (
+            'services:\n'
+            '  docker-7:\n'
+            '    image: coretg/unique-flow-chain-docker-7:iproute2\n'
+            '    container_name: docker-7\n'
+            '    labels:\n'
+            f'      coretg.wrapper_build_context: {wrapper_ctx}\n'
+        ),
+        encoding='utf-8',
+    )
+
+    calls = []
+
+    def fake_run(args, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        argv = list(args)
+        calls.append(argv)
+        if argv[:2] == ['docker', 'build']:
+            return _Proc(1, 'base image pull failed')
+        raise AssertionError(f'unexpected args after wrapper build failure: {argv}')
+
+    monkeypatch.setattr(topo, '_docker_compose_cmd', lambda: ['docker', 'compose'])
+    monkeypatch.setattr(topo, '_docker_cmd', lambda: ['docker'])
+    monkeypatch.setattr(topo.subprocess, 'run', fake_run)
+    monkeypatch.delenv('CORETG_DOCKER_STRICT_PULL', raising=False)
+    topo._PREFLIGHTED_DOCKER_NODE_COMPOSES.discard(str(Path(compose_path).resolve()))
+
+    try:
+        topo._docker_compose_preflight(str(compose_path), node_name='docker-7')
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError('expected wrapper build failure to abort preflight')
+
+    assert 'docker wrapper image build failed' in message
+    assert 'coretg/unique-flow-chain-docker-7:iproute2' in message
+    assert 'base image pull failed' in message
+    assert calls == [
+        [
+            'docker',
+            'build',
+            '--network',
+            'host',
+            '-t',
+            'coretg/unique-flow-chain-docker-7:iproute2',
+            '-f',
+            str(wrapper_ctx / 'Dockerfile'),
+            str(wrapper_ctx),
+        ]
+    ]
+
+
 def test_docker_compose_preflight_runs_inject_helpers_before_target_service(tmp_path, monkeypatch):
     compose_path = tmp_path / 'docker-compose.yml'
     compose_path.write_text(
