@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -182,20 +183,24 @@ def _cleanup_script(*, dry_run: bool) -> str:
     if dry_run:
         return r"""
 set -u
-echo '== docker system df =='
+echo '[cleanup] starting dry run'
+echo '[cleanup] docker system df'
 docker system df || true
-echo '== counts =='
+echo '[cleanup] counting Docker resources'
 printf 'containers=%s\n' "$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
 printf 'images=%s\n' "$(docker images -aq 2>/dev/null | sort -u | wc -l | tr -d ' ')"
 printf 'volumes=%s\n' "$(docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
 printf 'networks=%s\n' "$(docker network ls -q 2>/dev/null | wc -l | tr -d ' ')"
+echo '[cleanup] dry run complete'
 """.strip()
 
     return r"""
 set -u
-echo '== before cleanup =='
+echo '[cleanup] starting destructive Docker cleanup'
+echo '[cleanup] before cleanup: docker system df'
 docker system df || true
 
+echo '[cleanup] removing all containers'
 containers="$(docker ps -aq 2>/dev/null || true)"
 if [ -n "$containers" ]; then
   echo "$containers" | xargs -r docker rm -f
@@ -203,6 +208,7 @@ else
   echo 'no containers to remove'
 fi
 
+echo '[cleanup] removing all images'
 images="$(docker images -aq 2>/dev/null | sort -u || true)"
 if [ -n "$images" ]; then
   echo "$images" | xargs -r docker rmi -f
@@ -210,14 +216,20 @@ else
   echo 'no images to remove'
 fi
 
+echo '[cleanup] pruning stopped containers'
 docker container prune -f || true
+echo '[cleanup] pruning unused images'
 docker image prune -af || true
+echo '[cleanup] pruning build cache'
 docker builder prune -af || true
+echo '[cleanup] pruning unused volumes'
 docker volume prune -f || true
+echo '[cleanup] pruning unused networks'
 docker network prune -f || true
 
-echo '== after cleanup =='
+echo '[cleanup] after cleanup: docker system df'
 docker system df || true
+echo '[cleanup] destructive cleanup complete'
 """.strip()
 
 
@@ -235,7 +247,98 @@ def _decode_stream(value: Any) -> str:
     return str(value)
 
 
-def _run_remote_cleanup(client: Any, cfg: dict[str, Any], *, dry_run: bool, timeout: float) -> tuple[int, str, str]:
+def _write_output(stream: Any, text: str) -> None:
+    if stream is None or not text:
+        return
+    try:
+        stream.write(text)
+        stream.flush()
+    except Exception:
+        pass
+
+
+def _stream_channel_output(
+    stdout: Any,
+    stderr: Any,
+    *,
+    timeout: float,
+    output_stream: Any = None,
+    error_stream: Any = None,
+) -> tuple[int, str, str]:
+    channel = getattr(stdout, "channel", None)
+    required = ("recv_ready", "recv", "exit_status_ready", "recv_exit_status")
+    if channel is None or any(not hasattr(channel, name) for name in required):
+        out = stdout.read() if stdout is not None else b""
+        err = stderr.read() if stderr is not None else b""
+        out_text = _decode_stream(out)
+        err_text = _decode_stream(err)
+        _write_output(output_stream, out_text)
+        _write_output(error_stream, err_text)
+        try:
+            code = int(stdout.channel.recv_exit_status()) if stdout is not None and hasattr(stdout, "channel") else 0
+        except Exception:
+            code = 0
+        return code, out_text, err_text
+
+    out_parts: list[str] = []
+    err_parts: list[str] = []
+    started = time.monotonic()
+
+    def drain() -> bool:
+        got_output = False
+        try:
+            while channel.recv_ready():
+                chunk = channel.recv(65536)
+                if not chunk:
+                    break
+                text = _decode_stream(chunk)
+                out_parts.append(text)
+                _write_output(output_stream, text)
+                got_output = True
+        except Exception:
+            pass
+        try:
+            if hasattr(channel, "recv_stderr_ready") and hasattr(channel, "recv_stderr"):
+                while channel.recv_stderr_ready():
+                    chunk = channel.recv_stderr(65536)
+                    if not chunk:
+                        break
+                    text = _decode_stream(chunk)
+                    err_parts.append(text)
+                    _write_output(error_stream, text)
+                    got_output = True
+        except Exception:
+            pass
+        return got_output
+
+    while True:
+        drain()
+        try:
+            if channel.exit_status_ready():
+                drain()
+                return int(channel.recv_exit_status()), "".join(out_parts), "".join(err_parts)
+        except Exception:
+            return 0, "".join(out_parts), "".join(err_parts)
+
+        if timeout and timeout > 0 and (time.monotonic() - started) > timeout:
+            try:
+                channel.close()
+            except Exception:
+                pass
+            raise TimeoutError(f"remote cleanup exceeded timeout of {timeout:g} seconds")
+
+        time.sleep(0.2)
+
+
+def _run_remote_cleanup(
+    client: Any,
+    cfg: dict[str, Any],
+    *,
+    dry_run: bool,
+    timeout: float,
+    output_stream: Any = None,
+    error_stream: Any = None,
+) -> tuple[int, str, str]:
     command = _sudo_command(_cleanup_script(dry_run=dry_run), str(cfg.get("ssh_password") or ""))
     stdin = stdout = stderr = None
     try:
@@ -246,13 +349,13 @@ def _run_remote_cleanup(client: Any, cfg: dict[str, Any], *, dry_run: bool, time
                 stdin.flush()
             except Exception:
                 pass
-        out = stdout.read() if stdout is not None else b""
-        err = stderr.read() if stderr is not None else b""
-        try:
-            code = int(stdout.channel.recv_exit_status()) if stdout is not None and hasattr(stdout, "channel") else 0
-        except Exception:
-            code = 0
-        return code, _decode_stream(out), _decode_stream(err)
+        return _stream_channel_output(
+            stdout,
+            stderr,
+            timeout=timeout,
+            output_stream=output_stream,
+            error_stream=error_stream,
+        )
     finally:
         for stream in (stdin, stdout, stderr):
             try:
@@ -301,8 +404,22 @@ def main(argv: list[str] | None = None) -> int:
 
     client = None
     try:
+        target = f"{cfg.get('ssh_username')}@{cfg.get('ssh_host')}:{cfg.get('ssh_port')}"
+        print(f"[cleanup] connecting to {target}", file=sys.stderr)
         client = _open_ssh_client(cfg)
-        code, out, err = _run_remote_cleanup(client, cfg, dry_run=bool(args.dry_run), timeout=float(args.timeout or 900.0))
+        print(
+            f"[cleanup] connected; starting {'dry run' if args.dry_run else 'destructive cleanup'} "
+            f"(timeout={float(args.timeout or 900.0):g}s)",
+            file=sys.stderr,
+        )
+        code, _out, _err = _run_remote_cleanup(
+            client,
+            cfg,
+            dry_run=bool(args.dry_run),
+            timeout=float(args.timeout or 900.0),
+            output_stream=sys.stdout,
+            error_stream=sys.stderr,
+        )
     except Exception as exc:
         print(f"cleanup-scenarioforge-docker failed: {exc}", file=sys.stderr)
         return 1
@@ -313,10 +430,6 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-    if out:
-        print(out, end="" if out.endswith("\n") else "\n")
-    if err:
-        print(err, file=sys.stderr, end="" if err.endswith("\n") else "\n")
     if code != 0:
         print(f"cleanup-scenarioforge-docker failed with remote exit code {code}", file=sys.stderr)
         return code
