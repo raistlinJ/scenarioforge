@@ -294,6 +294,95 @@ def test_remote_copy_flow_artifacts_retries_when_container_is_replaced(tmp_path,
     assert item.get('verified_paths') == ['/flow_injects/service']
 
 
+def test_remote_copy_flow_artifacts_waits_out_restarting_container(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / 'flag_node_generators_runs' / 'flow-scenario1' / '02_generator_docker-2'
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / 'callback_url.txt').write_text('http://example.test/callback', encoding='utf-8')
+
+    (assign_dir / 'docker-compose-docker-2.yml').write_text(
+        'services:\n  docker-2:\n    image: demo\n',
+        encoding='utf-8',
+    )
+    (assign_dir / 'compose_assignments.json').write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-2': {
+                        'InjectFiles': ['callback_url.txt -> /tmp/encoded'],
+                        'InjectSourceDir': str(source_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    inspect_states = iter(
+        [
+            ('a' * 64, 'true', 'running'),
+            ('a' * 64, 'false', 'restarting'),
+            ('b' * 64, 'true', 'running'),
+            ('b' * 64, 'true', 'running'),
+            ('b' * 64, 'true', 'running'),
+        ]
+    )
+    current_state = {'status': 'unknown'}
+    exec_while_restarting: list[list[str]] = []
+    cp_calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-2\n')
+        if docker_cmd[:3] == ['inspect', '--format', '{{.Id}}|{{.State.Running}}|{{.State.Status}}']:
+            cid, running, status = next(inspect_states)
+            current_state['status'] = status
+            return subprocess.CompletedProcess(cmd_list, 0, stdout=f'{cid}|{running}|{status}\n')
+        if docker_cmd[:2] == ['exec', 'docker-2']:
+            if current_state.get('status') == 'restarting':
+                exec_while_restarting.append(docker_cmd)
+                return subprocess.CompletedProcess(
+                    cmd_list,
+                    1,
+                    stdout='Error response from daemon: Container abc is restarting, wait until the container is running',
+                )
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            cp_calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setenv('CORETG_FLOW_COPY_SETTLE_S', '0')
+    monkeypatch.setenv('CORETG_FLOW_COPY_RETRY_S', '0')
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    namespace = {'__name__': '__main__'}
+    output = io.StringIO()
+    with redirect_stdout(output):
+        exec(script, namespace, namespace)
+    payload = json.loads(output.getvalue().strip())
+
+    item = (payload.get('items') or [])[0]
+    attempts = item.get('copy_attempts') or []
+    assert item.get('ok') is True
+    assert attempts[0].get('ok') is False
+    assert attempts[0].get('errors') == ['docker-2: container not running (restarting)']
+    assert attempts[1].get('ok') is True
+    assert item.get('verified_paths') == ['/tmp/encoded/callback_url.txt']
+    assert not exec_while_restarting
+    assert len(cp_calls) == 1
+
+
 def test_remote_copy_flow_artifacts_script_falls_back_to_resolved_inject_sources():
     script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
 

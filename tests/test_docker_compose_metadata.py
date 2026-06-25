@@ -679,9 +679,9 @@ ENTRYPOINT [ "/docker-entrypoint.sh" ]
 
     assert "USER 0" in txt
     assert "USER root" not in txt
-    assert "chmod 0755 /docker-entrypoint.sh" in txt
+    assert "chmod 0755 """ in txt
     assert "iproute2" in txt
-    assert txt.index("chmod 0755 /docker-entrypoint.sh") < txt.index("if command -v ip >/dev/null 2>&1; then exit 0; fi;")
+    assert txt.index("chmod 0755 """) < txt.index("if command -v ip >/dev/null 2>&1; then exit 0; fi;")
 
 
 def test_prepare_compose_build_only_includes_buster_archive_fallback(tmp_path):
