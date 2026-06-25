@@ -393,7 +393,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     # `docker compose pull` fails for buildable services with scenario-scoped tags
     # (e.g., `coretg/scenarios-...`) because those are expected to be built locally.
     pull_services: List[str] = []
-    wrapper_builds: List[tuple[str, str, str]] = []  # (service, image, context)
+    wrapper_builds: List[tuple[str, str, str, bool]] = []  # (service, image, context, force_pull)
     try:
         import yaml  # type: ignore
 
@@ -415,7 +415,11 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 except Exception:
                     ctx = ''
                 if image.startswith('coretg/') and image.endswith(':iproute2') and ctx:
-                    wrapper_builds.append((str(svc_name), image, ctx))
+                    try:
+                        force_pull = str(labels.get('coretg.wrapper_build_pull') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+                    except Exception:
+                        force_pull = False
+                    wrapper_builds.append((str(svc_name), image, ctx, force_pull))
                     # Do NOT include in pull services; it's a local-only tag.
                     continue
 
@@ -449,7 +453,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     try:
         compose_dir = os.path.dirname(os.path.abspath(compose_path))
         wrapper_build_failures: List[str] = []
-        for svc_name, image, ctx in wrapper_builds:
+        for svc_name, image, ctx, force_pull in wrapper_builds:
             df_path = os.path.join(ctx, 'Dockerfile')
             if not os.path.isabs(df_path):
                 df_path = os.path.abspath(df_path)
@@ -462,7 +466,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 pass
 
             args = docker_cmd + ['build', '--network', 'host']
-            if build_pull:
+            if build_pull or force_pull:
                 args.append('--pull')
             args += ['-t', image, '-f', df_path, ctx_path]
             rc, tail = _run(args, timeout=1800)

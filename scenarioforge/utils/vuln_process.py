@@ -388,6 +388,25 @@ def _repair_known_catalog_compose(obj: dict, rec: Dict[str, str], *, src_dir: st
 				except Exception:
 					pass
 			return obj
+		if identity == 'appweb/cve-2018-8715':
+			for svc_key, svc in services.items():
+				if not isinstance(svc, dict):
+					continue
+				image_text = str(svc.get('image') or '').strip().lower()
+				if image_text != 'vulhub/appweb:7.0.1':
+					continue
+				svc['command'] = ['/usr/local/lib/appweb/7.0.1/bin/appweb']
+				labs = svc.get('labels')
+				if not isinstance(labs, dict):
+					labs = {}
+				labs.setdefault('coretg.repaired_catalog_command', '/usr/local/lib/appweb/7.0.1/bin/appweb')
+				labs.setdefault('coretg.wrapper_build_pull', 'true')
+				svc['labels'] = labs
+				try:
+					logger.info('[vuln] repaired appweb catalog startup identity=%s service=%s image=%s', identity, svc_key, image_text)
+				except Exception:
+					pass
+			return obj
 		if identity != 'python/cve-2024-23334':
 			return obj
 		candidates: List[str] = []

@@ -144,6 +144,67 @@ def test_docker_compose_preflight_builds_build_only_dependency_without_explicit_
     assert ['docker', 'compose', '-p', 'docker-1conf', '-f', str(compose_path), 'build'] not in calls
 
 
+def test_docker_compose_preflight_wrapper_build_pull_label_forces_pull(tmp_path, monkeypatch):
+    compose_path = tmp_path / 'docker-compose.yml'
+    wrapper_ctx = tmp_path / 'wrapper'
+    wrapper_ctx.mkdir()
+    (wrapper_ctx / 'Dockerfile').write_text('FROM vulhub/appweb:7.0.1\n', encoding='utf-8')
+
+    compose_path.write_text(
+        (
+            'services:\n'
+            '  docker-9:\n'
+            '    image: coretg/test-appweb-docker-9:iproute2\n'
+            '    container_name: docker-9\n'
+            '    labels:\n'
+            f'      coretg.wrapper_build_context: {wrapper_ctx}\n'
+            '      coretg.wrapper_build_pull: "true"\n'
+        ),
+        encoding='utf-8',
+    )
+
+    calls = []
+
+    def fake_run(args, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        argv = list(args)
+        calls.append(argv)
+
+        if argv[:2] == ['docker', 'build']:
+            return _Proc(0, '')
+        if argv[:3] == ['docker', 'compose', '-p']:
+            if argv[-2:] == ['pull', '--ignore-buildable']:
+                return _Proc(0, '')
+            if argv[-3:] == ['up', '--no-start', '--no-build']:
+                return _Proc(0, '')
+            if argv[-4:] == ['up', '-d', '--no-build', 'docker-9']:
+                return _Proc(0, '')
+        if argv[:3] == ['docker', 'inspect', '--format']:
+            if argv[3] == '{{.State.Pid}} {{.State.Status}}':
+                return _Proc(0, '123 running')
+        raise AssertionError(f'unexpected args: {argv}')
+
+    monkeypatch.setattr(topo, '_docker_compose_cmd', lambda: ['docker', 'compose'])
+    monkeypatch.setattr(topo, '_docker_cmd', lambda: ['docker'])
+    monkeypatch.setattr(topo.subprocess, 'run', fake_run)
+    monkeypatch.delenv('CORETG_DOCKER_BUILD_PULL', raising=False)
+    topo._PREFLIGHTED_DOCKER_NODE_COMPOSES.discard(str(Path(compose_path).resolve()))
+
+    topo._docker_compose_preflight(str(compose_path), node_name='docker-9')
+
+    assert [
+        'docker',
+        'build',
+        '--network',
+        'host',
+        '--pull',
+        '-t',
+        'coretg/test-appweb-docker-9:iproute2',
+        '-f',
+        str(wrapper_ctx / 'Dockerfile'),
+        str(wrapper_ctx),
+    ] in calls
+
+
 def test_docker_compose_preflight_fails_on_wrapper_build_failure(tmp_path, monkeypatch):
     compose_path = tmp_path / 'docker-compose.yml'
     wrapper_ctx = tmp_path / 'wrapper'
