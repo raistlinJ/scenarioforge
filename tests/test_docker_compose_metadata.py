@@ -246,6 +246,47 @@ services:
     assert labels.get("coretg.wrapper_base_image") == "vulhub/craftcms:5.5.1.1"
 
 
+def test_prepare_compose_repairs_appweb_startup_and_forces_wrapper_pull(tmp_path):
+    compose_src = tmp_path / "docker-compose.yml"
+    compose_src.write_text(
+        """
+services:
+  web:
+    image: vulhub/appweb:7.0.1
+    volumes:
+      - ./appweb.conf:/etc/appweb/appweb.conf
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "appweb.conf").write_text('Documents "/var/www/appweb"\nListen 8080\n', encoding="utf-8")
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "appweb/CVE-2018-8715",
+        "Path": str(compose_src),
+    }
+
+    created = prepare_compose_for_assignments({"docker-1": record}, out_base=str(tmp_path / "out"))
+    assert created
+
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    out_path = tmp_path / "out" / "docker-compose-docker-1.yml"
+    obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    web = (obj or {}).get("services", {}).get("web") or {}
+    labels = web.get("labels") or {}
+
+    assert web.get("image") == "coretg/scenario-docker-1:iproute2"
+    assert web.get("command") == ["/usr/local/lib/appweb/7.0.1/bin/appweb"]
+    assert labels.get("coretg.wrapper_base_image") == "vulhub/appweb:7.0.1"
+    assert labels.get("coretg.repaired_catalog_command") == "/usr/local/lib/appweb/7.0.1/bin/appweb"
+    assert labels.get("coretg.wrapper_build_pull") == "true"
+
+
 def test_prepare_compose_bypasses_wrapper_for_ingress_nginx_when_image_already_has_ip(tmp_path):
     compose_src = tmp_path / "docker-compose.yml"
     compose_src.write_text(
