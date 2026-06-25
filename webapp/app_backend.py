@@ -5834,22 +5834,49 @@ def _prepare_remote_cli_context(
                         )
                     except Exception:
                         pass
+
+            catalog = []
+            try:
+                from scenarioforge.utils.vuln_process import load_vuln_catalog
+                catalog = load_vuln_catalog(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+            except Exception:
+                pass
+
             for item_el in root.findall('.//item'):
                 try:
                     v_path_raw = str(item_el.get('v_path') or '').strip()
                 except Exception:
                     v_path_raw = ''
+                
+                if not v_path_raw:
+                    # Fallback to catalog lookup
+                    v_name = str(item_el.get('v_name') or item_el.get('Name') or '').strip()
+                    if v_name and catalog:
+                        for r in catalog:
+                            if str(r.get('Name') or '').strip() == v_name:
+                                v_path_raw = str(r.get('Path') or '').strip()
+                                break
+                                
                 if not v_path_raw:
                     continue
+                    
                 local_compose_path = os.path.abspath(v_path_raw)
                 if not os.path.isfile(local_compose_path):
                     continue
-                remote_compose_path = _remote_path_join(run_dir, os.path.basename(local_compose_path))
+                
+                raw_name = str(item_el.get('v_name') or item_el.get('Name') or '').strip()
+                safe_name = _safe_name(raw_name) if raw_name else ''
+                base_name = os.path.basename(local_compose_path)
+                remote_basename = f"{safe_name}_{base_name}" if safe_name else base_name
+                remote_compose_path = _remote_path_join(run_dir, remote_basename)
+                
                 if local_compose_path not in uploaded_paths:
                     _upload_compose_with_remote_wrapper_paths(local_compose_path, remote_compose_path)
                     uploaded_paths.add(local_compose_path)
-                item_el.set('v_path', remote_compose_path)
-                rewrites += 1
+                
+                if remote_compose_path != str(item_el.get('v_path') or '').strip():
+                    item_el.set('v_path', remote_compose_path)
+                    rewrites += 1
             if rewrites > 0:
                 import tempfile as _tempfile
 
