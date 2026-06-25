@@ -31511,6 +31511,10 @@ def main():
                     target_ok = bool(before.get('running'))
                     if not target_ok:
                         attempt_errors.append(f'{t}: container not running ({before.get("status") or "unknown"})')
+                        if before_id:
+                            attempt_ids.append(before_id)
+                        attempt_ok = False
+                        continue
 
                     for planned in copy_plan:
                         src_path = str(planned.get('src_path') or '')

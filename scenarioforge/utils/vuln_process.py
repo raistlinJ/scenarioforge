@@ -3556,7 +3556,7 @@ def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: 
 			seen_paths: Set[str] = set()
 			for match in re.finditer(r'^\s*(?:ENTRYPOINT|CMD)\s+(.+)$', text, flags=re.IGNORECASE | re.MULTILINE):
 				payload = str(match.group(1) or '')
-				for path_match in re.findall(r'(/[^"\'\s,\]]+\.sh)\b', payload):
+				for path_match in re.findall(r'([^"\'\s,\]]*(?:entrypoint|\.sh)[^"\'\s,\]]*)\b', payload, flags=re.IGNORECASE):
 					path_text = str(path_match or '').strip()
 					if not path_text or path_text in seen_paths:
 						continue
@@ -3578,7 +3578,13 @@ def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: 
 			parts: List[str] = []
 			for entrypoint_path in entrypoint_paths:
 				quoted = shlex.quote(entrypoint_path)
-				parts.append(f"\tif [ -f {quoted} ]; then chmod 0755 {quoted}; fi; \\\n")
+				parts.append(
+					f"\ttarget=$(command -v {quoted} 2>/dev/null || echo {quoted}); "
+					f"if [ -f \"$target\" ]; then "
+					f"chmod 0755 \"$target\"; "
+					f"if head -n 1 \"$target\" 2>/dev/null | grep -q '^#!'; then sed -i 's/\\r$//' \"$target\" 2>/dev/null || true; fi; "
+					f"fi; \\\n"
+				)
 			entrypoint_fixup = ''.join(parts)
 
 		snippet = (
