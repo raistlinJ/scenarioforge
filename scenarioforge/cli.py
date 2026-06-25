@@ -4713,6 +4713,83 @@ def _add_cli_phase_arg(container: Any) -> None:
     )
 
 
+_LATEST_ERRORS_HANDLER_FLAG = '_scenarioforge_latest_errors_handler'
+
+
+def _remove_latest_errors_handlers() -> None:
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if getattr(handler, _LATEST_ERRORS_HANDLER_FLAG, False):
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+
+def _resolve_latest_errors_path(args: Any) -> str:
+    for env_name in ('SCENARIOFORGE_LATEST_ERRORS', 'CORETG_LATEST_ERRORS_PATH'):
+        raw = str(os.environ.get(env_name) or '').strip()
+        if not raw:
+            continue
+        if raw.lower() in {'0', 'false', 'no', 'off', 'disabled'}:
+            return ''
+        return os.path.abspath(os.path.expanduser(raw))
+    try:
+        xml_path = str(getattr(args, 'xml', '') or '').strip()
+    except Exception:
+        xml_path = ''
+    if xml_path:
+        try:
+            return os.path.join(os.path.dirname(os.path.abspath(xml_path)) or os.getcwd(), 'latest.errors')
+        except Exception:
+            pass
+    return os.path.abspath('latest.errors')
+
+
+def _install_latest_errors_handler(path: str) -> str:
+    _remove_latest_errors_handlers()
+    path = str(path or '').strip()
+    if not path:
+        return ''
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write('# ScenarioForge latest warnings/errors\n')
+            fh.write(f'# Started: {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n')
+            fh.write('# Includes log records at WARNING and ERROR level.\n\n')
+        handler = logging.FileHandler(path, mode='a', encoding='utf-8')
+        handler.setLevel(logging.WARNING)
+        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s - %(message)s'))
+        setattr(handler, _LATEST_ERRORS_HANDLER_FLAG, True)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        return path
+    except Exception:
+        return ''
+
+
+def _configure_cli_logging(args: Any) -> str:
+    level = logging.DEBUG if bool(getattr(args, 'verbose', False)) else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+    try:
+        logging.getLogger().setLevel(level)
+    except Exception:
+        pass
+    latest_errors_path = _install_latest_errors_handler(_resolve_latest_errors_path(args))
+    if latest_errors_path:
+        try:
+            logging.getLogger(__name__).info('Writing latest warnings/errors to %s', latest_errors_path)
+        except Exception:
+            pass
+    return latest_errors_path
+
+
 def _add_cli_common_args(container: Any) -> None:
     container.add_argument('--xml', required=True, help='Path to XML scenario file')
     container.add_argument('--scenario', default=None, help='Scenario name to use (defaults to the first scenario; execute/topo forward the resolved value during remote delegation)')
@@ -5088,6 +5165,7 @@ def main():
 
     ap = _build_cli_parser()
     args = ap.parse_args()
+    _configure_cli_logging(args)
 
     # Remote SSH runner may provide sudo password on stdin; make it available to
     # docker-invoking subprocesses (e.g. flag-node-generators) via env.
@@ -5180,11 +5258,6 @@ def main():
                 pass
         except Exception:
             preview_payload, preview_full = None, None
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
 
     if execute_hitl_errors:
         logging.error('HITL interface validation failed before execute.')

@@ -366,7 +366,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 pass
         except Exception as exc:
             try:
-                logger.warning('[docker-node] preflight cmd failed: %s err=%s', ' '.join(args), exc)
+                logger.warning('[docker-node] preflight cmd failed node=%s compose=%s cmd=%s err=%s', node_name, compose_path, ' '.join(args), exc)
             except Exception:
                 pass
         return returncode, tail
@@ -680,7 +680,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                         allow_helper_failure = False
                     if inject_copy_required or not allow_helper_failure:
                         raise RuntimeError(
-                            f"docker compose inject helper failed (node={node_name} helper={helper_service} rc={helper_rc})\n{helper_reason}".strip()
+                            f"docker compose inject helper failed (node={node_name} compose={compose_path} helper={helper_service} rc={helper_rc})\n{helper_reason}".strip()
                         )
 
             up_services = [str(target_service)]
@@ -688,7 +688,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             rc, tail = _run(compose_base + ['up', '-d', '--no-build'] + up_services, timeout=900)
             if strict_pull and rc != 0:
                 raise RuntimeError(
-                    f"docker compose up -d failed (node={node_name} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
+                    f"docker compose up -d failed (node={node_name} compose={compose_path} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
                 )
 
             # Best-effort: wait for PID to be non-zero.
@@ -771,7 +771,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 rc, tail = _run(compose_base + ['up', '-d', '--force-recreate', '--no-build'] + up_services, timeout=900)
                 if strict_pull and rc != 0:
                     raise RuntimeError(
-                        f"docker compose up -d --force-recreate failed (node={node_name} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
+                        f"docker compose up -d --force-recreate failed (node={node_name} compose={compose_path} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
                     )
                 pid_ready, last_inspect_tail, last_status = _wait_for_nonzero_pid()
 
@@ -784,7 +784,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 raise RuntimeError(
                     (
                         f"docker preflight startup failed: container PID remained 0 "
-                        f"(node={node_name} service={target_service} inspect={inspect_name} rc={ps_rc}). "
+                        f"(node={node_name} compose={compose_path} service={target_service} inspect={inspect_name} rc={ps_rc}). "
                         "This would cause CORE to fail with /proc/0/environ.\n"
                         f"wait_seconds={wait_seconds} poll_seconds={poll_seconds} status={last_status}\n"
                         f"inspect_tail={last_inspect_tail}\n"
@@ -803,7 +803,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         if strict_pull:
             raise
         try:
-            logger.warning('[docker-node] preflight start/wait skipped node=%s err=%s', node_name, exc)
+            logger.warning('[docker-node] preflight start/wait skipped node=%s compose=%s err=%s', node_name, compose_path, exc)
         except Exception:
             pass
 
@@ -970,6 +970,37 @@ def _resolve_compose_interpolations(text: str) -> str:
     return out
 
 
+def _compose_file_excerpt_for_error(compose_path: str, max_chars: int = 30000) -> str:
+    path = str(compose_path or '').strip()
+    if not path:
+        return ''
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+    except Exception as exc:
+        return f'<unable to read compose file: {exc}>'
+    if len(text) > max_chars:
+        return text[:max_chars] + f"\n... truncated {len(text) - max_chars} chars ..."
+    return text
+
+
+def _log_docker_compose_preflight_failure(node_name: str, compose_path: str, exc: Exception) -> None:
+    try:
+        excerpt = _compose_file_excerpt_for_error(compose_path)
+        logger.error(
+            '[docker-node] compose preflight failed node=%s compose=%s reason=%s\n'
+            '--- docker-compose snapshot: %s ---\n%s\n'
+            '--- end docker-compose snapshot ---',
+            node_name,
+            compose_path,
+            exc,
+            compose_path,
+            excerpt or '<empty>',
+        )
+    except Exception:
+        pass
+
+
 def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str, str]]) -> None:
     """Best-effort ensure a per-node compose project exists and is Mako-safe.
 
@@ -985,6 +1016,7 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
     This is especially important because CORE starts Docker nodes immediately on add_node()
     (default start=True), and /tmp/vulns may contain stale files from earlier runs.
     """
+    logged_preflight_failure = False
     try:
         strict_pull = False
         try:
@@ -1100,6 +1132,8 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
             # preflight failures as fatal so the run is cancelled and the user sees the error.
             exc_text = str(exc or '')
             if strict_pull or ('PID remained 0' in exc_text) or ('/proc/0/environ' in exc_text):
+                _log_docker_compose_preflight_failure(node_name, out_path, exc)
+                logged_preflight_failure = True
                 raise
             try:
                 logger.warning('[docker-node] preflight skipped/failed node=%s err=%s', node_name, exc)
@@ -1117,12 +1151,16 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
             or 'PID remained 0' in exc_text
             or '/proc/0/environ' in exc_text
         ):
+            if not logged_preflight_failure:
+                _log_docker_compose_preflight_failure(node_name, locals().get('out_path', ''), exc)
             raise
         try:
             strict_pull2 = str(os.getenv('CORETG_DOCKER_STRICT_PULL') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
         except Exception:
             strict_pull2 = False
         if strict_pull2:
+            if not logged_preflight_failure:
+                _log_docker_compose_preflight_failure(node_name, locals().get('out_path', ''), exc)
             raise
         return
 
