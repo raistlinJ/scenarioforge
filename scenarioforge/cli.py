@@ -4725,6 +4725,12 @@ def _remove_latest_errors_handlers() -> None:
                 handler.close()
             except Exception:
                 pass
+    import sys
+    if getattr(sys.stderr, '_is_latest_errors_tee', False):
+        try:
+            sys.stderr = sys.stderr.orig_stderr
+        except Exception:
+            pass
 
 
 def _resolve_latest_errors_path(args: Any) -> str:
@@ -4766,6 +4772,26 @@ def _install_latest_errors_handler(path: str) -> str:
         setattr(handler, _LATEST_ERRORS_HANDLER_FLAG, True)
         root = logging.getLogger()
         root.addHandler(handler)
+        
+        import sys
+        if not getattr(sys.stderr, '_is_latest_errors_tee', False):
+            class _StderrTee:
+                _is_latest_errors_tee = True
+                def __init__(self, orig_stderr, log_path):
+                    self.orig_stderr = orig_stderr
+                    self.log_path = log_path
+                def write(self, data):
+                    self.orig_stderr.write(data)
+                    try:
+                        with open(self.log_path, 'a', encoding='utf-8') as f:
+                            f.write(data)
+                    except Exception:
+                        pass
+                def flush(self):
+                    self.orig_stderr.flush()
+                def __getattr__(self, name):
+                    return getattr(self.orig_stderr, name)
+            sys.stderr = _StderrTee(sys.stderr, path)
         return path
     except Exception:
         return ''
@@ -4777,6 +4803,7 @@ def _configure_cli_logging(args: Any) -> str:
         level=level,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
+    logging.captureWarnings(True)
     try:
         logging.getLogger().setLevel(level)
     except Exception:
