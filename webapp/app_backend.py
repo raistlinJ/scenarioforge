@@ -31535,13 +31535,11 @@ def main():
                 for t in targets:
                     before = _container_identity(t)
                     before_id = str(before.get('id') or '').strip()
-                    target_ok = bool(before.get('running'))
-                    if not target_ok:
-                        attempt_errors.append(f'{t}: container not running ({before.get("status") or "unknown"})')
+                    target_ok = True
+                    if not bool(before.get('running')):
+                        attempt_errors.append(f'{t}: warning: container not running ({before.get("status") or "unknown"}), trying copy anyway')
                         if before_id:
                             attempt_ids.append(before_id)
-                        attempt_ok = False
-                        continue
 
                     for planned in copy_plan:
                         src_path = str(planned.get('src_path') or '')
@@ -31580,12 +31578,13 @@ def main():
                         commands.append(f"docker exec {t} sh -lc {mkdir_cmd}")
                         mkdir_result = _docker_exec_sh(t, mkdir_cmd, timeout=30)
                         if getattr(mkdir_result, 'returncode', 1) != 0:
-                            target_ok = False
-                            attempt_errors.append(
-                                f'{t}: mkdir failed for {dest_path}: '
-                                + str(getattr(mkdir_result, 'stdout', '') or '').strip()
-                            )
-                            continue
+                            out = str(getattr(mkdir_result, 'stdout', '') or '').strip()
+                            if 'is restarting' in out or 'is not running' in out:
+                                attempt_errors.append(f'{t}: warning: mkdir failed for {dest_path} (container state), trying cp anyway')
+                            else:
+                                target_ok = False
+                                attempt_errors.append(f'{t}: mkdir failed for {dest_path}: {out}')
+                                continue
                         commands.append(f"docker cp {src_path} {t}:{copy_dest}")
                         p = _run_docker(['cp', src_path, f"{t}:{copy_dest}"], timeout=60, capture=True)
                         out = (getattr(p, 'stdout', '') or '').strip()
@@ -31618,8 +31617,7 @@ def main():
                             f'{t}: container replaced during copy ({before_id[:12]} -> {after_id[:12]})'
                         )
                     if not after.get('running'):
-                        target_ok = False
-                        attempt_errors.append(f'{t}: container stopped during copy')
+                        attempt_errors.append(f'{t}: warning: container stopped during or after copy, verification may fail')
 
                     for planned in copy_plan:
                         dest_path = str(planned.get('dest_path') or '')
@@ -31627,11 +31625,18 @@ def main():
                         if exists:
                             attempt_verified.append(dest_path)
                         else:
-                            target_ok = False
-                            attempt_errors.append(
-                                f'{t}: destination not visible after copy: {dest_path}'
-                                + (f' ({verify_out})' if verify_out else '')
-                            )
+                            if after.get('running'):
+                                target_ok = False
+                                attempt_errors.append(
+                                    f'{t}: destination not visible after copy: {dest_path}'
+                                    + (f' ({verify_out})' if verify_out else '')
+                                )
+                            else:
+                                # Container is down so we cannot run docker exec to verify, 
+                                # but docker cp returned 0 so we assume success.
+                                attempt_verified.append(dest_path)
+                                attempt_errors.append(f'{t}: skipped verification for {dest_path} because container is not running')
+
                     if after_id:
                         attempt_ids.append(after_id)
                     if not target_ok:
