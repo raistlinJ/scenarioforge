@@ -3593,8 +3593,8 @@ def _try_build_segmented_topology_from_preview(
     routers_data = preview_plan.get('routers') or []
     hosts_data = preview_plan.get('hosts') or []
     switches_detail = preview_plan.get('switches_detail') or []
-    if not routers_data or not hosts_data:
-        logger.debug("[preview] missing routers or hosts in preview payload; skipping preview realization")
+    if not routers_data and not hosts_data:
+        logger.debug("[preview] missing both routers and hosts in preview payload; skipping preview realization")
         return None
 
     layout_positions = preview_plan.get('layout_positions') or {}

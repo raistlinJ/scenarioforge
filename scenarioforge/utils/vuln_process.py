@@ -662,11 +662,12 @@ def select_vulnerabilities(density: float, items_cfg: List[dict], catalog: List[
 			v_name = str(it.get('v_name') or '').strip()
 			v_path = str(it.get('v_path') or '').strip()
 			if catalog:
-				pool = [
-					rec for rec in catalog
-					if (v_path and str(rec.get('Path') or '').strip() == v_path)
-					or (v_name and str(rec.get('Name') or '').strip() == v_name)
-				]
+				for rec in catalog:
+					if (v_path and str(rec.get('Path') or '').strip() == v_path) or (v_name and str(rec.get('Name') or '').strip() == v_name):
+						rec_copy = dict(rec)
+						if v_path:
+							rec_copy['Path'] = v_path
+						pool.append(rec_copy)
 			elif v_name or v_path:
 				pool = [{'Name': v_name, 'Path': v_path, 'Type': 'docker-compose', 'Vector': ''}]
 		elif sel == 'Random':
@@ -3579,7 +3580,12 @@ def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: 
 			for entrypoint_path in entrypoint_paths:
 				quoted = shlex.quote(entrypoint_path)
 				parts.append(
-					f"\ttarget=$(command -v {quoted} 2>/dev/null || echo {quoted}); "
+					f"\ttarget={quoted}; "
+					f"if [ ! -f \"$target\" ]; then "
+					f"for p in $(echo $PATH | tr ':' ' '); do "
+					f"if [ -f \"$p/$target\" ]; then target=\"$p/$target\"; break; fi; "
+					f"done; "
+					f"fi; "
 					f"if [ -f \"$target\" ]; then "
 					f"chmod 0755 \"$target\"; "
 					f"if head -n 1 \"$target\" 2>/dev/null | grep -q '^#!'; then sed -i 's/\\r$//' \"$target\" 2>/dev/null || true; fi; "
