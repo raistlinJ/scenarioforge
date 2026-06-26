@@ -30839,13 +30839,13 @@ try:
 except Exception:
     COPY_SETTLE_S = 1.0
 try:
-    COPY_RETRY_S = max(0.0, float(os.environ.get('CORETG_FLOW_COPY_RETRY_S') or '1.0'))
+    COPY_RETRY_S = max(0.0, float(os.environ.get('CORETG_FLOW_COPY_RETRY_S') or '2.0'))
 except Exception:
-    COPY_RETRY_S = 1.0
+    COPY_RETRY_S = 2.0
 try:
-    COPY_MAX_ATTEMPTS = max(1, min(10, int(os.environ.get('CORETG_FLOW_COPY_MAX_ATTEMPTS') or '4')))
+    COPY_MAX_ATTEMPTS = max(1, min(20, int(os.environ.get('CORETG_FLOW_COPY_MAX_ATTEMPTS') or '10')))
 except Exception:
-    COPY_MAX_ATTEMPTS = 4
+    COPY_MAX_ATTEMPTS = 10
 
 
 def _run_docker(cmd, timeout=30, capture=True):
@@ -31200,7 +31200,7 @@ def _container_identity(target: str):
     container_id = str(parts[0] if parts else '').strip()
     running_raw = str(parts[1] if len(parts) > 1 else '').strip().lower()
     status = str(parts[2] if len(parts) > 2 else '').strip().lower()
-    running = running_raw == 'true' or status == 'running'
+    running = (running_raw == 'true' or status == 'running') and status != 'restarting'
     return {'id': container_id, 'running': bool(running), 'status': status}
 
 
