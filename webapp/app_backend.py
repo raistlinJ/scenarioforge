@@ -5647,6 +5647,11 @@ def _prepare_remote_cli_context(
                 services = compose_obj.get('services') if isinstance(compose_obj, dict) else None
                 local_compose_dir = os.path.dirname(os.path.abspath(local_compose_path))
                 remote_compose_dir = posixpath.dirname(remote_compose_path) or run_dir
+                
+                if local_compose_dir not in uploaded_dirs:
+                    _upload_wrapper_dir(local_compose_dir, remote_compose_dir)
+                    uploaded_dirs.add(local_compose_dir)
+
                 if isinstance(services, dict):
                     for svc in services.values():
                         if not isinstance(svc, dict):
@@ -5848,8 +5853,8 @@ def _prepare_remote_cli_context(
                 except Exception:
                     v_path_raw = ''
                 
-                if not v_path_raw:
-                    # Fallback to catalog lookup
+                if not v_path_raw or not os.path.isfile(os.path.abspath(v_path_raw)):
+                    # Fallback to catalog lookup if empty or not a local file (e.g. github URL)
                     v_name = str(item_el.get('v_name') or item_el.get('Name') or '').strip()
                     if v_name and catalog:
                         for r in catalog:
