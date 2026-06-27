@@ -388,6 +388,25 @@ def _repair_known_catalog_compose(obj: dict, rec: Dict[str, str], *, src_dir: st
 				except Exception:
 					pass
 			return obj
+		if identity == 'appweb/cve-2018-8715':
+			for svc_key, svc in services.items():
+				if not isinstance(svc, dict):
+					continue
+				image_text = str(svc.get('image') or '').strip().lower()
+				if image_text != 'vulhub/appweb:7.0.1':
+					continue
+				svc['command'] = ['/usr/local/lib/appweb/7.0.1/bin/appweb']
+				labs = svc.get('labels')
+				if not isinstance(labs, dict):
+					labs = {}
+				labs.setdefault('coretg.repaired_catalog_command', '/usr/local/lib/appweb/7.0.1/bin/appweb')
+				labs.setdefault('coretg.wrapper_build_pull', 'true')
+				svc['labels'] = labs
+				try:
+					logger.info('[vuln] repaired appweb catalog startup identity=%s service=%s image=%s', identity, svc_key, image_text)
+				except Exception:
+					pass
+			return obj
 		if identity != 'python/cve-2024-23334':
 			return obj
 		candidates: List[str] = []
@@ -643,11 +662,12 @@ def select_vulnerabilities(density: float, items_cfg: List[dict], catalog: List[
 			v_name = str(it.get('v_name') or '').strip()
 			v_path = str(it.get('v_path') or '').strip()
 			if catalog:
-				pool = [
-					rec for rec in catalog
-					if (v_path and str(rec.get('Path') or '').strip() == v_path)
-					or (v_name and str(rec.get('Name') or '').strip() == v_name)
-				]
+				for rec in catalog:
+					if (v_path and str(rec.get('Path') or '').strip() == v_path) or (v_name and str(rec.get('Name') or '').strip() == v_name):
+						rec_copy = dict(rec)
+						if v_path:
+							rec_copy['Path'] = v_path
+						pool.append(rec_copy)
 			elif v_name or v_path:
 				pool = [{'Name': v_name, 'Path': v_path, 'Type': 'docker-compose', 'Vector': ''}]
 		elif sel == 'Random':
@@ -1566,6 +1586,18 @@ def _compose_force_root_workdir_enabled() -> bool:
 	"""
 	mode = _compose_force_root_workdir_mode()
 	return mode != 'off'
+
+
+def _force_service_root_user_for_core(service: Dict[str, object]) -> None:
+	"""Force a compose service to use root for CORE file/service operations.
+
+	CORE creates and chmods service files with ``docker exec``. Removing a compose
+	``user`` override is insufficient because the image may still declare a
+	non-root Dockerfile USER.
+	"""
+	if not isinstance(service, dict):
+		return
+	service['user'] = '0:0'
 
 
 def _compose_force_root_workdir_mode() -> str:
@@ -2676,7 +2708,7 @@ def _split_inject_spec(raw: str) -> tuple[str, str]:
 	text = str(raw or '').strip()
 	if not text:
 		return '', ''
-	for sep in ('->', '=>'):
+	for sep in ('->', '=>', ':'):
 		if sep in text:
 			left, right = text.split(sep, 1)
 			return left.strip(), right.strip()
@@ -3129,18 +3161,15 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 				else:
 					svc['depends_on'] = {copy_service_name: {'condition': 'service_completed_successfully'}}
 			else:
-				if isinstance(dep, list):
-					dep = [x for x in dep if str(x) != copy_service_name]
-					if dep:
-						svc['depends_on'] = dep
-					else:
-						svc.pop('depends_on', None)
-				elif isinstance(dep, dict):
-					dep.pop(copy_service_name, None)
-					if dep:
-						svc['depends_on'] = dep
-					else:
-						svc.pop('depends_on', None)
+				if isinstance(dep, dict):
+					dep.setdefault(copy_service_name, {'condition': 'service_started'})
+					svc['depends_on'] = dep
+				elif isinstance(dep, list):
+					if copy_service_name not in dep:
+						dep.append(copy_service_name)
+					svc['depends_on'] = dep
+				else:
+					svc['depends_on'] = [copy_service_name]
 	except Exception:
 		pass
 
@@ -3528,7 +3557,7 @@ def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: 
 			seen_paths: Set[str] = set()
 			for match in re.finditer(r'^\s*(?:ENTRYPOINT|CMD)\s+(.+)$', text, flags=re.IGNORECASE | re.MULTILINE):
 				payload = str(match.group(1) or '')
-				for path_match in re.findall(r'(/[^"\'\s,\]]+\.sh)\b', payload):
+				for path_match in re.findall(r'([^"\'\s,\]]*(?:entrypoint|\.sh)[^"\'\s,\]]*)\b', payload, flags=re.IGNORECASE):
 					path_text = str(path_match or '').strip()
 					if not path_text or path_text in seen_paths:
 						continue
@@ -3550,7 +3579,18 @@ def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: 
 			parts: List[str] = []
 			for entrypoint_path in entrypoint_paths:
 				quoted = shlex.quote(entrypoint_path)
-				parts.append(f"\tif [ -f {quoted} ]; then chmod 0755 {quoted}; fi; \\\n")
+				parts.append(
+					f"\ttarget={quoted}; "
+					f"if [ ! -f \"$target\" ]; then "
+					f"for p in $(echo $PATH | tr ':' ' '); do "
+					f"if [ -f \"$p/$target\" ]; then target=\"$p/$target\"; break; fi; "
+					f"done; "
+					f"fi; "
+					f"if [ -f \"$target\" ]; then "
+					f"chmod 0755 \"$target\"; "
+					f"if head -n 1 \"$target\" 2>/dev/null | grep -q '^#!'; then sed -i 's/\\r$//' \"$target\" 2>/dev/null || true; fi; "
+					f"fi; \\\n"
+				)
 			entrypoint_fixup = ''.join(parts)
 
 		snippet = (
@@ -4636,14 +4676,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						except Exception:
 							pass
 						try:
-							u = svc.get('user')
-							u_s = str(u).strip() if u is not None else ''
-							if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
-								svc.pop('user', None)
-								try:
-									logger.info('[vuln] removed non-root user (already wrapped) node=%s service=%s user=%s', node_name, svc_key, u_s)
-								except Exception:
-									pass
+							_force_service_root_user_for_core(svc)
 						except Exception:
 							pass
 						try:
@@ -4673,10 +4706,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 							except Exception:
 								pass
 							try:
-								u = svc.get('user')
-								u_s = str(u).strip() if u is not None else ''
-								if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
-									svc.pop('user', None)
+								_force_service_root_user_for_core(svc)
 							except Exception:
 								pass
 							try:
@@ -4736,21 +4766,10 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 							# DefaultRoute needs iproute2 + NET_ADMIN in many images.
 							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
 							svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
-							# IMPORTANT: Many upstream vuln stacks pin a non-root `user:` (e.g., airflow
-							# `50000:50000`). CORE's DefaultRoute service writes and chmods scripts inside
-							# the container using `docker exec <node> chmod ...`. When the container runs
-							# as non-root, this fails with "Operation not permitted".
-							#
-							# For CORE DockerNodes, prefer running the wrapped service as root.
+							# Image Dockerfiles may declare a non-root USER even when compose has
+							# no user override. CORE needs root for docker-exec chmod/create_file.
 							try:
-								u = svc.get('user')
-								u_s = str(u).strip() if u is not None else ''
-								if u_s and u_s not in ('0', 'root', '0:0', 'root:root'):
-									svc.pop('user', None)
-									try:
-										logger.info('[vuln] removed non-root user for CORE docker wrapper node=%s service=%s user=%s', node_name, svc_key, u_s)
-									except Exception:
-										pass
+								_force_service_root_user_for_core(svc)
 							except Exception:
 								pass
 							# CORE services often manipulate files using relative paths; force root workdir.
@@ -4783,6 +4802,13 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						services = obj.get('services') if isinstance(obj, dict) else None
 						if svc_key and isinstance(services, dict) and isinstance(services.get(svc_key), dict):
 							_maybe_force_service_workdir_root(services.get(svc_key))
+				except Exception:
+					pass
+				try:
+					svc_key = _select_service_key(obj, prefer_service=prefer)
+					services = obj.get('services') if isinstance(obj, dict) else None
+					if svc_key and isinstance(services, dict) and isinstance(services.get(svc_key), dict):
+						_force_service_root_user_for_core(services.get(svc_key))
 				except Exception:
 					pass
 			# Apply published-port pruning late so overlays/wrappers can't reintroduce
@@ -4841,6 +4867,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						services = obj.get('services') if isinstance(obj, dict) else None
 						node_svc = services.get(node_name) if isinstance(services, dict) else None
 						if isinstance(node_svc, dict):
+							_force_service_root_user_for_core(node_svc)
 							node_svc['restart'] = 'unless-stopped'
 					except Exception:
 						pass

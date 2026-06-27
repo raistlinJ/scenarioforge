@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Scenarios>
+  <CoreConnection host="127.0.0.1" port="50051" ssh_enabled="true" ssh_host="12.0.0.100" ssh_port="22" ssh_username="sampleuser" venv_bin="/opt/core/venv/bin" venv_user_override="False"/>
+  <Scenario name="testscenario" density_count="10" scenario_total_nodes="10" base_nodes="0">
+    <ScenarioEditor>
+      <BaseScenario filepath=""/>
+      <section name="Node Information" density_count="10" base_nodes="10" additive_nodes="0" combined_nodes="10" weight_rows="0" count_rows="0" weight_sum="0.000" normalized_weight_sum="0.000"/>
+      <section name="Routing" density="0.500" explicit_count="0" derived_count="0" total_planned="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Services" density="0.500" explicit_count="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Traffic" density="0.500" explicit_count="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Vulnerabilities" flag_type="text" density="0.500" explicit_count="0" derived_count="0" total_planned="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Segmentation" density="0.500" explicit_count="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Notes">
+        <notes/>
+      </section>
+    </ScenarioEditor>
+  </Scenario>
+</Scenarios>

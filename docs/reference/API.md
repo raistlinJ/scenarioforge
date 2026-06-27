@@ -875,19 +875,111 @@ Invoke from the repo root to ensure generated reports land in `./reports/`:
 core-python -m scenarioforge.cli --xml /abs/path/scenarios.xml --verbose
 ```
 
+Batch harnesses and `scenarioforge-eval` integrations should also follow the
+[ScenarioForge Eval Compatibility Contract](../SCENARIOFORGE_EVAL_COMPATIBILITY.md).
+It defines the authoritative XML lifecycle, common seed, post-execution
+validation marker, artifact set, shared-VM locking, and credential-redaction
+requirements.
+
+Saved XML exported or edited through the Web UI is a supported input to the CLI execute path. When the XML already contains embedded `PlanPreview` and `FlagSequencing/FlowState` data, the CLI uses those sections during execute preflight so standalone runs fail early on the same stale-preview or missing-Flow-runtime conditions that `/run_cli` and `/run_cli_async` reject in the Web UI.
+
+For `execute` and `topo`, `--preview-plan` is now optional when the XML already embeds `PlanPreview`; the CLI reuses that embedded preview automatically. Prefer saved scenario XML under `outputs/scenarios-*` for later CLI runs rather than `outputs/tmp-preview-*`, which are temporary staging artifacts and may no longer reference valid Flow runtime files.
+
+### Phase Commands
+
+The CLI now accepts an optional first positional phase name. If omitted, `execute` is used.
+
+- `new`: Creates a starter ScenarioForge XML file with one scenario and canonical section keys.
+- `execute`: Full legacy/default run. Equivalent to `python -m scenarioforge.cli --xml ...`.
+- `preview-plan`: Persists planner-owned `PlanPreview` metadata into the XML and prints the preview payload as JSON.
+- `flag-sequencing`: Runs the same Flow prepare/resolve helper used by the Web UI and persists updated `FlowState` into the XML.
+- `topo`: Builds the topology in CORE and stops before segmentation, traffic, report generation, and session start.
+
+Saved-XML config parity:
+
+- Direct CLI launches load `.scenarioforge.env` via the same env loader the web backend uses.
+- `execute` and `topo` resolve `CoreConnection`/scenario HITL core settings from the XML, then merge env/default values and any saved secret-backed SSH credentials before connecting.
+- When remote delegation is required, the CLI forwards the resolved scenario name and effective preview-plan source, including the implicit embedded-`PlanPreview` case, to the remote CLI process.
+- If the resolved scenario points at a remote CORE VM, the CLI delegates the run to a remote CLI process over SSH so the uploaded XML and generated `/tmp/vulns` artifacts are available on the host running `core-daemon`.
+- If the XML has no saved `CoreConnection`, env-only defaults from `.scenarioforge.env` can still drive remote `execute`, `topo`, and `flag-sequencing` behavior.
+
+Examples:
+
+```bash
+core-python -m scenarioforge.cli new --xml /abs/path/scenarios.xml --scenario "Scenario 1"
+core-python -m scenarioforge.cli preview-plan --xml /abs/path/scenarios.xml --scenario "Scenario 1"
+core-python -m scenarioforge.cli flag-sequencing --xml /abs/path/scenarios.xml --scenario "Scenario 1" --flow-mode resolve --flow-length 3
+core-python -m scenarioforge.cli topo --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
+core-python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051 --post-execution-validation
+```
+
+### Dangerous Docker Maintenance Command
+
+`cleanup-scenarioforge-docker` is a standalone maintenance command for disposable remote CORE VMs used by ScenarioForge batch/eval runs. It reads `CORE_SSH_HOST`, `CORE_SSH_PORT`, `CORE_SSH_USERNAME`, and `CORE_SSH_PASSWORD` from `.scenarioforge.env` or the environment unless overridden by `--ssh-*` flags.
+
+```bash
+# Safe inspection only.
+uv run cleanup-scenarioforge-docker --dry-run
+
+# Dangerous: removes every Docker container, image, build cache, and unused Docker volume/network on the remote host.
+uv run cleanup-scenarioforge-docker --force
+```
+
+Without `--force`, the command requires typing `DELETE ALL REMOTE DOCKER` exactly. Do not run it against shared Docker hosts or machines with non-ScenarioForge workloads.
+
 ### Core Arguments
 
 - `--xml` (required): Scenario XML path.
+- Direct CLI execution uses the exact `--xml` file as ground truth. WebUI execution first persists its validated CORE connection into the selected scenario XML; saved page state is not allowed to redirect the CLI to another VM.
 - `--scenario`: Scenario name (defaults to the first in the file).
-- `--host`, `--port`: CORE gRPC endpoint (defaults `localhost:50051`).
+- `--force`: Overwrite an existing XML file when used with the `new` phase.
+- `--density-count`: Scenario-level Count for Density base host pool for density-driven planning in the `new` phase. Defaults to `10`, matching the Web UI starter payload.
+- `--seed-role`: Repeatable `ROLE=COUNT` seeding for the `new` phase.
+- `--seed-routing`: Repeatable routing-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-routing-density`: Density used with `--seed-routing`.
+- `--seed-service`: Repeatable services-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-service-density`: Density used with `--seed-service`.
+- `--seed-traffic`: Repeatable traffic-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-traffic-density`: Density used with `--seed-traffic`.
+- `--seed-segmentation`: Repeatable segmentation-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-segmentation-density`: Density used with `--seed-segmentation`.
+- `--seed-vulnerability`: Repeatable specific-vulnerability seeding for the `new` phase. Accepts an active catalog entry name or path as `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-vulnerability-density`: Density used with `--seed-vulnerability` when count is omitted or set to density.
+- `--seed-random-vulnerability-count`: Seed random vulnerability targets for the `new` phase.
+- `--ssh-host`, `--ssh-port`, `--ssh-username`, `--ssh-password`: Persist CORE SSH connection details directly in the XML.
+- `--venv-bin`: Persist the remote CORE Python `venv/bin` path directly in the XML.
+- `--host`, `--port`: CORE gRPC endpoint. Defaults come from the same env-/backend-backed sources as the Web UI, commonly `localhost:50051` unless overridden by `.scenarioforge.env` or real environment variables.
 - `--prefix`: IPv4 prefix for auto-assigned addresses (default `10.0.0.0/24`).
 - `--ip-mode`: `private | mixed | public` (default `private`).
 - `--ip-region`: `all | na | eu | apac | latam | africa | middle-east` (default `all`).
 - `--max-nodes`: Hard cap on node creation.
 - `--verbose`: Enables debug logging.
-- `--seed`: RNG seed for deterministic randomness.
+- `--seed`: RNG seed for deterministic planner/build randomness. Reuse the same value across `preview-plan`, `flag-sequencing`, `topo`, and `execute` when you want repeatable results. If an explicit `--preview-plan` carries a saved seed and `--seed` is omitted, the CLI reuses that saved seed when available.
+- `-post-execution-validation`, `--post-execution-validation`: After `execute`, export the live CORE session and run the WebUI-equivalent node, Docker, Flow, generator, and inject validator. The CLI prints red errors, yellow warnings, emits `VALIDATION_SUMMARY_JSON`, and saves `core-post/validation-session-<id>.json` beside the scenario XML.
+- `--plan-output`: Optional file path for JSON output from phase commands.
 - `--layout-density`: `compact | normal | spacious` (default `normal`).
 - `--router-mesh-style`: `full | ring | tree` (fallback when routing items omit `r2r_mode`).
+
+For Routing, Services, Traffic, Segmentation, and specific Vulnerabilities, multiple density-style seed rows in the same section are written with equal `factor` values that sum to `1.0` for that section. Count rows remain additive.
+
+CLI help defaults now reflect these same Web UI/backend defaults rather than only static parser literals.
+
+### Flag-Sequencing Phase Arguments
+
+- `--flow-mode`: `preview | resolve | resolve_hints | hint | hint_only` (default `resolve`)
+- `--flow-length`: Requested chain length.
+- `--flow-preset`: Optional preset name.
+- `--flow-chain-id`: Repeatable explicit chain node id.
+- `--flow-chain-ids`: Comma-separated explicit chain node ids.
+- `--flow-best-effort`: Clamp to eligible nodes when necessary.
+- `--flow-allow-node-duplicates`: Allow duplicate nodes in the chain.
+- `--flow-timeout-s`: Optional timeout in seconds.
+- `--flow-run-remote`: Force remote generator execution when CORE SSH config is available.
+- `--flow-run-local`: Force local generator execution even when remote-capable CORE config exists.
+- `--flow-cleanup-generated-artifacts`: Delete temporary generator run directories after completion.
+- `--flow-dependency-level`: Dependency strictness level (1-5).
+
+For CLI `flag-sequencing`, generator-running modes such as `resolve` now require remote execution when the saved or environment-derived CORE configuration is remote-capable, unless `--flow-run-local` is explicitly set. In that case, remote setup failures are returned as errors instead of silently falling back to local execution. The JSON payload also reports `generator_execution_requested` and `generator_execution_mode`.
 
 ### Traffic Overrides
 
@@ -961,4 +1053,3 @@ print(meta["node_info"]["combined_nodes"])
 
 - Currently expose structural placeholders (`explicit_count`, `weight_rows`, `count_rows`, `weight_sum`).
 - Derived totals may be added in future releases as semantics mature.
-

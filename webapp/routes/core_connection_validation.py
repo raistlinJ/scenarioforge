@@ -25,6 +25,10 @@ def register(
     core_connection: Callable[..., Any],
     save_core_credentials: Callable[[dict[str, Any]], dict[str, Any]],
     merge_hitl_validation_into_scenario_catalog: Callable[..., Any],
+    latest_xml_path_for_scenario: Optional[Callable[[str], Optional[str]]] = None,
+    update_core_config_in_xml: Optional[
+        Callable[[str, Optional[str], dict[str, Any]], tuple[bool, str]]
+    ] = None,
     normalize_core_config: Callable[..., dict[str, Any]],
     local_timestamp_display: Callable[[], str],
     ssh_tunnel_error_type: type[BaseException],
@@ -522,6 +526,42 @@ def register(
                     )
             except Exception:
                 pass
+            xml_sync = None
+            if scenario_name_val and callable(latest_xml_path_for_scenario) and callable(update_core_config_in_xml):
+                try:
+                    latest_xml = latest_xml_path_for_scenario(scenario_name_val)
+                    if latest_xml:
+                        xml_core_cfg = dict(cfg)
+                        xml_core_cfg.update({
+                            'core_secret_id': stored_meta.get('identifier'),
+                            'validated': bool(stored_meta.get('identifier')),
+                            'last_validated_at': local_timestamp_display(),
+                            'vm_key': stored_meta.get('vm_key'),
+                            'vm_name': stored_meta.get('vm_name'),
+                            'vm_node': stored_meta.get('vm_node'),
+                            'vmid': stored_meta.get('vmid'),
+                            'proxmox_secret_id': stored_meta.get('proxmox_secret_id'),
+                            'proxmox_target': stored_meta.get('proxmox_target'),
+                        })
+                        sync_ok, sync_message = update_core_config_in_xml(
+                            latest_xml,
+                            scenario_name_val,
+                            xml_core_cfg,
+                        )
+                        xml_sync = {
+                            'ok': bool(sync_ok),
+                            'message': str(sync_message or ''),
+                            'xml_path': latest_xml,
+                        }
+                        if not sync_ok:
+                            app.logger.warning(
+                                '[core] validated connection but failed to update authoritative XML %s: %s',
+                                latest_xml,
+                                sync_message,
+                            )
+                except Exception as exc:
+                    xml_sync = {'ok': False, 'message': str(exc), 'xml_path': None}
+                    app.logger.warning('[core] failed synchronizing validated connection into XML: %s', exc)
             return jsonify({
                 'ok': True,
                 'forward_host': forwarded_host,
@@ -537,6 +577,7 @@ def register(
                 'core': normalize_core_config(cfg, include_password=False),
                 'core_secret_id': stored_meta['identifier'],
                 'core_summary': stored_meta,
+                'xml_sync': xml_sync,
                 'scenario_index': scenario_index_val,
                 'scenario_name': scenario_name_val,
                 'message': summary_message,

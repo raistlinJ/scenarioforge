@@ -28,6 +28,9 @@ dependencies = [
   "bleach>=6.1.0",
 ]
 
+[project.scripts]
+cleanup-scenarioforge-docker = "scenarioforge.cleanup_scenarioforge_docker:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0.0",

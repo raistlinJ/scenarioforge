@@ -9,6 +9,7 @@ Use this page to navigate the main project documentation.
 - [Screenshots](screenshots.md)
 
 ## Core workflows
+- [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md)
 - [AI Generator Workflow](AI_GENERATOR_WORKFLOW.md)
 - [Full Preview Workflow](FULL_PREVIEW_WORKFLOW.md)
 - [Feature Deep Dive](FEATURE_DEEP_DIVE.md)
@@ -35,6 +36,7 @@ Use this page to navigate the main project documentation.
 - [XML Validation](reference/SCENARIO_XML_SCHEMA.md)
 
 ## Integration & Advanced
+- [ScenarioForge Eval Compatibility Contract](SCENARIOFORGE_EVAL_COMPATIBILITY.md) – Required CLI pipeline, XML ground truth, validation parsing, artifacts, concurrency, and secret handling for batch evaluators.
 - [DeployForge](DEPLOYFORGE.md) – Ready-to-deploy VM-mode lab file coming soon.
 - [MCP (Model Context Protocol) Server](reference/MCP_README.md) – Remote scenario authoring and LLM tool integration.
 - [Web UI Backend](webapp/README.md) – Web backend architecture, routes, and Docker deployment.

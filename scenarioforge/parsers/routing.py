@@ -8,7 +8,6 @@ from .common import find_scenario
 
 logger = logging.getLogger(__name__)
 
-
 def parse_routing_info(xml_path: str, scenario_name: Optional[str]) -> Tuple[float, List[RoutingInfo]]:
     density = 0.0
     items: List[RoutingInfo] = []
@@ -44,6 +43,9 @@ def parse_routing_info(xml_path: str, scenario_name: Optional[str]) -> Tuple[flo
         proto = (it.get("selected") or "").strip()
         if not proto:
             continue
+        if proto.lower() == "routing":
+            logger.warning("Ignoring legacy routing protocol placeholder 'Routing'")
+            proto = ""
         vm = (it.get("v_metric") or "").strip()
         r2r_mode = (it.get("r2r_mode") or "").strip()
         r2s_mode = (it.get("r2s_mode") or "").strip()
@@ -106,7 +108,7 @@ def parse_routing_info(xml_path: str, scenario_name: Optional[str]) -> Tuple[flo
                 fallback_count = 0
 
         if fallback_count > 0:
-            items.append(RoutingInfo(protocol="Routing", factor=0.0, abs_count=fallback_count, r2r_mode="", r2r_edges=0, r2s_mode="", r2s_edges=0, r2s_hosts_min=0, r2s_hosts_max=0))
+            items.append(RoutingInfo(protocol="", factor=0.0, abs_count=fallback_count, r2r_mode="", r2r_edges=0, r2s_mode="", r2s_edges=0, r2s_hosts_min=0, r2s_hosts_max=0))
 
     if weight_items:
         for p,f,rm,re,sm,se,hmin,hmax in weight_items:

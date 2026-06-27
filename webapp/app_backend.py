@@ -5834,22 +5834,49 @@ def _prepare_remote_cli_context(
                         )
                     except Exception:
                         pass
+
+            catalog = []
+            try:
+                from scenarioforge.utils.vuln_process import load_vuln_catalog
+                catalog = load_vuln_catalog(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+            except Exception:
+                pass
+
             for item_el in root.findall('.//item'):
                 try:
                     v_path_raw = str(item_el.get('v_path') or '').strip()
                 except Exception:
                     v_path_raw = ''
+                
+                if not v_path_raw:
+                    # Fallback to catalog lookup
+                    v_name = str(item_el.get('v_name') or item_el.get('Name') or '').strip()
+                    if v_name and catalog:
+                        for r in catalog:
+                            if str(r.get('Name') or '').strip() == v_name:
+                                v_path_raw = str(r.get('Path') or '').strip()
+                                break
+                                
                 if not v_path_raw:
                     continue
+                    
                 local_compose_path = os.path.abspath(v_path_raw)
                 if not os.path.isfile(local_compose_path):
                     continue
-                remote_compose_path = _remote_path_join(run_dir, os.path.basename(local_compose_path))
+                
+                raw_name = str(item_el.get('v_name') or item_el.get('Name') or '').strip()
+                safe_name = _safe_name(raw_name) if raw_name else ''
+                base_name = os.path.basename(local_compose_path)
+                remote_basename = f"{safe_name}_{base_name}" if safe_name else base_name
+                remote_compose_path = _remote_path_join(run_dir, remote_basename)
+                
                 if local_compose_path not in uploaded_paths:
                     _upload_compose_with_remote_wrapper_paths(local_compose_path, remote_compose_path)
                     uploaded_paths.add(local_compose_path)
-                item_el.set('v_path', remote_compose_path)
-                rewrites += 1
+                
+                if remote_compose_path != str(item_el.get('v_path') or '').strip():
+                    item_el.set('v_path', remote_compose_path)
+                    rewrites += 1
             if rewrites > 0:
                 import tempfile as _tempfile
 
@@ -5882,52 +5909,185 @@ def _prepare_remote_cli_context(
 
     def _sync_runtime_subset_to_remote_repo(repo_dir: str, sftp: Any, log_handle_local: Any) -> None:
         repo_root = _get_repo_root()
+        allowed_names = {'.coretg_pack.json', 'Dockerfile', 'docker-compose.yml', 'manifest.yaml', 'manifest.yml', 'generator.py'}
+        allowed_ext = {'.py', '.yaml', '.yml', '.json'}
+        upload_entries: list[tuple[str, str, str, int]] = []
+        seen_rel_files: set[str] = set()
 
-        def _put_file(rel_path: str) -> None:
+        def _queue_file(rel_path: str) -> None:
             rel = str(rel_path or '').strip().replace('\\', '/')
             if not rel:
+                return
+            if rel in seen_rel_files:
                 return
             local_path = os.path.join(repo_root, rel)
             if not os.path.isfile(local_path):
                 return
             remote_path = _remote_path_join(repo_dir, rel)
-            remote_parent = posixpath.dirname(remote_path)
-            _remote_mkdirs(client, remote_parent)
-            sftp.put(local_path, remote_path)
+            try:
+                file_size = int(os.path.getsize(local_path))
+            except Exception:
+                file_size = 0
+            upload_entries.append((local_path, remote_path, rel, max(0, file_size)))
+            seen_rel_files.add(rel)
 
-        def _put_tree(rel_dir: str) -> None:
+        def _queue_tree(rel_dir: str) -> None:
             rel = str(rel_dir or '').strip().replace('\\', '/')
             if not rel:
                 return
             local_dir = os.path.join(repo_root, rel)
             if not os.path.isdir(local_dir):
                 return
-            allowed_names = {'.coretg_pack.json', 'Dockerfile', 'docker-compose.yml', 'manifest.yaml', 'manifest.yml', 'generator.py'}
-            allowed_ext = {'.py', '.yaml', '.yml', '.json'}
             for root, _dirs, files in os.walk(local_dir):
                 for fn in files:
                     if fn not in allowed_names and os.path.splitext(fn)[1].lower() not in allowed_ext:
                         continue
                     local_path = os.path.join(root, fn)
                     rel_file = os.path.relpath(local_path, repo_root).replace('\\', '/')
-                    remote_path = _remote_path_join(repo_dir, rel_file)
-                    remote_parent = posixpath.dirname(remote_path)
-                    _remote_mkdirs(client, remote_parent)
-                    try:
-                        sftp.put(local_path, remote_path)
-                    except Exception:
+                    if rel_file in seen_rel_files:
                         continue
+                    remote_path = _remote_path_join(repo_dir, rel_file)
+                    try:
+                        file_size = int(os.path.getsize(local_path))
+                    except Exception:
+                        file_size = 0
+                    upload_entries.append((local_path, remote_path, rel_file, max(0, file_size)))
+                    seen_rel_files.add(rel_file)
 
         # Keep remote Execute on the same package code as the local webapp.
         # Syncing only cli.py leaves imported runtime modules stale on the CORE VM.
-        _put_tree('scenarioforge')
-        _put_file('scripts/run_flag_generator.py')
-        _put_tree('outputs/installed_generators/flag_generators')
-        _put_tree('outputs/installed_generators/flag_node_generators')
-        _put_tree('flag_generators')
-        _put_tree('flag_node_generators')
+        _queue_tree('scenarioforge')
+        _queue_file('scripts/run_flag_generator.py')
+        _queue_tree('outputs/installed_generators/flag_generators')
+        _queue_tree('outputs/installed_generators/flag_node_generators')
+        _queue_tree('flag_generators')
+        _queue_tree('flag_node_generators')
+
+        total_files = len(upload_entries)
+        total_bytes = sum(max(0, int(entry[3] or 0)) for entry in upload_entries)
+        if total_files <= 0:
+            try:
+                log_handle_local.write('[remote] runtime subset sync skipped: no eligible files\n')
+            except Exception:
+                pass
+            return
+
         try:
-            log_handle_local.write('[remote] synced runtime subset (core package/runner/generators)\n')
+            log_handle_local.write(
+                f'[remote] runtime subset sync plan: files={total_files} bytes={total_bytes}\n'
+            )
+        except Exception:
+            pass
+
+        uploaded_files = 0
+        uploaded_bytes = 0
+        last_logged_bucket = -1
+
+        def _log_sync_progress(*, force: bool = False) -> None:
+            nonlocal last_logged_bucket
+            if total_files <= 0:
+                percent = 100
+            else:
+                percent = int((uploaded_files * 100) / total_files)
+                if uploaded_files > 0 and percent <= 0:
+                    percent = 1
+            bucket = 100 if percent >= 100 else int(percent / 5) * 5
+            if not force and bucket <= last_logged_bucket:
+                return
+            last_logged_bucket = max(last_logged_bucket, bucket)
+            try:
+                log_handle_local.write(
+                    f'[remote] runtime subset sync progress: {percent}% '
+                    f'({uploaded_files}/{total_files} files, {uploaded_bytes}/{total_bytes} bytes)\n'
+                )
+            except Exception:
+                pass
+
+        _log_sync_progress(force=True)
+
+        repo_base_name = posixpath.basename(str(repo_dir or '').rstrip('/')) or 'scenarioforge'
+        repo_parent = posixpath.dirname(str(repo_dir or '').rstrip('/')) or '/'
+        archive_fd = None
+        archive_path = None
+        remote_archive = _remote_path_join(repo_parent, f'.coretg-runtime-subset-{uuid.uuid4().hex}.tar.gz')
+        archive_size = 0
+        archive_logged_bucket = -1
+
+        def _log_archive_progress(transferred: int, total: int, *, force: bool = False) -> None:
+            nonlocal archive_logged_bucket
+            if total <= 0:
+                percent = 100
+            else:
+                percent = int((transferred * 100) / total)
+                if transferred > 0 and percent <= 0:
+                    percent = 1
+            bucket = 100 if percent >= 100 else int(percent / 5) * 5
+            if not force and bucket <= archive_logged_bucket:
+                return
+            archive_logged_bucket = max(archive_logged_bucket, bucket)
+            try:
+                log_handle_local.write(
+                    f'[remote] runtime subset sync progress: {percent}% '
+                    f'({transferred}/{total} archive bytes)\n'
+                )
+            except Exception:
+                pass
+
+        try:
+            archive_fd, archive_path = tempfile.mkstemp(prefix='coretg_runtime_subset_', suffix='.tar.gz')
+            os.close(archive_fd)
+            archive_fd = None
+            with tarfile.open(archive_path, 'w:gz') as tar:
+                for local_path, _remote_path, rel_file, _file_size in upload_entries:
+                    try:
+                        tar.add(local_path, arcname=posixpath.join(repo_base_name, rel_file))
+                    except Exception:
+                        continue
+            try:
+                archive_size = int(os.path.getsize(archive_path))
+            except Exception:
+                archive_size = 0
+            try:
+                log_handle_local.write(
+                    f'[remote] runtime subset archive ready: bytes={archive_size} target={remote_archive}\n'
+                )
+            except Exception:
+                pass
+
+            _remote_mkdirs(client, repo_parent)
+            sftp.put(
+                archive_path,
+                remote_archive,
+                callback=lambda transferred, total: _log_archive_progress(int(transferred or 0), int(total or 0)),
+            )
+            _log_archive_progress(archive_size, archive_size, force=True)
+
+            extract_script = (
+                f"set -euo pipefail; mkdir -p {shlex.quote(repo_parent)}; "
+                f"tar -xzf {shlex.quote(remote_archive)} -C {shlex.quote(repo_parent)}; "
+                f"rm -f {shlex.quote(remote_archive)}"
+            )
+            _exec_ssh_command(client, f"bash -lc {shlex.quote(extract_script)}", timeout=None, check=True)
+            uploaded_files = total_files
+            uploaded_bytes = total_bytes
+        finally:
+            if archive_fd is not None:
+                try:
+                    os.close(archive_fd)
+                except Exception:
+                    pass
+            if archive_path and os.path.exists(archive_path):
+                try:
+                    os.remove(archive_path)
+                except Exception:
+                    pass
+
+        try:
+            log_handle_local.write(
+                f'[remote] synced runtime subset (core package/runner/generators) '
+                f'files={uploaded_files}/{total_files} bytes={uploaded_bytes}/{total_bytes} '
+                f'archive_bytes={archive_size}\n'
+            )
         except Exception:
             pass
 
@@ -5953,18 +6113,29 @@ def _prepare_remote_cli_context(
         except Exception:
             pass
         try:
+            try:
+                log_handle.write('[remote] syncing runtime subset to CORE host...\n')
+            except Exception:
+                pass
             _sync_runtime_subset_to_remote_repo(repo_dir, sftp, log_handle)
         except Exception as sync_exc:
             try:
-                log_handle.write(f"[remote] runtime subset sync skipped/failed: {sync_exc}\n")
+                log_handle.write(f"[remote] runtime subset sync failed: {sync_exc}\n")
             except Exception:
                 pass
+            raise RuntimeError(
+                f'Failed to synchronize ScenarioForge runtime code to CORE host: {sync_exc}'
+            ) from sync_exc
         # Ensure reports/outputs/uploads directories exist for CLI outputs
         for subdir in ('reports', 'outputs', 'uploads'):
             _remote_mkdirs(client, _remote_path_join(repo_dir, subdir))
         remote_xml_path = _remote_path_join(run_dir, os.path.basename(xml_path))
         uploaded_paths: set[str] = set()
         uploaded_dirs: set[str] = set()
+        try:
+            log_handle.write(f"[remote] preparing scenario XML upload: {xml_path} -> {remote_xml_path}\n")
+        except Exception:
+            pass
         _upload_xml_with_remote_vuln_paths(
             xml_path,
             remote_xml_path,
@@ -5993,6 +6164,13 @@ def _prepare_remote_cli_context(
                 _put_required_file(preview_plan_path, remote_preview_plan, label='preview plan')
             # If the preview/flow plan references local /tmp/vulns artifact directories,
             # upload them to the CORE VM so the remote run can use them.
+            try:
+                flow_dirs = _extract_flow_artifact_dirs_from_plan(preview_plan_path)
+                log_handle.write(
+                    f"[remote] checking flow artifacts for preview plan: dirs={len(flow_dirs or [])} path={preview_plan_path}\n"
+                )
+            except Exception:
+                pass
             _upload_flow_artifacts_for_plan_to_remote(
                 client=client,
                 sftp=sftp,
@@ -6000,6 +6178,13 @@ def _prepare_remote_cli_context(
                 log_handle=log_handle,
                 upload_only_injected_artifacts=bool(upload_only_injected_artifacts),
             )
+            try:
+                assignments = _extract_flow_assignments_from_plan(preview_plan_path)
+                log_handle.write(
+                    f"[remote] checking remote flow artifact regeneration: assignments={len(assignments or [])} path={preview_plan_path}\n"
+                )
+            except Exception:
+                pass
             _regenerate_missing_remote_flow_artifacts_for_plan(
                 sftp=sftp,
                 preview_plan_path=preview_plan_path,
@@ -6016,6 +6201,13 @@ def _prepare_remote_cli_context(
         }
         if not preview_plan_path:
             try:
+                try:
+                    flow_dirs = _extract_flow_artifact_dirs_from_plan(xml_path)
+                    log_handle.write(
+                        f"[remote] checking flow artifacts for scenario XML: dirs={len(flow_dirs or [])} path={xml_path}\n"
+                    )
+                except Exception:
+                    pass
                 _upload_flow_artifacts_for_plan_to_remote(
                     client=client,
                     sftp=sftp,
@@ -6023,6 +6215,13 @@ def _prepare_remote_cli_context(
                     log_handle=log_handle,
                     upload_only_injected_artifacts=bool(upload_only_injected_artifacts),
                 )
+                try:
+                    assignments = _extract_flow_assignments_from_plan(xml_path)
+                    log_handle.write(
+                        f"[remote] checking remote flow artifact regeneration: assignments={len(assignments or [])} path={xml_path}\n"
+                    )
+                except Exception:
+                    pass
                 _regenerate_missing_remote_flow_artifacts_for_plan(
                     sftp=sftp,
                     preview_plan_path=xml_path,
@@ -6288,24 +6487,20 @@ def _core_connection_via_ssh(core_cfg: Dict[str, Any]) -> Iterator[Tuple[str, in
             remote_port=int(core_cfg.get('port') or 50051),
         )
         host, port = tunnel.start()
-        yield host, port
     except Exception as exc:
         ssh_host = str(core_cfg.get('ssh_host') or core_cfg.get('host') or 'localhost')
         ssh_port = int(core_cfg.get('ssh_port') or 22)
         remote_host = str(core_cfg.get('host') or 'localhost')
         remote_port = int(core_cfg.get('port') or 50051)
         ssh_user = str(core_cfg.get('ssh_username') or '')
-        
-        # Helper for common Docker misconfiguration
-        hint = ""
-        if remote_host in ('localhost', '127.0.0.1') and core_cfg.get('ssh_enabled'):
-            hint = " (Hint: 'localhost' usually means THIS container, not the SSH server. Did you mean to use the SSH server's internal checking address?)"
 
         app.logger.error(
-            "SSH tunnel failed: %s. Context: ssh=%s:%s user=%s target=%s:%s%s",
-            exc, ssh_host, ssh_port, ssh_user, remote_host, remote_port, hint
+            "SSH tunnel setup failed: %s. Context: ssh=%s:%s user=%s target=%s:%s",
+            exc, ssh_host, ssh_port, ssh_user, remote_host, remote_port
         )
-        raise exc
+        raise
+    try:
+        yield host, port
     finally:
         if tunnel:
             tunnel.close()
@@ -6349,6 +6544,92 @@ def _grpc_save_current_session_xml_with_config(
 
     cfg = _normalize_core_config(core_cfg, include_password=True)
     os.makedirs(out_dir, exist_ok=True)
+
+    def _missing_core_module(exc: BaseException) -> bool:
+        try:
+            if isinstance(exc, ModuleNotFoundError):
+                missing_name = str(getattr(exc, 'name', '') or '').strip()
+                if missing_name == 'core' or missing_name.startswith('core.'):
+                    return True
+        except Exception:
+            pass
+        return "No module named 'core'" in str(exc)
+
+    def _local_core_grpc_host() -> str:
+        host = str(cfg.get('host') or cfg.get('grpc_host') or 'localhost').strip() or 'localhost'
+        if host in {'localhost', '::1'}:
+            return '127.0.0.1'
+        return host
+
+    def _try_local_core_python_save_xml() -> Optional[str]:
+        try:
+            target_port = int(cfg.get('port') or cfg.get('grpc_port') or CORE_PORT)
+        except Exception:
+            target_port = CORE_PORT
+        target_id_text = str(session_id).strip() if session_id not in (None, '') else None
+        local_filename = (
+            f'session-{target_id_text}.xml'
+            if target_id_text
+            else f'core-session-{_local_timestamp_safe()}.xml'
+        )
+        local_path = os.path.join(out_dir, local_filename)
+        script = _remote_core_save_xml_script(
+            f'{_local_core_grpc_host()}:{target_port}',
+            target_id_text,
+            local_path,
+        )
+        errors: List[str] = []
+        for interpreter in _candidate_remote_python_interpreters(cfg):
+            exe = str(interpreter or '').strip()
+            if not exe:
+                continue
+            try:
+                proc = subprocess.run(
+                    [exe, '-c', script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120.0,
+                )
+            except Exception as exc:
+                errors.append(f'{exe}: {exc}')
+                continue
+            stdout_text = str(proc.stdout or '').strip()
+            stderr_text = str(proc.stderr or '').strip()
+            if proc.returncode != 0:
+                errors.append(
+                    f'{exe}: exit={proc.returncode} stdout={_summarize_for_log(stdout_text)} stderr={_summarize_for_log(stderr_text)}'
+                )
+                continue
+            if not stdout_text:
+                errors.append(f'{exe}: empty stdout')
+                continue
+            try:
+                payload = json.loads(stdout_text)
+            except Exception:
+                try:
+                    last_line = [ln for ln in stdout_text.splitlines() if ln.strip()][-1]
+                    payload = json.loads(last_line)
+                except Exception as exc:
+                    errors.append(f'{exe}: invalid JSON: {exc}')
+                    continue
+            if not isinstance(payload, dict):
+                errors.append(f'{exe}: non-object JSON payload')
+                continue
+            error_text = str(payload.get('error') or '').strip()
+            if error_text:
+                errors.append(f'{exe}: {error_text}')
+                if "No module named 'core'" in error_text:
+                    continue
+                raise RuntimeError(error_text)
+            output_path = str(payload.get('output_path') or '').strip()
+            if not output_path:
+                errors.append(f'{exe}: missing output_path')
+                continue
+            return output_path
+        detail = '; '.join(errors[-4:]) if errors else 'no interpreter candidates'
+        raise RuntimeError(f'local CORE Python save_xml fallback failed: {detail}')
+
     try:
         with _core_connection(cfg) as (conn_host, conn_port):
             from core.api.grpc.client import CoreGrpcClient
@@ -6399,6 +6680,8 @@ def _grpc_save_current_session_xml_with_config(
     try:
         ssh_cfg = _require_core_ssh_credentials(cfg)
     except Exception:
+        if _missing_core_module(original_exc):
+            return _try_local_core_python_save_xml()
         raise original_exc
 
     try:
@@ -6437,7 +6720,16 @@ def _grpc_save_current_session_xml_with_config(
         except Exception:
             pass
         return out_path
-    except Exception:
+    except Exception as remote_exc:
+        if _missing_core_module(original_exc):
+            try:
+                return _try_local_core_python_save_xml()
+            except Exception as local_exc:
+                raise RuntimeError(
+                    'CORE session XML export failed because the current Python environment '
+                    f'cannot import core.api.grpc, remote save_xml fallback failed ({remote_exc}), '
+                    f'and local CORE Python fallback failed ({local_exc})'
+                ) from original_exc
         raise original_exc
 
 
@@ -6809,6 +7101,40 @@ def _scrub_scenario_core_config(raw: Any) -> Dict[str, Any] | None:
         normalized = dict(normalized)
         normalized.update(extras)
     return normalized
+
+
+def _fill_matching_core_credentials(
+    core_cfg: Dict[str, Any],
+    credential_cfg: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Fill secrets only when both configs identify the same CORE connection."""
+    if not isinstance(core_cfg, dict) or not isinstance(credential_cfg, dict):
+        return core_cfg
+
+    def _text(cfg: Dict[str, Any], key: str) -> str:
+        return str(cfg.get(key) or '').strip()
+
+    core_secret_id = _text(core_cfg, 'core_secret_id')
+    credential_secret_id = _text(credential_cfg, 'core_secret_id')
+    same_secret = bool(
+        core_secret_id
+        and credential_secret_id
+        and core_secret_id == credential_secret_id
+    )
+    same_target = all(
+        _text(core_cfg, key)
+        and _text(core_cfg, key) == _text(credential_cfg, key)
+        for key in ('ssh_host', 'ssh_port', 'ssh_username')
+    )
+    if not same_secret and not same_target:
+        return core_cfg
+
+    enriched = dict(core_cfg)
+    if enriched.get('ssh_password') in (None, ''):
+        password = credential_cfg.get('ssh_password')
+        if password not in (None, ''):
+            enriched['ssh_password'] = password
+    return enriched
 
 
 def _merge_core_configs(*configs: Any, include_password: bool = True) -> Dict[str, Any]:
@@ -8000,19 +8326,193 @@ def _install_custom_services_to_core_vm(
         finally:
             _close_ssh_command_streams(stdin, stdout, stderr)
 
+    def _remote_python_candidates() -> list[str]:
+        candidates: list[str] = []
+        try:
+            if core_cfg:
+                for cand in _candidate_remote_python_interpreters(core_cfg):
+                    c = str(cand or '').strip()
+                    if c and c not in candidates:
+                        candidates.append(c)
+        except Exception:
+            pass
+        for c in ('core-python', '/opt/core/venv/bin/python', 'python3', 'python'):
+            if c not in candidates:
+                candidates.append(c)
+        return candidates
+
+    def _remote_file_size(sftp: Any, remote_path: str) -> Optional[int]:
+        try:
+            st = sftp.stat(remote_path)
+            return int(getattr(st, 'st_size'))
+        except Exception:
+            return None
+
+    def _sftp_put_compat(sftp: Any, local_path: str, remote_path: str) -> None:
+        try:
+            sftp.put(local_path, remote_path, confirm=False)
+        except TypeError:
+            sftp.put(local_path, remote_path)
+
+    def _sftp_stream_upload(sftp: Any, local_path: str, remote_path: str) -> None:
+        opener = getattr(sftp, 'open', None) or getattr(sftp, 'file', None)
+        if not callable(opener):
+            _sftp_put_compat(sftp, local_path, remote_path)
+            return
+        remote_fh = opener(remote_path, 'wb')
+        try:
+            with open(local_path, 'rb') as local_fh:
+                shutil.copyfileobj(local_fh, remote_fh)
+            flush = getattr(remote_fh, 'flush', None)
+            if callable(flush):
+                flush()
+        finally:
+            try:
+                remote_fh.close()
+            except Exception:
+                pass
+
+    def _upload_custom_service_file_via_command(local_path: str, remote_path: str) -> None:
+        expected_size = os.path.getsize(local_path)
+        with open(local_path, 'rb') as handle:
+            payload_b64 = base64.b64encode(handle.read()).decode('ascii')
+
+        remote_path_literal = json.dumps(remote_path)
+        upload_script = textwrap.dedent(
+            f"""
+            import base64
+            import os
+            import sys
+
+            path = {remote_path_literal}
+            expected_size = {int(expected_size)}
+            tmp_path = f"{{path}}.tmp-{{os.getpid()}}"
+
+            try:
+                encoded = sys.stdin.read()
+                if isinstance(encoded, bytes):
+                    encoded = encoded.decode("ascii")
+                payload = base64.b64decode(str(encoded or "").encode("ascii"), validate=True)
+                if len(payload) != expected_size:
+                    raise RuntimeError(f"decoded size {{len(payload)}} != expected {{expected_size}}")
+
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+
+                with open(tmp_path, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    try:
+                        os.fsync(handle.fileno())
+                    except OSError:
+                        pass
+
+                actual_size = os.path.getsize(tmp_path)
+                if actual_size != expected_size:
+                    raise RuntimeError(f"remote temp size {{actual_size}} != expected {{expected_size}}")
+                os.replace(tmp_path, path)
+                print(actual_size)
+            except Exception as exc:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                except Exception:
+                    pass
+                print(exc, file=sys.stderr)
+                sys.exit(1)
+            """
+        )
+        upload_script_b64 = base64.b64encode(upload_script.encode('utf-8')).decode('ascii')
+        loader = (
+            "import base64; "
+            f"exec(compile(base64.b64decode('{upload_script_b64}').decode('utf-8'), "
+            "'<coretg-custom-service-upload>', 'exec'))"
+        )
+
+        failures: list[str] = []
+        for interpreter in _remote_python_candidates():
+            cmd = f"{shlex.quote(interpreter)} -c {shlex.quote(loader)}"
+            stdin = stdout = stderr = None
+            try:
+                stdin, stdout, stderr = ssh_client.exec_command(cmd, timeout=30.0, get_pty=False)
+                if stdin:
+                    try:
+                        stdin.write(payload_b64)
+                    except TypeError:
+                        stdin.write(payload_b64.encode('ascii'))
+                    try:
+                        stdin.flush()
+                    except Exception:
+                        pass
+                    try:
+                        stdin.close()
+                    except Exception:
+                        pass
+                    stdin = None
+                out = stdout.read() if stdout else b''
+                err = stderr.read() if stderr else b''
+                try:
+                    exit_code = stdout.channel.recv_exit_status() if (stdout and hasattr(stdout, 'channel')) else 0
+                except Exception:
+                    exit_code = 0
+                out_text = out.decode('utf-8', 'ignore') if isinstance(out, (bytes, bytearray)) else str(out or '')
+                err_text = err.decode('utf-8', 'ignore') if isinstance(err, (bytes, bytearray)) else str(err or '')
+                if exit_code == 0:
+                    last_line = out_text.strip().splitlines()[-1].strip() if out_text.strip() else ''
+                    try:
+                        actual_size = int(last_line)
+                    except (TypeError, ValueError):
+                        actual_size = expected_size if not last_line else -1
+                    if actual_size == expected_size:
+                        return
+                    failures.append(
+                        f"{interpreter}: exit=0 but reported size {last_line or 'n/a'} != {expected_size}"
+                    )
+                else:
+                    detail = (err_text or out_text or f'exit={exit_code}').strip()
+                    failures.append(
+                        f"{interpreter}: exit={exit_code} detail={_summarize_for_log(detail, limit=160)}"
+                    )
+            except Exception as exc:
+                failures.append(f"{interpreter}: {exc}")
+            finally:
+                _close_ssh_command_streams(stdin, stdout, stderr)
+
+        detail = '; '.join(failures[-4:]) if failures else 'no remote python candidates'
+        raise RuntimeError(f'command-channel fallback failed: {detail}')
+
+    def _upload_custom_service_file(sftp: Any, local_path: str, remote_path: str) -> None:
+        expected_size = os.path.getsize(local_path)
+        errors: list[str] = []
+        for attempt in range(1, 4):
+            try:
+                if attempt == 1:
+                    _sftp_put_compat(sftp, local_path, remote_path)
+                else:
+                    _sftp_stream_upload(sftp, local_path, remote_path)
+                actual_size = _remote_file_size(sftp, remote_path)
+                if actual_size is None or actual_size == expected_size:
+                    return
+                errors.append(f'attempt {attempt}: remote size {actual_size} != local size {expected_size}')
+            except Exception as exc:
+                errors.append(f'attempt {attempt}: {exc}')
+            try:
+                time.sleep(0.15 * attempt)
+            except Exception:
+                pass
+        try:
+            _upload_custom_service_file_via_command(local_path, remote_path)
+            return
+        except Exception as exc:
+            errors.append(str(exc))
+        detail = '; '.join(errors[-4:]) if errors else 'unknown upload failure'
+        raise RuntimeError(
+            f'Failed uploading custom service {os.path.basename(local_path)} to {remote_path}: {detail}'
+        )
+
     # Discover the remote core.services directory (where CORE loads service modules).
-    candidates: list[str] = []
-    try:
-        if core_cfg:
-            for cand in _candidate_remote_python_interpreters(core_cfg):
-                c = str(cand or '').strip()
-                if c and c not in candidates:
-                    candidates.append(c)
-    except Exception:
-        pass
-    for c in ('core-python', '/opt/core/venv/bin/python', 'python3', 'python'):
-        if c not in candidates:
-            candidates.append(c)
+    candidates = _remote_python_candidates()
 
     services_dirs: list[str] = []
     core_conf_custom_services_dirs: list[str] = []
@@ -8179,7 +8679,7 @@ def _install_custom_services_to_core_vm(
         sftp = ssh_client.open_sftp()
         for lp in local_files:
             rp = f"{tmp_dir}/{os.path.basename(lp)}"
-            sftp.put(lp, rp)
+            _upload_custom_service_file(sftp, lp, rp)
     finally:
         try:
             if sftp:
@@ -8259,12 +8759,13 @@ def _install_custom_services_to_core_vm(
 
         # Discoverable scan across core.services.
         all_names = set()
-        for m in pkgutil.iter_modules(core.services.__path__):
+        prefix = core.services.__name__ + '.'
+        for m in pkgutil.walk_packages(core.services.__path__, prefix):
             name = getattr(m, 'name', None)
             if not name:
                 continue
             try:
-                mod = importlib.import_module(f"core.services.{{name}}")
+                mod = importlib.import_module(name)
             except Exception:
                 continue
             for svc_name in service_names_from_module(mod):
@@ -8408,12 +8909,13 @@ def _remote_core_service_names(
             return dirs
 
         package_names = set()
-        for m in pkgutil.iter_modules(core.services.__path__):
+        prefix = core.services.__name__ + '.'
+        for m in pkgutil.walk_packages(core.services.__path__, prefix):
             n = getattr(m, 'name', None)
             if not n:
                 continue
             try:
-                mod = importlib.import_module(f"core.services.{{n}}")
+                mod = importlib.import_module(n)
             except Exception:
                 continue
             package_names.update(service_names_from_module(mod))
@@ -13627,8 +14129,6 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
     vmid = ''
     vm_name = ''
     vm_key = ''
-    participant_url = str(os.getenv('CORETG_VM_MODE_PARTICIPANT_URL') or 'http://participant-ui.example').strip()
-
     core_defaults = _normalize_core_config(
         {
             'host': core_host,
@@ -13695,7 +14195,6 @@ def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
         'core': core_defaults,
         'hitl': {
             'enabled': _env_bool_flag('CORETG_VM_MODE_HITL_ENABLED', True),
-            'participant_ui_url': participant_url,
             'participant_pool': 'same-pool',
             'interfaces': interfaces_defaults,
             'shared_core_ifx_ipv4': list(single_ifx_ipv4),
@@ -13745,6 +14244,13 @@ def _inject_template_user() -> dict:
 @app.context_processor
 def _inject_nav_participant_link() -> dict:
     try:
+        if _webui_runtime_mode() == 'vm':
+            return {
+                'nav_participant_url': '',
+                'nav_participant_scenario': '',
+                'nav_participant_enabled': False,
+            }
+
         # If the current page is scoped to a scenario, the navbar Participant UI link
         # should reflect THAT scenario only. If that scenario has no participant URL,
         # hide the nav item instead of falling back to some other scenario that does.
@@ -13880,6 +14386,7 @@ try:
     _participant_ui_routes.register(
         app,
         participant_ui_state_getter=lambda: _participant_ui_state(),
+        participant_ui_enabled=lambda: _webui_runtime_mode() != 'vm',
         normalize_scenario_label=lambda value: _normalize_scenario_label(value),
         normalize_participant_proxmox_url=lambda value: _normalize_participant_proxmox_url(value),
         load_run_history=lambda: _load_run_history(),
@@ -14889,6 +15396,7 @@ try:
         planner_persist_flow_plan=lambda **kwargs: _planner_persist_flow_plan(**kwargs),
         normalize_scenario_label=lambda value: _normalize_scenario_label(value),
         latest_xml_path_for_scenario=lambda scenario_name: _latest_xml_path_for_scenario(scenario_name),
+        resolve_preexecute_xml_path=lambda xml_path, scenario_name: _resolve_preexecute_xml_path(xml_path, scenario_name),
     )
 except Exception:
     try:
@@ -23367,15 +23875,17 @@ def _select_python_interpreter(preferred_venv_bin: Optional[str] = None) -> str:
     Priority order:
     1. Explicit environment override CORE_PY (absolute path wins, otherwise treated as first lookup candidate)
     2. Interpreter binaries that live inside the preferred/core-configured venv bin (falling back to CORE_VENV_BIN env var and /opt/core/venv/bin)
-    3. 'core-python', then 'python3', then 'python' discovered via PATH (with the venv bin prepended to PATH)
-    4. sys.executable as a final fallback
+    3. Named CORE_PY override discovered via PATH
+    4. The current process interpreter when it is executable (preserves the active environment)
+    5. 'core-python', then 'python3', then 'python' discovered via PATH (with the venv bin prepended to PATH)
+    6. sys.executable as a final fallback string
 
     Returns the chosen executable string (absolute path or name)."""
 
     override = os.environ.get('CORE_PY')
     venv_bin = _resolve_cli_venv_bin(preferred_venv_bin)
 
-    name_candidates: list[str] = []
+    override_name_candidates: list[str] = []
 
     if override:
         if os.path.isabs(override):
@@ -23385,20 +23895,34 @@ def _select_python_interpreter(preferred_venv_bin: Optional[str] = None) -> str:
             except Exception:
                 pass
         else:
-            name_candidates.append(override)
+            override_name_candidates.append(override)
 
     if venv_bin:
         preferred_python = _find_python_in_venv_bin(venv_bin)
         if preferred_python:
             return preferred_python
 
-    name_candidates.extend(PYTHON_EXECUTABLE_NAMES)
-
     search_path = os.environ.get('PATH') or ''
     if venv_bin:
         search_path = f"{venv_bin}:{search_path}" if search_path else venv_bin
 
-    for name in name_candidates:
+    for name in override_name_candidates:
+        try:
+            resolved = shutil.which(name, path=search_path)
+        except Exception:
+            resolved = None
+        if resolved:
+            return resolved
+
+    current_python = str(sys.executable or '').strip()
+    if current_python:
+        try:
+            if os.path.isabs(current_python) and os.access(current_python, os.X_OK):
+                return current_python
+        except Exception:
+            pass
+
+    for name in PYTHON_EXECUTABLE_NAMES:
         try:
             resolved = shutil.which(name, path=search_path)
         except Exception:
@@ -26411,6 +26935,22 @@ def _participant_ui_state() -> Dict[str, Any]:
         cached = getattr(g, '_participant_ui_state', _G_PARTICIPANT_STATE_SENTINEL)
         if cached is not _G_PARTICIPANT_STATE_SENTINEL:
             return cached
+    if _webui_runtime_mode() == 'vm':
+        state = {
+            'selected_norm': '',
+            'selected_label': '',
+            'selected_url': '',
+            'selected_nearest_gateway': '',
+            'listing': [],
+            'listing_heading': 'Participant UI',
+            'listing_empty_message': 'Participant UI is unavailable in VM mode.',
+            'listing_hint': '',
+            'restrict_to_assigned': False,
+            'has_assignments': False,
+        }
+        if has_request_context():
+            setattr(g, '_participant_ui_state', state)
+        return state
     user = _current_user()
     user_role = _normalize_role_value(user.get('role')) if user else ''
     scenario_names, scenario_paths, scenario_url_hints = _scenario_catalog_for_user(
@@ -26595,6 +27135,7 @@ try:
         default_ui_view_mode_for_role=lambda role: _default_ui_view_mode_for_role(role),
         is_participant_role=lambda role: _is_participant_role(role),
         ui_view_session_key=_UI_VIEW_SESSION_KEY,
+        participant_ui_enabled=lambda: _webui_runtime_mode() != 'vm',
     )
 except Exception:
     try:
@@ -30289,9 +30830,22 @@ def _remote_copy_flow_artifacts_into_containers_script(sudo_password: str | None
     sudo_password_literal = json.dumps(str(sudo_password) if sudo_password else "")
     return (
         r"""
-import json, os, re, subprocess, time
+import json, os, re, shlex, subprocess, time
 
 SUDO_PASSWORD = __SUDO_PASSWORD_LITERAL__
+
+try:
+    COPY_SETTLE_S = max(0.0, float(os.environ.get('CORETG_FLOW_COPY_SETTLE_S') or '1.0'))
+except Exception:
+    COPY_SETTLE_S = 1.0
+try:
+    COPY_RETRY_S = max(0.0, float(os.environ.get('CORETG_FLOW_COPY_RETRY_S') or '2.0'))
+except Exception:
+    COPY_RETRY_S = 2.0
+try:
+    COPY_MAX_ATTEMPTS = max(1, min(20, int(os.environ.get('CORETG_FLOW_COPY_MAX_ATTEMPTS') or '10')))
+except Exception:
+    COPY_MAX_ATTEMPTS = 10
 
 
 def _run_docker(cmd, timeout=30, capture=True):
@@ -30354,6 +30908,36 @@ def _normalize_remote_flow_path(path_value):
 def _read_json(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def _compose_node_names(assign_dir):
+    out = []
+    try:
+        for name in sorted(os.listdir(assign_dir or '')):
+            text = str(name or '').strip()
+            if not text.startswith('docker-compose-') or not text.endswith('.yml'):
+                continue
+            if text.endswith('.orig.yml'):
+                continue
+            node_name = text[len('docker-compose-'):-len('.yml')]
+            if node_name:
+                out.append(node_name)
+    except Exception:
+        return []
+    return out
+
+
+def _first_compose_dir(path_candidates):
+    for directory in path_candidates:
+        d = str(directory or '').strip()
+        if not d:
+            continue
+        try:
+            if _compose_node_names(d):
+                return d
+        except Exception:
+            continue
+    return None
 
 
 def _docker_names():
@@ -30603,32 +31187,161 @@ def _docker_exec_sh(target: str, cmd: str, timeout: int = 30):
     return _run_docker(['exec', target, 'sh', '-lc', cmd], timeout=timeout, capture=True)
 
 
+def _container_identity(target: str):
+    p = _run_docker(
+        ['inspect', '--format', '{{.Id}}|{{.State.Running}}|{{.State.Status}}', target],
+        timeout=20,
+        capture=True,
+    )
+    if getattr(p, 'returncode', 1) != 0:
+        return {'id': '', 'running': True, 'status': 'unknown'}
+    raw = str(getattr(p, 'stdout', '') or '').strip()
+    parts = raw.split('|', 2)
+    container_id = str(parts[0] if parts else '').strip()
+    running_raw = str(parts[1] if len(parts) > 1 else '').strip().lower()
+    status = str(parts[2] if len(parts) > 2 else '').strip().lower()
+    running = (running_raw == 'true' or status == 'running') and status != 'restarting'
+    return {'id': container_id, 'running': bool(running), 'status': status}
+
+
+def _resolve_targets(node_name: str, yml: str, attempts: int = 6):
+    last_err = ''
+    project = f"{node_name}conf" if node_name else 'coretg'
+    fallback_targets = []
+    for idx in range(max(1, int(attempts or 1))):
+        names, err = _docker_names()
+        last_err = err or last_err
+        if node_name in names:
+            state = _container_identity(node_name)
+            if state.get('running'):
+                return [node_name], last_err
+        ids = _compose_container_ids(project, yml)
+        if ids:
+            fallback_targets = list(ids)
+            running_ids = [
+                target for target in ids
+                if _container_identity(target).get('running')
+            ]
+            if running_ids:
+                fallback_targets = running_ids
+        if idx < max(1, int(attempts or 1)) - 1:
+            time.sleep(COPY_RETRY_S)
+    return list(fallback_targets), last_err
+
+
+def _container_path_exists(target: str, path: str):
+    quoted = shlex.quote(str(path or '').strip())
+    if not quoted:
+        return False, 'empty destination path'
+    p = _docker_exec_sh(target, f'test -e {quoted}', timeout=25)
+    ok = getattr(p, 'returncode', 1) == 0
+    return bool(ok), str(getattr(p, 'stdout', '') or '').strip()
+
+
+def _resolve_relative_inject_source(source_dir: str, rel_path: str):
+    source_dir = _normalize_remote_flow_path(str(source_dir or '').strip())
+    rel = str(rel_path or '').replace('\\', '/').strip().lstrip('/')
+    if not source_dir or not rel:
+        return _normalize_remote_flow_path(os.path.join(source_dir, rel) if source_dir else rel)
+
+    candidates = []
+    try:
+        base_name = os.path.basename(source_dir.rstrip('/')).lower()
+    except Exception:
+        base_name = ''
+    if base_name in ('artifacts', 'flow_artifacts'):
+        for prefix in ('artifacts/', 'flow_artifacts/'):
+            if rel.startswith(prefix):
+                stripped = rel.split(prefix, 1)[1].lstrip('/')
+                if stripped:
+                    candidates.append(os.path.join(source_dir, stripped))
+    candidates.append(os.path.join(source_dir, rel))
+
+    seen = set()
+    fallback = ''
+    for cand in candidates:
+        normalized = _normalize_remote_flow_path(cand)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if not fallback:
+            fallback = normalized
+        try:
+            if os.path.exists(normalized):
+                return normalized
+        except Exception:
+            continue
+    return fallback or _normalize_remote_flow_path(os.path.join(source_dir, rel))
+
+
+def _runtime_dest_rel_for_inject(rel_path: str):
+    rel = str(rel_path or '').replace('\\', '/').strip()
+    while rel.startswith('./'):
+        rel = rel[2:]
+    rel = rel.lstrip('/')
+    original_base = os.path.basename(rel.rstrip('/'))
+    for prefix in ('flow_artifacts/', 'artifacts/'):
+        if rel.startswith(prefix):
+            rel = rel.split(prefix, 1)[1].lstrip('/')
+            break
+    rel = rel.strip('/')
+    if rel:
+        return rel
+    return original_base
+
+
 def main():
     base = os.environ.get('CORE_REMOTE_BASE_DIR', '/tmp/scenarioforge')
-    candidates = [
+    assignment_candidates = [
         os.path.join(base, 'vulns', 'compose_assignments.json'),
         os.path.join(base, 'outputs', 'vulns', 'compose_assignments.json'),
         os.path.join(base, 'compose_assignments.json'),
         '/tmp/vulns/compose_assignments.json',
     ]
-    assignments_path = _first_existing(candidates)
-    if not assignments_path:
-        print(json.dumps({'ok': False, 'items': [], 'error': 'compose_assignments.json not found on CORE VM'}))
-        return
-
-    try:
-        data = _read_json(assignments_path)
-    except Exception as e:
-        print(json.dumps({'ok': False, 'items': [], 'error': f'failed reading assignments: {e}'}))
-        return
+    compose_dir_candidates = [
+        os.path.join(base, 'vulns'),
+        os.path.join(base, 'outputs', 'vulns'),
+        base,
+        '/tmp/vulns',
+    ]
+    assignments_path = _first_existing(assignment_candidates)
+    assignments_missing = False
+    if assignments_path:
+        try:
+            data = _read_json(assignments_path)
+        except Exception as e:
+            print(json.dumps({'ok': False, 'items': [], 'error': f'failed reading assignments: {e}'}))
+            return
+        assign_dir = os.path.dirname(assignments_path)
+    else:
+        assignments_missing = True
+        data = {'assignments': {}}
+        assign_dir = _first_compose_dir(compose_dir_candidates)
+        if not assign_dir:
+            print(json.dumps({'ok': False, 'items': [], 'error': 'compose_assignments.json not found on CORE VM and no docker-compose-*.yml files were found'}))
+            return
 
     assignments = data.get('assignments', {}) if isinstance(data, dict) else {}
     if not isinstance(assignments, dict):
         assignments = {}
 
-    assign_dir = os.path.dirname(assignments_path)
-    items = []
+    candidate_nodes = []
+    seen_nodes = set()
     for node_name in sorted(assignments.keys()):
+        name = str(node_name or '').strip()
+        if not name or name in seen_nodes:
+            continue
+        seen_nodes.add(name)
+        candidate_nodes.append(name)
+    for node_name in _compose_node_names(assign_dir):
+        name = str(node_name or '').strip()
+        if not name or name in seen_nodes:
+            continue
+        seen_nodes.add(name)
+        candidate_nodes.append(name)
+
+    items = []
+    for node_name in candidate_nodes:
         assignment_entry = assignments.get(node_name) if isinstance(assignments, dict) else None
         yml = os.path.join(assign_dir, f'docker-compose-{node_name}.yml')
         if not os.path.exists(yml):
@@ -30727,23 +31440,7 @@ def main():
         # actually manages. Only fall back to compose project containers when the
         # alias is absent. This avoids treating sidecars or transient helper
         # services as the node's runtime container during postrun verification.
-        targets = []
-        last_err = ''
-        project = f"{node_name}conf" if node_name else 'coretg'
-        fallback_targets = []
-        for _ in range(6):
-            names, err = _docker_names()
-            last_err = err or last_err
-            if node_name in names:
-                targets = [node_name]
-                break
-            ids = _compose_container_ids(project, yml)
-            if ids:
-                fallback_targets = list(ids)
-            time.sleep(2)
-
-        if not targets and fallback_targets:
-            targets = list(fallback_targets)
+        targets, last_err = _resolve_targets(node_name, yml, attempts=6)
 
         if not targets:
             items.append({'node': node_name, 'compose': yml, 'src': src, 'dest': dest, 'ok': False, 'error': 'container not found', 'docker_error': last_err})
@@ -30792,41 +31489,205 @@ def main():
                 # No usable base path for relative inject sources.
                 errs.append('inject mappings present but no inject source_dir and no flow src')
                 source_dir = ''
-            for t in targets:
-                for entry in inject_items:
-                    rel = str(entry.get('src') or '').strip()
-                    dest_dir = str(entry.get('dest') or dest or '').strip()
-                    if not rel or not dest_dir or not dest_dir.startswith('/'):
-                        continue
-                    if os.path.isabs(rel):
-                        src_path = _normalize_remote_flow_path(rel)
-                        rel_path = os.path.basename(str(src_path or rel).rstrip('/')) or os.path.basename(rel.rstrip('/'))
-                    else:
-                        src_path = os.path.join(source_dir, rel.lstrip('/')) if source_dir else rel
-                        src_path = _normalize_remote_flow_path(src_path)
-                        rel_path = rel
-                    if not src_path or not rel_path:
-                        continue
-                    dest_path = dest_dir.rstrip('/') + '/' + rel_path.lstrip('/')
-                    rel_dir = os.path.dirname(rel_path)
-                    if rel_dir:
-                        mkdir_cmd = f"mkdir -p {dest_dir.rstrip('/')}/{rel_dir}"
-                    else:
-                        mkdir_cmd = f"mkdir -p {dest_dir.rstrip('/')}"
-                    commands.append(f"docker exec {t} sh -lc {mkdir_cmd}")
-                    _docker_exec_sh(t, mkdir_cmd, timeout=30)
-                    commands.append(f"docker cp {src_path} {t}:{dest_path}")
-                    p = _run_docker(['cp', src_path, f"{t}:{dest_path}"], timeout=60, capture=True)
-                    out = (getattr(p, 'stdout', '') or '').strip()
-                    rc = int(getattr(p, 'returncode', 1) or 0)
-                    command_outputs.append({'target': t, 'rc': rc, 'out': out, 'dest': dest_path})
-                    if getattr(p, 'returncode', 1) == 0:
-                        copied_any = True
-                    else:
-                        errs.append(out)
-        items.append({'node': node_name, 'compose': yml, 'src': src, 'dest': dest, 'targets': targets, 'ok': bool(copied_any), 'errors': errs, 'commands': commands, 'command_outputs': command_outputs})
+            copy_plan = []
+            for entry in inject_items:
+                rel = str(entry.get('src') or '').strip()
+                dest_dir = str(entry.get('dest') or dest or '').strip()
+                if not rel or not dest_dir or not dest_dir.startswith('/'):
+                    continue
+                if os.path.isabs(rel):
+                    src_path = _normalize_remote_flow_path(rel)
+                    rel_path = os.path.basename(str(src_path or rel).rstrip('/')) or os.path.basename(rel.rstrip('/'))
+                else:
+                    src_path = _resolve_relative_inject_source(source_dir, rel)
+                    rel_path = _runtime_dest_rel_for_inject(rel)
+                if not src_path or not rel_path:
+                    continue
+                dest_path = dest_dir.rstrip('/') + '/' + rel_path.lstrip('/')
+                copy_plan.append({
+                    'src_path': src_path,
+                    'rel_path': rel_path,
+                    'dest_dir': dest_dir,
+                    'dest_path': dest_path,
+                })
 
-    print(json.dumps({'ok': True, 'items': items, 'timestamp': int(time.time()), 'assignments_count': len(assignments), 'assignments_keys': sorted(assignments.keys())}))
+            copy_attempts = []
+            verified_paths = []
+            stable_container_id = ''
+            container_replaced = False
+            max_copy_attempts = COPY_MAX_ATTEMPTS
+            for attempt in range(1, max_copy_attempts + 1):
+                if attempt > 1:
+                    targets, resolve_err = _resolve_targets(node_name, yml, attempts=4)
+                    last_err = resolve_err or last_err
+                if not targets:
+                    copy_attempts.append({
+                        'attempt': attempt,
+                        'ok': False,
+                        'error': 'container not found during copy retry',
+                    })
+                    continue
+
+                attempt_ok = True
+                attempt_errors = []
+                attempt_verified = []
+                attempt_ids = []
+                for t in targets:
+                    before = _container_identity(t)
+                    before_id = str(before.get('id') or '').strip()
+                    target_ok = True
+                    if not bool(before.get('running')):
+                        attempt_errors.append(f'{t}: warning: container not running ({before.get("status") or "unknown"}), trying copy anyway')
+                        if before_id:
+                            attempt_ids.append(before_id)
+
+                    for planned in copy_plan:
+                        src_path = str(planned.get('src_path') or '')
+                        rel_path = str(planned.get('rel_path') or '')
+                        dest_dir = str(planned.get('dest_dir') or '')
+                        dest_path = str(planned.get('dest_path') or '')
+                        try:
+                            src_exists = os.path.exists(src_path)
+                            src_is_dir = os.path.isdir(src_path)
+                        except Exception:
+                            src_exists = False
+                            src_is_dir = False
+                        dest_parent = os.path.dirname(dest_path.rstrip('/')) or dest_dir.rstrip('/') or '/'
+                        if src_is_dir:
+                            mkdir_path = dest_parent
+                            copy_dest = dest_parent
+                        else:
+                            mkdir_path = dest_parent
+                            copy_dest = dest_path
+                        if not src_exists:
+                            target_ok = False
+                            attempt_errors.append(f'{t}: source missing for {dest_path}: {src_path}')
+                            command_outputs.append({
+                                'attempt': attempt,
+                                'target': t,
+                                'container_id': before_id,
+                                'rc': 1,
+                                'out': 'source missing',
+                                'src': src_path,
+                                'dest': dest_path,
+                                'copy_dest': copy_dest,
+                                'src_is_dir': bool(src_is_dir),
+                            })
+                            continue
+                        mkdir_cmd = f"mkdir -p {shlex.quote(mkdir_path)}"
+                        commands.append(f"docker exec {t} sh -lc {mkdir_cmd}")
+                        mkdir_result = _docker_exec_sh(t, mkdir_cmd, timeout=30)
+                        if getattr(mkdir_result, 'returncode', 1) != 0:
+                            out = str(getattr(mkdir_result, 'stdout', '') or '').strip()
+                            if 'is restarting' in out or 'is not running' in out:
+                                attempt_errors.append(f'{t}: warning: mkdir failed for {dest_path} (container state), trying cp anyway')
+                            else:
+                                target_ok = False
+                                attempt_errors.append(f'{t}: mkdir failed for {dest_path}: {out}')
+                                continue
+                        commands.append(f"docker cp {src_path} {t}:{copy_dest}")
+                        p = _run_docker(['cp', src_path, f"{t}:{copy_dest}"], timeout=60, capture=True)
+                        out = (getattr(p, 'stdout', '') or '').strip()
+                        rc = int(getattr(p, 'returncode', 1) or 0)
+                        command_outputs.append({
+                            'attempt': attempt,
+                            'target': t,
+                            'container_id': before_id,
+                            'rc': rc,
+                            'out': out,
+                            'src': src_path,
+                            'dest': dest_path,
+                            'copy_dest': copy_dest,
+                            'src_is_dir': bool(src_is_dir),
+                        })
+                        if getattr(p, 'returncode', 1) != 0:
+                            target_ok = False
+                            attempt_errors.append(
+                                f'{t}: docker cp failed for {dest_path} via {copy_dest}: {out or "unknown error"}'
+                            )
+
+                    if before_id and COPY_SETTLE_S > 0:
+                        time.sleep(COPY_SETTLE_S)
+                    after = _container_identity(t)
+                    after_id = str(after.get('id') or '').strip()
+                    if before_id and after_id and before_id != after_id:
+                        container_replaced = True
+                        target_ok = False
+                        attempt_errors.append(
+                            f'{t}: container replaced during copy ({before_id[:12]} -> {after_id[:12]})'
+                        )
+                    if not after.get('running'):
+                        attempt_errors.append(f'{t}: warning: container stopped during or after copy, verification may fail')
+
+                    for planned in copy_plan:
+                        dest_path = str(planned.get('dest_path') or '')
+                        exists, verify_out = _container_path_exists(t, dest_path)
+                        if exists:
+                            attempt_verified.append(dest_path)
+                        else:
+                            if after.get('running'):
+                                target_ok = False
+                                attempt_errors.append(
+                                    f'{t}: destination not visible after copy: {dest_path}'
+                                    + (f' ({verify_out})' if verify_out else '')
+                                )
+                            else:
+                                # Container is down so we cannot run docker exec to verify, 
+                                # but docker cp returned 0 so we assume success.
+                                attempt_verified.append(dest_path)
+                                attempt_errors.append(f'{t}: skipped verification for {dest_path} because container is not running')
+
+                    if after_id:
+                        attempt_ids.append(after_id)
+                    if not target_ok:
+                        attempt_ok = False
+
+                copy_attempts.append({
+                    'attempt': attempt,
+                    'ok': bool(attempt_ok),
+                    'targets': list(targets),
+                    'container_ids': attempt_ids,
+                    'verified_paths': sorted(set(attempt_verified)),
+                    'errors': attempt_errors,
+                })
+                if attempt_ok and copy_plan:
+                    copied_any = True
+                    verified_paths = sorted(set(attempt_verified))
+                    stable_container_id = attempt_ids[0] if attempt_ids else ''
+                    errs = []
+                    break
+                errs.extend(attempt_errors)
+                if attempt < max_copy_attempts and COPY_RETRY_S > 0:
+                    time.sleep(COPY_RETRY_S)
+
+        items.append({
+            'node': node_name,
+            'compose': yml,
+            'src': src,
+            'dest': dest,
+            'targets': targets,
+            'ok': bool(copied_any),
+            'errors': list(dict.fromkeys(errs)),
+            'commands': commands,
+            'command_outputs': command_outputs,
+            'copy_attempts': copy_attempts if inject_items else [],
+            'verified_paths': verified_paths if inject_items else [],
+            'stable_container_id': stable_container_id if inject_items else '',
+            'container_replaced': bool(container_replaced) if inject_items else False,
+        })
+
+    print(json.dumps({
+        'ok': True,
+        'items': items,
+        'timestamp': int(time.time()),
+        'assignments_count': len(assignments),
+        'assignments_keys': sorted(assignments.keys()),
+        'assignments_path': assignments_path,
+        'assignments_missing': bool(assignments_missing),
+        'assign_dir': assign_dir,
+        'candidate_count': len(candidate_nodes),
+        'candidate_keys': candidate_nodes,
+    }))
 
 
 if __name__ == '__main__':
@@ -31771,6 +32632,21 @@ def _build_execute_error_logs(
     now = _local_timestamp_display()
     has_issue = not bool(validation.get('ok'))
 
+    def _filter_string_details_for_items(details: Any, item_values: Any) -> list[Any]:
+        if not isinstance(details, list) or not details:
+            return []
+        if not isinstance(item_values, list) or not item_values:
+            return []
+        item_names = [str(item or '').strip() for item in item_values if str(item or '').strip()]
+        if not item_names:
+            return []
+        filtered: list[Any] = []
+        for detail in details:
+            text = str(detail or '').strip()
+            if any(text.startswith(f"{name}:") for name in item_names):
+                filtered.append(detail)
+        return filtered
+
     for key, label, fname in categories:
         items = validation.get(key)
         if not isinstance(items, list) or not items:
@@ -31792,7 +32668,7 @@ def _build_execute_error_logs(
         if key == 'injects_missing':
             details = validation.get('injects_detail')
             if isinstance(details, list) and details:
-                payload['details'] = details
+                payload['details'] = _filter_string_details_for_items(details, items) or details
         if key in {'generator_outputs_missing', 'generator_injects_missing'}:
             details = validation.get('generator_validation_detail')
             if isinstance(details, list) and details:
@@ -31903,15 +32779,8 @@ def _parse_scenarios_xml(path):
         raise ValueError("Root element must be <Scenarios> or <ScenarioEditor>")
     core_el = root.find('CoreConnection')
     if core_el is not None:
-        core_meta = {
-            'host': core_el.get('host'),
-            'port': core_el.get('port'),
-            'ssh_enabled': core_el.get('ssh_enabled'),
-            'ssh_host': core_el.get('ssh_host'),
-            'ssh_port': core_el.get('ssh_port'),
-            'ssh_username': core_el.get('ssh_username'),
-        }
-        data['core'] = _normalize_core_config(core_meta, include_password=False)
+        core_meta = _extract_optional_core_config(dict(core_el.attrib), include_password=True)
+        data['core'] = core_meta if isinstance(core_meta, dict) else _normalize_core_config({}, include_password=True)
     else:
         data['core'] = _default_core_dict()
 
@@ -32183,6 +33052,26 @@ def _latest_xml_path_for_scenario(scenario_norm: str) -> str | None:
         return None
 
 
+def _resolve_preexecute_xml_path(xml_path: Any, scenario_name: Any) -> str:
+    """Prefer the latest saved scenario XML during preview/plan/execute flows."""
+    try:
+        scenario_norm = _normalize_scenario_label(scenario_name or '')
+    except Exception:
+        scenario_norm = str(scenario_name or '').strip().lower()
+    if scenario_norm:
+        try:
+            latest_xml = _existing_xml_path_or_none(_latest_xml_path_for_scenario(scenario_norm) or '')
+        except Exception:
+            latest_xml = None
+        if latest_xml:
+            return latest_xml
+    try:
+        resolved = _abs_path_or_original(xml_path)
+    except Exception:
+        resolved = str(xml_path or '').strip()
+    return str(resolved or '').strip()
+
+
 def _is_autosave_xml_path(path_value: str) -> bool:
     try:
         if not path_value:
@@ -32317,10 +33206,169 @@ def _update_flow_state_in_xml(xml_path: str, scenario_label: str | None, flow_st
                 fs_el.remove(child)
         st_el = ET.SubElement(fs_el, 'FlowState')
         st_el.text = json.dumps(flow_state, separators=(',', ':'), ensure_ascii=False)
-        tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+        _write_xml_tree_atomic(tree, xml_path)
         return True, 'ok'
     except Exception as e:
         return False, f'failed to update xml: {e}'
+
+
+def _write_xml_tree_atomic(tree: ET.ElementTree, xml_path: str) -> None:
+    """Persist XML by writing a sibling temp file and replacing the target.
+
+    This avoids opening the existing XML for in-place write, which can fail when
+    the file itself is read-only or owned by another user even though the parent
+    directory is writable. XML containing an SSH password is restricted to the
+    owning user.
+    """
+    xml_path = _abs_path_or_original(xml_path)
+    if not xml_path:
+        raise ValueError('xml_path not found')
+    target_dir = os.path.dirname(xml_path) or '.'
+    original_mode: int | None = None
+    try:
+        original_mode = os.stat(xml_path).st_mode & 0o777
+    except Exception:
+        original_mode = None
+
+    has_embedded_password = any(
+        element.tag == 'CoreConnection'
+        and bool(str(element.get('ssh_password') or '').strip())
+        for element in tree.getroot().iter()
+    )
+    target_mode = 0o600 if has_embedded_password else original_mode
+
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix='.coretg-xml-', suffix='.tmp', dir=target_dir)
+    os.close(tmp_fd)
+    try:
+        tree.write(tmp_path, encoding='utf-8', xml_declaration=True)
+        if target_mode is not None:
+            try:
+                os.chmod(tmp_path, target_mode)
+            except Exception:
+                pass
+        os.replace(tmp_path, xml_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _core_config_xml_attributes(core_cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Serialize the complete CORE connection into the authoritative XML."""
+    public_cfg = (
+        _extract_optional_core_config(core_cfg, include_password=True)
+        or _normalize_core_config(core_cfg, include_password=True)
+        or {}
+    )
+    attrs: Dict[str, str] = {}
+    host = public_cfg.get('grpc_host') or public_cfg.get('host') or ''
+    port = public_cfg.get('grpc_port') if public_cfg.get('grpc_port') not in (None, '') else public_cfg.get('port')
+    attrs['host'] = str(host)
+    attrs['port'] = str(port or '')
+    attrs['ssh_enabled'] = 'true' if _coerce_bool(public_cfg.get('ssh_enabled')) else 'false'
+    attrs['ssh_host'] = str(public_cfg.get('ssh_host') or host or '')
+    attrs['ssh_port'] = str(public_cfg.get('ssh_port') or '')
+    attrs['ssh_username'] = str(public_cfg.get('ssh_username') or '')
+    if public_cfg.get('ssh_password') not in (None, ''):
+        attrs['ssh_password'] = str(public_cfg.get('ssh_password') or '')
+
+    skipped = {
+        'host',
+        'port',
+        'grpc_host',
+        'grpc_port',
+        'ssh_enabled',
+        'ssh_host',
+        'ssh_port',
+        'ssh_username',
+        'ssh_password',
+        'ssh',
+    }
+    for key, value in public_cfg.items():
+        if key in skipped or value in (None, ''):
+            continue
+        if isinstance(value, bool):
+            attrs[str(key)] = 'true' if value else 'false'
+        elif isinstance(value, (dict, list, tuple)):
+            attrs[str(key)] = json.dumps(value, separators=(',', ':'), sort_keys=True)
+        else:
+            attrs[str(key)] = str(value)
+    return attrs
+
+
+def _update_core_config_in_xml(
+    xml_path: str,
+    scenario_label: str | None,
+    core_cfg: Dict[str, Any],
+) -> tuple[bool, str]:
+    """Make the selected CORE connection part of the authoritative scenario XML."""
+    xml_path = _abs_path_or_original(xml_path)
+    if not xml_path or not os.path.exists(xml_path):
+        return False, 'xml_path not found'
+    if not isinstance(core_cfg, dict) or not core_cfg:
+        return False, 'core config empty'
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+    except Exception as exc:
+        return False, f'failed to parse xml: {exc}'
+
+    attrs = _core_config_xml_attributes(core_cfg)
+    scenario_norm = _normalize_scenario_label(scenario_label or '')
+    scenario_el = None
+    editor_el = None
+
+    try:
+        if root.tag == 'Scenarios':
+            global_core = root.find('CoreConnection')
+            if global_core is None:
+                global_core = ET.Element('CoreConnection')
+                root.insert(0, global_core)
+            global_core.attrib.clear()
+            global_core.attrib.update(attrs)
+
+            for candidate in root.findall('Scenario'):
+                name = str(candidate.get('name') or '').strip()
+                if scenario_norm and _normalize_scenario_label(name) != scenario_norm:
+                    continue
+                scenario_el = candidate
+                break
+            if scenario_el is None and not scenario_norm:
+                scenario_el = root.find('Scenario')
+            if scenario_el is not None:
+                editor_el = scenario_el.find('ScenarioEditor')
+                if editor_el is None:
+                    editor_el = ET.SubElement(scenario_el, 'ScenarioEditor')
+        elif root.tag == 'Scenario':
+            scenario_el = root
+            editor_el = root.find('ScenarioEditor')
+            if editor_el is None:
+                editor_el = ET.SubElement(root, 'ScenarioEditor')
+        elif root.tag == 'ScenarioEditor':
+            editor_el = root
+    except Exception as exc:
+        return False, f'failed to locate scenario: {exc}'
+
+    if editor_el is None:
+        return False, 'ScenarioEditor not found'
+
+    try:
+        hitl_el = editor_el.find('HardwareInLoop')
+        if hitl_el is None:
+            hitl_el = ET.SubElement(editor_el, 'HardwareInLoop')
+            hitl_el.set('enabled', 'false')
+        scenario_core = hitl_el.find('CoreConnection')
+        if scenario_core is None:
+            scenario_core = ET.SubElement(hitl_el, 'CoreConnection')
+        scenario_core.attrib.clear()
+        scenario_core.attrib.update(attrs)
+        _write_xml_tree_atomic(tree, xml_path)
+        return True, 'ok'
+    except Exception as exc:
+        return False, f'failed to update core config in xml: {exc}'
 
 
 def _read_flow_state_from_xml_path(xml_path: str, scenario_label: str | None) -> dict[str, Any] | None:
@@ -32518,7 +33566,7 @@ def _clear_flow_state_in_xml(xml_path: str, scenario_label: str | None) -> tuple
                 fs_el.remove(child)
                 removed = True
         if removed:
-            tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+            _write_xml_tree_atomic(tree, xml_path)
         return True, 'ok'
     except Exception as e:
         return False, f'failed to update xml: {e}'
@@ -32587,7 +33635,7 @@ def _update_plan_preview_in_xml(
         if plan_el is None:
             plan_el = ET.SubElement(se_target, 'PlanPreview')
         plan_el.text = json.dumps(plan_payload, separators=(',', ':'), ensure_ascii=False)
-        tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+        _write_xml_tree_atomic(tree, xml_path)
         return True, 'ok'
     except Exception as e:
         return False, f'failed to update xml: {e}'
@@ -32784,7 +33832,7 @@ def _parse_scenario_editor(se):
         hitl_info["interfaces"] = interfaces
         core_el = hitl_el.find("CoreConnection")
         if core_el is not None:
-            core_cfg = _extract_optional_core_config(dict(core_el.attrib), include_password=False)
+            core_cfg = _extract_optional_core_config(dict(core_el.attrib), include_password=True)
             if core_cfg:
                 if "validated" in core_cfg:
                     core_cfg["validated"] = _coerce_bool(core_cfg.get("validated"))
@@ -33035,7 +34083,7 @@ def _parse_scenario_editor(se):
 
 def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
     root = ET.Element("Scenarios")
-    core_cfg = _normalize_core_config(data_dict.get('core'), include_password=False)
+    core_cfg = _extract_optional_core_config(data_dict.get('core'), include_password=True) or _normalize_core_config(data_dict.get('core'), include_password=True)
     core_el = ET.SubElement(root, 'CoreConnection')
     core_host = core_cfg.get('grpc_host') or core_cfg.get('host') or ''
     core_port = core_cfg.get('grpc_port') if core_cfg.get('grpc_port') not in (None, '') else core_cfg.get('port')
@@ -33045,6 +34093,16 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
     core_el.set('ssh_host', str(core_cfg.get('ssh_host') or core_host or ''))
     core_el.set('ssh_port', str(core_cfg.get('ssh_port') or ''))
     core_el.set('ssh_username', str(core_cfg.get('ssh_username') or ''))
+    if core_cfg.get('ssh_password') not in (None, ''):
+        core_el.set('ssh_password', str(core_cfg.get('ssh_password') or ''))
+    for extra_key, extra_val in core_cfg.items():
+        if extra_key in {'host', 'port', 'grpc_host', 'grpc_port', 'ssh_enabled', 'ssh_host', 'ssh_port', 'ssh_username', 'ssh_password', 'ssh'}:
+            continue
+        try:
+            if extra_val not in (None, ''):
+                core_el.set(str(extra_key), str(extra_val))
+        except Exception:
+            continue
     for idx, scen in enumerate(data_dict.get("scenarios", [])):
         scen = _normalize_scenario_section_semantics(scen)
         scen_el = ET.SubElement(root, "Scenario")
@@ -33183,7 +34241,7 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                     hitl_el.set("bridge_validated_at", bridge_validated_at)
             if participant_url:
                 hitl_el.set('participant_proxmox_url', participant_url)
-            hitl_core_cfg = _extract_optional_core_config(hitl.get("core"), include_password=False)
+            hitl_core_cfg = _extract_optional_core_config(hitl.get("core"), include_password=True)
             if hitl_core_cfg:
                 hitl_core_el = ET.SubElement(hitl_el, "CoreConnection")
                 hitl_core_host = hitl_core_cfg.get("grpc_host") or hitl_core_cfg.get("host") or ""
@@ -33194,8 +34252,10 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                 hitl_core_el.set("ssh_host", str(hitl_core_cfg.get("ssh_host") or hitl_core_host or ""))
                 hitl_core_el.set("ssh_port", str(hitl_core_cfg.get("ssh_port") or ""))
                 hitl_core_el.set("ssh_username", str(hitl_core_cfg.get("ssh_username") or ""))
+                if hitl_core_cfg.get('ssh_password') not in (None, ''):
+                    hitl_core_el.set('ssh_password', str(hitl_core_cfg.get('ssh_password') or ''))
                 for extra_key, extra_val in hitl_core_cfg.items():
-                    if extra_key in {"host", "port", "ssh_enabled", "ssh_host", "ssh_port", "ssh_username", "ssh_password"}:
+                    if extra_key in {"host", "port", "grpc_host", "grpc_port", "ssh_enabled", "ssh_host", "ssh_port", "ssh_username", "ssh_password", "ssh"}:
                         continue
                     try:
                         hitl_core_el.set(str(extra_key), str(extra_val))
@@ -37345,6 +38405,8 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
             label=f'docker.copy_flow_artifacts({stage})',
             timeout=180.0,
         )
+        if isinstance(payload, dict):
+            meta['flow_artifact_copy_summary'] = payload
         try:
             if isinstance(payload, dict) and payload.get('error'):
                 _append_async_run_log_line(meta, f"{log_prefix}docker.copy_flow_artifacts({stage}) error={payload.get('error')}")
@@ -37352,6 +38414,11 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
                 _append_async_run_log_line(
                     meta,
                     f"{log_prefix}docker.copy_flow_artifacts({stage}) assignments={payload.get('assignments_count')} keys={payload.get('assignments_keys')}",
+                )
+            if isinstance(payload, dict) and 'candidate_count' in payload:
+                _append_async_run_log_line(
+                    meta,
+                    f"{log_prefix}docker.copy_flow_artifacts({stage}) candidates={payload.get('candidate_count')} keys={payload.get('candidate_keys')}",
                 )
         except Exception:
             pass
@@ -37363,6 +38430,54 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
             if isinstance(items, list)
             else 0
         )
+
+        def _first_copy_failure_detail() -> str:
+            if not isinstance(items, list):
+                return ''
+            for it in items:
+                if not isinstance(it, dict) or it.get('ok'):
+                    continue
+                direct = str(it.get('error') or '').strip()
+                if direct:
+                    return _summarize_for_log(direct)
+                errs = it.get('errors') if isinstance(it.get('errors'), list) else []
+                for raw in errs:
+                    detail = str(raw or '').strip()
+                    if detail:
+                        return _summarize_for_log(detail)
+                attempts = it.get('copy_attempts') if isinstance(it.get('copy_attempts'), list) else []
+                for attempt in reversed(attempts):
+                    if not isinstance(attempt, dict) or attempt.get('ok'):
+                        continue
+                    attempt_errors = attempt.get('errors') if isinstance(attempt.get('errors'), list) else []
+                    for raw in attempt_errors:
+                        detail = str(raw or '').strip()
+                        if detail:
+                            return _summarize_for_log(detail)
+                cmd_outs = it.get('command_outputs') if isinstance(it.get('command_outputs'), list) else []
+                for entry in reversed(cmd_outs):
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        rc = int(entry.get('rc') or 0)
+                    except Exception:
+                        rc = 0
+                    if rc == 0:
+                        continue
+                    out = str(entry.get('out') or '').strip()
+                    dest_path = str(entry.get('dest') or '').strip()
+                    copy_dest = str(entry.get('copy_dest') or '').strip()
+                    parts = []
+                    if dest_path:
+                        parts.append(f'dest={dest_path}')
+                    if copy_dest and copy_dest != dest_path:
+                        parts.append(f'copy_dest={copy_dest}')
+                    if out:
+                        parts.append(out)
+                    if parts:
+                        return _summarize_for_log('; '.join(parts))
+            return ''
+
         _append_async_run_log_line(
             meta,
             f"{log_prefix}docker.copy_flow_artifacts({stage}) complete ok={int(copied_ok)} total={int(copied_total)}",
@@ -37549,14 +38664,31 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
                             )
         except Exception as exc_verify:
             _append_async_run_log_line(meta, f"{log_prefix}docker.exec.verify_flow_artifacts({stage}) failed: {exc_verify}")
-        if not payload_error and (copied_total <= 0 or copied_ok == copied_total):
+        copy_required = _coerce_bool(meta.get('flow_copy_required'))
+        copy_complete = bool(
+            not payload_error
+            and copied_ok == copied_total
+            and (copied_total > 0 or not copy_required)
+        )
+        if copy_complete:
             meta['flow_artifacts_copied'] = True
         else:
+            if copy_required and copied_total <= 0 and not payload_error:
+                meta['flow_artifact_copy_error'] = 'no Flow artifact copy targets were found'
+            elif payload_error:
+                meta['flow_artifact_copy_error'] = payload_error
+            elif copied_ok != copied_total:
+                detail = _first_copy_failure_detail()
+                message = f'only {int(copied_ok)} of {int(copied_total)} Flow artifact copy targets succeeded'
+                if detail:
+                    message += f'; first_error={detail}'
+                meta['flow_artifact_copy_error'] = message
             _append_async_run_log_line(
                 meta,
                 f"{log_prefix}docker.copy_flow_artifacts({stage}) pending retry ok={int(copied_ok)} total={int(copied_total)}",
             )
     except Exception as exc:
+        meta['flow_artifact_copy_error'] = str(exc)
         _append_async_run_log_line(meta, f"{log_prefix}docker.copy_flow_artifacts({stage}) failed: {exc}")
 
 
@@ -37872,6 +39004,7 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
     run_id_local = run_id
     seed = job_spec.get('seed')
     xml_path = job_spec.get('xml_path')
+    session_xml_str = job_spec.get('session_xml_str')
     preview_plan_path = job_spec.get('preview_plan_path')
     core_override = job_spec.get('core_override')
     scenario_core_override = job_spec.get('scenario_core_override')
@@ -38080,17 +39213,10 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         if scenario_for_secret:
             selected_cfg = _select_core_config_for_page(scenario_for_secret, history, include_password=True)
 
-        pw_raw = core_cfg.get('ssh_password') if isinstance(core_cfg, dict) else None
-        pw_ok = bool(str(pw_raw).strip()) if pw_raw not in (None, '') else False
-
-        if request_provided_core:
-            # Only fill missing secrets; do not override request-provided host/ports.
-            if selected_cfg and not pw_ok:
-                core_cfg = _merge_core_configs(selected_cfg, core_cfg, include_password=True)
-        else:
-            # Only auto-select a saved CORE config when we have a scenario label.
-            if selected_cfg:
-                core_cfg = _merge_core_configs(core_cfg, selected_cfg, include_password=True)
+        # The XML/request identifies the target. Saved page state may only
+        # provide credentials for that same target.
+        if selected_cfg:
+            core_cfg = _fill_matching_core_credentials(core_cfg, selected_cfg)
     except Exception:
         pass
     core_cfg = _prefer_explicit_or_ssh_core_host(
@@ -38101,7 +39227,7 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         scenario_core_override if isinstance(scenario_core_override, dict) else None,
     )
     try:
-        if scenario_for_secret:
+        if scenario_for_secret and str(core_cfg.get('core_secret_id') or '').strip():
             core_cfg = _apply_core_secret_to_config(core_cfg, scenario_for_secret)
     except Exception:
         pass
@@ -38331,14 +39457,10 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             ssh_host = str(core_cfg.get('ssh_host') or core_host)
             ssh_port = int(core_cfg.get('ssh_port') or 22)
             ssh_user = str(core_cfg.get('ssh_username') or '')
-            
-            hint = ""
-            if str(core_host) in ('localhost', '127.0.0.1') and core_cfg.get('ssh_enabled'):
-                hint = " (Hint: 'localhost' usually means THIS container. Did you mean to use the SSH server's internal checking address?)"
 
             app.logger.warning(
-                "[async] SSH tunnel setup failed: %s. Context: ssh=%s:%s user=%s target=%s:%s%s",
-                exc, ssh_host, ssh_port, ssh_user, core_host, core_port, hint
+                "[async] SSH tunnel setup failed: %s. Context: ssh=%s:%s user=%s target=%s:%s",
+                exc, ssh_host, ssh_port, ssh_user, core_host, core_port
             )
         except Exception:
             pass
@@ -38818,7 +39940,13 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
 
     try:
         required_custom_services = set(_local_custom_service_names() or ["DockerDefaultRoute", "CoreTGPrereqs"])
-        install_custom_services_on_execute = bool(core_cfg.get('install_custom_services', False))
+        # Keep Execute on the repository's current service implementations.
+        # CORE imports custom service classes in core-daemon, so merely syncing the
+        # repo is not enough; updated modules must be installed and the daemon restarted.
+        install_custom_services_on_execute = bool(
+            core_cfg.get('install_custom_services', False)
+            or core_cfg.get('ssh_password')
+        )
         discovered = _remote_core_service_names(remote_client, core_cfg=core_cfg, require_custom_services_dir=True)
         missing = sorted([name for name in required_custom_services if name not in discovered])
         if install_custom_services_on_execute:
@@ -39048,6 +40176,7 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             '-u',
             '-m',
             'scenarioforge.cli',
+            'execute',
             '--xml',
             remote_ctx['xml_path'],
             '--host',
@@ -39126,7 +40255,10 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             docker_env_parts.append('CORETG_DOCKER_SUDO_PASSWORD_STDIN=1')
         
         docker_env_prefix = (' '.join(docker_env_parts) + ' ') if docker_env_parts else ''
-        flow_env_parts: list[str] = ['CORETG_FLOW_ARTIFACTS_MODE=copy']
+        flow_env_parts: list[str] = [
+            'CORETG_FLOW_ARTIFACTS_MODE=copy',
+            'CORETG_CLI_REMOTE_DELEGATED=1',
+        ]
         if remote_ctx.get('base_dir'):
              flow_env_parts.append(f"CORE_REMOTE_BASE_DIR={shlex.quote(str(remote_ctx.get('base_dir')))}")
         
@@ -40485,6 +41617,8 @@ try:
         core_connection=lambda cfg: _core_connection(cfg),
         save_core_credentials=lambda payload: _save_core_credentials(payload),
         merge_hitl_validation_into_scenario_catalog=lambda *args, **kwargs: _merge_hitl_validation_into_scenario_catalog(*args, **kwargs),
+        latest_xml_path_for_scenario=lambda scenario_name: _latest_xml_path_for_scenario(scenario_name),
+        update_core_config_in_xml=lambda *args, **kwargs: _update_core_config_in_xml(*args, **kwargs),
         normalize_core_config=lambda *args, **kwargs: _normalize_core_config(*args, **kwargs),
         local_timestamp_display=lambda: _local_timestamp_display(),
         ssh_tunnel_error_type=_SSHTunnelError,

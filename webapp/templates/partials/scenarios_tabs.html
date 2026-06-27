@@ -46,6 +46,7 @@
   <div class="d-flex align-items-center gap-2 flex-wrap justify-content-end">
     <span class="small text-muted">Mode: {{ 'VM' if webui_runtime_mode == 'vm' else 'Native' }}</span>
     <span id="coretgStateSourceBadge" class="badge text-bg-light border text-muted">State source: XML</span>
+    <span id="coretgSavedXmlWarningBadge" class="badge text-bg-warning d-none" title="Preview and Execute use the latest saved XML until you save again.">Unsaved edits: Preview/Execute use last saved XML</span>
   </div>
 </div>
 
@@ -129,6 +130,14 @@
     }
   }
 
+  function getCurrentStateSourceXmlPath(){
+    try {
+      return (document.getElementById('scenariosPreviewXmlPath')?.value || '').toString().trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
   function updateStateSourceBadge(opts){
     try {
       const badge = document.getElementById('coretgStateSourceBadge');
@@ -150,6 +159,58 @@
       }
       if (xmlPath) badge.title = xmlPath;
       else badge.title = 'No XML path available (state cannot be confirmed from XML).';
+    } catch (e) {}
+  }
+
+  function updateSavedXmlWarningBadge(opts){
+    try {
+      const badge = document.getElementById('coretgSavedXmlWarningBadge');
+      if (!badge) return;
+      const options = (opts && typeof opts === 'object') ? opts : {};
+      const xmlPath = (options.xmlPath || '').toString().trim();
+      const hasUnsavedChanges = options.hasUnsavedChanges === true;
+      if (!xmlPath || !hasUnsavedChanges) {
+        badge.classList.add('d-none');
+        return;
+      }
+      badge.classList.remove('d-none');
+      const scenario = (options.scenario || '').toString().trim();
+      badge.textContent = scenario
+        ? `Unsaved edits: ${scenario} Preview/Execute use last saved XML`
+        : 'Unsaved edits: Preview/Execute use last saved XML';
+      badge.title = 'The editor has unsaved changes. Preview and Execute still use the latest saved XML until you save again.';
+    } catch (e) {}
+  }
+
+  function syncSavedXmlWarningBadge(opts){
+    try {
+      const options = (opts && typeof opts === 'object') ? opts : {};
+      const scenario = (options.scenario || '').toString().trim();
+      const xmlPath = (options.xmlPath || '').toString().trim();
+      const hasUnsavedChanges = options.hasUnsavedChanges === true;
+      if (options.persist !== false && typeof window.coretgWriteSavedXmlGroundTruthWarning === 'function') {
+        window.coretgWriteSavedXmlGroundTruthWarning({
+          scenario,
+          xmlPath,
+          active: !!(hasUnsavedChanges && xmlPath),
+        });
+      }
+      let badgeScenario = scenario;
+      let badgeXmlPath = xmlPath;
+      let showWarning = !!(hasUnsavedChanges && xmlPath);
+      if (!showWarning && options.allowStored === true && typeof window.coretgGetSavedXmlGroundTruthWarningState === 'function') {
+        const warningState = window.coretgGetSavedXmlGroundTruthWarningState({ scenario, xmlPath, allowStored: true });
+        if (warningState && warningState.active === true) {
+          showWarning = true;
+          badgeScenario = (warningState.scenario || scenario || '').toString().trim();
+          badgeXmlPath = (warningState.xmlPath || xmlPath || '').toString().trim();
+        }
+      }
+      updateSavedXmlWarningBadge({
+        scenario: badgeScenario,
+        xmlPath: badgeXmlPath,
+        hasUnsavedChanges: showWarning,
+      });
     } catch (e) {}
   }
 
@@ -346,7 +407,20 @@
   }
 
   function getPreviewPlanPathForScenario(scenarioName){
-    return '';
+    try {
+      const key = normalizeScenarioKey(scenarioName);
+      if (!key) return '';
+      const map = readPreviewPlanMap();
+      const entry = (map && typeof map === 'object') ? map[key] : null;
+      if (typeof entry === 'string') return entry.trim();
+      if (entry && typeof entry === 'object') {
+        const path = entry.preview_plan_path ?? entry.path ?? '';
+        return (typeof path === 'string') ? path.trim() : '';
+      }
+      return '';
+    } catch (e) {
+      return '';
+    }
   }
 
   function setPreviewPlanPathForScenario(scenarioName, previewPlanPath){
@@ -355,7 +429,16 @@
       if (!key) return;
       const map = readPreviewPlanMap();
       const next = (map && typeof map === 'object') ? map : {};
-      try { delete next[key]; } catch (e) {}
+      const path = (previewPlanPath || '').toString().trim();
+      if (!path) {
+        try { delete next[key]; } catch (e) {}
+      } else {
+        next[key] = {
+          scenario: (scenarioName || '').toString().trim(),
+          preview_plan_path: path,
+          updated_at: Date.now(),
+        };
+      }
       localStorage.setItem(PREVIEW_PLAN_BY_SCENARIO_STORAGE_KEY, JSON.stringify(next));
     } catch (e) {}
   }
@@ -523,29 +606,39 @@
       };
       const liveScenarioSignatureBeforeFetch = getLiveScenarioRefreshSignature();
       let explicitXmlPath = '';
+      let explicitXmlPathIsPageSource = false;
       try {
         explicitXmlPath = (options.xmlPath || options.xml_path || '').toString().trim();
       } catch (e) { explicitXmlPath = ''; }
       if (!explicitXmlPath) {
         try {
-          explicitXmlPath = (getLatestXmlPathForScenario(scenario) || '').toString().trim();
+          explicitXmlPath = getCurrentStateSourceXmlPath();
+          explicitXmlPathIsPageSource = !!explicitXmlPath;
         } catch (e) { explicitXmlPath = ''; }
       }
       if (!explicitXmlPath) {
         try {
-          explicitXmlPath = (document.getElementById('scenariosPreviewXmlPath')?.value || '').toString().trim();
+          explicitXmlPath = (getLatestXmlPathForScenario(scenario) || '').toString().trim();
         } catch (e) { explicitXmlPath = ''; }
       }
 
+      const useExplicitXmlPath = !!explicitXmlPath && (options.forceXmlPath === true || explicitXmlPathIsPageSource);
+
       let latestStateUrl = '/api/scenario/latest_state?scenario=' + encodeURIComponent(scenario);
-      if (explicitXmlPath && options.forceXmlPath === true) {
+      if (useExplicitXmlPath) {
         latestStateUrl += '&xml_path=' + encodeURIComponent(explicitXmlPath);
       }
 
-      const resp = await fetch(latestStateUrl, { credentials: 'same-origin' });
-      let data = null;
-      try { data = await resp.json(); } catch (e) { data = null; }
-      if (!resp.ok || !data || data.ok !== true) return null;
+      const data = (typeof window.CORETG_FETCH_LATEST_STATE === 'function')
+        ? await window.CORETG_FETCH_LATEST_STATE(scenario, { xmlPath: explicitXmlPath, forceXmlPath: useExplicitXmlPath })
+        : await (async () => {
+            const resp = await fetch(latestStateUrl, { credentials: 'same-origin' });
+            let payload = null;
+            try { payload = await resp.json(); } catch (e) { payload = null; }
+            if (!resp.ok || !payload || payload.ok !== true) return null;
+            return payload;
+          })();
+      if (!data || data.ok !== true) return null;
 
       const xmlPath = (data.xml_path || '').toString().trim();
       if (xmlPath) {
@@ -1778,6 +1871,8 @@
   window.coretgGetPreviewPlanPathForScenario = getPreviewPlanPathForScenario;
   window.coretgSetPreviewPlanPathForScenario = setPreviewPlanPathForScenario;
   window.coretgUpdateStateSourceBadge = updateStateSourceBadge;
+  window.coretgUpdateSavedXmlWarningBadge = updateSavedXmlWarningBadge;
+  window.coretgSyncSavedXmlWarningBadge = syncSavedXmlWarningBadge;
   window.coretgIsFlowDirtyForScenario = isFlowDirtyForScenario;
   window.coretgSetFlowDirtyForScenario = setFlowDirtyForScenario;
 

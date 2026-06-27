@@ -58,6 +58,10 @@ def test_execute_preflights_flow_artifacts_and_regenerates_when_safe() -> None:
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
+        "const EXECUTE_FLOW_PREFLIGHT_CACHE_PREFIX = 'coretg_execute_flow_preflight_v1::';",
+        "function buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath } = {}) {",
+        "const cached = readExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath });",
+        "log('Using recent Flow challenge file check.');",
         "async function ensureExecuteFlowArtifactsReady",
         "'/api/flag-sequencing/revalidate_flow'",
         "'/api/flag-sequencing/regenerate_flow_artifacts'",
@@ -66,6 +70,8 @@ def test_execute_preflights_flow_artifacts_and_regenerates_when_safe() -> None:
         "const flowReady = await ensureExecuteFlowArtifactsReady({",
         "if (!flowReady) {",
         "return false;",
+        "writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, check);",
+        "writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, verify);",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
@@ -88,6 +94,10 @@ def test_execute_preflights_custom_services_and_prompts_before_run_request() -> 
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
+        "const EXECUTE_CUSTOM_SERVICES_CACHE_PREFIX = 'coretg_execute_custom_services_v1::';",
+        "function buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig } = {}) {",
+        "const cached = readExecuteCustomServicesCache({ scenarioName, coreConfig: core });",
+        "log('Using recent custom CORE services check.');",
         "async function ensureExecuteCustomServicesReady",
         "'/core/custom_services/check'",
         "Install Custom Services?",
@@ -96,6 +106,8 @@ def test_execute_preflights_custom_services_and_prompts_before_run_request() -> 
         "const servicesReady = await ensureExecuteCustomServicesReady({",
         "if (!servicesReady) {",
         "return false;",
+        "writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, check);",
+        "writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, install);",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]

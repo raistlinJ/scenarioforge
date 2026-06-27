@@ -131,6 +131,51 @@ def test_core_data_with_no_scenarios_skips_core_lookup(tmp_path, monkeypatch):
     assert payload.get('port') is None
 
 
+def test_core_data_returns_not_modified_when_cache_key_matches(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    from webapp import app_backend as backend
+
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    run_history_path = outdir / 'run_history.json'
+    monkeypatch.setattr(backend, 'RUN_HISTORY_PATH', str(run_history_path))
+    run_history_path.write_text(
+        '[{"timestamp":"2025-12-26T00:00:00Z","mode":"async","scenario_name":"Alpha","returncode":0}]',
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(backend, '_list_active_core_sessions', lambda *args, **kwargs: [])
+    monkeypatch.setattr(backend, '_scan_core_xmls', lambda: [])
+    monkeypatch.setattr(backend, '_load_core_sessions_store', lambda: {})
+    monkeypatch.setattr(backend, '_attach_hitl_metadata_to_sessions', lambda *args, **kwargs: None)
+    monkeypatch.setattr(backend, '_attach_participant_urls_to_sessions', lambda *args, **kwargs: None)
+    monkeypatch.setattr(backend, '_select_core_config_for_page', lambda *args, **kwargs: {
+        'host': '127.0.0.1',
+        'port': 50051,
+        'ssh_host': '127.0.0.1',
+        'ssh_port': 22,
+        'ssh_username': 'u',
+        'ssh_password': 'p',
+    })
+
+    first = client.get('/core/data?scenario=Alpha')
+    assert first.status_code == 200
+    first_payload = first.get_json() or {}
+    cache_key = str(first_payload.get('data_cache_key') or '')
+    assert cache_key
+
+    second = client.get('/core/data', query_string={'scenario': 'Alpha', 'if_data_cache_key': cache_key})
+    assert second.status_code == 200
+    second_payload = second.get_json() or {}
+    assert second_payload.get('ok') is True
+    assert second_payload.get('not_modified') is True
+    assert second_payload.get('data_cache_key') == cache_key
+
+
 def test_core_stop_redirect_preserves_scenario(monkeypatch):
     client = app.test_client()
     _login(client)

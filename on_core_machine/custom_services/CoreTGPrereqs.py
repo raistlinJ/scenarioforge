@@ -1,4 +1,38 @@
+import threading
+
 from core.services.base import CoreService, ShadowDir, ServiceMode
+
+
+_CORETG_MAKO_TEMPLATE_LOCK = threading.RLock()
+
+
+def _install_threadsafe_mako_template_lookup() -> None:
+    """Serialize Mako template compilation on affected Python 3.11 runtimes.
+
+    CORE boots nodes concurrently. Older Python 3.11 patch releases can raise a
+    spurious AST recursion-depth SystemError when Mako compiles templates in
+    parallel. Custom service modules load when core-daemon starts, before node
+    services render templates, making this a process-wide compatibility hook.
+    """
+    try:
+        from mako.lookup import TemplateLookup
+    except Exception:
+        return
+
+    if getattr(TemplateLookup, "_coretg_threadsafe_get_template", False):
+        return
+
+    original_get_template = TemplateLookup.get_template
+
+    def _locked_get_template(self, uri):
+        with _CORETG_MAKO_TEMPLATE_LOCK:
+            return original_get_template(self, uri)
+
+    TemplateLookup.get_template = _locked_get_template
+    TemplateLookup._coretg_threadsafe_get_template = True
+
+
+_install_threadsafe_mako_template_lookup()
 
 
 class CoreTGPrereqsService(CoreService):

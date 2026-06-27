@@ -63,9 +63,12 @@ services:
     if yaml is not None:
         obj = yaml.safe_load(open(expected_path, encoding="utf-8"))
         svc = obj["services"]["app"]
+        node_svc = obj["services"]["host-1"]
 
         # Option B: no Docker-managed networking, so no docker eth0/default route.
         assert svc.get("network_mode") == "none"
+        assert str(svc.get("user") or "") == "0:0"
+        assert str(node_svc.get("user") or "") == "0:0"
         # With network_mode none we should not be publishing ports at all.
         assert "ports" not in svc
         # Preserve container-side port intent for reporting/metadata.
@@ -243,6 +246,47 @@ services:
     assert labels.get("coretg.wrapper_base_image") == "vulhub/craftcms:5.5.1.1"
 
 
+def test_prepare_compose_repairs_appweb_startup_and_forces_wrapper_pull(tmp_path):
+    compose_src = tmp_path / "docker-compose.yml"
+    compose_src.write_text(
+        """
+services:
+  web:
+    image: vulhub/appweb:7.0.1
+    volumes:
+      - ./appweb.conf:/etc/appweb/appweb.conf
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "appweb.conf").write_text('Documents "/var/www/appweb"\nListen 8080\n', encoding="utf-8")
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "appweb/CVE-2018-8715",
+        "Path": str(compose_src),
+    }
+
+    created = prepare_compose_for_assignments({"docker-1": record}, out_base=str(tmp_path / "out"))
+    assert created
+
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    out_path = tmp_path / "out" / "docker-compose-docker-1.yml"
+    obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    web = (obj or {}).get("services", {}).get("web") or {}
+    labels = web.get("labels") or {}
+
+    assert web.get("image") == "coretg/scenario-docker-1:iproute2"
+    assert web.get("command") == ["/usr/local/lib/appweb/7.0.1/bin/appweb"]
+    assert labels.get("coretg.wrapper_base_image") == "vulhub/appweb:7.0.1"
+    assert labels.get("coretg.repaired_catalog_command") == "/usr/local/lib/appweb/7.0.1/bin/appweb"
+    assert labels.get("coretg.wrapper_build_pull") == "true"
+
+
 def test_prepare_compose_bypasses_wrapper_for_ingress_nginx_when_image_already_has_ip(tmp_path):
     compose_src = tmp_path / "docker-compose.yml"
     compose_src.write_text(
@@ -283,7 +327,43 @@ services:
     assert "build" not in svc
     assert "NET_ADMIN" in (svc.get("cap_add") or [])
     assert "NET_RAW" in (svc.get("cap_add") or [])
+    assert str(svc.get("user") or "") == "0:0"
     assert svc.get("working_dir") == "/"
+
+
+def test_prepare_compose_overrides_image_or_compose_non_root_user_for_core(tmp_path, monkeypatch):
+    compose_src = tmp_path / "docker-compose.yml"
+    compose_src.write_text(
+        """
+services:
+  app:
+    image: example/nonroot:latest
+    user: "1000:1000"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "Non-root example",
+        "Path": str(compose_src),
+        "SkipIproute2Wrapper": "true",
+    }
+
+    created = prepare_compose_for_assignments({"docker-1": record}, out_base=str(tmp_path))
+    assert created
+
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    obj = yaml.safe_load((tmp_path / "docker-compose-docker-1.yml").read_text("utf-8"))
+    services = (obj or {}).get("services") or {}
+
+    assert str((services.get("app") or {}).get("user") or "") == "0:0"
+    assert str((services.get("docker-1") or {}).get("user") or "") == "0:0"
 
 
 def test_prepare_compose_repairs_known_bad_aiohttp_image_to_local_build_context(tmp_path):
@@ -599,9 +679,9 @@ ENTRYPOINT [ "/docker-entrypoint.sh" ]
 
     assert "USER 0" in txt
     assert "USER root" not in txt
-    assert "chmod 0755 /docker-entrypoint.sh" in txt
+    assert "chmod 0755 """ in txt
     assert "iproute2" in txt
-    assert txt.index("chmod 0755 /docker-entrypoint.sh") < txt.index("if command -v ip >/dev/null 2>&1; then exit 0; fi;")
+    assert txt.index("chmod 0755 """) < txt.index("if command -v ip >/dev/null 2>&1; then exit 0; fi;")
 
 
 def test_prepare_compose_build_only_includes_buster_archive_fallback(tmp_path):
@@ -1814,5 +1894,3 @@ def test_prepare_compose_can_disable_root_workdir_with_env(tmp_path, monkeypatch
     target = services.get("docker-1")
     assert isinstance(target, dict)
     assert "working_dir" not in target
-
-

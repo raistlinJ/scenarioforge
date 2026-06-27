@@ -78,3 +78,56 @@ def test_prepare_preview_context_uses_saved_page_core_cfg_when_xml_lacks_passwor
         'grpc_host': 'localhost',
         'grpc_port': 50051,
     }
+
+
+def test_prepare_preview_context_prefers_latest_preview_plan_for_scenario(tmp_path):
+    stale_xml = tmp_path / 'stale.xml'
+    latest_xml = tmp_path / 'latest.xml'
+    stale_xml.write_text('<Scenarios />', encoding='utf-8')
+    latest_xml.write_text('<Scenarios />', encoding='utf-8')
+
+    deps = SimpleNamespace(
+        _coerce_bool=lambda value: bool(value),
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower(),
+        _flow_preset_steps=lambda preset: [],
+        _existing_xml_path_or_none=lambda value: str(value) if value and str(value) in {str(stale_xml), str(latest_xml)} else None,
+        _latest_xml_path_for_scenario=lambda scenario_norm: str(latest_xml),
+        _planner_get_plan=lambda scenario_norm: None,
+        _latest_preview_plan_for_scenario_norm_origin=lambda scenario_norm, origin=None: None,
+        _latest_preview_plan_for_scenario_norm=lambda scenario_norm: str(latest_xml),
+        _core_config_from_xml_path=lambda *args, **kwargs: {
+            'host': 'localhost',
+            'port': 50051,
+            'ssh_enabled': False,
+        },
+        _load_run_history=lambda: [],
+        _select_core_config_for_page=lambda scenario_norm, include_password=True: None,
+        _merge_core_configs=lambda *parts, include_password=True: {
+            key: value
+            for part in parts
+            if isinstance(part, dict)
+            for key, value in part.items()
+        },
+        _apply_core_secret_to_config=lambda cfg, scenario_norm: dict(cfg),
+        _flow_normalize_fact_override=lambda value: None,
+        _load_preview_payload_from_path=lambda *args, **kwargs: {'full_preview': {}},
+        _canonicalize_payload_flow_from_xml=lambda payload, xml_path=None, scenario_label=None: ({}, {}),
+    )
+
+    with app.app_context():
+        with app.test_request_context(
+            '/api/flag-sequencing/prepare_preview_for_execute',
+            method='POST',
+            json={
+                'scenario': 'Scenario One',
+                'preview_plan': str(stale_xml),
+                'mode': 'resolve',
+            },
+        ):
+            result = flow_prepare_preview_execute._load_prepare_preview_request_context(
+                deps=deps,
+                flow_progress=lambda message: None,
+            )
+
+    assert result.get('response') is None
+    assert result.get('base_plan_path') == str(latest_xml)

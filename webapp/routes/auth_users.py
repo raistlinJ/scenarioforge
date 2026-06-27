@@ -24,6 +24,7 @@ def register(
     default_ui_view_mode_for_role: Callable[[str], str],
     is_participant_role: Callable[[str], bool],
     ui_view_session_key: str,
+    participant_ui_enabled: Callable[[], bool] | None = None,
 ) -> None:
     """Register authentication + user management routes.
 
@@ -35,6 +36,9 @@ def register(
 
     if not begin_route_registration(app, "auth_users_routes"):
         return
+
+    if participant_ui_enabled is None:
+        participant_ui_enabled = lambda: True
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -59,6 +63,12 @@ def register(
             except Exception:
                 pass
             if is_participant_role(role_value):
+                try:
+                    if not participant_ui_enabled():
+                        flash("Participant UI is unavailable in VM mode")
+                        return redirect(url_for("index"))
+                except Exception:
+                    pass
                 return redirect(url_for("participant_ui_page"))
             return redirect(url_for("index"))
 

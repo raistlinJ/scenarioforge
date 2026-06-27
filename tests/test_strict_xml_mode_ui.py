@@ -33,3 +33,10 @@ def test_tabs_flow_state_helpers_use_window_state_not_localstorage() -> None:
     text = TABS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
     assert "const scenarios = (window.state && Array.isArray(window.state.scenarios)) ? window.state.scenarios : [];" in text
     assert "localStorage.setItem(FLOW_STATE_STORAGE_KEY" not in text
+
+
+def test_index_rehydrate_latest_xml_does_not_force_specific_xml_path() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    block = text.split("async function rehydrateScenarioFromLatestXml(idx, scenarioName) {", 1)[1].split("const existing = state?.scenarios?.[idx];", 1)[0]
+    assert "query.set('xml_path', preferredXmlPath);" not in block
+    assert "forceXmlPath: !!preferredXmlPath" not in block

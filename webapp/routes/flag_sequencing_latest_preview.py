@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from typing import Any
 
 from flask import jsonify, request
@@ -12,6 +15,28 @@ def register(app, *, backend_module: Any) -> None:
         return
 
     backend = backend_module
+
+    def _path_fingerprint(path_value: Any) -> str:
+        text = str(path_value or '').strip()
+        if not text:
+            return ''
+        try:
+            abs_path = os.path.abspath(text)
+        except Exception:
+            abs_path = text
+        try:
+            st = os.stat(abs_path)
+            mtime_ns = int(getattr(st, 'st_mtime_ns', 0) or 0)
+            return f"{abs_path}|{int(getattr(st, 'st_size', 0) or 0)}|{mtime_ns}"
+        except Exception:
+            return abs_path
+
+    def _stable_cache_hash(value: Any) -> str:
+        try:
+            raw = json.dumps(value, sort_keys=True, separators=(',', ':'), default=str)
+        except Exception:
+            raw = repr(value)
+        return hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:24]
 
     @app.route('/api/flag-sequencing/latest_preview_plan')
     def api_flow_latest_preview_plan():
@@ -269,16 +294,35 @@ def register(app, *, backend_module: Any) -> None:
 
         if preview_payload is not None:
             details = _flow_eligibility_details(preview_payload)
-            return jsonify(
+            payload = {
+                'ok': True,
+                'scenario': scenario_label or scenario_norm,
+                'preview_source': preview_source,
+                'metadata': preview_meta,
+                'preview_plan_path': preview_path,
+                'core_validated': True,
+                **details,
+            }
+            data_cache_key = _stable_cache_hash(
                 {
-                    'ok': True,
-                    'scenario': scenario_label or scenario_norm,
-                    'preview_source': preview_source,
-                    'metadata': preview_meta,
-                    'core_validated': True,
-                    **details,
+                    'scenario_norm': scenario_norm,
+                    'xml_path': _path_fingerprint(xml_path_for_core),
+                    'preview_path': _path_fingerprint(preview_path),
+                    'payload': payload,
                 }
             )
+            incoming_cache_key = (request.args.get('if_data_cache_key') or request.headers.get('X-Data-Cache-Key') or '').strip()
+            if incoming_cache_key and incoming_cache_key == data_cache_key:
+                return jsonify(
+                    {
+                        'ok': True,
+                        'scenario': scenario_label or scenario_norm,
+                        'data_cache_key': data_cache_key,
+                        'not_modified': True,
+                    }
+                )
+            payload['data_cache_key'] = data_cache_key
+            return jsonify(payload)
 
         return jsonify({'ok': False, 'error': 'No XML found for this scenario. Save XML with a PlanPreview first.'}), 404
 

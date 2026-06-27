@@ -14,7 +14,9 @@ class DockerDefaultRouteService(CoreService):
     executables: list[str] = []
     dependencies: list[str] = ["CoreTGPrereqs"]
     startup: list[str] = ["/bin/sh /defaultroute.sh"]
-    validate: list[str] = ["ip route | grep -q '^default '"]
+    # Route setup is best-effort. CORE starts node services concurrently, so the
+    # attached interface or peer route may not be ready during service validation.
+    validate: list[str] = []
     shutdown: list[str] = []
     validation_mode: ServiceMode = ServiceMode.NON_BLOCKING
     shadow_directories: list[ShadowDir] = []

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from types import SimpleNamespace
+import xml.etree.ElementTree as ET
 
 from webapp.app_backend import app
 
@@ -250,3 +251,13 @@ def test_run_cli_sync_uses_saved_page_core_cfg_when_xml_lacks_password(monkeypat
         'ssh_host': '10.0.0.8',
         'ssh_password': 'saved-secret',
     }
+    root = ET.parse(xml_path).getroot()
+    root_core = root.find('CoreConnection')
+    scenario_core = root.find('./Scenario/ScenarioEditor/HardwareInLoop/CoreConnection')
+    assert root_core is not None
+    assert scenario_core is not None
+    for core_el in (root_core, scenario_core):
+        assert core_el.get('host') == '10.0.0.8'
+        assert core_el.get('ssh_host') == '10.0.0.8'
+        assert core_el.get('core_secret_id') == 'core-secret-1'
+        assert core_el.get('ssh_password') == 'saved-secret'
