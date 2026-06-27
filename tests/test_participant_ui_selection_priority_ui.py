@@ -50,3 +50,17 @@ def test_participant_ui_rewrites_stale_first_hint_ips() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing participant UI stale first-hint IP rewrite snippets: " + "; ".join(missing)
+
+
+def test_participant_ui_uses_conditional_json_cache_for_details_and_topology() -> None:
+    text = PARTICIPANT_UI_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function'",
+        "await window.CORETG_FETCH_CONDITIONAL_JSON(url, { scope: 'participant-ui-details'",
+        "await window.CORETG_FETCH_CONDITIONAL_JSON(url, { scope: 'participant-ui-topology'",
+        "cache: 'no-store'",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing participant UI conditional cache fetch snippets: " + "; ".join(missing)

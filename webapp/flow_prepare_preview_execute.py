@@ -17,6 +17,7 @@ def _backend_dependencies(backend: Any) -> Any:
         '_normalize_scenario_label',
         '_flow_preset_steps',
         '_existing_xml_path_or_none',
+        '_latest_xml_path_for_scenario',
         '_planner_get_plan',
         '_latest_preview_plan_for_scenario_norm_origin',
         '_latest_preview_plan_for_scenario_norm',
@@ -279,9 +280,26 @@ def _load_prepare_preview_request_context(*, deps, flow_progress) -> dict[str, A
     except Exception:
         pass
 
-    base_plan_path = str(j.get('preview_plan') or '').strip() or None
-    if base_plan_path:
-        base_plan_path = deps._existing_xml_path_or_none(base_plan_path)
+    latest_saved_xml_path = None
+    try:
+        latest_xml_resolver = getattr(deps, '_latest_xml_path_for_scenario', None)
+        if callable(latest_xml_resolver):
+            latest_saved_xml_path = deps._existing_xml_path_or_none(latest_xml_resolver(scenario_norm) or '')
+    except Exception:
+        latest_saved_xml_path = None
+
+    base_plan_path = deps._latest_preview_plan_for_scenario_norm_origin(scenario_norm, origin='planner')
+    if not base_plan_path:
+        base_plan_path = deps._latest_preview_plan_for_scenario_norm(scenario_norm)
+    if not base_plan_path and latest_saved_xml_path:
+        return {
+            'response': (jsonify({'ok': False, 'error': 'No preview plan found for this scenario. Generate a Full Preview first.'}), 404),
+        }
+
+    if not base_plan_path:
+        base_plan_path = str(j.get('preview_plan') or '').strip() or None
+        if base_plan_path:
+            base_plan_path = deps._existing_xml_path_or_none(base_plan_path)
     if not base_plan_path:
         try:
             entry = deps._planner_get_plan(scenario_norm)
@@ -293,12 +311,6 @@ def _load_prepare_preview_request_context(*, deps, flow_progress) -> dict[str, A
                 )
         except Exception:
             base_plan_path = base_plan_path
-
-    if not base_plan_path:
-        base_plan_path = deps._latest_preview_plan_for_scenario_norm_origin(scenario_norm, origin='planner')
-
-    if not base_plan_path:
-        base_plan_path = deps._latest_preview_plan_for_scenario_norm(scenario_norm)
 
     if not base_plan_path:
         return {
@@ -1434,6 +1446,8 @@ def _finalize_prepare_preview_response(
     *,
     helpers,
     flag_assignments: list[dict[str, Any]],
+    flow_run_remote: bool,
+    run_generators: bool,
     run_generators_request: bool,
     mode: str,
     base_plan_path: str,
@@ -1442,6 +1456,7 @@ def _finalize_prepare_preview_response(
     length: int,
     requested_length: int,
     dependency_level: int,
+    allow_node_duplicates: bool,
     chain_nodes: list[dict[str, Any]],
     flags_enabled: bool,
     flow_valid: bool,
@@ -1500,6 +1515,7 @@ def _finalize_prepare_preview_response(
             'length': length,
             'requested_length': requested_length,
             'dependency_level': dependency_level,
+            'allow_node_duplicates': bool(allow_node_duplicates),
             'chain': [{'id': str(node.get('id') or ''), 'name': str(node.get('name') or ''), 'type': str(node.get('type') or '')} for node in chain_nodes],
             'flag_assignments': persisted_flag_assignments,
             'flags_enabled': bool(flags_enabled),
@@ -1525,6 +1541,7 @@ def _finalize_prepare_preview_response(
             'length': length,
             'requested_length': requested_length,
             'dependency_level': dependency_level,
+            'allow_node_duplicates': bool(allow_node_duplicates),
             'chain': [{'id': str(node.get('id') or ''), 'name': str(node.get('name') or ''), 'type': str(node.get('type') or '')} for node in chain_nodes],
             'flag_assignments': flag_assignments,
             'flags_enabled': bool(flags_enabled),
@@ -1621,6 +1638,8 @@ def _finalize_prepare_preview_response(
         dag_debug=dag_debug,
         warning=warning,
         backend=backend,
+        flow_run_remote=bool(flow_run_remote),
+        run_generators=bool(run_generators),
     )
     success_payload['dependency_level'] = dependency_level
     return jsonify(success_payload), (422 if generation_failures and not best_effort else 200)
@@ -1911,6 +1930,8 @@ def execute_impl(*, backend: Any):
         deps=deps,
         helpers=_flow_prepare_preview_helpers,
         flag_assignments=flag_assignments,
+        flow_run_remote=flow_run_remote,
+        run_generators=run_generators,
         run_generators_request=run_generators_request,
         mode=mode,
         base_plan_path=base_plan_path,
@@ -1919,6 +1940,7 @@ def execute_impl(*, backend: Any):
         length=length,
         requested_length=requested_length,
         dependency_level=dependency_level,
+        allow_node_duplicates=allow_node_duplicates,
         chain_nodes=chain_nodes,
         flags_enabled=flags_enabled,
         flow_valid=flow_valid,

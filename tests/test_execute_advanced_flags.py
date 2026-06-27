@@ -202,6 +202,55 @@ def test_run_cli_async_blocks_when_sessions_present_and_no_adv_kill(tmp_path, mo
     assert isinstance(payload.get('run_id'), str) and payload.get('run_id')
 
 
+def test_run_cli_async_prefers_latest_xml_for_scenario(tmp_path, monkeypatch):
+    from webapp import app_backend as backend
+
+    stale_xml = tmp_path / 'stale.xml'
+    latest_xml = tmp_path / 'latest.xml'
+    stale_xml.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    latest_xml.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+
+    fake_core_cfg = {
+        'host': '127.0.0.1',
+        'port': 50051,
+        'ssh_enabled': False,
+        'ssh_host': '127.0.0.1',
+        'ssh_port': 22,
+        'ssh_username': 'core',
+        'ssh_password': 'pw',
+        'auto_start_daemon': False,
+        'venv_bin': '',
+    }
+
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _norm: str(latest_xml))
+    monkeypatch.setattr(backend, '_merge_core_configs', lambda *a, **k: dict(fake_core_cfg))
+    monkeypatch.setattr(backend, '_require_core_ssh_credentials', lambda cfg: cfg)
+    monkeypatch.setattr(backend, '_scenario_names_from_xml', lambda _p: ['Scenario One'])
+    monkeypatch.setattr(backend, '_SshTunnel', _DummyTunnel)
+    monkeypatch.setattr(backend, '_open_ssh_client', lambda _cfg: _DummySSHClient())
+    monkeypatch.setattr(backend.threading, 'Thread', _CaptureThread)
+    monkeypatch.setattr(backend, '_list_active_core_sessions', lambda *a, **k: [])
+
+    _CaptureThread.calls = []
+    client = app.test_client()
+    _login(client)
+
+    resp = client.post(
+        '/run_cli_async',
+        data={
+            'xml_path': str(stale_xml),
+            'scenario': 'Scenario One',
+            'flow_enabled': '0',
+        },
+    )
+
+    assert resp.status_code == 202
+    assert _CaptureThread.calls
+    run_id, job_spec = _CaptureThread.calls[-1]['kwargs']['args']
+    assert run_id
+    assert job_spec['xml_path'] == str(latest_xml)
+
+
 def test_run_cli_async_blocks_when_flow_artifact_paths_missing(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 
@@ -484,6 +533,124 @@ def test_remote_execute_generator_image_cleanup_uses_shell_command() -> None:
     assert '_exec_sudo(_remote_docker_remove_generator_images_script' not in source
     assert '_remote_docker_remove_generator_images_shell' in source
     assert 'coretg-gen-' in source
+
+
+def test_remote_execute_builtin_service_preflight_has_session_xml_input_defined() -> None:
+    import inspect
+
+    from webapp import app_backend as backend
+
+    source = inspect.getsource(backend._run_cli_background_task)
+
+    assert "session_xml_str = job_spec.get('session_xml_str')" in source
+    assert "_required_builtin_core_services_for_xml_input(\n            xml_path,\n            session_xml_str," in source
+
+
+def test_run_cli_background_task_marks_remote_cli_as_delegated() -> None:
+    import inspect
+
+    from webapp import app_backend as backend
+
+    source = inspect.getsource(backend._run_cli_background_task)
+
+    assert "'CORETG_CLI_REMOTE_DELEGATED=1'" in source
+    assert "'scenarioforge.cli',\n            'execute'," in source
+
+
+def test_webui_execute_refreshes_custom_services_when_ssh_password_is_available() -> None:
+    import inspect
+
+    from webapp import app_backend as backend
+
+    source = inspect.getsource(backend._run_cli_background_task)
+
+    assert "or core_cfg.get('ssh_password')" in source
+    assert 'install_custom_services_on_execute' in source
+    assert '_install_custom_services_to_core_vm(' in source
+
+
+def test_run_cli_async_uses_scenario_xml_as_preview_source_for_execute_parity(tmp_path, monkeypatch):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'scenario.xml'
+    preview_path = tmp_path / 'preview.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="NewScenario1"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    preview_path.write_text(
+        '<Scenarios><Scenario name="NewScenario1"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+
+    remote_core_cfg = {
+        'host': '127.0.0.1',
+        'port': 50051,
+        'ssh_enabled': True,
+        'ssh_host': '127.0.0.1',
+        'ssh_port': 22,
+        'ssh_username': 'core',
+        'ssh_password': 'pw',
+        'auto_start_daemon': False,
+        'venv_bin': '',
+    }
+    flow_state = {
+        'flag_assignments': [
+            {
+                'node_id': '7',
+                'id': 'nfs_sensitive_file',
+                'resolved_outputs': {'Flag(flag_id)': 'FLAG{abc}'},
+            }
+        ]
+    }
+    loaded_preview_paths = []
+
+    def _fake_preview_payload(path, _scenario):
+        loaded_preview_paths.append(str(path))
+        return {
+            'metadata': {'flow': flow_state},
+            'full_preview': {
+                'role_counts': {'Docker': 1},
+                'hosts': [{'node_id': '7', 'role': 'Docker', 'vulnerabilities': []}],
+            },
+        }
+
+    monkeypatch.setattr(backend, '_merge_core_configs', lambda *a, **k: dict(remote_core_cfg))
+    monkeypatch.setattr(backend, '_prefer_explicit_or_ssh_core_host', lambda cfg, *a, **k: cfg)
+    monkeypatch.setattr(backend, '_require_core_ssh_credentials', lambda cfg: cfg)
+    monkeypatch.setattr(backend, '_load_run_history', lambda: [])
+    monkeypatch.setattr(backend, '_select_core_config_for_page', lambda *a, **k: dict(remote_core_cfg))
+    monkeypatch.setattr(backend, '_load_preview_payload_from_path', _fake_preview_payload)
+    monkeypatch.setattr(backend, '_update_plan_preview_in_xml', lambda *_a, **_k: (True, 'ok'))
+    monkeypatch.setattr(backend, '_flow_state_from_xml_path', lambda *_a, **_k: dict(flow_state))
+    monkeypatch.setattr(backend, '_summary_from_preview_plan_path', lambda *_a, **_k: ({}, {'scenario': 'NewScenario1'}))
+    monkeypatch.setattr(backend, '_summary_from_xml_plan', lambda *_a, **_k: ({}, None))
+    monkeypatch.setattr(backend, '_diff_plan_summaries', lambda *_a, **_k: [])
+    _CaptureThread.calls = []
+    monkeypatch.setattr(backend.threading, 'Thread', _CaptureThread)
+
+    client = app.test_client()
+    _login(client)
+
+    resp = client.post(
+        '/run_cli_async',
+        data={
+            'xml_path': str(xml_path),
+            'scenario': 'NewScenario1',
+            'preview_plan': str(preview_path),
+            'flow_enabled': '1',
+        },
+    )
+
+    assert resp.status_code == 202
+    assert _CaptureThread.calls, 'expected background thread invocation'
+    thread_args = (_CaptureThread.calls[0].get('kwargs') or {}).get('args') or ()
+    assert len(thread_args) == 2
+    job_spec = thread_args[1]
+    assert isinstance(job_spec, dict)
+    assert job_spec.get('xml_path') == str(xml_path)
+    assert job_spec.get('preview_plan_path') == str(xml_path)
+    assert str(xml_path) in loaded_preview_paths
 
 
 def test_run_cli_async_hitl_rewrite_keeps_preview_plan_path_aligned(tmp_path, monkeypatch):

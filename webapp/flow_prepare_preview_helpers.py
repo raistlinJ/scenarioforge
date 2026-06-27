@@ -3458,9 +3458,17 @@ def persist_prepare_preview_plan(
         if not ok:
             return {'ok': False, 'error': f'Failed to persist flow-modified preview plan: {err}'}
         try:
-            backend._update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
-        except Exception:
-            pass
+            flow_ok, flow_err = backend._update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
+        except Exception as exc:
+            return {
+                'ok': False,
+                'error': f'Failed to persist flow-modified preview plan FlowState: {exc}',
+            }
+        if not flow_ok:
+            return {
+                'ok': False,
+                'error': f'Failed to persist flow-modified preview plan FlowState: {flow_err}',
+            }
         out_path = xml_target
         try:
             backend._planner_set_plan(scenario_norm, plan_path=xml_target, xml_path=xml_target, seed=(meta_out or {}).get('seed'))
@@ -3566,6 +3574,8 @@ def build_prepare_preview_success_payload(
     dag_debug: Any,
     warning: str | None,
     backend: Any,
+    flow_run_remote: bool = False,
+    run_generators: bool = False,
 ) -> dict[str, Any]:
     payload = {
         'ok': True,
@@ -3609,6 +3619,8 @@ def build_prepare_preview_success_payload(
         'cleanup_generated_artifacts': bool(cleanup_generated_artifacts),
         'cleanup_deleted_run_dirs': cleanup_deleted_run_dirs,
         'phase_timings': dict(phase_timings or {}),
+        'generator_execution_requested': bool(run_generators),
+        'generator_execution_mode': 'remote' if bool(flow_run_remote) else 'local',
     }
     if flow_errors_detail:
         payload['flow_errors_detail'] = flow_errors_detail

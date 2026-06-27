@@ -446,6 +446,141 @@
         window.alertWithModal = function (title, message, confirmLabel = 'OK', tone = 'primary', options = {}) {
             return window.confirmWithModal(title, message, confirmLabel, tone, { ...(options || {}), hideCancel: true });
         };
+
+        const CORETG_SAVED_XML_WARNING_PREFIX = 'coretg_saved_xml_ground_truth_warning_v1::';
+
+        function normalizeSavedXmlWarningScenario(value) {
+            try {
+                return String(value || '').trim().toLowerCase();
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function savedXmlGroundTruthWarningKey(scenario) {
+            const normalized = normalizeSavedXmlWarningScenario(scenario);
+            return normalized ? (CORETG_SAVED_XML_WARNING_PREFIX + normalized) : '';
+        }
+
+        window.coretgReadSavedXmlGroundTruthWarning = function (scenario) {
+            try {
+                const key = savedXmlGroundTruthWarningKey(scenario);
+                if (!key) return null;
+                const raw = sessionStorage.getItem(key);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                if (!parsed || typeof parsed !== 'object') return null;
+                const xmlPath = String(parsed.xmlPath || '').trim();
+                if (!xmlPath) return null;
+                return {
+                    scenario: String(parsed.scenario || scenario || '').trim(),
+                    scenarioKey: normalizeSavedXmlWarningScenario(parsed.scenario || scenario || ''),
+                    xmlPath,
+                    updatedAt: Number(parsed.updatedAt || 0) || 0,
+                };
+            } catch (e) {
+                return null;
+            }
+        };
+
+        window.coretgWriteSavedXmlGroundTruthWarning = function (opts = {}) {
+            try {
+                const options = (opts && typeof opts === 'object') ? opts : {};
+                const scenario = String(options.scenario || '').trim();
+                const key = savedXmlGroundTruthWarningKey(scenario);
+                if (!key) return false;
+                const active = options.active === true;
+                const xmlPath = String(options.xmlPath || '').trim();
+                if (!active || !xmlPath) {
+                    sessionStorage.removeItem(key);
+                    return false;
+                }
+                sessionStorage.setItem(key, JSON.stringify({
+                    scenario,
+                    xmlPath,
+                    updatedAt: Date.now(),
+                }));
+                return true;
+            } catch (e) {
+                return false;
+            }
+        };
+
+        window.coretgClearSavedXmlGroundTruthWarning = function (scenario) {
+            try {
+                const key = savedXmlGroundTruthWarningKey(scenario);
+                if (!key) return false;
+                sessionStorage.removeItem(key);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        };
+
+        window.coretgGetSavedXmlGroundTruthWarningState = function (opts = {}) {
+            try {
+                const options = (opts && typeof opts === 'object') ? opts : {};
+                const scenario = String(options.scenario || '').trim();
+                const xmlPath = String(options.xmlPath || '').trim();
+                if (options.hasUnsavedChanges === true && xmlPath) {
+                    return {
+                        active: true,
+                        persisted: false,
+                        scenario,
+                        xmlPath,
+                    };
+                }
+                if (options.allowStored === false) {
+                    return { active: false, persisted: false, scenario, xmlPath };
+                }
+                const stored = window.coretgReadSavedXmlGroundTruthWarning(scenario);
+                if (!stored || !stored.xmlPath) {
+                    return { active: false, persisted: false, scenario, xmlPath };
+                }
+                if (xmlPath && stored.xmlPath !== xmlPath) {
+                    return { active: false, persisted: true, scenario, xmlPath, stored };
+                }
+                return {
+                    active: true,
+                    persisted: true,
+                    scenario: stored.scenario || scenario,
+                    xmlPath: stored.xmlPath || xmlPath,
+                    stored,
+                };
+            } catch (e) {
+                return { active: false, persisted: false, scenario: '', xmlPath: '' };
+            }
+        };
+
+        window.coretgConfirmSavedXmlGroundTruth = async function (actionLabel, opts = {}) {
+            try {
+                const action = String(actionLabel || 'Continue').trim() || 'Continue';
+                const state = window.coretgGetSavedXmlGroundTruthWarningState(opts);
+                if (!state || state.active !== true) return true;
+                const scenario = String(state.scenario || '').trim();
+                const intro = state.persisted
+                    ? 'This preview was opened while the editor had unsaved changes.'
+                    : (scenario ? `${scenario} has unsaved editor changes.` : 'The editor has unsaved changes.');
+                const title = `${action} Uses Saved XML`;
+                const message = [
+                    intro,
+                    `${action} will use the last saved XML, not the current unsaved edits.`,
+                    'Save first if you want the current edits included.'
+                ].join('\n\n');
+                if (typeof window.confirmWithModal === 'function') {
+                    return await window.confirmWithModal(
+                        title,
+                        message,
+                        'Continue with saved XML',
+                        'warning',
+                        { cancelLabel: 'Cancel' }
+                    );
+                }
+                return window.confirm(`${title}\n\n${message}`);
+            } catch (e) {
+                return true;
+            }
+        };
     </script>
 
     <script>
@@ -866,6 +1001,245 @@
                 applyAvailability(explicitHref || storedDefault || '');
             };
             updateFromSources();
+        })();
+    </script>
+    <script>
+        (function () {
+            if (typeof window === 'undefined') return;
+
+            const STORAGE_PREFIX = 'coretg_latest_state_cache_v1::';
+
+            function latestStateCacheStorage() {
+                try {
+                    return window.sessionStorage;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function normalizeScenarioCacheName(value) {
+                return (value || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+            }
+
+            function latestStateCacheStorageKey(scenarioName, xmlPath) {
+                const scen = normalizeScenarioCacheName(scenarioName) || '__none__';
+                const xml = (xmlPath || '').toString().trim() || '__latest__';
+                return `${STORAGE_PREFIX}${scen}::${xml}`;
+            }
+
+            function cloneLatestStatePayload(value) {
+                try {
+                    return JSON.parse(JSON.stringify(value));
+                } catch (e) {
+                    return value;
+                }
+            }
+
+            function readLatestStateCacheRaw(scenarioName, xmlPath) {
+                const storage = latestStateCacheStorage();
+                if (!storage) return null;
+                const key = latestStateCacheStorageKey(scenarioName, xmlPath);
+                try {
+                    const raw = storage.getItem(key);
+                    if (!raw) return null;
+                    const parsed = JSON.parse(raw);
+                    if (!parsed || typeof parsed !== 'object') return null;
+                    if (!parsed.payload || typeof parsed.payload !== 'object') return null;
+                    return parsed;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function writeLatestStateCacheRaw(scenarioName, xmlPath, payload) {
+                const storage = latestStateCacheStorage();
+                if (!storage || !payload || typeof payload !== 'object') return;
+                const resolvedXml = (payload.xml_path || xmlPath || '').toString().trim();
+                const entry = {
+                    xml_cache_key: (payload.xml_cache_key || '').toString().trim(),
+                    xml_path: resolvedXml,
+                    saved_at: Date.now(),
+                    payload: cloneLatestStatePayload(payload),
+                };
+                const writeKey = (targetXmlPath) => {
+                    try {
+                        storage.setItem(latestStateCacheStorageKey(scenarioName, targetXmlPath), JSON.stringify(entry));
+                    } catch (e) { }
+                };
+                writeKey(xmlPath || '');
+                if (resolvedXml && resolvedXml !== (xmlPath || '').toString().trim()) {
+                    writeKey(resolvedXml);
+                }
+                if (!xmlPath) {
+                    writeKey('');
+                }
+            }
+
+            window.CORETG_READ_LATEST_STATE_CACHE = function (scenarioName, options) {
+                const opts = (options && typeof options === 'object') ? options : {};
+                const xmlPath = (opts.xmlPath || opts.xml_path || '').toString().trim();
+                const exact = readLatestStateCacheRaw(scenarioName, xmlPath);
+                if (exact) return cloneLatestStatePayload(exact);
+                if (xmlPath) return null;
+                const latest = readLatestStateCacheRaw(scenarioName, '');
+                return latest ? cloneLatestStatePayload(latest) : null;
+            };
+
+            window.CORETG_WRITE_LATEST_STATE_CACHE = function (scenarioName, payload, options) {
+                const opts = (options && typeof options === 'object') ? options : {};
+                const xmlPath = (opts.xmlPath || opts.xml_path || '').toString().trim();
+                writeLatestStateCacheRaw(scenarioName, xmlPath, payload);
+            };
+
+            window.CORETG_FETCH_LATEST_STATE = async function (scenarioName, options) {
+                const opts = (options && typeof options === 'object') ? options : {};
+                const scenario = (scenarioName || '').toString().trim();
+                if (!scenario) return null;
+                const explicitXmlPath = (opts.xmlPath || opts.xml_path || '').toString().trim();
+                const cached = window.CORETG_READ_LATEST_STATE_CACHE(scenario, { xmlPath: explicitXmlPath });
+                const query = new URLSearchParams({ scenario });
+                if (explicitXmlPath && opts.forceXmlPath === true) {
+                    query.set('xml_path', explicitXmlPath);
+                }
+                const cachedKey = (cached && cached.xml_cache_key) ? String(cached.xml_cache_key || '').trim() : '';
+                if (cachedKey) {
+                    query.set('if_xml_cache_key', cachedKey);
+                }
+                const resp = await fetch(`/api/scenario/latest_state?${query.toString()}`, {
+                    method: 'GET',
+                    credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json' },
+                });
+                let data = null;
+                try { data = await resp.json(); } catch (e) { data = null; }
+                if (!resp.ok || !data || data.ok === false) {
+                    return null;
+                }
+                if (data.not_modified === true && cached && cached.payload && typeof cached.payload === 'object') {
+                    return cloneLatestStatePayload(cached.payload);
+                }
+                if (data.scenario_state && typeof data.scenario_state === 'object') {
+                    window.CORETG_WRITE_LATEST_STATE_CACHE(scenario, data, { xmlPath: explicitXmlPath });
+                }
+                return data;
+            };
+        })();
+    </script>
+    <script>
+        (function () {
+            if (typeof window === 'undefined') return;
+
+            const CONDITIONAL_JSON_STORAGE_PREFIX = 'coretg_conditional_json_cache_v1::';
+
+            function conditionalJsonStorage() {
+                try {
+                    return window.sessionStorage;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function conditionalJsonClone(value) {
+                try {
+                    return JSON.parse(JSON.stringify(value));
+                } catch (e) {
+                    return value;
+                }
+            }
+
+            function canonicalConditionalJsonPath(rawUrl, versionQueryName) {
+                const queryName = (versionQueryName || 'if_data_cache_key').toString().trim() || 'if_data_cache_key';
+                try {
+                    const url = new URL(String(rawUrl || ''), window.location.origin);
+                    url.searchParams.delete(queryName);
+                    return `${url.pathname}${url.search}`;
+                } catch (e) {
+                    return String(rawUrl || '');
+                }
+            }
+
+            function conditionalJsonStorageKey(rawUrl, scope, versionQueryName) {
+                const cacheScope = (scope || 'default').toString().trim() || 'default';
+                return `${CONDITIONAL_JSON_STORAGE_PREFIX}${cacheScope}::${canonicalConditionalJsonPath(rawUrl, versionQueryName)}`;
+            }
+
+            function readConditionalJsonCacheRaw(rawUrl, scope, versionQueryName) {
+                const storage = conditionalJsonStorage();
+                if (!storage) return null;
+                const key = conditionalJsonStorageKey(rawUrl, scope, versionQueryName);
+                try {
+                    const raw = storage.getItem(key);
+                    if (!raw) return null;
+                    const parsed = JSON.parse(raw);
+                    if (!parsed || typeof parsed !== 'object') return null;
+                    if (!parsed.payload || typeof parsed.payload !== 'object') return null;
+                    if (!parsed.data_cache_key || typeof parsed.data_cache_key !== 'string') return null;
+                    return parsed;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function writeConditionalJsonCacheRaw(rawUrl, payload, scope, versionQueryName) {
+                const storage = conditionalJsonStorage();
+                if (!storage || !payload || typeof payload !== 'object') return;
+                const cacheKey = String(payload.data_cache_key || '').trim();
+                if (!cacheKey) return;
+                const key = conditionalJsonStorageKey(rawUrl, scope, versionQueryName);
+                const entry = {
+                    data_cache_key: cacheKey,
+                    saved_at: Date.now(),
+                    payload: conditionalJsonClone(payload),
+                };
+                try {
+                    storage.setItem(key, JSON.stringify(entry));
+                } catch (e) { }
+            }
+
+            window.CORETG_READ_CONDITIONAL_JSON_CACHE = function (rawUrl, options) {
+                const opts = (options && typeof options === 'object') ? options : {};
+                const versionQueryName = (opts.versionQueryName || 'if_data_cache_key').toString().trim() || 'if_data_cache_key';
+                const scope = (opts.scope || '').toString().trim();
+                const entry = readConditionalJsonCacheRaw(rawUrl, scope, versionQueryName);
+                return entry ? conditionalJsonClone(entry) : null;
+            };
+
+            window.CORETG_WRITE_CONDITIONAL_JSON_CACHE = function (rawUrl, payload, options) {
+                const opts = (options && typeof options === 'object') ? options : {};
+                const versionQueryName = (opts.versionQueryName || 'if_data_cache_key').toString().trim() || 'if_data_cache_key';
+                const scope = (opts.scope || '').toString().trim();
+                writeConditionalJsonCacheRaw(rawUrl, payload, scope, versionQueryName);
+            };
+
+            window.CORETG_FETCH_CONDITIONAL_JSON = async function (rawUrl, options) {
+                const opts = (options && typeof options === 'object') ? options : {};
+                const versionQueryName = (opts.versionQueryName || 'if_data_cache_key').toString().trim() || 'if_data_cache_key';
+                const scope = (opts.scope || '').toString().trim();
+                const cached = readConditionalJsonCacheRaw(rawUrl, scope, versionQueryName);
+                const url = new URL(String(rawUrl || ''), window.location.origin);
+                if (cached && cached.data_cache_key) {
+                    url.searchParams.set(versionQueryName, String(cached.data_cache_key));
+                }
+                const fetchInit = Object.assign({ credentials: 'same-origin' }, (opts.fetchInit && typeof opts.fetchInit === 'object') ? opts.fetchInit : {});
+                const resp = await fetch(`${url.pathname}${url.search}${url.hash}`, fetchInit);
+                let data = null;
+                try { data = await resp.json(); } catch (e) { data = null; }
+                if (!resp.ok || !data || data.ok === false) {
+                    return null;
+                }
+                if (data.not_modified === true && cached && cached.payload && typeof cached.payload === 'object') {
+                    const cachedPayload = conditionalJsonClone(cached.payload);
+                    if (cachedPayload && typeof cachedPayload === 'object') {
+                        cachedPayload.__fromConditionalCache = true;
+                        cachedPayload.__notModified = true;
+                    }
+                    return cachedPayload;
+                }
+                if (data && typeof data === 'object' && typeof data.data_cache_key === 'string' && data.data_cache_key.trim()) {
+                    writeConditionalJsonCacheRaw(rawUrl, data, scope, versionQueryName);
+                }
+                return data;
+            };
         })();
     </script>
     <script>

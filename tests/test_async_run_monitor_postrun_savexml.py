@@ -118,6 +118,7 @@ def test_async_run_status_retries_postrun_flow_copy_for_completed_success(tmp_pa
             "log_path": str(log_path),
             "xml_path": str(xml_path),
             "scenario_name": "NewScenario1",
+            "flow_enabled": True,
             "core_cfg": {
                 "host": "localhost",
                 "port": 50051,
@@ -135,7 +136,9 @@ def test_async_run_status_retries_postrun_flow_copy_for_completed_success(tmp_pa
 
     def _validate(*args, **kwargs):
         events.append("validate")
-        return {"ok": True}
+        if events.count("validate") == 1:
+            return {"ok": False, "injects_missing": ["docker-3"]}
+        return {"ok": True, "injects_missing": []}
 
     async_run_monitor.register(
         app,
@@ -157,7 +160,7 @@ def test_async_run_status_retries_postrun_flow_copy_for_completed_success(tmp_pa
         select_core_config_for_page=lambda *args, **kwargs: {},
         merge_core_configs=lambda left, right, **kwargs: dict(left or {}, **(right or {})),
         apply_core_secret_to_config=lambda cfg, scenario_norm: cfg,
-        grpc_save_current_session_xml_with_config=lambda *args, **kwargs: None,
+        grpc_save_current_session_xml_with_config=lambda *args, **kwargs: str(xml_path),
         append_async_run_log_line=lambda meta, line: None,
         append_session_scenario_discrepancies=lambda *args, **kwargs: None,
         validate_session_nodes_and_injects=_validate,
@@ -181,5 +184,12 @@ def test_async_run_status_retries_postrun_flow_copy_for_completed_success(tmp_pa
     resp = client.get("/run_status/run-1")
 
     assert resp.status_code == 200
-    assert events[:2] == ["copy:postrun", "validate"]
+    assert events[:4] == [
+        "copy:postrun",
+        "validate",
+        "copy:validation-retry",
+        "validate",
+    ]
     assert runs_store["run-1"].get("flow_artifacts_copied") is True
+    assert runs_store["run-1"]["validation_summary"]["injects_missing"] == []
+    assert runs_store["run-1"]["validation_summary"]["flow_copy_retried_after_validation"] is True

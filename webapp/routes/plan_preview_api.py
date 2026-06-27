@@ -64,6 +64,7 @@ def register(app, *, backend_module: Any) -> None:
                         matching_scenario = None
                     if isinstance(matching_scenario, dict):
                         preview_scenarios = [matching_scenario]
+            xml_path = backend._resolve_preexecute_xml_path(xml_path, scenario)
             if not xml_path:
                 if isinstance(preview_scenarios, list):
                     try:
@@ -163,8 +164,8 @@ def register(app, *, backend_module: Any) -> None:
     def _api_plan_persist_flow_plan():
         try:
             payload = request.get_json(silent=True) or {}
-            xml_path = (payload.get('xml_path') or '').strip()
             scenario = (payload.get('scenario') or '').strip() or None
+            xml_path = backend._resolve_preexecute_xml_path(payload.get('xml_path'), scenario)
             seed = payload.get('seed')
             try:
                 if seed is not None:

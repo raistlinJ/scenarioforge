@@ -104,7 +104,9 @@ def compute_full_plan(
     try:
         for ri in routing_items:
             if getattr(ri, 'abs_count', 0) > 0:
-                simple_routing_plan[getattr(ri, 'protocol', 'proto')] = int(getattr(ri, 'abs_count', 0))
+                protocol = str(getattr(ri, 'protocol', '') or '').strip()
+                if protocol:
+                    simple_routing_plan[protocol] = int(getattr(ri, 'abs_count', 0))
     except Exception:
         pass
     router_breakdown['simple_plan'] = simple_routing_plan

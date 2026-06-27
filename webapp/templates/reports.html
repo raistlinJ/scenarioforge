@@ -2470,9 +2470,14 @@ async function refreshParticipantNavForScenario(scenarioName){
 
     const url = new URL(participantDetailsBaseUrl, window.location.origin);
     url.searchParams.set('scenario', scen);
-    const res = await fetch(url.pathname + url.search, { cache: 'no-store' });
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function')
+      ? await window.CORETG_FETCH_CONDITIONAL_JSON(url.pathname + url.search, { scope: 'participant-ui-details-nav', fetchInit: { cache: 'no-store', credentials: 'same-origin' } })
+      : await (async () => {
+          const res = await fetch(url.pathname + url.search, { cache: 'no-store' });
+          if (!res.ok) return null;
+          try { return await res.json(); } catch (e) { return null; }
+        })();
+    if (!data) return;
     const configured = !!(data && data.scenario && data.scenario.participant_link_configured);
     if (typeof window.CORETG_SET_PARTICIPANT_NAV_VISIBLE === 'function') {
       window.CORETG_SET_PARTICIPANT_NAV_VISIBLE(configured);
@@ -2486,9 +2491,14 @@ async function fetchHistory(){
   refreshInFlight = true;
   try {
     const url = buildReportsDataUrl();
-    const res = await fetch(url);
-    if(!res.ok) return;
-    const data = await res.json();
+    const data = (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function')
+      ? await window.CORETG_FETCH_CONDITIONAL_JSON(url, { scope: 'reports-data', fetchInit: { credentials: 'same-origin', cache: 'no-store' } })
+      : await (async () => {
+          const res = await fetch(url);
+          if(!res.ok) return null;
+          try { return await res.json(); } catch (e) { return null; }
+        })();
+    if(!data) return;
     if (data && data.participant_url_flags && typeof data.participant_url_flags === 'object') {
       participantUrlFlags = data.participant_url_flags;
     }

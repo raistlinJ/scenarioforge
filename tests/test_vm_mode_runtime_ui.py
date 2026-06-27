@@ -16,6 +16,7 @@ def test_vm_mode_ui_seeds_runtime_managed_core_defaults() -> None:
     index_expected = [
         "const WEBUI_RUNTIME_MODE =",
         "const WEBUI_VM_MODE = WEBUI_RUNTIME_MODE === 'vm';",
+        "const RUNTIME_PARTICIPANT_UI_ENABLED = !WEBUI_VM_MODE;",
         "const WEBUI_VM_MODE_DEFAULTS =",
         "function runtimeManagedVmCoreConfigured(hitlState) {",
         "function applyVmModeDefaultsToScenario(scen) {",
@@ -134,6 +135,28 @@ def test_vm_mode_core_management_nav_allows_runtime_managed_defaults() -> None:
     modal_body = modal_match.group("body")
     assert "{% if webui_runtime_mode == 'vm' %}" in modal_body
     assert "VM mode CORE defaults are incomplete" in modal_body
+
+
+def test_vm_mode_ui_hides_participant_ui_surfaces() -> None:
+    index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    backend_text = BACKEND_PATH = (Path(__file__).resolve().parent.parent / "webapp" / "app_backend.py").read_text(encoding="utf-8", errors="ignore")
+
+    expected_index_snippets = [
+        "hitl.participant_proxmox_url = '';",
+        "delete hitl.participant_ui_url;",
+        "if (WEBUI_VM_MODE) {\n            wrapper.classList.add('d-none');",
+        "const part5SectionHtml = WEBUI_VM_MODE ? '' : `",
+        "if (RUNTIME_PARTICIPANT_UI_ENABLED) {\n                            const participantUrlValue = participantProxmoxUrlHasValue",
+    ]
+    missing_index = [snippet for snippet in expected_index_snippets if snippet not in index_text]
+    assert not missing_index, "Missing VM-mode Participant UI removal snippets in index.html: " + "; ".join(missing_index)
+
+    expected_backend_snippets = [
+        "if _webui_runtime_mode() == 'vm':\n            return {\n                'nav_participant_url': '',",
+        "'listing_empty_message': 'Participant UI is unavailable in VM mode.'",
+    ]
+    missing_backend = [snippet for snippet in expected_backend_snippets if snippet not in backend_text]
+    assert not missing_backend, "Missing VM-mode Participant UI removal snippets in app_backend.py: " + "; ".join(missing_backend)
 
 
 def test_hitl_summary_prefers_stored_bridge_mapping_over_inventory() -> None:

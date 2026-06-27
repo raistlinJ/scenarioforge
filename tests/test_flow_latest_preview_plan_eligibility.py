@@ -153,3 +153,46 @@ def test_latest_preview_plan_accepts_run_remote_query_flag(tmp_path, monkeypatch
     data = resp.get_json()
     assert data['core_validated'] is False
     assert data['flow_eligible'] is False
+
+
+def test_latest_preview_plan_returns_not_modified_when_cache_key_matches(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios/>', encoding='utf-8')
+
+    payload = {
+        'metadata': {'scenario': 'Scenario One'},
+        'full_preview': {
+            'hosts': [
+                {'id': 'docker-1', 'role': 'docker', 'vulnerabilities': []},
+            ],
+            'role_counts': {'Docker': 1},
+            'vulnerabilities_by_node': {},
+        },
+    }
+
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _scenario: str(xml_path))
+    monkeypatch.setattr(backend, '_load_plan_preview_from_xml', lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(backend, '_core_config_from_xml_path', lambda *_args, **_kwargs: {'validated': True, 'ssh_enabled': True})
+    monkeypatch.setattr(backend, '_apply_core_secret_to_config', lambda cfg, *_args, **_kwargs: cfg)
+    monkeypatch.setattr(backend, '_flag_generators_from_enabled_sources', lambda: ([{'id': 'fg-1'}], []))
+    monkeypatch.setattr(backend, '_flag_node_generators_from_enabled_sources', lambda: ([{'id': 'fng-1'}], []))
+    monkeypatch.setattr(backend, '_load_backend_vuln_catalog_items', lambda selectable_only=True: [])
+
+    first = client.get('/api/flag-sequencing/latest_preview_plan', query_string={'scenario': 'Scenario One'})
+    assert first.status_code == 200
+    first_data = first.get_json() or {}
+    cache_key = str(first_data.get('data_cache_key') or '')
+    assert cache_key
+
+    second = client.get(
+        '/api/flag-sequencing/latest_preview_plan',
+        query_string={'scenario': 'Scenario One', 'if_data_cache_key': cache_key},
+    )
+    assert second.status_code == 200
+    second_data = second.get_json() or {}
+    assert second_data.get('ok') is True
+    assert second_data.get('not_modified') is True
+    assert second_data.get('data_cache_key') == cache_key

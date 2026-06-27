@@ -1,5 +1,6 @@
 import io
 import json
+import shutil
 import subprocess
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -144,7 +145,7 @@ def test_remote_copy_flow_artifacts_script_prefers_node_alias_over_compose_sidec
     script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
 
     assert "if node_name in names:" in script
-    assert "targets = [node_name]" in script
+    assert "return [node_name], last_err" in script
     assert script.index("if node_name in names:") < script.index("ids = _compose_container_ids(project, yml)")
 
 
@@ -214,8 +215,172 @@ def test_remote_copy_flow_artifacts_script_waits_for_node_alias_before_fallback(
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert ps_calls['count'] >= 3
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/service'
-    assert 'abcdef123456:/flow_injects/service' not in cp_calls[0][-1]
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
+    assert 'abcdef123456:/flow_injects' not in cp_calls[0][-1]
+
+
+def test_remote_copy_flow_artifacts_retries_when_container_is_replaced(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / 'flag_node_generators_runs' / 'flow-scenario1' / '02_generator_docker-1'
+    service_dir = source_dir / 'service'
+    service_dir.mkdir(parents=True, exist_ok=True)
+    (service_dir / 'secret.txt').write_text('demo', encoding='utf-8')
+
+    compose_path = assign_dir / 'docker-compose-docker-1.yml'
+    compose_path.write_text('services:\n  docker-1:\n    image: demo\n', encoding='utf-8')
+    (assign_dir / 'compose_assignments.json').write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-1': {
+                        'InjectFiles': ['service -> /flow_injects'],
+                        'InjectSourceDir': str(source_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    old_id = 'a' * 64
+    new_id = 'b' * 64
+    inspect_ids = iter([old_id, old_id, new_id, new_id, new_id, new_id])
+    cp_calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-1\n')
+        if docker_cmd[:3] == ['inspect', '--format', '{{.Id}}|{{.State.Running}}|{{.State.Status}}']:
+            return subprocess.CompletedProcess(
+                cmd_list,
+                0,
+                stdout=f'{next(inspect_ids)}|true|running\n',
+            )
+        if docker_cmd[:2] == ['exec', 'docker-1']:
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            cp_calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setenv('CORETG_FLOW_COPY_SETTLE_S', '0')
+    monkeypatch.setenv('CORETG_FLOW_COPY_RETRY_S', '0')
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    namespace = {'__name__': '__main__'}
+    output = io.StringIO()
+    with redirect_stdout(output):
+        exec(script, namespace, namespace)
+    payload = json.loads(output.getvalue().strip())
+
+    item = (payload.get('items') or [])[0]
+    attempts = item.get('copy_attempts') or []
+    assert item.get('ok') is True
+    assert item.get('container_replaced') is True
+    assert item.get('stable_container_id') == new_id
+    assert len(cp_calls) == 2
+    assert attempts[0].get('ok') is False
+    assert attempts[1].get('ok') is True
+    assert item.get('verified_paths') == ['/flow_injects/service']
+
+
+def test_remote_copy_flow_artifacts_waits_out_restarting_container(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / 'flag_node_generators_runs' / 'flow-scenario1' / '02_generator_docker-2'
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / 'callback_url.txt').write_text('http://example.test/callback', encoding='utf-8')
+
+    (assign_dir / 'docker-compose-docker-2.yml').write_text(
+        'services:\n  docker-2:\n    image: demo\n',
+        encoding='utf-8',
+    )
+    (assign_dir / 'compose_assignments.json').write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-2': {
+                        'InjectFiles': ['callback_url.txt -> /tmp/encoded'],
+                        'InjectSourceDir': str(source_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    inspect_states = iter(
+        [
+            ('a' * 64, 'true', 'running'),
+            ('a' * 64, 'false', 'restarting'),
+            ('b' * 64, 'true', 'running'),
+            ('b' * 64, 'true', 'running'),
+            ('b' * 64, 'true', 'running'),
+        ]
+    )
+    current_state = {'status': 'unknown'}
+    exec_while_restarting: list[list[str]] = []
+    cp_calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-2\n')
+        if docker_cmd[:3] == ['inspect', '--format', '{{.Id}}|{{.State.Running}}|{{.State.Status}}']:
+            cid, running, status = next(inspect_states)
+            current_state['status'] = status
+            return subprocess.CompletedProcess(cmd_list, 0, stdout=f'{cid}|{running}|{status}\n')
+        if docker_cmd[:2] == ['exec', 'docker-2']:
+            if current_state.get('status') == 'restarting':
+                exec_while_restarting.append(docker_cmd)
+                return subprocess.CompletedProcess(
+                    cmd_list,
+                    1,
+                    stdout='Error response from daemon: Container abc is restarting, wait until the container is running',
+                )
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            cp_calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setenv('CORETG_FLOW_COPY_SETTLE_S', '0')
+    monkeypatch.setenv('CORETG_FLOW_COPY_RETRY_S', '0')
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    namespace = {'__name__': '__main__'}
+    output = io.StringIO()
+    with redirect_stdout(output):
+        exec(script, namespace, namespace)
+    payload = json.loads(output.getvalue().strip())
+
+    item = (payload.get('items') or [])[0]
+    attempts = item.get('copy_attempts') or []
+    assert item.get('ok') is True
+    assert attempts[0].get('ok') is False
+    assert attempts[0].get('errors') == ['docker-2: container not running (restarting)']
+    assert attempts[1].get('ok') is True
+    assert item.get('verified_paths') == ['/tmp/encoded/callback_url.txt']
+    assert not exec_while_restarting
+    assert len(cp_calls) == 1
 
 
 def test_remote_copy_flow_artifacts_script_falls_back_to_resolved_inject_sources():
@@ -301,7 +466,15 @@ def test_remote_copy_flow_artifacts_script_rewrites_local_outputs_paths_to_remot
     compose_path = assign_dir / 'docker-compose-docker-1.yml'
     compose_path.write_text('services:\n  docker-1:\n    image: demo\n', encoding='utf-8')
 
-    stale_source_dir = '/Users/sampleuser/Documents/scenarioforge/outputs/flag_node_generators_runs/flow-scenario1/02_git_deploy_key_repo_docker-1'
+    remote_flow_root = Path('/tmp/vulns/flag_node_generators_runs') / f'flow-{tmp_path.name}'
+    remote_source_dir = remote_flow_root / '02_git_deploy_key_repo_docker-1'
+    remote_service_dir = remote_source_dir / 'service'
+    remote_service_dir.mkdir(parents=True, exist_ok=True)
+    (remote_service_dir / 'README.md').write_text('demo', encoding='utf-8')
+    stale_source_dir = (
+        '/Users/sampleuser/Documents/scenarioforge/outputs/flag_node_generators_runs/'
+        f'{remote_flow_root.name}/02_git_deploy_key_repo_docker-1'
+    )
 
     assignments_path = assign_dir / 'compose_assignments.json'
     assignments_path.write_text(
@@ -339,18 +512,21 @@ def test_remote_copy_flow_artifacts_script_rewrites_local_outputs_paths_to_remot
     monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
     monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
 
-    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
-    ns = {'__name__': '__main__'}
-    out = io.StringIO()
-    with redirect_stdout(out):
-        exec(script, ns, ns)
-    payload = json.loads(out.getvalue().strip())
+    try:
+        script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+        ns = {'__name__': '__main__'}
+        out = io.StringIO()
+        with redirect_stdout(out):
+            exec(script, ns, ns)
+        payload = json.loads(out.getvalue().strip())
+    finally:
+        shutil.rmtree(remote_flow_root, ignore_errors=True)
 
     assert payload.get('ok') is True
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
-    assert cp_calls[0][-2] == '/tmp/vulns/flag_node_generators_runs/flow-scenario1/02_git_deploy_key_repo_docker-1/service'
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/service'
+    assert cp_calls[0][-2] == str(remote_service_dir)
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
 
 
 def test_remote_copy_flow_artifacts_script_recovers_stale_flow_injects_source(tmp_path, monkeypatch):
@@ -413,7 +589,7 @@ def test_remote_copy_flow_artifacts_script_recovers_stale_flow_injects_source(tm
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert cp_calls[0][-2] == str(source_dir / 'workspace')
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/workspace'
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
 
 
 def test_remote_copy_flow_artifacts_script_maps_source_side_detail_to_flow_injects(tmp_path, monkeypatch):
@@ -478,7 +654,268 @@ def test_remote_copy_flow_artifacts_script_maps_source_side_detail_to_flow_injec
     cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
     assert cp_calls
     assert cp_calls[0][-2] == str(site_dir)
-    assert cp_calls[0][-1] == 'docker-1:/flow_injects/site'
+    assert cp_calls[0][-1] == 'docker-1:/flow_injects'
+
+
+def test_remote_copy_flow_artifacts_script_uses_compose_nodes_not_only_assignment_keys(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / 'flag_node_generators_runs' / 'flow-scenario1' / '11_http_login_staff_portal_docker-11'
+    site_dir = source_dir / 'site'
+    site_dir.mkdir(parents=True, exist_ok=True)
+    (site_dir / 'index.html').write_text('demo', encoding='utf-8')
+
+    compose_path = assign_dir / 'docker-compose-docker-11.yml'
+    compose_path.write_text(
+        '\n'.join(
+            [
+                'services:',
+                '  docker-11:',
+                '    image: demo',
+                '    labels:',
+                f'      coretg.inject.source_dir: "{str(source_dir)}"',
+                "      coretg.inject.map: '[{\"src\": \"site\", \"dest\": \"/flow_injects\"}]'",
+                '',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    assignments_path = assign_dir / 'compose_assignments.json'
+    assignments_path.write_text(json.dumps({'assignments': {}}), encoding='utf-8')
+
+    calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-11\n')
+        if docker_cmd[:2] == ['exec', 'docker-11']:
+            calls.append(docker_cmd)
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    ns = {'__name__': '__main__'}
+    out = io.StringIO()
+    with redirect_stdout(out):
+        exec(script, ns, ns)
+    payload = json.loads(out.getvalue().strip())
+
+    assert payload.get('ok') is True
+    assert payload.get('assignments_count') == 0
+    assert payload.get('candidate_count') == 1
+    assert payload.get('candidate_keys') == ['docker-11']
+    cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
+    assert cp_calls
+    assert cp_calls[0][-2] == str(site_dir)
+    assert cp_calls[0][-1] == 'docker-11:/flow_injects'
+
+
+def test_remote_copy_flow_artifacts_script_falls_back_to_compose_files_without_manifest(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / 'flag_node_generators_runs' / 'flow-scenario1' / '02_generator_docker-2'
+    service_dir = source_dir / 'service'
+    service_dir.mkdir(parents=True, exist_ok=True)
+    (service_dir / 'token.txt').write_text('demo', encoding='utf-8')
+
+    (assign_dir / 'docker-compose-docker-2.yml').write_text(
+        '\n'.join(
+            [
+                'services:',
+                '  docker-2:',
+                '    image: demo',
+                '    labels:',
+                f'      coretg.inject.source_dir: "{str(source_dir)}"',
+                "      coretg.inject.map: '[{\"src\": \"service\", \"dest\": \"/flow_injects\"}]'",
+                '',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-2\n')
+        if docker_cmd[:2] == ['exec', 'docker-2']:
+            calls.append(docker_cmd)
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    ns = {'__name__': '__main__'}
+    out = io.StringIO()
+    with redirect_stdout(out):
+        exec(script, ns, ns)
+    payload = json.loads(out.getvalue().strip())
+
+    assert payload.get('ok') is True
+    assert payload.get('assignments_missing') is True
+    assert payload.get('assignments_count') == 0
+    assert payload.get('assign_dir') == str(assign_dir)
+    assert payload.get('candidate_keys') == ['docker-2']
+    cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
+    assert cp_calls
+    assert cp_calls[0][-2] == str(service_dir)
+    assert cp_calls[0][-1] == 'docker-2:/flow_injects'
+
+
+def test_remote_copy_flow_artifacts_script_collapses_duplicate_artifacts_prefix(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    run_dir = tmp_path / 'flag_generators_runs' / 'flow-sanitycheck' / '01_120_docker-2'
+    artifacts_dir = run_dir / 'artifacts'
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / 'operator_pin.hash').write_text('demo', encoding='utf-8')
+
+    (assign_dir / 'docker-compose-docker-2.yml').write_text(
+        'services:\n  docker-2:\n    image: demo\n',
+        encoding='utf-8',
+    )
+    (assign_dir / 'compose_assignments.json').write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-2': {
+                        'InjectFiles': ['artifacts/operator_pin.hash -> /flow_injects'],
+                        'InjectSourceDir': str(artifacts_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-2\n')
+        if docker_cmd[:2] == ['exec', 'docker-2']:
+            calls.append(docker_cmd)
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    ns = {'__name__': '__main__'}
+    out = io.StringIO()
+    with redirect_stdout(out):
+        exec(script, ns, ns)
+    payload = json.loads(out.getvalue().strip())
+
+    assert payload.get('ok') is True
+    items = payload.get('items') or []
+    assert items and items[0].get('ok') is True
+    cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
+    assert cp_calls
+    assert cp_calls[0][-2] == str(artifacts_dir / 'operator_pin.hash')
+    assert cp_calls[0][-1] == 'docker-2:/flow_injects/operator_pin.hash'
+
+
+def test_remote_copy_flow_artifacts_script_copies_run_root_artifact_to_basename(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    run_dir = tmp_path / 'flag_generators_runs' / 'flow-sanitycheck' / '01_formatted_csv_user_export_docker-2'
+    artifacts_dir = run_dir / 'artifacts'
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / 'user-export.csv').write_text('demo', encoding='utf-8')
+
+    (assign_dir / 'docker-compose-docker-2.yml').write_text(
+        'services:\n  docker-2:\n    image: demo\n',
+        encoding='utf-8',
+    )
+    (assign_dir / 'compose_assignments.json').write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-2': {
+                        'InjectFiles': ['artifacts/user-export.csv -> /flow_injects'],
+                        'InjectSourceDir': str(run_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-2\n')
+        if docker_cmd[:2] == ['exec', 'docker-2']:
+            calls.append(docker_cmd)
+            if '/usr/local/coretg/bin/busybox' in docker_cmd:
+                return subprocess.CompletedProcess(cmd_list, 1, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        if docker_cmd[:1] == ['cp']:
+            calls.append(docker_cmd)
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    ns = {'__name__': '__main__'}
+    out = io.StringIO()
+    with redirect_stdout(out):
+        exec(script, ns, ns)
+    payload = json.loads(out.getvalue().strip())
+
+    assert payload.get('ok') is True
+    items = payload.get('items') or []
+    assert items and items[0].get('ok') is True
+    cp_calls = [entry for entry in calls if entry[:1] == ['cp']]
+    assert cp_calls
+    assert cp_calls[0][-2] == str(artifacts_dir / 'user-export.csv')
+    assert cp_calls[0][-1] == 'docker-2:/flow_injects/user-export.csv'
 
 
 def test_remote_validator_maps_numeric_node_id_to_docker_alias():

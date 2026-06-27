@@ -846,9 +846,14 @@ current_user.is_authenticated) else '' %}
 
       const url = new URL(asSameOriginPath(participantDetailsBaseUrl), window.location.origin);
       url.searchParams.set('scenario', scen);
-      const res = await fetch(url.pathname + url.search, { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
+      const data = (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function')
+        ? await window.CORETG_FETCH_CONDITIONAL_JSON(url.pathname + url.search, { scope: 'participant-ui-details-nav', fetchInit: { cache: 'no-store', credentials: 'same-origin' } })
+        : await (async () => {
+            const res = await fetch(url.pathname + url.search, { cache: 'no-store' });
+            if (!res.ok) return null;
+            try { return await res.json(); } catch (e) { return null; }
+          })();
+      if (!data) return;
       if (data && data.participant_url_flags && typeof data.participant_url_flags === 'object') {
         participantUrlFlags = data.participant_url_flags;
       }
@@ -1141,13 +1146,19 @@ current_user.is_authenticated) else '' %}
       const shouldIncludeXmls = forceXmls || (!firstLoadDone) || (scenarioNow !== lastXmlsScenario) || (corePollSeq % 6 === 0);
       const dataUrl = buildCoreDataUrl({ includeXmls: shouldIncludeXmls });
       dockLog('DEBUG', `[core] Refreshing core data from ${dataUrl}${scenarioFilter ? ` (scenario=${scenarioFilter})` : ''}`);
-      const res = await fetch(dataUrl, { cache: 'no-store' });
-      if (!res.ok) {
-        dockLog('WARN', `[core] refresh failed (${res.status}) for ${dataUrl}`);
+      const data = (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function')
+        ? await window.CORETG_FETCH_CONDITIONAL_JSON(dataUrl, { scope: 'core-data', fetchInit: { credentials: 'same-origin', cache: 'no-store' } })
+        : await (async () => {
+            const res = await fetch(dataUrl, { cache: 'no-store' });
+            if (!res.ok) return { __coretgRequestFailed: true, __coretgStatus: res.status };
+            try { return await res.json(); } catch (e) { return null; }
+          })();
+      if (!data || data.__coretgRequestFailed) {
+        const code = data && data.__coretgStatus ? data.__coretgStatus : 'unknown';
+        dockLog('WARN', `[core] refresh failed (${code}) for ${dataUrl}`);
         return;
       }
-      const data = await res.json();
-      if (Array.isArray(data.logs) && data.logs.length) {
+      if (!data.__notModified && Array.isArray(data.logs) && data.logs.length) {
         data.logs.forEach(entry => {
           if (!entry) return;
           dockLog(entry.level || 'INFO', entry.message || '');

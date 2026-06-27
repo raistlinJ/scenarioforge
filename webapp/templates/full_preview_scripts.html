@@ -21,6 +21,32 @@
     const flowNodeFlagModalTitleEl = document.getElementById('flowNodeFlagModalTitle');
     const flowNodeFlagModalBodyEl = document.getElementById('flowNodeFlagModalBody');
     const flowAlertEl = document.getElementById('fpFlowValidityAlert');
+    const savedXmlWarningEl = document.getElementById('fpSavedXmlWarning');
+
+    function syncSavedXmlGroundTruthAlert() {
+      try {
+        if (!savedXmlWarningEl) return;
+        const helper = (window.top || window).coretgGetSavedXmlGroundTruthWarningState;
+        if (typeof helper !== 'function') {
+          savedXmlWarningEl.classList.add('d-none');
+          return;
+        }
+        const warningState = helper({
+          scenario: '{{ scenario or "" }}',
+          xmlPath: '{{ xml_path or "" }}',
+          allowStored: true,
+        });
+        if (warningState && warningState.active === true) {
+          savedXmlWarningEl.classList.remove('d-none');
+        } else {
+          savedXmlWarningEl.classList.add('d-none');
+        }
+      } catch (e) {
+        try { savedXmlWarningEl?.classList.add('d-none'); } catch (_e) { }
+      }
+    }
+
+    syncSavedXmlGroundTruthAlert();
 
     function toRoman(num) {
       const n = Number(num);
@@ -2956,6 +2982,17 @@
       const labelToggleEl = document.getElementById('graphLabelsToggle');
       const wrapNode = document.getElementById('previewGraph');
       const storageKey = 'coretg_fp_labels_state';
+      if (wrapNode) {
+        wrapNode.addEventListener('coretg-graph-ready', () => {
+          try {
+            window.requestAnimationFrame(() => {
+              window.requestAnimationFrame(() => notifyParentReady('graph-ready'));
+            });
+          } catch (e) {
+            notifyParentReady('graph-ready');
+          }
+        }, { once: true });
+      }
       if (labelToggleEl && !labelToggleEl.dataset.bound) {
         labelToggleEl.dataset.bound = '1';
         labelToggleEl.addEventListener('change', () => {
@@ -2973,6 +3010,13 @@
         labelToggleEl.checked = savedLabelState === 'on';
       }
       buildGraph();
+      if (!wrapNode) {
+        try {
+          window.requestAnimationFrame(() => notifyParentReady('init-ready'));
+        } catch (e) {
+          notifyParentReady('init-ready');
+        }
+      }
 
       wrapNode?.addEventListener('coretg-graph-ready', (ev) => {
         const show = ev.detail?.showLabels ?? (labelToggleEl ? labelToggleEl.checked : false);
@@ -3161,22 +3205,24 @@
       }
       // Delay styling until after DOM is built
       setTimeout(() => { applySegmentationRowStyling(); applyTrafficRowStyling(); }, 0);
+      setTimeout(() => notifyParentReady('init-fallback'), 1200);
     }
-    function notifyParentReady() {
+    let parentReadyPosted = false;
+    function notifyParentReady(reason = 'ready') {
       try {
+        if (parentReadyPosted) return;
         if (window.parent && window.parent !== window) {
+          parentReadyPosted = true;
           try { console.debug('[full_preview] posting ready'); } catch (e) { }
-          window.parent.postMessage({ type: 'full-preview-ready' }, window.location.origin);
+          window.parent.postMessage({ type: 'full-preview-ready', reason }, window.location.origin);
         }
       } catch (e) { }
     }
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => {
-        notifyParentReady();
         setTimeout(init, 0);
       });
     } else {
-      notifyParentReady();
       setTimeout(init, 0);
     }
     // Export JSON
@@ -3346,6 +3392,14 @@
         // Always delegate to the Topology Execute flow so the UX and backend path are consistent.
         try {
           const scen = (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '{{ (scenario or "")|e }}').trim();
+          const proceedWithSavedXml = await ((window.top || window).coretgConfirmSavedXmlGroundTruth?.('Execute', {
+            scenario: scen,
+            xmlPath: '{{ xml_path or "" }}',
+            allowStored: true,
+          }) ?? true);
+          if (!proceedWithSavedXml) {
+            return;
+          }
           const baseUrl = '{{ url_for("index") }}';
           const url = baseUrl
             + '?auto_execute=1'

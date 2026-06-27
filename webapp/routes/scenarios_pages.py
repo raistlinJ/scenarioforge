@@ -75,6 +75,48 @@ def register(app, *, backend_module: Any) -> None:
                 best_mtime = mtime
         return best_path
 
+    def _build_route_scenario_xml_map(
+        scenario_names,
+        scenario_paths,
+        current_xml_path: str,
+        current_xml_scenario_names,
+        fallback_scenario_norm: str,
+    ) -> dict[str, str]:
+        scenario_xml_by_name: dict[str, str] = {}
+        try:
+            if current_xml_path and isinstance(scenario_names, list):
+                xml_name_norms = {
+                    backend._normalize_scenario_label(name)
+                    for name in (current_xml_scenario_names or [])
+                    if backend._normalize_scenario_label(name)
+                }
+                for name in scenario_names:
+                    display_name = str(name)
+                    name_norm = backend._normalize_scenario_label(display_name)
+                    if not name_norm:
+                        continue
+                    if xml_name_norms:
+                        if name_norm in xml_name_norms:
+                            scenario_xml_by_name[display_name] = current_xml_path
+                    elif fallback_scenario_norm and name_norm == fallback_scenario_norm:
+                        scenario_xml_by_name[display_name] = current_xml_path
+            if isinstance(scenario_names, list) and isinstance(scenario_paths, dict):
+                for name in scenario_names:
+                    display_name = str(name)
+                    if display_name in scenario_xml_by_name:
+                        continue
+                    try:
+                        name_norm = backend._normalize_scenario_label(display_name)
+                        raw_path = scenario_paths.get(name_norm) or scenario_paths.get(display_name) or ''
+                        chosen = _select_route_scenario_xml_path(raw_path, name_norm) or ''
+                        if chosen:
+                            scenario_xml_by_name[display_name] = os.path.abspath(chosen)
+                    except Exception:
+                        scenario_xml_by_name.setdefault(display_name, '')
+        except Exception:
+            return {}
+        return scenario_xml_by_name
+
     def _flow_page_view():
         current_user = backend._current_user()
         scenario_names, scenario_paths, scenario_url_hints = backend._scenario_catalog_for_user(None, user=current_user)
@@ -151,6 +193,14 @@ def register(app, *, backend_module: Any) -> None:
                 scenario_norm = backend._normalize_scenario_label(scenario_names[0])
             active_scenario = backend._resolve_scenario_display(scenario_norm, scenario_names, scenario_query)
 
+        scenario_xml_by_name = _build_route_scenario_xml_map(
+            scenario_names,
+            scenario_paths,
+            active_scenario_xml_path,
+            xml_scenario_names,
+            scenario_norm,
+        )
+
         xml_preview = ''
         flow_state_by_scenario: dict[str, Any] = {}
         try:
@@ -197,6 +247,7 @@ def register(app, *, backend_module: Any) -> None:
             scenarios=scenario_names,
             active_scenario=active_scenario,
             participant_url_flags=participant_url_flags,
+            scenario_xml_by_name=scenario_xml_by_name,
             preview_xml_path=active_scenario_xml_path,
             xml_preview=xml_preview,
             flow_state_by_scenario=flow_state_by_scenario,
@@ -267,33 +318,13 @@ def register(app, *, backend_module: Any) -> None:
                 scenario_norm = backend._normalize_scenario_label(scenario_names[0])
             active_scenario = backend._resolve_scenario_display(scenario_norm, scenario_names, scenario_query)
 
-        scenario_xml_by_name: dict[str, str] = {}
-        try:
-            if xml_path_abs and isinstance(scenario_names, list):
-                xml_name_norms = {
-                    backend._normalize_scenario_label(name)
-                    for name in (xml_scenario_names or [])
-                    if backend._normalize_scenario_label(name)
-                }
-                for name in scenario_names:
-                    name_norm = backend._normalize_scenario_label(name)
-                    if xml_name_norms:
-                        if name_norm in xml_name_norms:
-                            scenario_xml_by_name[str(name)] = xml_path_abs
-                    elif scenario_norm and name_norm == scenario_norm:
-                        scenario_xml_by_name[str(name)] = xml_path_abs
-            if isinstance(scenario_names, list) and isinstance(scenario_paths, dict):
-                for name in scenario_names:
-                    try:
-                        name_norm = backend._normalize_scenario_label(name)
-                        raw_path = scenario_paths.get(name_norm) or scenario_paths.get(name) or ''
-                        chosen = _select_route_scenario_xml_path(raw_path, name_norm) or ''
-                        if chosen:
-                            scenario_xml_by_name[str(name)] = os.path.abspath(chosen)
-                    except Exception:
-                        scenario_xml_by_name.setdefault(str(name), '')
-        except Exception:
-            scenario_xml_by_name = {}
+        scenario_xml_by_name = _build_route_scenario_xml_map(
+            scenario_names,
+            scenario_paths,
+            xml_path_abs,
+            xml_scenario_names,
+            scenario_norm,
+        )
 
         xml_preview = ''
         try:

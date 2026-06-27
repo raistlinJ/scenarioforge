@@ -1,6 +1,12 @@
 ## Scenario XML Schema (Application-Level)
 
-This document summarizes the structure of the scenario editor XML consumed and produced by the Web UI / CLI. It complements `schemas/xml/scenarios.xsd` (machine-readable) and focuses on semantics and authoring guidance.
+This document summarizes the structure of the scenario editor XML consumed and produced by the Web UI / CLI. It focuses on semantics and authoring guidance.
+
+`schemas/xml/scenarios.xsd` describes the older planning-section core of this
+format. Current saved XML also contains runtime metadata described below,
+including `CoreConnection`, `HardwareInLoop`, `PlanPreview`, and
+`FlagSequencing/FlowState`. The application parser is authoritative for those
+extensions; the current XSD may reject an otherwise valid saved WebUI XML.
 
 ### Root Elements
 
@@ -21,8 +27,67 @@ Wraps a base scenario reference and a sequence of planning sections.
 
 Child elements:
 * `<BaseScenario filepath=""/>` (filepath may be empty or an absolute/relative path to a CORE session XML used as a base layout).
-* `<PlanPreview>` (optional) JSON payload containing the latest full preview/plan data from the Web UI (round‑trip only; not used by CLI parsing).
+* `<PlanPreview>` (optional) JSON payload containing the latest full preview/plan data from the Web UI. The Web UI writes it for round-tripping, and the CLI execute path also consumes it for preview parity checks and runtime slot/vulnerability alignment.
+* `<HardwareInLoop>` (optional) selected CORE VM, bridge, Proxmox, and external-interface metadata. Its nested `<CoreConnection>` is the scenario-specific execution target.
+* `<FlagSequencing><FlowState>...</FlowState></FlagSequencing>` (optional) JSON payload containing the active Flow chain, resolved generator outputs, inject sources, and flag assignments.
 * `<section ...>` repeated for each planning domain.
+
+### Runtime Metadata And Ground Truth
+
+Saved WebUI XML is the ground truth for later CLI phases:
+
+```xml
+<Scenarios>
+  <CoreConnection
+    host="localhost"
+    port="50051"
+    ssh_enabled="true"
+    ssh_host="core-vm.example"
+    ssh_port="22"
+    ssh_username="corevm"
+    ssh_password="..."
+    venv_bin="/opt/core/venv/bin" />
+  <Scenario name="Scenario 1">
+    <ScenarioEditor>
+      <BaseScenario filepath="" />
+      <HardwareInLoop enabled="false">
+        <CoreConnection ... />
+      </HardwareInLoop>
+      <FlagSequencing>
+        <FlowState>{"flags_enabled":false,"chain_ids":[]}</FlowState>
+      </FlagSequencing>
+      <PlanPreview>{"full_preview":{},"metadata":{"seed":12345}}</PlanPreview>
+      <!-- planning sections -->
+    </ScenarioEditor>
+  </Scenario>
+</Scenarios>
+```
+
+The top-level `CoreConnection` supplies the document execution target. The
+scenario HITL `CoreConnection` preserves the corresponding scenario-specific
+selection and related metadata. WebUI Execute synchronizes its validated
+connection into both locations before invoking the CLI.
+
+`preview-plan` updates embedded `PlanPreview`. `flag-sequencing` updates embedded
+`FlowState`. `execute` and `topo` reuse the embedded preview when no separate
+`--preview-plan` path is supplied.
+
+Do not regenerate or replace the XML between those phases. A stale preview or an
+active Flow state with unresolved or missing runtime artifacts is an execute
+preflight error.
+
+### Credential Handling
+
+`CoreConnection/@ssh_password` is intentionally embedded when remote standalone
+CLI execution needs it. Credential-bearing XML must be treated as a secret:
+
+* write it atomically with file mode `0600`
+* keep its containing output directory private
+* redact the password before adding XML to logs, AI prompts, reports, archives,
+  or issue attachments
+
+The WebUI backend helper `_write_xml_tree_atomic` applies the required file mode
+when a password is present.
 
 ### `<section>` Attributes
 
@@ -121,9 +186,9 @@ Segmentation items currently use only `selected`, `factor`, and optional Count s
 </Scenarios>
 ```
 
-### Validation
+### Planning-Core XSD Validation
 
-Use the provided XSD for structural validation:
+The provided XSD can validate XML limited to its planning-section subset:
 
 ```bash
 python - <<'PY'
@@ -135,6 +200,10 @@ print('OK')
 PY
 ```
 
+Do not use this XSD alone as the acceptance test for a current saved WebUI XML.
+Application-level parse, preview, Flow, and execute preflight behavior validate
+the runtime extension nodes.
+
 ### Forward Compatibility Guidance
 
 If you add new per-item planning knobs, prefer optional attributes on `<item>` (keeps XSD adjustments localized). Document semantic constraints (e.g., value ranges, interactions with modes) in this file and extend `schemas/xml/scenarios.xsd` accordingly.
@@ -143,6 +212,7 @@ If you add new per-item planning knobs, prefer optional attributes on `<item>` (
 
 | Date | Change |
 |------|--------|
+| 2026-06-22 | Documented authoritative CoreConnection, HardwareInLoop, embedded PlanPreview/FlowState lifecycle, XSD coverage limits, and credential handling. |
 | 2025-09-30 | Added routing connectivity attributes (r2r_mode, r2r_edges, r2s_mode, r2s_edges, r2s_hosts_min, r2s_hosts_max) and planning metadata attributes to XSD; published this schema summary. |
 
 ---

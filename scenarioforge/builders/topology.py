@@ -13,11 +13,18 @@ import select
 import os
 import json
 
-try:  # pragma: no cover - offline mode exercised via CLI tests
-    from core.api.grpc import client  # type: ignore
-    from core.api.grpc.wrappers import NodeType, Position, Interface  # type: ignore
+from ..utils.core_imports import quiet_import
+
+_core_client_ok, _core_client_mod, CORE_GRPC_IMPORT_ERROR = quiet_import('core.api.grpc.client')
+_core_wrappers_ok, _core_wrappers_mod, _core_wrappers_error = quiet_import('core.api.grpc.wrappers')
+if _core_client_ok and _core_wrappers_ok:  # pragma: no cover - offline mode exercised via CLI tests
+    client = _core_client_mod  # type: ignore
+    NodeType = getattr(_core_wrappers_mod, 'NodeType')  # type: ignore
+    Position = getattr(_core_wrappers_mod, 'Position')  # type: ignore
+    Interface = getattr(_core_wrappers_mod, 'Interface')  # type: ignore
     CORE_GRPC_AVAILABLE = True
-except ModuleNotFoundError:  # pragma: no cover
+else:  # pragma: no cover
+    CORE_GRPC_IMPORT_ERROR = CORE_GRPC_IMPORT_ERROR or _core_wrappers_error
     CORE_GRPC_AVAILABLE = False
 
     class _DummyCoreClient:
@@ -76,6 +83,28 @@ _PREPARED_DOCKER_NODE_COMPOSES: Set[str] = set()
 
 # Track which per-node compose files have had docker preflight executed.
 _PREFLIGHTED_DOCKER_NODE_COMPOSES: Set[str] = set()
+
+
+def _docker_node_compose_token(node_name: str) -> str:
+    raw = str(node_name or '').strip()
+    if not raw:
+        return 'node'
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in raw)
+    safe = safe.strip('-.')
+    return safe or 'node'
+
+
+def _docker_node_legacy_compose_path(node_name: str, out_base: str = '/tmp/vulns') -> str:
+    return os.path.join(out_base, f"docker-compose-{node_name}.yml")
+
+
+def _docker_node_compose_project_dir(node_name: str, out_base: str = '/tmp/vulns') -> str:
+    token = _docker_node_compose_token(node_name)
+    return os.path.join(out_base, '.compose-projects', token)
+
+
+def _docker_node_compose_path(node_name: str, out_base: str = '/tmp/vulns') -> str:
+    return os.path.join(_docker_node_compose_project_dir(node_name, out_base), 'docker-compose.yml')
 
 
 def _reset_docker_compose_prepare_caches(context: str = '') -> None:
@@ -337,7 +366,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 pass
         except Exception as exc:
             try:
-                logger.warning('[docker-node] preflight cmd failed: %s err=%s', ' '.join(args), exc)
+                logger.warning('[docker-node] preflight cmd failed node=%s compose=%s cmd=%s err=%s', node_name, compose_path, ' '.join(args), exc)
             except Exception:
                 pass
         return returncode, tail
@@ -364,7 +393,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     # `docker compose pull` fails for buildable services with scenario-scoped tags
     # (e.g., `coretg/scenarios-...`) because those are expected to be built locally.
     pull_services: List[str] = []
-    wrapper_builds: List[tuple[str, str, str]] = []  # (service, image, context)
+    wrapper_builds: List[tuple[str, str, str, bool]] = []  # (service, image, context, force_pull)
     try:
         import yaml  # type: ignore
 
@@ -386,7 +415,11 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 except Exception:
                     ctx = ''
                 if image.startswith('coretg/') and image.endswith(':iproute2') and ctx:
-                    wrapper_builds.append((str(svc_name), image, ctx))
+                    try:
+                        force_pull = str(labels.get('coretg.wrapper_build_pull') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+                    except Exception:
+                        force_pull = False
+                    wrapper_builds.append((str(svc_name), image, ctx, force_pull))
                     # Do NOT include in pull services; it's a local-only tag.
                     continue
 
@@ -413,9 +446,14 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
 
     # Build wrapper images declared via labels (no `build:` stanza) first.
     # This ensures core-daemon will not attempt to build/pull when it later starts nodes.
+    #
+    # Treat wrapper build failures as fatal even outside strict pull mode. Wrapper
+    # image tags are local-only and scenario/node scoped, so falling through after
+    # a failed build can accidentally start a stale image from an earlier run.
     try:
         compose_dir = os.path.dirname(os.path.abspath(compose_path))
-        for svc_name, image, ctx in wrapper_builds:
+        wrapper_build_failures: List[str] = []
+        for svc_name, image, ctx, force_pull in wrapper_builds:
             df_path = os.path.join(ctx, 'Dockerfile')
             if not os.path.isabs(df_path):
                 df_path = os.path.abspath(df_path)
@@ -428,14 +466,27 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 pass
 
             args = docker_cmd + ['build', '--network', 'host']
-            if build_pull:
+            if build_pull or force_pull:
                 args.append('--pull')
             args += ['-t', image, '-f', df_path, ctx_path]
-            rc, _tail = _run(args, timeout=1800)
+            rc, tail = _run(args, timeout=1800)
             if rc == 0:
                 built_any = True
+            else:
+                wrapper_build_failures.append(
+                    (
+                        f"service={svc_name} image={image} rc={rc} "
+                        f"context={ctx_path} dockerfile={df_path}"
+                        + (f"\n{tail}" if tail else "")
+                    ).strip()
+                )
+        if wrapper_build_failures:
+            raise RuntimeError(
+                "docker wrapper image build failed; refusing to use an existing/stale local image\n"
+                + "\n---\n".join(wrapper_build_failures)
+            )
     except Exception:
-        pass
+        raise
 
     # Build any services that declare a `build:` stanza using host networking.
     # This avoids reliance on Docker's default bridge network (which may be disabled
@@ -629,7 +680,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                         allow_helper_failure = False
                     if inject_copy_required or not allow_helper_failure:
                         raise RuntimeError(
-                            f"docker compose inject helper failed (node={node_name} helper={helper_service} rc={helper_rc})\n{helper_reason}".strip()
+                            f"docker compose inject helper failed (node={node_name} compose={compose_path} helper={helper_service} rc={helper_rc})\n{helper_reason}".strip()
                         )
 
             up_services = [str(target_service)]
@@ -637,7 +688,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             rc, tail = _run(compose_base + ['up', '-d', '--no-build'] + up_services, timeout=900)
             if strict_pull and rc != 0:
                 raise RuntimeError(
-                    f"docker compose up -d failed (node={node_name} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
+                    f"docker compose up -d failed (node={node_name} compose={compose_path} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
                 )
 
             # Best-effort: wait for PID to be non-zero.
@@ -720,7 +771,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 rc, tail = _run(compose_base + ['up', '-d', '--force-recreate', '--no-build'] + up_services, timeout=900)
                 if strict_pull and rc != 0:
                     raise RuntimeError(
-                        f"docker compose up -d --force-recreate failed (node={node_name} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
+                        f"docker compose up -d --force-recreate failed (node={node_name} compose={compose_path} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
                     )
                 pid_ready, last_inspect_tail, last_status = _wait_for_nonzero_pid()
 
@@ -733,7 +784,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 raise RuntimeError(
                     (
                         f"docker preflight startup failed: container PID remained 0 "
-                        f"(node={node_name} service={target_service} inspect={inspect_name} rc={ps_rc}). "
+                        f"(node={node_name} compose={compose_path} service={target_service} inspect={inspect_name} rc={ps_rc}). "
                         "This would cause CORE to fail with /proc/0/environ.\n"
                         f"wait_seconds={wait_seconds} poll_seconds={poll_seconds} status={last_status}\n"
                         f"inspect_tail={last_inspect_tail}\n"
@@ -752,7 +803,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         if strict_pull:
             raise
         try:
-            logger.warning('[docker-node] preflight start/wait skipped node=%s err=%s', node_name, exc)
+            logger.warning('[docker-node] preflight start/wait skipped node=%s compose=%s err=%s', node_name, compose_path, exc)
         except Exception:
             pass
 
@@ -919,15 +970,53 @@ def _resolve_compose_interpolations(text: str) -> str:
     return out
 
 
+def _compose_file_excerpt_for_error(compose_path: str, max_chars: int = 30000) -> str:
+    path = str(compose_path or '').strip()
+    if not path:
+        return ''
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+    except Exception as exc:
+        return f'<unable to read compose file: {exc}>'
+    if len(text) > max_chars:
+        return text[:max_chars] + f"\n... truncated {len(text) - max_chars} chars ..."
+    return text
+
+
+def _log_docker_compose_preflight_failure(node_name: str, compose_path: str, exc: Exception) -> None:
+    try:
+        excerpt = _compose_file_excerpt_for_error(compose_path)
+        logger.error(
+            '[docker-node] compose preflight failed node=%s compose=%s reason=%s\n'
+            '--- docker-compose snapshot: %s ---\n%s\n'
+            '--- end docker-compose snapshot ---',
+            node_name,
+            compose_path,
+            exc,
+            compose_path,
+            excerpt or '<empty>',
+        )
+    except Exception:
+        pass
+
+
 def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str, str]]) -> None:
-    """Best-effort ensure /tmp/vulns/docker-compose-<node>.yml exists and is Mako-safe.
+    """Best-effort ensure a per-node compose project exists and is Mako-safe.
 
     CORE treats docker compose files as Mako templates. Unescaped `${...}` in compose YAML
     causes core-daemon startup to fail with NameError("Undefined").
 
+    We keep the legacy per-node file for diagnostics, but CORE itself must receive a compose
+    file actually named `docker-compose.yml`. Some CORE versions start the compose service with
+    `docker compose -f <file> up`, then resolve the runtime container later with bare
+    `docker compose ps -q <service>` from the node directory. If the compose file name is not
+    the default, that follow-up call fails with `no configuration file provided`.
+
     This is especially important because CORE starts Docker nodes immediately on add_node()
     (default start=True), and /tmp/vulns may contain stale files from earlier runs.
     """
+    logged_preflight_failure = False
     try:
         strict_pull = False
         try:
@@ -941,13 +1030,17 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
             return
         out_base = "/tmp/vulns"
         os.makedirs(out_base, exist_ok=True)
-        out_path = os.path.join(out_base, f"docker-compose-{node_name}.yml")
+        legacy_out_path = _docker_node_legacy_compose_path(node_name, out_base)
+        project_dir = _docker_node_compose_project_dir(node_name, out_base)
+        out_path = _docker_node_compose_path(node_name, out_base)
+        os.makedirs(project_dir, exist_ok=True)
         # Remove any stale compose file so we don't accidentally reuse an older, unescaped version.
-        try:
-            if os.path.exists(out_path):
-                os.remove(out_path)
-        except Exception:
-            pass
+        for stale_path in (legacy_out_path, out_path):
+            try:
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+            except Exception:
+                pass
         rec_source = "provided"
         if rec is None:
             rec = _standard_docker_compose_record()
@@ -973,7 +1066,7 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
         # Ensure downstream helpers know the intended per-node output path.
         try:
             if isinstance(rec, dict):
-                rec['compose_path'] = out_path
+                rec['compose_path'] = legacy_out_path
         except Exception:
             pass
         # Pass scenario tag through so vuln wrapper images can be scoped per run/scenario.
@@ -1000,8 +1093,8 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
         # This catches cases where upstream generation fails, or where compose_path points
         # to a source file that couldn't be parsed/rewritten.
         try:
-            if os.path.exists(out_path):
-                with open(out_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            if os.path.exists(legacy_out_path):
+                with open(legacy_out_path, 'r', encoding='utf-8', errors='ignore') as fh:
                     txt = fh.read()
                 fixed = _resolve_compose_interpolations(txt)
                 # If any `${...}` survive, docker compose will likely fail; keep visible.
@@ -1011,12 +1104,20 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
                     except Exception:
                         pass
                 if fixed != txt:
-                    with open(out_path, 'w', encoding='utf-8') as fh:
+                    with open(legacy_out_path, 'w', encoding='utf-8') as fh:
                         fh.write(fixed)
                     try:
-                        logger.info("[vuln-node] compose sanitized for node=%s path=%s", node_name, out_path)
+                        logger.info("[vuln-node] compose sanitized for node=%s path=%s", node_name, legacy_out_path)
                     except Exception:
                         pass
+                with open(out_path, 'w', encoding='utf-8') as fh:
+                    fh.write(fixed)
+                try:
+                    if isinstance(rec, dict):
+                        rec['legacy_compose_path'] = legacy_out_path
+                        rec['compose_path'] = out_path
+                except Exception:
+                    pass
         except Exception:
             pass
         _PREPARED_DOCKER_NODE_COMPOSES.add(node_name)
@@ -1031,6 +1132,8 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
             # preflight failures as fatal so the run is cancelled and the user sees the error.
             exc_text = str(exc or '')
             if strict_pull or ('PID remained 0' in exc_text) or ('/proc/0/environ' in exc_text):
+                _log_docker_compose_preflight_failure(node_name, out_path, exc)
+                logged_preflight_failure = True
                 raise
             try:
                 logger.warning('[docker-node] preflight skipped/failed node=%s err=%s', node_name, exc)
@@ -1048,12 +1151,16 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
             or 'PID remained 0' in exc_text
             or '/proc/0/environ' in exc_text
         ):
+            if not logged_preflight_failure:
+                _log_docker_compose_preflight_failure(node_name, locals().get('out_path', ''), exc)
             raise
         try:
             strict_pull2 = str(os.getenv('CORETG_DOCKER_STRICT_PULL') or '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
         except Exception:
             strict_pull2 = False
         if strict_pull2:
+            if not logged_preflight_failure:
+                _log_docker_compose_preflight_failure(node_name, locals().get('out_path', ''), exc)
             raise
         return
 
@@ -1114,6 +1221,162 @@ def _docker_traffic_service_enabled() -> bool:
     if val is None:
         return False
     return str(val).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
+def _node_is_docker_like(node_obj: object | None = None, node_type: object | None = None) -> bool:
+    try:
+        if _is_docker_node_type(node_type):
+            return True
+    except Exception:
+        pass
+    try:
+        if node_obj is not None and _is_docker_node_type(getattr(node_obj, 'type', None)):
+            return True
+    except Exception:
+        pass
+    try:
+        model = getattr(node_obj, 'model', None) if node_obj is not None else None
+        if isinstance(model, str) and model.strip().lower() == 'docker':
+            return True
+    except Exception:
+        pass
+    try:
+        type_text = str(node_type or '').strip().lower()
+        if type_text == 'docker' or type_text.endswith('.docker'):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _effective_host_role(role: object, node_type: object) -> str:
+    if _node_is_docker_like(node_type=node_type):
+        return 'Docker'
+    text = str(role or '').strip()
+    return text or 'Host'
+
+
+def _sanitize_services_for_node(
+    services: List[str],
+    *,
+    node_id: object,
+    node_obj: object | None = None,
+    node_type: object | None = None,
+    context: str = '',
+) -> List[str]:
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for raw in services or []:
+        if not raw:
+            continue
+        try:
+            name = str(raw).strip()
+        except Exception:
+            continue
+        if not name or name.lower() in ('auto', 'random'):
+            continue
+        if name in seen:
+            continue
+        ordered.append(name)
+        seen.add(name)
+
+    if not _node_is_docker_like(node_obj=node_obj, node_type=node_type):
+        return ordered
+
+    allowed: Set[str] = set()
+    route_service = _docker_default_route_service_name()
+    if _docker_default_route_enabled():
+        allowed.add('DefaultRoute')
+        allowed.add(route_service)
+        allowed.update(_docker_default_route_dependencies(route_service))
+    if _docker_traffic_service_enabled():
+        allowed.add('Traffic')
+
+    sanitized: List[str] = []
+    dropped: List[str] = []
+    for name in ordered:
+        normalized = route_service if name == 'DefaultRoute' else name
+        if normalized in allowed:
+            if normalized not in sanitized:
+                sanitized.append(normalized)
+        else:
+            dropped.append(name)
+
+    if dropped:
+        node_label = str(node_id or '').strip()
+        if not node_label and node_obj is not None:
+            try:
+                node_label = str(getattr(node_obj, 'id') or '').strip()
+            except Exception:
+                node_label = ''
+        if context:
+            logger.info(
+                '[%s] skipping unsupported CORE services on docker node %s: %s',
+                context,
+                node_label or '?',
+                ', '.join(sorted(dropped)),
+            )
+        else:
+            logger.info(
+                'Skipping unsupported CORE services on docker node %s: %s',
+                node_label or '?',
+                ', '.join(sorted(dropped)),
+            )
+
+    return sanitized
+
+
+def _ensure_services_with_policy(
+    session: object,
+    node_id: int,
+    services: List[str],
+    *,
+    node_obj: object | None = None,
+    context: str = '',
+) -> List[str]:
+    node_type = getattr(node_obj, 'type', None) if node_obj is not None else None
+    effective_services = _sanitize_services_for_node(
+        services,
+        node_id=node_id,
+        node_obj=node_obj,
+        node_type=node_type,
+        context=context,
+    )
+
+    if _node_is_docker_like(node_obj=node_obj, node_type=node_type) and effective_services:
+        expanded_services: List[str] = []
+        expanded_seen: Set[str] = set()
+
+        def _add_expanded(service_name: str) -> None:
+            name = str(service_name or '').strip()
+            if not name or name in expanded_seen:
+                return
+            expanded_services.append(name)
+            expanded_seen.add(name)
+
+        route_service = _docker_default_route_service_name()
+        for service_name in effective_services:
+            if service_name == route_service:
+                for dep_service in _docker_default_route_dependencies(route_service):
+                    _add_expanded(dep_service)
+            elif service_name == 'Traffic':
+                _add_expanded('CoreTGPrereqs')
+            _add_expanded(service_name)
+        effective_services = expanded_services
+
+    applied: List[str] = []
+    for service_name in effective_services:
+        try:
+            if ensure_service(session, node_id, service_name, node_obj=node_obj):
+                applied.append(service_name)
+        except Exception as exc:
+            logger.debug('Failed to assign service %s to node %s: %s', service_name, node_id, exc)
+    if any(service_name in ROUTING_STACK_SERVICES for service_name in applied):
+        try:
+            ensure_service(session, node_id, 'zebra', node_obj=node_obj)
+        except Exception:
+            pass
+    return applied
 
 
 def _session_add_node(
@@ -1436,7 +1699,7 @@ def _docker_node_add_node_kwargs(node_name: str, rec: Optional[Dict[str, str]]) 
     n = str(node_name or '').strip()
     if not n:
         return {}
-    compose_path = f"/tmp/vulns/docker-compose-{n}.yml"
+    compose_path = _docker_node_compose_path(n)
     compose_name = _docker_compose_service_for_record(compose_path, rec)
     if not compose_name:
         compose_name = n
@@ -1924,7 +2187,7 @@ def _apply_docker_compose_meta(node, rec, session=None):
         # (e.g. `${UID:-1000}`), which causes NameError during Mako render unless we
         # sanitize/escape them. Our pipeline writes sanitized per-node compose files
         # to this fixed location.
-        default_per_node = f"/tmp/vulns/docker-compose-{n}.yml"
+        default_per_node = _docker_node_compose_path(n)
 
         compose_path = None
         source_compose_hint = None
@@ -2594,6 +2857,27 @@ def _router_node_type():
     return NodeType.DEFAULT
 
 
+def _canonicalize_routing_protocol(protocol: Any) -> str:
+    value = str(protocol or '').strip()
+    return '' if value.lower() == 'routing' else value
+
+
+def _canonicalize_routing_items(routing_items: List[RoutingInfo] | None) -> List[RoutingInfo]:
+    """Repair the retired count-only placeholder before CORE service assignment."""
+    for item in routing_items or []:
+        try:
+            current = str(getattr(item, 'protocol', '') or '').strip()
+            canonical = _canonicalize_routing_protocol(current)
+            if canonical != current:
+                logger.warning(
+                    "Ignoring legacy routing protocol placeholder 'Routing'"
+                )
+                item.protocol = canonical
+        except Exception:
+            continue
+    return list(routing_items or [])
+
+
 def build_star_from_roles(core,
                           role_counts: Dict[str, int],
                           services: Optional[List[ServiceInfo]] = None,
@@ -2761,11 +3045,13 @@ def build_star_from_roles(core,
 
         _log_add_node_result(session, node, node_id, node_type, node_name, position=node_position)
 
+        effective_role = _effective_host_role(role, node_type)
+
         if node_type == NodeType.DEFAULT:
             host_ip, host_mask = mac_alloc.next_ip()
             host_mac = mac_alloc.next_mac()
             host_iface = Interface(id=0, name="eth0", ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
-            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=role))
+            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=effective_role))
             sw_iface = Interface(id=sw_ifid, name=f"sw{sw_ifid}", mac=mac_alloc.next_mac())
             sw_ifid += 1
             safe_add_link(session, node, switch, iface1=host_iface, iface2=sw_iface)
@@ -2785,7 +3071,7 @@ def build_star_from_roles(core,
                 host_ip, host_mask = mac_alloc.next_ip()
                 host_mac = mac_alloc.next_mac()
                 dev_iface = Interface(id=dev_ifid, name=dev_iface_name, ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
-                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=role))
+                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=effective_role))
             else:
                 dev_iface = Interface(id=dev_ifid, name=dev_iface_name)
             dev_next_ifid[node.id] = dev_ifid + 1
@@ -2809,55 +3095,18 @@ def build_star_from_roles(core,
     if created_docker:
         logger.info("Docker nodes created in star topology: %d", created_docker)
     if services:
-        service_assignments = distribute_services(node_infos, services)
-        for node_id, service_list in service_assignments.items():
-            for service_name in service_list:
-                assigned = False
-                try:
-                    if hasattr(session, "add_service"):
-                        session.add_service(node_id=node_id, service_name=service_name)
-                        assigned = True
-                except Exception:
-                    pass
-                if not assigned:
-                    try:
-                        if hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, service_name)
-                            except TypeError:
-                                node_obj_try = nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, service_name)
-                                else:
-                                    raise
-                            assigned = True
-                    except Exception:
-                        pass
-                if not assigned:
-                    node_obj = nodes_by_id.get(node_id)
-                    if node_obj is not None:
-                        try:
-                            if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
-                                node_obj.services.add(service_name)
-                                assigned = True
-                            elif hasattr(node_obj, "add_service"):
-                                node_obj.add_service(service_name)
-                                assigned = True
-                        except Exception:
-                            pass
-                if assigned and service_name in ROUTING_STACK_SERVICES:
-                    try:
-                        if hasattr(session, "add_service"):
-                            session.add_service(node_id=node_id, service_name="zebra")
-                        elif hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, "zebra")
-                            except TypeError:
-                                node_obj_try = nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, "zebra")
-                    except Exception:
-                        pass
+        planned_assignments = distribute_services(node_infos, services)
+        for node_id, service_list in planned_assignments.items():
+            node_obj = nodes_by_id.get(node_id)
+            assigned = _ensure_services_with_policy(
+                session,
+                node_id,
+                service_list,
+                node_obj=node_obj,
+                context='star',
+            )
+            if assigned:
+                service_assignments[node_id] = assigned
 
     # Final pass: ensure Docker nodes still have DefaultRoute after any other service operations.
     try:
@@ -3083,6 +3332,8 @@ def build_multi_switch_topology(core,
         nodes_by_id[node.id] = node
         next_id += 1
 
+        effective_role = _effective_host_role(role, node_type)
+
         if node_type == NodeType.DEFAULT:
             # Allocate a unique /24 LAN and assign a varied host IP (not always .2).
             lan = subnet_alloc.next_random_subnet(24)
@@ -3095,7 +3346,7 @@ def build_multi_switch_topology(core,
             sw_ifid[sw_node_id] += 1
             sw_if = Interface(id=sw_ifid[sw_node_id], name=f"sw{sw_node_id}-h{node.id}")
             safe_add_link(session, node, sw_node, iface1=host_if, iface2=sw_if)
-            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=role))
+            node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=effective_role))
             try:
                 ensure_service(session, node.id, "DefaultRoute", node_obj=node)
             except Exception:
@@ -3115,7 +3366,7 @@ def build_multi_switch_topology(core,
                 dev_next_ifid[node.id] = dev_ifid + 1
                 dev_if = Interface(id=dev_ifid, name=f"eth{dev_ifid}", ip4=h_ip, ip4_mask=lan.prefixlen, mac=h_mac)
                 safe_add_link(session, node, sw_node, iface1=dev_if, iface2=sw_if)
-                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=role))
+                node_infos.append(NodeInfo(node_id=node.id, ip4=f"{h_ip}/{lan.prefixlen}", role=effective_role))
                 _ensure_default_route_for_docker(session, node)
             else:
                 safe_add_link(session, node, sw_node, iface2=sw_if)
@@ -3123,32 +3374,18 @@ def build_multi_switch_topology(core,
     if created_docker:
         logger.info("Docker nodes created in multi-switch topology: %d", created_docker)
     if services:
-        service_assignments = distribute_services(node_infos, services)
-        for node_id, svc_list in service_assignments.items():
-            for svc in svc_list:
-                try:
-                    if hasattr(session, "add_service"):
-                        session.add_service(node_id=node_id, service_name=svc)
-                    elif hasattr(session, "services") and hasattr(session.services, "add"):
-                        try:
-                            session.services.add(node_id, svc)
-                        except TypeError:
-                            node_obj_try = session.get_node(node_id)
-                            session.services.add(node_obj_try, svc)
-                except Exception:
-                    pass
-                if svc in ROUTING_STACK_SERVICES:
-                    try:
-                        if hasattr(session, "add_service"):
-                            session.add_service(node_id=node_id, service_name="zebra")
-                        elif hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, "zebra")
-                            except TypeError:
-                                node_obj_try = session.get_node(node_id)
-                                session.services.add(node_obj_try, "zebra")
-                    except Exception:
-                        pass
+        planned_assignments = distribute_services(node_infos, services)
+        for node_id, svc_list in planned_assignments.items():
+            node_obj = nodes_by_id.get(node_id)
+            assigned = _ensure_services_with_policy(
+                session,
+                node_id,
+                svc_list,
+                node_obj=node_obj,
+                context='multi-switch',
+            )
+            if assigned:
+                service_assignments[node_id] = assigned
 
     # Final pass: ensure Docker nodes still have DefaultRoute after any other service operations.
     try:
@@ -3356,8 +3593,8 @@ def _try_build_segmented_topology_from_preview(
     routers_data = preview_plan.get('routers') or []
     hosts_data = preview_plan.get('hosts') or []
     switches_detail = preview_plan.get('switches_detail') or []
-    if not routers_data or not hosts_data:
-        logger.debug("[preview] missing routers or hosts in preview payload; skipping preview realization")
+    if not routers_data and not hosts_data:
+        logger.debug("[preview] missing both routers and hosts in preview payload; skipping preview realization")
         return None
 
     layout_positions = preview_plan.get('layout_positions') or {}
@@ -3621,7 +3858,7 @@ def _try_build_segmented_topology_from_preview(
 
         ip_hint = str(hdata.get('ip4') or "")
         if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
-            hosts_info.append(NodeInfo(node_id=hid, ip4=ip_hint, role=role))
+            hosts_info.append(NodeInfo(node_id=hid, ip4=ip_hint, role=_effective_host_role(role, node_type)))
 
     if docker_slot_plan:
         missing_slots = set(docker_slot_plan.keys()) - docker_slots_used
@@ -3932,7 +4169,7 @@ def _try_build_segmented_topology_from_preview(
             rid = int(entry.get('router_id'))
         except Exception:
             continue
-        proto = entry.get('protocol')
+        proto = _canonicalize_routing_protocol(entry.get('protocol'))
         if rid and proto:
             router_protocols[rid].append(proto)
 
@@ -4030,15 +4267,13 @@ def _try_build_segmented_topology_from_preview(
         node = host_nodes_by_id.get(hid)
         if not node:
             continue
-        assigned: List[str] = []
-        for svc in svc_list or []:
-            if not svc:
-                continue
-            try:
-                ensure_service(session, hid, svc, node_obj=node)
-                assigned.append(svc)
-            except Exception as exc:
-                logger.debug("[preview] failed to assign service %s to host %s: %s", svc, hid, exc)
+        assigned = _ensure_services_with_policy(
+            session,
+            hid,
+            list(svc_list or []),
+            node_obj=node,
+            context='segmented-preview',
+        )
         if assigned:
             host_service_assignments[hid] = assigned
 
@@ -4109,6 +4344,7 @@ def build_segmented_topology(core,
                              preview_plan: Optional[Dict[str, Any]] = None,
                              enable_traffic_mount: bool = False,
                              enable_segmentation_mount: bool = False):
+    routing_items = _canonicalize_routing_items(routing_items)
     _reset_docker_compose_prepare_caches('segmented')
     logger.info("Docker CORE interfaces start at eth%s (CORETG_DOCKER_IFID_START)", _docker_ifid_start())
     def _preview_payload_present(payload: Optional[Dict[str, Any]]) -> bool:
@@ -4852,7 +5088,7 @@ def build_segmented_topology(core,
             host_direct_link[host.id] = True
             logger.debug("Host %s <-> Router %s LAN /%s", host.id, router_node.id, lan_net.prefixlen)
             if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
-                hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=role))
+                hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=_effective_host_role(role, node_type)))
                 # Ensure default routing service on hosts
                 try:
                     ensure_service(session, host.id, "DefaultRoute", node_obj=host)
@@ -4957,7 +5193,7 @@ def build_segmented_topology(core,
                 host_router_map[host.id] = router_node.id
                 host_direct_link[host.id] = True
                 if node_type == NodeType.DEFAULT or _is_docker_node_type(node_type):
-                    hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=role))
+                    hosts.append(NodeInfo(node_id=host.id, ip4=f"{h_ip}/{lan_net.prefixlen}", role=_effective_host_role(role, node_type)))
                     try:
                         ensure_service(session, host.id, "DefaultRoute", node_obj=host)
                     except Exception:
@@ -5490,12 +5726,13 @@ def build_segmented_topology(core,
         logger.info("Docker nodes created in segmented topology: %d", created_docker)
     router_protocols: Dict[int, List[str]] = {r.node_id: [] for r in routers}
     if routing_items:
-        # Only allow protocols explicitly selected by user (excluding Random). If only Random provided, default to OSPFv2.
+        # Only assign protocols explicitly selected by the user. Random remains an
+        # explicit request and resolves from the selected pool or the GUI defaults.
         concrete_protocols = [ri.protocol for ri in routing_items if ri.protocol and ri.protocol.lower() != 'random']
         fallback_pool = concrete_protocols or ["OSPFv2"]
         for ri in routing_items:
             try:
-                if (not ri.protocol) or (ri.protocol.lower() == 'random'):
+                if ri.protocol and ri.protocol.lower() == 'random':
                     ri.protocol = random.choice(fallback_pool)
             except Exception:
                 pass
@@ -5518,7 +5755,8 @@ def build_segmented_topology(core,
             rid = rnode.id
             if i < len(expanded_protocols):
                 proto = expanded_protocols[i]
-                router_protocols[rid].append(proto)
+                if proto:
+                    router_protocols[rid].append(proto)
                 # IMPORTANT: earlier during router creation we applied mandatory router services (IPForward + zebra).
                 # This protocol-assignment pass overwrites the router service set, so ensure the mandatory services remain
                 # present before appending protocol-specific daemons.
@@ -5670,53 +5908,18 @@ def build_segmented_topology(core,
 
     host_service_assignments: Dict[int, List[str]] = {}
     if services:
-        host_service_assignments = distribute_services(hosts, services)
-        for node_id, svc_list in host_service_assignments.items():
-            for svc in svc_list:
-                assigned = False
-                try:
-                    if hasattr(session, "add_service"):
-                        session.add_service(node_id=node_id, service_name=svc)
-                        assigned = True
-                except Exception:
-                    pass
-                if not assigned:
-                    try:
-                        if hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, svc)
-                            except TypeError:
-                                node_obj_try = host_nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, svc)
-                                    assigned = True
-                    except Exception:
-                        pass
-                if not assigned:
-                    node_obj = host_nodes_by_id.get(node_id)
-                    if node_obj is not None:
-                        try:
-                            if hasattr(node_obj, "services") and hasattr(node_obj.services, "add"):
-                                node_obj.services.add(svc)
-                                assigned = True
-                            elif hasattr(node_obj, "add_service"):
-                                node_obj.add_service(svc)
-                                assigned = True
-                        except Exception:
-                            pass
-                if assigned and svc in ROUTING_STACK_SERVICES:
-                    try:
-                        if hasattr(session, "add_service"):
-                            session.add_service(node_id=node_id, service_name="zebra")
-                        elif hasattr(session, "services") and hasattr(session.services, "add"):
-                            try:
-                                session.services.add(node_id, "zebra")
-                            except TypeError:
-                                node_obj_try = host_nodes_by_id.get(node_id)
-                                if node_obj_try is not None:
-                                    session.services.add(node_obj_try, "zebra")
-                    except Exception:
-                        pass
+        planned_assignments = distribute_services(hosts, services)
+        for node_id, svc_list in planned_assignments.items():
+            node_obj = host_nodes_by_id.get(node_id)
+            assigned = _ensure_services_with_policy(
+                session,
+                node_id,
+                svc_list,
+                node_obj=node_obj,
+                context='segmented',
+            )
+            if assigned:
+                host_service_assignments[node_id] = assigned
     # --- Post-build cleanup: remove any orphan switches (only connected to routers, no host endpoints) ---
     try:
         # Heuristic: a switch is orphan if (a) its model is 'switch'; (b) it has no directly connected DEFAULT or DOCKER hosts;

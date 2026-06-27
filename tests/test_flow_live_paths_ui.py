@@ -700,6 +700,83 @@ def test_flow_restore_refreshes_xml_only_when_server_state_missing() -> None:
     assert not missing, "Flow restore should refresh XML-backed state only when server state is missing: " + "; ".join(missing)
 
 
+def test_flow_scenario_switch_uses_cached_preview_plan_before_background_refresh() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "lastPreviewPlanPath = (typeof window.coretgGetPreviewPlanPathForScenario === 'function')",
+        "try { updateMeta(); } catch (e) { }",
+        "const latestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');",
+        "latestPreviewPromise.then(() => {",
+        "updateEmptyFlowStatus();",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow scenario switching should use cached preview plan before background refresh: " + "; ".join(missing)
+
+
+def test_flow_initial_boot_uses_cached_preview_plan_before_background_refresh() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "lastPreviewPlanPath = (typeof window.coretgGetPreviewPlanPathForScenario === 'function')",
+        "const initialLatestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');",
+        "initialLatestPreviewPromise.then(() => {",
+        "if (!currentChain.length && !currentFlagAssignments.length) {",
+        "updateEmptyFlowStatus();",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow initial boot should use cached preview plan before background refresh: " + "; ".join(missing)
+
+
+def test_flow_generate_sets_preview_plan_path_once() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert text.count("window.coretgSetPreviewPlanPathForScenario(scenario, previewPlan);") == 1
+
+
+def test_flow_preview_does_not_write_disabled_state_twice() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "if (!flowEnabled) {",
+        "if (shouldPersistFlowState && !(await clearFlowStateInXml())) {",
+        "throw new Error('Failed to clear Flag Sequencing state in XML.');",
+        "} else if (shouldPersistFlowState) {",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow preview should clear disabled state once instead of save+clear: " + "; ".join(missing)
+
+
+def test_set_flow_enabled_skip_xml_persist_when_disable_already_clears() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const skipXmlPersist = (!flowEnabled && clearStateOnDisable);",
+        "if (xmlPath && !skipXmlPersist) {",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "setFlowEnabled should not clear XML and then immediately save the same disabled state again: " + "; ".join(missing)
+
+
+def test_flow_latest_preview_refresh_uses_conditional_json_cache() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "if (typeof window.CORETG_FETCH_CONDITIONAL_JSON === 'function') {",
+        "data = await window.CORETG_FETCH_CONDITIONAL_JSON(url, {",
+        "scope: 'flow-latest-preview-plan',",
+        "if (!data) {",
+        "data = await fetchJson(url);",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Flow latest preview refresh should use conditional JSON cache before plain fetch: " + "; ".join(missing)
+
+
 def test_flow_restore_emits_debug_logs_for_roundtrip_diagnostics() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

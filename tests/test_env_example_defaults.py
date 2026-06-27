@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 ENV_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / ".scenarioforge.env.example"
+ENV_DEFAULTS_PATH = Path(__file__).resolve().parent.parent / ".scenarioforge.env"
 
 
 def test_env_example_includes_runtime_hitl_defaults_for_direct_python_and_compose() -> None:
@@ -22,8 +23,15 @@ def test_env_example_includes_runtime_hitl_defaults_for_direct_python_and_compos
         "CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router",
         "CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION=Scenario HITL participant network",
         "CORETG_HITL_CORE_IFX_IPV4=10.254.200.3/24",
-        "CORETG_VM_MODE_PARTICIPANT_URL=http://participant-ui.example",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing .scenarioforge.env.example defaults: " + "; ".join(missing)
+
+    assert "CORETG_VM_MODE_PARTICIPANT_URL=" not in text
+
+
+def test_repo_runtime_defaults_drop_vm_participant_ui_line() -> None:
+    text = ENV_DEFAULTS_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "CORETG_VM_MODE_PARTICIPANT_URL=" not in text

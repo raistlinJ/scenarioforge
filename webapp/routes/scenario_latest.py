@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from typing import Any, Callable
 
@@ -21,6 +23,21 @@ def register(
     if not begin_route_registration(app, 'scenario_latest_routes'):
         return
 
+    def _xml_cache_key_for_path(path_value: str) -> str:
+        try:
+            abs_path = abs_path_or_original(path_value)
+        except Exception:
+            abs_path = str(path_value or '')
+        try:
+            st = os.stat(abs_path)
+            size = int(getattr(st, 'st_size', 0) or 0)
+            mtime_ns = int(getattr(st, 'st_mtime_ns', 0) or 0)
+        except Exception:
+            size = 0
+            mtime_ns = 0
+        raw = f"{abs_path}|{size}|{mtime_ns}"
+        return hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:24]
+
     def _latest_xml_view():
         scenario = (request.args.get('scenario') or '').strip()
         if not scenario:
@@ -30,7 +47,11 @@ def register(
             xml_path = latest_xml_path_for_scenario(scen_norm)
             if not xml_path:
                 return jsonify({'ok': False, 'error': 'No XML found'}), 404
-            return jsonify({'ok': True, 'scenario': scenario, 'xml_path': xml_path})
+            try:
+                xml_mtime = float(os.path.getmtime(xml_path))
+            except Exception:
+                xml_mtime = 0.0
+            return jsonify({'ok': True, 'scenario': scenario, 'xml_path': xml_path, 'xml_mtime': xml_mtime, 'xml_cache_key': _xml_cache_key_for_path(xml_path)})
         except Exception as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 500
 
@@ -51,6 +72,23 @@ def register(
                 xml_path = latest_xml_path_for_scenario(scen_norm) or ''
             if not xml_path:
                 return jsonify({'ok': False, 'error': 'No XML found'}), 404
+
+            xml_cache_key = _xml_cache_key_for_path(xml_path)
+            incoming_cache_key = (request.args.get('if_xml_cache_key') or request.headers.get('X-Scenario-Xml-Cache-Key') or '').strip()
+            try:
+                xml_mtime = float(os.path.getmtime(xml_path))
+            except Exception:
+                xml_mtime = 0.0
+            if incoming_cache_key and incoming_cache_key == xml_cache_key:
+                return jsonify({
+                    'ok': True,
+                    'scenario': scenario,
+                    'scenario_norm': scen_norm,
+                    'xml_path': xml_path,
+                    'xml_mtime': xml_mtime,
+                    'xml_cache_key': xml_cache_key,
+                    'not_modified': True,
+                })
 
             parsed = parse_scenarios_xml(xml_path)
             scen_list = parsed.get('scenarios') if isinstance(parsed, dict) else None
@@ -83,11 +121,6 @@ def register(
             if core_payload is None and isinstance(parsed.get('core'), dict):
                 core_payload = parsed.get('core')
             try:
-                xml_mtime = float(os.path.getmtime(xml_path))
-            except Exception:
-                xml_mtime = 0.0
-
-            try:
                 fs_dbg = selected.get('flow_state') if isinstance(selected, dict) and isinstance(selected.get('flow_state'), dict) else {}
                 chain_dbg = fs_dbg.get('chain_ids') if isinstance(fs_dbg.get('chain_ids'), list) else []
                 if logger is not None:
@@ -109,6 +142,7 @@ def register(
                 'scenario_norm': scen_norm,
                 'xml_path': xml_path,
                 'xml_mtime': xml_mtime,
+                'xml_cache_key': xml_cache_key,
                 'scenario_state': selected,
                 'core': core_payload,
             })

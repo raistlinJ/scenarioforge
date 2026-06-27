@@ -1249,7 +1249,7 @@
                     <h5 class="modal-title mb-0">Execute Scenario</h5>
                     <div class="small text-muted" id="executePhaseHeader">Phase: —</div>
                 </div>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" id="executeConfirmCloseX"></button>
             </div>
             <div class="modal-body">
                 <p class="mb-3" id="executeConfirmMessage">Execute this scenario now?</p>
@@ -1640,6 +1640,7 @@
     const WEBUI_LOCAL_MODE = {{ 'true' if webui_local_mode else 'false' }};
     const WEBUI_RUNTIME_MODE = {{ (webui_runtime_mode or 'native')|tojson }};
     const WEBUI_VM_MODE = WEBUI_RUNTIME_MODE === 'vm';
+    const RUNTIME_PARTICIPANT_UI_ENABLED = !WEBUI_VM_MODE;
     const WEBUI_VM_MODE_DEFAULTS = {{ (webui_vm_mode_defaults or {})|tojson }};
     const WEBUI_LOCAL_CORE_HOST = {{ (webui_local_core_host or '127.0.0.1')|tojson }};
     const WEBUI_LOCAL_CORE_PORT = {{ (webui_local_core_port or 50051)|int }};
@@ -2561,10 +2562,10 @@
         if (!WEBUI_VM_MODE) return;
 
         hitl.runtime_mode = 'vm';
-        const participantUrl = (hitlDefaults.participant_ui_url ?? '').toString().trim();
-        if (participantUrl) {
-            hitl.participant_proxmox_url = participantUrl;
-        }
+        hitl.participant_proxmox_url = '';
+        delete hitl.participant_ui_url;
+        delete hitl.participant_url;
+        delete hitl.participant;
         hitl.vm_mode_participant_pool = (hitlDefaults.participant_pool ?? 'same-pool').toString().trim() || 'same-pool';
         hitl.vm_mode_participant_notes = hitlDefaults.participant_notes && typeof hitlDefaults.participant_notes === 'object'
             ? { ...hitlDefaults.participant_notes }
@@ -7016,6 +7017,25 @@
             }
             return false;
         }
+
+        try {
+            window.coretgHasUnsavedChanges = function () {
+                try { return hasUnsavedChanges(); } catch (e) { return false; }
+            };
+        } catch (e) { }
+
+        function updateSavedXmlGroundTruthWarning() {
+            try {
+                if (typeof window.coretgSyncSavedXmlWarningBadge !== 'function') return;
+                const activeScenarioName = (typeof getActiveScenarioName === 'function') ? (getActiveScenarioName() || '') : '';
+                const xmlPath = (state?.result_path || '').toString().trim();
+                window.coretgSyncSavedXmlWarningBadge({
+                    scenario: activeScenarioName,
+                    xmlPath,
+                    hasUnsavedChanges: hasUnsavedChanges(),
+                });
+            } catch (e) { }
+        }
         const full = payload.full_preview || payload.fullPreview || payload.preview || payload.full || payload;
         return _applyPlanPreviewToUi(full);
     }
@@ -7317,18 +7337,21 @@
         const hint = document.getElementById('planHint');
         const genBtn = document.getElementById('runSyncBtn');
         const xmlPathVal = (state.result_path || '').trim();
+        const unsavedChanges = hasUnsavedChanges();
         previewState.xmlSaved = !!xmlPathVal;
         const canPreview = previewState.xmlSaved || previewState.dirty;
         if (previewBtn) previewBtn.disabled = !canPreview;
         if (genBtn) genBtn.disabled = !canPreview;
         if (hint) {
             if (!previewState.xmlSaved) hint.textContent = 'Save XML to enable planning.';
+            else if (unsavedChanges && !IS_BUILDER_VIEW) hint.textContent = 'Unsaved edits are present. Preview and Execute use the last saved XML until you save again.';
             else hint.textContent = previewState.fullPreview ? 'Full preview ready.' : 'Generate a full preview.';
         }
         if (statusBadge) {
             statusBadge.className = 'badge ' + (previewState.fullPreview ? 'text-bg-info' : 'text-bg-secondary');
             statusBadge.textContent = previewState.fullPreview ? 'Preview' : 'No Preview';
         }
+        try { updateSavedXmlGroundTruthWarning(); } catch (e) { }
     }
 
 
@@ -7520,6 +7543,15 @@
     async function computeFullPlanPreview() {
         let newXmlPath = (state.result_path || '').trim();
         if (!IS_BUILDER_VIEW) {
+            if (newXmlPath && hasUnsavedChanges()) {
+                const proceedWithSavedXml = await window.coretgConfirmSavedXmlGroundTruth('Preview', {
+                    scenario: (typeof getActiveScenarioName === 'function') ? (getActiveScenarioName() || '') : '',
+                    xmlPath: newXmlPath,
+                    hasUnsavedChanges: true,
+                    allowStored: false,
+                });
+                if (!proceedWithSavedXml) return;
+            }
             if (!newXmlPath) {
                 try { await autoSaveXml(); } catch (e) { alert('Auto-save failed: ' + e); return; }
             }
@@ -11005,6 +11037,14 @@
         const wrapper = document.getElementById('navParticipantLinkWrap');
         const link = document.getElementById('navParticipantLink');
         if (!wrapper || !link) return;
+        if (WEBUI_VM_MODE) {
+            wrapper.classList.add('d-none');
+            link.href = '#';
+            link.setAttribute('aria-disabled', 'true');
+            link.dataset.participantUiHref = '';
+            window.CORETG_PARTICIPANT_UI_HREF = '';
+            return;
+        }
         const scenario = state.scenarios?.[activeIdx];
 
         // Server can inject the participant URL for the currently loaded `?scenario=` even before
@@ -14244,14 +14284,22 @@
             if (preferredXmlPath) {
                 query.set('xml_path', preferredXmlPath);
             }
-            const resp = await fetch(`/api/scenario/latest_state?${query.toString()}`, {
-                method: 'GET',
-                credentials: 'same-origin',
-                headers: { 'Accept': 'application/json' },
-            });
-            let data = null;
-            try { data = await resp.json(); } catch (e) { data = null; }
-            if (!resp.ok || !data || data.ok === false || !data.scenario_state || typeof data.scenario_state !== 'object') {
+            // When a scenario entry already carries a saved XML path, rehydrate from that
+            // exact project source instead of re-resolving by scenario name.
+            const data = (typeof window.CORETG_FETCH_LATEST_STATE === 'function')
+                ? await window.CORETG_FETCH_LATEST_STATE(scenLabel, preferredXmlPath ? { xmlPath: preferredXmlPath, forceXmlPath: true } : {})
+                : await (async () => {
+                    const resp = await fetch(`/api/scenario/latest_state?${query.toString()}`, {
+                        method: 'GET',
+                        credentials: 'same-origin',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    let payload = null;
+                    try { payload = await resp.json(); } catch (e) { payload = null; }
+                    if (!resp.ok || !payload || payload.ok === false) return null;
+                    return payload;
+                })();
+            if (!data || !data.scenario_state || typeof data.scenario_state !== 'object') {
                 return false;
             }
 
@@ -15060,7 +15108,9 @@
         const hostInterfaces = getEffectiveHostInterfacesForScenario(activeIdx);
         const hitl = ensureHitlStateForScenario(scen);
         const proxmox = hitl.proxmox || { url: '', port: 8006, username: '', password: '' };
-        const participantProxmoxUrlRaw = (hitl.participant_proxmox_url || '').toString();
+        const participantProxmoxUrlRaw = RUNTIME_PARTICIPANT_UI_ENABLED
+            ? (hitl.participant_proxmox_url || '').toString()
+            : '';
         const participantProxmoxUrlHtml = escapeHtml(participantProxmoxUrlRaw);
         const participantProxmoxUrlHasValue = participantProxmoxUrlRaw.trim().length > 0;
         // In builder view, credentials are intentionally hidden and secret-backed actions are disabled.
@@ -15760,10 +15810,12 @@
                             ? `${mappedVmIfaceLabelsUnique.length}: ${mappedVmIfaceLabelsUnique.join(', ')}`
                             : 'Not set';
 
-                        const participantUrlValue = participantProxmoxUrlHasValue
-                            ? participantProxmoxUrlRaw
-                            : 'Not set';
-                        hitlRows.push(['Participant UI', participantUrlValue, participantProxmoxUrlHasValue ? 'ok' : 'no']);
+                        if (RUNTIME_PARTICIPANT_UI_ENABLED) {
+                            const participantUrlValue = participantProxmoxUrlHasValue
+                                ? participantProxmoxUrlRaw
+                                : 'Not set';
+                            hitlRows.push(['Participant UI', participantUrlValue, participantProxmoxUrlHasValue ? 'ok' : 'no']);
+                        }
                         if (persistedHitlValidatedAtLabel) {
                             hitlRows.push(['Last verified', persistedHitlValidatedAtLabel, 'ok']);
                         }
@@ -16541,13 +16593,13 @@
             <fieldset class="hitl-step-fieldset ${step3Disabled ? 'hitl-step-disabled' : ''}" ${step3Disabled ? 'disabled' : ''} data-hitl-step4-body>
                 ${step4Content}
             </fieldset>
-            <div class="text-center small text-muted mt-2">▼ Step 5 below</div>
+            ${RUNTIME_PARTICIPANT_UI_ENABLED ? '<div class="text-center small text-muted mt-2">▼ Step 5 below</div>' : ''}
         </div>`;
         const participantUrlStatusClass = participantProxmoxUrlHasValue ? 'text-success' : 'text-muted';
         const participantUrlStatusText = participantProxmoxUrlHasValue
             ? PARTICIPANT_STATUS_SAVED_TEXT
             : PARTICIPANT_STATUS_EMPTY_TEXT;
-        const part5SectionHtml = `
+        const part5SectionHtml = WEBUI_VM_MODE ? '' : `
         <div data-hitl-part="5">
             <h6 class="mb-2">Step 5 — Participant UI (optional)</h6>
             <div class="form-text mb-3">Paste the Proxmox console or landing URL that participants should use. This adds the Participant UI navigation tab and links the HITL interface entry so facilitators and players open the same console.</div>
@@ -20167,6 +20219,15 @@
             executeSelectCoreVmBtn.dataset.execBound = '1';
         }
         if (executeConfirmModalEl && !executeConfirmModalEl.dataset.execHiddenBound) {
+            // Prevent closing while summarizing results (non-closable until summary modal appears)
+            executeConfirmModalEl.addEventListener('hide.bs.modal', (event) => {
+                try {
+                    if (executeProgressState && executeProgressState.done && !executeProgressState._allowHide) {
+                        event.preventDefault();
+                        return;
+                    }
+                } catch (e) { }
+            });
             executeConfirmModalEl.addEventListener('hidden.bs.modal', () => {
                 // If the modal is closed while a run is in progress, treat it as a cancel.
                 // Otherwise there is no way to cancel after closing.
@@ -20610,7 +20671,18 @@
         renderExecuteSummary(!!success);
         if (executeSummaryModalEl && window.bootstrap) {
             try {
+                // Restore confirm modal close controls before hiding so state is clean for next use
                 if (executeConfirmModalEl && window.bootstrap) {
+                    try {
+                        const closeX = document.getElementById('executeConfirmCloseX');
+                        if (closeX) closeX.classList.remove('d-none');
+                        if (executeConfirmCancelBtn) {
+                            executeConfirmCancelBtn.textContent = 'Close';
+                            executeConfirmCancelBtn.disabled = false;
+                        }
+                    } catch (e) { }
+                    // Allow the programmatic hide through the hide guard
+                    try { executeProgressState._allowHide = true; } catch (e) { }
                     bootstrap.Modal.getOrCreateInstance(executeConfirmModalEl).hide();
                 }
                 bootstrap.Modal.getOrCreateInstance(executeSummaryModalEl).show();
@@ -21379,6 +21451,12 @@
             executeConfirmCancelBtn.disabled = false;
             executeConfirmCancelBtn.textContent = executeConfirmCancelBtn.dataset.cancelLabel;
         }
+        // Reset summarizing-phase lock state
+        executeProgressState._allowHide = false;
+        try {
+            const closeX = document.getElementById('executeConfirmCloseX');
+            if (closeX) closeX.classList.remove('d-none');
+        } catch (e) { }
         updateExecuteBeforeUnloadGuard(false);
     }
 
@@ -21508,18 +21586,42 @@
                 updateExecuteConfirmAlert(msg, 'warning');
             }
         } catch (e) { }
-        if (executePhaseHeaderEl) executePhaseHeaderEl.textContent = success ? 'Phase: Complete' : 'Phase: Error';
-        if (executeConfirmCancelBtn) {
-            executeConfirmCancelBtn.textContent = 'Close';
-            executeConfirmCancelBtn.disabled = false;
-        }
-        if (executeConfirmRunBtn) {
-            executeConfirmRunBtn.disabled = true;
-        }
+        if (executePhaseHeaderEl) executePhaseHeaderEl.textContent = success ? 'Phase: Summarizing…' : 'Phase: Error';
         if (executeProgressCancelBtn) {
             executeProgressCancelBtn.classList.add('d-none');
             executeProgressCancelBtn.disabled = true;
         }
+        if (executeConfirmRunBtn) {
+            executeConfirmRunBtn.disabled = true;
+        }
+        // Make the modal non-closable while summarizing results
+        if (executeConfirmCancelBtn) {
+            executeConfirmCancelBtn.textContent = 'Summarizing results, please wait…';
+            executeConfirmCancelBtn.disabled = true;
+        }
+        try {
+            const closeX = document.getElementById('executeConfirmCloseX');
+            if (closeX) closeX.classList.add('d-none');
+        } catch (e) { }
+        // Show summarizing spinner in the progress status area
+        if (executeProgressSpinnerEl) executeProgressSpinnerEl.classList.remove('d-none');
+        setExecuteProgressStatus('Summarizing results, please wait…', '');
+        // Safety fallback: re-enable close controls if summary modal doesn't appear within 15s
+        try {
+            setTimeout(() => {
+                try {
+                    if (executeSummaryModalEl && executeSummaryModalEl.classList.contains('show')) return;
+                    // Allow closing again
+                    try { executeProgressState._allowHide = true; } catch (e) { }
+                    const closeX = document.getElementById('executeConfirmCloseX');
+                    if (closeX) closeX.classList.remove('d-none');
+                    if (executeConfirmCancelBtn) {
+                        executeConfirmCancelBtn.textContent = 'Close';
+                        executeConfirmCancelBtn.disabled = false;
+                    }
+                } catch (e) { }
+            }, 15000);
+        } catch (e) { }
         updateExecuteBeforeUnloadGuard(false);
         // Re-enable connection & advanced controls only after run completes.
         try { if (typeof setExecuteDialogControlsEnabled === 'function') setExecuteDialogControlsEnabled(true); } catch (e) { }
@@ -21764,6 +21866,36 @@
         const updateRemoteDefault = typeof options.updateRemoteDefault === 'boolean'
             ? options.updateRemoteDefault
             : getExecuteConfirmUpdateRemotePref();
+        if (!IS_BUILDER_VIEW) {
+            const scenarioName = (() => {
+                try {
+                    const scen = Array.isArray(state?.scenarios) ? state.scenarios[scenarioIndex] : null;
+                    return String(scen?.name || getActiveScenarioName() || '').trim();
+                } catch (e) {
+                    return '';
+                }
+            })();
+            const xmlPath = (state?.result_path || '').toString().trim();
+            if (xmlPath && hasUnsavedChanges()) {
+                const proceedWithSavedXml = await window.coretgConfirmSavedXmlGroundTruth('Execute', {
+                    scenario: scenarioName,
+                    xmlPath,
+                    hasUnsavedChanges: true,
+                    allowStored: false,
+                });
+                if (!proceedWithSavedXml) {
+                    const remoteExecution = true;
+                    const pushPreference = !!updateRemoteDefault;
+                    return {
+                        confirmed: false,
+                        scenarioIndex,
+                        updateRemote: pushPreference,
+                        remoteExecution,
+                        pushPreference,
+                    };
+                }
+            }
+        }
         if (executeConfirmPushUpdateToggle) {
             executeConfirmPushUpdateToggle.checked = !!updateRemoteDefault;
         } else if (typeof updateRemoteDefault === 'boolean') {
@@ -23268,6 +23400,101 @@
         return missing.map((item) => String(item || '').trim()).filter(Boolean);
     }
 
+    const EXECUTE_FLOW_PREFLIGHT_CACHE_PREFIX = 'coretg_execute_flow_preflight_v1::';
+    const EXECUTE_FLOW_PREFLIGHT_CACHE_TTL_MS = 30000;
+
+    function executeFlowPreflightCacheStorage() {
+        try {
+            return window.sessionStorage;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function executeFlowPreflightHash(text) {
+        const input = String(text || '');
+        let hash = 5381;
+        for (let i = 0; i < input.length; i += 1) {
+            hash = ((hash << 5) + hash) + input.charCodeAt(i);
+            hash >>>= 0;
+        }
+        return hash.toString(16);
+    }
+
+    function buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath } = {}) {
+        try {
+            const scenario = String(scenarioName || '').trim().toLowerCase();
+            const path = String(xmlPath || '').trim();
+            const previewPlanPath = (scenario && typeof window.coretgGetPreviewPlanPathForScenario === 'function')
+                ? String(window.coretgGetPreviewPlanPathForScenario(scenario) || '').trim()
+                : '';
+            let xmlCacheKey = '';
+            try {
+                if (scenario && typeof window.CORETG_READ_LATEST_STATE_CACHE === 'function') {
+                    const latestState = window.CORETG_READ_LATEST_STATE_CACHE(scenario, { xmlPath: path });
+                    xmlCacheKey = (latestState && latestState.xml_cache_key) ? String(latestState.xml_cache_key || '').trim() : '';
+                }
+            } catch (e) { xmlCacheKey = ''; }
+            let flowSignature = '';
+            try {
+                const scenarios = Array.isArray(state?.scenarios) ? state.scenarios : [];
+                const activeScenario = scenarios.find((entry) => {
+                    const name = (entry && typeof entry === 'object' && entry.name) ? String(entry.name).trim().toLowerCase() : '';
+                    return !!scenario && name === scenario;
+                });
+                const flowState = (activeScenario && typeof activeScenario === 'object' && activeScenario.flow_state && typeof activeScenario.flow_state === 'object')
+                    ? activeScenario.flow_state
+                    : null;
+                flowSignature = flowState ? JSON.stringify(flowState) : '';
+            } catch (e) { flowSignature = ''; }
+            const rawKey = JSON.stringify({ scenario, path, previewPlanPath, xmlCacheKey, flowSignature });
+            return EXECUTE_FLOW_PREFLIGHT_CACHE_PREFIX + executeFlowPreflightHash(rawKey);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function readExecuteFlowPreflightCache({ scenarioName, xmlPath } = {}) {
+        try {
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath });
+            if (!storage || !key) return null;
+            const raw = storage.getItem(key);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            const savedAt = Number(parsed.saved_at || 0);
+            if (!savedAt || (Date.now() - savedAt) > EXECUTE_FLOW_PREFLIGHT_CACHE_TTL_MS) {
+                storage.removeItem(key);
+                return null;
+            }
+            const payload = parsed.payload;
+            if (!payload || typeof payload !== 'object') return null;
+            const missing = executeFlowMissingList(payload);
+            const containerMissing = Array.isArray(payload.container_missing) ? payload.container_missing.filter(Boolean) : [];
+            if (payload.ok !== true || missing.length || containerMissing.length) {
+                storage.removeItem(key);
+                return null;
+            }
+            return payload;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function writeExecuteFlowPreflightCache({ scenarioName, xmlPath } = {}, payload) {
+        try {
+            if (!payload || typeof payload !== 'object' || payload.ok !== true) return;
+            const missing = executeFlowMissingList(payload);
+            const containerMissing = Array.isArray(payload.container_missing) ? payload.container_missing.filter(Boolean) : [];
+            if (missing.length || containerMissing.length) return;
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath });
+            if (!storage || !key) return;
+            storage.setItem(key, JSON.stringify({ saved_at: Date.now(), payload }));
+        } catch (e) { }
+    }
+
     async function ensureExecuteFlowArtifactsReady({ scenarioName, xmlPath, appendLog, updateStatus, abortRun } = {}) {
         const scenario = String(scenarioName || '').trim();
         const planPath = String(xmlPath || '').trim();
@@ -23277,6 +23504,13 @@
         const log = typeof appendLog === 'function' ? appendLog : () => { };
         const setStatus = typeof updateStatus === 'function' ? updateStatus : () => { };
         const abort = typeof abortRun === 'function' ? abortRun : () => { };
+
+        const cached = readExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath });
+        if (cached) {
+            log('Using recent Flow challenge file check.');
+            setStatus('Using recent Flow challenge file check…', 'Skipping duplicate Flow Re-Validate before execute.');
+            return true;
+        }
 
         log('Checking Flow challenge files on CORE VM…');
         setStatus('Checking Flow challenge files…', 'Running Flow Re-Validate before execute.');
@@ -23299,6 +23533,7 @@
         const missing = executeFlowMissingList(check);
         if (!missing.length) {
             log('Flow challenge files found on CORE VM.');
+            writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, check);
             return true;
         }
 
@@ -23359,12 +23594,92 @@
         }
 
         log('Flow challenge files regenerated and verified.');
+        writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, verify);
         return true;
     }
 
     function executeMissingServicesList(data) {
         const missing = data && Array.isArray(data.missing_services) ? data.missing_services : [];
         return missing.map((item) => String(item || '').trim()).filter(Boolean);
+    }
+
+    const EXECUTE_CUSTOM_SERVICES_CACHE_PREFIX = 'coretg_execute_custom_services_v1::';
+    const EXECUTE_CUSTOM_SERVICES_CACHE_TTL_MS = 30000;
+
+    function buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig } = {}) {
+        try {
+            const scenario = String(scenarioName || '').trim().toLowerCase();
+            const core = (coreConfig && typeof coreConfig === 'object') ? coreConfig : {};
+            let xmlCacheKey = '';
+            let xmlPath = '';
+            try {
+                xmlPath = (scenario && typeof window.coretgGetLatestXmlPathForScenario === 'function')
+                    ? String(window.coretgGetLatestXmlPathForScenario(scenario) || '').trim()
+                    : '';
+            } catch (e) { xmlPath = ''; }
+            try {
+                if (scenario && typeof window.CORETG_READ_LATEST_STATE_CACHE === 'function') {
+                    const latestState = window.CORETG_READ_LATEST_STATE_CACHE(scenario, { xmlPath });
+                    xmlCacheKey = (latestState && latestState.xml_cache_key) ? String(latestState.xml_cache_key || '').trim() : '';
+                }
+            } catch (e) { xmlCacheKey = ''; }
+            const coreFingerprint = {
+                host: String(core.grpc_host || core.host || '').trim(),
+                port: String(core.grpc_port || core.port || '').trim(),
+                ssh_host: String(core.ssh_host || '').trim(),
+                ssh_port: String(core.ssh_port || '').trim(),
+                ssh_username: String(core.ssh_username || '').trim(),
+                vm_key: String(core.vm_key || '').trim(),
+                vm_name: String(core.vm_name || '').trim(),
+                vm_node: String(core.vm_node || '').trim(),
+                vmid: String(core.vmid || '').trim(),
+            };
+            return EXECUTE_CUSTOM_SERVICES_CACHE_PREFIX + executeFlowPreflightHash(JSON.stringify({ scenario, xmlPath, xmlCacheKey, coreFingerprint }));
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function readExecuteCustomServicesCache({ scenarioName, coreConfig } = {}) {
+        try {
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig });
+            if (!storage || !key) return null;
+            const raw = storage.getItem(key);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            const savedAt = Number(parsed.saved_at || 0);
+            if (!savedAt || (Date.now() - savedAt) > EXECUTE_CUSTOM_SERVICES_CACHE_TTL_MS) {
+                storage.removeItem(key);
+                return null;
+            }
+            const payload = parsed.payload;
+            if (!payload || typeof payload !== 'object' || payload.ok !== true) {
+                storage.removeItem(key);
+                return null;
+            }
+            const missing = executeMissingServicesList(payload);
+            if (missing.length) {
+                storage.removeItem(key);
+                return null;
+            }
+            return payload;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function writeExecuteCustomServicesCache({ scenarioName, coreConfig } = {}, payload) {
+        try {
+            if (!payload || typeof payload !== 'object' || payload.ok !== true) return;
+            const missing = executeMissingServicesList(payload);
+            if (missing.length) return;
+            const storage = executeFlowPreflightCacheStorage();
+            const key = buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig });
+            if (!storage || !key) return;
+            storage.setItem(key, JSON.stringify({ saved_at: Date.now(), payload }));
+        } catch (e) { }
     }
 
     async function ensureExecuteCustomServicesReady({ scenarioName, coreConfig, appendLog, updateStatus, abortRun } = {}) {
@@ -23379,6 +23694,13 @@
             core,
             scenario_name: String(scenarioName || '').trim(),
         };
+
+        const cached = readExecuteCustomServicesCache({ scenarioName, coreConfig: core });
+        if (cached) {
+            log('Using recent custom CORE services check.');
+            setStatus('Using recent custom CORE services check…', 'Skipping duplicate custom services check before execute.');
+            return true;
+        }
 
         log('Checking custom CORE services on CORE VM…');
         setStatus('Checking custom CORE services…', 'Verifying ScenarioForge service modules are installed.');
@@ -23396,6 +23718,7 @@
         const missing = executeMissingServicesList(check);
         if (!missing.length) {
             log('Custom CORE services are installed on CORE VM.');
+            writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, check);
             return true;
         }
 
@@ -23434,6 +23757,7 @@
         const meta = (install.install_custom_services && typeof install.install_custom_services === 'object') ? install.install_custom_services : null;
         const modules = meta && Array.isArray(meta.modules) ? meta.modules.map(v => String(v || '').trim()).filter(Boolean) : [];
         log(`Custom CORE services installed${modules.length ? `: ${modules.join(', ')}` : '.'}`);
+        writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, install);
         return true;
     }
 

@@ -20,8 +20,8 @@ def register(app, *, backend_module: Any) -> None:
         try:
             embed_raw = request.args.get('embed') or request.form.get('embed') or ''
             embed = str(embed_raw).strip().lower() in ['1', 'true', 'yes', 'y', 'on']
-            xml_path = request.form.get('xml_path')
             scenario = request.form.get('scenario') or None
+            xml_path = backend._resolve_preexecute_xml_path(request.form.get('xml_path'), scenario)
             force_raw = request.form.get('force') or request.form.get('force_recompute') or ''
             force_recompute = str(force_raw).strip().lower() in ['1', 'true', 'yes', 'y', 'on']
             seed_raw = request.form.get('seed') or ''
