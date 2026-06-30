@@ -1531,6 +1531,65 @@ def _force_compose_no_network(compose_obj: dict) -> dict:
 		return compose_obj
 
 
+def _command_starts_with_token(value: object, token: str) -> bool:
+	try:
+		token_s = str(token or '').strip()
+		if not token_s:
+			return False
+		if isinstance(value, str):
+			parts = shlex.split(value)
+			return bool(parts and parts[0] == token_s)
+		if isinstance(value, list) and value:
+			return str(value[0]).strip() == token_s
+	except Exception:
+		return False
+	return False
+
+
+def _entrypoint_uses_custom_script(value: object) -> bool:
+	try:
+		parts = value if isinstance(value, list) else shlex.split(str(value or ''))
+		for part in parts or []:
+			text = str(part or '').strip().lower()
+			if text.endswith('entrypoint.sh') or text.endswith('/entrypoint.sh'):
+				return True
+	except Exception:
+		return False
+	return False
+
+
+def _repair_apache_foreground_for_no_network(compose_obj: dict) -> dict:
+	"""Bypass DB-wait entrypoints when Compose networking is disabled."""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		for _svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			if not _command_starts_with_token(svc.get('command'), 'apache2-foreground'):
+				continue
+			if not _entrypoint_uses_custom_script(svc.get('entrypoint')):
+				continue
+			svc['entrypoint'] = 'sh'
+			svc['command'] = [
+				'-lc',
+				'if command -v apache2-foreground >/dev/null 2>&1; then exec apache2-foreground; fi; '
+				'if command -v apache2ctl >/dev/null 2>&1; then exec apache2ctl -D FOREGROUND; fi; '
+				'exec /usr/sbin/apache2 -DFOREGROUND',
+			]
+			labs = svc.get('labels')
+			if not isinstance(labs, dict):
+				labs = {}
+			labs.setdefault('coretg.repaired_no_network_entrypoint', 'apache2-foreground')
+			svc['labels'] = labs
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
 def _compose_force_no_network_enabled() -> bool:
 	"""Whether generated vuln docker-compose stacks should run with network_mode: none.
 
@@ -3244,6 +3303,35 @@ def _wrapper_image_tag(scenario_tag_safe: str, node_name: str, identity: object)
 	return f"coretg/{_wrapper_image_slug(scenario_tag_safe, node_name, identity)}:iproute2"
 
 
+def _docker_php_entrypoint_fallback_lines() -> List[str]:
+	return [
+		"# Some catalog images inherit ENTRYPOINT [\"docker-php-entrypoint\"] but lack the script.",
+		"# Provide a small offline fallback without overwriting a real upstream entrypoint.",
+		"RUN set -eu; \\",
+		"\tif command -v docker-php-entrypoint >/dev/null 2>&1; then exit 0; fi; \\",
+		"\tmkdir -p /usr/local/bin /usr/bin /bin; \\",
+		"\t{ \\",
+		"\t\techo '#!/bin/sh'; \\",
+		"\t\techo 'set -e'; \\",
+		"\t\techo 'if [ \"$#\" -eq 0 ]; then'; \\",
+		"\t\techo '  if command -v apache2-foreground >/dev/null 2>&1; then set -- apache2-foreground;'; \\",
+		"\t\techo '  elif command -v apache2ctl >/dev/null 2>&1; then set -- apache2ctl -D FOREGROUND;'; \\",
+		"\t\techo '  elif [ -x /usr/sbin/apache2 ]; then set -- /usr/sbin/apache2 -DFOREGROUND;'; \\",
+		"\t\techo '  else set -- sleep infinity; fi'; \\",
+		"\t\techo 'fi'; \\",
+		"\t\techo 'if [ \"${1#-}\" != \"$1\" ]; then set -- apache2-foreground \"$@\"; fi'; \\",
+		"\t\techo 'if [ \"$1\" = \"apache2-foreground\" ] && ! command -v apache2-foreground >/dev/null 2>&1; then'; \\",
+		"\t\techo '  if command -v apache2ctl >/dev/null 2>&1; then set -- apache2ctl -D FOREGROUND;'; \\",
+		"\t\techo '  elif [ -x /usr/sbin/apache2 ]; then set -- /usr/sbin/apache2 -DFOREGROUND; fi'; \\",
+		"\t\techo 'fi'; \\",
+		"\t\techo 'exec \"$@\"'; \\",
+		"\t} > /usr/local/bin/docker-php-entrypoint; \\",
+		"\tchmod 0755 /usr/local/bin/docker-php-entrypoint; \\",
+		"\tln -sf /usr/local/bin/docker-php-entrypoint /usr/bin/docker-php-entrypoint; \\",
+		"\tln -sf /usr/local/bin/docker-php-entrypoint /bin/docker-php-entrypoint",
+	]
+
+
 def _ensure_keepalive_for_base_os_images(compose_obj: dict, node_name: str, prefer_service: Optional[str] = None) -> dict:
 	"""Best-effort: keep base OS images running by injecting a default command.
 
@@ -3398,6 +3486,7 @@ def _write_iproute2_wrapper(
 			"\tln -sf /usr/local/coretg/bin/busybox /sbin/ip; \\",
 			"\t/usr/sbin/ip -V >/dev/null 2>&1 || true",
 		]
+		lines += [""] + _docker_php_entrypoint_fallback_lines()
 		if extra_pip:
 			pkgs = ' '.join(extra_pip)
 			lines += [
@@ -3517,6 +3606,7 @@ def _write_iproute2_wrapper(
 			"ENV PYTHONUSERBASE=/home/airflow/.local",
 			"ENV PATH=/home/airflow/.local/bin:$PATH",
 		]
+	lines += [""] + _docker_php_entrypoint_fallback_lines()
 	if extra_pip:
 		pkgs = ' '.join(extra_pip)
 		lines += [
@@ -4865,6 +4955,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 							'only if this lab intentionally needs Docker-managed internal networking',
 							node_name,
 						)
+						obj = _repair_apache_foreground_for_no_network(obj)
 					obj = _force_compose_no_network(obj)
 				else:
 					obj = _prune_compose_published_ports(obj)
