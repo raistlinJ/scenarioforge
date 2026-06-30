@@ -7,6 +7,7 @@ import random
 import logging
 import ipaddress
 import subprocess
+import shutil
 import time
 import sys
 import select
@@ -105,6 +106,285 @@ def _docker_node_compose_project_dir(node_name: str, out_base: str = '/tmp/vulns
 
 def _docker_node_compose_path(node_name: str, out_base: str = '/tmp/vulns') -> str:
     return os.path.join(_docker_node_compose_project_dir(node_name, out_base), 'docker-compose.yml')
+
+
+def _compose_asset_safe_name(raw: object) -> str:
+    text = str(raw or '').strip()
+    if not text:
+        return ''
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_', '.') else '-' for ch in text)
+    safe = safe.strip('-.')
+    return safe or ''
+
+
+def _copy_compose_asset_replace_wrong_type(src_path: str, dst_path: str) -> None:
+    src = os.path.abspath(str(src_path or ''))
+    dst = os.path.abspath(str(dst_path or ''))
+    if not src or not dst or not os.path.exists(src):
+        return
+    src_is_dir = os.path.isdir(src)
+    if os.path.lexists(dst):
+        try:
+            dst_is_dir = os.path.isdir(dst)
+        except Exception:
+            dst_is_dir = False
+        if src_is_dir != dst_is_dir:
+            try:
+                if dst_is_dir and not os.path.islink(dst):
+                    shutil.rmtree(dst, ignore_errors=True)
+                else:
+                    os.remove(dst)
+            except Exception:
+                try:
+                    shutil.rmtree(dst, ignore_errors=True)
+                except Exception:
+                    pass
+    if src_is_dir:
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    else:
+        parent = os.path.dirname(dst)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def _compose_short_source_is_host_path(source: str) -> bool:
+    src = str(source or '').strip()
+    if not src:
+        return False
+    expanded = os.path.expanduser(src)
+    return (
+        os.path.isabs(expanded)
+        or src.startswith('./')
+        or src.startswith('../')
+        or src in ('.', '..')
+        or src.startswith('~/')
+    )
+
+
+def _compose_path_is_fileish(path_value: object) -> bool:
+    text = str(path_value or '').strip().rstrip('/')
+    if not text:
+        return False
+    base = os.path.basename(text)
+    if not base:
+        return False
+    if base in {'Dockerfile', 'Containerfile'}:
+        return True
+    return '.' in base
+
+
+def _resolve_compose_host_path(source: str, compose_dir: str) -> str:
+    src = str(source or '').strip()
+    if not src:
+        return ''
+    src = os.path.expanduser(src)
+    if os.path.isabs(src):
+        return os.path.abspath(src)
+    return os.path.abspath(os.path.join(compose_dir, src))
+
+
+def _compose_bind_entries(compose_path: str) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return entries
+    try:
+        compose_dir = os.path.dirname(os.path.abspath(compose_path))
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            obj = yaml.safe_load(fh) or {}
+    except Exception:
+        return entries
+    services = obj.get('services') if isinstance(obj, dict) else None
+    if not isinstance(services, dict):
+        return entries
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        volumes = svc.get('volumes')
+        if isinstance(volumes, list):
+            for volume in volumes:
+                if isinstance(volume, str):
+                    if ':' not in volume:
+                        continue
+                    parts = volume.split(':', 2)
+                    if len(parts) < 2:
+                        continue
+                    src = str(parts[0] or '').strip()
+                    target = str(parts[1] or '').strip()
+                    if not _compose_short_source_is_host_path(src):
+                        continue
+                    entries.append(
+                        {
+                            'service': str(svc_name),
+                            'kind': 'volume',
+                            'source': src,
+                            'target': target,
+                            'resolved_source': _resolve_compose_host_path(src, compose_dir),
+                            'expected_file': _compose_path_is_fileish(src) or _compose_path_is_fileish(target),
+                        }
+                    )
+                elif isinstance(volume, dict):
+                    vtype = str(volume.get('type') or '').strip().lower()
+                    if vtype and vtype != 'bind':
+                        continue
+                    src = str(volume.get('source') or volume.get('src') or '').strip()
+                    target = str(volume.get('target') or volume.get('dst') or volume.get('destination') or '').strip()
+                    if not src:
+                        continue
+                    entries.append(
+                        {
+                            'service': str(svc_name),
+                            'kind': 'volume',
+                            'source': src,
+                            'target': target,
+                            'resolved_source': _resolve_compose_host_path(src, compose_dir),
+                            'expected_file': _compose_path_is_fileish(src) or _compose_path_is_fileish(target),
+                        }
+                    )
+        env_file = svc.get('env_file')
+        env_entries = env_file if isinstance(env_file, list) else [env_file] if isinstance(env_file, str) else []
+        for env_entry in env_entries:
+            env_path = ''
+            if isinstance(env_entry, str):
+                env_path = env_entry.strip()
+            elif isinstance(env_entry, dict):
+                env_path = str(env_entry.get('path') or env_entry.get('file') or '').strip()
+            if not env_path:
+                continue
+            entries.append(
+                {
+                    'service': str(svc_name),
+                    'kind': 'env_file',
+                    'source': env_path,
+                    'target': '',
+                    'resolved_source': _resolve_compose_host_path(env_path, compose_dir),
+                    'expected_file': True,
+                }
+            )
+    return entries
+
+
+def _relative_compose_asset_path(source_path: str, compose_dir: str) -> str:
+    try:
+        rel = os.path.relpath(os.path.abspath(source_path), os.path.abspath(compose_dir))
+    except Exception:
+        return ''
+    if not rel or rel == '.' or rel.startswith('..' + os.sep) or rel == '..':
+        return ''
+    return rel
+
+
+def _compose_asset_candidate_dirs(
+    *,
+    node_name: str,
+    rec: Optional[Dict[str, str]],
+    legacy_out_path: str,
+    project_dir: str,
+    out_base: str,
+) -> list[str]:
+    candidates: list[str] = []
+
+    def _add(path_value: object) -> None:
+        path = str(path_value or '').strip()
+        if not path:
+            return
+        if os.path.isfile(path):
+            path = os.path.dirname(os.path.abspath(path))
+        elif os.path.isdir(path):
+            path = os.path.abspath(path)
+        else:
+            return
+        if path and path not in candidates:
+            candidates.append(path)
+
+    _add(os.path.dirname(os.path.abspath(legacy_out_path)))
+    if isinstance(rec, dict):
+        for key in ('Path', 'path', 'compose_path', 'legacy_compose_path'):
+            _add(rec.get(key))
+        safe_name = _compose_asset_safe_name(
+            rec.get('Name') or rec.get('name') or rec.get('Title') or rec.get('title') or 'vuln'
+        )
+        safe_node = _compose_asset_safe_name(node_name)
+        if safe_name:
+            _add(os.path.join(out_base, safe_name))
+            if safe_node:
+                _add(os.path.join(out_base, safe_name, f'node-{safe_node}'))
+    _add(project_dir)
+    return candidates
+
+
+def _materialize_compose_project_assets(compose_path: str, candidate_dirs: list[str]) -> list[str]:
+    """Copy project-relative bind/env files into the final CORE compose directory."""
+    issues: list[str] = []
+    compose_dir = os.path.dirname(os.path.abspath(compose_path))
+    clean_candidates = [os.path.abspath(p) for p in candidate_dirs if p and os.path.isdir(p)]
+    for entry in _compose_bind_entries(compose_path):
+        resolved = str(entry.get('resolved_source') or '').strip()
+        if not resolved:
+            continue
+        rel = _relative_compose_asset_path(resolved, compose_dir)
+        if not rel:
+            continue
+        expected_file = bool(entry.get('expected_file'))
+        source_ok = os.path.isfile(resolved) if expected_file else os.path.exists(resolved)
+        if source_ok:
+            continue
+
+        copied = False
+        for base_dir in clean_candidates:
+            candidate = os.path.abspath(os.path.join(base_dir, rel))
+            if candidate == resolved:
+                continue
+            if expected_file and not os.path.isfile(candidate):
+                continue
+            if (not expected_file) and not os.path.exists(candidate):
+                continue
+            try:
+                _copy_compose_asset_replace_wrong_type(candidate, resolved)
+                copied = True
+                break
+            except Exception:
+                continue
+        if not copied and expected_file:
+            issues.append(
+                f"{entry.get('service')} {entry.get('kind')} source missing or not a file: "
+                f"{resolved} (target={entry.get('target')})"
+            )
+    return issues
+
+
+def _compose_bind_source_preflight_issues(compose_path: str) -> list[str]:
+    issues: list[str] = []
+    for entry in _compose_bind_entries(compose_path):
+        source = str(entry.get('resolved_source') or '').strip()
+        if not source:
+            continue
+        expected_file = bool(entry.get('expected_file'))
+        if expected_file:
+            if not os.path.isfile(source):
+                actual = 'missing'
+                if os.path.isdir(source):
+                    actual = 'directory'
+                elif os.path.exists(source):
+                    actual = 'not a regular file'
+                issues.append(
+                    f"{entry.get('service')} {entry.get('kind')} bind source is {actual}: "
+                    f"{source} -> {entry.get('target')}"
+                )
+        elif os.path.exists(source):
+            continue
+    return issues
+
+
+def _format_compose_bind_source_issues(compose_path: str, issues: list[str]) -> str:
+    shown = '; '.join([str(issue) for issue in issues[:6]])
+    more = '' if len(issues) <= 6 else f'; +{len(issues) - 6} more'
+    return (
+        f"docker compose bind-source preflight failed (compose={compose_path}): "
+        f"{shown}{more}"
+    ).strip()
 
 
 def _reset_docker_compose_prepare_caches(context: str = '') -> None:
@@ -388,6 +668,12 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         _sanitize_compose_incompatible_workdirs(compose_path)
     except Exception:
         pass
+    try:
+        bind_issues = _compose_bind_source_preflight_issues(compose_path)
+    except Exception:
+        bind_issues = []
+    if bind_issues:
+        raise RuntimeError(_format_compose_bind_source_issues(compose_path, bind_issues))
 
     # Determine which services are buildable vs pull-only.
     # `docker compose pull` fails for buildable services with scenario-scoped tags
@@ -1112,6 +1398,30 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
                         pass
                 with open(out_path, 'w', encoding='utf-8') as fh:
                     fh.write(fixed)
+                try:
+                    candidate_dirs = _compose_asset_candidate_dirs(
+                        node_name=node_name,
+                        rec=rec if isinstance(rec, dict) else None,
+                        legacy_out_path=legacy_out_path,
+                        project_dir=project_dir,
+                        out_base=out_base,
+                    )
+                    asset_issues = _materialize_compose_project_assets(out_path, candidate_dirs)
+                    if asset_issues:
+                        logger.warning(
+                            "[vuln-node] compose project asset materialization incomplete node=%s issues=%s",
+                            node_name,
+                            '; '.join(asset_issues[:4]),
+                        )
+                except Exception as asset_exc:
+                    try:
+                        logger.warning(
+                            "[vuln-node] compose project asset materialization failed node=%s err=%s",
+                            node_name,
+                            asset_exc,
+                        )
+                    except Exception:
+                        pass
                 try:
                     if isinstance(rec, dict):
                         rec['legacy_compose_path'] = legacy_out_path
