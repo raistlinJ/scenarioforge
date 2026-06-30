@@ -105,6 +105,8 @@ services:
         assert "WORKDIR /" not in txt
         assert "ln -sfn /defaultroute.sh" in txt
         assert "ln -sfn /runtraffic.sh" in txt
+        assert "docker-php-entrypoint" in txt
+        assert "apache2ctl -D FOREGROUND" in txt
 
 
 def test_apply_docker_compose_meta_pushes_options(tmp_path):
@@ -165,6 +167,8 @@ services:
     assert "WORKDIR /" not in txt
     assert "ln -sfn /defaultroute.sh" in txt
     assert "ln -sfn /runtraffic.sh" in txt
+    assert "docker-php-entrypoint" in txt
+    assert "apache2ctl -D FOREGROUND" in txt
     assert "http://archive.debian.org/debian buster main" in txt
     assert "http://archive.debian.org/debian-security buster/updates main" in txt
     assert "http://archive.debian.org/debian stretch-updates main" not in txt
@@ -1684,6 +1688,118 @@ services:
     assert "80" in [str(entry) for entry in (target.get("expose") or [])]
     assert "depends_on" not in target
     assert "links" not in target
+
+
+def test_prepare_compose_repairs_apache_entrypoint_when_forcing_no_network(tmp_path, monkeypatch):
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    compose_src = tmp_path / "docker-compose.yml"
+    compose_src.write_text(
+        """
+services:
+  web:
+    image: vulhub/cacti:1.2.28
+    ports:
+      - "8080:80"
+    depends_on:
+      - db
+    entrypoint:
+      - bash
+      - /entrypoint.sh
+    volumes:
+      - ./entrypoint.sh:/entrypoint.sh
+    command: apache2-foreground
+  db:
+    image: mysql:5.7
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nwait-for-it db:3306 -t 300 -- echo ready\nexec \"$@\"\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("CORETG_COMPOSE_FORCE_NO_NETWORK", raising=False)
+    monkeypatch.delenv("CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING", raising=False)
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "cacti/CVE-2025-24367",
+        "Path": str(compose_src),
+        "ScenarioTag": "test",
+    }
+
+    created = prepare_compose_for_assignments({"docker-12": record}, out_base=str(tmp_path / "out"))
+    assert created
+
+    out_path = tmp_path / "out" / "docker-compose-docker-12.yml"
+    obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    target = ((obj or {}).get("services") or {}).get("docker-12") or {}
+
+    assert target.get("network_mode") == "none"
+    assert "depends_on" not in target
+    assert target.get("entrypoint") == "sh"
+    command = target.get("command") or []
+    command_text = " ".join(str(part) for part in command)
+    assert "command -v apache2-foreground" in command_text
+    assert "apache2ctl -D FOREGROUND" in command_text
+    labels = target.get("labels") or {}
+    assert labels.get("coretg.repaired_no_network_entrypoint") == "apache2-foreground"
+
+
+def test_prepare_compose_preserves_apache_entrypoint_when_internal_networking_opted_in(tmp_path, monkeypatch):
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    compose_src = tmp_path / "docker-compose.yml"
+    compose_src.write_text(
+        """
+services:
+  web:
+    image: vulhub/cacti:1.2.28
+    depends_on:
+      - db
+    entrypoint:
+      - bash
+      - /entrypoint.sh
+    volumes:
+      - ./entrypoint.sh:/entrypoint.sh
+    command: apache2-foreground
+  db:
+    image: mysql:5.7
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\nexec \"$@\"\n", encoding="utf-8")
+
+    monkeypatch.delenv("CORETG_COMPOSE_FORCE_NO_NETWORK", raising=False)
+    monkeypatch.setenv("CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING", "1")
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "cacti/CVE-2025-24367",
+        "Path": str(compose_src),
+        "ScenarioTag": "test",
+    }
+
+    created = prepare_compose_for_assignments({"docker-12": record}, out_base=str(tmp_path / "out"))
+    assert created
+
+    out_path = tmp_path / "out" / "docker-compose-docker-12.yml"
+    obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    target = ((obj or {}).get("services") or {}).get("docker-12") or {}
+
+    assert target.get("network_mode") != "none"
+    assert target.get("entrypoint") == ["bash", "/entrypoint.sh"]
+    assert target.get("command") == "apache2-foreground"
+    assert "depends_on" in target
 
 
 def test_prepare_compose_can_opt_in_to_internal_networking_for_multi_service_dependencies(tmp_path, monkeypatch):
