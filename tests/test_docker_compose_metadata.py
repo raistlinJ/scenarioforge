@@ -242,7 +242,8 @@ services:
     web = (obj or {}).get("services", {}).get("web") or {}
     labels = web.get("labels") or {}
 
-    assert web.get("image") == "coretg/scenario-docker-1:iproute2"
+    image = str(web.get("image") or "")
+    assert re.match(r"^coretg/scenario-docker-1-[a-f0-9]{12}:iproute2$", image)
     assert labels.get("coretg.wrapper_base_image") == "vulhub/craftcms:5.5.1.1"
 
 
@@ -280,11 +281,78 @@ services:
     web = (obj or {}).get("services", {}).get("web") or {}
     labels = web.get("labels") or {}
 
-    assert web.get("image") == "coretg/scenario-docker-1:iproute2"
+    image = str(web.get("image") or "")
+    assert re.match(r"^coretg/scenario-docker-1-[a-f0-9]{12}:iproute2$", image)
     assert web.get("command") == ["/usr/local/lib/appweb/7.0.1/bin/appweb"]
     assert labels.get("coretg.wrapper_base_image") == "vulhub/appweb:7.0.1"
     assert labels.get("coretg.repaired_catalog_command") == "/usr/local/lib/appweb/7.0.1/bin/appweb"
     assert labels.get("coretg.wrapper_build_pull") == "true"
+
+
+def test_prepare_compose_wrapper_tag_includes_base_image_identity(tmp_path):
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    src1 = tmp_path / "src1"
+    src1.mkdir()
+    compose1 = src1 / "docker-compose.yml"
+    compose1.write_text(
+        """
+services:
+  app:
+    image: nginx:1
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    src2 = tmp_path / "src2"
+    src2.mkdir()
+    compose2 = src2 / "docker-compose.yml"
+    compose2.write_text(
+        """
+services:
+  app:
+    image: vulhub/ffmpeg:2.8.4-with-php
+    command: php -S 0.0.0.0:8080 -t /var/www/html
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out_base = tmp_path / "out"
+    rec1 = {
+        "Type": "docker-compose",
+        "Name": "first",
+        "Path": str(compose1),
+        "ScenarioTag": "boundedrandomizedstressrun8",
+    }
+    rec2 = {
+        "Type": "docker-compose",
+        "Name": "second",
+        "Path": str(compose2),
+        "ScenarioTag": "boundedrandomizedstressrun8",
+    }
+
+    prepare_compose_for_assignments({"docker-7": rec1}, out_base=str(out_base))
+    out_path = out_base / "docker-compose-docker-7.yml"
+    obj1 = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    svc1 = ((obj1 or {}).get("services") or {}).get("docker-7") or {}
+    image1 = str(svc1.get("image") or "")
+
+    prepare_compose_for_assignments({"docker-7": rec2}, out_base=str(out_base))
+    obj2 = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    svc2 = ((obj2 or {}).get("services") or {}).get("docker-7") or {}
+    image2 = str(svc2.get("image") or "")
+
+    assert re.match(r"^coretg/boundedrandomizedstressrun8-docker-7-[a-f0-9]{12}:iproute2$", image1)
+    assert re.match(r"^coretg/boundedrandomizedstressrun8-docker-7-[a-f0-9]{12}:iproute2$", image2)
+    assert image1 != image2
+    assert svc2.get("command") == "php -S 0.0.0.0:8080 -t /var/www/html"
+    labels2 = svc2.get("labels") or {}
+    assert labels2.get("coretg.wrapper_base_image") == "vulhub/ffmpeg:2.8.4-with-php"
 
 
 def test_prepare_compose_bypasses_wrapper_for_ingress_nginx_when_image_already_has_ip(tmp_path):
@@ -1614,7 +1682,8 @@ services:
     assert "ports" not in target
     assert "ports" not in php
     assert "80" in [str(entry) for entry in (target.get("expose") or [])]
-    assert "depends_on" in target
+    assert "depends_on" not in target
+    assert "links" not in target
 
 
 def test_prepare_compose_can_opt_in_to_internal_networking_for_multi_service_dependencies(tmp_path, monkeypatch):

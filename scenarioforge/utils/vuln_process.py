@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import hashlib
 import logging
 import os
 import csv
@@ -1494,10 +1495,20 @@ def _force_service_network_mode_none(service: Dict[str, object]) -> None:
 	service['network_mode'] = 'none'
 
 
+def _drop_service_dependencies_for_no_network(service: Dict[str, object]) -> None:
+	"""Remove Compose service dependencies that cannot work without Compose networking."""
+	if not isinstance(service, dict):
+		return
+	service.pop('depends_on', None)
+	service.pop('links', None)
+
+
 def _force_compose_no_network(compose_obj: dict) -> dict:
 	"""Best-effort: make all services run with network_mode: none.
 
-	Also drops top-level networks to avoid compose validation conflicts.
+	Also drops Compose dependency links and top-level networks to avoid compose
+	validation conflicts and unintended startup of internal services that CORE cannot
+	reach once Docker-managed networking is disabled.
 	"""
 	try:
 		if not isinstance(compose_obj, dict):
@@ -1508,6 +1519,7 @@ def _force_compose_no_network(compose_obj: dict) -> dict:
 		for _svc_name, svc in services.items():
 			if isinstance(svc, dict):
 				_force_service_network_mode_none(svc)
+				_drop_service_dependencies_for_no_network(svc)
 				# With network_mode none, host port publishing is meaningless and can
 				# create collisions or validation errors. Preserve container-side port intent
 				# via `expose`, then drop `ports` entirely.
@@ -2945,7 +2957,12 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 	def _select_target_service() -> str:
 		if prefer_service and prefer_service in services:
 			return prefer_service
-			
+		try:
+			selected = _select_service_key(compose_obj, prefer_service=prefer_service)
+			if selected and selected in services:
+				return str(selected)
+		except Exception:
+			pass
 		# fall back to first service
 		for k in services.keys():
 			return str(k)
@@ -3204,6 +3221,27 @@ def _ensure_list_field_has(value: object, item: str) -> List[str]:
 	if item not in out:
 		out.append(item)
 	return out
+
+
+def _wrapper_image_identity_hash(identity: object) -> str:
+	try:
+		raw = str(identity or '').encode('utf-8', errors='ignore')
+		return hashlib.sha256(raw).hexdigest()[:12]
+	except Exception:
+		return '000000000000'
+
+
+def _wrapper_image_slug(scenario_tag_safe: str, node_name: str, identity: object) -> str:
+	base = _safe_name(f"{scenario_tag_safe}-{_safe_name(node_name)}")
+	digest = _wrapper_image_identity_hash(identity)
+	max_base_len = 120 - len(digest) - 1
+	if len(base) > max_base_len:
+		base = base[:max_base_len].strip('-_.') or 'scenario-node'
+	return f"{base}-{digest}"
+
+
+def _wrapper_image_tag(scenario_tag_safe: str, node_name: str, identity: object) -> str:
+	return f"coretg/{_wrapper_image_slug(scenario_tag_safe, node_name, identity)}:iproute2"
 
 
 def _ensure_keepalive_for_base_os_images(compose_obj: dict, node_name: str, prefer_service: Optional[str] = None) -> dict:
@@ -4735,7 +4773,10 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 									override = 'ubuntu:22.04'
 								base_image = override
 								extra_apt = ['nfs-ganesha', 'nfs-ganesha-vfs']
-							wrap_dir = os.path.join(out_base, f"docker-wrap-{scenario_tag_safe}-{_safe_name(node_name)}")
+							wrapper_identity = str(orig_base_image)
+							if str(orig_base_image) != str(base_image):
+								wrapper_identity = f"{orig_base_image}->{base_image}"
+							wrap_dir = os.path.join(out_base, f"docker-wrap-{_wrapper_image_slug(scenario_tag_safe, node_name, wrapper_identity)}")
 							_write_iproute2_wrapper(wrap_dir, base_image, extra_apt_packages=extra_apt)
 							# IMPORTANT: do NOT leave a `build:` stanza in the compose file that CORE will
 							# later run. core-daemon uses `docker compose up -d <node>` and will attempt to
@@ -4745,7 +4786,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 							# wrapper image ahead of time, then CORE only needs to start the already-built
 							# `image:` tag.
 							svc.pop('build', None)
-							svc['image'] = f"coretg/{scenario_tag_safe}-{_safe_name(node_name)}:iproute2"
+							svc['image'] = _wrapper_image_tag(scenario_tag_safe, node_name, wrapper_identity)
 							# Preserve the original base image for later heuristics/diagnostics.
 							try:
 								labs = svc.get('labels')
