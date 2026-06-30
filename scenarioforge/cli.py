@@ -2960,6 +2960,7 @@ _POST_EXECUTION_WARNING_FIELDS = (
     ('extra_nodes', 'Unexpected scenario nodes'),
     ('extra_docker_nodes', 'Unexpected Docker nodes'),
     ('docker_start_pending', 'Docker containers still starting'),
+    ('flow_artifact_copy_pending', 'Flow artifact copy pending'),
     ('injects_missing', 'Missing container injects'),
     ('generator_injects_missing', 'Missing generator inject sources'),
 )
@@ -3134,6 +3135,20 @@ def _remote_execute_failure_detail(output_text: str) -> str | None:
     return lines[-1][-2000:] if lines else None
 
 
+def _flow_copy_error_is_startup_pending(error_text: str) -> bool:
+    text = str(error_text or '').strip().lower()
+    if not text:
+        return False
+    pending_markers = (
+        'container not running (restarting)',
+        'container is restarting',
+        ' is restarting, wait until the container is running',
+        'container not running (created)',
+        'container not running (starting)',
+    )
+    return any(marker in text for marker in pending_markers)
+
+
 def _run_cli_post_execution_validation(
     *,
     backend: Any,
@@ -3265,6 +3280,19 @@ def _run_cli_post_execution_validation(
                 copy_error = str(retry_meta.get('flow_artifact_copy_error') or copy_error).strip()
         except Exception as exc:
             copy_error = f'Flow artifact repair retry failed: {exc}'
+
+    if (
+        copy_error
+        and isinstance(summary, dict)
+        and bool(summary.get('docker_start_pending'))
+        and _flow_copy_error_is_startup_pending(copy_error)
+    ):
+        pending_values = summary.get('flow_artifact_copy_pending')
+        if not isinstance(pending_values, list):
+            pending_values = []
+        pending_values.append(copy_error)
+        summary['flow_artifact_copy_pending'] = pending_values
+        copy_error = ''
 
     if copy_error:
         summary['flow_artifact_copy_error'] = copy_error

@@ -365,6 +365,88 @@ def test_post_execution_validation_flow_copy_failure_is_an_error():
     assert 'ERROR: Flow artifact copy failed (1)' in stream.getvalue()
 
 
+def test_post_execution_validation_flow_copy_pending_is_a_warning():
+    stream = io.StringIO()
+
+    ok = cli._print_post_execution_validation_summary(
+        {
+            'ok': False,
+            'docker_start_pending': ['docker-12'],
+            'flow_artifact_copy_pending': ['only 2 of 3 targets succeeded; first_error=docker-12: container not running (restarting)'],
+        },
+        stream=stream,
+    )
+
+    out = stream.getvalue()
+    assert ok is True
+    assert 'Post-execution validation: PASSED WITH WARNINGS' in out
+    assert 'WARNING: Flow artifact copy pending (1)' in out
+    assert 'ERROR: Flow artifact copy failed' not in out
+
+
+def test_cli_post_execution_validation_downgrades_startup_pending_flow_copy(tmp_path, monkeypatch):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    session_xml = tmp_path / 'session.xml'
+    session_xml.write_text('<session />', encoding='utf-8')
+
+    def _copy(meta, **_kwargs):
+        meta['flow_artifact_copy_summary'] = {
+            'items': [
+                {'node': 'docker-11', 'ok': True},
+                {
+                    'node': 'docker-12',
+                    'ok': False,
+                    'errors': ['docker-12: container not running (restarting)'],
+                },
+                {'node': 'docker-13', 'ok': True},
+            ]
+        }
+        meta['flow_artifact_copy_error'] = (
+            'only 2 of 3 Flow artifact copy targets succeeded; '
+            'first_error=docker-12: container not running (restarting)'
+        )
+
+    fake_backend = SimpleNamespace(
+        _maybe_copy_flow_artifacts_into_containers=_copy,
+        _grpc_save_current_session_xml_with_config=lambda *_args, **_kwargs: str(session_xml),
+        _validate_session_nodes_and_injects=lambda **_kwargs: {
+            'ok': False,
+            'docker_start_pending': ['docker-12'],
+            'injects_missing': [],
+        },
+    )
+    args = SimpleNamespace(
+        xml=str(xml_path),
+        preview_plan=None,
+        scenario='Scenario One',
+    )
+    monkeypatch.setattr(cli, '_flow_state_from_xml', lambda *_args, **_kwargs: {'flow_enabled': True})
+    monkeypatch.setattr(cli, '_flow_state_requires_cli_execute_runtime', lambda _state: True)
+
+    stream = io.StringIO()
+    ok = cli._run_cli_post_execution_validation(
+        backend=fake_backend,
+        args=args,
+        core_cfg={'ssh_password': 'pw'},
+        session_id=7,
+        stream=stream,
+    )
+
+    out = stream.getvalue()
+    assert ok is True
+    assert 'WARNING: Docker containers still starting (1)' in out
+    assert 'WARNING: Flow artifact copy pending (1)' in out
+    assert 'ERROR: Flow artifact copy failed' not in out
+    summary = cli._extract_last_json_marker(out, 'VALIDATION_SUMMARY_JSON:')
+    assert summary is not None
+    assert summary.get('flow_artifact_copy_error') in (None, '')
+    assert summary.get('flow_artifact_copy_pending')
+
+
 def test_post_execution_validation_unavailable_emits_machine_summary():
     stream = io.StringIO()
 

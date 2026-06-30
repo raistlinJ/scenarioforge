@@ -31542,9 +31542,11 @@ def main():
                     before_id = str(before.get('id') or '').strip()
                     target_ok = True
                     if not bool(before.get('running')):
-                        attempt_errors.append(f'{t}: warning: container not running ({before.get("status") or "unknown"}), trying copy anyway')
+                        attempt_errors.append(f'{t}: container not running ({before.get("status") or "unknown"})')
                         if before_id:
                             attempt_ids.append(before_id)
+                        attempt_ok = False
+                        continue
 
                     for planned in copy_plan:
                         src_path = str(planned.get('src_path') or '')
@@ -38437,19 +38439,31 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
         )
 
         def _first_copy_failure_detail() -> str:
+            def _is_warning_detail(value: str) -> bool:
+                text = str(value or '').strip().lower()
+                return text.startswith('warning:') or ': warning:' in text
+
             if not isinstance(items, list):
                 return ''
+            warning_fallback = ''
             for it in items:
                 if not isinstance(it, dict) or it.get('ok'):
                     continue
                 direct = str(it.get('error') or '').strip()
                 if direct:
-                    return _summarize_for_log(direct)
+                    if _is_warning_detail(direct):
+                        warning_fallback = warning_fallback or direct
+                    else:
+                        return _summarize_for_log(direct)
                 errs = it.get('errors') if isinstance(it.get('errors'), list) else []
                 for raw in errs:
                     detail = str(raw or '').strip()
-                    if detail:
-                        return _summarize_for_log(detail)
+                    if not detail:
+                        continue
+                    if _is_warning_detail(detail):
+                        warning_fallback = warning_fallback or detail
+                        continue
+                    return _summarize_for_log(detail)
                 attempts = it.get('copy_attempts') if isinstance(it.get('copy_attempts'), list) else []
                 for attempt in reversed(attempts):
                     if not isinstance(attempt, dict) or attempt.get('ok'):
@@ -38457,8 +38471,12 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
                     attempt_errors = attempt.get('errors') if isinstance(attempt.get('errors'), list) else []
                     for raw in attempt_errors:
                         detail = str(raw or '').strip()
-                        if detail:
-                            return _summarize_for_log(detail)
+                        if not detail:
+                            continue
+                        if _is_warning_detail(detail):
+                            warning_fallback = warning_fallback or detail
+                            continue
+                        return _summarize_for_log(detail)
                 cmd_outs = it.get('command_outputs') if isinstance(it.get('command_outputs'), list) else []
                 for entry in reversed(cmd_outs):
                     if not isinstance(entry, dict):
@@ -38481,7 +38499,7 @@ def _maybe_copy_flow_artifacts_into_containers(meta: Dict[str, Any] | None, *, s
                         parts.append(out)
                     if parts:
                         return _summarize_for_log('; '.join(parts))
-            return ''
+            return _summarize_for_log(warning_fallback) if warning_fallback else ''
 
         _append_async_run_log_line(
             meta,

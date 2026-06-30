@@ -755,6 +755,48 @@ def test_maybe_copy_flow_artifacts_includes_first_copy_failure_detail(monkeypatc
     assert 'first_error=docker-2: source missing for /flow_injects/service' in error
 
 
+def test_maybe_copy_flow_artifacts_reports_non_warning_failure_detail(monkeypatch):
+    meta = {
+        'remote': True,
+        'core_cfg': {'ssh_password': 'pw'},
+        'flow_copy_required': True,
+    }
+
+    monkeypatch.setattr(backend, '_log_remote_vulns_inventory', lambda *a, **k: None)
+    monkeypatch.setattr(backend, '_append_async_run_log_line', lambda *a, **k: None)
+
+    def _fake_run_remote_python_json(_cfg, _script, logger=None, label='', timeout=0):
+        if str(label).startswith('docker.copy_flow_artifacts'):
+            return {
+                'ok': True,
+                'assignments_count': 1,
+                'candidate_count': 1,
+                'items': [
+                    {
+                        'node': 'docker-12',
+                        'ok': False,
+                        'errors': [
+                            'abcd1234: warning: container stopped during or after copy, verification may fail',
+                            'abcd1234: docker cp failed for /flow_injects/support_runbook.html via /flow_injects/support_runbook.html: container is restarting',
+                        ],
+                    }
+                ],
+            }
+        if str(label).startswith('docker.exec.verify_flow_artifacts'):
+            return {'ok': True, 'items': []}
+        if str(label).startswith('docker.exec.listener_snapshot'):
+            return {'ok': True, 'items': []}
+        raise AssertionError(label)
+
+    monkeypatch.setattr(backend, '_run_remote_python_json', _fake_run_remote_python_json)
+
+    backend._maybe_copy_flow_artifacts_into_containers(meta, stage='cli-postrun')
+
+    error = str(meta.get('flow_artifact_copy_error') or '')
+    assert 'first_error=abcd1234: docker cp failed for /flow_injects/support_runbook.html' in error
+    assert 'first_error=abcd1234: warning:' not in error
+
+
 def test_remote_flow_copy_ignores_original_compose_backups():
     script = backend._remote_copy_flow_artifacts_into_containers_script('pw')
 
