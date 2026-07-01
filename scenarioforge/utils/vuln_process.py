@@ -2007,18 +2007,41 @@ def _iter_bind_sources_from_service(svc: Dict[str, object]) -> List[str]:
 				if not src or os.path.isabs(src):
 					continue
 				results.append(src)
-	# env_file can be str or list
+	return results
+
+
+def _env_file_entry_path(entry: object) -> str:
+	if isinstance(entry, str):
+		return entry.strip()
+	if isinstance(entry, dict):
+		return str(entry.get('path') or entry.get('file') or '').strip()
+	return ''
+
+
+def _rewrite_env_file_entry_path(entry: object, path: str) -> object:
+	if isinstance(entry, str):
+		return path
+	if isinstance(entry, dict):
+		updated = dict(entry)
+		if 'file' in updated and 'path' not in updated:
+			updated['file'] = path
+		else:
+			updated['path'] = path
+		return updated
+	return entry
+
+
+def _iter_env_file_sources_from_service(svc: Dict[str, object]) -> List[str]:
+	"""Return relative env_file sources referenced by a compose service."""
+	results: List[str] = []
+	if not isinstance(svc, dict):
+		return results
 	env_file = svc.get('env_file')
-	if isinstance(env_file, str):
-		p = env_file.strip()
-		if p and not os.path.isabs(p):
-			results.append(p)
-	elif isinstance(env_file, list):
-		for p in env_file:
-			if isinstance(p, str):
-				ps = p.strip()
-				if ps and not os.path.isabs(ps):
-					results.append(ps)
+	env_entries = env_file if isinstance(env_file, list) else [env_file] if env_file is not None else []
+	for entry in env_entries:
+		path = _env_file_entry_path(entry)
+		if path and not os.path.isabs(path):
+			results.append(path)
 	return results
 
 
@@ -2052,6 +2075,64 @@ def _copy_path_replace_wrong_type(src_path: str, dst_path: str) -> None:
 		shutil.copy2(src_path, dst_path)
 
 
+def _compose_env_file_example_candidates(src_dir: str, rel_path: str) -> List[str]:
+	rel_norm = os.path.normpath(rel_path)
+	parent, filename = os.path.split(rel_norm)
+	if not filename:
+		return []
+	root, ext = os.path.splitext(filename)
+	names: List[str] = []
+	for suffix in ('.example', '.sample', '.dist', '.template', '.default'):
+		names.append(filename + suffix)
+	if ext:
+		for marker in ('example', 'sample', 'dist', 'template', 'default'):
+			names.append(f"{root}.{marker}{ext}")
+	if filename == '.env':
+		names.extend(['.env.example', '.env.sample', '.env.dist', '.env.template', 'env.example', 'env.sample'])
+	candidates: List[str] = []
+	seen: Set[str] = set()
+	for name in names:
+		if not name:
+			continue
+		candidate = os.path.normpath(os.path.join(src_dir, parent, name))
+		if candidate in seen:
+			continue
+		seen.add(candidate)
+		candidates.append(candidate)
+	return candidates
+
+
+def _materialize_missing_env_file(src_dir: str, rel_path: str, dst_path: str) -> bool:
+	"""Ensure a referenced env_file exists in the prepared compose project."""
+	try:
+		if os.path.isfile(dst_path):
+			return True
+		src_path = os.path.normpath(os.path.join(src_dir, rel_path))
+		if os.path.isfile(src_path):
+			_copy_path_replace_wrong_type(src_path, dst_path)
+			return True
+		for candidate in _compose_env_file_example_candidates(src_dir, rel_path):
+			if os.path.isfile(candidate):
+				_copy_path_replace_wrong_type(candidate, dst_path)
+				return True
+		if os.path.lexists(dst_path):
+			try:
+				if os.path.isdir(dst_path) and not os.path.islink(dst_path):
+					shutil.rmtree(dst_path, ignore_errors=True)
+				else:
+					os.remove(dst_path)
+			except Exception:
+				return False
+		parent = os.path.dirname(dst_path)
+		if parent:
+			os.makedirs(parent, exist_ok=True)
+		with open(dst_path, 'w', encoding='utf-8') as fh:
+			fh.write('')
+		return True
+	except Exception:
+		return False
+
+
 def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, base_dir: str) -> dict:
 	"""Copy referenced relative bind sources into base_dir and rewrite to absolute paths.
 
@@ -2063,8 +2144,10 @@ def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, ba
 		services = compose_obj.get('services')
 		if not isinstance(services, dict):
 			return compose_obj
+
 		# Gather all referenced relative paths that actually exist alongside the source compose.
 		seen: set[str] = set()
+		env_sources: set[str] = set()
 		for _svc_name, svc in services.items():
 			if not isinstance(svc, dict):
 				continue
@@ -2072,6 +2155,11 @@ def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, ba
 				candidate = os.path.normpath(os.path.join(src_dir, rel))
 				# Only treat as support file/dir if it exists next to the source compose.
 				if os.path.exists(candidate):
+					seen.add(rel)
+			for rel in _iter_env_file_sources_from_service(svc):
+				env_sources.add(rel)
+				candidate = os.path.normpath(os.path.join(src_dir, rel))
+				if os.path.isfile(candidate):
 					seen.add(rel)
 
 		# Copy support paths into base_dir, preserving relative structure.
@@ -2082,6 +2170,16 @@ def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, ba
 				_copy_path_replace_wrong_type(src_path, dst_path)
 			except Exception:
 				# Best-effort: continue even if some optional paths fail.
+				pass
+
+		# Compose treats missing env_file entries as fatal. Some upstream catalogs
+		# reference a local .env placeholder without shipping it, so materialize a
+		# harmless file in the prepared project instead of letting preflight fail.
+		for rel in sorted(env_sources):
+			dst_path = os.path.normpath(os.path.join(base_dir, rel))
+			try:
+				_materialize_missing_env_file(src_dir, rel, dst_path)
+			except Exception:
 				pass
 
 		# Rewrite bind sources to absolute paths rooted in base_dir.
@@ -2119,19 +2217,18 @@ def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, ba
 			env_file = svc.get('env_file')
 			if isinstance(env_file, str):
 				p = env_file.strip()
-				if p and (not os.path.isabs(p)) and os.path.exists(os.path.join(src_dir, p)):
+				if p and (not os.path.isabs(p)) and os.path.isfile(os.path.join(base_dir, p)):
 					svc['env_file'] = os.path.abspath(os.path.join(base_dir, p))
 			elif isinstance(env_file, list):
 				new_env: List[object] = []
 				changed = False
-				for p in env_file:
-					if isinstance(p, str):
-						ps = p.strip()
-						if ps and (not os.path.isabs(ps)) and os.path.exists(os.path.join(src_dir, ps)):
-							new_env.append(os.path.abspath(os.path.join(base_dir, ps)))
-							changed = True
-							continue
-					new_env.append(p)
+				for entry in env_file:
+					ps = _env_file_entry_path(entry)
+					if ps and (not os.path.isabs(ps)) and os.path.isfile(os.path.join(base_dir, ps)):
+						new_env.append(_rewrite_env_file_entry_path(entry, os.path.abspath(os.path.join(base_dir, ps))))
+						changed = True
+						continue
+					new_env.append(entry)
 				if changed:
 					svc['env_file'] = new_env
 		return compose_obj
@@ -2241,16 +2338,15 @@ def _rewrite_abs_paths_from_dir_to_dir(compose_obj: dict, from_dir: str, to_dir:
 			elif isinstance(env_file, list):
 				new_env: List[object] = []
 				changed = False
-				for p in env_file:
-					if isinstance(p, str):
-						ps = p.strip()
-						if ps and os.path.isabs(ps):
-							mapped = _map_path(ps)
-							if mapped != ps:
-								new_env.append(mapped)
-								changed = True
-								continue
-					new_env.append(p)
+				for entry in env_file:
+					ps = _env_file_entry_path(entry)
+					if ps and os.path.isabs(ps):
+						mapped = _map_path(ps)
+						if mapped != ps:
+							new_env.append(_rewrite_env_file_entry_path(entry, mapped))
+							changed = True
+							continue
+					new_env.append(entry)
 				if changed:
 					svc['env_file'] = new_env
 		return compose_obj

@@ -1147,6 +1147,51 @@ def test_prepare_compose_replaces_stale_directory_at_file_bind_paths(tmp_path):
     assert vol0.split(":", 1)[0] == str(node_dir / "config.yml")
 
 
+def test_prepare_compose_materializes_missing_env_file(tmp_path):
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    src_dir = tmp_path / "phpmailer-src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    compose_src = src_dir / "docker-compose.yml"
+    compose_src.write_text(
+        (
+            "services:\n"
+            "  web:\n"
+            "    image: alpine:3.19\n"
+            "    command: ['sh','-lc','sleep 60']\n"
+            "    env_file:\n"
+            "      - .env\n"
+        ),
+        encoding="utf-8",
+    )
+
+    out_base = tmp_path / "out"
+    record = {"Type": "docker-compose", "Name": "phpmailer/CVE-2017-5223", "Path": str(compose_src)}
+    created = prepare_compose_for_assignments({"docker-7": record}, out_base=str(out_base))
+
+    out_path = out_base / "docker-compose-docker-7.yml"
+    assert str(out_path) in created
+    obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    services = (obj or {}).get("services") or {}
+    assert "web" in services
+    assert "docker-7" in services
+    env_paths = []
+    for svc in services.values():
+        env_files = svc.get("env_file") or []
+        assert isinstance(env_files, list)
+        env_paths.append(str(env_files[0]))
+
+    for env_path in env_paths:
+        assert os.path.isabs(env_path)
+        assert env_path.startswith(str(out_base))
+        assert os.path.isfile(env_path)
+        assert open(env_path, encoding="utf-8").read() == ""
+    assert not (src_dir / ".env").exists()
+
+
 def test_prepare_compose_prefers_local_path_over_cached(tmp_path):
     # Two different local compose sources but same Name (so same safe base_dir).
     src1 = tmp_path / "run1"
