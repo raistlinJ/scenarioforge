@@ -173,6 +173,50 @@ def test_preflight_fails_before_docker_for_wrong_type_file_bind(tmp_path, monkey
         topology._docker_compose_preflight(str(compose_path), node_name="docker-8")
 
 
+def test_bind_source_preflight_accepts_directory_target_with_trailing_slash(tmp_path):
+    compose_dir = tmp_path / ".compose-projects" / "docker-8"
+    bind_source = compose_dir / "database"
+    bind_source.mkdir(parents=True)
+    compose_path = compose_dir / "docker-compose.yml"
+    compose_path.write_text(
+        "\n".join(
+            [
+                "services:",
+                "  mysql:",
+                "    image: mysql:8",
+                "    volumes:",
+                "      - ./database:/docker-entrypoint-initdb.d/",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert topology._compose_bind_source_preflight_issues(str(compose_path)) == []
+
+
+def test_bind_source_preflight_treats_dot_d_target_as_directory(tmp_path):
+    compose_dir = tmp_path / ".compose-projects" / "docker-8"
+    bind_source = compose_dir / "database"
+    bind_source.mkdir(parents=True)
+    compose_path = compose_dir / "docker-compose.yml"
+    compose_path.write_text(
+        "\n".join(
+            [
+                "services:",
+                "  mysql:",
+                "    image: mysql:8",
+                "    volumes:",
+                "      - ./database:/docker-entrypoint-initdb.d",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert topology._compose_bind_source_preflight_issues(str(compose_path)) == []
+
+
 def test_remote_docker_cleanup_prunes_unused_volumes():
     import inspect
     from webapp import app_backend as backend

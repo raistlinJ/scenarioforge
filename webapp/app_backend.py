@@ -30835,7 +30835,7 @@ def _remote_copy_flow_artifacts_into_containers_script(sudo_password: str | None
     sudo_password_literal = json.dumps(str(sudo_password) if sudo_password else "")
     return (
         r"""
-import json, os, re, shlex, subprocess, time
+import json, os, re, shlex, shutil, subprocess, tempfile, time
 
 SUDO_PASSWORD = __SUDO_PASSWORD_LITERAL__
 
@@ -31243,6 +31243,32 @@ def _container_path_exists(target: str, path: str):
     return bool(ok), str(getattr(p, 'stdout', '') or '').strip()
 
 
+def _docker_cp_file_parent_tree(target: str, src_path: str, dest_path: str):
+    dest = '/' + str(dest_path or '').replace('\\', '/').lstrip('/')
+    parts = [p for p in dest.split('/') if p]
+    if len(parts) < 2:
+        return _run_docker(['cp', src_path, f"{target}:{dest}"], timeout=60, capture=True)
+    tmp_dir = tempfile.mkdtemp(prefix='coretg-flow-cp-')
+    try:
+        local_dest = os.path.join(tmp_dir, *parts)
+        parent = os.path.dirname(local_dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copy2(src_path, local_dest)
+        top_src = os.path.join(tmp_dir, parts[0])
+        return _run_docker(['cp', top_src, f"{target}:/"], timeout=60, capture=True)
+    except Exception as e:
+        class _P:
+            returncode = 1
+            stdout = str(e)
+        return _P()
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def _resolve_relative_inject_source(source_dir: str, rel_path: str):
     source_dir = _normalize_remote_flow_path(str(source_dir or '').strip())
     rel = str(rel_path or '').replace('\\', '/').strip().lstrip('/')
@@ -31584,10 +31610,14 @@ def main():
                         mkdir_cmd = f"mkdir -p {shlex.quote(mkdir_path)}"
                         commands.append(f"docker exec {t} sh -lc {mkdir_cmd}")
                         mkdir_result = _docker_exec_sh(t, mkdir_cmd, timeout=30)
+                        mkdir_failed = False
                         if getattr(mkdir_result, 'returncode', 1) != 0:
                             out = str(getattr(mkdir_result, 'stdout', '') or '').strip()
                             if 'is restarting' in out or 'is not running' in out:
                                 attempt_errors.append(f'{t}: warning: mkdir failed for {dest_path} (container state), trying cp anyway')
+                            elif not src_is_dir:
+                                mkdir_failed = True
+                                attempt_errors.append(f'{t}: warning: mkdir failed for {dest_path}, trying docker cp parent-tree fallback if needed: {out}')
                             else:
                                 target_ok = False
                                 attempt_errors.append(f'{t}: mkdir failed for {dest_path}: {out}')
@@ -31608,10 +31638,37 @@ def main():
                             'src_is_dir': bool(src_is_dir),
                         })
                         if getattr(p, 'returncode', 1) != 0:
-                            target_ok = False
-                            attempt_errors.append(
-                                f'{t}: docker cp failed for {dest_path} via {copy_dest}: {out or "unknown error"}'
-                            )
+                            lower_out = str(out or '').lower()
+                            if (not src_is_dir) and (
+                                mkdir_failed
+                                or 'could not find the file' in lower_out
+                                or 'no such file or directory' in lower_out
+                                or 'not found' in lower_out
+                            ):
+                                commands.append(f"docker cp <parent-tree for {dest_path}> {t}:/")
+                                fallback = _docker_cp_file_parent_tree(t, src_path, dest_path)
+                                fallback_out = (getattr(fallback, 'stdout', '') or '').strip()
+                                fallback_rc = int(getattr(fallback, 'returncode', 1) or 0)
+                                command_outputs.append({
+                                    'attempt': attempt,
+                                    'target': t,
+                                    'container_id': before_id,
+                                    'rc': fallback_rc,
+                                    'out': fallback_out,
+                                    'src': src_path,
+                                    'dest': dest_path,
+                                    'copy_dest': f'{t}:/',
+                                    'src_is_dir': bool(src_is_dir),
+                                    'fallback': 'parent_tree',
+                                })
+                                if getattr(fallback, 'returncode', 1) == 0:
+                                    p = fallback
+                                    out = fallback_out
+                            if getattr(p, 'returncode', 1) != 0:
+                                target_ok = False
+                                attempt_errors.append(
+                                    f'{t}: docker cp failed for {dest_path} via {copy_dest}: {out or "unknown error"}'
+                                )
 
                     if before_id and COPY_SETTLE_S > 0:
                         time.sleep(COPY_SETTLE_S)
