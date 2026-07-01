@@ -219,6 +219,85 @@ def test_remote_copy_flow_artifacts_script_waits_for_node_alias_before_fallback(
     assert 'abcdef123456:/flow_injects' not in cp_calls[0][-1]
 
 
+def test_remote_copy_flow_artifacts_file_copy_falls_back_when_parent_dir_missing(tmp_path, monkeypatch):
+    base_dir = tmp_path / 'remote-base'
+    assign_dir = base_dir / 'vulns'
+    assign_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / 'flag_node_generators_runs' / 'flow-scenario1' / '03_backup_docker-1'
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / 'backup_index.html').write_text('<html>backup</html>', encoding='utf-8')
+
+    compose_path = assign_dir / 'docker-compose-docker-1.yml'
+    compose_path.write_text('services:\n  docker-1:\n    image: demo\n', encoding='utf-8')
+
+    assignments_path = assign_dir / 'compose_assignments.json'
+    assignments_path.write_text(
+        json.dumps(
+            {
+                'assignments': {
+                    'docker-1': {
+                        'InjectFiles': ['backup_index.html -> /flow_injects'],
+                        'InjectSourceDir': str(source_dir),
+                    }
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        cmd_list = [str(part) for part in cmd]
+        docker_idx = cmd_list.index('docker')
+        docker_cmd = cmd_list[docker_idx + 1:]
+
+        if docker_cmd[:3] == ['ps', '-a', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='docker-1\n')
+        if docker_cmd[:2] == ['inspect', '--format']:
+            return subprocess.CompletedProcess(cmd_list, 0, stdout='cid123|true|running\n')
+        if docker_cmd[:2] == ['exec', 'docker-1']:
+            calls.append(docker_cmd)
+            joined = ' '.join(docker_cmd)
+            if 'test -e /flow_injects/backup_index.html' in joined:
+                return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+            return subprocess.CompletedProcess(cmd_list, 1, stdout='exec: "sh": executable file not found')
+        if docker_cmd[:1] == ['cp']:
+            calls.append(docker_cmd)
+            dest = docker_cmd[-1]
+            if dest == 'docker-1:/flow_injects/backup_index.html':
+                return subprocess.CompletedProcess(
+                    cmd_list,
+                    1,
+                    stdout='Error response from daemon: Could not find the file /flow_injects in container cid123',
+                )
+            if dest == 'docker-1:/':
+                copied_root = Path(docker_cmd[-2])
+                assert copied_root.name == 'flow_injects'
+                assert (copied_root / 'backup_index.html').is_file()
+                return subprocess.CompletedProcess(cmd_list, 0, stdout='')
+        raise AssertionError(docker_cmd)
+
+    monkeypatch.setenv('CORE_REMOTE_BASE_DIR', str(base_dir))
+    monkeypatch.setenv('CORETG_FLOW_COPY_SETTLE_S', '0')
+    monkeypatch.setattr(subprocess, 'run', _fake_subprocess_run)
+
+    script = backend._remote_copy_flow_artifacts_into_containers_script(sudo_password='pw')
+    ns = {'__name__': '__main__'}
+    out = io.StringIO()
+    with redirect_stdout(out):
+        exec(script, ns, ns)
+    payload = json.loads(out.getvalue().strip())
+
+    assert payload.get('ok') is True
+    item = payload.get('items', [{}])[0]
+    assert item.get('ok') is True
+    assert any(call[:1] == ['cp'] and call[-1] == 'docker-1:/' for call in calls)
+    outputs = item.get('command_outputs') or []
+    assert any(output.get('fallback') == 'parent_tree' and output.get('rc') == 0 for output in outputs)
+
+
 def test_remote_copy_flow_artifacts_retries_when_container_is_replaced(tmp_path, monkeypatch):
     base_dir = tmp_path / 'remote-base'
     assign_dir = base_dir / 'vulns'

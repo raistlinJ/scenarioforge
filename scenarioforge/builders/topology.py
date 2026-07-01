@@ -163,7 +163,10 @@ def _compose_short_source_is_host_path(source: str) -> bool:
 
 
 def _compose_path_is_fileish(path_value: object) -> bool:
-    text = str(path_value or '').strip().rstrip('/')
+    raw = str(path_value or '').strip()
+    if not raw or raw.endswith(('/', '\\')):
+        return False
+    text = raw.rstrip('/\\')
     if not text:
         return False
     base = os.path.basename(text)
@@ -171,6 +174,8 @@ def _compose_path_is_fileish(path_value: object) -> bool:
         return False
     if base in {'Dockerfile', 'Containerfile'}:
         return True
+    if base.endswith('.d'):
+        return False
     return '.' in base
 
 
