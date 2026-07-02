@@ -86,8 +86,20 @@ def register(
             message = 'Vulnerability catalog pack installed.'
             if bundle_count > 0:
                 message = f'Installed {bundle_count} vulnerability catalog pack(s) from bundle.'
+            missing_required_file_count = 0
+            try:
+                missing_required_file_count = int(entry.get('missing_required_file_count') or 0) if isinstance(entry, dict) else 0
+            except Exception:
+                missing_required_file_count = 0
+            if missing_required_file_count > 0:
+                message = f'{message} Missing {missing_required_file_count} compose support file(s).'
             if is_ajax:
-                return jsonify({'ok': True, 'message': message, 'catalog_id': str(entry.get('id') or '')})
+                return jsonify({
+                    'ok': True,
+                    'message': message,
+                    'catalog_id': str(entry.get('id') or ''),
+                    'missing_required_file_count': missing_required_file_count,
+                })
             flash(message)
         except Exception as exc:
             try:

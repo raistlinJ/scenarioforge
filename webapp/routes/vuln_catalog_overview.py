@@ -12,6 +12,8 @@ def register(
     *,
     require_builder_or_admin: Callable[[], None],
     load_vuln_catalogs_state: Callable[[], dict],
+    write_vuln_catalogs_state: Callable[[dict], None],
+    write_vuln_catalog_csv_from_items: Callable[..., list[str]],
     get_active_vuln_catalog_entry: Callable[[dict], dict | None],
     normalize_vuln_catalog_items: Callable[[dict], list[dict[str, Any]]],
     vuln_catalog_pack_content_dir: Callable[[str], str],
@@ -48,6 +50,100 @@ def register(
             active_page='vuln_catalog',
         )
 
+    def _missing_dependency_paths_from_required(required_files: object) -> list[str]:
+        missing: list[str] = []
+        if not isinstance(required_files, list):
+            return missing
+        for entry in required_files:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get('required') is False or entry.get('exists') is not False:
+                continue
+            path = str(entry.get('path') or '').strip()
+            if path:
+                missing.append(path)
+        return sorted(dict.fromkeys(missing))
+
+    def _scan_vuln_item_dependency_metadata(*, base_dir: str, item: dict[str, Any]) -> dict[str, object]:
+        try:
+            from scenarioforge.compose_dependencies import scan_compose_dependencies
+        except Exception as exc:
+            return {
+                'required_files': [],
+                'missing_required_files': [],
+                'compose_dependency_warning': f'Dependency scan unavailable: {exc}',
+            }
+        compose_rel = str(item.get('compose_rel') or '').strip()
+        if not compose_rel:
+            return {
+                'required_files': [],
+                'missing_required_files': [],
+                'compose_dependency_warning': 'Compose path is missing.',
+            }
+        try:
+            compose_path = safe_path_under(base_dir, compose_rel)
+        except Exception as exc:
+            return {
+                'required_files': [],
+                'missing_required_files': [],
+                'compose_dependency_warning': f'Compose path could not be resolved: {exc}',
+            }
+        if not compose_path or not os_module.path.isfile(compose_path):
+            return {
+                'required_files': [],
+                'missing_required_files': [],
+                'compose_dependency_warning': 'Compose file is missing.',
+            }
+        try:
+            summary = scan_compose_dependencies(compose_path)
+        except Exception as exc:
+            return {
+                'required_files': [],
+                'missing_required_files': [],
+                'compose_dependency_warning': f'Compose dependency scan failed: {exc}',
+            }
+        required_files = summary.get('requires') if isinstance(summary, dict) and isinstance(summary.get('requires'), list) else []
+        return {
+            'required_files': required_files,
+            'missing_required_files': _missing_dependency_paths_from_required(required_files),
+            'compose_dependency_warning': str(summary.get('warning') or '').strip() if isinstance(summary, dict) else '',
+        }
+
+    def _recheck_active_vuln_dependency_cache() -> dict[str, int | str]:
+        state = load_vuln_catalogs_state()
+        entry = get_active_vuln_catalog_entry(state)
+        if not entry:
+            return {'checked': 0, 'missing': 0, 'catalog_id': ''}
+        cid = str(entry.get('id') or '').strip()
+        catalogs = [catalog for catalog in (state.get('catalogs') or []) if isinstance(catalog, dict)]
+        base_dir = vuln_catalog_pack_content_dir(cid)
+        checked = 0
+        missing_count = 0
+        for catalog in catalogs:
+            if str(catalog.get('id') or '').strip() != cid:
+                continue
+            items = normalize_vuln_catalog_items(catalog)
+            for item in items:
+                metadata = _scan_vuln_item_dependency_metadata(base_dir=base_dir, item=item)
+                item['required_files'] = metadata.get('required_files') if isinstance(metadata.get('required_files'), list) else []
+                item['missing_required_files'] = metadata.get('missing_required_files') if isinstance(metadata.get('missing_required_files'), list) else []
+                item['compose_dependency_warning'] = str(metadata.get('compose_dependency_warning') or '').strip()
+                if item['missing_required_files']:
+                    item['disabled'] = True
+                    item['disabled_due_to_missing_files'] = True
+                elif item.get('disabled_due_to_missing_files') is True:
+                    item['disabled'] = False
+                    item['disabled_due_to_missing_files'] = False
+                checked += 1
+                missing_count += len(item.get('missing_required_files') or [])
+            catalog['compose_items'] = items
+            catalog['missing_required_file_count'] = missing_count
+            catalog['csv_paths'] = write_vuln_catalog_csv_from_items(catalog_id=cid, items=items)
+            state['catalogs'] = catalogs
+            write_vuln_catalogs_state(state)
+            break
+        return {'checked': checked, 'missing': missing_count, 'catalog_id': cid}
+
     @app.route('/vuln_catalog_items_data')
     def vuln_catalog_items_data():
         require_builder_or_admin()
@@ -73,6 +169,9 @@ def register(
         out_items: list[dict[str, Any]] = []
         for item in items:
             readme_url = ''
+            required_files = item.get('required_files') if isinstance(item.get('required_files'), list) else []
+            missing_required_files = item.get('missing_required_files') if isinstance(item.get('missing_required_files'), list) else []
+            compose_dependency_warning = str(item.get('compose_dependency_warning') or '').strip()
             try:
                 rel_dir = str(item.get('dir_rel') or item.get('rel_dir') or '').strip().replace('\\', '/')
                 abs_dir = safe_path_under(base_dir, rel_dir)
@@ -118,11 +217,16 @@ def register(
                 'type': 'docker-compose',
                 'from_source': from_source,
                 'disabled': bool(item.get('disabled', False)),
+                'disabled_due_to_missing_files': bool(item.get('disabled_due_to_missing_files') is True),
                 'readme_url': readme_url,
                 'validated_ok': bool(item.get('validated_ok')) if item.get('validated_ok') is not None else None,
                 'validated_incomplete': bool(item.get('validated_incomplete') is True),
                 'validated_at': str(item.get('validated_at') or '').strip() or None,
                 'log_download_url': log_download_url or None,
+                'required_files': required_files,
+                'missing_required_files': missing_required_files,
+                'missing_required_file_count': len(missing_required_files),
+                'compose_dependency_warning': compose_dependency_warning or None,
                 'eligible_for_selection': bool(item.get('validated_ok') is True and item.get('validated_incomplete') is not True and not bool(item.get('disabled', False))),
             })
         return jsonify({
@@ -133,6 +237,17 @@ def register(
                 'from_source': from_source,
             },
             'items': out_items,
+        })
+
+    @app.route('/vuln_catalog_items/recheck_dependencies', methods=['POST'])
+    def vuln_catalog_items_recheck_dependencies():
+        require_builder_or_admin()
+        stats = _recheck_active_vuln_dependency_cache()
+        return jsonify({
+            'ok': True,
+            'catalog_id': stats.get('catalog_id') or '',
+            'checked_count': stats.get('checked', 0),
+            'missing_required_file_count': stats.get('missing', 0),
         })
 
     @app.route('/vuln_catalog_items/test/log')

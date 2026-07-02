@@ -31,14 +31,16 @@ def register(
         ids = list(dict.fromkeys(ids))
         if not ids:
             return jsonify({'ok': False, 'error': 'No generator ids provided'}), 400
-        if action not in {'disable', 'delete', 'override_success', 'override_fail'}:
+        if action not in {'enable', 'disable', 'delete', 'override_success', 'override_fail'}:
             return jsonify({'ok': False, 'error': f'Unsupported action: {action}'}), 400
 
         updated: list[str] = []
         errors: list[dict[str, str]] = []
         for gid in ids:
             try:
-                if action == 'disable':
+                if action == 'enable':
+                    ok, note = set_generator_disabled_state(kind=kind, generator_id=gid, disabled=False)
+                elif action == 'disable':
                     ok, note = set_generator_disabled_state(kind=kind, generator_id=gid, disabled=True)
                 elif action == 'delete':
                     ok, note = delete_installed_generator(kind=kind, generator_id=gid)

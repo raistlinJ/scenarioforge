@@ -119,11 +119,15 @@
                 <div class="col-md-6">
                   <input id="genFilter" class="form-control" placeholder="Filter generators…" />
                 </div>
+                <div class="col-md-6 d-flex justify-content-md-end">
+                  <button class="btn btn-sm btn-outline-secondary" type="button" id="genDependencyRecheckBtn">Recheck Files</button>
+                </div>
               </div>
               <div class="small text-muted mt-2" id="genMeta"></div>
               <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
                 <div class="small text-muted" id="genSelectionMeta">0 selected.</div>
                 <div class="btn-group btn-group-sm" role="group" aria-label="Selected generator actions">
+                  <button class="btn btn-outline-success" type="button" id="genBatchEnableBtn" disabled>Enable</button>
                   <button class="btn btn-outline-warning" type="button" id="genBatchDisableBtn" disabled>Disable</button>
                   <button class="btn btn-outline-danger" type="button" id="genBatchDeleteBtn" disabled>Delete</button>
                   <button class="btn btn-outline-success" type="button" id="genBatchOverrideSuccessBtn" disabled>Override Success</button>
@@ -167,11 +171,15 @@
                 <div class="col-md-6">
                   <input id="nodeGenFilter" class="form-control" placeholder="Filter node-generators…" />
                 </div>
+                <div class="col-md-6 d-flex justify-content-md-end">
+                  <button class="btn btn-sm btn-outline-secondary" type="button" id="nodeGenDependencyRecheckBtn">Recheck Files</button>
+                </div>
               </div>
               <div class="small text-muted mt-2" id="nodeGenMeta"></div>
               <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
                 <div class="small text-muted" id="nodeGenSelectionMeta">0 selected.</div>
                 <div class="btn-group btn-group-sm" role="group" aria-label="Selected node-generator actions">
+                  <button class="btn btn-outline-success" type="button" id="nodeGenBatchEnableBtn" disabled>Enable</button>
                   <button class="btn btn-outline-warning" type="button" id="nodeGenBatchDisableBtn" disabled>Disable</button>
                   <button class="btn btn-outline-danger" type="button" id="nodeGenBatchDeleteBtn" disabled>Delete</button>
                   <button class="btn btn-outline-success" type="button" id="nodeGenBatchOverrideSuccessBtn" disabled>Override Success</button>
@@ -1220,6 +1228,99 @@
     return out.length ? out.join(', ') : '—';
   }
 
+  function dependencyEntrySearchText(entry) {
+    if (!entry || typeof entry !== 'object') return String(entry || '');
+    const parts = [];
+    ['path', 'rel_path', 'kind', 'service', 'source'].forEach((key) => {
+      const value = String(entry[key] || '').trim();
+      if (value) parts.push(value);
+    });
+    parts.push(entry.required === false ? 'optional' : 'required');
+    if (entry.exists === false) parts.push('missing');
+    if (entry.exists === true) parts.push('present');
+    return parts.join(' ');
+  }
+
+  function composeDependencySearchText(item) {
+    if (!item || typeof item !== 'object') return '';
+    const missing = Array.isArray(item.missing_required_files)
+      ? item.missing_required_files.map((p) => String(p || '').trim()).filter(Boolean)
+      : [];
+    const required = Array.isArray(item.required_files)
+      ? item.required_files.map(dependencyEntrySearchText).filter(Boolean)
+      : [];
+    const status = missing.length
+      ? 'missing missing-files has:missing needs-files compose-support-missing'
+      : 'complete has:all-files no-missing';
+    return [
+      status,
+      missing.join(' '),
+      required.join(' '),
+      item.compose_dependency_warning || '',
+    ].join(' ');
+  }
+
+  function groupedNameSearchText(items) {
+    const arr = Array.isArray(items) ? items : [];
+    const req = [];
+    const opt = [];
+    arr.forEach((x) => {
+      if (!x || typeof x !== 'object') return;
+      const nm = String(x.name || x.artifact || '').trim();
+      if (!nm) return;
+      if (x.required === false) opt.push(nm);
+      else req.push(nm);
+    });
+    return [
+      req.length ? `Required ${req.join(' ')}` : '',
+      opt.length ? `Optional ${opt.join(' ')}` : '',
+      nameSummary(items),
+      typeSummary(items),
+    ].join(' ');
+  }
+
+  function generatorTableSearchText(g) {
+    if (!g || typeof g !== 'object') return '';
+    const src = (g.source && g.source.path) ? g.source.path : '';
+    const entry = (g.source && g.source.entry) ? g.source.entry : '';
+    const composeFile = (g.compose && typeof g.compose === 'object' && typeof g.compose.file === 'string') ? g.compose.file : '';
+    const composeService = (g.compose && typeof g.compose === 'object' && typeof g.compose.service === 'string') ? g.compose.service : '';
+    const missing = Array.isArray(g.missing_required_files)
+      ? g.missing_required_files.map((p) => String(p || '').trim()).filter(Boolean)
+      : [];
+    const isDisabled = !!(g && typeof g === 'object' && g._disabled);
+    const isDuplicateConflict = !!(g && typeof g === 'object' && g._duplicate_conflict);
+    const validation = g.validated_incomplete === true
+      ? 'Incomplete'
+      : (g.validated_ok === true ? 'Validated' : (g.validated_ok === false ? 'Failed' : '—'));
+    const actionText = isDuplicateConflict
+      ? 'Uninstall Pack'
+      : ['Test', isDisabled ? 'Enable' : 'Disable', 'Delete'].join(' ');
+    return [
+      g.id,
+      g.name,
+      isDisabled ? 'Disabled' : 'Enabled',
+      isDuplicateConflict ? 'Duplicate ID' : '',
+      missing.length ? 'Missing Files' : '',
+      missing.length ? `Missing compose support file${missing.length === 1 ? '' : 's'} ${missing.join(' ')}` : '',
+      g.description || '',
+      g.language || '',
+      groupedNameSearchText(g.inputs),
+      groupedNameSearchText(g.outputs),
+      injectedSummary(g.inject_files),
+      validation,
+      g.log_download_url ? 'Log' : '',
+      g.validated_at || '',
+      g._source_name || '',
+      actionText,
+      src,
+      entry,
+      composeFile,
+      composeService,
+      composeDependencySearchText(g),
+    ].join(' ');
+  }
+
   function renderGenerators() {
     const body = document.getElementById('genBody');
     const q = (genState.filter || '').toLowerCase();
@@ -1227,26 +1328,7 @@
 
     let filtered = (genState.generators || []).filter((g) => {
       if (!q) return true;
-      const src = (g.source && g.source.path) ? g.source.path : '';
-      const entry = (g.source && g.source.entry) ? g.source.entry : '';
-      const composeFile = (g.compose && typeof g.compose === 'object' && typeof g.compose.file === 'string') ? g.compose.file : '';
-      const composeService = (g.compose && typeof g.compose === 'object' && typeof g.compose.service === 'string') ? g.compose.service : '';
-      const hay = [
-        g.id,
-        g.name,
-        g.language,
-        src,
-        entry,
-        composeFile,
-        composeService,
-        nameSummary(g.inputs),
-        nameSummary(g.outputs),
-        typeSummary(g.inputs),
-        typeSummary(g.outputs),
-        g.description || '',
-        g._source_name || '',
-      ].join(' ').toLowerCase();
-      return hay.includes(q);
+      return generatorTableSearchText(g).toLowerCase().includes(q);
     });
 
     const sortKey = genState.sortKey || 'name';
@@ -1282,6 +1364,12 @@
       const packLabel = String((g && g._pack_label) || '').trim();
       const rowSelectable = isInstalled && !isDuplicateConflict;
       const rowSelected = !!(genState.selectedIds && genState.selectedIds.has(String(g.id || '')));
+      const missingRequiredFiles = Array.isArray(g.missing_required_files)
+        ? g.missing_required_files.map((p) => String(p || '').trim()).filter(Boolean)
+        : [];
+      const missingRequiredHtml = missingRequiredFiles.length
+        ? `<div class="small text-warning-emphasis mt-1">Missing compose support file${missingRequiredFiles.length === 1 ? '' : 's'}: ${escapeHtml(missingRequiredFiles.slice(0, 3).join(', '))}${missingRequiredFiles.length > 3 ? `, +${missingRequiredFiles.length - 3} more` : ''}</div>`
+        : '';
       const logLink = g.log_download_url ? `<a class="btn btn-link btn-sm p-0 ms-2 align-baseline" href="${escapeHtml(g.log_download_url)}">Log</a>` : '';
       const validatedHtml = g.validated_incomplete === true
         ? `<span class="badge text-bg-secondary">Incomplete</span>${logLink}${g.validated_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(g.validated_at)}</div>` : ''}`
@@ -1297,6 +1385,9 @@
       if (isDuplicateConflict) {
         tr.classList.add('table-warning');
       }
+      if (missingRequiredFiles.length) {
+        tr.classList.add('table-warning');
+      }
 
       const typeLabel = String(g.language || '');
       tr.innerHTML = `
@@ -1307,8 +1398,10 @@
             <strong>${escapeHtml(g.name || '')}</strong>
             ${isDisabled ? `<span class="badge bg-warning text-dark ms-2">Disabled</span>` : ''}
             ${isDuplicateConflict ? `<span class="badge bg-danger ms-2">Duplicate ID</span>` : ''}
+            ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
           </div>
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
+          ${missingRequiredHtml}
           ${isDuplicateConflict ? `<div class="small text-danger">${escapeHtml(String(g._duplicate_conflict_note || 'This installed generator conflicts with another installed generator id. Remove one of the packs to resolve it.'))}</div>` : ''}
         </td>
         <td class="small">${escapeHtml(typeLabel)}</td>
@@ -1340,7 +1433,7 @@
           metaId: 'genSelectionMeta',
           checkAllId: 'genCheckAll',
           rowSelector: '#genBody',
-          buttonIds: ['genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
+          buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
         });
       });
 
@@ -1406,7 +1499,7 @@
       metaId: 'genSelectionMeta',
       checkAllId: 'genCheckAll',
       rowSelector: '#genBody',
-      buttonIds: ['genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
+      buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
     });
   }
 
@@ -1417,26 +1510,7 @@
 
     let filtered = (nodeGenState.generators || []).filter((g) => {
       if (!q) return true;
-      const src = (g.source && g.source.path) ? g.source.path : '';
-      const entry = (g.source && g.source.entry) ? g.source.entry : '';
-      const composeFile = (g.compose && typeof g.compose === 'object' && typeof g.compose.file === 'string') ? g.compose.file : '';
-      const composeService = (g.compose && typeof g.compose === 'object' && typeof g.compose.service === 'string') ? g.compose.service : '';
-      const hay = [
-        g.id,
-        g.name,
-        g.language,
-        src,
-        entry,
-        composeFile,
-        composeService,
-        nameSummary(g.inputs),
-        nameSummary(g.outputs),
-        typeSummary(g.inputs),
-        typeSummary(g.outputs),
-        g.description || '',
-        g._source_name || '',
-      ].join(' ').toLowerCase();
-      return hay.includes(q);
+      return generatorTableSearchText(g).toLowerCase().includes(q);
     });
 
     const sortKey = nodeGenState.sortKey || 'name';
@@ -1472,6 +1546,12 @@
       const packLabel = String((g && g._pack_label) || '').trim();
       const rowSelectable = isInstalled && !isDuplicateConflict;
       const rowSelected = !!(nodeGenState.selectedIds && nodeGenState.selectedIds.has(String(g.id || '')));
+      const missingRequiredFiles = Array.isArray(g.missing_required_files)
+        ? g.missing_required_files.map((p) => String(p || '').trim()).filter(Boolean)
+        : [];
+      const missingRequiredHtml = missingRequiredFiles.length
+        ? `<div class="small text-warning-emphasis mt-1">Missing compose support file${missingRequiredFiles.length === 1 ? '' : 's'}: ${escapeHtml(missingRequiredFiles.slice(0, 3).join(', '))}${missingRequiredFiles.length > 3 ? `, +${missingRequiredFiles.length - 3} more` : ''}</div>`
+        : '';
       const logLink = g.log_download_url ? `<a class="btn btn-link btn-sm p-0 ms-2 align-baseline" href="${escapeHtml(g.log_download_url)}">Log</a>` : '';
       const validatedHtml = g.validated_incomplete === true
         ? `<span class="badge text-bg-secondary">Incomplete</span>${logLink}${g.validated_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(g.validated_at)}</div>` : ''}`
@@ -1487,6 +1567,9 @@
       if (isDuplicateConflict) {
         tr.classList.add('table-warning');
       }
+      if (missingRequiredFiles.length) {
+        tr.classList.add('table-warning');
+      }
 
       const typeLabel = String(g.language || '');
       tr.innerHTML = `
@@ -1497,8 +1580,10 @@
             <strong>${escapeHtml(g.name || '')}</strong>
             ${isDisabled ? `<span class="badge bg-warning text-dark ms-2">Disabled</span>` : ''}
             ${isDuplicateConflict ? `<span class="badge bg-danger ms-2">Duplicate ID</span>` : ''}
+            ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
           </div>
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
+          ${missingRequiredHtml}
           ${isDuplicateConflict ? `<div class="small text-danger">${escapeHtml(String(g._duplicate_conflict_note || 'This installed node-generator conflicts with another installed node-generator id. Remove one of the packs to resolve it.'))}</div>` : ''}
         </td>
         <td class="small">${escapeHtml(typeLabel)}</td>
@@ -1530,7 +1615,7 @@
           metaId: 'nodeGenSelectionMeta',
           checkAllId: 'nodeGenCheckAll',
           rowSelector: '#nodeGenBody',
-          buttonIds: ['nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
+          buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
         });
       });
 
@@ -1596,7 +1681,7 @@
       metaId: 'nodeGenSelectionMeta',
       checkAllId: 'nodeGenCheckAll',
       rowSelector: '#nodeGenBody',
-      buttonIds: ['nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
+      buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
     });
   }
 
@@ -2437,7 +2522,13 @@
       if (filters.scope === 'unvalidated' && !(item.validated_ok == null || item.validated_incomplete === true)) return false;
       if (!filters.query) return true;
       const needle = filters.query.toLowerCase();
-      return [item.id, item.name, item.from_source, item._source_path].some((value) => String(value || '').toLowerCase().includes(needle));
+      return [
+        item.id,
+        item.name,
+        item.from_source,
+        item._source_path,
+        composeDependencySearchText(item),
+      ].some((value) => String(value || '').toLowerCase().includes(needle));
     });
     if (filters.limit != null) {
       selected = selected.slice(0, filters.limit);
@@ -3029,30 +3120,60 @@
     }
   }
 
-  async function loadGenerators() {
+  async function loadGenerators(opts = {}) {
     const metaEl = document.getElementById('genMeta');
-    metaEl.textContent = 'Loading…';
+    const recheckDependencies = !!(opts && opts.recheckDependencies);
+    const recheckBtn = document.getElementById('genDependencyRecheckBtn');
+    metaEl.textContent = recheckDependencies ? 'Rechecking files…' : 'Loading…';
+    if (recheckBtn) recheckBtn.disabled = true;
     setGenLog([]);
-    const data = await fetchJson('/flag_generators_data');
-    if (data && data.ok === false) {
-      metaEl.textContent = data.error || 'Failed loading generators.';
-      return;
+    try {
+      let recheckResult = null;
+      if (recheckDependencies) {
+        recheckResult = await fetchJson('/api/generator_catalog/recheck_dependencies', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({ kind: 'flag-generator' }),
+        });
+        if (!recheckResult || recheckResult.ok === false) {
+          throw new Error((recheckResult && recheckResult.error) ? recheckResult.error : 'Failed to recheck files');
+        }
+      }
+      const data = await fetchJson('/flag_generators_data');
+      if (data && data.ok === false) {
+        metaEl.textContent = data.error || 'Failed loading generators.';
+        return;
+      }
+      genState.generators = data.generators || [];
+      pruneGeneratorSelection(genState);
+      genState.errors = data.errors || [];
+      const recheckText = recheckResult ? ` Rechecked ${Number(recheckResult.checked_count || 0)} item(s).` : '';
+      metaEl.textContent = `Loaded ${genState.generators.length} installed generators.${recheckText}`;
+      const lines = [];
+      (genState.errors || []).forEach(e => lines.push(JSON.stringify(e)));
+      setGenLog(lines);
+      renderGenerators();
+      renderFlagBatchSelectionPreview();
+    } finally {
+      if (recheckBtn) recheckBtn.disabled = false;
     }
-    genState.generators = data.generators || [];
-    pruneGeneratorSelection(genState);
-    genState.errors = data.errors || [];
-    metaEl.textContent = `Loaded ${genState.generators.length} installed generators.`;
-    const lines = [];
-    (genState.errors || []).forEach(e => lines.push(JSON.stringify(e)));
-    setGenLog(lines);
-    renderGenerators();
-    renderFlagBatchSelectionPreview();
   }
 
   document.getElementById('genFilter').addEventListener('input', (e) => {
     genState.filter = e.target.value || '';
     renderGenerators();
     renderFlagBatchSelectionPreview();
+  });
+  document.getElementById('genDependencyRecheckBtn')?.addEventListener('click', async () => {
+    try {
+      await loadGenerators({ recheckDependencies: true });
+    } catch (e) {
+      appendPreLine('genLog', `[error] ${String(e)}`);
+    }
   });
 
   // Load generator list when the tab is shown
@@ -3108,30 +3229,60 @@
     });
   })();
 
-  async function loadNodeGenerators() {
+  async function loadNodeGenerators(opts = {}) {
     const metaEl = document.getElementById('nodeGenMeta');
-    metaEl.textContent = 'Loading…';
+    const recheckDependencies = !!(opts && opts.recheckDependencies);
+    const recheckBtn = document.getElementById('nodeGenDependencyRecheckBtn');
+    metaEl.textContent = recheckDependencies ? 'Rechecking files…' : 'Loading…';
+    if (recheckBtn) recheckBtn.disabled = true;
     setNodeGenLog([]);
-    const data = await fetchJson('/flag_node_generators_data');
-    if (data && data.ok === false) {
-      metaEl.textContent = data.error || 'Failed loading node-generators.';
-      return;
+    try {
+      let recheckResult = null;
+      if (recheckDependencies) {
+        recheckResult = await fetchJson('/api/generator_catalog/recheck_dependencies', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({ kind: 'flag-node-generator' }),
+        });
+        if (!recheckResult || recheckResult.ok === false) {
+          throw new Error((recheckResult && recheckResult.error) ? recheckResult.error : 'Failed to recheck files');
+        }
+      }
+      const data = await fetchJson('/flag_node_generators_data');
+      if (data && data.ok === false) {
+        metaEl.textContent = data.error || 'Failed loading node-generators.';
+        return;
+      }
+      nodeGenState.generators = data.generators || [];
+      pruneGeneratorSelection(nodeGenState);
+      nodeGenState.errors = data.errors || [];
+      const recheckText = recheckResult ? ` Rechecked ${Number(recheckResult.checked_count || 0)} item(s).` : '';
+      metaEl.textContent = `Loaded ${nodeGenState.generators.length} installed node-generators.${recheckText}`;
+      const lines = [];
+      (nodeGenState.errors || []).forEach(e => lines.push(JSON.stringify(e)));
+      setNodeGenLog(lines);
+      renderNodeGenerators();
+      renderFlagBatchSelectionPreview();
+    } finally {
+      if (recheckBtn) recheckBtn.disabled = false;
     }
-    nodeGenState.generators = data.generators || [];
-    pruneGeneratorSelection(nodeGenState);
-    nodeGenState.errors = data.errors || [];
-    metaEl.textContent = `Loaded ${nodeGenState.generators.length} installed node-generators.`;
-    const lines = [];
-    (nodeGenState.errors || []).forEach(e => lines.push(JSON.stringify(e)));
-    setNodeGenLog(lines);
-    renderNodeGenerators();
-    renderFlagBatchSelectionPreview();
   }
 
   document.getElementById('nodeGenFilter').addEventListener('input', (e) => {
     nodeGenState.filter = e.target.value || '';
     renderNodeGenerators();
     renderFlagBatchSelectionPreview();
+  });
+  document.getElementById('nodeGenDependencyRecheckBtn')?.addEventListener('click', async () => {
+    try {
+      await loadNodeGenerators({ recheckDependencies: true });
+    } catch (e) {
+      appendPreLine('nodeGenLog', `[error] ${String(e)}`);
+    }
   });
 
   document.getElementById('genCheckAll')?.addEventListener('change', (e) => {
@@ -3150,7 +3301,7 @@
       metaId: 'genSelectionMeta',
       checkAllId: 'genCheckAll',
       rowSelector: '#genBody',
-      buttonIds: ['genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
+      buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
     });
   });
 
@@ -3170,10 +3321,19 @@
       metaId: 'nodeGenSelectionMeta',
       checkAllId: 'nodeGenCheckAll',
       rowSelector: '#nodeGenBody',
-      buttonIds: ['nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
+      buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
     });
   });
 
+  document.getElementById('genBatchEnableBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
+    state: genState,
+    action: 'enable',
+    apiPath: '/api/flag_generators/batch_mutate',
+    logPreId: 'genLog',
+    reloadFn: loadGenerators,
+    itemLabel: 'generator',
+    confirmMessage: `Enable ${genState.selectedIds.size} selected generator(s)?`,
+  }));
   document.getElementById('genBatchDisableBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
     state: genState,
     action: 'disable',
@@ -3211,6 +3371,15 @@
     confirmMessage: `Override ${genState.selectedIds.size} selected generator(s) as fail?`,
   }));
 
+  document.getElementById('nodeGenBatchEnableBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
+    state: nodeGenState,
+    action: 'enable',
+    apiPath: '/api/flag_node_generators/batch_mutate',
+    logPreId: 'nodeGenLog',
+    reloadFn: loadNodeGenerators,
+    itemLabel: 'node-generator',
+    confirmMessage: `Enable ${nodeGenState.selectedIds.size} selected node-generator(s)?`,
+  }));
   document.getElementById('nodeGenBatchDisableBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
     state: nodeGenState,
     action: 'disable',
@@ -3544,6 +3713,13 @@
         const ids = Array.isArray(group && group.ids) ? group.ids.map((id) => String(id || '').trim()).filter(Boolean) : [];
         if (kind && ids.length) detailLines.push(`${kind}: ${ids.join(', ')}`);
       });
+      const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings : [];
+      const dependencyWarnings = warnings
+        .map((warning) => String((warning && (warning.dependency_path || warning.warning)) || '').trim())
+        .filter(Boolean);
+      if (dependencyWarnings.length) {
+        detailLines.push(`Missing compose support files: ${dependencyWarnings.slice(0, 3).join(', ')}${dependencyWarnings.length > 3 ? `, +${dependencyWarnings.length - 3} more` : ''}`);
+      }
       if (successTextEl) successTextEl.textContent = confirmationText;
       if (successMetaEl) successMetaEl.textContent = detailLines.join(' ');
       if (successAlertEl) {

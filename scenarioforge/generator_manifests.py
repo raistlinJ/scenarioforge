@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -328,10 +329,113 @@ def _artifact_kind(artifact: str) -> str:
     return ''
 
 
+def _read_installed_pack_marker_ids(generator_path: Path) -> list[str]:
+    marker_path = generator_path / '.coretg_pack.json'
+    try:
+        marker = json.loads(marker_path.read_text('utf-8', errors='ignore') or '{}')
+    except Exception:
+        marker = None
+    if not isinstance(marker, dict):
+        return []
+    ids: list[str] = []
+    for key in ('source_generator_id', 'generator_id'):
+        value = str(marker.get(key) or '').strip()
+        if value and value not in ids:
+            ids.append(value)
+    return ids
+
+
+def _load_installed_generator_state(installed_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    state_path = installed_root / '_packs_state.json'
+    try:
+        state = json.loads(state_path.read_text('utf-8', errors='ignore') or '{}')
+    except Exception:
+        return {}
+    packs = state.get('packs') if isinstance(state, dict) else None
+    if not isinstance(packs, list):
+        return {}
+
+    by_kind_id: dict[tuple[str, str], dict[str, Any]] = {}
+    for pack in packs:
+        if not isinstance(pack, dict):
+            continue
+        pack_id = str(pack.get('id') or '').strip()
+        pack_label = str(pack.get('label') or '').strip() or pack_id
+        pack_uninstalled = bool(pack.get('uninstalled') is True)
+        pack_disabled = bool(pack.get('disabled') is True or pack_uninstalled)
+        installed_items = pack.get('installed') or []
+        if not isinstance(installed_items, list):
+            continue
+        for item in installed_items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get('id') or '').strip()
+            item_kind = _norm_kind(str(item.get('kind') or '').strip())
+            if not item_id or not item_kind:
+                continue
+            item_uninstalled = bool(item.get('uninstalled') is True)
+            item_disabled = bool(item.get('disabled') is True or item_uninstalled)
+            info = {
+                'pack_id': pack_id,
+                'pack_label': pack_label,
+                'pack_disabled': pack_disabled,
+                'pack_uninstalled': pack_uninstalled,
+                'item_disabled': item_disabled,
+                'item_uninstalled': item_uninstalled,
+                'disabled': bool(pack_disabled or item_disabled or item_uninstalled),
+                'uninstalled': bool(pack_uninstalled or item_uninstalled),
+            }
+            if isinstance(item.get('required_files'), list):
+                info['required_files'] = item.get('required_files') or []
+            if isinstance(item.get('missing_required_files'), list):
+                info['missing_required_files'] = item.get('missing_required_files') or []
+            info['disabled_due_to_missing_files'] = bool(item.get('disabled_due_to_missing_files') is True)
+            warning = str(item.get('compose_dependency_warning') or '').strip()
+            if warning:
+                info['compose_dependency_warning'] = warning
+            checked_at = str(item.get('dependency_checked_at') or '').strip()
+            if checked_at:
+                info['dependency_checked_at'] = checked_at
+            ids = [item_id]
+            try:
+                item_path = Path(str(item.get('path') or '')).expanduser()
+                if not item_path.is_absolute():
+                    item_path = (installed_root / item_path).resolve()
+                for marker_id in _read_installed_pack_marker_ids(item_path):
+                    if marker_id not in ids:
+                        ids.append(marker_id)
+            except Exception:
+                pass
+            for generator_id in ids:
+                by_kind_id.setdefault((item_kind, generator_id), info)
+    return by_kind_id
+
+
+def _lookup_installed_generator_state(
+    state_by_kind_id: dict[tuple[str, str], dict[str, Any]],
+    *,
+    kind: str,
+    candidate_ids: list[str],
+) -> dict[str, Any] | None:
+    norm_kind = _norm_kind(kind)
+    seen: set[str] = set()
+    for candidate_id in candidate_ids:
+        generator_id = str(candidate_id or '').strip()
+        if not generator_id or generator_id in seen:
+            continue
+        seen.add(generator_id)
+        info = state_by_kind_id.get((norm_kind, generator_id))
+        if info:
+            return info
+    return None
+
+
 def discover_generator_manifests(
     *,
     repo_root: str | os.PathLike[str] | Path,
     kind: str,
+    include_disabled: bool = True,
+    scan_dependencies: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[ManifestLoadError]]:
     """Discover and load generator manifests.
 
@@ -377,6 +481,8 @@ def discover_generator_manifests(
     gen_index_by_id: dict[str, int] = {}
     is_installed_by_id: dict[str, bool] = {}
     errors: list[ManifestLoadError] = []
+    installed_state_by_kind_id = _load_installed_generator_state(installed_root)
+    disabled_suppressed_ids: set[str] = set()
 
     for base_dir in base_dirs:
         is_installed_base = False
@@ -468,6 +574,22 @@ def discover_generator_manifests(
                 )
                 continue
 
+            installed_disabled_info: dict[str, Any] | None = None
+            if is_installed_base:
+                installed_disabled_info = _lookup_installed_generator_state(
+                    installed_state_by_kind_id,
+                    kind=plugin_type,
+                    candidate_ids=[gen_id, installed_source_id, installed_assigned_id, str(doc.get('id') or '')],
+                )
+                if (not include_disabled) and installed_disabled_info and installed_disabled_info.get('disabled') is True:
+                    disabled_suppressed_ids.add(gen_id)
+                    plugins_by_id.pop(gen_id, None)
+                    gen_index_by_id.pop(gen_id, None)
+                    is_installed_by_id.pop(gen_id, None)
+                    continue
+            elif (not include_disabled) and gen_id in disabled_suppressed_ids:
+                continue
+
             runtime = doc.get('runtime') if isinstance(doc.get('runtime'), dict) else {}
             runtime_type = str(runtime.get('type') or 'docker-compose').strip().lower()
 
@@ -528,6 +650,24 @@ def discover_generator_manifests(
                 gen['access_instructions'] = dict(doc.get('access_instructions'))
 
             if is_installed_base:
+                if installed_disabled_info:
+                    gen['_pack_id'] = installed_disabled_info.get('pack_id')
+                    gen['_pack_label'] = installed_disabled_info.get('pack_label')
+                    gen['_pack_disabled'] = bool(installed_disabled_info.get('pack_disabled'))
+                    gen['_pack_uninstalled'] = bool(installed_disabled_info.get('pack_uninstalled'))
+                    gen['_disabled'] = bool(installed_disabled_info.get('disabled'))
+                    gen['_item_disabled'] = bool(installed_disabled_info.get('item_disabled'))
+                    gen['_disabled_due_to_missing_files'] = bool(installed_disabled_info.get('disabled_due_to_missing_files'))
+                    gen['_item_uninstalled'] = bool(installed_disabled_info.get('item_uninstalled'))
+                    gen['_uninstalled'] = bool(installed_disabled_info.get('uninstalled'))
+                    if isinstance(installed_disabled_info.get('required_files'), list):
+                        gen['required_files'] = installed_disabled_info.get('required_files') or []
+                    if isinstance(installed_disabled_info.get('missing_required_files'), list):
+                        gen['missing_required_files'] = installed_disabled_info.get('missing_required_files') or []
+                    if installed_disabled_info.get('compose_dependency_warning'):
+                        gen['compose_dependency_warning'] = str(installed_disabled_info.get('compose_dependency_warning') or '')
+                    if installed_disabled_info.get('dependency_checked_at'):
+                        gen['dependency_checked_at'] = str(installed_disabled_info.get('dependency_checked_at') or '')
                 if installed_assigned_id:
                     gen['_installed_assigned_id'] = installed_assigned_id
                 if installed_source_id:
@@ -541,10 +681,37 @@ def discover_generator_manifests(
 
             # Runtime
             if runtime_type in {'docker-compose', 'compose'}:
+                compose_file = str(runtime.get('compose_file') or runtime.get('file') or 'docker-compose.yml')
                 gen['compose'] = {
-                    'file': str(runtime.get('compose_file') or runtime.get('file') or 'docker-compose.yml'),
+                    'file': compose_file,
                     'service': str(runtime.get('service') or 'generator'),
                 }
+                if scan_dependencies:
+                    try:
+                        from scenarioforge.compose_dependencies import missing_dependency_paths, scan_compose_dependencies
+
+                        scan_base = child
+                        source_candidate = Path(source_path)
+                        if source_path:
+                            if source_candidate.is_absolute():
+                                candidate_dir = source_candidate.resolve()
+                            else:
+                                candidate_dir = (repo_root_p / source_candidate).resolve()
+                            if candidate_dir.exists() and candidate_dir.is_dir():
+                                scan_base = candidate_dir
+                        compose_path = (scan_base / compose_file).resolve()
+                        if compose_path.exists() and compose_path.is_file():
+                            dependency_summary = scan_compose_dependencies(compose_path)
+                            gen['required_files'] = dependency_summary.get('requires') or []
+                            gen['missing_required_files'] = missing_dependency_paths(dependency_summary)
+                            if dependency_summary.get('warning'):
+                                gen['compose_dependency_warning'] = str(dependency_summary.get('warning') or '')
+                    except Exception:
+                        gen.setdefault('required_files', [])
+                        gen.setdefault('missing_required_files', [])
+                else:
+                    gen.setdefault('required_files', [])
+                    gen.setdefault('missing_required_files', [])
             elif runtime_type in {'run', 'command'}:
                 cmd = runtime.get('cmd')
                 if isinstance(cmd, list):
@@ -623,6 +790,18 @@ def discover_generator_manifests(
             gen_index_by_id[gen_id] = len(generators)
             is_installed_by_id[gen_id] = bool(is_installed_base)
             generators.append(gen)
+
+    if disabled_suppressed_ids:
+        generators = [
+            generator
+            for generator in generators
+            if str(generator.get('id') or '').strip() not in disabled_suppressed_ids
+        ]
+        plugins_by_id = {
+            generator_id: plugin
+            for generator_id, plugin in plugins_by_id.items()
+            if str(generator_id or '').strip() not in disabled_suppressed_ids
+        }
 
     generators.sort(key=lambda g: (str(g.get('name') or '').lower(), str(g.get('id') or '')))
     return generators, plugins_by_id, errors

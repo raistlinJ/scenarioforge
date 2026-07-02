@@ -128,7 +128,8 @@
                 <div class="col-md-6">
                   <input id="vulnCatalogFilter" class="form-control" placeholder="Filter vulnerabilities…" />
                 </div>
-                <div class="col-md-6 d-flex justify-content-md-end">
+                <div class="col-md-6 d-flex flex-wrap align-items-center justify-content-md-end gap-3">
+                  <button class="btn btn-sm btn-outline-secondary" type="button" id="vulnDependencyRecheckBtn">Recheck Files</button>
                   <div class="form-check mt-2 mt-md-0">
                     <input class="form-check-input" type="checkbox" id="vulnCatalogCheckAllVisible" aria-label="Select all viewable vulnerabilities">
                     <label class="form-check-label" for="vulnCatalogCheckAllVisible">Select all viewable</label>
@@ -139,6 +140,7 @@
               <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
                 <div class="small text-muted" id="vulnSelectionMeta">0 selected.</div>
                 <div class="btn-group btn-group-sm" role="group" aria-label="Selected vulnerability actions">
+                  <button class="btn btn-outline-success" type="button" id="vulnBatchEnableSelectedBtn" disabled>Enable</button>
                   <button class="btn btn-outline-warning" type="button" id="vulnBatchDisableSelectedBtn" disabled>Disable</button>
                   <button class="btn btn-outline-danger" type="button" id="vulnBatchDeleteSelectedBtn" disabled>Delete</button>
                   <button class="btn btn-outline-success" type="button" id="vulnBatchOverrideSuccessBtn" disabled>Override Success</button>
@@ -553,7 +555,7 @@
         ? `${selectedCount} selected. Selection actions are locked while a test or batch is active.`
         : `${selectedCount} selected.`;
     }
-    ['vulnBatchDisableSelectedBtn', 'vulnBatchDeleteSelectedBtn', 'vulnBatchOverrideSuccessBtn', 'vulnBatchOverrideFailBtn'].forEach((id) => {
+    ['vulnBatchEnableSelectedBtn', 'vulnBatchDisableSelectedBtn', 'vulnBatchDeleteSelectedBtn', 'vulnBatchOverrideSuccessBtn', 'vulnBatchOverrideFailBtn'].forEach((id) => {
       const el = _qs(id);
       if (el) el.disabled = locked || selectedCount === 0;
     });
@@ -861,6 +863,67 @@
     return out;
   }
 
+  function _dependencyEntrySearchText(entry) {
+    if (!entry || typeof entry !== 'object') return String(entry || '');
+    const parts = [];
+    ['path', 'rel_path', 'kind', 'service', 'source'].forEach((key) => {
+      const value = String(entry[key] || '').trim();
+      if (value) parts.push(value);
+    });
+    parts.push(entry.required === false ? 'optional' : 'required');
+    if (entry.exists === false) parts.push('missing');
+    if (entry.exists === true) parts.push('present');
+    return parts.join(' ');
+  }
+
+  function _composeDependencySearchText(item) {
+    if (!item || typeof item !== 'object') return '';
+    const missing = Array.isArray(item.missing_required_files)
+      ? item.missing_required_files.map((p) => String(p || '').trim()).filter(Boolean)
+      : [];
+    const required = Array.isArray(item.required_files)
+      ? item.required_files.map(_dependencyEntrySearchText).filter(Boolean)
+      : [];
+    const status = missing.length
+      ? 'missing missing-files has:missing needs-files compose-support-missing'
+      : 'complete has:all-files no-missing';
+    return [
+      status,
+      missing.join(' '),
+      required.join(' '),
+      item.compose_dependency_warning || '',
+    ].join(' ');
+  }
+
+  function _vulnCatalogTableSearchText(item) {
+    if (!item || typeof item !== 'object') return '';
+    const missing = Array.isArray(item.missing_required_files)
+      ? item.missing_required_files.map((p) => String(p || '').trim()).filter(Boolean)
+      : [];
+    const validation = item.validated_incomplete === true
+      ? 'Incomplete'
+      : (item.validated_ok === true ? 'Validated' : (item.validated_ok === false ? 'Failed' : '—'));
+    return [
+      item.id,
+      item.name,
+      item.disabled ? 'Disabled' : 'Enabled',
+      missing.length ? 'Missing Files' : '',
+      missing.length ? `Missing compose support file${missing.length === 1 ? '' : 's'} ${missing.join(' ')}` : '',
+      `ID: ${item.id ?? ''}`,
+      item.readme_url ? 'README' : '—',
+      validation,
+      item.log_download_url ? 'Log' : '',
+      item.validated_at || '',
+      item.from_source || '',
+      'Test',
+      item.disabled ? 'Enable' : 'Disable',
+      'Delete',
+      item.rel_dir || '',
+      item.dir_rel || '',
+      _composeDependencySearchText(item),
+    ].join(' ');
+  }
+
   function _renderVulnCatalogTable() {
     const body = _qs('vulnCatalogBody');
     if (!body) return;
@@ -871,9 +934,7 @@
 
     const rows = items.filter(it => {
       if (!filter) return true;
-      const nm = String(it.name || '').toLowerCase();
-      const src = String(it.from_source || '').toLowerCase();
-      return nm.includes(filter) || src.includes(filter) || String(it.id || '').includes(filter);
+      return _vulnCatalogTableSearchText(it).toLowerCase().includes(filter);
     });
 
     const sortKey = _vulnCatalogState.sortKey || 'name';
@@ -897,8 +958,15 @@
       const isBatchRunning = batchActive && itemId && itemId === batchItemId;
       const isBusy = isRunning || isCleaning || batchActive;
       const mutationsLocked = isRunning || isCleaning || batchActive;
+      const missingRequiredFiles = Array.isArray(it.missing_required_files)
+        ? it.missing_required_files.map((p) => String(p || '').trim()).filter(Boolean)
+        : [];
+      const missingRequiredHtml = missingRequiredFiles.length
+        ? `<div class="small text-warning-emphasis mt-1">Missing compose support file${missingRequiredFiles.length === 1 ? '' : 's'}: ${escapeHtml(missingRequiredFiles.slice(0, 3).join(', '))}${missingRequiredFiles.length > 3 ? `, +${missingRequiredFiles.length - 3} more` : ''}</div>`
+        : '';
       const tr = document.createElement('tr');
       if (it.disabled) tr.classList.add('table-secondary');
+      if (missingRequiredFiles.length) tr.classList.add('table-warning');
       const isSelected = !!(_vulnCatalogState.selectedItemIds && _vulnCatalogState.selectedItemIds.has(itemId));
       const logLink = it.log_download_url ? `<a class="btn btn-link btn-sm p-0 ms-2 align-baseline" href="${escapeHtml(it.log_download_url)}">Log</a>` : '';
       tr.innerHTML = `
@@ -911,8 +979,10 @@
             ${isRunning ? `<span class="badge text-bg-info ms-2">Running</span>` : ''}
             ${isCleaning ? `<span class="badge text-bg-secondary ms-2">Cleaning up</span>` : ''}
             ${isBatchRunning ? `<span class="badge text-bg-primary ms-2">Batch Active</span>` : ''}
+            ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
           </div>
           <div class="small text-muted">ID: ${escapeHtml(it.id ?? '')}</div>
+          ${missingRequiredHtml}
         </td>
         <td class="small">
           ${it.readme_url ? `<a href="${escapeHtml(it.readme_url)}" target="_blank" rel="noopener">README</a>` : '<span class="text-muted">—</span>'}
@@ -978,26 +1048,45 @@
     _updateVulnSelectionUi();
   }
 
-  async function loadVulnCatalogItems() {
+  async function loadVulnCatalogItems(opts = {}) {
     const metaEl = _qs('vulnCatalogMeta');
-    if (metaEl) metaEl.textContent = 'Loading…';
+    const recheckDependencies = !!(opts && opts.recheckDependencies);
+    const recheckBtn = _qs('vulnDependencyRecheckBtn');
+    let recheckResult = null;
+    if (metaEl) metaEl.textContent = recheckDependencies ? 'Rechecking files…' : 'Loading…';
+    if (recheckBtn) recheckBtn.disabled = true;
 
-    const data = await _fetchJson('/vuln_catalog_items_data');
-    if (!data || data.ok === false) {
-      const err = data && data.error ? data.error : 'Failed to load vulnerability catalog items';
-      if (metaEl) metaEl.textContent = err;
-      _vulnCatalogState.items = [];
+    try {
+      if (recheckDependencies) {
+        recheckResult = await _postJson('/vuln_catalog_items/recheck_dependencies', {});
+        if (!recheckResult || recheckResult.ok === false) {
+          throw new Error((recheckResult && recheckResult.error) ? recheckResult.error : 'Failed to recheck files');
+        }
+      }
+
+      const data = await _fetchJson('/vuln_catalog_items_data');
+      if (!data || data.ok === false) {
+        const err = data && data.error ? data.error : 'Failed to load vulnerability catalog items';
+        if (metaEl) metaEl.textContent = err;
+        _vulnCatalogState.items = [];
+        _renderVulnCatalogTable();
+        return;
+      }
+      _vulnCatalogState.active = data.active || null;
+      _vulnCatalogState.items = Array.isArray(data.items) ? data.items : [];
+      _pruneVulnSelection();
+      const src = _vulnCatalogState.active && _vulnCatalogState.active.from_source ? String(_vulnCatalogState.active.from_source) : '';
+      const activeLabel = _vulnCatalogState.active && _vulnCatalogState.active.label ? String(_vulnCatalogState.active.label) : 'repo default';
+      const recheckText = recheckResult ? ` • Rechecked ${Number(recheckResult.checked_count || 0)} item(s)` : '';
+      if (metaEl) metaEl.textContent = `${_vulnCatalogState.items.length} items • Active: ${activeLabel}${src ? ' • From: ' + src : ''}${recheckText}`;
       _renderVulnCatalogTable();
-      return;
+      try { renderVulnBatchSelectionPreview(); } catch (e) {}
+    } catch (e) {
+      if (metaEl) metaEl.textContent = String(e);
+      throw e;
+    } finally {
+      if (recheckBtn) recheckBtn.disabled = false;
     }
-    _vulnCatalogState.active = data.active || null;
-    _vulnCatalogState.items = Array.isArray(data.items) ? data.items : [];
-    _pruneVulnSelection();
-    const src = _vulnCatalogState.active && _vulnCatalogState.active.from_source ? String(_vulnCatalogState.active.from_source) : '';
-    const activeLabel = _vulnCatalogState.active && _vulnCatalogState.active.label ? String(_vulnCatalogState.active.label) : 'repo default';
-    if (metaEl) metaEl.textContent = `${_vulnCatalogState.items.length} items • Active: ${activeLabel}${src ? ' • From: ' + src : ''}`;
-    _renderVulnCatalogTable();
-    try { renderVulnBatchSelectionPreview(); } catch (e) {}
   }
 
   const _vulnBatchStorageKey = 'coretg_vuln_batch_run_id';
@@ -1067,7 +1156,14 @@
       if (filters.scope === 'unvalidated' && !(item.validated_ok == null || item.validated_incomplete === true)) return false;
       if (!filters.query) return true;
       const needle = filters.query.toLowerCase();
-      return [item.id, item.name, item.from_source].some((value) => String(value || '').toLowerCase().includes(needle));
+      return [
+        item.id,
+        item.name,
+        item.from_source,
+        item.rel_dir,
+        item.dir_rel,
+        _composeDependencySearchText(item),
+      ].some((value) => String(value || '').toLowerCase().includes(needle));
     });
     if (filters.limit != null) {
       selected = selected.slice(0, filters.limit);
@@ -1941,6 +2037,14 @@
 
     const filter = _qs('vulnCatalogFilter');
     if (filter) filter.addEventListener('input', _renderVulnCatalogTable);
+    const recheckBtn = _qs('vulnDependencyRecheckBtn');
+    if (recheckBtn) recheckBtn.addEventListener('click', async () => {
+      try {
+        await loadVulnCatalogItems({ recheckDependencies: true });
+      } catch (e) {
+        _appendLog('vulnCatalogLog', `Error: ${e}`);
+      }
+    });
     const batchFilter = _qs('vulnBatchFilter');
     if (batchFilter) batchFilter.addEventListener('input', renderVulnBatchSelectionPreview);
     const batchScope = _qs('vulnBatchScope');
@@ -1961,6 +2065,7 @@
       _setVulnCatalogSelectionForViewableRows(checked);
     });
 
+    _qs('vulnBatchEnableSelectedBtn')?.addEventListener('click', () => _applyVulnBatchMutation('enable', `Enable ${_selectedVulnItemIds().length} selected item(s)?`));
     _qs('vulnBatchDisableSelectedBtn')?.addEventListener('click', () => _applyVulnBatchMutation('disable', `Disable ${_selectedVulnItemIds().length} selected item(s)?`));
     _qs('vulnBatchDeleteSelectedBtn')?.addEventListener('click', () => _applyVulnBatchMutation('delete', `Delete ${_selectedVulnItemIds().length} selected item(s)? This cannot be undone.`));
     _qs('vulnBatchOverrideSuccessBtn')?.addEventListener('click', () => _applyVulnBatchMutation('override_success', `Override ${_selectedVulnItemIds().length} selected item(s) as success?`));
