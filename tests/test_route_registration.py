@@ -1326,6 +1326,7 @@ def test_generator_catalog_data_register_is_idempotent():
         is_installed_generator_view=lambda gen: True,
         annotate_disabled_state=lambda generators, kind: generators,
         load_installed_generator_packs_state=lambda: {'packs': []},
+        save_installed_generator_packs_state=lambda state: None,
         installed_generators_root=lambda: '/tmp/outputs/installed_generators',
     )
     generator_catalog_data.register(
@@ -1335,12 +1336,14 @@ def test_generator_catalog_data_register_is_idempotent():
         is_installed_generator_view=lambda gen: True,
         annotate_disabled_state=lambda generators, kind: generators,
         load_installed_generator_packs_state=lambda: {'packs': []},
+        save_installed_generator_packs_state=lambda state: None,
         installed_generators_root=lambda: '/tmp/outputs/installed_generators',
     )
 
     rules = {rule.rule for rule in app.url_map.iter_rules()}
     assert '/flag_generators_data' in rules
     assert '/flag_node_generators_data' in rules
+    assert '/api/generator_catalog/recheck_dependencies' in rules
     assert '/api/generator_catalog/test_log' in rules
 
 
@@ -1493,6 +1496,8 @@ def test_vuln_catalog_overview_register_is_idempotent():
         app,
         require_builder_or_admin=lambda: None,
         load_vuln_catalogs_state=lambda: {'catalogs': [], 'active_id': ''},
+        write_vuln_catalogs_state=lambda state: None,
+        write_vuln_catalog_csv_from_items=lambda **kwargs: [],
         get_active_vuln_catalog_entry=lambda state: None,
         normalize_vuln_catalog_items=lambda entry: [],
         vuln_catalog_pack_content_dir=lambda catalog_id: '/tmp/vuln-pack',
@@ -1505,6 +1510,8 @@ def test_vuln_catalog_overview_register_is_idempotent():
         app,
         require_builder_or_admin=lambda: None,
         load_vuln_catalogs_state=lambda: {'catalogs': [], 'active_id': ''},
+        write_vuln_catalogs_state=lambda state: None,
+        write_vuln_catalog_csv_from_items=lambda **kwargs: [],
         get_active_vuln_catalog_entry=lambda state: None,
         normalize_vuln_catalog_items=lambda entry: [],
         vuln_catalog_pack_content_dir=lambda catalog_id: '/tmp/vuln-pack',
@@ -1517,6 +1524,7 @@ def test_vuln_catalog_overview_register_is_idempotent():
     rules = {rule.rule for rule in app.url_map.iter_rules()}
     assert '/vuln_catalog_page' in rules
     assert '/vuln_catalog_items_data' in rules
+    assert '/vuln_catalog_items/recheck_dependencies' in rules
     assert '/vuln_catalog_items/test/log' in rules
 
 

@@ -143,3 +143,28 @@ def test_api_flag_node_generators_batch_disable_maps_kind(monkeypatch):
         'message': 'Applied disable to 1 item(s).',
     }
     assert captured == [{'kind': 'flag-node-generator', 'generator_id': 'node-g-1', 'disabled': True}]
+
+
+def test_api_flag_generators_batch_enable_maps_disabled_false(monkeypatch):
+    client = app.test_client()
+    _login(client)
+    captured = []
+
+    monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
+
+    def fake_set_generator_disabled_state(*, kind, generator_id, disabled):
+        captured.append({'kind': kind, 'generator_id': generator_id, 'disabled': disabled})
+        return True, 'updated'
+
+    monkeypatch.setattr(backend, '_set_generator_disabled_state', fake_set_generator_disabled_state)
+
+    resp = client.post('/api/flag_generators/batch_mutate', json={'generator_ids': ['g-1'], 'action': 'enable'})
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {
+        'ok': True,
+        'updated': ['g-1'],
+        'errors': [],
+        'message': 'Applied enable to 1 item(s).',
+    }
+    assert captured == [{'kind': 'flag-generator', 'generator_id': 'g-1', 'disabled': False}]

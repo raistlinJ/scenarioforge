@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -67,6 +68,51 @@ def test_find_generator_prints_manifest_warning_details_on_failure(tmp_path: Pat
     assert "[manifest] warning:" in stdout
     assert "duplicate generator id: dupe" in stdout
     assert "[manifest] warnings: 1" not in stdout
+
+
+def test_find_generator_excludes_disabled_installed_generator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    installed_root = tmp_path / "installed_generators"
+    monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(installed_root))
+    installed_path = installed_root / "flag_generators" / "000001"
+    _write_manifest(installed_path, generator_id="000001")
+    (installed_path / ".coretg_pack.json").write_text(
+        json.dumps(
+            {
+                "pack_id": "pack-1",
+                "pack_label": "Pack One",
+                "generator_id": "000001",
+                "source_generator_id": "disabled_runner",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (installed_root / "_packs_state.json").write_text(
+        json.dumps(
+            {
+                "packs": [
+                    {
+                        "id": "pack-1",
+                        "label": "Pack One",
+                        "installed": [
+                            {
+                                "id": "000001",
+                                "kind": "flag-generator",
+                                "path": str(installed_path),
+                                "disabled": True,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        rfg.find_generator(tmp_path, "flag-generator", "disabled_runner")
+
+    assert "Generator not found: disabled_runner" in str(excinfo.value)
+    assert capsys.readouterr().out == ""
 
 
 def test_source_cache_digest_tracks_generator_source_and_ignores_transient_compose(tmp_path: Path) -> None:

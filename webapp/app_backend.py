@@ -42520,7 +42520,7 @@ except Exception:
 # ---------------- Flag Generators (manifest) -----------------
 
 
-def _flag_generators_from_manifests(*, kind: str) -> tuple[list[dict], dict[str, dict[str, Any]], list[dict]]:
+def _flag_generators_from_manifests(*, kind: str, scan_dependencies: bool = False) -> tuple[list[dict], dict[str, dict[str, Any]], list[dict]]:
     """Load generators + plugin contracts from strict YAML manifests.
 
     Returns: (generator_views, plugins_by_id, errors)
@@ -42535,7 +42535,11 @@ def _flag_generators_from_manifests(*, kind: str) -> tuple[list[dict], dict[str,
     except Exception:
         repo_root = os.getcwd()
 
-    gens, plugins_by_id, errs = discover_generator_manifests(repo_root=repo_root, kind=kind)
+    gens, plugins_by_id, errs = discover_generator_manifests(
+        repo_root=repo_root,
+        kind=kind,
+        scan_dependencies=scan_dependencies,
+    )
     errors: list[dict] = []
     for e in (errs or []):
         try:
@@ -42545,14 +42549,17 @@ def _flag_generators_from_manifests(*, kind: str) -> tuple[list[dict], dict[str,
     return gens, plugins_by_id, errors
 
 
-def _flag_generators_from_enabled_sources() -> tuple[list[dict], list[dict]]:
+def _flag_generators_from_enabled_sources(*, scan_dependencies: bool = False) -> tuple[list[dict], list[dict]]:
     """Return enabled flag-generators.
 
     Enabled means:
       - installed under outputs/installed_generators (installed-only policy)
       - not disabled (pack-level or generator-level)
     """
-    gens, _plugins_by_id, errors = _flag_generators_from_manifests(kind='flag-generator')
+    gens, _plugins_by_id, errors = _flag_generators_from_manifests(
+        kind='flag-generator',
+        scan_dependencies=scan_dependencies,
+    )
     out: list[dict] = []
     for g in (gens or []):
         if not isinstance(g, dict):
@@ -42568,14 +42575,17 @@ def _flag_generators_from_enabled_sources() -> tuple[list[dict], list[dict]]:
     return out, errors
 
 
-def _flag_node_generators_from_enabled_sources() -> tuple[list[dict], list[dict]]:
+def _flag_node_generators_from_enabled_sources(*, scan_dependencies: bool = False) -> tuple[list[dict], list[dict]]:
     """Return enabled flag-node-generators.
 
     Enabled means:
       - installed under outputs/installed_generators (installed-only policy)
       - not disabled (pack-level or generator-level)
     """
-    gens, _plugins_by_id, errors = _flag_generators_from_manifests(kind='flag-node-generator')
+    gens, _plugins_by_id, errors = _flag_generators_from_manifests(
+        kind='flag-node-generator',
+        scan_dependencies=scan_dependencies,
+    )
     out: list[dict] = []
     for g in (gens or []):
         if not isinstance(g, dict):
@@ -42591,9 +42601,12 @@ def _flag_node_generators_from_enabled_sources() -> tuple[list[dict], list[dict]
     return out, errors
 
 
-def _flag_generators_from_all_installed_sources() -> tuple[list[dict], list[dict]]:
+def _flag_generators_from_all_installed_sources(*, scan_dependencies: bool = False) -> tuple[list[dict], list[dict]]:
     """Return all installed flag-generators regardless of disabled state (for catalog display)."""
-    gens, _plugins_by_id, errors = _flag_generators_from_manifests(kind='flag-generator')
+    gens, _plugins_by_id, errors = _flag_generators_from_manifests(
+        kind='flag-generator',
+        scan_dependencies=scan_dependencies,
+    )
     out: list[dict] = []
     for g in (gens or []):
         if not isinstance(g, dict):
@@ -42607,9 +42620,12 @@ def _flag_generators_from_all_installed_sources() -> tuple[list[dict], list[dict
     return out, errors
 
 
-def _flag_node_generators_from_all_installed_sources() -> tuple[list[dict], list[dict]]:
+def _flag_node_generators_from_all_installed_sources(*, scan_dependencies: bool = False) -> tuple[list[dict], list[dict]]:
     """Return all installed flag-node-generators regardless of disabled state (for catalog display)."""
-    gens, _plugins_by_id, errors = _flag_generators_from_manifests(kind='flag-node-generator')
+    gens, _plugins_by_id, errors = _flag_generators_from_manifests(
+        kind='flag-node-generator',
+        scan_dependencies=scan_dependencies,
+    )
     out: list[dict] = []
     for g in (gens or []):
         if not isinstance(g, dict):
@@ -42633,6 +42649,7 @@ try:
         is_installed_generator_view=lambda gen: _is_installed_generator_view(gen),
         annotate_disabled_state=lambda generators, kind: _annotate_disabled_state(generators, kind=kind),
         load_installed_generator_packs_state=lambda: _load_installed_generator_packs_state(),
+        save_installed_generator_packs_state=lambda state: _save_installed_generator_packs_state(state),
         installed_generators_root=lambda: _installed_generators_root(),
     )
 except Exception:
@@ -42798,6 +42815,7 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
                 'validated_at': str(it.get('validated_at') or '').strip() or None,
                 'last_test_log_path': str(it.get('last_test_log_path') or '').strip() or None,
                 'last_test_log_filename': str(it.get('last_test_log_filename') or '').strip() or None,
+                'disabled_due_to_missing_files': bool(it.get('disabled_due_to_missing_files') is True),
             }
 
             # Back-compat: generator packs may use numeric ids in the packs state,
@@ -42838,6 +42856,7 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_pack_uninstalled'] = bool(info.get('pack_uninstalled'))
             g['_disabled'] = bool(info.get('disabled'))
             g['_item_disabled'] = bool(info.get('item_disabled'))
+            g['_disabled_due_to_missing_files'] = bool(info.get('disabled_due_to_missing_files'))
             g['_item_uninstalled'] = bool(info.get('item_uninstalled'))
             g['_uninstalled'] = bool(info.get('uninstalled'))
             g['_validated_ok'] = info.get('validated_ok')
@@ -42847,6 +42866,7 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_last_test_log_filename'] = info.get('last_test_log_filename')
         else:
             g['_disabled'] = False
+            g['_disabled_due_to_missing_files'] = False
             g['_uninstalled'] = False
             g['_validated_ok'] = None
             g['_validated_incomplete'] = False
@@ -43169,6 +43189,11 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
         # support files) are preserved.
         content_dir = _vuln_catalog_pack_content_dir(catalog_id)
         _safe_extract_zip_to_dir(zip_path, content_dir)
+        try:
+            from scenarioforge.compose_dependencies import missing_dependency_paths, scan_compose_dependencies
+        except Exception:
+            missing_dependency_paths = None  # type: ignore
+            scan_compose_dependencies = None  # type: ignore
 
         # Discover all directories containing docker-compose.yml (required).
         compose_paths: list[tuple[str, str]] = []
@@ -43204,6 +43229,15 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                     display_name = parts[-1] if parts else 'root'
             compose_rel = os.path.relpath(compose_path, content_dir).replace('\\', '/')
             dir_rel = os.path.relpath(os.path.dirname(compose_path), content_dir).replace('\\', '/')
+            compose_dependency_summary: dict[str, Any] = {}
+            if scan_compose_dependencies is not None and missing_dependency_paths is not None:
+                try:
+                    compose_dependency_summary = scan_compose_dependencies(compose_path)
+                except Exception:
+                    compose_dependency_summary = {}
+            required_files = compose_dependency_summary.get('requires') or []
+            missing_required_files = missing_dependency_paths(compose_dependency_summary) if missing_dependency_paths is not None else []
+            auto_disabled = bool(missing_required_files)
             compose_items.append({
                 'id': idx,
                 'name': display_name,
@@ -43214,7 +43248,11 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 'compose_path': os.path.relpath(compose_path, _get_repo_root()).replace('\\', '/'),
                 'dir': os.path.relpath(os.path.dirname(compose_path), _get_repo_root()).replace('\\', '/'),
                 'from_source': norm_label,
-                'disabled': False,
+                'disabled': auto_disabled,
+                'disabled_due_to_missing_files': auto_disabled,
+                'required_files': required_files,
+                'missing_required_files': missing_required_files,
+                'compose_dependency_warning': str(compose_dependency_summary.get('warning') or '').strip(),
             })
 
         # Generate a catalog CSV from discovered compose directories.
@@ -43223,13 +43261,16 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             w = csv.writer(f)
             w.writerow(['Name', 'Path', 'Type', 'Vector', 'Startup', 'CVE', 'Description', 'References'])
             for it in compose_items:
+                if bool(it.get('disabled', False)):
+                    continue
                 abs_compose = os.path.abspath(os.path.join(content_dir, str(it.get('compose_rel') or 'docker-compose.yml')))
                 w.writerow([str(it.get('name') or ''), abs_compose, 'docker-compose', '', '', '', '', ''])
 
         # Validate generated CSV is parseable and non-empty.
         try:
             from scenarioforge.utils.vuln_process import _read_csv as _read_vuln_csv
-            if not _read_vuln_csv(out_path):
+            enabled_compose_items = [it for it in compose_items if not bool(it.get('disabled', False))]
+            if enabled_compose_items and not _read_vuln_csv(out_path):
                 raise ValueError('Generated catalog CSV parsed as empty')
         except Exception as exc:
             raise ValueError(f'Invalid vulnerability catalog CSV: {exc}')
@@ -43249,6 +43290,11 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
         'content_dir': os.path.relpath(_vuln_catalog_pack_content_dir(catalog_id), _get_repo_root()).replace('\\', '/'),
         'compose_items': compose_items,
         'compose_count': len(compose_items),
+        'missing_required_file_count': sum(
+            len(item.get('missing_required_files') or [])
+            for item in compose_items
+            if isinstance(item, dict)
+        ),
     }
 
     state = _load_vuln_catalogs_state()
@@ -43374,6 +43420,8 @@ try:
         app,
         require_builder_or_admin=lambda: _require_builder_or_admin(),
         load_vuln_catalogs_state=lambda: _load_vuln_catalogs_state(),
+        write_vuln_catalogs_state=lambda state: _write_vuln_catalogs_state(state),
+        write_vuln_catalog_csv_from_items=lambda **kwargs: _write_vuln_catalog_csv_from_items(**kwargs),
         get_active_vuln_catalog_entry=lambda state: _get_active_vuln_catalog_entry(state),
         normalize_vuln_catalog_items=lambda entry: _normalize_vuln_catalog_items(entry),
         vuln_catalog_pack_content_dir=lambda catalog_id: _vuln_catalog_pack_content_dir(catalog_id),
@@ -43482,6 +43530,7 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         next_id = max(next_id, iid_int + 1)
         it['id'] = iid_int
         it['disabled'] = bool(it.get('disabled', False))
+        it['disabled_due_to_missing_files'] = bool(it.get('disabled_due_to_missing_files', False))
         it['name'] = str(it.get('name') or '').strip() or 'root'
         it['rel_dir'] = str(it.get('rel_dir') or '').strip()
         it['dir_rel'] = str(it.get('dir_rel') or '').strip()
@@ -44482,12 +44531,18 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
         import ast
         import yaml  # type: ignore
     except Exception as exc:
-        return False, f'Missing validator dependency: {exc}', []
+        return False, f'Missing validator dependency: {exc}', [], []
 
     try:
         from scenarioforge.sequencer.facts import parse_fact_ref
     except Exception:
         parse_fact_ref = None  # type: ignore
+
+    try:
+        from scenarioforge.compose_dependencies import missing_dependency_paths, scan_compose_dependencies
+    except Exception:
+        missing_dependency_paths = None  # type: ignore
+        scan_compose_dependencies = None  # type: ignore
 
     root = Path(extracted_dir)
     if not root.exists() or not root.is_dir():
@@ -44700,6 +44755,7 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
         runtime_dir = _resolve_manifest_runtime_dir(gen_dir, source_path_value)
         runtime = doc.get('runtime') if isinstance(doc.get('runtime'), dict) else {}
         runtime_type = str(runtime.get('type') or 'docker-compose').strip().lower()
+        compose_dependency_summary: dict[str, Any] = {}
         if runtime_type in ('docker-compose', 'compose'):
             compose_file = str(runtime.get('compose_file') or runtime.get('file') or 'docker-compose.yml')
             compose_service = str(runtime.get('service') or 'generator')
@@ -44722,6 +44778,18 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             if compose_service not in services:
                 errors.append(f'{compose_path}: missing service "{compose_service}"')
                 continue
+            if scan_compose_dependencies is not None and missing_dependency_paths is not None:
+                try:
+                    compose_dependency_summary = scan_compose_dependencies(compose_path)
+                    for missing_path in missing_dependency_paths(compose_dependency_summary):
+                        warnings.append({
+                            'manifest_path': str(mp),
+                            'compose_path': str(compose_path),
+                            'dependency_path': missing_path,
+                            'warning': f'Missing compose dependency "{missing_path}"; create it before running this generator.',
+                        })
+                except Exception:
+                    compose_dependency_summary = {}
 
         # Basic Python syntax check for any .py file in the generator dir.
         try:
@@ -44740,6 +44808,7 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             'source_id': source_id,
             'manifest_id': manifest_id,
             'manifest_path': str(mp),
+            'compose_dependencies': compose_dependency_summary,
         })
 
     if errors:
@@ -44885,7 +44954,25 @@ def _install_generator_pack_payload(
             except Exception:
                 pass
 
-            installed.append({'id': assigned_gid, 'kind': kind, 'path': dest_dir})
+            installed_item: dict[str, Any] = {'id': assigned_gid, 'kind': kind, 'path': dest_dir}
+            compose_dependency_summary = it.get('compose_dependencies') if isinstance(it.get('compose_dependencies'), dict) else {}
+            required_files = compose_dependency_summary.get('requires') if isinstance(compose_dependency_summary, dict) else []
+            if isinstance(required_files, list):
+                installed_item['required_files'] = required_files
+                installed_item['missing_required_files'] = [
+                    str(entry.get('path') or '').strip()
+                    for entry in required_files
+                    if isinstance(entry, dict)
+                    and entry.get('required') is not False
+                    and entry.get('exists') is False
+                    and str(entry.get('path') or '').strip()
+                ]
+                if installed_item['missing_required_files']:
+                    installed_item['disabled'] = True
+                    installed_item['disabled_due_to_missing_files'] = True
+            if isinstance(compose_dependency_summary, dict) and compose_dependency_summary.get('warning'):
+                installed_item['compose_dependency_warning'] = str(compose_dependency_summary.get('warning') or '').strip()
+            installed.append(installed_item)
 
         return True, note, installed, next_numeric, warnings
     finally:
@@ -45311,6 +45398,7 @@ def _set_generator_disabled_state(*, kind: str, generator_id: str, disabled: boo
             if not _installed_generator_state_item_matches(item=it, kind=k, generator_id=gid):
                 continue
             it['disabled'] = bool(disabled)
+            it['disabled_due_to_missing_files'] = False
             state['packs'] = packs
             _save_installed_generator_packs_state(state)
             return True, ('Disabled' if disabled else 'Enabled') + f' {k} {gid}'

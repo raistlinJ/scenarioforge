@@ -67,6 +67,7 @@ def test_vuln_catalog_pack_upload_ajax_installs_zip(monkeypatch, tmp_path):
         'ok': True,
         'message': 'Vulnerability catalog pack installed.',
         'catalog_id': 'catalog-123',
+        'missing_required_file_count': 0,
     }
     assert captured['origin'] == 'upload'
     assert captured['label'] == 'danger_demo.zip'
@@ -97,6 +98,7 @@ def test_vuln_catalog_pack_upload_ajax_reports_bundle_count(monkeypatch):
         'ok': True,
         'message': 'Installed 2 vulnerability catalog pack(s) from bundle.',
         'catalog_id': 'catalog-123',
+        'missing_required_file_count': 0,
     }
 
 

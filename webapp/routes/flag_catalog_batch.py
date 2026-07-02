@@ -124,6 +124,39 @@ def _selected_item_label(item: dict[str, Any]) -> str:
     return name or generator_id or 'generator'
 
 
+def _dependency_search_fields(item: dict[str, Any]) -> list[str]:
+    fields: list[str] = []
+    missing = item.get('missing_required_files') if isinstance(item.get('missing_required_files'), list) else []
+    missing_values = [str(value or '').strip() for value in missing if str(value or '').strip()]
+    if missing_values:
+        fields.extend(['missing', 'missing-files', 'has:missing', 'needs-files', 'compose-support-missing'])
+        fields.extend(missing_values)
+    else:
+        fields.extend(['complete', 'has:all-files', 'no-missing'])
+
+    warning = str(item.get('compose_dependency_warning') or '').strip()
+    if warning:
+        fields.append(warning)
+
+    required = item.get('required_files') if isinstance(item.get('required_files'), list) else []
+    for entry in required:
+        if isinstance(entry, dict):
+            for key in ('path', 'rel_path', 'kind', 'service', 'source'):
+                value = str(entry.get(key) or '').strip()
+                if value:
+                    fields.append(value)
+            fields.append('optional' if entry.get('required') is False else 'required')
+            if entry.get('exists') is False:
+                fields.append('missing')
+            elif entry.get('exists') is True:
+                fields.append('present')
+        else:
+            value = str(entry or '').strip()
+            if value:
+                fields.append(value)
+    return fields
+
+
 def _item_matches_query(item: dict[str, Any], query: str) -> bool:
     needle = str(query or '').strip().lower()
     if not needle:
@@ -134,6 +167,7 @@ def _item_matches_query(item: dict[str, Any], query: str) -> bool:
         str(item.get('from_source') or ''),
         str(item.get('_source_path') or ''),
     ]
+    fields.extend(_dependency_search_fields(item))
     return any(needle in str(value).lower() for value in fields)
 
 

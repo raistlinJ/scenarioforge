@@ -43,6 +43,16 @@ def test_vuln_catalog_page_renders_active_catalog(monkeypatch):
     assert 'Clear' in page
 
 
+def test_vuln_catalog_filters_include_compose_dependency_metadata() -> None:
+    text = VULN_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert 'function _vulnCatalogTableSearchText(item)' in text
+    assert 'return _vulnCatalogTableSearchText(it).toLowerCase().includes(filter);' in text
+    assert 'function _composeDependencySearchText(item)' in text
+    assert 'missing_required_files' in text
+    assert 'has:missing' in text
+    assert '_composeDependencySearchText(item)' in text
+
+
 def test_vuln_catalog_items_data_returns_active_items(monkeypatch, tmp_path):
     client = app.test_client()
     _login(client)
@@ -142,10 +152,57 @@ def test_vuln_catalog_batch_reuses_core_session_prompt() -> None:
 def test_vuln_catalog_template_exposes_selection_and_log_controls() -> None:
     text = VULN_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
     assert 'id="vulnCatalogCheckAll"' in text
+    assert 'id="vulnDependencyRecheckBtn"' in text
+    assert 'id="vulnBatchEnableSelectedBtn"' in text
     assert 'id="vulnBatchDisableSelectedBtn"' in text
     assert 'id="vulnBatchOverrideSuccessBtn"' in text
     assert 'id="vulnBatchOverrideFailBtn"' in text
     assert 'href="${escapeHtml(it.log_download_url)}"' in text
+    assert '/vuln_catalog_items/recheck_dependencies' in text
+
+
+def test_vuln_catalog_batch_mutate_enable_rewrites_enabled_csv(monkeypatch):
+    client = app.test_client()
+    _login(client)
+    state = {
+        'active_id': 'cat1',
+        'catalogs': [
+            {
+                'id': 'cat1',
+                'label': 'Catalog One',
+                'compose_items': [
+                    {'id': 1, 'name': 'alpha', 'disabled': True, 'compose_rel': 'a/docker-compose.yml'},
+                    {'id': 2, 'name': 'beta', 'disabled': False, 'compose_rel': 'b/docker-compose.yml'},
+                ],
+            }
+        ],
+    }
+    captured = {}
+
+    monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
+    monkeypatch.setattr(backend, '_load_vuln_catalogs_state', lambda: state)
+    monkeypatch.setattr(backend, '_get_active_vuln_catalog_entry', lambda loaded: loaded['catalogs'][0])
+    monkeypatch.setattr(backend, '_normalize_vuln_catalog_items', lambda entry: list(entry.get('compose_items') or []))
+
+    def fake_write_csv(*, catalog_id, items):
+        captured['catalog_id'] = catalog_id
+        captured['csv_items'] = list(items)
+        return ['outputs/installed_vuln_catalogs/cat1/vuln_list_w_url.csv']
+
+    monkeypatch.setattr(backend, '_write_vuln_catalog_csv_from_items', fake_write_csv)
+    monkeypatch.setattr(backend, '_write_vuln_catalogs_state', lambda saved_state: captured.setdefault('state', saved_state))
+
+    resp = client.post('/vuln_catalog_items/batch_mutate', json={'action': 'enable', 'item_ids': [1]})
+
+    assert resp.status_code == 200
+    payload = resp.get_json() or {}
+    assert payload['ok'] is True
+    assert payload['updated'] == [1]
+    items = state['catalogs'][0]['compose_items']
+    assert items[0]['disabled'] is False
+    assert state['catalogs'][0]['csv_paths'] == ['outputs/installed_vuln_catalogs/cat1/vuln_list_w_url.csv']
+    assert captured['catalog_id'] == 'cat1'
+    assert [item['id'] for item in captured['csv_items']] == [1, 2]
 
 
 def test_vuln_catalog_entire_catalog_download_warns_before_starting() -> None:

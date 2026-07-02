@@ -88,6 +88,7 @@ def register(
             for item in items:
                 if int(item.get('id') or 0) == item_id:
                     item['disabled'] = disabled
+                    item['disabled_due_to_missing_files'] = False
                     updated = True
                     break
             catalog['compose_items'] = items
@@ -150,7 +151,7 @@ def register(
         item_ids = list(dict.fromkeys(item_ids))
         if not item_ids:
             return jsonify({'ok': False, 'error': 'No item ids provided'}), 400
-        if action not in {'disable', 'delete', 'override_success', 'override_fail'}:
+        if action not in {'enable', 'disable', 'delete', 'override_success', 'override_fail'}:
             return jsonify({'ok': False, 'error': f'Unsupported action: {action}'}), 400
 
         state, entry, cid, catalogs, _items = _load_active_catalog_and_items()
@@ -174,8 +175,12 @@ def register(
                 updated.append(item_id)
                 if action == 'delete':
                     continue
-                if action == 'disable':
+                if action == 'enable':
+                    item['disabled'] = False
+                    item['disabled_due_to_missing_files'] = False
+                elif action == 'disable':
                     item['disabled'] = True
+                    item['disabled_due_to_missing_files'] = False
                 elif action == 'override_success':
                     item['validated_ok'] = True
                     item['validated_incomplete'] = False

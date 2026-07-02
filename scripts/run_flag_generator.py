@@ -610,7 +610,11 @@ def find_generator(repo_root: Path, kind: str, generator_id: str) -> tuple[dict[
     try:
         from scenarioforge.generator_manifests import discover_generator_manifests
 
-        gens, _plugins_by_id, errs = discover_generator_manifests(repo_root=repo_root, kind=kind)
+        gens, _plugins_by_id, errs = discover_generator_manifests(
+            repo_root=repo_root,
+            kind=kind,
+            include_disabled=False,
+        )
         manifest_warnings = list(errs or [])
         for g in gens:
             if str(g.get('id') or '') == generator_id:

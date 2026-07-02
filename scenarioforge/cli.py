@@ -6565,7 +6565,11 @@ def main():
                 try:
                     from scenarioforge.generator_manifests import discover_generator_manifests
 
-                    gens, _plugins_by_id, errs = discover_generator_manifests(repo_root=repo_root_path, kind='flag-node-generator')
+                    gens, _plugins_by_id, errs = discover_generator_manifests(
+                        repo_root=repo_root_path,
+                        kind='flag-node-generator',
+                        include_disabled=False,
+                    )
                     try:
                         if errs:
                             logging.debug("flag-node-generator manifest warnings: %d", len(errs))

@@ -72,6 +72,23 @@ def test_flag_catalog_escape_html_handles_numeric_batch_counts() -> None:
     assert '${escapeHtml(value)}</span>' in text
 
 
+def test_flag_catalog_filters_include_compose_dependency_metadata() -> None:
+    text = FLAG_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert 'function generatorTableSearchText(g)' in text
+    assert 'groupedNameSearchText(g.inputs)' in text
+    assert 'return generatorTableSearchText(g).toLowerCase().includes(q);' in text
+    assert 'function composeDependencySearchText(item)' in text
+    assert 'missing_required_files' in text
+    assert 'has:missing' in text
+    assert 'composeDependencySearchText(g)' in text
+    assert 'composeDependencySearchText(item)' in text
+    assert 'id="genBatchEnableBtn"' in text
+    assert 'id="nodeGenBatchEnableBtn"' in text
+    assert 'id="genDependencyRecheckBtn"' in text
+    assert 'id="nodeGenDependencyRecheckBtn"' in text
+    assert '/api/generator_catalog/recheck_dependencies' in text
+
+
 def test_flag_catalog_batch_results_include_running_active_item() -> None:
     text = FLAG_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
     assert '<option value="running">Running</option>' in text

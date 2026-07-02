@@ -56,6 +56,23 @@ def test_build_batch_input_config_autogenerates_required_values_by_format():
     assert str(result['cfg']['callback_url']).startswith('http://example.test/')
 
 
+def test_flag_catalog_batch_query_matches_compose_dependency_metadata():
+    item = {
+        'id': 'alpha',
+        'name': 'Alpha',
+        'missing_required_files': ['.venv'],
+        'required_files': [
+            {'path': '.venv', 'kind': 'volume', 'service': 'generator', 'required': True, 'exists': False},
+            {'path': 'optional.env', 'kind': 'env_file', 'required': False, 'exists': False},
+        ],
+    }
+
+    assert flag_catalog_batch._item_matches_query(item, 'has:missing') is True
+    assert flag_catalog_batch._item_matches_query(item, '.venv') is True
+    assert flag_catalog_batch._item_matches_query(item, 'optional.env') is True
+    assert flag_catalog_batch._item_matches_query(item, 'no-such-file') is False
+
+
 def test_flag_catalog_batch_start_selects_matching_items(monkeypatch):
     monkeypatch.setattr(app_backend, '_require_builder_or_admin', lambda: None)
     monkeypatch.setattr(
