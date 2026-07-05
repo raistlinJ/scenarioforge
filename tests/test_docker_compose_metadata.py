@@ -1343,6 +1343,96 @@ def test_prepare_compose_flow_injects_default_to_flow_injects_dir(tmp_path, monk
     assert any(str(v).endswith(":/flow_injects") for v in vols), vols
 
 
+def test_prepare_compose_flow_candidate_paths_do_not_override_flow_injects_default(tmp_path, monkeypatch):
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    compose_src = tmp_path / "base-compose.yml"
+    compose_src.write_text(
+        "services:\n  php:\n    image: php:7.2-apache\n    volumes:\n      - ./www:/var/www/html\n",
+        encoding="utf-8",
+    )
+
+    flow_root = tmp_path / "tmp" / "vulns" / "flag_generators_runs" / "flow-x" / "02_gen" / "artifacts"
+    flow_root.mkdir(parents=True, exist_ok=True)
+    (flow_root / "loader_diag.bin").write_text("x\n", encoding="utf-8")
+    (flow_root / "outputs.json").write_text('{"outputs": {"File(path)": "loader_diag.bin"}}\n', encoding="utf-8")
+
+    monkeypatch.setenv("CORETG_INJECT_FILES_MODE", "copy")
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "Example",
+        "Path": str(compose_src),
+        "ScenarioTag": "test",
+        "ArtifactsDir": str(flow_root),
+        "ArtifactsMountPath": "/flow_artifacts",
+        "InjectFiles": ["File(path)"],
+        "InjectSourceDir": str(flow_root),
+        "OutputsManifest": str(flow_root / "outputs.json"),
+        "InjectCandidatePaths": ["/usr/local/bin"],
+    }
+
+    created = prepare_compose_for_assignments({"docker-1": record}, out_base=str(tmp_path))
+    assert created
+
+    obj = yaml.safe_load((tmp_path / "docker-compose-docker-1.yml").read_text("utf-8", errors="ignore"))
+    services = (obj or {}).get("services") or {}
+    target = services.get("docker-1") or services.get("php")
+    assert isinstance(target, dict)
+    vols = [str(v) for v in (target.get("volumes") or [])]
+    assert any(v.endswith(":/flow_injects") for v in vols), vols
+    assert not any(v.endswith(":/usr/local/bin") for v in vols), vols
+
+    labels = target.get("labels") or {}
+    assert isinstance(labels, dict)
+    inject_map = json.loads(str(labels.get("coretg.inject.map") or "[]"))
+    assert inject_map == [{"src": "loader_diag.bin", "dest": "/flow_injects"}]
+
+
+def test_prepare_compose_explicit_flow_inject_dest_uses_file_bind_not_directory_mask(tmp_path, monkeypatch):
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    compose_src = tmp_path / "base-compose.yml"
+    compose_src.write_text(
+        "services:\n  php:\n    image: php:7.2-apache\n    volumes:\n      - ./www:/var/www/html\n",
+        encoding="utf-8",
+    )
+
+    flow_root = tmp_path / "tmp" / "vulns" / "flag_generators_runs" / "flow-x" / "03_gen" / "artifacts"
+    flow_root.mkdir(parents=True, exist_ok=True)
+    artifact = flow_root / "loader_diag.bin"
+    artifact.write_text("x\n", encoding="utf-8")
+
+    monkeypatch.setenv("CORETG_INJECT_FILES_MODE", "copy")
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "Example",
+        "Path": str(compose_src),
+        "ScenarioTag": "test",
+        "InjectFiles": ["loader_diag.bin -> /usr/local/bin"],
+        "InjectSourceDir": str(flow_root),
+    }
+
+    created = prepare_compose_for_assignments({"docker-1": record}, out_base=str(tmp_path))
+    assert created
+
+    obj = yaml.safe_load((tmp_path / "docker-compose-docker-1.yml").read_text("utf-8", errors="ignore"))
+    services = (obj or {}).get("services") or {}
+    target = services.get("docker-1") or services.get("php")
+    assert isinstance(target, dict)
+    vols = [str(v) for v in (target.get("volumes") or [])]
+    assert f"{artifact}:/usr/local/bin/loader_diag.bin:ro" in vols
+    assert not any(v.endswith(":/usr/local/bin") or v.endswith(":/usr/local/bin:rw") for v in vols), vols
+    assert not any(str(k).startswith("inject_copy") for k in services.keys())
+
+
 def test_prepare_compose_ignores_legacy_tmp_flag_container_path(tmp_path, monkeypatch):
     """Regression: /tmp/flag.txt is an in-container fallback path, not a host source."""
     try:

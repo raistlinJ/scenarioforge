@@ -9,6 +9,7 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 - [Other operating modes](#other-operating-modes)
 - [Quick start](docs/QUICK_START.md)
 - [CLI execution deep dive](docs/CLI_EXECUTION_DEEP_DIVE.md)
+- [Catalog batch testing](docs/CATALOG_BATCH_TESTING.md)
 - [Evaluator compatibility contract](docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md)
 - [Full Preview workflow](docs/FULL_PREVIEW_WORKFLOW.md)
 - [Feature deep dive](docs/FEATURE_DEEP_DIVE.md)
@@ -24,6 +25,7 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 - **Built for practice and instruction** – use ScenarioForge to train yourself, run classroom labs, rehearse cyber ranges, prototype network-defense scenarios, or experiment with attack/defense workflows without rebuilding the lab by hand each time.
 - **VM-mode first for realistic labs** – run ScenarioForge as the control application for a Proxmox-hosted CORE 9.2 VM and a participant machine such as Kali, with CORE gRPC, SSH validation, and HITL bridge workflows tied into the UI.
 - **Preview before execution** – inspect topology graphs, challenge chains, vulnerability placement, node roles, and generated artifacts before starting the CORE session.
+- **Catalog checks before execution** – batch-test vulnerability catalog items, flag-generators, and flag-node-generators from the CLI before starting a full scenario Execute run.
 - **Reproducible runs** – optional RNG seeds, XML scenario files, saved plans, Markdown reports, and JSON summaries make labs repeatable for students, operators, and future experiments.
 
 ## Screenshots
@@ -137,6 +139,20 @@ uv run cleanup-scenarioforge-docker --force
 
 `cleanup-scenarioforge-docker` reads `CORE_SSH_HOST`, `CORE_SSH_PORT`, `CORE_SSH_USERNAME`, and `CORE_SSH_PASSWORD` from `.scenarioforge.env` or the environment. Use it only against disposable ScenarioForge/CORE VMs, not shared Docker hosts.
 
+Catalog preflight and batch tests before Execute:
+
+```bash
+# Fast local check of the active vulnerability catalog, including inject-plan wiring.
+uv run preflight-vuln-catalog --repo-root .
+
+# Live Web UI/API batch check for vuln items and both flag generator families.
+uv run catalog-batch-test --target all --scope untested
+uv run catalog-batch-test --target all --scope failed
+uv run catalog-batch-test --target all --scope all
+```
+
+The `catalog-batch-test` scope names match the Web UI filters (`untested`, `failed`, `all`) and writes JSON exports under `outputs/catalog-batch-tests/`. See [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md).
+
 ### DeployForge
 
 A ready-to-deploy DeployForge file is coming soon: [docs/DEPLOYFORGE.md](docs/DEPLOYFORGE.md).
@@ -159,6 +175,7 @@ See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with loca
 ## Additional documentation
 - [docs/README.md](docs/README.md) – Index of project documentation pages
 - [docs/CLI_EXECUTION_DEEP_DIVE.md](docs/CLI_EXECUTION_DEEP_DIVE.md) – End-to-end CLI phases, remote CORE delegation, Flow behavior, and starter XML workflow
+- [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md) – CLI preflight and live batch testing for vulnerability and flag generator catalogs
 - [docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md](docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md) – Integration contract for CLI-driven batch evaluators
 - [docs/reference/API.md](docs/reference/API.md) – REST endpoints exposed by the Web UI backend
 - Flag Sequencing (Flow) endpoints and Attack Flow Builder `.afb` export are documented in [docs/reference/API.md](docs/reference/API.md) and the OpenAPI spec at [`docs/openapi.yaml`](docs/openapi.yaml).
@@ -176,6 +193,7 @@ See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with loca
 
 ## Runtime validation
 - Execute and CLI runs perform runtime validation as part of the run lifecycle.
+- Use `uv run preflight-vuln-catalog --repo-root .` and `uv run catalog-batch-test --target all --scope all` to catch catalog start/inject issues before full Execute runs.
 - Web runs expose the latest validation payload at `GET /run_status/<run_id>` as `validation_summary` while the run is retained in memory.
 - Reports persist validation details in the Markdown/JSON report artifacts under `./reports/` and in run history entries.
 - A healthy strict validation has `validation_summary.ok == true` and zero issue counters such as `missing_nodes`, `docker_not_running`, `injects_missing`, `generator_outputs_missing`, and `generator_injects_missing`.

@@ -48,6 +48,20 @@ python -m scenarioforge.cli execute \
 `preview-plan` and `flag-sequencing` modify the XML in place. Do not regenerate,
 replace, or restore the XML between phases.
 
+Optional pre-execute catalog gates can catch catalog/runtime failures before the
+full scenario pipeline starts:
+
+```bash
+uv run preflight-vuln-catalog --repo-root .
+uv run catalog-batch-test --target all --scope all --max-wait-seconds 3600
+```
+
+`preflight-vuln-catalog` is local and vulnerability-catalog only.
+`catalog-batch-test` requires the Web UI and CORE configuration and runs the
+same batch routes as the catalog pages for vulnerability items,
+flag-generators, and flag-node-generators. See
+[Catalog Batch Testing](CATALOG_BATCH_TESTING.md).
+
 ## Minimum Evaluator Changes
 
 An evaluator updating from the older CLI contract should make these changes:
