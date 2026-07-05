@@ -3007,7 +3007,8 @@ def _flow_flag_record_from_host_metadata(hdata: Any) -> Optional[Dict[str, str]]
                 'InjectSourceDir': inject_source_dir,
                 'OutputsManifest': str(flow_flag.get('outputs_manifest') or ''),
                 'RunDir': str(flow_flag.get('run_dir') or ''),
-                # Candidate injection paths (optional): one is chosen at random as destination.
+                # Candidate injection paths are selectable suggestions; implicit injects
+                # still default to /flow_injects unless the assignment uses "src -> dest".
                 'InjectCandidatePaths': flow_flag.get('inject_candidate_paths') or [],
             }
             if hint_text:

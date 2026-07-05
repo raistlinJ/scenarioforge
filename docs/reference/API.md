@@ -1,6 +1,6 @@
 # ScenarioForge API
 
-This guide documents the HTTP surface exposed by the ScenarioForge web backend (`webapp/app_backend.py`) and the CLI entry point (`scenarioforge.cli`). Use it to script scenario management, trigger runs, download artifacts, and integrate with external systems.
+This guide documents the HTTP surface exposed by the ScenarioForge web backend (`webapp/app_backend.py`) and the CLI entry points (`scenarioforge.cli`, `catalog-batch-test`, and `preflight-vuln-catalog`). Use it to script scenario management, trigger runs, download artifacts, preflight catalogs, and integrate with external systems.
 
 ## Base Environment
 
@@ -8,6 +8,8 @@ This guide documents the HTTP surface exposed by the ScenarioForge web backend (
 - **Entry modules:**
 	- Web server: `python webapp/app_backend.py`
 	- CLI: `core-python -m scenarioforge.cli` (fall back to `python -m scenarioforge.cli` if `core-python` is unavailable)
+	- Catalog batch CLI: `uv run catalog-batch-test --target all --scope all`
+	- Vulnerability catalog preflight CLI: `uv run preflight-vuln-catalog --repo-root .`
 - **Artifacts:**
 	- Scenario XML snapshots: `outputs/scenarios-<timestamp>/`
 	- Run history index: `outputs/run_history.json`
@@ -49,6 +51,7 @@ The web UI uses cookie sessions. Script clients must authenticate once and reuse
 - [Data Sources & Vulnerability Catalog](#data-sources--vulnerability-catalog)
 - [Generator Builder](#generator-builder)
 - [Generator Packs & Installed Generators](#generator-packs--installed-generators)
+- [Catalog Batch Tests](#catalog-batch-tests)
 - [Diagnostics & Maintenance](#diagnostics--maintenance)
 - [User Administration](#user-administration)
 
@@ -614,6 +617,100 @@ Parity note:
 - Generator tests exercise `scripts/run_flag_generator.py` directly.
 - They validate generator output/inject staging, but do not start a full CORE topology session.
 
+### Catalog Batch Tests
+
+These authenticated routes back the Web UI batch controls and the `catalog-batch-test` CLI. The CLI runs vulnerability batches and both flag generator batch kinds sequentially when invoked with `--target all`.
+
+Scope values accepted by the routes:
+
+- `unvalidated`: untested or incomplete items
+- `failed`: previously failed items
+- `all_enabled`: all enabled items
+
+The CLI additionally accepts UI-style aliases: `untested`, `failed`, and `all`.
+
+`POST /flag_catalog_items/batch/start`
+: JSON body:
+	- `kind`: `flag-generator` or `flag-node-generator`
+	- `scope`: `unvalidated`, `failed`, or `all_enabled`
+	- `query` (optional string)
+	- `include_disabled` (optional bool)
+	- `limit` (optional int, max 500)
+	- `core` (object): CORE VM SSH/gRPC config
+
+Returns `{ ok, run_id, kind, selected_count, eligible_count, manual_input_count, generated_input_count, scope, scope_label, include_disabled, limit }`.
+
+`GET /flag_catalog_items/batch/status?run_id=<id>`
+: Returns `{ ok, run_id, done, status, selection, progress, category_counts, active_item, active_child, results, log_lines }`.
+
+`POST /flag_catalog_items/batch/stop`
+: JSON `{ run_id }`. Requests stop for the batch and active child run.
+
+`GET /flag_catalog_items/batch/active`
+: Returns the currently active flag test or flag batch run when present.
+
+`POST /flag_catalog_items/batch/stop_active`
+: Stops the active flag test or flag batch run when present.
+
+`GET /flag_catalog_items/batch/export.json?run_id=<id>`
+: Exports the batch result as JSON.
+
+`GET /flag_catalog_items/batch/export.md?run_id=<id>`
+: Exports the batch result as Markdown.
+
+`GET /flag_catalog_items/batch/item_log?run_id=<id>&item_id=<id>`
+: Downloads the stored child log for one batch item when available.
+
+`POST /vuln_catalog_items/batch/start`
+: JSON body:
+	- `scope`: `unvalidated`, `failed`, or `all_enabled`
+	- `query` (optional string)
+	- `include_disabled` (optional bool)
+	- `limit` (optional int, max 500)
+	- `core` (object): CORE VM SSH/gRPC config
+
+Returns `{ ok, run_id, selected_count, scope, include_disabled, limit }`.
+
+`GET /vuln_catalog_items/batch/status?run_id=<id>`
+: Returns `{ ok, run_id, done, status, catalog, selection, progress, category_counts, active_item, active_child, results, log_lines }`.
+
+`POST /vuln_catalog_items/batch/stop`
+: JSON `{ run_id }`. Requests stop for the batch and active child run.
+
+`GET /vuln_catalog_items/batch/export.json?run_id=<id>`
+: Exports the batch result as JSON.
+
+`GET /vuln_catalog_items/batch/export.md?run_id=<id>`
+: Exports the batch result as Markdown.
+
+`GET /vuln_catalog_items/batch/item_log?run_id=<id>&item_id=<id>`
+: Downloads the stored child log for one batch item when available.
+
+Common progress object:
+
+```json
+{
+	"total": 10,
+	"completed": 4,
+	"passed": 3,
+	"failed": 1,
+	"incomplete": 0,
+	"skipped": 0,
+	"pending": 6
+}
+```
+
+CLI wrapper examples:
+
+```bash
+uv run catalog-batch-test --target all --scope untested
+uv run catalog-batch-test --target all --scope failed
+uv run catalog-batch-test --target vulns --scope all --query jboss
+uv run catalog-batch-test --target flag-generators --scope all --core-json @core.json
+```
+
+See [Catalog Batch Testing](../CATALOG_BATCH_TESTING.md) for CLI options, report paths, and exit codes.
+
 ### Run Execution & Reports
 
 `POST /run_cli`
@@ -827,6 +924,9 @@ Returns `{ ok, run_id }` on success, or `{ ok: true, replace_required: true, exi
 `POST /vuln_catalog_items/test/stop_active`
 : Stops the currently running vulnerability test (if any) with `{ ok?: true|false|null }`.
 
+Batch note:
+- Use the [Catalog Batch Tests](#catalog-batch-tests) endpoints or `uv run catalog-batch-test --target vulns --scope all` to test multiple vulnerability catalog items before Execute.
+
 `POST /vuln_compose/status`
 : JSON `{ "items": [{ "Name": "Node1", "Path": "...", "compose"?: "docker-compose.yml" }] }`. Returns `{ "items": [...], "log": [...] }` with compose availability and Docker pull state.
 
@@ -926,6 +1026,26 @@ uv run cleanup-scenarioforge-docker --force
 ```
 
 Without `--force`, the command requires typing `DELETE ALL REMOTE DOCKER` exactly. Do not run it against shared Docker hosts or machines with non-ScenarioForge workloads.
+
+### Catalog Preflight And Batch Commands
+
+`preflight-vuln-catalog` performs a local static preflight of the active installed vulnerability catalog:
+
+```bash
+uv run preflight-vuln-catalog --repo-root .
+```
+
+It does not start CORE or Docker. It validates compose/template compatibility and inject-plan wiring and writes `outputs/vuln-catalog-preflight/latest.json` by default.
+
+`catalog-batch-test` logs into the Web UI and runs the authenticated batch routes:
+
+```bash
+uv run catalog-batch-test --target all --scope untested
+uv run catalog-batch-test --target all --scope failed
+uv run catalog-batch-test --target all --scope all
+```
+
+Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope aliases are `untested`, `failed`, and `all`; they map to `unvalidated`, `failed`, and `all_enabled` for the REST payload. JSON exports are written under `outputs/catalog-batch-tests/` by default.
 
 ### Core Arguments
 

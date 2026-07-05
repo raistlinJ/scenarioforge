@@ -6,10 +6,12 @@ Use this page to navigate the main project documentation.
 - [Quick Start](QUICK_START.md)
 - [Operating Modes](OPERATING_MODES.md)
 - [Runtime Validation (strict by default)](QUICK_START.md#runtime-validation)
+- [Catalog Batch Testing](CATALOG_BATCH_TESTING.md)
 - [Screenshots](screenshots.md)
 
 ## Core workflows
 - [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md)
+- [Catalog Batch Testing](CATALOG_BATCH_TESTING.md)
 - [AI Generator Workflow](AI_GENERATOR_WORKFLOW.md)
 - [Full Preview Workflow](FULL_PREVIEW_WORKFLOW.md)
 - [Feature Deep Dive](FEATURE_DEEP_DIVE.md)
@@ -37,6 +39,7 @@ Use this page to navigate the main project documentation.
 
 ## Integration & Advanced
 - [ScenarioForge Eval Compatibility Contract](SCENARIOFORGE_EVAL_COMPATIBILITY.md) – Required CLI pipeline, XML ground truth, validation parsing, artifacts, concurrency, and secret handling for batch evaluators.
+- [Catalog Batch Testing](CATALOG_BATCH_TESTING.md) – Pre-execute CLI checks for vulnerability catalogs, flag-generators, and flag-node-generators.
 - [DeployForge](DEPLOYFORGE.md) – Ready-to-deploy VM-mode lab file coming soon.
 - [MCP (Model Context Protocol) Server](reference/MCP_README.md) – Remote scenario authoring and LLM tool integration.
 - [Web UI Backend](webapp/README.md) – Web backend architecture, routes, and Docker deployment.

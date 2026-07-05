@@ -1976,7 +1976,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '- Do not set flow_supply_when_first for purely internal entropy/config fields that participants never need, such as ordinary seeds.',
         '- outputs.json.outputs keys must exactly match produces and must reference artifacts that actually exist by the time the generator exits successfully.',
         '- If you declare inject_files, every inject entry must resolve to a real generated file path, not just an ontology key name.',
-        '- If injected artifacts should land in one of several plausible target directories, include inject_candidate_paths as absolute paths; do not include relative paths or paths containing `..`.',
+        '- If injected artifacts could land in plausible target directories, include inject_candidate_paths as absolute UI suggestions; default injection remains /flow_injects unless inject_files uses an explicit `source -> /dest` entry.',
         '- Include access_instructions when participants need to mount, connect to, exploit, or read generated services/files/credentials. Use title and steps with markdown instructions and optional vars mapping placeholders to output/input keys.',
     ]
     if plugin_type == 'flag-node-generator':
@@ -2078,7 +2078,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '- Keep manifest-facing artifact keys and outputs.json keys aligned.',
         '- Treat inject_files as runtime file paths that must be created, not as abstract artifact declarations.',
         '- If inject_files references File(path), then produces must include File(path) and outputs.json.outputs["File(path)"] must point to a created file path relative to /outputs, not an absolute /outputs/... path.',
-        '- Use inject_candidate_paths only for absolute candidate destinations for injected artifacts without explicit -> destinations.',
+        '- Use inject_candidate_paths only as absolute suggested destinations; use explicit inject_files entries like `File(path) -> /dest` when runtime injection must target a non-default path.',
         '- Use access_instructions as a manifest-ready dict with title and steps when participants need concrete access guidance.',
         '',
         'JSON schema shape:',

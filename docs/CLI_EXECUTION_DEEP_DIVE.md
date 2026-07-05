@@ -285,6 +285,30 @@ python -m scenarioforge.cli preview-plan --xml /abs/path/labs/my-lab.xml --scena
 python -m scenarioforge.cli flag-sequencing --xml /abs/path/labs/my-lab.xml --scenario "MyLab" --flow-mode resolve --flow-length 5
 ```
 
+### Catalog Preflight And Batch Checks
+
+These standalone commands are not `scenarioforge.cli` phases. They are pre-execute checks for catalog health.
+
+Fast local vulnerability catalog preflight:
+
+```bash
+uv run preflight-vuln-catalog --repo-root .
+```
+
+This checks the active installed vulnerability catalog without starting CORE or Docker. It validates compose/template compatibility and inject-plan wiring, then writes `outputs/vuln-catalog-preflight/latest.json` by default.
+
+Live Web UI batch tests:
+
+```bash
+uv run catalog-batch-test --target all --scope untested
+uv run catalog-batch-test --target all --scope failed
+uv run catalog-batch-test --target all --scope all
+```
+
+Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope aliases match the Web UI filters: `untested`, `failed`, and `all`. The command logs into the Web UI, starts the existing batch routes, polls progress, and exports JSON reports under `outputs/catalog-batch-tests/`.
+
+See [Catalog Batch Testing](CATALOG_BATCH_TESTING.md) for full usage, CORE credential options, and exit codes.
+
 ## Configuration Resolution
 
 Direct CLI launches load `.scenarioforge.env` from the repo root when present.

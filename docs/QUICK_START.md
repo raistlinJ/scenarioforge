@@ -164,10 +164,41 @@ VM mode note:
 Runtime validation is built into Execute and CLI runs.
 
 - Add `--post-execution-validation` (or `-post-execution-validation`) to CLI `execute` to copy Flow injects into stable running containers, verify each destination, export the live CORE session, and run the same detailed post-run validation used by the Web UI. Container replacement triggers copy retries, and a remaining missing-inject result triggers one automatic repair/revalidation pass. The CLI prints red errors, yellow warnings, emits `VALIDATION_SUMMARY_JSON`, and saves the complete result under `core-post/validation-session-<id>.json` beside the scenario XML.
+- Before running full Execute, use `uv run preflight-vuln-catalog --repo-root .` for a fast local vulnerability catalog/inject-plan check and `uv run catalog-batch-test --target all --scope all` for live Web UI batch tests.
 - Web runs expose validation details in `GET /run_status/<run_id>` as `validation_summary` while the run is retained in memory.
 - Report artifacts under `./reports/` persist validation details for later review.
 - A healthy strict validation has `validation_summary.ok == true` and zero issue counters such as `missing_nodes`, `docker_not_running`, `injects_missing`, `generator_outputs_missing`, and `generator_injects_missing`.
 - An empty editor project does not create scenario XML or runtime validation artifacts until at least one scenario exists and is executed.
+
+## Catalog preflight and batch tests
+
+Run these before Execute when you want to catch catalog start or inject issues early.
+
+Fast local vulnerability catalog preflight:
+
+```bash
+uv run preflight-vuln-catalog --repo-root .
+```
+
+Live Web UI batch tests for vulnerability items and both flag generator families:
+
+```bash
+uv run catalog-batch-test --target all --scope untested
+uv run catalog-batch-test --target all --scope failed
+uv run catalog-batch-test --target all --scope all
+```
+
+Narrow the run when needed:
+
+```bash
+uv run catalog-batch-test --target vulns --scope all --query jboss
+uv run catalog-batch-test --target flag-generators --scope failed --limit 25
+uv run catalog-batch-test --target flag-node-generators --scope all --allow-skipped
+```
+
+`catalog-batch-test` logs into the Web UI, starts the existing batch routes, polls progress, and writes JSON exports under `outputs/catalog-batch-tests/`. It can read saved Web UI CORE secrets or take explicit CORE config with `--core-json @core.json`.
+
+Need more detail: see [Catalog Batch Testing](CATALOG_BATCH_TESTING.md).
 
 ## Live generator smoke
 Live CORE credential parity smoke for flag tests:

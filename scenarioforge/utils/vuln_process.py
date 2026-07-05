@@ -763,7 +763,8 @@ def _normalize_vuln_record_path(rec: Dict[str, str], repo_root: Optional[str] = 
 			pass
 		if repo_root is None:
 			try:
-				repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+				env_root = str(os.getenv('CORETG_REPO_ROOT') or '').strip()
+				repo_root = os.path.abspath(env_root) if env_root else os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 			except Exception:
 				repo_root = None
 		if repo_root:
@@ -3002,21 +3003,10 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 	# Build inject mapping: relpath -> dest_dir
 	inject_map: dict[str, str] = {}
 	# Flow default: if inject specs omit a destination, prefer /flow_injects so the
-	# UI validation and user expectations align.
+	# UI validation and user expectations align. Candidate paths are surfaced
+	# to the UI for explicit user selection; they should not silently override
+	# this default because whole-directory mounts can mask image-owned paths.
 	flow_default_dest = str(os.getenv('CORETG_FLOW_INJECTS_DIR') or '').strip() or '/flow_injects'
-	# If the generator declares candidate injection paths, pick one non-deterministically
-	# as the effective flow default so the inject lands in a random location on each run.
-	_valid_candidates = [
-		str(p or '').strip().rstrip('/')
-		for p in (inject_candidate_paths or [])
-		if str(p or '').strip().startswith('/')
-	]
-	if _valid_candidates:
-		try:
-			import random as _random
-			flow_default_dest = _random.choice(_valid_candidates)
-		except Exception:
-			pass
 	is_flow_source = False
 	try:
 		sd_low = str(source_dir or '').replace('\\', '/').lower()
@@ -3135,26 +3125,6 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 			pass
 		return compose_obj
 
-	# Copy mode: use a helper init service to copy into named volumes.
-	copy_service_name = 'inject_copy'
-	if copy_service_name in services:
-		i = 2
-		while f"inject_copy_{i}" in services:
-			i += 1
-		copy_service_name = f"inject_copy_{i}"
-
-	copy_vols: list[Any] = []
-	copy_vols.append(f"{source_dir}:/src:ro")
-
-	dest_to_volume: dict[str, str] = {}
-	dest_mounts: dict[str, str] = {}
-	for dest_dir in set(inject_map.values()):
-		vol_name = dest_to_volume.setdefault(dest_dir, _volume_name_for_dest(dest_dir))
-		slug = vol_name.replace('inject-', '')
-		mount_path = f"/dst/{slug}"
-		dest_mounts[dest_dir] = mount_path
-		copy_vols.append(f"{vol_name}:{mount_path}")
-
 	missing_sources: list[str] = []
 	skipped_legacy_fallbacks: list[str] = []
 	for rel in list(inject_map.keys()):
@@ -3183,6 +3153,35 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 	if not inject_map:
 		return compose_obj
 
+	def _norm_dest_key(dest_dir: str) -> str:
+		text = str(dest_dir or '').strip().replace('\\', '/').rstrip('/')
+		return text or '/'
+
+	flow_dest_key = _norm_dest_key(flow_default_dest)
+
+	def _use_direct_bind_for_dest(dest_dir: str) -> bool:
+		if not is_flow_source:
+			return False
+		dest_key = _norm_dest_key(dest_dir)
+		return bool(dest_key and dest_key != flow_dest_key)
+
+	def _container_dest_for_rel(dest_dir: str, rel: str) -> str:
+		base = _norm_dest_key(dest_dir)
+		rel_clean = str(rel or '').replace('\\', '/').lstrip('/').strip('/')
+		if not rel_clean:
+			return base
+		if base == '/':
+			return '/' + rel_clean
+		return base + '/' + rel_clean
+
+	volume_inject_map: dict[str, str] = {}
+	direct_bind_map: dict[str, str] = {}
+	for rel, dest_dir in inject_map.items():
+		if _use_direct_bind_for_dest(dest_dir):
+			direct_bind_map[rel] = dest_dir
+		else:
+			volume_inject_map[rel] = dest_dir
+
 	# Persist inject mapping metadata for remote copy mode (labels on target service).
 	try:
 		inject_items = [{'src': k, 'dest': v} for k, v in inject_map.items()]
@@ -3196,16 +3195,61 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 		)
 	except Exception:
 		pass
+	if direct_bind_map:
+		try:
+			logger.info(
+				"[injects] applying direct bind injects to service=%s map=%s",
+				target_service,
+				direct_bind_map,
+			)
+		except Exception:
+			pass
+		for rel, dest_dir in direct_bind_map.items():
+			try:
+				src_path = os.path.abspath(os.path.join(source_dir, rel))
+				dest_path = _container_dest_for_rel(dest_dir, rel)
+				if not src_path or not dest_path:
+					continue
+				compose_obj = _inject_service_bind_mount(
+					compose_obj,
+					f"{src_path}:{dest_path}:ro",
+					prefer_service=target_service,
+				)
+			except Exception:
+				pass
+	if not volume_inject_map:
+		return compose_obj
+
+	# Copy mode: use a helper init service to copy into named volumes.
+	copy_service_name = 'inject_copy'
+	if copy_service_name in services:
+		i = 2
+		while f"inject_copy_{i}" in services:
+			i += 1
+		copy_service_name = f"inject_copy_{i}"
+
+	copy_vols: list[Any] = []
+	copy_vols.append(f"{source_dir}:/src:ro")
+
+	dest_to_volume: dict[str, str] = {}
+	dest_mounts: dict[str, str] = {}
+	for dest_dir in set(volume_inject_map.values()):
+		vol_name = dest_to_volume.setdefault(dest_dir, _volume_name_for_dest(dest_dir))
+		slug = vol_name.replace('inject-', '')
+		mount_path = f"/dst/{slug}"
+		dest_mounts[dest_dir] = mount_path
+		copy_vols.append(f"{vol_name}:{mount_path}")
+
 	try:
 		logger.info(
 			"[injects] applying injects to service=%s mode=%s map=%s",
 			target_service,
 			'copy',
-			inject_map,
+			volume_inject_map,
 		)
 		logger.info(
 			"[injects] clearing destination directories before copy: %s",
-			list(set(inject_map.values())),
+			list(set(volume_inject_map.values())),
 		)
 	except Exception:
 		pass
@@ -3241,7 +3285,7 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 	bb_fallback = 'busybox'
 
 	# Clean destination directories before copying to avoid mixing old and new artifacts.
-	for dest_dir in set(inject_map.values()):
+	for dest_dir in set(volume_inject_map.values()):
 		mount_path = dest_mounts.get(dest_dir)
 		if not mount_path:
 			continue
@@ -3251,7 +3295,7 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 		else:
 			cmds.append(f"rm -rf \"{mount_path}\"/*")
 
-	for rel, dest_dir in inject_map.items():
+	for rel, dest_dir in volume_inject_map.items():
 		mount_path = dest_mounts.get(dest_dir)
 		if not mount_path:
 			continue
@@ -5045,10 +5089,11 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 				allow_internal_networking = _compose_allow_internal_networking_enabled()
 				if force_no_network and (not _compose_requires_internal_networking(obj) or not allow_internal_networking):
 					if _compose_requires_internal_networking(obj) and not allow_internal_networking:
-						logger.warning(
-							'[vuln] forcing network_mode=none for multi-service compose node=%s; '
-							'set CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 and CORETG_DOCKER_IFID_START=1 '
-							'only if this lab intentionally needs Docker-managed internal networking',
+						logger.info(
+							'[vuln] using CORE-only networking for multi-service compose node=%s; '
+							'Docker-managed internal networking remains disabled. Set '
+							'CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 and CORETG_DOCKER_IFID_START=1 '
+							'only for labs that intentionally need Compose service networking.',
 							node_name,
 						)
 						obj = _repair_apache_foreground_for_no_network(obj)

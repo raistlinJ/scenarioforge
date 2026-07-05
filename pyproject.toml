@@ -30,6 +30,8 @@ dependencies = [
 
 [project.scripts]
 cleanup-scenarioforge-docker = "scenarioforge.cleanup_scenarioforge_docker:main"
+catalog-batch-test = "scenarioforge.validation.catalog_batch_cli:main"
+preflight-vuln-catalog = "scenarioforge.validation.vuln_catalog_preflight:main"
 
 [project.optional-dependencies]
 dev = [
