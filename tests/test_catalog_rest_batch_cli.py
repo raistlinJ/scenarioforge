@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse
 
-from scenarioforge.validation import catalog_batch_cli as cli
+from scenarioforge.validation import catalog_rest_batch_cli as cli
 
 
 class FakeResponse:
@@ -93,7 +93,8 @@ def _install_fake_session(monkeypatch):
     return sessions
 
 
-def test_catalog_batch_cli_runs_vuln_batch_and_writes_export(tmp_path: Path, monkeypatch) -> None:
+def test_catalog_rest_batch_cli_runs_vuln_batch_and_writes_export(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
     sessions = _install_fake_session(monkeypatch)
     core_json = {"ssh_host": "12.0.0.100", "ssh_username": "sampleuser", "ssh_password": "samplepass"}
 
@@ -125,7 +126,8 @@ def test_catalog_batch_cli_runs_vuln_batch_and_writes_export(tmp_path: Path, mon
     assert (tmp_path / "batch-out" / "vulns-vuln-run.json").is_file()
 
 
-def test_catalog_batch_cli_all_runs_vulns_and_both_flag_generator_kinds(tmp_path: Path, monkeypatch) -> None:
+def test_catalog_rest_batch_cli_all_runs_vulns_and_both_flag_generator_kinds(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
     sessions = _install_fake_session(monkeypatch)
 
     rc = cli.main(
@@ -157,7 +159,8 @@ def test_catalog_batch_cli_all_runs_vulns_and_both_flag_generator_kinds(tmp_path
     assert all(payload["limit"] == 5 for _name, payload in sessions[0].start_payloads)
 
 
-def test_catalog_batch_cli_accepts_ui_scope_alias_all(tmp_path: Path, monkeypatch) -> None:
+def test_catalog_rest_batch_cli_accepts_ui_scope_alias_all(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
     sessions = _install_fake_session(monkeypatch)
 
     rc = cli.main(
@@ -179,7 +182,8 @@ def test_catalog_batch_cli_accepts_ui_scope_alias_all(tmp_path: Path, monkeypatc
     assert sessions[0].start_payloads[0][1]["scope"] == "all_enabled"
 
 
-def test_catalog_batch_cli_accepts_ui_scope_alias_untested(tmp_path: Path, monkeypatch) -> None:
+def test_catalog_rest_batch_cli_accepts_ui_scope_alias_untested(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
     sessions = _install_fake_session(monkeypatch)
 
     rc = cli.main(
@@ -201,7 +205,8 @@ def test_catalog_batch_cli_accepts_ui_scope_alias_untested(tmp_path: Path, monke
     assert sessions[0].start_payloads[0][1]["scope"] == "unvalidated"
 
 
-def test_catalog_batch_cli_returns_nonzero_when_batch_reports_failure(tmp_path: Path, monkeypatch) -> None:
+def test_catalog_rest_batch_cli_returns_nonzero_when_batch_reports_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
     sessions = _install_fake_session(monkeypatch)
     FakeSession.fail_names = {"flag-generators"}
     try:
@@ -224,7 +229,8 @@ def test_catalog_batch_cli_returns_nonzero_when_batch_reports_failure(tmp_path: 
     assert sessions[0].start_payloads[0][0] == "flag-generators"
 
 
-def test_catalog_batch_cli_can_load_core_secret_hint(tmp_path: Path, monkeypatch) -> None:
+def test_catalog_rest_batch_cli_can_load_core_secret_hint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
     sessions = _install_fake_session(monkeypatch)
     hint_path = tmp_path / "outputs" / "flag_generators_test_core_hint.json"
     hint_path.parent.mkdir(parents=True)
@@ -244,3 +250,184 @@ def test_catalog_batch_cli_can_load_core_secret_hint(tmp_path: Path, monkeypatch
     assert rc == 0
     payload = sessions[0].start_payloads[0][1]
     assert payload["core"]["ssh_host"] == "12.0.0.100"
+
+
+def _clear_core_env(monkeypatch) -> None:
+    for name in (
+        "CORE_HOST",
+        "CORE_PORT",
+        "CORE_SSH_HOST",
+        "CORE_SSH_PORT",
+        "CORE_SSH_USERNAME",
+        "CORE_SSH_PASSWORD",
+        "CORETG_WEBUI_MODE",
+        "CORETG_RUNTIME_MODE",
+        "CORETG_BATCH_CORE_HOST",
+        "CORETG_BATCH_CORE_PORT",
+        "CORETG_BATCH_CORE_SSH_HOST",
+        "CORETG_BATCH_CORE_SSH_PORT",
+        "CORETG_BATCH_CORE_SSH_USERNAME",
+        "CORETG_BATCH_CORE_SSH_PASSWORD",
+        "CORETG_BATCH_CORE_VENV_BIN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_catalog_rest_batch_cli_native_mode_requires_explicit_core_config(tmp_path: Path, monkeypatch) -> None:
+    _clear_core_env(monkeypatch)
+    sessions = _install_fake_session(monkeypatch)
+
+    rc = cli.main(
+        [
+            "--target",
+            "vulns",
+            "--repo-root",
+            str(tmp_path),
+            "--out-dir",
+            "",
+        ]
+    )
+
+    assert rc == 11
+    assert sessions[0].start_payloads == []
+
+
+def test_catalog_rest_batch_cli_native_mode_accepts_core_flags(tmp_path: Path, monkeypatch) -> None:
+    _clear_core_env(monkeypatch)
+    sessions = _install_fake_session(monkeypatch)
+
+    rc = cli.main(
+        [
+            "--target",
+            "vulns",
+            "--repo-root",
+            str(tmp_path),
+            "--out-dir",
+            "",
+            "--core-host",
+            "10.0.0.50",
+            "--core-port",
+            "50051",
+            "--core-ssh-host",
+            "10.0.0.50",
+            "--core-ssh-username",
+            "corevm",
+            "--core-ssh-password",
+            "change-me",
+            "--core-venv-bin",
+            "/opt/core/venv/bin",
+        ]
+    )
+
+    assert rc == 0
+    payload = sessions[0].start_payloads[0][1]
+    assert payload["core"] == {
+        "ssh_host": "10.0.0.50",
+        "ssh_port": 22,
+        "ssh_username": "corevm",
+        "ssh_password": "change-me",
+        "host": "10.0.0.50",
+        "port": 50051,
+        "venv_bin": "/opt/core/venv/bin",
+    }
+
+
+def test_catalog_rest_batch_cli_core_flags_take_precedence_over_scenarioforge_env(tmp_path: Path, monkeypatch) -> None:
+    _clear_core_env(monkeypatch)
+    (tmp_path / ".scenarioforge.env").write_text(
+        "\n".join(
+            [
+                "CORETG_WEBUI_MODE=vm",
+                "CORE_SSH_HOST=10.0.0.50",
+                "CORE_SSH_USERNAME=env-user",
+                "CORE_SSH_PASSWORD=env-pass",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    sessions = _install_fake_session(monkeypatch)
+
+    rc = cli.main(
+        [
+            "--target",
+            "vulns",
+            "--repo-root",
+            str(tmp_path),
+            "--out-dir",
+            "",
+            "--core-ssh-host",
+            "10.0.0.51",
+            "--core-ssh-username",
+            "flag-user",
+            "--core-ssh-password",
+            "flag-pass",
+        ]
+    )
+
+    assert rc == 0
+    payload = sessions[0].start_payloads[0][1]
+    assert payload["core"]["ssh_host"] == "10.0.0.51"
+    assert payload["core"]["ssh_username"] == "flag-user"
+
+
+def test_catalog_rest_batch_cli_reads_core_config_from_scenarioforge_env(tmp_path: Path, monkeypatch) -> None:
+    _clear_core_env(monkeypatch)
+    (tmp_path / ".scenarioforge.env").write_text(
+        "\n".join(
+            [
+                "CORETG_WEBUI_MODE=vm",
+                "CORE_HOST=10.0.0.50",
+                "CORE_PORT=50051",
+                "CORE_SSH_HOST=10.0.0.50",
+                "CORE_SSH_PORT=22",
+                "CORE_SSH_USERNAME=corevm",
+                "CORE_SSH_PASSWORD=change-me",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    sessions = _install_fake_session(monkeypatch)
+
+    rc = cli.main(
+        [
+            "--target",
+            "vulns",
+            "--repo-root",
+            str(tmp_path),
+            "--out-dir",
+            "",
+        ]
+    )
+
+    assert rc == 0
+    payload = sessions[0].start_payloads[0][1]
+    assert payload["core"] == {
+        "ssh_host": "10.0.0.50",
+        "ssh_port": 22,
+        "ssh_username": "corevm",
+        "ssh_password": "change-me",
+        "host": "10.0.0.50",
+        "port": 50051,
+    }
+
+
+def test_catalog_rest_batch_cli_errors_when_no_core_config_available_in_vm_mode(tmp_path: Path, monkeypatch) -> None:
+    _clear_core_env(monkeypatch)
+    monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")
+    sessions = _install_fake_session(monkeypatch)
+
+    rc = cli.main(
+        [
+            "--target",
+            "vulns",
+            "--repo-root",
+            str(tmp_path),
+            "--out-dir",
+            "",
+        ]
+    )
+
+    assert rc == 11
+    assert sessions[0].start_payloads == []

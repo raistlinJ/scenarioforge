@@ -53,11 +53,11 @@ full scenario pipeline starts:
 
 ```bash
 uv run preflight-vuln-catalog --repo-root .
-uv run catalog-batch-test --target all --scope all --max-wait-seconds 3600
+uv run catalog-rest-batch-test --target all --scope all --max-wait-seconds 3600
 ```
 
 `preflight-vuln-catalog` is local and vulnerability-catalog only.
-`catalog-batch-test` requires the Web UI and CORE configuration and runs the
+`catalog-rest-batch-test` requires the Web UI and CORE configuration and runs the
 same batch routes as the catalog pages for vulnerability items,
 flag-generators, and flag-node-generators. See
 [Catalog Batch Testing](CATALOG_BATCH_TESTING.md).

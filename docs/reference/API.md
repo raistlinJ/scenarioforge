@@ -1,6 +1,6 @@
 # ScenarioForge API
 
-This guide documents the HTTP surface exposed by the ScenarioForge web backend (`webapp/app_backend.py`) and the CLI entry points (`scenarioforge.cli`, `catalog-batch-test`, and `preflight-vuln-catalog`). Use it to script scenario management, trigger runs, download artifacts, preflight catalogs, and integrate with external systems.
+This guide documents the HTTP surface exposed by the ScenarioForge web backend (`webapp/app_backend.py`) and the CLI entry points (`scenarioforge.cli`, `catalog-rest-batch-test`, and `preflight-vuln-catalog`). Use it to script scenario management, trigger runs, download artifacts, preflight catalogs, and integrate with external systems.
 
 ## Base Environment
 
@@ -8,7 +8,7 @@ This guide documents the HTTP surface exposed by the ScenarioForge web backend (
 - **Entry modules:**
 	- Web server: `python webapp/app_backend.py`
 	- CLI: `core-python -m scenarioforge.cli` (fall back to `python -m scenarioforge.cli` if `core-python` is unavailable)
-	- Catalog batch CLI: `uv run catalog-batch-test --target all --scope all`
+	- Catalog REST batch CLI: `uv run catalog-rest-batch-test --target all --scope all`
 	- Vulnerability catalog preflight CLI: `uv run preflight-vuln-catalog --repo-root .`
 - **Artifacts:**
 	- Scenario XML snapshots: `outputs/scenarios-<timestamp>/`
@@ -51,7 +51,7 @@ The web UI uses cookie sessions. Script clients must authenticate once and reuse
 - [Data Sources & Vulnerability Catalog](#data-sources--vulnerability-catalog)
 - [Generator Builder](#generator-builder)
 - [Generator Packs & Installed Generators](#generator-packs--installed-generators)
-- [Catalog Batch Tests](#catalog-batch-tests)
+- [Catalog REST Batch Tests](#catalog-rest-batch-tests)
 - [Diagnostics & Maintenance](#diagnostics--maintenance)
 - [User Administration](#user-administration)
 
@@ -617,9 +617,9 @@ Parity note:
 - Generator tests exercise `scripts/run_flag_generator.py` directly.
 - They validate generator output/inject staging, but do not start a full CORE topology session.
 
-### Catalog Batch Tests
+### Catalog REST Batch Tests
 
-These authenticated routes back the Web UI batch controls and the `catalog-batch-test` CLI. The CLI runs vulnerability batches and both flag generator batch kinds sequentially when invoked with `--target all`.
+These authenticated routes back the Web UI batch controls and the `catalog-rest-batch-test` CLI. The CLI runs vulnerability batches and both flag generator batch kinds sequentially when invoked with `--target all`. It supports both native and VM runtime modes; in native mode the CORE VM connection must be given explicitly (via `--core-json`, `--core-secret-id`, or discrete `--core-*` flags), while VM mode may additionally fall back to `.scenarioforge.env`. See [Catalog Batch Testing](../CATALOG_BATCH_TESTING.md#native-and-vm-mode).
 
 Scope values accepted by the routes:
 
@@ -703,10 +703,12 @@ Common progress object:
 CLI wrapper examples:
 
 ```bash
-uv run catalog-batch-test --target all --scope untested
-uv run catalog-batch-test --target all --scope failed
-uv run catalog-batch-test --target vulns --scope all --query jboss
-uv run catalog-batch-test --target flag-generators --scope all --core-json @core.json
+uv run catalog-rest-batch-test --target all --scope untested
+uv run catalog-rest-batch-test --target all --scope failed
+uv run catalog-rest-batch-test --target vulns --scope all --query jboss
+uv run catalog-rest-batch-test --target flag-generators --scope all --core-json @core.json
+uv run catalog-rest-batch-test --target vulns --scope all \
+  --core-ssh-host 10.0.0.50 --core-ssh-username corevm --core-ssh-password change-me
 ```
 
 See [Catalog Batch Testing](../CATALOG_BATCH_TESTING.md) for CLI options, report paths, and exit codes.
@@ -925,7 +927,7 @@ Returns `{ ok, run_id }` on success, or `{ ok: true, replace_required: true, exi
 : Stops the currently running vulnerability test (if any) with `{ ok?: true|false|null }`.
 
 Batch note:
-- Use the [Catalog Batch Tests](#catalog-batch-tests) endpoints or `uv run catalog-batch-test --target vulns --scope all` to test multiple vulnerability catalog items before Execute.
+- Use the [Catalog REST Batch Tests](#catalog-rest-batch-tests) endpoints or `uv run catalog-rest-batch-test --target vulns --scope all` to test multiple vulnerability catalog items before Execute.
 
 `POST /vuln_compose/status`
 : JSON `{ "items": [{ "Name": "Node1", "Path": "...", "compose"?: "docker-compose.yml" }] }`. Returns `{ "items": [...], "log": [...] }` with compose availability and Docker pull state.
@@ -1037,15 +1039,15 @@ uv run preflight-vuln-catalog --repo-root .
 
 It does not start CORE or Docker. It validates compose/template compatibility and inject-plan wiring and writes `outputs/vuln-catalog-preflight/latest.json` by default.
 
-`catalog-batch-test` logs into the Web UI and runs the authenticated batch routes:
+`catalog-rest-batch-test` logs into the Web UI and runs the authenticated batch routes:
 
 ```bash
-uv run catalog-batch-test --target all --scope untested
-uv run catalog-batch-test --target all --scope failed
-uv run catalog-batch-test --target all --scope all
+uv run catalog-rest-batch-test --target all --scope untested
+uv run catalog-rest-batch-test --target all --scope failed
+uv run catalog-rest-batch-test --target all --scope all
 ```
 
-Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope aliases are `untested`, `failed`, and `all`; they map to `unvalidated`, `failed`, and `all_enabled` for the REST payload. JSON exports are written under `outputs/catalog-batch-tests/` by default.
+Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope aliases are `untested`, `failed`, and `all`; they map to `unvalidated`, `failed`, and `all_enabled` for the REST payload. JSON exports are written under `outputs/catalog-rest-batch-tests/` by default.
 
 ### Core Arguments
 

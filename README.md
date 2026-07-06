@@ -146,12 +146,16 @@ Catalog preflight and batch tests before Execute:
 uv run preflight-vuln-catalog --repo-root .
 
 # Live Web UI/API batch check for vuln items and both flag generator families.
-uv run catalog-batch-test --target all --scope untested
-uv run catalog-batch-test --target all --scope failed
-uv run catalog-batch-test --target all --scope all
+# Native mode (default) requires an explicit CORE VM connection, same as the Web UI:
+uv run catalog-rest-batch-test --target all --scope untested \
+  --core-ssh-host 10.0.0.50 --core-ssh-username corevm --core-ssh-password change-me
+uv run catalog-rest-batch-test --target all --scope failed \
+  --core-ssh-host 10.0.0.50 --core-ssh-username corevm --core-ssh-password change-me
+uv run catalog-rest-batch-test --target all --scope all \
+  --core-ssh-host 10.0.0.50 --core-ssh-username corevm --core-ssh-password change-me
 ```
 
-The `catalog-batch-test` scope names match the Web UI filters (`untested`, `failed`, `all`) and writes JSON exports under `outputs/catalog-batch-tests/`. See [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md).
+The `catalog-rest-batch-test` scope names match the Web UI filters (`untested`, `failed`, `all`) and writes JSON exports under `outputs/catalog-rest-batch-tests/`. CORE VM connection info can be passed via `--core-json`, `--core-secret-id`, or discrete `--core-host`/`--core-port`/`--core-ssh-host`/`--core-ssh-port`/`--core-ssh-username`/`--core-ssh-password`/`--core-venv-bin` flags; in VM mode (`CORETG_WEBUI_MODE=vm`) it can also fall back to `.scenarioforge.env`. See [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md#native-and-vm-mode).
 
 ### DeployForge
 
@@ -193,7 +197,7 @@ See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with loca
 
 ## Runtime validation
 - Execute and CLI runs perform runtime validation as part of the run lifecycle.
-- Use `uv run preflight-vuln-catalog --repo-root .` and `uv run catalog-batch-test --target all --scope all` to catch catalog start/inject issues before full Execute runs.
+- Use `uv run preflight-vuln-catalog --repo-root .` and `uv run catalog-rest-batch-test --target all --scope all` to catch catalog start/inject issues before full Execute runs.
 - Web runs expose the latest validation payload at `GET /run_status/<run_id>` as `validation_summary` while the run is retained in memory.
 - Reports persist validation details in the Markdown/JSON report artifacts under `./reports/` and in run history entries.
 - A healthy strict validation has `validation_summary.ok == true` and zero issue counters such as `missing_nodes`, `docker_not_running`, `injects_missing`, `generator_outputs_missing`, and `generator_injects_missing`.

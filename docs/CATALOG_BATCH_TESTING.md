@@ -5,7 +5,7 @@ Use these checks before a full Execute run when you want to catch catalog start,
 There are two complementary commands:
 
 - `preflight-vuln-catalog`: local static preflight for the active vulnerability catalog. It does not require the Web UI, CORE, SSH, or Docker.
-- `catalog-batch-test`: live batch runner through the Web UI API. It uses the same batch routes as the UI and can test vulnerabilities, flag-generators, and flag-node-generators against the configured CORE target.
+- `catalog-rest-batch-test`: live REST API batch runner through the Web UI. It uses the same batch routes as the UI and can test vulnerabilities, flag-generators, and flag-node-generators against the configured CORE target.
 
 ## Static Vulnerability Preflight
 
@@ -29,31 +29,31 @@ Write a specific report path:
 uv run preflight-vuln-catalog --repo-root . --out outputs/vuln-catalog-preflight/check.json
 ```
 
-This command is intentionally vulnerability-catalog only. Use `catalog-batch-test` for flag generator catalogs.
+This command is intentionally vulnerability-catalog only. Use `catalog-rest-batch-test` for flag generator catalogs.
 
 ## Live Batch Tests
 
 Run this when the Web UI is up and you want the same start/test path used by the catalog pages:
 
 ```bash
-uv run catalog-batch-test --target all --scope untested
+uv run catalog-rest-batch-test --target all --scope untested
 ```
 
 Targets:
 
 ```bash
-uv run catalog-batch-test --target vulns
-uv run catalog-batch-test --target flag-generators
-uv run catalog-batch-test --target flag-node-generators
-uv run catalog-batch-test --target all
+uv run catalog-rest-batch-test --target vulns
+uv run catalog-rest-batch-test --target flag-generators
+uv run catalog-rest-batch-test --target flag-node-generators
+uv run catalog-rest-batch-test --target all
 ```
 
 Scopes match the Web UI vocabulary:
 
 ```bash
-uv run catalog-batch-test --target all --scope untested
-uv run catalog-batch-test --target all --scope failed
-uv run catalog-batch-test --target all --scope all
+uv run catalog-rest-batch-test --target all --scope untested
+uv run catalog-rest-batch-test --target all --scope failed
+uv run catalog-rest-batch-test --target all --scope all
 ```
 
 The CLI also accepts the internal aliases `unvalidated`, `incomplete`, `previously failed`, `all enabled`, and `all_enabled`.
@@ -61,20 +61,27 @@ The CLI also accepts the internal aliases `unvalidated`, `incomplete`, `previous
 Useful filters:
 
 ```bash
-uv run catalog-batch-test --target vulns --scope all --query jboss
-uv run catalog-batch-test --target flag-generators --scope failed --limit 25
-uv run catalog-batch-test --target all --scope all --include-disabled
+uv run catalog-rest-batch-test --target vulns --scope all --query jboss
+uv run catalog-rest-batch-test --target flag-generators --scope failed --limit 25
+uv run catalog-rest-batch-test --target all --scope all --include-disabled
 ```
 
 By default, skipped items make the command fail. This is useful in CI because manual-input generators are not silently treated as a pass. If skipped items are acceptable for a run:
 
 ```bash
-uv run catalog-batch-test --target flag-generators --scope all --allow-skipped
+uv run catalog-rest-batch-test --target flag-generators --scope all --allow-skipped
 ```
+
+## Native And VM Mode
+
+`catalog-rest-batch-test` reads the runtime mode from `CORETG_WEBUI_MODE` (or `CORETG_RUNTIME_MODE`), taken from the environment or from `.scenarioforge.env` under `--repo-root`, defaulting to `native` when unset. It logs the mode it resolved as `RUNTIME_MODE=<native|vm>` at the start of every run. This mirrors the Web UI's own runtime mode, and it changes exactly one thing: whether CORE VM connection info can be picked up implicitly from `.scenarioforge.env`.
+
+- **VM mode** (`CORETG_WEBUI_MODE=vm`): the CORE VM is expected to be pre-seeded, so if you don't pass an explicit CORE config the CLI falls back to reading `CORE_HOST`/`CORE_PORT`/`CORE_SSH_*` straight out of `.scenarioforge.env`, same as the Web UI does in VM mode.
+- **Native mode** (default): the CLI never guesses a CORE VM target. You must provide the connection explicitly through `--core-json`, `--core-secret-id`, or the discrete `--core-*` flags below — exactly like the Web UI, which requires you to select or configure a CORE VM connection when running natively.
 
 ## CORE And Web Credentials
 
-`catalog-batch-test` logs into the Web UI and reuses the backend's saved/default CORE config when possible.
+`catalog-rest-batch-test` logs into the Web UI and reuses the backend's saved/default CORE config when possible.
 
 Default Web UI values:
 
@@ -87,7 +94,7 @@ CORETG_WEB_PASS=coreadmin
 Override from the command line:
 
 ```bash
-uv run catalog-batch-test \
+uv run catalog-rest-batch-test \
   --base-url http://127.0.0.1:9090 \
   --username coreadmin \
   --password coreadmin \
@@ -95,10 +102,31 @@ uv run catalog-batch-test \
   --scope all
 ```
 
+### Discrete CORE VM flags
+
+These mirror the fields on the Web UI's CORE VM connection form one-to-one, so you can specify the CORE VM directly on the command line without building JSON:
+
+```bash
+uv run catalog-rest-batch-test \
+  --target all \
+  --scope all \
+  --core-host 10.0.0.50 \
+  --core-port 50051 \
+  --core-ssh-host 10.0.0.50 \
+  --core-ssh-port 22 \
+  --core-ssh-username corevm \
+  --core-ssh-password change-me \
+  --core-venv-bin /opt/core/venv/bin
+```
+
+`--core-ssh-host`, `--core-ssh-username`, and `--core-ssh-password` are required to activate this source; `--core-host` defaults to `--core-ssh-host`, `--core-port` defaults to `50051`, and `--core-ssh-port` defaults to `22` when omitted. `--core-venv-bin` is optional. Each flag also has a matching environment variable if you'd rather not put credentials on the command line: `CORETG_BATCH_CORE_HOST`, `CORETG_BATCH_CORE_PORT`, `CORETG_BATCH_CORE_SSH_HOST`, `CORETG_BATCH_CORE_SSH_PORT`, `CORETG_BATCH_CORE_SSH_USERNAME`, `CORETG_BATCH_CORE_SSH_PASSWORD`, `CORETG_BATCH_CORE_VENV_BIN`.
+
+### Full CORE JSON
+
 Pass CORE config directly:
 
 ```bash
-uv run catalog-batch-test --target all --scope all --core-json @core.json
+uv run catalog-rest-batch-test --target all --scope all --core-json @core.json
 ```
 
 `core.json` should be a JSON object with the same fields the Web UI stores for CORE testing, for example:
@@ -118,7 +146,7 @@ uv run catalog-batch-test --target all --scope all --core-json @core.json
 You can also pass inline JSON:
 
 ```bash
-uv run catalog-batch-test \
+uv run catalog-rest-batch-test \
   --target vulns \
   --scope all \
   --core-json '{"ssh_host":"10.0.0.50","ssh_username":"corevm","ssh_password":"change-me"}'
@@ -127,31 +155,41 @@ uv run catalog-batch-test \
 Or select a saved Web UI CORE secret:
 
 ```bash
-uv run catalog-batch-test --target all --scope failed --core-secret-id my-core-secret
+uv run catalog-rest-batch-test --target all --scope failed --core-secret-id my-core-secret
 ```
 
-If no explicit CORE config or secret is provided, the CLI tries local Web UI hints under `outputs/flag_generators_test_core_hint.json` and `outputs/secrets/core/`, then sends an empty `core` object so the Web UI route can use its configured defaults.
+### Resolution order
+
+The CLI resolves CORE config in this order, using the first source that produces a usable config:
+
+1. `--core-json` (inline JSON, `@path`, or a bare path)
+2. The discrete `--core-*` flags (see above)
+3. `--core-secret-id`, or the local hint files under `outputs/flag_generators_test_core_hint.json` and `outputs/secrets/core/`
+4. **VM mode only:** `.scenarioforge.env` (`CORE_HOST`/`CORE_PORT`/`CORE_SSH_*`)
+
+If none of these yield a usable CORE config, the CLI exits with code `11` instead of silently starting with an empty config — the message tells you whether that's because native mode needs explicit input, or because nothing at all resolved.
 
 ## Reports And Exit Codes
 
 JSON exports are written by default to:
 
 ```text
-outputs/catalog-batch-tests/<target>-<run-id>.json
+outputs/catalog-rest-batch-tests/<target>-<run-id>.json
 ```
 
 Change or disable report output:
 
 ```bash
-uv run catalog-batch-test --target all --out-dir outputs/my-batch-reports
-uv run catalog-batch-test --target all --out-dir ""
+uv run catalog-rest-batch-test --target all --out-dir outputs/my-batch-reports
+uv run catalog-rest-batch-test --target all --out-dir ""
 ```
 
 Exit codes:
 
 - `0`: all selected batches completed without failed, incomplete, pending, or disallowed skipped items.
+- `2`: invalid `--scope` value.
 - `10`: Web UI login failed.
-- `11`: explicit CORE JSON or CORE secret loading failed.
+- `11`: explicit CORE JSON or CORE secret loading failed, or no usable CORE config was found anywhere (JSON, flags, secrets, hints, and — in VM mode — `.scenarioforge.env`). In native mode this is also what you get if you don't pass an explicit CORE config at all.
 - `12`: start, status, or export request failed.
 - `20`: the batch completed but at least one item failed, was incomplete, stayed pending, or was skipped without `--allow-skipped`.
 - `130`: interrupted.
@@ -168,17 +206,21 @@ These batch tests are pre-execute checks. A full scenario Execute with `--post-e
 
 ## CI Example
 
-With the Web UI already running:
+With the Web UI already running, set the CORE VM connection env vars (or pass the equivalent `--core-*` flags) so the CLI has an explicit target:
 
 ```bash
+export CORETG_BATCH_CORE_SSH_HOST=10.0.0.50
+export CORETG_BATCH_CORE_SSH_USERNAME=corevm
+export CORETG_BATCH_CORE_SSH_PASSWORD=change-me
+
 uv run preflight-vuln-catalog --repo-root .
-uv run catalog-batch-test --target all --scope all --max-wait-seconds 3600
+uv run catalog-rest-batch-test --target all --scope all --max-wait-seconds 3600
 ```
 
 For a narrower incremental check:
 
 ```bash
-uv run catalog-batch-test --target all --scope failed --limit 50
+uv run catalog-rest-batch-test --target all --scope failed --limit 50
 ```
 
 ## Related Endpoints
