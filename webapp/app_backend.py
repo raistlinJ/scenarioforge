@@ -14102,6 +14102,60 @@ def _env_int_first(names: Sequence[str], default: int) -> int:
     return default
 
 
+def _env_float_first(names: Sequence[str], default: float | None = None) -> float | None:
+    for name in names:
+        try:
+            raw = os.getenv(name)
+            if raw in (None, ''):
+                continue
+            return float(raw)
+        except Exception:
+            continue
+    return default
+
+
+def _bounded_runtime_timeout(value: Any, *, low: float = 5.0, high: float = 600.0) -> float | None:
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if parsed <= 0:
+        return None
+    return max(low, min(parsed, high))
+
+
+def _format_runtime_timeout_arg(value: float) -> str:
+    try:
+        number = float(value)
+    except Exception:
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f'{number:g}'
+
+
+def _webui_remote_core_start_timeout_s() -> float | None:
+    configured = _env_float_first(
+        ('CORETG_WEBUI_CORE_START_TIMEOUT_S', 'CORETG_CORE_START_TIMEOUT_S'),
+        None,
+    )
+    if configured is not None:
+        bounded = _bounded_runtime_timeout(configured)
+        if bounded is not None:
+            return bounded
+    if _webui_runtime_mode() == 'vm':
+        return 300.0
+    return None
+
+
+def _webui_remote_docker_wait_s() -> float | None:
+    configured = _env_float_first(
+        ('CORETG_WEBUI_DOCKER_WAIT_RUNNING_S', 'CORETG_DOCKER_WAIT_RUNNING_S'),
+        None,
+    )
+    return _bounded_runtime_timeout(configured)
+
+
 def _webui_vm_mode_defaults(*, include_password: bool = True) -> Dict[str, Any]:
     core_host = str(
         os.getenv('CORE_HOST')
@@ -27900,12 +27954,37 @@ def _extract_async_error_from_text(text: str) -> str | None:
         return None
     try:
         matches = list(re.finditer(r"\[async error\]\s*(.+)", text))
-        if not matches:
-            return None
-        msg = str(matches[-1].group(1) or '').strip()
-        return msg or None
+        if matches:
+            msg = str(matches[-1].group(1) or '').strip()
+            if msg:
+                return msg
     except Exception:
-        return None
+        pass
+    try:
+        lines = [
+            str(raw_line or '').strip()
+            for raw_line in str(text or '').splitlines()
+            if str(raw_line or '').strip()
+        ]
+        priority_markers = (
+            'Start validation failed:',
+            'CORE daemon node boot failure:',
+            'CORE daemon runtime hint:',
+            'Failed to start/validate CORE session:',
+            'CORE session did not reach runtime',
+            'CORE session stayed in "configuration"',
+        )
+        for marker in priority_markers:
+            for line in reversed(lines):
+                if marker.lower() in line.lower():
+                    return line[-2000:]
+        for line in reversed(lines):
+            lowered = line.lower()
+            if ' error ' in f' {lowered} ' or 'exception' in lowered or 'failed' in lowered:
+                return line[-2000:]
+    except Exception:
+        pass
+    return None
 
 
 def _extract_docker_conflicts_from_text(text: str) -> dict | None:
@@ -40293,6 +40372,13 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         
         if remote_ctx.get('preview_plan_path'):
             cli_args.extend(['--preview-plan', remote_ctx['preview_plan_path']])
+
+        core_start_timeout_s = _webui_remote_core_start_timeout_s()
+        docker_wait_s = _webui_remote_docker_wait_s()
+        if core_start_timeout_s is not None:
+            cli_args.extend(['--start-timeout-s', _format_runtime_timeout_arg(core_start_timeout_s)])
+        if docker_wait_s is not None:
+            cli_args.extend(['--docker-wait-s', _format_runtime_timeout_arg(docker_wait_s)])
         
         cli_cmd = ' '.join(shlex.quote(arg) for arg in cli_args)
         work_dir = remote_ctx['repo_dir']

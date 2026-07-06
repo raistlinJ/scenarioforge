@@ -123,6 +123,29 @@ def test_vm_mode_backend_defaults_do_not_require_vm_identity_metadata(monkeypatc
     assert merged["vmid"] == ""
 
 
+def test_vm_mode_webui_remote_execute_uses_longer_start_timeout(monkeypatch) -> None:
+    monkeypatch.delenv("CORETG_WEBUI_CORE_START_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("CORETG_CORE_START_TIMEOUT_S", raising=False)
+    monkeypatch.setattr(app_backend, "_webui_runtime_mode", lambda: "vm")
+
+    assert app_backend._webui_remote_core_start_timeout_s() == 300.0
+
+    monkeypatch.setenv("CORETG_CORE_START_TIMEOUT_S", "480")
+    assert app_backend._webui_remote_core_start_timeout_s() == 480.0
+
+    monkeypatch.setenv("CORETG_WEBUI_CORE_START_TIMEOUT_S", "999")
+    assert app_backend._webui_remote_core_start_timeout_s() == 600.0
+
+    monkeypatch.setenv("CORETG_WEBUI_CORE_START_TIMEOUT_S", "0")
+    assert app_backend._webui_remote_core_start_timeout_s() == 300.0
+
+    monkeypatch.delenv("CORETG_WEBUI_CORE_START_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("CORETG_CORE_START_TIMEOUT_S", raising=False)
+    monkeypatch.setattr(app_backend, "_webui_runtime_mode", lambda: "native")
+
+    assert app_backend._webui_remote_core_start_timeout_s() is None
+
+
 def test_docker_bridge_preserves_loopback_core_host_in_vm_mode(monkeypatch) -> None:
     monkeypatch.setenv("CORETG_DOCKER_BRIDGE", "1")
     monkeypatch.setenv("CORETG_WEBUI_MODE", "vm")

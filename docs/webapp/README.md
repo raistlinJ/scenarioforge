@@ -12,7 +12,7 @@ Remote CORE VM support:
 - Scenario Execute can run remotely on a CORE VM via SSH.
 - Generator **Test** runs can optionally execute on the CORE VM (via SSH) to reduce Test-vs-Execute drift.
 - Vulnerability catalog item **Test** runs execute on the CORE VM and use offline-friendly preflight steps (build wrapper images, pull pull-only images, start with `--no-build`).
-- CLI batch wrapper: `uv run catalog-batch-test --target all --scope all` logs into the Web UI and runs the same vuln/flag catalog batch routes before full Execute.
+- REST batch CLI wrapper: `uv run catalog-rest-batch-test --target all --scope all` logs into the Web UI and runs the same vuln/flag catalog batch routes before full Execute.
 
 ## Local dev
 

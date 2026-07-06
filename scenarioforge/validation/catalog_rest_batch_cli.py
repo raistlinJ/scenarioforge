@@ -12,8 +12,14 @@ from typing import Any
 
 import requests
 
+try:  # pragma: no cover - env bootstrap is exercised indirectly in integration paths
+    from webapp.env_loader import load_runtime_env_files as _load_runtime_env_files
+except Exception:  # pragma: no cover - keep CLI usable even if web helpers are unavailable
+    _load_runtime_env_files = None  # type: ignore
+
 
 DEFAULT_BASE_URL = "http://127.0.0.1:9090"
+RUNTIME_MODE_ENV_VARS = ("CORETG_WEBUI_MODE", "CORETG_RUNTIME_MODE")
 VALID_SCOPES = ("unvalidated", "failed", "all_enabled")
 TARGETS = ("vulns", "flag-generators", "flag-node-generators", "all")
 SCOPE_ALIASES = {
@@ -120,13 +126,50 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--core-secret-id", default=os.getenv("CORETG_CORE_SECRET_ID", ""))
     parser.add_argument(
+        "--core-host",
+        default=os.getenv("CORETG_BATCH_CORE_HOST", ""),
+        help="CORE gRPC host, same as the Web UI CORE VM 'Host' field. Defaults to --core-ssh-host when omitted.",
+    )
+    parser.add_argument(
+        "--core-port",
+        type=int,
+        default=int(os.getenv("CORETG_BATCH_CORE_PORT", "0") or "0"),
+        help="CORE gRPC port, same as the Web UI CORE VM 'Port' field. Defaults to 50051 when omitted.",
+    )
+    parser.add_argument(
+        "--core-ssh-host",
+        default=os.getenv("CORETG_BATCH_CORE_SSH_HOST", ""),
+        help="SSH host for the CORE VM, same as the Web UI CORE VM 'SSH Host' field.",
+    )
+    parser.add_argument(
+        "--core-ssh-port",
+        type=int,
+        default=int(os.getenv("CORETG_BATCH_CORE_SSH_PORT", "0") or "0"),
+        help="SSH port for the CORE VM, same as the Web UI CORE VM 'SSH Port' field. Defaults to 22 when omitted.",
+    )
+    parser.add_argument(
+        "--core-ssh-username",
+        default=os.getenv("CORETG_BATCH_CORE_SSH_USERNAME", ""),
+        help="SSH username for the CORE VM, same as the Web UI CORE VM 'SSH Username' field.",
+    )
+    parser.add_argument(
+        "--core-ssh-password",
+        default=os.getenv("CORETG_BATCH_CORE_SSH_PASSWORD", ""),
+        help="SSH password for the CORE VM, same as the Web UI CORE VM 'SSH Password' field.",
+    )
+    parser.add_argument(
+        "--core-venv-bin",
+        default=os.getenv("CORETG_BATCH_CORE_VENV_BIN", ""),
+        help="Optional CORE venv bin directory on the CORE VM, same as the Web UI 'venv bin' field.",
+    )
+    parser.add_argument(
         "--repo-root",
         default=os.getenv("CORETG_REPO_ROOT", "."),
         help="Repo root used for output paths and local core-secret hints.",
     )
     parser.add_argument(
         "--out-dir",
-        default=os.getenv("CORETG_BATCH_OUT_DIR", "outputs/catalog-batch-tests"),
+        default=os.getenv("CORETG_BATCH_OUT_DIR", "outputs/catalog-rest-batch-tests"),
         help="Directory for exported JSON reports. Use an empty value to skip export.",
     )
     parser.add_argument("--request-timeout", type=float, default=float(os.getenv("CORETG_BATCH_REQUEST_TIMEOUT", "30")))
@@ -229,6 +272,112 @@ def _load_core_json(value: str, *, repo_root: Path) -> dict[str, Any] | None:
     return _parse_json_object(raw, context="--core-json")
 
 
+def _load_scenarioforge_env(repo_root: Path) -> None:
+    if _load_runtime_env_files is None:
+        return
+    try:
+        _load_runtime_env_files(base_dir=repo_root, include_example=False)
+    except Exception:
+        pass
+
+
+def _runtime_mode() -> str:
+    raw = ""
+    for name in RUNTIME_MODE_ENV_VARS:
+        raw = str(os.getenv(name) or "").strip().lower()
+        if raw:
+            break
+    return raw if raw in ("native", "vm") else "native"
+
+
+def _core_flags_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "host": args.core_host,
+        "port": args.core_port,
+        "ssh_host": args.core_ssh_host,
+        "ssh_port": args.core_ssh_port,
+        "ssh_username": args.core_ssh_username,
+        "ssh_password": args.core_ssh_password,
+        "venv_bin": args.core_venv_bin,
+    }
+
+
+def _core_cfg_from_flags(flags: dict[str, Any]) -> dict[str, Any] | None:
+    ssh_host = str(flags.get("ssh_host") or "").strip()
+    ssh_username = str(flags.get("ssh_username") or "").strip()
+    ssh_password = str(flags.get("ssh_password") or "").strip()
+    if not (ssh_host and ssh_username and ssh_password):
+        return None
+
+    try:
+        ssh_port = int(flags.get("ssh_port") or 0) or 22
+    except Exception:
+        ssh_port = 22
+    try:
+        port = int(flags.get("port") or 0) or 50051
+    except Exception:
+        port = 50051
+    host = str(flags.get("host") or "").strip() or ssh_host
+
+    core_cfg: dict[str, Any] = {
+        "ssh_host": ssh_host,
+        "ssh_port": ssh_port,
+        "ssh_username": ssh_username,
+        "ssh_password": ssh_password,
+        "host": host,
+        "port": port,
+    }
+    venv_bin = str(flags.get("venv_bin") or "").strip()
+    if venv_bin:
+        core_cfg["venv_bin"] = venv_bin
+    return core_cfg
+
+
+_CORE_FLAG_HINT = (
+    "--core-ssh-host/--core-ssh-username/--core-ssh-password (plus --core-host/--core-port/"
+    "--core-venv-bin as needed)"
+)
+
+
+def _no_core_config_message(runtime_mode: str) -> str:
+    if runtime_mode == "vm":
+        return (
+            "no CORE config found: set CORE_SSH_HOST/CORE_SSH_USERNAME/CORE_SSH_PASSWORD in "
+            f".scenarioforge.env, or pass {_CORE_FLAG_HINT}, --core-json, or --core-secret-id"
+        )
+    return (
+        f"native mode requires an explicit CORE VM connection: pass {_CORE_FLAG_HINT}, "
+        "--core-json, or --core-secret-id"
+    )
+
+
+def _core_cfg_from_env() -> dict[str, Any] | None:
+    ssh_host = str(os.getenv("CORE_SSH_HOST") or "").strip()
+    ssh_username = str(os.getenv("CORE_SSH_USERNAME") or "").strip()
+    ssh_password = str(os.getenv("CORE_SSH_PASSWORD") or "").strip()
+    if not (ssh_host and ssh_username and ssh_password):
+        return None
+
+    try:
+        ssh_port = int(os.getenv("CORE_SSH_PORT") or 22)
+    except Exception:
+        ssh_port = 22
+    try:
+        port = int(os.getenv("CORE_PORT") or 50051)
+    except Exception:
+        port = 50051
+    host = str(os.getenv("CORE_HOST") or "").strip() or ssh_host
+
+    return {
+        "ssh_host": ssh_host,
+        "ssh_port": ssh_port,
+        "ssh_username": ssh_username,
+        "ssh_password": ssh_password,
+        "host": host,
+        "port": port,
+    }
+
+
 def _candidate_secret_ids(repo_root: Path, explicit_secret_id: str) -> list[str]:
     candidate_ids: list[str] = []
     preferred = str(explicit_secret_id or "").strip()
@@ -317,11 +466,18 @@ def _load_core_cfg(
     repo_root: Path,
     core_json: str,
     core_secret_id: str,
+    core_flags: dict[str, Any],
+    runtime_mode: str,
 ) -> dict[str, Any]:
     from_json = _load_core_json(core_json, repo_root=repo_root)
     if from_json is not None:
         _log("CORE_CONFIG=core-json")
         return from_json
+
+    from_flags = _core_cfg_from_flags(core_flags)
+    if from_flags is not None:
+        _log("CORE_CONFIG=flags")
+        return from_flags
 
     from_secret = _load_core_cfg_from_secret(
         session,
@@ -337,8 +493,13 @@ def _load_core_cfg(
     if str(core_secret_id or "").strip():
         raise CatalogBatchError("no usable CORE secret found for --core-secret-id", exit_code=11)
 
-    _log("CORE_CONFIG=web-default")
-    return {}
+    if runtime_mode == "vm":
+        from_env = _core_cfg_from_env()
+        if from_env is not None:
+            _log("CORE_CONFIG=scenarioforge-env")
+            return from_env
+
+    raise CatalogBatchError(_no_core_config_message(runtime_mode), exit_code=11)
 
 
 def _progress_int(progress: dict[str, Any], key: str) -> int:
@@ -514,6 +675,9 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = _out_dir(args, repo_root=repo_root)
 
     try:
+        _load_scenarioforge_env(repo_root)
+        runtime_mode = _runtime_mode()
+        _log(f"RUNTIME_MODE={runtime_mode}")
         args.scope = _normalize_scope(args.scope)
         session = requests.Session()
         _login(
@@ -530,6 +694,8 @@ def main(argv: list[str] | None = None) -> int:
             repo_root=repo_root,
             core_json=str(args.core_json or ""),
             core_secret_id=str(args.core_secret_id or ""),
+            core_flags=_core_flags_from_args(args),
+            runtime_mode=runtime_mode,
         )
 
         outcomes: list[BatchOutcome] = []

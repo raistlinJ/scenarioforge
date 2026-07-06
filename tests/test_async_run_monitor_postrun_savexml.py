@@ -193,3 +193,89 @@ def test_async_run_status_retries_postrun_flow_copy_for_completed_success(tmp_pa
     assert runs_store["run-1"].get("flow_artifacts_copied") is True
     assert runs_store["run-1"]["validation_summary"]["injects_missing"] == []
     assert runs_store["run-1"]["validation_summary"]["flow_copy_retried_after_validation"] is True
+
+
+def test_async_run_status_preserves_nonzero_cli_start_error_with_post_xml(tmp_path):
+    app = Flask(__name__)
+
+    xml_path = tmp_path / "scenario.xml"
+    xml_path.write_text("<Scenarios><Scenario name=\"NewScenario1\" /></Scenarios>\n", encoding="utf-8")
+
+    log_path = tmp_path / "run.log"
+    log_path.write_text(
+        "CORE_SESSION_ID: 7\n"
+        "2026-07-05 ERROR root - Start validation failed: "
+        "CORE session did not reach runtime (state=configuration)\n",
+        encoding="utf-8",
+    )
+
+    runs_store = {
+        "run-1": {
+            "proc": None,
+            "returncode": 1,
+            "done": True,
+            "history_added": False,
+            "log_path": str(log_path),
+            "xml_path": str(xml_path),
+            "scenario_name": "NewScenario1",
+            "core_cfg": {
+                "host": "localhost",
+                "port": 50051,
+                "ssh_host": "localhost",
+                "ssh_port": 22,
+                "ssh_username": "core",
+                "ssh_password": "pw",
+            },
+        }
+    }
+
+    async_run_monitor.register(
+        app,
+        runs_store=runs_store,
+        maybe_copy_flow_artifacts_into_containers=lambda *args, **kwargs: None,
+        sync_remote_artifacts=lambda meta: None,
+        scenario_names_from_xml=lambda path: ["NewScenario1"],
+        extract_report_path_from_text=lambda text: None,
+        find_latest_report_path=lambda: None,
+        extract_summary_path_from_text=lambda text: None,
+        derive_summary_from_report=lambda report_path: None,
+        find_latest_summary_path=lambda: None,
+        outputs_dir=lambda: str(tmp_path),
+        extract_session_id_from_text=lambda text: "7",
+        record_session_mapping=lambda *args, **kwargs: None,
+        write_remote_session_scenario_meta=lambda *args, **kwargs: None,
+        normalize_core_config=lambda cfg, **kwargs: cfg,
+        load_run_history=lambda: [],
+        select_core_config_for_page=lambda *args, **kwargs: {},
+        merge_core_configs=lambda left, right, **kwargs: dict(left or {}, **(right or {})),
+        apply_core_secret_to_config=lambda cfg, scenario_norm: cfg,
+        grpc_save_current_session_xml_with_config=lambda *args, **kwargs: str(xml_path),
+        append_async_run_log_line=lambda meta, line: None,
+        append_session_scenario_discrepancies=lambda *args, **kwargs: None,
+        validate_session_nodes_and_injects=lambda *args, **kwargs: {"ok": True},
+        coerce_bool=lambda value: bool(value),
+        extract_async_error_from_text=lambda text: "Start validation failed: CORE session did not reach runtime (state=configuration)",
+        persist_execute_validation_artifacts=lambda *args, **kwargs: None,
+        write_single_scenario_xml=lambda *args, **kwargs: None,
+        build_full_scenario_archive=lambda *args, **kwargs: None,
+        append_run_history=lambda entry: True,
+        local_timestamp_display=lambda: "2026-07-05T00:00:00Z",
+        close_async_run_tunnel=lambda meta: None,
+        cleanup_remote_workspace=lambda meta: None,
+        extract_docker_conflicts_from_text=lambda text: [],
+        build_execute_error_logs=lambda *args, **kwargs: [],
+        normalize_core_config_public=lambda cfg: cfg,
+        sse_marker_prefix="SSEMARK",
+        download_report_endpoint="download_report",
+    )
+
+    client = app.test_client()
+    resp = client.get("/run_status/run-1")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert "did not reach runtime" in payload["error"]
+    summary = payload["validation_summary"]
+    assert summary["ok"] is True
+    assert "did not reach runtime" in summary["error"]
+    assert summary["run_error"] == summary["error"]

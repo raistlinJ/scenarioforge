@@ -555,6 +555,8 @@ def test_run_cli_background_task_marks_remote_cli_as_delegated() -> None:
 
     assert "'CORETG_CLI_REMOTE_DELEGATED=1'" in source
     assert "'scenarioforge.cli',\n            'execute'," in source
+    assert "_webui_remote_core_start_timeout_s()" in source
+    assert "'--start-timeout-s'" in source
 
 
 def test_webui_execute_refreshes_custom_services_when_ssh_password_is_available() -> None:
@@ -567,6 +569,23 @@ def test_webui_execute_refreshes_custom_services_when_ssh_password_is_available(
     assert "or core_cfg.get('ssh_password')" in source
     assert 'install_custom_services_on_execute' in source
     assert '_install_custom_services_to_core_vm(' in source
+
+
+def test_extract_async_error_prefers_cli_start_validation_failure() -> None:
+    from webapp import app_backend as backend
+
+    text = (
+        "[remote] Starting CLI execution...\n"
+        "2026-07-05 ERROR root - Start validation failed: "
+        "CORE session did not reach runtime (state=configuration)\n"
+        "[remote] Process finished with exit code 1\n"
+    )
+
+    error = backend._extract_async_error_from_text(text)
+
+    assert error is not None
+    assert "Start validation failed" in error
+    assert "did not reach runtime" in error
 
 
 def test_run_cli_async_uses_scenario_xml_as_preview_source_for_execute_parity(tmp_path, monkeypatch):

@@ -300,12 +300,12 @@ This checks the active installed vulnerability catalog without starting CORE or 
 Live Web UI batch tests:
 
 ```bash
-uv run catalog-batch-test --target all --scope untested
-uv run catalog-batch-test --target all --scope failed
-uv run catalog-batch-test --target all --scope all
+uv run catalog-rest-batch-test --target all --scope untested
+uv run catalog-rest-batch-test --target all --scope failed
+uv run catalog-rest-batch-test --target all --scope all
 ```
 
-Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope aliases match the Web UI filters: `untested`, `failed`, and `all`. The command logs into the Web UI, starts the existing batch routes, polls progress, and exports JSON reports under `outputs/catalog-batch-tests/`.
+Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope aliases match the Web UI filters: `untested`, `failed`, and `all`. The command logs into the Web UI, starts the existing batch routes, polls progress, and exports JSON reports under `outputs/catalog-rest-batch-tests/`.
 
 See [Catalog Batch Testing](CATALOG_BATCH_TESTING.md) for full usage, CORE credential options, and exit codes.
 

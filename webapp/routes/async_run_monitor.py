@@ -289,6 +289,7 @@ def register(
                         append_async_run_log_line(meta, f'[validate] SKIP: {reason}')
                     elif rc_int is not None and rc_int != 0 and not post_saved:
                         async_error = extract_async_error_from_text(txt) or 'execute failed before session validation'
+                        meta['error'] = async_error
                         validation = validate_session_nodes_and_injects(
                             scenario_xml_path=xml_path_local,
                             session_xml_path=None,
@@ -301,6 +302,7 @@ def register(
                             validation = {'ok': False}
                         validation['ok'] = False
                         validation['error'] = async_error
+                        validation['run_error'] = async_error
                         meta['validation_summary'] = validation
                         append_async_run_log_line(meta, f'[validate] SKIP: {async_error}')
                     else:
@@ -337,6 +339,12 @@ def register(
                                 if isinstance(retry_validation, dict):
                                     validation = retry_validation
                                     validation['flow_copy_retried_after_validation'] = True
+                        if rc_int is not None and rc_int != 0 and isinstance(validation, dict):
+                            async_error = extract_async_error_from_text(txt) or f'execute exited with code {rc_int}'
+                            meta['error'] = async_error
+                            validation['run_error'] = async_error
+                            if not str(validation.get('error') or '').strip():
+                                validation['error'] = async_error
                         meta['validation_summary'] = validation
                         append_async_run_log_line(meta, '[validate] VALIDATION_SUMMARY_JSON: ' + json.dumps(validation))
                         persist_execute_validation_artifacts(report_md, summary_json, validation)
@@ -427,6 +435,22 @@ def register(
             summary_json = None
         if summary_json:
             meta['summary_path'] = summary_json
+        try:
+            rc_int_status = int(meta.get('returncode')) if meta.get('returncode') is not None else None
+        except Exception:
+            rc_int_status = None
+        if meta.get('done') and rc_int_status is not None and rc_int_status != 0 and not meta.get('error'):
+            parsed_error = extract_async_error_from_text(txt) or f'execute exited with code {rc_int_status}'
+            meta['error'] = parsed_error
+            try:
+                if isinstance(meta.get('validation_summary'), dict):
+                    val = meta.get('validation_summary') if isinstance(meta.get('validation_summary'), dict) else {}
+                    val['run_error'] = parsed_error
+                    if not str(val.get('error') or '').strip():
+                        val['error'] = parsed_error
+                    meta['validation_summary'] = val
+            except Exception:
+                pass
         if meta.get('done'):
             try:
                 if meta.get('validation_summary') is None:
