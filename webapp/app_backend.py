@@ -11287,8 +11287,9 @@ except Exception:
     pass
 try:
     log_path = os.path.join(logs_dir, f'webui-{port}.log')
+    root = logging.getLogger()
     has_handler = False
-    for h in list(app.logger.handlers):
+    for h in list(root.handlers):
         try:
             if isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', None) == log_path:
                 has_handler = True
@@ -11299,13 +11300,10 @@ try:
         fh = logging.FileHandler(log_path)
         fh.setLevel(getattr(logging, _log_level_name, logging.INFO))
         fh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
-        app.logger.addHandler(fh)
-        try:
-            root = logging.getLogger()
-            if fh not in root.handlers:
-                root.addHandler(fh)
-        except Exception:
-            pass
+        # Attach only to the root logger. app.logger (and other module loggers)
+        # propagate up to root by default, so adding fh there too would emit
+        # every record twice.
+        root.addHandler(fh)
 except Exception:
     pass
 
@@ -23220,18 +23218,6 @@ def _flow_reorder_chain_by_generator_dag(
         except Exception:
             pass
         return chain_nodes, flag_assignments, None
-
-
-def _flow_prepare_preview_for_execute_impl():
-    from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
-
-    return _flow_prepare_preview_execute.execute_impl(backend=sys.modules[__name__])
-
-
-def _flow_prepare_preview_for_execute():
-    from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
-
-    return _flow_prepare_preview_execute.execute(backend=sys.modules[__name__])
 
 
 try:
