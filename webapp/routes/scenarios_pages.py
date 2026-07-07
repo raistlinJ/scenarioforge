@@ -242,6 +242,11 @@ def register(app, *, backend_module: Any) -> None:
         except Exception:
             pass
 
+        flow_timeouts = {
+            'sequence_timeout_s': backend._env_int_value('CORETG_FLOW_SEQUENCE_TIMEOUT_S', 300),
+            'execute_timeout_s': backend._env_int_value('CORETG_FLOW_EXECUTE_TIMEOUT_S', 3600),
+        }
+
         return render_template(
             'flow.html',
             scenarios=scenario_names,
@@ -251,6 +256,7 @@ def register(app, *, backend_module: Any) -> None:
             preview_xml_path=active_scenario_xml_path,
             xml_preview=xml_preview,
             flow_state_by_scenario=flow_state_by_scenario,
+            flow_timeouts=flow_timeouts,
             active_page='scenarios',
         )
 
