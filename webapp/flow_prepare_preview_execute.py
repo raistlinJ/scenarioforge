@@ -224,8 +224,6 @@ def _prepare_remote_generator_execution(
 
 def _load_prepare_preview_request_context(*, deps, flow_progress) -> dict[str, Any]:
     j = request.get_json(silent=True) or {}
-    with open('/tmp/app_backend_debug.txt', 'a') as f:
-        f.write(f"DEBUG: api_flow_prepare_preview_for_execute called. j={list(j.keys())}\n")
     scenario_label = str(j.get('scenario') or '').strip()
     scenario_norm = deps._normalize_scenario_label(scenario_label)
     preset = str(j.get('preset') or '').strip()
