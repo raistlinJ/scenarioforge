@@ -50,6 +50,10 @@ services:
     depends_on:
       web:
         condition: service_healthy
+    env_file:
+      # Picks up CORETG_NGINX_PROXY_READ_TIMEOUT_S alongside the web service's config.
+      - path: ./.scenarioforge.env
+        required: false
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/certs:/etc/nginx/certs

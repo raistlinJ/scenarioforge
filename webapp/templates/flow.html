@@ -489,6 +489,7 @@
   const scenarioXmlByName = {{ (scenario_xml_by_name or { })| tojson }};
   const scenarioNamesCache = {{ (scenarios or[])| tojson }};
   const initialScenario = {{ (active_scenario or '')| tojson }};
+  const flowTimeouts = {{ (flow_timeouts or { })| tojson }};
   let activeScenario = (initialScenario || (Array.isArray(scenarioNamesCache) && scenarioNamesCache.length ? String(scenarioNamesCache[0]) : '')).trim();
     let flowEnabled = !!(flowEnabledToggleEl ? flowEnabledToggleEl.checked : true);
     const fallbackText = 'Please generate a chain. It will appear here.';
@@ -3192,7 +3193,10 @@
 
   async function postSequencePreviewPlan(payload, opts) {
     const requestOpts = Object.assign({}, opts || {});
-    const timeoutFloorMs = 180000;
+    const configuredSequenceTimeoutS = Number(flowTimeouts && flowTimeouts.sequence_timeout_s);
+    const timeoutFloorMs = (Number.isFinite(configuredSequenceTimeoutS) && configuredSequenceTimeoutS > 0)
+      ? configuredSequenceTimeoutS * 1000
+      : 300000;
     const requestedTimeoutMs = Number(requestOpts.timeoutMs);
     if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs < timeoutFloorMs) {
       requestOpts.timeoutMs = timeoutFloorMs;
@@ -11048,7 +11052,11 @@
               showComposeDialog('Generator Output', 'Solving chain and assignments…');
             } catch (e) { }
             const chain_ids = currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean);
-            resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));
+            const configuredExecuteTimeoutS = Number(flowTimeouts && flowTimeouts.execute_timeout_s);
+            const executeTimeoutCapS = (Number.isFinite(configuredExecuteTimeoutS) && configuredExecuteTimeoutS > 0)
+              ? configuredExecuteTimeoutS
+              : 3600;
+            resolveTimeoutSeconds = Math.min(executeTimeoutCapS, Math.max(600, (chain_ids.length * 150) + 180));
             resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
             resolveStartedAt = Date.now();
             stopProgressPoll = startFlowProgressPoll({

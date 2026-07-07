@@ -87,6 +87,9 @@ Key runtime variables in [.scenarioforge.env.example](.scenarioforge.env.example
 - `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target for that VM-mode interface: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
 - `CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION` – optional label/description applied to that VM-mode HITL interface entry.
 - `CORETG_VM_MODE_PARTICIPANT_URL` – optional participant UI URL shown in VM-mode flows.
+- `CORETG_FLOW_SEQUENCE_TIMEOUT_S` – minimum browser-side timeout (seconds, default `300`) for the Flag Sequencing "Sequence" step. Raise it if sequencing large/constrained chains reports a lost connection before the backend finishes.
+- `CORETG_FLOW_EXECUTE_TIMEOUT_S` – upper cap (seconds, default `3600`) on the browser-side timeout for the Flag Sequencing "Resolve"/"Execute" step, which scales with chain length up to this value. Raise it if resolving long chains or slow generators reports a lost connection before the backend finishes.
+- `CORETG_NGINX_PROXY_READ_TIMEOUT_S` – nginx `proxy_read_timeout` (seconds, default `3700`) for the Docker Compose deployment only. Keep it at or above `CORETG_FLOW_EXECUTE_TIMEOUT_S` so nginx doesn't cut a long Resolve/Execute request before the browser's own timeout would. Not used for direct Python launches.
 
 Minimum VM-mode override example:
 
