@@ -228,6 +228,12 @@ def register(
                 'missing_required_file_count': len(missing_required_files),
                 'compose_dependency_warning': compose_dependency_warning or None,
                 'eligible_for_selection': bool(item.get('validated_ok') is True and item.get('validated_incomplete') is not True and not bool(item.get('disabled', False))),
+                'persistent': bool(item.get('persistent', False)),
+                'cached': item.get('cached') if isinstance(item.get('cached'), bool) else None,
+                'cache_checked_at': str(item.get('cache_checked_at') or '').strip() or None,
+                'cache_last_core_host': str(item.get('cache_last_core_host') or '').strip() or None,
+                'cache_missing_images': item.get('cache_missing_images') if isinstance(item.get('cache_missing_images'), list) else [],
+                'cache_error': str(item.get('cache_error') or '').strip() or None,
             })
         return jsonify({
             'ok': True,
