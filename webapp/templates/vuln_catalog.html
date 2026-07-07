@@ -19,6 +19,9 @@
         <li class="nav-item" role="presentation">
           <button class="nav-link" id="vulnBatchTab" data-bs-toggle="tab" data-bs-target="#vulnBatch" type="button" role="tab">Batch Test</button>
         </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="vulnImageCacheTab" data-bs-toggle="tab" data-bs-target="#vulnImageCache" type="button" role="tab">Image Cache</button>
+        </li>
       </ul>
 
       <div class="tab-content mt-3">
@@ -145,6 +148,8 @@
                   <button class="btn btn-outline-danger" type="button" id="vulnBatchDeleteSelectedBtn" disabled>Delete</button>
                   <button class="btn btn-outline-success" type="button" id="vulnBatchOverrideSuccessBtn" disabled>Override Success</button>
                   <button class="btn btn-outline-secondary" type="button" id="vulnBatchOverrideFailBtn" disabled>Override Fail</button>
+                  <button class="btn btn-outline-info" type="button" id="vulnBatchPersistentBtn" disabled title="Protect cached images for the selected item(s) from cleanup">Mark Persistent</button>
+                  <button class="btn btn-outline-secondary" type="button" id="vulnBatchUnpersistentBtn" disabled>Unmark Persistent</button>
                 </div>
               </div>
             </div>
@@ -162,6 +167,7 @@
                       <th>Description</th>
                       <th style="width: 140px;">Validated</th>
                       <th>From Source</th>
+                      <th style="width: 130px;">Image Cache</th>
                       <th style="width: 160px;">Actions</th>
                     </tr>
                   </thead>
@@ -301,6 +307,94 @@
             <div class="card-body">
               <div class="small text-muted mb-1">Batch Log</div>
               <pre class="small bg-light p-2 mb-0" id="vulnBatchLog" style="max-height: 260px; overflow: auto;"></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-pane fade" id="vulnImageCache" role="tabpanel">
+          <div class="card mb-3">
+            <div class="card-body">
+              <div class="small text-muted mb-3">
+                Pull the docker images required by catalog items onto the CORE VM ahead of time so scenario
+                execution there doesn't need internet access. Use <strong>Refresh Image Cache</strong> to check
+                what's already present on a given CORE VM. Items marked <strong>Persistent</strong> (see the
+                Vulnerability Catalog tab) are never removed by ScenarioForge's own cleanup routines.
+              </div>
+              <div class="row g-2 align-items-end">
+                <div class="col-md-5">
+                  <label class="form-label">Filter</label>
+                  <input id="vulnCacheFilter" class="form-control" placeholder="Name, id, source, or path…" />
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">Max Items</label>
+                  <input id="vulnCacheLimit" class="form-control" type="number" min="1" max="500" placeholder="All" />
+                </div>
+                <div class="col-md-5 d-flex justify-content-md-end gap-2">
+                  <button class="btn btn-primary" type="button" id="vulnCacheStartBtn">Cache Images</button>
+                  <button class="btn btn-outline-primary" type="button" id="vulnCacheRefreshBtn">Refresh Image Cache</button>
+                  <button class="btn btn-outline-danger" type="button" id="vulnCacheStopBtn" style="display:none;">Stop</button>
+                </div>
+                <div class="col-12 d-flex flex-wrap gap-3 align-items-center small text-muted">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vulnCacheIncludeDisabled">
+                    <label class="form-check-label" for="vulnCacheIncludeDisabled">Include disabled items</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="vulnCacheSelectedOnly">
+                    <label class="form-check-label" for="vulnCacheSelectedOnly">Use table selection instead of filter</label>
+                  </div>
+                </div>
+                <div class="col-12 small text-muted" id="vulnCacheMeta">No cache run active.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row g-3">
+            <div class="col-lg-4">
+              <div class="card h-100">
+                <div class="card-body">
+                  <h6 class="mb-3">Progress</h6>
+                  <div class="small mb-2">Mode: <strong id="vulnCacheMode">—</strong></div>
+                  <div class="small mb-2">Queued: <strong id="vulnCacheCountTotal">0</strong></div>
+                  <div class="small mb-2">Completed: <strong id="vulnCacheCountCompleted">0</strong></div>
+                  <div class="small mb-2 text-success">OK: <strong id="vulnCacheCountOk">0</strong></div>
+                  <div class="small mb-2 text-danger">Failed: <strong id="vulnCacheCountFailed">0</strong></div>
+                  <div class="small mb-3">Pending: <strong id="vulnCacheCountPending">0</strong></div>
+                  <hr>
+                  <div class="small text-muted mb-1">Active Item</div>
+                  <div id="vulnCacheActiveItem" class="small">Idle</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-lg-8">
+              <div class="card h-100">
+                <div class="card-body">
+                  <h6 class="mb-2">Results</h6>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead>
+                        <tr>
+                          <th style="width: 70px;">#</th>
+                          <th>Item</th>
+                          <th style="width: 110px;">Cached</th>
+                          <th>Missing Images / Error</th>
+                        </tr>
+                      </thead>
+                      <tbody id="vulnCacheResultsBody">
+                        <tr><td colspan="4" class="text-muted">No results yet.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mt-3">
+            <div class="card-body">
+              <div class="small text-muted mb-1">Cache Log</div>
+              <pre class="small bg-light p-2 mb-0" id="vulnCacheLog" style="max-height: 260px; overflow: auto;"></pre>
             </div>
           </div>
         </div>
@@ -555,7 +649,7 @@
         ? `${selectedCount} selected. Selection actions are locked while a test or batch is active.`
         : `${selectedCount} selected.`;
     }
-    ['vulnBatchEnableSelectedBtn', 'vulnBatchDisableSelectedBtn', 'vulnBatchDeleteSelectedBtn', 'vulnBatchOverrideSuccessBtn', 'vulnBatchOverrideFailBtn'].forEach((id) => {
+    ['vulnBatchEnableSelectedBtn', 'vulnBatchDisableSelectedBtn', 'vulnBatchDeleteSelectedBtn', 'vulnBatchOverrideSuccessBtn', 'vulnBatchOverrideFailBtn', 'vulnBatchPersistentBtn', 'vulnBatchUnpersistentBtn'].forEach((id) => {
       const el = _qs(id);
       if (el) el.disabled = locked || selectedCount === 0;
     });
@@ -997,6 +1091,18 @@
                 : '<span class="text-muted">—</span>'))}
         </td>
         <td class="small">${escapeHtml(it.from_source || '')}</td>
+        <td class="small">
+          ${it.cached === true
+            ? '<span class="badge text-bg-success">Cached</span>'
+            : (it.cached === false
+              ? '<span class="badge text-bg-secondary">Not cached</span>'
+              : '<span class="text-muted">—</span>')}
+          ${it.cache_checked_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(it.cache_checked_at)}${it.cache_last_core_host ? ' @ ' + escapeHtml(it.cache_last_core_host) : ''}</div>` : ''}
+          <div class="form-check mt-1">
+            <input class="form-check-input" type="checkbox" data-action="persistent" data-item-id="${escapeHtml(itemId)}" ${it.persistent ? 'checked' : ''} aria-label="Keep image cache persistent for ${escapeHtml(it.name || '')}">
+            <label class="form-check-label" style="font-size:11px;">Persistent</label>
+          </div>
+        </td>
         <td>
           <div class="btn-group btn-group-sm" role="group">
             <button class="btn btn-sm btn-outline-primary" data-action="test" type="button" ${(it.disabled || isBusy) ? 'disabled' : ''} title="${it.disabled ? 'Disabled' : (isBusy ? 'Another test or batch is active' : 'Test vulnerability')}">Test</button>
@@ -1011,6 +1117,17 @@
         if (checked) _vulnCatalogState.selectedItemIds.add(itemId);
         else _vulnCatalogState.selectedItemIds.delete(itemId);
         _updateVulnSelectionUi();
+      });
+
+      tr.querySelector('[data-action="persistent"]')?.addEventListener('change', async (event) => {
+        const checked = !!(event && event.target && event.target.checked);
+        try {
+          await _postJson('/vuln_catalog_items/set_persistent', { item_id: it.id, persistent: checked });
+          it.persistent = checked;
+        } catch (e) {
+          if (event && event.target) event.target.checked = !checked;
+          _appendLog('vulnCatalogLog', `[error] Failed to update persistent flag for #${it.id}: ${e}`);
+        }
       });
 
       tr.querySelector('[data-action="test"]').addEventListener('click', () => openVulnTestModal(it));
@@ -1041,7 +1158,7 @@
 
     if (!rows.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td colspan="7" class="text-muted">No vulnerabilities found.</td>`;
+      tr.innerHTML = `<td colspan="8" class="text-muted">No vulnerabilities found.</td>`;
       body.appendChild(tr);
     }
 
@@ -1549,6 +1666,178 @@
     if (!runId) return;
     await _postJson('/vuln_catalog_items/batch/stop', { run_id: runId });
     await refreshVulnBatchStatus(runId);
+  }
+
+  const _vulnCacheStorageKey = 'coretg_vuln_cache_run_id';
+  let _vulnCachePollTimer = null;
+  const _vulnCacheState = { runId: null, done: true };
+
+  function _loadSavedVulnCacheRunId() {
+    try {
+      return localStorage.getItem(_vulnCacheStorageKey) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function _saveVulnCacheRunId(runId) {
+    try {
+      if (runId) localStorage.setItem(_vulnCacheStorageKey, String(runId));
+      else localStorage.removeItem(_vulnCacheStorageKey);
+    } catch (e) {}
+  }
+
+  function _scheduleVulnCachePoll(delayMs) {
+    if (_vulnCachePollTimer) {
+      clearTimeout(_vulnCachePollTimer);
+      _vulnCachePollTimer = null;
+    }
+    _vulnCachePollTimer = setTimeout(() => {
+      refreshVulnCacheStatus().catch(() => {});
+    }, Math.max(250, Number(delayMs || 1500)));
+  }
+
+  function _collectVulnCacheSelection() {
+    const selectedOnlyEl = _qs('vulnCacheSelectedOnly');
+    if (selectedOnlyEl && selectedOnlyEl.checked) {
+      return { item_ids: _selectedVulnItemIds() };
+    }
+    const queryEl = _qs('vulnCacheFilter');
+    const limitEl = _qs('vulnCacheLimit');
+    const includeDisabledEl = _qs('vulnCacheIncludeDisabled');
+    const limitRaw = String((limitEl && limitEl.value) || '').trim();
+    let limit = null;
+    if (limitRaw) {
+      const parsed = parseInt(limitRaw, 10);
+      if (Number.isFinite(parsed) && parsed > 0) limit = Math.min(parsed, 500);
+    }
+    return {
+      query: String((queryEl && queryEl.value) || '').trim(),
+      include_disabled: !!(includeDisabledEl && includeDisabledEl.checked),
+      limit,
+    };
+  }
+
+  function _renderVulnCacheResults(results) {
+    const body = _qs('vulnCacheResultsBody');
+    if (!body) return;
+    const rows = Array.isArray(results) ? results : [];
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="4" class="text-muted">No results yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map((r, idx) => {
+      const cachedBadge = r && r.cached === true
+        ? '<span class="badge text-bg-success">Cached</span>'
+        : (r && r.cached === false
+          ? '<span class="badge text-bg-secondary">Not cached</span>'
+          : (r && r.ok ? '<span class="badge text-bg-secondary">Skipped</span>' : '<span class="badge text-bg-danger">Failed</span>'));
+      const missing = Array.isArray(r && r.missing_images) ? r.missing_images : [];
+      const detail = missing.length
+        ? escapeHtml(missing.join(', '))
+        : (r && r.error ? escapeHtml(String(r.error)) : '<span class="text-muted">—</span>');
+      return `
+        <tr>
+          <td class="text-muted">${idx + 1}</td>
+          <td>${escapeHtml(String((r && r.item_name) || ''))} <span class="text-muted small">#${escapeHtml(String((r && r.item_id) || ''))}</span></td>
+          <td>${cachedBadge}</td>
+          <td class="small">${detail}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function _renderVulnCacheStatus(payload) {
+    if (!payload) return;
+    _setText('vulnCacheMode', payload.mode === 'status' ? 'Refresh status' : 'Cache (pull)');
+    const progress = payload.progress || {};
+    _setText('vulnCacheCountTotal', String(progress.total || 0));
+    _setText('vulnCacheCountCompleted', String(progress.completed || 0));
+    _setText('vulnCacheCountOk', String(progress.ok || 0));
+    _setText('vulnCacheCountFailed', String(progress.failed || 0));
+    _setText('vulnCacheCountPending', String(progress.pending || 0));
+    const activeItem = payload.active_item;
+    _setText('vulnCacheActiveItem', activeItem ? `#${activeItem.id} ${activeItem.name || ''}` : 'Idle');
+    _renderVulnCacheResults(payload.results);
+
+    const logEl = _qs('vulnCacheLog');
+    if (logEl) {
+      const lines = Array.isArray(payload.log_lines) ? payload.log_lines : [];
+      logEl.textContent = lines.join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    const startBtn = _qs('vulnCacheStartBtn');
+    const refreshBtn = _qs('vulnCacheRefreshBtn');
+    const stopBtn = _qs('vulnCacheStopBtn');
+    const done = !!payload.done;
+    _vulnCacheState.done = done;
+    _vulnCacheState.runId = payload.run_id || null;
+    if (startBtn) startBtn.disabled = !done;
+    if (refreshBtn) refreshBtn.disabled = !done;
+    if (stopBtn) stopBtn.style.display = done ? 'none' : '';
+
+    const metaEl = _qs('vulnCacheMeta');
+    if (metaEl) {
+      metaEl.textContent = done
+        ? `Last run: ${payload.status || 'unknown'} (${progress.completed || 0}/${progress.total || 0})`
+        : `Running: ${payload.status || 'running'} (${progress.completed || 0}/${progress.total || 0})`;
+    }
+
+    if (!done) {
+      _scheduleVulnCachePoll(1500);
+    } else {
+      _saveVulnCacheRunId('');
+      if (_vulnCachePollTimer) {
+        clearTimeout(_vulnCachePollTimer);
+        _vulnCachePollTimer = null;
+      }
+      try { loadVulnCatalogItems(); } catch (e) {}
+    }
+  }
+
+  async function refreshVulnCacheStatus(runId) {
+    const targetRunId = String(runId || _vulnCacheState.runId || _loadSavedVulnCacheRunId() || '').trim();
+    const url = targetRunId
+      ? `/vuln_catalog_items/cache/status?run_id=${encodeURIComponent(targetRunId)}`
+      : '/vuln_catalog_items/cache/status';
+    try {
+      const payload = await _fetchJson(url, { method: 'GET' });
+      _renderVulnCacheStatus(payload);
+    } catch (e) {
+      const msg = String(e || '');
+      if (!msg.toLowerCase().includes('not found')) {
+        _setText('vulnCacheMeta', `Cache status error: ${msg}`);
+      }
+    }
+  }
+
+  async function startVulnCache(mode) {
+    if (!_vulnCacheState.done) return;
+    const creds = await resolveVulnBatchCoreConfig();
+    if (!creds) return;
+    const selection = _collectVulnCacheSelection();
+    _setText('vulnCacheMeta', mode === 'status' ? 'Starting refresh…' : 'Starting cache pull…');
+    try {
+      const url = mode === 'status' ? '/vuln_catalog_items/cache/refresh/start' : '/vuln_catalog_items/cache/start';
+      const result = await _postJson(url, { ...selection, core: creds });
+      if (!result || result.ok === false) {
+        throw new Error((result && result.error) ? result.error : 'Failed to start');
+      }
+      _vulnCacheState.done = false;
+      _vulnCacheState.runId = result.run_id;
+      _saveVulnCacheRunId(result.run_id);
+      await refreshVulnCacheStatus(result.run_id);
+    } catch (e) {
+      _setText('vulnCacheMeta', `Failed to start: ${String(e)}`);
+    }
+  }
+
+  async function stopVulnCache() {
+    const runId = String(_vulnCacheState.runId || _loadSavedVulnCacheRunId() || '').trim();
+    if (!runId) return;
+    await _postJson('/vuln_catalog_items/cache/stop', { run_id: runId });
+    await refreshVulnCacheStatus(runId);
   }
 
   function openVulnTestModal(item) {
@@ -2070,6 +2359,8 @@
     _qs('vulnBatchDeleteSelectedBtn')?.addEventListener('click', () => _applyVulnBatchMutation('delete', `Delete ${_selectedVulnItemIds().length} selected item(s)? This cannot be undone.`));
     _qs('vulnBatchOverrideSuccessBtn')?.addEventListener('click', () => _applyVulnBatchMutation('override_success', `Override ${_selectedVulnItemIds().length} selected item(s) as success?`));
     _qs('vulnBatchOverrideFailBtn')?.addEventListener('click', () => _applyVulnBatchMutation('override_fail', `Override ${_selectedVulnItemIds().length} selected item(s) as fail?`));
+    _qs('vulnBatchPersistentBtn')?.addEventListener('click', () => _applyVulnBatchMutation('persistent', `Mark ${_selectedVulnItemIds().length} selected item(s) as persistent? Their cached images will never be removed by cleanup.`));
+    _qs('vulnBatchUnpersistentBtn')?.addEventListener('click', () => _applyVulnBatchMutation('unpersistent', `Unmark ${_selectedVulnItemIds().length} selected item(s) as persistent?`));
 
     // Mirror Flag-Generators: click header to sort + arrows
     enableTableSorting('vulnCatalogTable', _vulnCatalogState, [
@@ -2118,6 +2409,38 @@
         _setText('vulnBatchMeta', `Batch stop failed: ${String(e)}`);
       }
     });
+    const cacheStartBtn = _qs('vulnCacheStartBtn');
+    if (cacheStartBtn) cacheStartBtn.addEventListener('click', async () => {
+      try {
+        await loadVulnCatalogItems();
+        await startVulnCache('pull');
+      } catch (e) {
+        _setText('vulnCacheMeta', `Cache start failed: ${String(e)}`);
+      }
+    });
+    const cacheRefreshBtn = _qs('vulnCacheRefreshBtn');
+    if (cacheRefreshBtn) cacheRefreshBtn.addEventListener('click', async () => {
+      try {
+        await loadVulnCatalogItems();
+        await startVulnCache('status');
+      } catch (e) {
+        _setText('vulnCacheMeta', `Refresh failed: ${String(e)}`);
+      }
+    });
+    const cacheStopBtn = _qs('vulnCacheStopBtn');
+    if (cacheStopBtn) cacheStopBtn.addEventListener('click', async () => {
+      try {
+        await stopVulnCache();
+      } catch (e) {
+        _setText('vulnCacheMeta', `Cache stop failed: ${String(e)}`);
+      }
+    });
+    const savedCacheRunId = _loadSavedVulnCacheRunId();
+    if (savedCacheRunId) {
+      _vulnCacheState.runId = savedCacheRunId;
+      _vulnCacheState.done = false;
+      refreshVulnCacheStatus(savedCacheRunId).catch(() => {});
+    }
     const batchCategoryFilter = _qs('vulnBatchResultsCategoryFilter');
     if (batchCategoryFilter) batchCategoryFilter.addEventListener('change', () => {
       const payload = _vulnCatalogState.latestBatchPayload;

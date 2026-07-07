@@ -531,7 +531,10 @@ def register(app, *, backend_module: Any) -> None:
                         app.logger.warning('[sync] Pre-run: docker remove-all-containers requested')
                         backend._run_remote_python_json(
                             core_cfg,
-                            backend._remote_docker_remove_all_containers_script(core_cfg.get('ssh_password')),
+                            backend._remote_docker_remove_all_containers_script(
+                                core_cfg.get('ssh_password'),
+                                keep_images=list(backend._persistent_image_keep_set()),
+                            ),
                             logger=app.logger,
                             label='docker.remove_all_containers(prerun)',
                             timeout=900.0,
@@ -566,7 +569,10 @@ def register(app, *, backend_module: Any) -> None:
                             )
                         backend._run_remote_python_json(
                             core_cfg,
-                            backend._remote_docker_remove_wrapper_images_script(core_cfg.get('ssh_password')),
+                            backend._remote_docker_remove_wrapper_images_script(
+                                core_cfg.get('ssh_password'),
+                                keep_images=list(backend._persistent_image_keep_set()),
+                            ),
                             logger=app.logger,
                             label='docker.wrapper_images.cleanup(prerun)',
                             timeout=180.0,

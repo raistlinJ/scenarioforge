@@ -101,6 +101,44 @@ def register(
         write_vuln_catalogs_state(state)
         return jsonify({'ok': True})
 
+    @app.route('/vuln_catalog_items/set_persistent', methods=['POST'])
+    def vuln_catalog_items_set_persistent():
+        require_builder_or_admin()
+        payload = request.get_json(silent=True) or {}
+        item_id_raw = payload.get('item_id')
+        persistent = bool(payload.get('persistent', False))
+        try:
+            item_id = int(item_id_raw)
+        except Exception:
+            return jsonify({'ok': False, 'error': 'Invalid item_id'}), 400
+
+        state = load_vuln_catalogs_state()
+        entry = get_active_vuln_catalog_entry(state)
+        if not entry:
+            return jsonify({'ok': False, 'error': 'No active catalog pack'}), 404
+        cid = str(entry.get('id') or '').strip()
+        catalogs = [catalog for catalog in (state.get('catalogs') or []) if isinstance(catalog, dict)]
+
+        updated = False
+        for catalog in catalogs:
+            if str(catalog.get('id') or '').strip() != cid:
+                continue
+            items = normalize_vuln_catalog_items(catalog)
+            for item in items:
+                if int(item.get('id') or 0) == item_id:
+                    item['persistent'] = persistent
+                    updated = True
+                    break
+            catalog['compose_items'] = items
+            catalog['csv_paths'] = write_vuln_catalog_csv_from_items(catalog_id=cid, items=items)
+            break
+        if not updated:
+            return jsonify({'ok': False, 'error': 'Unknown item id'}), 404
+
+        state['catalogs'] = catalogs
+        write_vuln_catalogs_state(state)
+        return jsonify({'ok': True})
+
     @app.route('/vuln_catalog_items/delete', methods=['POST'])
     def vuln_catalog_items_delete():
         require_builder_or_admin()
@@ -151,7 +189,7 @@ def register(
         item_ids = list(dict.fromkeys(item_ids))
         if not item_ids:
             return jsonify({'ok': False, 'error': 'No item ids provided'}), 400
-        if action not in {'enable', 'disable', 'delete', 'override_success', 'override_fail'}:
+        if action not in {'enable', 'disable', 'delete', 'override_success', 'override_fail', 'persistent', 'unpersistent'}:
             return jsonify({'ok': False, 'error': f'Unsupported action: {action}'}), 400
 
         state, entry, cid, catalogs, _items = _load_active_catalog_and_items()
@@ -189,6 +227,10 @@ def register(
                     item['validated_ok'] = False
                     item['validated_incomplete'] = False
                     item['validated_at'] = validated_at
+                elif action == 'persistent':
+                    item['persistent'] = True
+                elif action == 'unpersistent':
+                    item['persistent'] = False
                 kept.append(item)
             if not changed:
                 continue

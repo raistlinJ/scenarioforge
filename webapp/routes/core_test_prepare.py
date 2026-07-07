@@ -122,7 +122,10 @@ def register(app, *, backend_module: Any) -> None:
         try:
             image_cleanup_payload = backend._run_remote_python_json(
                 core_cfg,
-                backend._remote_docker_remove_wrapper_images_script(core_cfg.get('ssh_password')),
+                backend._remote_docker_remove_wrapper_images_script(
+                    core_cfg.get('ssh_password'),
+                    keep_images=list(backend._persistent_image_keep_set()),
+                ),
                 logger=app.logger,
                 label='docker.wrapper_images.cleanup(test prepare cleanup)',
                 timeout=180.0,

@@ -14,6 +14,7 @@ def register(
     set_pack_disabled_state: Callable[..., tuple[bool, str]],
     set_generator_disabled_state: Callable[..., tuple[bool, str]],
     set_generator_validation_state: Callable[..., tuple[bool, str]],
+    set_generator_persistent_state: Callable[..., tuple[bool, str]],
     delete_installed_generator: Callable[..., tuple[bool, str]],
 ) -> None:
     if not begin_route_registration(app, 'generator_catalog_mutations_routes'):
@@ -31,7 +32,7 @@ def register(
         ids = list(dict.fromkeys(ids))
         if not ids:
             return jsonify({'ok': False, 'error': 'No generator ids provided'}), 400
-        if action not in {'enable', 'disable', 'delete', 'override_success', 'override_fail'}:
+        if action not in {'enable', 'disable', 'delete', 'override_success', 'override_fail', 'persistent', 'unpersistent'}:
             return jsonify({'ok': False, 'error': f'Unsupported action: {action}'}), 400
 
         updated: list[str] = []
@@ -46,8 +47,12 @@ def register(
                     ok, note = delete_installed_generator(kind=kind, generator_id=gid)
                 elif action == 'override_success':
                     ok, note = set_generator_validation_state(kind=kind, generator_id=gid, validated_ok=True, validated_incomplete=False)
-                else:
+                elif action == 'override_fail':
                     ok, note = set_generator_validation_state(kind=kind, generator_id=gid, validated_ok=False, validated_incomplete=False)
+                elif action == 'persistent':
+                    ok, note = set_generator_persistent_state(kind=kind, generator_id=gid, persistent=True)
+                else:
+                    ok, note = set_generator_persistent_state(kind=kind, generator_id=gid, persistent=False)
             except Exception as exc:
                 ok, note = False, str(exc)
             if ok:
@@ -114,6 +119,24 @@ def register(
         generator_id = str(payload.get('generator_id') or payload.get('id') or '').strip()
         disabled = bool(payload.get('disabled') is True)
         ok, note = set_generator_disabled_state(kind='flag-node-generator', generator_id=generator_id, disabled=disabled)
+        return jsonify({'ok': ok, 'message': note} if ok else {'ok': False, 'error': note}), (200 if ok else 400)
+
+    @app.route('/api/flag_generators/set_persistent', methods=['POST'])
+    def api_flag_generators_set_persistent():
+        require_builder_or_admin()
+        payload = request.get_json(silent=True) or {}
+        generator_id = str(payload.get('generator_id') or payload.get('id') or '').strip()
+        persistent = bool(payload.get('persistent') is True)
+        ok, note = set_generator_persistent_state(kind='flag-generator', generator_id=generator_id, persistent=persistent)
+        return jsonify({'ok': ok, 'message': note} if ok else {'ok': False, 'error': note}), (200 if ok else 400)
+
+    @app.route('/api/flag_node_generators/set_persistent', methods=['POST'])
+    def api_flag_node_generators_set_persistent():
+        require_builder_or_admin()
+        payload = request.get_json(silent=True) or {}
+        generator_id = str(payload.get('generator_id') or payload.get('id') or '').strip()
+        persistent = bool(payload.get('persistent') is True)
+        ok, note = set_generator_persistent_state(kind='flag-node-generator', generator_id=generator_id, persistent=persistent)
         return jsonify({'ok': ok, 'message': note} if ok else {'ok': False, 'error': note}), (200 if ok else 400)
 
     @app.route('/api/flag_generators/batch_mutate', methods=['POST'])

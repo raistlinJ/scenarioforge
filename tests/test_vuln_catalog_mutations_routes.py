@@ -173,6 +173,86 @@ def test_vuln_catalog_items_set_disabled_returns_404_for_missing_item():
     assert writes == []
 
 
+def test_vuln_catalog_items_set_persistent_updates_item_and_regenerates_csv():
+    app, state, writes, csv_calls, _ = _build_app(
+        {
+            'active_id': 'pack-1',
+            'catalogs': [
+                {
+                    'id': 'pack-1',
+                    'compose_items': [
+                        {'id': 11, 'disabled': False, 'persistent': False},
+                        {'id': 12, 'disabled': False, 'persistent': False},
+                    ],
+                }
+            ],
+        }
+    )
+    client = app.test_client()
+
+    response = client.post('/vuln_catalog_items/set_persistent', json={'item_id': 12, 'persistent': True})
+
+    assert response.status_code == 200
+    assert response.get_json() == {'ok': True}
+    items = state['catalogs'][0]['compose_items']
+    assert items[0]['persistent'] is False
+    assert items[1]['persistent'] is True
+    assert writes[-1]['catalogs'][0]['compose_items'][1]['persistent'] is True
+    assert csv_calls[-1]['catalog_id'] == 'pack-1'
+
+
+def test_vuln_catalog_items_set_persistent_returns_404_for_missing_item():
+    app, _, writes, _, _ = _build_app(
+        {
+            'active_id': 'pack-1',
+            'catalogs': [{'id': 'pack-1', 'compose_items': [{'id': 11, 'persistent': False}]}],
+        }
+    )
+    client = app.test_client()
+
+    response = client.post('/vuln_catalog_items/set_persistent', json={'item_id': 99, 'persistent': True})
+
+    assert response.status_code == 404
+    assert response.get_json() == {'ok': False, 'error': 'Unknown item id'}
+    assert writes == []
+
+
+def test_vuln_catalog_items_batch_mutate_persistent_and_unpersistent():
+    app, state, writes, csv_calls, _ = _build_app(
+        {
+            'active_id': 'pack-1',
+            'catalogs': [
+                {
+                    'id': 'pack-1',
+                    'compose_items': [
+                        {'id': 11, 'persistent': False},
+                        {'id': 12, 'persistent': True},
+                    ],
+                }
+            ],
+        }
+    )
+    client = app.test_client()
+
+    response = client.post('/vuln_catalog_items/batch_mutate', json={'item_ids': [11], 'action': 'persistent'})
+    assert response.status_code == 200
+    payload = response.get_json() or {}
+    assert payload['ok'] is True
+    assert payload['updated'] == [11]
+    items = state['catalogs'][0]['compose_items']
+    assert items[0]['persistent'] is True
+    assert csv_calls[-1]['catalog_id'] == 'pack-1'
+
+    response = client.post('/vuln_catalog_items/batch_mutate', json={'item_ids': [12], 'action': 'unpersistent'})
+    assert response.status_code == 200
+    payload = response.get_json() or {}
+    assert payload['ok'] is True
+    assert payload['updated'] == [12]
+    items = state['catalogs'][0]['compose_items']
+    assert items[1]['persistent'] is False
+    assert writes[-1]['catalogs'][0]['compose_items'][1]['persistent'] is False
+
+
 def test_vuln_catalog_items_batch_override_fail_updates_multiple_items():
     app, state, writes, csv_calls, _ = _build_app(
         {

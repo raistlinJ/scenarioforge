@@ -132,6 +132,8 @@
                   <button class="btn btn-outline-danger" type="button" id="genBatchDeleteBtn" disabled>Delete</button>
                   <button class="btn btn-outline-success" type="button" id="genBatchOverrideSuccessBtn" disabled>Override Success</button>
                   <button class="btn btn-outline-secondary" type="button" id="genBatchOverrideFailBtn" disabled>Override Fail</button>
+                  <button class="btn btn-outline-info" type="button" id="genBatchPersistentBtn" disabled title="Protect cached images for the selected generator(s) from cleanup">Mark Persistent</button>
+                  <button class="btn btn-outline-secondary" type="button" id="genBatchUnpersistentBtn" disabled>Unmark Persistent</button>
                 </div>
               </div>
             </div>
@@ -152,6 +154,7 @@
                       <th>Injects</th>
                       <th style="width: 140px;">Validated</th>
                       <th>From Source</th>
+                      <th style="width: 130px;">Image Cache</th>
                       <th style="width: 160px;">Actions</th>
                     </tr>
                   </thead>
@@ -184,6 +187,8 @@
                   <button class="btn btn-outline-danger" type="button" id="nodeGenBatchDeleteBtn" disabled>Delete</button>
                   <button class="btn btn-outline-success" type="button" id="nodeGenBatchOverrideSuccessBtn" disabled>Override Success</button>
                   <button class="btn btn-outline-secondary" type="button" id="nodeGenBatchOverrideFailBtn" disabled>Override Fail</button>
+                  <button class="btn btn-outline-info" type="button" id="nodeGenBatchPersistentBtn" disabled title="Protect cached images for the selected node-generator(s) from cleanup">Mark Persistent</button>
+                  <button class="btn btn-outline-secondary" type="button" id="nodeGenBatchUnpersistentBtn" disabled>Unmark Persistent</button>
                 </div>
               </div>
             </div>
@@ -204,6 +209,7 @@
                       <th>Injects</th>
                       <th style="width: 140px;">Validated</th>
                       <th>From Source</th>
+                      <th style="width: 130px;">Image Cache</th>
                       <th style="width: 160px;">Actions</th>
                     </tr>
                   </thead>
@@ -351,6 +357,102 @@
             <div class="card-body">
               <div class="small text-muted mb-1">Batch Log</div>
               <pre class="small bg-light p-2 mb-0" id="flagBatchLog" style="max-height: 260px; overflow: auto;"></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-pane fade" id="flagImageCache" role="tabpanel">
+          <div class="card mb-3">
+            <div class="card-body">
+              <div class="small text-muted mb-3">
+                Pull the docker images required by compose-based generators onto the CORE VM ahead of time so
+                scenario execution there doesn't need internet access. Use <strong>Refresh Image Cache</strong> to
+                check what's already present on a given CORE VM. Generators marked <strong>Persistent</strong> (see
+                the Flag-Generators / Flag-Node-Generators tabs) are never removed by ScenarioForge's own cleanup
+                routines. Generators without a docker-compose runtime have nothing to cache.
+              </div>
+              <div class="row g-2 align-items-end">
+                <div class="col-md-2">
+                  <label class="form-label">Kind</label>
+                  <select id="genCacheKind" class="form-select">
+                    <option value="flag-generator" selected>Flag-Generators</option>
+                    <option value="flag-node-generator">Flag-Node-Generators</option>
+                  </select>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Filter</label>
+                  <input id="genCacheFilter" class="form-control" placeholder="Name or id…" />
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">Max Items</label>
+                  <input id="genCacheLimit" class="form-control" type="number" min="1" max="500" placeholder="All" />
+                </div>
+                <div class="col-md-4 d-flex justify-content-md-end gap-2">
+                  <button class="btn btn-primary" type="button" id="genCacheStartBtn">Cache Images</button>
+                  <button class="btn btn-outline-primary" type="button" id="genCacheRefreshBtn">Refresh Image Cache</button>
+                  <button class="btn btn-outline-danger" type="button" id="genCacheStopBtn" style="display:none;">Stop</button>
+                </div>
+                <div class="col-12 d-flex flex-wrap gap-3 align-items-center small text-muted">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="genCacheIncludeDisabled">
+                    <label class="form-check-label" for="genCacheIncludeDisabled">Include disabled items</label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="genCacheSelectedOnly">
+                    <label class="form-check-label" for="genCacheSelectedOnly">Use table selection instead of filter</label>
+                  </div>
+                </div>
+                <div class="col-12 small text-muted" id="genCacheMeta">No cache run active.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row g-3">
+            <div class="col-lg-4">
+              <div class="card h-100">
+                <div class="card-body">
+                  <h6 class="mb-3">Progress</h6>
+                  <div class="small mb-2">Mode: <strong id="genCacheMode">—</strong></div>
+                  <div class="small mb-2">Queued: <strong id="genCacheCountTotal">0</strong></div>
+                  <div class="small mb-2">Completed: <strong id="genCacheCountCompleted">0</strong></div>
+                  <div class="small mb-2 text-success">OK: <strong id="genCacheCountOk">0</strong></div>
+                  <div class="small mb-2 text-danger">Failed: <strong id="genCacheCountFailed">0</strong></div>
+                  <div class="small mb-3">Pending: <strong id="genCacheCountPending">0</strong></div>
+                  <hr>
+                  <div class="small text-muted mb-1">Active Item</div>
+                  <div id="genCacheActiveItem" class="small">Idle</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-lg-8">
+              <div class="card h-100">
+                <div class="card-body">
+                  <h6 class="mb-2">Results</h6>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead>
+                        <tr>
+                          <th style="width: 70px;">#</th>
+                          <th>Item</th>
+                          <th style="width: 110px;">Cached</th>
+                          <th>Missing Images / Error</th>
+                        </tr>
+                      </thead>
+                      <tbody id="genCacheResultsBody">
+                        <tr><td colspan="4" class="text-muted">No results yet.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mt-3">
+            <div class="card-body">
+              <div class="small text-muted mb-1">Cache Log</div>
+              <pre class="small bg-light p-2 mb-0" id="genCacheLog" style="max-height: 260px; overflow: auto;"></pre>
             </div>
           </div>
         </div>
@@ -1410,6 +1512,20 @@
         <td class="small" style="max-width: 520px; word-break: break-all;">${escapeHtml(injected)}</td>
         <td class="small">${validatedHtml}</td>
         <td class="small">${escapeHtml(g._source_name || '')}</td>
+        <td class="small">
+          ${hasCompose
+            ? (g._cached === true
+              ? '<span class="badge text-bg-success">Cached</span>'
+              : (g._cached === false
+                ? '<span class="badge text-bg-secondary">Not cached</span>'
+                : '<span class="text-muted">—</span>'))
+            : '<span class="text-muted">no compose</span>'}
+          ${g._cache_checked_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(g._cache_checked_at)}${g._cache_last_core_host ? ' @ ' + escapeHtml(g._cache_last_core_host) : ''}</div>` : ''}
+          <div class="form-check mt-1">
+            <input class="form-check-input" type="checkbox" data-role="persistent" data-genid="${escapeHtml(g.id || '')}" ${g._persistent ? 'checked' : ''} ${hasCompose ? '' : 'disabled'} title="${hasCompose ? 'Keep this generator\'s cached images persistent' : 'No compose runtime to cache'}" aria-label="Keep image cache persistent for ${escapeHtml(g.name || '')}">
+            <label class="form-check-label" style="font-size:11px;">Persistent</label>
+          </div>
+        </td>
         <td>
           <div class="btn-group btn-group-sm" role="group">
             ${isDuplicateConflict
@@ -1433,8 +1549,14 @@
           metaId: 'genSelectionMeta',
           checkAllId: 'genCheckAll',
           rowSelector: '#genBody',
-          buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
+          buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn', 'genBatchPersistentBtn', 'genBatchUnpersistentBtn'],
         });
+      });
+
+      tr.querySelector('[data-role="persistent"]')?.addEventListener('change', async (event) => {
+        const checked = !!(event && event.target && event.target.checked);
+        const resp = await setInstalledGeneratorPersistent('/api/flag_generators/set_persistent', g, checked, { logPreId: 'genLog' });
+        if (resp && resp.ok === false && event && event.target) event.target.checked = !checked;
       });
 
       const packDeleteBtn = tr.querySelector('.genPackDeleteBtn');
@@ -1490,7 +1612,7 @@
 
     if (!filtered.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td colspan="10" class="text-muted">No generators found.</td>';
+      tr.innerHTML = '<td colspan="11" class="text-muted">No generators found.</td>';
       body.appendChild(tr);
     }
 
@@ -1499,7 +1621,7 @@
       metaId: 'genSelectionMeta',
       checkAllId: 'genCheckAll',
       rowSelector: '#genBody',
-      buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
+      buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn', 'genBatchPersistentBtn', 'genBatchUnpersistentBtn'],
     });
   }
 
@@ -1592,6 +1714,20 @@
         <td class="small" style="max-width: 520px; word-break: break-all;">${escapeHtml(injected)}</td>
         <td class="small">${validatedHtml}</td>
         <td class="small">${escapeHtml(g._source_name || '')}</td>
+        <td class="small">
+          ${hasCompose
+            ? (g._cached === true
+              ? '<span class="badge text-bg-success">Cached</span>'
+              : (g._cached === false
+                ? '<span class="badge text-bg-secondary">Not cached</span>'
+                : '<span class="text-muted">—</span>'))
+            : '<span class="text-muted">no compose</span>'}
+          ${g._cache_checked_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(g._cache_checked_at)}${g._cache_last_core_host ? ' @ ' + escapeHtml(g._cache_last_core_host) : ''}</div>` : ''}
+          <div class="form-check mt-1">
+            <input class="form-check-input" type="checkbox" data-role="persistent" data-genid="${escapeHtml(g.id || '')}" ${g._persistent ? 'checked' : ''} ${hasCompose ? '' : 'disabled'} title="${hasCompose ? 'Keep this node-generator\'s cached images persistent' : 'No compose runtime to cache'}" aria-label="Keep image cache persistent for ${escapeHtml(g.name || '')}">
+            <label class="form-check-label" style="font-size:11px;">Persistent</label>
+          </div>
+        </td>
         <td>
           <div class="btn-group btn-group-sm" role="group">
             ${isDuplicateConflict
@@ -1615,8 +1751,14 @@
           metaId: 'nodeGenSelectionMeta',
           checkAllId: 'nodeGenCheckAll',
           rowSelector: '#nodeGenBody',
-          buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
+          buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn', 'nodeGenBatchPersistentBtn', 'nodeGenBatchUnpersistentBtn'],
         });
+      });
+
+      tr.querySelector('[data-role="persistent"]')?.addEventListener('change', async (event) => {
+        const checked = !!(event && event.target && event.target.checked);
+        const resp = await setInstalledGeneratorPersistent('/api/flag_node_generators/set_persistent', g, checked, { logPreId: 'nodeGenLog' });
+        if (resp && resp.ok === false && event && event.target) event.target.checked = !checked;
       });
 
       const packDeleteBtn = tr.querySelector('.nodeGenPackDeleteBtn');
@@ -1672,7 +1814,7 @@
 
     if (!filtered.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td colspan="10" class="text-muted">No node-generators found.</td>';
+      tr.innerHTML = '<td colspan="11" class="text-muted">No node-generators found.</td>';
       body.appendChild(tr);
     }
 
@@ -1681,7 +1823,7 @@
       metaId: 'nodeGenSelectionMeta',
       checkAllId: 'nodeGenCheckAll',
       rowSelector: '#nodeGenBody',
-      buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
+      buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn', 'nodeGenBatchPersistentBtn', 'nodeGenBatchUnpersistentBtn'],
     });
   }
 
@@ -2399,6 +2541,30 @@
       await reloadFn();
     }
     if (logPreId) appendPreLine(logPreId, `[ok] ${resp && resp.message ? resp.message : 'Updated.'}`);
+  }
+
+  async function setInstalledGeneratorPersistent(apiPath, generator, persistent, opts) {
+    const genId = String(generator && generator.id ? generator.id : '').trim();
+    const logPreId = opts && opts.logPreId ? opts.logPreId : null;
+    if (!genId) {
+      if (logPreId) appendPreLine(logPreId, '[ui] Missing generator id; cannot update persistent flag.');
+      return null;
+    }
+    const resp = await fetchJson(apiPath, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: JSON.stringify({ generator_id: genId, persistent: !!persistent }),
+    });
+    if (resp && resp.ok === false) {
+      if (logPreId) appendPreLine(logPreId, `[error] ${resp.error || 'Update failed.'}`);
+      return resp;
+    }
+    generator.persistent = !!persistent;
+    return resp;
   }
 
   function flagBatchEl(id) {
@@ -3120,6 +3286,239 @@
     }
   }
 
+  const genCacheStorageKey = 'coretg_flag_cache_run_id';
+  let genCachePollTimer = null;
+  const genCacheState = { runId: null, done: true };
+
+  function loadSavedGenCacheRunId() {
+    try {
+      return localStorage.getItem(genCacheStorageKey) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function saveGenCacheRunId(runId) {
+    try {
+      if (runId) localStorage.setItem(genCacheStorageKey, String(runId));
+      else localStorage.removeItem(genCacheStorageKey);
+    } catch (e) {}
+  }
+
+  function scheduleGenCachePoll(delayMs) {
+    if (genCachePollTimer) {
+      clearTimeout(genCachePollTimer);
+      genCachePollTimer = null;
+    }
+    genCachePollTimer = setTimeout(() => {
+      refreshGenCacheStatus().catch(() => {});
+    }, Math.max(250, Number(delayMs || 1500)));
+  }
+
+  function selectedGenCacheKind() {
+    const el = document.getElementById('genCacheKind');
+    const value = String((el && el.value) || 'flag-generator');
+    return value === 'flag-node-generator' ? 'flag-node-generator' : 'flag-generator';
+  }
+
+  function collectGenCacheSelection() {
+    const kind = selectedGenCacheKind();
+    const selectedOnlyEl = document.getElementById('genCacheSelectedOnly');
+    if (selectedOnlyEl && selectedOnlyEl.checked) {
+      const state = kind === 'flag-node-generator' ? nodeGenState : genState;
+      return { kind, generator_ids: Array.from(state && state.selectedIds ? state.selectedIds : []) };
+    }
+    const queryEl = document.getElementById('genCacheFilter');
+    const limitEl = document.getElementById('genCacheLimit');
+    const includeDisabledEl = document.getElementById('genCacheIncludeDisabled');
+    const limitRaw = String((limitEl && limitEl.value) || '').trim();
+    let limit = null;
+    if (limitRaw) {
+      const parsed = parseInt(limitRaw, 10);
+      if (Number.isFinite(parsed) && parsed > 0) limit = Math.min(parsed, 500);
+    }
+    return {
+      kind,
+      query: String((queryEl && queryEl.value) || '').trim(),
+      include_disabled: !!(includeDisabledEl && includeDisabledEl.checked),
+      limit,
+    };
+  }
+
+  function renderGenCacheResults(results) {
+    const body = document.getElementById('genCacheResultsBody');
+    if (!body) return;
+    const rows = Array.isArray(results) ? results : [];
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="4" class="text-muted">No results yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map((r, idx) => {
+      const cachedBadge = r && r.cached === true
+        ? '<span class="badge text-bg-success">Cached</span>'
+        : (r && r.cached === false
+          ? '<span class="badge text-bg-secondary">Not cached</span>'
+          : (r && r.ok ? '<span class="badge text-bg-secondary">Skipped</span>' : '<span class="badge text-bg-danger">Failed</span>'));
+      const missing = Array.isArray(r && r.missing_images) ? r.missing_images : [];
+      const detail = missing.length
+        ? escapeHtml(missing.join(', '))
+        : (r && r.error ? escapeHtml(String(r.error)) : '<span class="text-muted">—</span>');
+      return `
+        <tr>
+          <td class="text-muted">${idx + 1}</td>
+          <td>${escapeHtml(String((r && r.item_name) || ''))} <span class="text-muted small">${escapeHtml(String((r && r.item_id) || ''))}</span></td>
+          <td>${cachedBadge}</td>
+          <td class="small">${detail}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function renderGenCacheStatus(payload) {
+    if (!payload) return;
+    const modeEl = document.getElementById('genCacheMode');
+    if (modeEl) modeEl.textContent = payload.mode === 'status' ? 'Refresh status' : 'Cache (pull)';
+    const progress = payload.progress || {};
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = String(value); };
+    setText('genCacheCountTotal', progress.total || 0);
+    setText('genCacheCountCompleted', progress.completed || 0);
+    setText('genCacheCountOk', progress.ok || 0);
+    setText('genCacheCountFailed', progress.failed || 0);
+    setText('genCacheCountPending', progress.pending || 0);
+    const activeItem = payload.active_item;
+    setText('genCacheActiveItem', activeItem ? `${activeItem.id} ${activeItem.name || ''}` : 'Idle');
+    renderGenCacheResults(payload.results);
+
+    const logEl = document.getElementById('genCacheLog');
+    if (logEl) {
+      const lines = Array.isArray(payload.log_lines) ? payload.log_lines : [];
+      logEl.textContent = lines.join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    const startBtn = document.getElementById('genCacheStartBtn');
+    const refreshBtn = document.getElementById('genCacheRefreshBtn');
+    const stopBtn = document.getElementById('genCacheStopBtn');
+    const done = !!payload.done;
+    genCacheState.done = done;
+    genCacheState.runId = payload.run_id || null;
+    if (startBtn) startBtn.disabled = !done;
+    if (refreshBtn) refreshBtn.disabled = !done;
+    if (stopBtn) stopBtn.style.display = done ? 'none' : '';
+
+    const metaEl = document.getElementById('genCacheMeta');
+    if (metaEl) {
+      metaEl.textContent = done
+        ? `Last run: ${payload.status || 'unknown'} (${progress.completed || 0}/${progress.total || 0})`
+        : `Running: ${payload.status || 'running'} (${progress.completed || 0}/${progress.total || 0})`;
+    }
+
+    if (!done) {
+      scheduleGenCachePoll(1500);
+    } else {
+      saveGenCacheRunId('');
+      if (genCachePollTimer) {
+        clearTimeout(genCachePollTimer);
+        genCachePollTimer = null;
+      }
+      try {
+        if (payload.kind === 'flag-node-generator') loadNodeGenerators(); else loadGenerators();
+      } catch (e) {}
+    }
+  }
+
+  async function refreshGenCacheStatus(runId) {
+    const targetRunId = String(runId || genCacheState.runId || loadSavedGenCacheRunId() || '').trim();
+    const url = targetRunId
+      ? `/flag_catalog_items/cache/status?run_id=${encodeURIComponent(targetRunId)}`
+      : '/flag_catalog_items/cache/status';
+    try {
+      const payload = await fetchJson(url, { method: 'GET' });
+      if (!payload || payload.ok === false) {
+        const msg = String((payload && payload.error) || '');
+        if (!msg.toLowerCase().includes('not found')) {
+          const metaEl = document.getElementById('genCacheMeta');
+          if (metaEl) metaEl.textContent = `Cache status error: ${msg}`;
+        }
+        return;
+      }
+      renderGenCacheStatus(payload);
+    } catch (e) {
+      const metaEl = document.getElementById('genCacheMeta');
+      if (metaEl) metaEl.textContent = `Cache status error: ${String(e)}`;
+    }
+  }
+
+  async function startGenCache(mode) {
+    if (!genCacheState.done) return;
+    const creds = await resolveFlagBatchCoreConfig();
+    if (!creds) return;
+    const selection = collectGenCacheSelection();
+    const metaEl = document.getElementById('genCacheMeta');
+    if (metaEl) metaEl.textContent = mode === 'status' ? 'Starting refresh…' : 'Starting cache pull…';
+    try {
+      const url = mode === 'status' ? '/flag_catalog_items/cache/refresh/start' : '/flag_catalog_items/cache/start';
+      const result = await fetchJson(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ ...selection, core: creds }),
+      });
+      if (!result || result.ok === false) {
+        throw new Error((result && result.error) ? result.error : 'Failed to start');
+      }
+      genCacheState.done = false;
+      genCacheState.runId = result.run_id;
+      saveGenCacheRunId(result.run_id);
+      await refreshGenCacheStatus(result.run_id);
+    } catch (e) {
+      if (metaEl) metaEl.textContent = `Failed to start: ${String(e)}`;
+    }
+  }
+
+  async function stopGenCache() {
+    const runId = String(genCacheState.runId || loadSavedGenCacheRunId() || '').trim();
+    if (!runId) return;
+    await fetchJson('/flag_catalog_items/cache/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ run_id: runId }),
+    });
+    await refreshGenCacheStatus(runId);
+  }
+
+  document.getElementById('genCacheStartBtn')?.addEventListener('click', async () => {
+    try {
+      await startGenCache('pull');
+    } catch (e) {
+      const metaEl = document.getElementById('genCacheMeta');
+      if (metaEl) metaEl.textContent = `Cache start failed: ${String(e)}`;
+    }
+  });
+  document.getElementById('genCacheRefreshBtn')?.addEventListener('click', async () => {
+    try {
+      await startGenCache('status');
+    } catch (e) {
+      const metaEl = document.getElementById('genCacheMeta');
+      if (metaEl) metaEl.textContent = `Refresh failed: ${String(e)}`;
+    }
+  });
+  document.getElementById('genCacheStopBtn')?.addEventListener('click', async () => {
+    try {
+      await stopGenCache();
+    } catch (e) {
+      const metaEl = document.getElementById('genCacheMeta');
+      if (metaEl) metaEl.textContent = `Cache stop failed: ${String(e)}`;
+    }
+  });
+  (function resumeGenCachePoll() {
+    const savedRunId = loadSavedGenCacheRunId();
+    if (savedRunId) {
+      genCacheState.runId = savedRunId;
+      genCacheState.done = false;
+      refreshGenCacheStatus(savedRunId).catch(() => {});
+    }
+  })();
+
   async function loadGenerators(opts = {}) {
     const metaEl = document.getElementById('genMeta');
     const recheckDependencies = !!(opts && opts.recheckDependencies);
@@ -3301,7 +3700,7 @@
       metaId: 'genSelectionMeta',
       checkAllId: 'genCheckAll',
       rowSelector: '#genBody',
-      buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn'],
+      buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn', 'genBatchPersistentBtn', 'genBatchUnpersistentBtn'],
     });
   });
 
@@ -3321,7 +3720,7 @@
       metaId: 'nodeGenSelectionMeta',
       checkAllId: 'nodeGenCheckAll',
       rowSelector: '#nodeGenBody',
-      buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn'],
+      buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn', 'nodeGenBatchPersistentBtn', 'nodeGenBatchUnpersistentBtn'],
     });
   });
 
@@ -3370,6 +3769,24 @@
     itemLabel: 'generator',
     confirmMessage: `Override ${genState.selectedIds.size} selected generator(s) as fail?`,
   }));
+  document.getElementById('genBatchPersistentBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
+    state: genState,
+    action: 'persistent',
+    apiPath: '/api/flag_generators/batch_mutate',
+    logPreId: 'genLog',
+    reloadFn: loadGenerators,
+    itemLabel: 'generator',
+    confirmMessage: `Mark ${genState.selectedIds.size} selected generator(s) as persistent? Their cached images will never be removed by cleanup.`,
+  }));
+  document.getElementById('genBatchUnpersistentBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
+    state: genState,
+    action: 'unpersistent',
+    apiPath: '/api/flag_generators/batch_mutate',
+    logPreId: 'genLog',
+    reloadFn: loadGenerators,
+    itemLabel: 'generator',
+    confirmMessage: `Unmark ${genState.selectedIds.size} selected generator(s) as persistent?`,
+  }));
 
   document.getElementById('nodeGenBatchEnableBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
     state: nodeGenState,
@@ -3415,6 +3832,24 @@
     reloadFn: loadNodeGenerators,
     itemLabel: 'node-generator',
     confirmMessage: `Override ${nodeGenState.selectedIds.size} selected node-generator(s) as fail?`,
+  }));
+  document.getElementById('nodeGenBatchPersistentBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
+    state: nodeGenState,
+    action: 'persistent',
+    apiPath: '/api/flag_node_generators/batch_mutate',
+    logPreId: 'nodeGenLog',
+    reloadFn: loadNodeGenerators,
+    itemLabel: 'node-generator',
+    confirmMessage: `Mark ${nodeGenState.selectedIds.size} selected node-generator(s) as persistent? Their cached images will never be removed by cleanup.`,
+  }));
+  document.getElementById('nodeGenBatchUnpersistentBtn')?.addEventListener('click', () => applyGeneratorBatchMutation({
+    state: nodeGenState,
+    action: 'unpersistent',
+    apiPath: '/api/flag_node_generators/batch_mutate',
+    logPreId: 'nodeGenLog',
+    reloadFn: loadNodeGenerators,
+    itemLabel: 'node-generator',
+    confirmMessage: `Unmark ${nodeGenState.selectedIds.size} selected node-generator(s) as persistent?`,
   }));
 
   // Load node-generator list when the tab is shown

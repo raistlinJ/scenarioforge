@@ -28,6 +28,7 @@ from webapp.routes import docker_routes
 from webapp.routes import editor_snapshot
 from webapp.routes import flag_compose
 from webapp.routes import flag_catalog_batch
+from webapp.routes import flag_catalog_cache
 from webapp.routes import flag_catalog_pages
 from webapp.routes import generator_catalog_data
 from webapp.routes import generator_catalog_mutations
@@ -69,6 +70,7 @@ from webapp.routes import vuln_catalog_overview
 from webapp.routes import vuln_catalog_pack_ingest
 from webapp.routes import vuln_catalog_pack_files
 from webapp.routes import vuln_catalog_batch
+from webapp.routes import vuln_catalog_cache
 from webapp.routes import vuln_catalog_test_control
 from webapp.routes import vuln_catalog_test_start
 from webapp.routes import vuln_compose
@@ -1703,6 +1705,44 @@ def test_flag_catalog_batch_register_is_idempotent():
     assert '/flag_catalog_items/batch/export.md' in rules
 
 
+def test_vuln_catalog_cache_register_is_idempotent():
+    app = Flask(__name__)
+
+    vuln_catalog_cache.register(
+        app,
+        backend_module=type('BackendModule', (), {})(),
+    )
+    vuln_catalog_cache.register(
+        app,
+        backend_module=type('BackendModule', (), {})(),
+    )
+
+    rules = {rule.rule for rule in app.url_map.iter_rules()}
+    assert '/vuln_catalog_items/cache/start' in rules
+    assert '/vuln_catalog_items/cache/refresh/start' in rules
+    assert '/vuln_catalog_items/cache/status' in rules
+    assert '/vuln_catalog_items/cache/stop' in rules
+
+
+def test_flag_catalog_cache_register_is_idempotent():
+    app = Flask(__name__)
+
+    flag_catalog_cache.register(
+        app,
+        backend_module=type('BackendModule', (), {})(),
+    )
+    flag_catalog_cache.register(
+        app,
+        backend_module=type('BackendModule', (), {})(),
+    )
+
+    rules = {rule.rule for rule in app.url_map.iter_rules()}
+    assert '/flag_catalog_items/cache/start' in rules
+    assert '/flag_catalog_items/cache/refresh/start' in rules
+    assert '/flag_catalog_items/cache/status' in rules
+    assert '/flag_catalog_items/cache/stop' in rules
+
+
 def test_vuln_catalog_test_start_register_is_idempotent():
     app = Flask(__name__)
 
@@ -1733,6 +1773,7 @@ def test_generator_catalog_mutations_register_is_idempotent():
         set_pack_disabled_state=lambda **kwargs: (True, 'ok'),
         set_generator_disabled_state=lambda **kwargs: (True, 'ok'),
         set_generator_validation_state=lambda **kwargs: (True, 'ok'),
+        set_generator_persistent_state=lambda **kwargs: (True, 'ok'),
         delete_installed_generator=lambda **kwargs: (True, 'ok'),
     )
     generator_catalog_mutations.register(
@@ -1741,6 +1782,7 @@ def test_generator_catalog_mutations_register_is_idempotent():
         set_pack_disabled_state=lambda **kwargs: (True, 'ok'),
         set_generator_disabled_state=lambda **kwargs: (True, 'ok'),
         set_generator_validation_state=lambda **kwargs: (True, 'ok'),
+        set_generator_persistent_state=lambda **kwargs: (True, 'ok'),
         delete_installed_generator=lambda **kwargs: (True, 'ok'),
     )
 
@@ -1751,6 +1793,8 @@ def test_generator_catalog_mutations_register_is_idempotent():
     assert '/api/generator_packs/set_disabled' in rules
     assert '/api/flag_generators/set_disabled' in rules
     assert '/api/flag_node_generators/set_disabled' in rules
+    assert '/api/flag_generators/set_persistent' in rules
+    assert '/api/flag_node_generators/set_persistent' in rules
     assert '/api/flag_generators/batch_mutate' in rules
     assert '/api/flag_node_generators/batch_mutate' in rules
 

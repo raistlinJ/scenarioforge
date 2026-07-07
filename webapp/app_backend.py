@@ -1396,6 +1396,161 @@ def _exec_ssh_sudo_command(
         _close_ssh_command_streams(stdin, stdout, stderr)
 
 
+def _catalog_ids_with_persistent_items() -> list[str]:
+    """Return vuln-catalog pack ids that contain at least one `persistent` item.
+
+    Used to keep an inactive pack's directory around during pack pruning if it
+    holds an image the operator has pinned as persistent.
+    """
+    out: list[str] = []
+    try:
+        state = _load_vuln_catalogs_state()
+        for catalog in (state.get('catalogs') or []):
+            if not isinstance(catalog, dict):
+                continue
+            cid = str(catalog.get('id') or '').strip()
+            if not cid:
+                continue
+            if any(bool(item.get('persistent')) for item in _normalize_vuln_catalog_items(catalog)):
+                out.append(cid)
+    except Exception:
+        pass
+    return out
+
+
+def _persistent_image_keep_set(*, client: Any | None = None) -> set[str]:
+    """Return the set of docker image references that must never be removed by any
+    ScenarioForge cleanup routine, because they belong to a vuln-catalog or
+    flag-generator/flag-node-generator item currently marked `persistent`.
+
+    Recomputed fresh on every call (never cached), so an item toggled persistent a
+    moment ago is protected on the very next cleanup pass. When `client` (an open
+    paramiko SSH session to the CORE VM) is provided, also resolves images via a
+    remote `docker compose config --images` pass, which correctly captures
+    `build:`-derived image tags that the local YAML-only parse below can't see.
+    """
+    from scenarioforge.utils.vuln_process import extract_compose_images_and_container_names
+
+    keep: set[str] = set()
+    local_compose_paths: list[str] = []
+
+    try:
+        state = _load_vuln_catalogs_state()
+        entry = _get_active_vuln_catalog_entry(state)
+        if entry:
+            cid = str(entry.get('id') or '').strip()
+            for item in _normalize_vuln_catalog_items(entry):
+                if not bool(item.get('persistent')):
+                    continue
+                try:
+                    path = _vuln_catalog_item_abs_compose_path(catalog_id=cid, item=item)
+                except Exception:
+                    continue
+                if path and os.path.isfile(path):
+                    local_compose_paths.append(path)
+    except Exception:
+        pass
+
+    try:
+        for loader, kind in (
+            (_flag_generators_from_all_installed_sources, 'flag-generator'),
+            (_flag_node_generators_from_all_installed_sources, 'flag-node-generator'),
+        ):
+            gens, _errors = loader()
+            gens = _annotate_disabled_state(gens, kind=kind)
+            for g in gens:
+                if not bool(g.get('_persistent')):
+                    continue
+                path = _generator_item_abs_compose_path(g)
+                if path and os.path.isfile(path):
+                    local_compose_paths.append(path)
+    except Exception:
+        pass
+
+    for path in local_compose_paths:
+        try:
+            images, _containers = extract_compose_images_and_container_names(path)
+            keep.update(images)
+        except Exception:
+            continue
+
+    if client is not None and local_compose_paths:
+        try:
+            repo_root = os.path.abspath(_get_repo_root())
+            sftp = client.open_sftp()
+            try:
+                remote_repo_dir = _remote_static_repo_dir(sftp)
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            remote_paths: list[str] = []
+            for path in local_compose_paths:
+                try:
+                    rel = os.path.relpath(os.path.abspath(path), repo_root)
+                except Exception:
+                    continue
+                if rel.startswith('..'):
+                    continue
+                remote_paths.append(_remote_path_join(remote_repo_dir, rel.replace(os.sep, '/')))
+            if remote_paths:
+                script = '\n'.join([
+                    'for f in ' + ' '.join(shlex.quote(p) for p in remote_paths) + '; do',
+                    '  if [ -f "$f" ]; then docker compose -f "$f" config --images 2>/dev/null; fi',
+                    'done',
+                ])
+                _rc, out, _err = _exec_ssh_command(client, f"sh -c {shlex.quote(script)}", timeout=60.0, check=False)
+                for line in str(out or '').splitlines():
+                    line = line.strip()
+                    if line:
+                        keep.add(line)
+        except Exception:
+            pass
+
+    return keep
+
+
+def _rmi_excluding_keep_set(
+    client: Any,
+    images: list[str],
+    *,
+    keep_set: set[str],
+    password: str = '',
+    log: Any | None = None,
+    sudo: bool = True,
+    timeout: float = 180.0,
+) -> None:
+    """`docker rmi -f` every image in `images` that is NOT in `keep_set`.
+
+    Shared by every remote cleanup routine so a `persistent`-marked item's image is
+    never removed, regardless of which cleanup path would otherwise have removed it.
+    """
+    seen: list[str] = list(dict.fromkeys(str(img or '').strip() for img in (images or []) if str(img or '').strip()))
+    targets = [img for img in seen if img not in keep_set]
+    skipped = [img for img in seen if img in keep_set]
+    if log is not None and skipped:
+        try:
+            log(f"docker rmi skipped {len(skipped)} persistent image(s): {_summarize_for_log(', '.join(skipped))}")
+        except Exception:
+            pass
+    if not targets:
+        return
+    cmd = 'docker rmi -f ' + ' '.join(shlex.quote(t) for t in targets) + ' >/dev/null 2>&1 || true'
+    if sudo:
+        rc, out, err = _exec_ssh_sudo_command(client, cmd, password=password, timeout=timeout)
+    else:
+        rc, out, err = _exec_ssh_command(client, cmd, timeout=timeout, check=False)
+    if log is not None:
+        try:
+            log(
+                f"docker rmi (excluding persistent) rc={rc} targets={len(targets)} "
+                f"out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}"
+            )
+        except Exception:
+            pass
+
+
 def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
     """Best-effort cleanup of remote docker resources created by test runs."""
     if not isinstance(meta, dict):
@@ -1414,6 +1569,7 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
     try:
         client = _open_ssh_client(core_cfg)
         pw = str(core_cfg.get('ssh_password') or '')
+        keep_set = _persistent_image_keep_set(client=client)
 
         project_name = str(meta.get('project_name') or '').strip()
         compose_path = str(meta.get('remote_compose_path') or '').strip()
@@ -1421,13 +1577,17 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
             down_cmd = (
                 f"if [ -f {shlex.quote(compose_path)} ]; then "
                 f"COMPOSE_PROJECT_NAME={shlex.quote(project_name)} docker compose -f {shlex.quote(compose_path)} "
-                f"down -v --remove-orphans --rmi all || true; fi"
+                f"down -v --remove-orphans || true; fi"
             )
             rc, out, err = _exec_ssh_sudo_command(client, down_cmd, password=pw, timeout=120.0)
             _log(
                 f"docker compose down (project={project_name}) rc={rc} "
                 f"out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}"
             )
+            images_cmd = f"docker compose -f {shlex.quote(compose_path)} config --images 2>/dev/null || true"
+            rc, out, err = _exec_ssh_sudo_command(client, images_cmd, password=pw, timeout=60.0)
+            compose_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+            _rmi_excluding_keep_set(client, compose_images, keep_set=keep_set, password=pw, log=_log)
 
         node_id = str(meta.get('test_docker_node_id') or '').strip()
         node_name = str(meta.get('test_docker_node_name') or '').strip()
@@ -1459,13 +1619,19 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
             down_node_cmd = (
                 f"if [ -f {shlex.quote(node_compose)} ]; then "
                 f"COMPOSE_PROJECT_NAME={shlex.quote(node_project)} docker compose -f {shlex.quote(node_compose)} "
-                f"down -v --remove-orphans --rmi all || true; fi"
+                f"down -v --remove-orphans || true; fi"
             )
             rc, out, err = _exec_ssh_sudo_command(client, down_node_cmd, password=pw, timeout=120.0)
             _log(
                 f"docker compose down (node={node_token}) rc={rc} "
                 f"out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}"
             )
+            node_images_cmd = (
+                f"if [ -f {shlex.quote(node_compose)} ]; then "
+                f"docker compose -f {shlex.quote(node_compose)} config --images 2>/dev/null; fi"
+            )
+            rc, out, err = _exec_ssh_sudo_command(client, node_images_cmd, password=pw, timeout=60.0)
+            node_compose_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
 
             rm_node_cmd = f"docker rm -f {shlex.quote(node_token)} >/dev/null 2>&1 || true"
             rc, out, err = _exec_ssh_sudo_command(client, rm_node_cmd, password=pw, timeout=60.0)
@@ -1474,26 +1640,20 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
                 f"out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}"
             )
 
+            node_images = list(node_compose_images)
             if image_ref:
-                rm_image_cmd = f"docker rmi -f {shlex.quote(image_ref)} >/dev/null 2>&1 || true"
-                rc, out, err = _exec_ssh_sudo_command(client, rm_image_cmd, password=pw, timeout=120.0)
-                _log(
-                    f"docker rmi container-image (name={node_token}, image={image_ref}) rc={rc} "
-                    f"out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}"
-                )
+                node_images.append(image_ref)
+            _rmi_excluding_keep_set(client, node_images, keep_set=keep_set, password=pw, log=_log)
 
         scenario_tag = str(meta.get('test_scenario_tag') or meta.get('scenario_tag') or '').strip()
         if scenario_tag:
-            rm_images_cmd = (
+            list_images_cmd = (
                 f"docker images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' "
-                f"| grep -F {shlex.quote(scenario_tag)} "
-                f"| xargs -r docker rmi -f >/dev/null 2>&1 || true"
+                f"| grep -F {shlex.quote(scenario_tag)} || true"
             )
-            rc, out, err = _exec_ssh_sudo_command(client, rm_images_cmd, password=pw, timeout=120.0)
-            _log(
-                f"docker rmi scenario-tag={scenario_tag} rc={rc} "
-                f"out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}"
-            )
+            rc, out, err = _exec_ssh_sudo_command(client, list_images_cmd, password=pw, timeout=60.0)
+            scenario_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+            _rmi_excluding_keep_set(client, scenario_images, keep_set=keep_set, password=pw, log=_log)
 
         # Ensure lingering CORE session state is cleaned up as part of test teardown.
         core_cleanup_cmd = "(command -v core-cleanup >/dev/null 2>&1 && core-cleanup) || (/usr/sbin/core-cleanup || true)"
@@ -6959,26 +7119,15 @@ def _run_postrun_remote_maintenance(meta: Dict[str, Any], client: Any | None = N
     except Exception:
         pw = ''
 
+    keep_set = _persistent_image_keep_set(client=client)
+
     maintenance_steps = [
         ('docker container prune', 'docker container prune -f', True, 120.0),
         ('docker image prune', 'docker image prune -f', True, 120.0),
         ('docker network prune', 'docker network prune -f', True, 120.0),
-        (
-            'docker remove wrapper images',
-            "docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f >/dev/null 2>&1 || true",
-            True,
-            180.0,
-        ),
     ]
-    if deep_cleanup:
-        maintenance_steps.append(
-            ('docker system prune --all --volumes', 'docker system prune -af --volumes', True, 900.0)
-        )
-
     for label, command, needs_sudo, timeout in maintenance_steps:
         try:
-            if command == 'docker system prune -af --volumes':
-                _postrun_remote_log(log_path, 'deep cleanup start: docker system prune -af --volumes')
             if needs_sudo:
                 rc, out, err = _exec_ssh_sudo_command(client, command, password=pw, timeout=timeout)
             else:
@@ -6987,19 +7136,70 @@ def _run_postrun_remote_maintenance(meta: Dict[str, Any], client: Any | None = N
                 log_path,
                 f"{label} rc={rc} out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}",
             )
-            if command == 'docker system prune -af --volumes':
-                _postrun_remote_log(log_path, f'deep cleanup complete: docker system prune -af --volumes rc={rc}')
         except Exception as exc:
-            if command == 'docker system prune -af --volumes':
-                _postrun_remote_log(log_path, f'deep cleanup failed: docker system prune -af --volumes error={exc}')
             _postrun_remote_log(log_path, f'{label} failed: {exc}')
+
+    try:
+        list_wrapper_cmd = "docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' || true"
+        rc, out, err = _exec_ssh_sudo_command(client, list_wrapper_cmd, password=pw, timeout=60.0)
+        wrapper_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+        _rmi_excluding_keep_set(
+            client,
+            wrapper_images,
+            keep_set=keep_set,
+            password=pw,
+            log=lambda msg: _postrun_remote_log(log_path, f'docker remove wrapper images: {msg}'),
+        )
+    except Exception as exc:
+        _postrun_remote_log(log_path, f'docker remove wrapper images failed: {exc}')
+
+    if deep_cleanup:
+        _postrun_remote_log(log_path, 'deep cleanup start')
+        try:
+            if not keep_set:
+                rc, out, err = _exec_ssh_sudo_command(client, 'docker system prune -af --volumes', password=pw, timeout=900.0)
+                _postrun_remote_log(
+                    log_path,
+                    f"docker system prune -af --volumes rc={rc} out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}",
+                )
+            else:
+                # A non-empty persistent keep-set exists: `docker system prune -af`
+                # has no per-image exclusion, so it can't be trusted here. Prune
+                # containers/networks/volumes as usual, then remove only
+                # currently-unused images that aren't in the keep-set.
+                rc, out, err = _exec_ssh_sudo_command(client, 'docker volume prune -f', password=pw, timeout=120.0)
+                _postrun_remote_log(
+                    log_path,
+                    f"docker volume prune rc={rc} out={_summarize_for_log((out or '').strip())} err={_summarize_for_log((err or '').strip())}",
+                )
+                unused_script = (
+                    "in_use=$(docker ps -aq | xargs -r docker inspect -f '{{.Image}}' 2>/dev/null | sort -u); "
+                    "docker images --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}}' | while read -r iid tag; do "
+                    "echo \"$in_use\" | grep -qx \"$iid\" && continue; "
+                    "echo \"$tag\"; "
+                    "done"
+                )
+                rc, out, err = _exec_ssh_sudo_command(client, unused_script, password=pw, timeout=180.0)
+                unused_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+                _rmi_excluding_keep_set(
+                    client,
+                    unused_images,
+                    keep_set=keep_set,
+                    password=pw,
+                    log=lambda msg: _postrun_remote_log(log_path, f'deep cleanup (targeted): {msg}'),
+                )
+            _postrun_remote_log(log_path, 'deep cleanup complete')
+        except Exception as exc:
+            _postrun_remote_log(log_path, f'deep cleanup failed: {exc}')
 
     remote_repo_dir = str(meta.get('remote_repo_dir') or '').strip()
     if deep_cleanup and remote_repo_dir:
+        keep_catalog_ids = _catalog_ids_with_persistent_items()
+        keep_ids_arg = f" --keep-ids {shlex.quote(','.join(keep_catalog_ids))}" if keep_catalog_ids else ''
         prune_script = _remote_path_join(remote_repo_dir, 'scripts', 'prune_vuln_catalog_packs.sh')
         prune_cmd = (
             f"if [ -f {shlex.quote(prune_script)} ]; then "
-            f"cd {shlex.quote(remote_repo_dir)} && bash scripts/prune_vuln_catalog_packs.sh --yes; "
+            f"cd {shlex.quote(remote_repo_dir)} && bash scripts/prune_vuln_catalog_packs.sh --yes{keep_ids_arg}; "
             "else echo 'missing prune_vuln_catalog_packs.sh'; fi"
         )
         try:
@@ -23220,6 +23420,18 @@ def _flow_reorder_chain_by_generator_dag(
         return chain_nodes, flag_assignments, None
 
 
+def _flow_prepare_preview_for_execute_impl():
+    from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
+
+    return _flow_prepare_preview_execute.execute_impl(backend=sys.modules[__name__])
+
+
+def _flow_prepare_preview_for_execute():
+    from webapp import flow_prepare_preview_execute as _flow_prepare_preview_execute
+
+    return _flow_prepare_preview_execute.execute(backend=sys.modules[__name__])
+
+
 try:
     from webapp.routes import flag_sequencing_substitutions as _flag_sequencing_substitutions_routes
 
@@ -30648,6 +30860,20 @@ except Exception:
         pass
 
 
+try:
+    from webapp.routes import flag_catalog_cache as _flag_catalog_cache_routes
+
+    _flag_catalog_cache_routes.register(
+        app,
+        backend_module=sys.modules[__name__],
+    )
+except Exception:
+    try:
+        app.logger.exception('Failed to register flag_catalog_cache routes.')
+    except Exception:
+        pass
+
+
 def _remote_docker_status_script(sudo_password: str | None = None) -> str:
     """Remote script to read compose assignments + docker state on the CORE VM.
 
@@ -32217,13 +32443,15 @@ if __name__ == '__main__':
     ).replace('__NAMES_LITERAL__', names_literal).replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal)
 
 
-def _remote_docker_remove_wrapper_images_script(sudo_password: str | None = None) -> str:
+def _remote_docker_remove_wrapper_images_script(sudo_password: str | None = None, keep_images: list[str] | None = None) -> str:
     sudo_password_literal = json.dumps(str(sudo_password) if sudo_password else "")
+    keep_images_literal = json.dumps(list(keep_images or []))
     return (
         """
 import json, subprocess
 
 SUDO_PASSWORD = __SUDO_PASSWORD_LITERAL__
+KEEP_IMAGES = set(__KEEP_IMAGES_LITERAL__)
 
 
 def _run_docker(cmd, timeout=30):
@@ -32270,6 +32498,8 @@ def main():
             continue
         if tag.startswith('iproute2'):
             targets.append(ref)
+    skipped_persistent = [ref for ref in targets if ref in KEEP_IMAGES]
+    targets = [ref for ref in targets if ref not in KEEP_IMAGES]
     for ref in targets:
         try:
             pr = _run_docker(['image', 'rm', '-f', ref], timeout=60)
@@ -32279,24 +32509,26 @@ def main():
                 errors.append({'ref': ref, 'output': (getattr(pr, 'stdout', '') or '').strip()})
         except Exception as e:
             errors.append({'ref': ref, 'output': str(e)})
-    print(json.dumps({'ok': True, 'listed': listed, 'targets': targets, 'removed': removed, 'errors': errors}))
+    print(json.dumps({'ok': True, 'listed': listed, 'targets': targets, 'skipped_persistent': skipped_persistent, 'removed': removed, 'errors': errors}))
 
 
 if __name__ == '__main__':
     main()
 """
-    ).replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal)
+    ).replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal).replace('__KEEP_IMAGES_LITERAL__', keep_images_literal)
 
 
-def _remote_docker_remove_all_containers_script(sudo_password: str | None = None) -> str:
+def _remote_docker_remove_all_containers_script(sudo_password: str | None = None, keep_images: list[str] | None = None) -> str:
     """Remote script to delete ALL docker containers on the CORE VM and remove now-unused container images."""
 
     sudo_password_literal = json.dumps(str(sudo_password) if sudo_password else "")
+    keep_images_literal = json.dumps(list(keep_images or []))
     return (
         """
 import json, subprocess
 
 SUDO_PASSWORD = __SUDO_PASSWORD_LITERAL__
+KEEP_IMAGES = set(__KEEP_IMAGES_LITERAL__)
 
 
 def _run_docker(cmd, timeout=60):
@@ -32352,6 +32584,20 @@ def main():
                         image_ids.append(img[0].strip())
             except Exception as e:
                 errors.append({'stage': 'inspect_container_image', 'container': cid, 'output': str(e)[:4000]})
+
+    keep_ids = set()
+    for keep_ref in KEEP_IMAGES:
+        try:
+            p_keep = _run_docker(['image', 'inspect', '-f', '{{.Id}}', keep_ref], timeout=15)
+            if getattr(p_keep, 'returncode', 1) == 0:
+                keep_id = (getattr(p_keep, 'stdout', '') or '').strip().splitlines()[:1]
+                if keep_id and keep_id[0].strip():
+                    keep_ids.add(keep_id[0].strip())
+        except Exception:
+            pass
+    images_skipped_persistent = len([i for i in image_ids if i in keep_ids])
+    image_ids = [i for i in image_ids if i not in keep_ids]
+
     stopped_attempted = 0
     removed_attempted = 0
     images_removed_attempted = 0
@@ -32394,6 +32640,7 @@ def main():
         'images': {
             'found': len(image_ids),
             'removed_attempted': images_removed_attempted,
+            'skipped_persistent': images_skipped_persistent,
             'skipped': False,
         },
         'errors': errors,
@@ -32403,7 +32650,7 @@ def main():
 if __name__ == '__main__':
     main()
 """
-    ).replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal)
+    ).replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal).replace('__KEEP_IMAGES_LITERAL__', keep_images_literal)
 
 
 def _remote_docker_remove_generator_images_script(sudo_password: str | None = None) -> str:
@@ -39887,12 +40134,32 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             pass
 
     def _maybe_core_cleanup() -> None:
+        keep_set = _persistent_image_keep_set(client=remote_client)
+        keep_ids: set[str] = set()
+        if keep_set:
+            for keep_ref in keep_set:
+                try:
+                    _kid_rc, kid_out, _kid_err = _exec_sudo(
+                        f"docker image inspect -f '{{{{.Id}}}}' {shlex.quote(keep_ref)}",
+                        stage='docker_keep_id_lookup',
+                    )
+                    kid = (kid_out or '').strip().splitlines()[:1]
+                    if kid and kid[0].strip():
+                        keep_ids.add(kid[0].strip())
+                except Exception:
+                    pass
+        # `grep -vF -e ... -e ...` exclusion stages, appended into the pipelines
+        # below so a `persistent`-marked image is never removed by these opt-in
+        # "Advanced Options" cleanup actions.
+        tag_exclude = (' | grep -vF ' + ' '.join(f'-e {shlex.quote(x)}' for x in sorted(keep_set))) if keep_set else ''
+        id_exclude = (' | grep -vFx ' + ' '.join(f'-e {shlex.quote(x)}' for x in sorted(keep_ids))) if keep_ids else ''
+
         _remote_docker_remove_all_containers_script = (
             "sh -c '"
             "ids=$(docker ps -a --format '\"'\"'{{.ID}} {{.Names}}'\"'\"' | "
             "grep -vE '\"'\"' core-daemon$| registry:2$'\"'\"' | awk '\"'\"'{print $1}'\"'\"'); "
             "if [ -n \"$ids\" ]; then "
-            "imgs=$(docker inspect -f '\"'\"'{{.Image}}'\"'\"' $ids 2>/dev/null | sort -u); "
+            f"imgs=$(docker inspect -f '\"'\"'{{{{.Image}}}}'\"'\"' $ids 2>/dev/null | sort -u{id_exclude}); "
             "echo \"$ids\" | xargs -r docker rm -f; "
             "if [ -n \"$imgs\" ]; then echo \"$imgs\" | xargs -r docker rmi -f || true; fi; "
             "fi'"
@@ -39905,13 +40172,17 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         find /tmp/vulns -maxdepth 1 \( -name 'docker-compose-*.yml' -o -name 'docker-compose-*.orig.yml' -o -name 'compose_assignments.json' -o -name 'docker-wrap-*' \) -exec rm -rf {} + 2>/dev/null || true
         """
 
-        _remote_docker_remove_generator_images_shell = r"""
-        docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f
-        """
+        _remote_docker_remove_generator_images_shell = (
+            "docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:'"
+            + tag_exclude
+            + " | xargs -r docker rmi -f"
+        )
 
-        _remote_docker_remove_wrapper_images_script = r"""
-        docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f
-        """
+        _remote_docker_remove_wrapper_images_script = (
+            "docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper'"
+            + tag_exclude
+            + " | xargs -r docker rmi -f"
+        )
 
         if adv_run_core_cleanup:
             try:
@@ -41649,7 +41920,9 @@ try:
         execute_remote_core_session_action=lambda *args, **kwargs: _execute_remote_core_session_action(*args, **kwargs),
         remote_docker_status_script=lambda password: _remote_docker_status_script(password),
         remote_docker_cleanup_script=lambda names, password: _remote_docker_cleanup_script(names, password),
-        remote_docker_remove_wrapper_images_script=lambda password: _remote_docker_remove_wrapper_images_script(password),
+        remote_docker_remove_wrapper_images_script=lambda password: _remote_docker_remove_wrapper_images_script(
+            password, keep_images=list(_persistent_image_keep_set())
+        ),
         core_host_default=CORE_HOST,
         core_port_default=CORE_PORT,
     )
@@ -42838,6 +43111,40 @@ def _is_installed_generator_view(gen: dict) -> bool:
     return False
 
 
+def _generator_item_abs_compose_path(gen: dict[str, Any]) -> str | None:
+    """Resolve a flag-generator/flag-node-generator item's docker-compose.yml to an
+    absolute path, or None if the generator has no compose runtime (a plain script
+    generator) or its source path can't be safely resolved."""
+    if not isinstance(gen, dict):
+        return None
+    compose = gen.get('compose')
+    if not isinstance(compose, dict):
+        return None
+    compose_file = str(compose.get('file') or '').strip()
+    if not compose_file:
+        return None
+    source = gen.get('source') if isinstance(gen.get('source'), dict) else {}
+    source_path = str(source.get('path') or '').strip()
+    if not source_path:
+        return None
+
+    if os.path.isabs(source_path):
+        base_dir = os.path.abspath(source_path)
+    else:
+        try:
+            repo_root = os.path.abspath(_get_repo_root())
+            base_dir = os.path.abspath(os.path.join(repo_root, source_path))
+            if os.path.commonpath([repo_root, base_dir]) != repo_root:
+                return None
+        except Exception:
+            return None
+
+    try:
+        return _safe_path_under(base_dir, compose_file)
+    except Exception:
+        return None
+
+
 def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
     """Return (pack_by_id, gen_by_kind_id) maps from the installed packs state."""
     state = _load_installed_generator_packs_state()
@@ -42888,6 +43195,12 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
                 'last_test_log_path': str(it.get('last_test_log_path') or '').strip() or None,
                 'last_test_log_filename': str(it.get('last_test_log_filename') or '').strip() or None,
                 'disabled_due_to_missing_files': bool(it.get('disabled_due_to_missing_files') is True),
+                'persistent': bool(it.get('persistent', False)),
+                'cached': it.get('cached') if isinstance(it.get('cached'), bool) else None,
+                'cache_checked_at': str(it.get('cache_checked_at') or '').strip() or None,
+                'cache_last_core_host': str(it.get('cache_last_core_host') or '').strip() or None,
+                'cache_missing_images': [str(v) for v in it.get('cache_missing_images')] if isinstance(it.get('cache_missing_images'), list) else [],
+                'cache_error': str(it.get('cache_error') or '').strip() or None,
             }
 
             # Back-compat: generator packs may use numeric ids in the packs state,
@@ -42936,6 +43249,12 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_validated_at'] = info.get('validated_at')
             g['_last_test_log_path'] = info.get('last_test_log_path')
             g['_last_test_log_filename'] = info.get('last_test_log_filename')
+            g['_persistent'] = bool(info.get('persistent'))
+            g['_cached'] = info.get('cached') if isinstance(info.get('cached'), bool) else None
+            g['_cache_checked_at'] = info.get('cache_checked_at')
+            g['_cache_last_core_host'] = info.get('cache_last_core_host')
+            g['_cache_missing_images'] = info.get('cache_missing_images') or []
+            g['_cache_error'] = info.get('cache_error')
         else:
             g['_disabled'] = False
             g['_disabled_due_to_missing_files'] = False
@@ -42945,6 +43264,12 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_validated_at'] = None
             g['_last_test_log_path'] = None
             g['_last_test_log_filename'] = None
+            g['_persistent'] = False
+            g['_cached'] = None
+            g['_cache_checked_at'] = None
+            g['_cache_last_core_host'] = None
+            g['_cache_missing_images'] = []
+            g['_cache_error'] = None
         out.append(g)
     return out
 
@@ -43607,6 +43932,13 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['rel_dir'] = str(it.get('rel_dir') or '').strip()
         it['dir_rel'] = str(it.get('dir_rel') or '').strip()
         it['compose_rel'] = str(it.get('compose_rel') or '').strip()
+        it['persistent'] = bool(it.get('persistent', False))
+        it['cached'] = it.get('cached') if isinstance(it.get('cached'), bool) else None
+        it['cache_checked_at'] = str(it.get('cache_checked_at') or '').strip() or None
+        it['cache_last_core_host'] = str(it.get('cache_last_core_host') or '').strip() or None
+        cache_missing = it.get('cache_missing_images')
+        it['cache_missing_images'] = [str(v) for v in cache_missing] if isinstance(cache_missing, list) else []
+        it['cache_error'] = str(it.get('cache_error') or '').strip() or None
         out.append(it)
     out.sort(key=lambda d: int(d.get('id') or 0))
     return out
@@ -43647,6 +43979,42 @@ def _vuln_catalog_item_abs_compose_path(*, catalog_id: str, item: dict[str, Any]
     if os.path.commonpath([repo_root, abs_p]) != repo_root:
         raise ValueError('Compose path escaped repo root')
     return abs_p
+
+
+def _update_vuln_catalog_item_cache_state(
+    *,
+    catalog_id: str,
+    item_id: int,
+    cached: bool | None,
+    missing_images: list[str] | None = None,
+    error: str | None = None,
+    core_host: str | None = None,
+) -> bool:
+    """Persist the outcome of a cache pull/status-check for one vuln-catalog item."""
+    state = _load_vuln_catalogs_state()
+    catalogs = [catalog for catalog in (state.get('catalogs') or []) if isinstance(catalog, dict)]
+    updated = False
+    for catalog in catalogs:
+        if str(catalog.get('id') or '').strip() != str(catalog_id or '').strip():
+            continue
+        items = _normalize_vuln_catalog_items(catalog)
+        for item in items:
+            if int(item.get('id') or 0) != int(item_id or 0):
+                continue
+            item['cached'] = cached
+            item['cache_checked_at'] = _local_timestamp_display()
+            item['cache_last_core_host'] = str(core_host or '').strip() or None
+            item['cache_missing_images'] = list(missing_images or [])
+            item['cache_error'] = str(error or '').strip() or None
+            updated = True
+            break
+        catalog['compose_items'] = items
+        break
+    if not updated:
+        return False
+    state['catalogs'] = catalogs
+    _write_vuln_catalogs_state(state)
+    return True
 
 
 def _write_vuln_catalog_csv_from_items(*, catalog_id: str, items: list[dict[str, Any]]) -> list[str]:
@@ -44367,6 +44735,20 @@ try:
 except Exception:
     try:
         app.logger.exception('Failed to register vuln_catalog_batch routes.')
+    except Exception:
+        pass
+
+
+try:
+    from webapp.routes import vuln_catalog_cache as _vuln_catalog_cache_routes
+
+    _vuln_catalog_cache_routes.register(
+        app,
+        backend_module=sys.modules[__name__],
+    )
+except Exception:
+    try:
+        app.logger.exception('Failed to register vuln_catalog_cache routes.')
     except Exception:
         pass
 
@@ -45478,6 +45860,79 @@ def _set_generator_disabled_state(*, kind: str, generator_id: str, disabled: boo
     return False, 'Installed generator not found'
 
 
+def _set_generator_persistent_state(*, kind: str, generator_id: str, persistent: bool) -> tuple[bool, str]:
+    gid = str(generator_id or '').strip()
+    if not gid:
+        return False, 'Missing generator id'
+    k = str(kind or '').strip().lower().replace('_', '-')
+    if k not in ('flag-generator', 'flag-node-generator'):
+        return False, f'Invalid kind: {kind}'
+
+    state = _load_installed_generator_packs_state()
+    packs = state.get('packs') if isinstance(state, dict) else None
+    if not isinstance(packs, list):
+        packs = []
+
+    for p in packs:
+        if not isinstance(p, dict):
+            continue
+        items = p.get('installed')
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if not _installed_generator_state_item_matches(item=it, kind=k, generator_id=gid):
+                continue
+            it['persistent'] = bool(persistent)
+            state['packs'] = packs
+            _save_installed_generator_packs_state(state)
+            return True, ('Marked persistent' if persistent else 'Unmarked persistent') + f' {k} {gid}'
+
+    return False, 'Installed generator not found'
+
+
+def _update_generator_item_cache_state(
+    *,
+    kind: str,
+    generator_id: str,
+    cached: bool | None,
+    missing_images: list[str] | None = None,
+    error: str | None = None,
+    core_host: str | None = None,
+) -> bool:
+    """Persist the outcome of a cache pull/status-check for one generator item."""
+    gid = str(generator_id or '').strip()
+    if not gid:
+        return False
+    k = str(kind or '').strip().lower().replace('_', '-')
+    if k not in ('flag-generator', 'flag-node-generator'):
+        return False
+
+    state = _load_installed_generator_packs_state()
+    packs = state.get('packs') if isinstance(state, dict) else None
+    if not isinstance(packs, list):
+        packs = []
+
+    for p in packs:
+        if not isinstance(p, dict):
+            continue
+        items = p.get('installed')
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if not _installed_generator_state_item_matches(item=it, kind=k, generator_id=gid):
+                continue
+            it['cached'] = cached
+            it['cache_checked_at'] = _local_timestamp_display()
+            it['cache_last_core_host'] = str(core_host or '').strip() or None
+            it['cache_missing_images'] = list(missing_images or [])
+            it['cache_error'] = str(error or '').strip() or None
+            state['packs'] = packs
+            _save_installed_generator_packs_state(state)
+            return True
+
+    return False
+
+
 try:
     from webapp.routes import generator_catalog_mutations as _generator_catalog_mutations_routes
 
@@ -45487,6 +45942,7 @@ try:
         set_pack_disabled_state=lambda **kwargs: _set_pack_disabled_state(**kwargs),
         set_generator_disabled_state=lambda **kwargs: _set_generator_disabled_state(**kwargs),
         set_generator_validation_state=lambda **kwargs: _set_generator_validation_state(**kwargs),
+        set_generator_persistent_state=lambda **kwargs: _set_generator_persistent_state(**kwargs),
         delete_installed_generator=lambda **kwargs: _delete_installed_generator(**kwargs),
     )
 except Exception:

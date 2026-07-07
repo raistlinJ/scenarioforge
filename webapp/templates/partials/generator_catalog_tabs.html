@@ -36,6 +36,15 @@
        aria-selected="{{ 'true' if active_generator_catalog_tab == 'batch-test' else 'false' }}">Batch Test</a>
   </li>
   <li class="nav-item" role="presentation">
+    <a class="nav-link {% if active_generator_catalog_tab == 'image-cache' %}active{% endif %}"
+       id="flagImageCacheTab"
+       data-bs-toggle="tab"
+       href="#flagImageCache"
+       role="tab"
+       aria-controls="flagImageCache"
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'image-cache' else 'false' }}">Image Cache</a>
+  </li>
+  <li class="nav-item" role="presentation">
     <a class="nav-link {% if active_generator_catalog_tab == 'generator-builder' %}active{% endif %}"
        id="flagGeneratorBuilderTab"
        href="{{ url_for('generator_builder_page') }}"><i class="bi bi-wrench-adjustable me-1"></i>Generator Builder</a>

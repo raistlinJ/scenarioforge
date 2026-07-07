@@ -9,6 +9,7 @@ STATE_PATH="$CATALOG_ROOT/_catalogs_state.json"
 DRY_RUN=0
 YES=0
 REMOVE_ALL=0
+KEEP_IDS_EXTRA=""
 
 usage() {
   cat <<'USAGE'
@@ -21,10 +22,12 @@ Default behavior:
   - remove all other catalog pack directories
 
 Options:
-  --all       Remove all catalog pack directories and reset state
-  --dry-run   Show what would be removed without deleting anything
-  --yes       Do not prompt for confirmation
-  -h, --help  Show help
+  --all              Remove all catalog pack directories and reset state
+  --keep-ids IDS      Comma-separated catalog ids to keep in addition to the
+                      active one (e.g. packs containing a `persistent` item)
+  --dry-run          Show what would be removed without deleting anything
+  --yes              Do not prompt for confirmation
+  -h, --help         Show help
 
 Notes:
   - This only removes app-level catalog pack files.
@@ -38,6 +41,10 @@ while [[ $# -gt 0 ]]; do
     --all)
       REMOVE_ALL=1
       shift
+      ;;
+    --keep-ids)
+      KEEP_IDS_EXTRA="$2"
+      shift 2
       ;;
     --dry-run)
       DRY_RUN=1
@@ -64,7 +71,7 @@ if [[ ! -d "$CATALOG_ROOT" ]]; then
   exit 0
 fi
 
-export CATALOG_ROOT STATE_PATH REMOVE_ALL
+export CATALOG_ROOT STATE_PATH REMOVE_ALL KEEP_IDS_EXTRA
 
 mapfile -t PLAN_LINES < <(python3 <<'PY'
 import json
@@ -96,13 +103,15 @@ for item in catalogs:
 
 dirs = sorted([p.name for p in catalog_root.iterdir() if p.is_dir()])
 
+extra_keep_ids = [x.strip() for x in os.environ.get('KEEP_IDS_EXTRA', '').split(',') if x.strip()]
+
 if remove_all:
     remove_ids = dirs
     keep_ids = []
     new_active = ''
     kept_catalogs = []
 else:
-    keep_ids = [active_id] if active_id else []
+    keep_ids = list(dict.fromkeys(([active_id] if active_id else []) + extra_keep_ids))
     remove_ids = [cid for cid in dirs if cid not in keep_ids]
     kept_catalogs = [item for item in catalogs if isinstance(item, dict) and str(item.get('id') or '').strip() in keep_ids]
     new_active = active_id if active_id in keep_ids else ''
