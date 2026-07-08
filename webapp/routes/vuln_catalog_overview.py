@@ -107,9 +107,12 @@ def register(
             'required_files': required_files,
             'missing_required_files': _missing_dependency_paths_from_required(required_files),
             'compose_dependency_warning': str(summary.get('warning') or '').strip() if isinstance(summary, dict) else '',
+            'requires_build_network': bool(summary.get('requires_build_network')) if isinstance(summary, dict) else False,
+            'build_network_notes': list(summary.get('build_network_notes') or []) if isinstance(summary, dict) else [],
         }
 
     def _recheck_active_vuln_dependency_cache() -> dict[str, int | str]:
+        from scenarioforge.compose_dependencies import apply_dependency_auto_disable
         state = load_vuln_catalogs_state()
         entry = get_active_vuln_catalog_entry(state)
         if not entry:
@@ -128,12 +131,13 @@ def register(
                 item['required_files'] = metadata.get('required_files') if isinstance(metadata.get('required_files'), list) else []
                 item['missing_required_files'] = metadata.get('missing_required_files') if isinstance(metadata.get('missing_required_files'), list) else []
                 item['compose_dependency_warning'] = str(metadata.get('compose_dependency_warning') or '').strip()
-                if item['missing_required_files']:
-                    item['disabled'] = True
-                    item['disabled_due_to_missing_files'] = True
-                elif item.get('disabled_due_to_missing_files') is True:
-                    item['disabled'] = False
-                    item['disabled_due_to_missing_files'] = False
+                item['requires_build_network'] = bool(metadata.get('requires_build_network'))
+                item['build_network_notes'] = metadata.get('build_network_notes') if isinstance(metadata.get('build_network_notes'), list) else []
+                apply_dependency_auto_disable(
+                    item,
+                    missing=bool(item['missing_required_files']),
+                    needs_build_network=bool(item['requires_build_network']),
+                )
                 checked += 1
                 missing_count += len(item.get('missing_required_files') or [])
             catalog['compose_items'] = items
@@ -233,7 +237,10 @@ def register(
                 'cache_checked_at': str(item.get('cache_checked_at') or '').strip() or None,
                 'cache_last_core_host': str(item.get('cache_last_core_host') or '').strip() or None,
                 'cache_missing_images': item.get('cache_missing_images') if isinstance(item.get('cache_missing_images'), list) else [],
+                'cache_size_bytes': item.get('cache_size_bytes') if isinstance(item.get('cache_size_bytes'), int) else None,
                 'cache_error': str(item.get('cache_error') or '').strip() or None,
+                'requires_build_network': bool(item.get('requires_build_network', False)),
+                'build_network_notes': item.get('build_network_notes') if isinstance(item.get('build_network_notes'), list) else [],
             })
         return jsonify({
             'ok': True,

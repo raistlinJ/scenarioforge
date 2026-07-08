@@ -257,3 +257,77 @@ injects: []
     assert refreshed_generators[0].get('missing_required_files') == []
     assert refreshed_generators[0].get('_disabled') is False
     assert refreshed_generators[0].get('_disabled_due_to_missing_files') is False
+
+
+def test_scan_dockerfile_build_network_detects_network_ops(tmp_path):
+    """A Dockerfile that installs packages / fetches at build time (like the
+    phpmailer vulhub item) must be flagged; a plain FROM+COPY must not."""
+    from scenarioforge.compose_dependencies import scan_dockerfile_build_network
+
+    heavy = tmp_path / 'Dockerfile.heavy'
+    heavy.write_text(
+        "FROM vulhub/php:5.6-apache\n"
+        "COPY www/* /var/www/html/\n"
+        "RUN set -ex \\\n"
+        "    && apt-get update \\\n"
+        "    && apt-get install -y --no-install-recommends git \\\n"
+        "    && curl -sSL https://getcomposer.org/installer | php \\\n"
+        "    && php composer.phar install\n",
+        encoding='utf-8',
+    )
+    assert scan_dockerfile_build_network(str(heavy)) == ['apt', 'composer', 'curl/wget']
+
+    simple = tmp_path / 'Dockerfile.simple'
+    simple.write_text("FROM python:3.11-slim\nWORKDIR /app\nCOPY generator.py /app/\nCMD [\"python\", \"generator.py\"]\n", encoding='utf-8')
+    assert scan_dockerfile_build_network(str(simple)) == []
+
+
+def test_scan_compose_dependencies_surfaces_build_network(tmp_path):
+    from scenarioforge.compose_dependencies import scan_compose_dependencies
+
+    (tmp_path / 'Dockerfile').write_text("FROM alpine\nRUN apk add --no-cache git && pip install requests\n", encoding='utf-8')
+    compose = tmp_path / 'docker-compose.yml'
+    compose.write_text("services:\n  web:\n    build: .\n", encoding='utf-8')
+
+    summary = scan_compose_dependencies(str(compose))
+    assert summary['requires_build_network'] is True
+    assert 'web: apk' in summary['build_network_notes']
+    assert 'web: pip install' in summary['build_network_notes']
+
+
+def test_scan_compose_dependencies_no_build_network_for_pull_only(tmp_path):
+    from scenarioforge.compose_dependencies import scan_compose_dependencies
+
+    compose = tmp_path / 'docker-compose.yml'
+    compose.write_text("services:\n  web:\n    image: nginx:1\n  db:\n    image: mysql:8\n", encoding='utf-8')
+
+    summary = scan_compose_dependencies(str(compose))
+    assert summary['requires_build_network'] is False
+    assert summary['build_network_notes'] == []
+
+
+def test_apply_dependency_auto_disable_tracks_reasons_independently():
+    from scenarioforge.compose_dependencies import apply_dependency_auto_disable
+
+    # Build-network item is auto-disabled, tracked by its own reason flag.
+    item: dict = {}
+    changed = apply_dependency_auto_disable(item, missing=False, needs_build_network=True)
+    assert changed and item['disabled'] is True
+    assert item['disabled_due_to_build_network'] is True
+    assert item['disabled_due_to_missing_files'] is False
+
+    # Clearing only the build-network reason re-enables (no other reason).
+    apply_dependency_auto_disable(item, missing=False, needs_build_network=False)
+    assert item['disabled'] is False
+
+    # A manual disable (no reason flags) is preserved across a clean check.
+    manual = {'disabled': True}
+    apply_dependency_auto_disable(manual, missing=False, needs_build_network=False)
+    assert manual['disabled'] is True
+
+    # If both reasons apply, fixing files alone keeps it disabled for build-net.
+    both = {}
+    apply_dependency_auto_disable(both, missing=True, needs_build_network=True)
+    assert both['disabled'] is True
+    apply_dependency_auto_disable(both, missing=False, needs_build_network=True)
+    assert both['disabled'] is True and both['disabled_due_to_build_network'] is True

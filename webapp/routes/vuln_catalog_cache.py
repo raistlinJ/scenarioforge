@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from flask import jsonify, request
@@ -11,6 +12,47 @@ from webapp.routes.vuln_catalog_batch import _item_matches_query, _prefer_explic
 
 _CACHE_LOG_LINE_LIMIT = 500
 _CACHE_RUN_KINDS = ('vuln_image_cache',)
+
+# Vuln-item compose files commonly interpolate these into volume bind-mount
+# specs (e.g. `${INPUTS_DIR}:/inputs:ro`). A cache run only pulls/inspects
+# images and never starts a container, so the paths don't need to exist -
+# they just need to be non-empty or Compose rejects the spec as malformed.
+_CACHE_COMPOSE_ENV_PREFIX = "INPUTS_DIR=/tmp OUTPUTS_DIR=/tmp ARTIFACT_VARIANT_ID=cache-check"
+
+_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+
+def _parse_compose_image_refs(raw: str) -> list[str]:
+    """Parse `docker compose config --images` output into image references.
+
+    Over an SSH+sudo session with a PTY allocated (needed for the sudo password
+    prompt), stdout and stderr get merged, so Compose's own log/warning lines
+    (e.g. "the attribute `version` is obsolete") can end up mixed in with the
+    real image names. Docker image references never contain whitespace, so any
+    line that still has whitespace after stripping ANSI color codes is log
+    noise, not an image reference.
+    """
+    images: list[str] = []
+    for line in (raw or '').splitlines():
+        text = _ANSI_ESCAPE_RE.sub('', line).strip()
+        if not text or any(ch.isspace() for ch in text):
+            continue
+        images.append(text)
+    return images
+
+
+def _parse_image_size(raw: str) -> int | None:
+    """Parse `docker image inspect --format '{{.Size}}'` output into bytes.
+
+    Same PTY stdout/stderr-merging concern as _parse_compose_image_refs: take
+    the last purely-numeric line, ignoring any log noise mixed into stdout.
+    """
+    size: int | None = None
+    for line in (raw or '').splitlines():
+        text = _ANSI_ESCAPE_RE.sub('', line).strip()
+        if text.isdigit():
+            size = int(text)
+    return size
 
 
 def _append_cache_log(meta: dict[str, Any], message: str) -> None:
@@ -76,6 +118,46 @@ def _run_cache_job(backend: Any, meta: dict[str, Any], core_cfg: dict[str, Any])
     repo_root = os.path.abspath(backend._get_repo_root())
     results: list[dict[str, Any]] = []
 
+    def _run_docker_cmd(cmd: str, *, timeout: float, cancel_check: Any) -> tuple[int, str, str]:
+        # `docker`/`docker compose` need daemon access, which typically requires sudo
+        # unless the SSH user is already in the `docker` group.
+        if sudo:
+            return backend._exec_ssh_sudo_command(client, cmd, password=pw, timeout=timeout, cancel_check=cancel_check)
+        return backend._exec_ssh_command(client, cmd, timeout=timeout, check=False, cancel_check=cancel_check)
+
+    def _check_images_and_sizes(remote_yml: str, cancel_check: Any) -> tuple[list[str], list[str], int | None]:
+        """Resolve a compose file's images and check presence + on-disk size.
+
+        Returns (images, missing, total_size_bytes). total_size_bytes is None if
+        any image is missing or its size couldn't be determined.
+        """
+        images_cmd = (
+            f"{_CACHE_COMPOSE_ENV_PREFIX} "
+            f"docker compose -f {backend.shlex.quote(remote_yml)} config --images"
+        )
+        rc, out, err = _run_docker_cmd(images_cmd, timeout=60.0, cancel_check=cancel_check)
+        if rc != 0:
+            raise RuntimeError((str(err or out or 'docker compose config --images failed')).strip()[-1000:])
+        images = _parse_compose_image_refs(out)
+        missing: list[str] = []
+        total_size = 0
+        for image_ref in images:
+            if meta.get('stop_requested'):
+                break
+            irc, iout, _ierr = _run_docker_cmd(
+                f"docker image inspect --format '{{{{.Size}}}}' {backend.shlex.quote(image_ref)}",
+                timeout=30.0, cancel_check=cancel_check,
+            )
+            if irc != 0:
+                missing.append(image_ref)
+                continue
+            size = _parse_image_size(iout)
+            if size is None:
+                missing.append(image_ref)
+            else:
+                total_size += size
+        return images, missing, (None if missing else total_size)
+
     try:
         for index, item in enumerate(items):
             if meta.get('stop_requested'):
@@ -93,6 +175,7 @@ def _run_cache_job(backend: Any, meta: dict[str, Any], core_cfg: dict[str, Any])
                 'ok': False,
                 'cached': None,
                 'missing_images': [],
+                'cache_size_bytes': None,
                 'error': None,
             }
 
@@ -117,10 +200,12 @@ def _run_cache_job(backend: Any, meta: dict[str, Any], core_cfg: dict[str, Any])
                 meta['results'] = results
                 continue
 
+            cancel_check = lambda: bool(meta.get('stop_requested'))
+
             try:
                 rc, out, _err = backend._exec_ssh_command(
                     client, f"[ -f {backend.shlex.quote(remote_yml)} ] && echo present || echo missing",
-                    timeout=15.0, check=False,
+                    timeout=15.0, check=False, cancel_check=cancel_check,
                 )
                 if 'present' not in (out or ''):
                     result['error'] = 'compose file not synced to CORE VM yet'
@@ -133,36 +218,96 @@ def _run_cache_job(backend: Any, meta: dict[str, Any], core_cfg: dict[str, Any])
                 meta['results'] = results
                 continue
 
+            # Some vulhub items ship a docker-compose that references an
+            # `env_file:` (e.g. `.env`) that never existed in the upstream
+            # package. Older Docker Compose builds hard-error on a missing
+            # env_file even for `config`/`pull`/`build`, so create empty
+            # placeholders next to the synced compose file. Harmless: caching
+            # never runs a container, so empty env values are fine.
+            try:
+                env_refs = backend._compose_env_file_relpaths(local_path)
+                if env_refs:
+                    remote_dir = backend.posixpath.dirname(remote_yml)
+                    for ref in env_refs:
+                        remote_env = backend._remote_path_join(remote_dir, ref)
+                        q = backend.shlex.quote(remote_env)
+                        backend._exec_ssh_command(
+                            client, f"[ -e {q} ] || : > {q}",
+                            timeout=15.0, check=False, cancel_check=cancel_check,
+                        )
+            except Exception:
+                pass
+
             if mode == 'pull':
-                cmd = f"docker compose -f {backend.shlex.quote(remote_yml)} pull"
+                # `pull` only fetches registry images; items built from a local
+                # Dockerfile (`build:`) are silently skipped ("No image to be pulled")
+                # and never actually cached unless we also build them here.
+                pull_cmd = f"{_CACHE_COMPOSE_ENV_PREFIX} docker compose -f {backend.shlex.quote(remote_yml)} pull"
+                build_cmd = f"{_CACHE_COMPOSE_ENV_PREFIX} docker compose -f {backend.shlex.quote(remote_yml)} build"
                 try:
-                    if sudo:
-                        rc, out, err = backend._exec_ssh_sudo_command(client, cmd, password=pw, timeout=600.0)
+                    pull_rc, pull_out, pull_err = _run_docker_cmd(pull_cmd, timeout=600.0, cancel_check=cancel_check)
+                    if meta.get('stop_requested'):
+                        result['error'] = 'cancelled before build step'
                     else:
-                        rc, out, err = backend._exec_ssh_command(client, cmd, timeout=600.0, check=False)
-                    result['ok'] = rc == 0
-                    result['cached'] = rc == 0
-                    if rc != 0:
-                        result['error'] = (str(err or out or 'docker compose pull failed').strip())[-1000:]
+                        build_rc, build_out, build_err = _run_docker_cmd(build_cmd, timeout=600.0, cancel_check=cancel_check)
+                        result['ok'] = pull_rc == 0 and build_rc == 0
+                        result['cached'] = result['ok']
+                        if not result['ok']:
+                            errors = []
+                            if pull_rc != 0:
+                                errors.append(f"pull: {(str(pull_err or pull_out or 'failed')).strip()[:400]}")
+                            if build_rc != 0:
+                                errors.append(f"build: {(str(build_err or build_out or 'failed')).strip()[:400]}")
+                            result['error'] = '; '.join(errors)[:1000]
+                        elif not meta.get('stop_requested'):
+                            try:
+                                _images, _missing, size = _check_images_and_sizes(remote_yml, cancel_check)
+                                result['cache_size_bytes'] = size
+                            except Exception:
+                                pass
                 except Exception as exc:
                     result['error'] = str(exc)
                 _append_cache_log(meta, f"[cache] pull #{item_id}: {'ok' if result['ok'] else 'failed'}")
+            elif mode == 'clear':
+                try:
+                    images_cmd = (
+                        f"{_CACHE_COMPOSE_ENV_PREFIX} "
+                        f"docker compose -f {backend.shlex.quote(remote_yml)} config --images"
+                    )
+                    rc, out, err = _run_docker_cmd(images_cmd, timeout=60.0, cancel_check=cancel_check)
+                    if rc != 0:
+                        result['error'] = (str(err or out or 'docker compose config --images failed').strip())[-1000:]
+                    else:
+                        images = _parse_compose_image_refs(out)
+                        removed: list[str] = []
+                        errors: list[str] = []
+                        for image_ref in images:
+                            if meta.get('stop_requested'):
+                                break
+                            rrc, rout, rerr = _run_docker_cmd(
+                                f"docker rmi -f {backend.shlex.quote(image_ref)}",
+                                timeout=60.0, cancel_check=cancel_check,
+                            )
+                            combined = str(rerr or rout or '')
+                            if rrc == 0 or 'no such image' in combined.lower():
+                                removed.append(image_ref)
+                            else:
+                                errors.append(f"{image_ref}: {combined.strip()[:200]}")
+                        result['ok'] = not errors
+                        result['cached'] = False
+                        result['missing_images'] = []
+                        if errors:
+                            result['error'] = '; '.join(errors)[:1000]
+                except Exception as exc:
+                    result['error'] = str(exc)
+                _append_cache_log(meta, f"[cache] clear #{item_id}: {'ok' if result['ok'] else 'failed'}")
             else:
                 try:
-                    images_cmd = f"docker compose -f {backend.shlex.quote(remote_yml)} config --images 2>/dev/null"
-                    rc, out, _err = backend._exec_ssh_command(client, images_cmd, timeout=60.0, check=False)
-                    images = [line.strip() for line in (out or '').splitlines() if line.strip()]
-                    missing: list[str] = []
-                    for image_ref in images:
-                        irc, _iout, _ierr = backend._exec_ssh_command(
-                            client, f"docker image inspect {backend.shlex.quote(image_ref)}",
-                            timeout=30.0, check=False,
-                        )
-                        if irc != 0:
-                            missing.append(image_ref)
+                    images, missing, size = _check_images_and_sizes(remote_yml, cancel_check)
                     result['ok'] = True
                     result['cached'] = bool(images) and not missing
                     result['missing_images'] = missing
+                    result['cache_size_bytes'] = size
                 except Exception as exc:
                     result['error'] = str(exc)
                 _append_cache_log(
@@ -176,6 +321,7 @@ def _run_cache_job(backend: Any, meta: dict[str, Any], core_cfg: dict[str, Any])
                     item_id=item_id,
                     cached=result.get('cached'),
                     missing_images=result.get('missing_images') or [],
+                    cache_size_bytes=result.get('cache_size_bytes'),
                     error=result.get('error'),
                     core_host=core_host,
                 )
@@ -225,6 +371,16 @@ def register(app, *, backend_module: Any) -> None:
             active = candidate
         return active
 
+    def _resolve_cache_core_cfg(payload: dict[str, Any]) -> dict[str, Any]:
+        core_cfg = backend._merge_core_configs(payload.get('core'), include_password=True)
+        runtime_mode = str(getattr(backend, '_webui_runtime_mode', lambda: 'native')() or 'native').strip().lower()
+        core_cfg = _prefer_explicit_or_ssh_core_host(payload.get('core'), core_cfg, runtime_mode=runtime_mode)
+        if not core_cfg.get('host'):
+            core_cfg['host'] = core_cfg.get('ssh_host') or '127.0.0.1'
+        if not core_cfg.get('port'):
+            core_cfg['port'] = backend.CORE_PORT
+        return backend._require_core_ssh_credentials(core_cfg)
+
     def _start_cache_run(mode: str):
         backend._require_builder_or_admin()
         payload = request.get_json(silent=True) or {}
@@ -242,6 +398,9 @@ def register(app, *, backend_module: Any) -> None:
         item_ids_raw = payload.get('item_ids') if isinstance(payload.get('item_ids'), list) else None
         query = str(payload.get('query') or '').strip()
         include_disabled = backend._coerce_bool(payload.get('include_disabled')) if 'include_disabled' in payload else False
+        scope = str(payload.get('scope') or 'all').strip().lower()
+        if scope not in ('all', 'uncached', 'failed'):
+            scope = 'all'
         limit = None
         try:
             limit_raw = payload.get('limit')
@@ -265,7 +424,15 @@ def register(app, *, backend_module: Any) -> None:
                     continue
                 if not _item_matches_query(item, query):
                     continue
+                if scope == 'uncached' and item.get('cached') is True:
+                    continue
+                if scope == 'failed' and not item.get('cache_error'):
+                    continue
                 selected_items.append(item)
+
+        if mode == 'clear':
+            # Persistent items are never touched by any cleanup-style action.
+            selected_items = [item for item in selected_items if not item.get('persistent')]
 
         if limit is not None:
             selected_items = selected_items[:limit]
@@ -273,14 +440,7 @@ def register(app, *, backend_module: Any) -> None:
             return jsonify({'ok': False, 'error': 'No catalog items matched the selection'}), 400
 
         try:
-            core_cfg = backend._merge_core_configs(payload.get('core'), include_password=True)
-            runtime_mode = str(getattr(backend, '_webui_runtime_mode', lambda: 'native')() or 'native').strip().lower()
-            core_cfg = _prefer_explicit_or_ssh_core_host(payload.get('core'), core_cfg, runtime_mode=runtime_mode)
-            if not core_cfg.get('host'):
-                core_cfg['host'] = core_cfg.get('ssh_host') or '127.0.0.1'
-            if not core_cfg.get('port'):
-                core_cfg['port'] = backend.CORE_PORT
-            core_cfg = backend._require_core_ssh_credentials(core_cfg)
+            core_cfg = _resolve_cache_core_cfg(payload)
         except Exception as exc:
             return jsonify({'ok': False, 'error': f'CORE VM SSH config required: {exc}'}), 400
 
@@ -320,6 +480,83 @@ def register(app, *, backend_module: Any) -> None:
 
         return jsonify({'ok': True, 'run_id': run_id, 'mode': mode, 'selected_count': len(selected_items)})
 
+    @app.route('/vuln_catalog_items/cache/precheck', methods=['POST'])
+    def vuln_catalog_items_cache_precheck():
+        backend._require_builder_or_admin()
+        payload = request.get_json(silent=True) or {}
+        stop_running = backend._coerce_bool(payload.get('stop_running'))
+
+        try:
+            core_cfg = _resolve_cache_core_cfg(payload)
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': f'CORE VM SSH config required: {exc}'}), 400
+
+        core_host = str(core_cfg.get('ssh_host') or core_cfg.get('host') or '')
+        core_port = core_cfg.get('ssh_port') or core_cfg.get('port')
+
+        try:
+            client = backend._open_ssh_client(core_cfg)
+        except Exception as exc:
+            return jsonify({
+                'ok': False, 'error': f'SSH connect failed: {exc}',
+                'core_host': core_host, 'core_port': core_port,
+            }), 502
+
+        try:
+            try:
+                names = backend._list_remote_running_containers(core_cfg, client=client)
+            except Exception as exc:
+                return jsonify({
+                    'ok': False, 'error': f'Unable to list running containers: {exc}',
+                    'core_host': core_host, 'core_port': core_port,
+                }), 502
+
+            if not names:
+                return jsonify({
+                    'ok': True, 'active': False, 'container_names': [], 'container_count': 0, 'stopped': False,
+                    'core_host': core_host, 'core_port': core_port,
+                })
+
+            if not stop_running:
+                return jsonify({
+                    'ok': True,
+                    'active': True,
+                    'container_names': names,
+                    'container_count': len(names),
+                    'stopped': False,
+                    'core_host': core_host,
+                    'core_port': core_port,
+                })
+
+            stopped, errors = backend._stop_remote_containers(core_cfg, names, client=client)
+            if errors:
+                return jsonify({
+                    'ok': False,
+                    'error': errors[0],
+                    'active': True,
+                    'container_names': names,
+                    'stopped_names': stopped,
+                    'errors': errors,
+                    'core_host': core_host,
+                    'core_port': core_port,
+                }), 409
+
+            return jsonify({
+                'ok': True,
+                'active': True,
+                'container_names': names,
+                'container_count': len(names),
+                'stopped': True,
+                'stopped_names': stopped,
+                'core_host': core_host,
+                'core_port': core_port,
+            })
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
     @app.route('/vuln_catalog_items/cache/start', methods=['POST'])
     def vuln_catalog_items_cache_start():
         return _start_cache_run('pull')
@@ -327,6 +564,10 @@ def register(app, *, backend_module: Any) -> None:
     @app.route('/vuln_catalog_items/cache/refresh/start', methods=['POST'])
     def vuln_catalog_items_cache_refresh_start():
         return _start_cache_run('status')
+
+    @app.route('/vuln_catalog_items/cache/clear/start', methods=['POST'])
+    def vuln_catalog_items_cache_clear_start():
+        return _start_cache_run('clear')
 
     @app.route('/vuln_catalog_items/cache/status')
     def vuln_catalog_items_cache_status():

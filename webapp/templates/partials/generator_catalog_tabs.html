@@ -1,48 +1,69 @@
+{% set generator_catalog_tabs_on_builder_page = active_generator_catalog_tab == 'generator-builder' %}
 <ul class="nav nav-tabs mb-3" id="generatorCatalogTabs" role="tablist">
   <li class="nav-item" role="presentation">
     <a class="nav-link {% if active_generator_catalog_tab == 'packs' %}active{% endif %}"
        id="flagGenSourcesTab"
+       {% if generator_catalog_tabs_on_builder_page %}
+       href="{{ url_for('flag_catalog_page') }}#flagGenSources"
+       {% else %}
        data-bs-toggle="tab"
        href="#flagGenSources"
        role="tab"
        aria-controls="flagGenSources"
-       aria-selected="{{ 'true' if active_generator_catalog_tab == 'packs' else 'false' }}">Generator Packs</a>
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'packs' else 'false' }}"
+       {% endif %}>Generator Packs</a>
   </li>
   <li class="nav-item" role="presentation">
     <a class="nav-link {% if active_generator_catalog_tab == 'flag-generators' %}active{% endif %}"
        id="flagGeneratorsTab"
+       {% if generator_catalog_tabs_on_builder_page %}
+       href="{{ url_for('flag_catalog_page') }}#flagGenerators"
+       {% else %}
        data-bs-toggle="tab"
        href="#flagGenerators"
        role="tab"
        aria-controls="flagGenerators"
-       aria-selected="{{ 'true' if active_generator_catalog_tab == 'flag-generators' else 'false' }}">Flag-Generators</a>
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'flag-generators' else 'false' }}"
+       {% endif %}>Flag-Generators</a>
   </li>
   <li class="nav-item" role="presentation">
     <a class="nav-link {% if active_generator_catalog_tab == 'flag-node-generators' %}active{% endif %}"
        id="flagNodeGeneratorsTab"
+       {% if generator_catalog_tabs_on_builder_page %}
+       href="{{ url_for('flag_catalog_page') }}#flagNodeGenerators"
+       {% else %}
        data-bs-toggle="tab"
        href="#flagNodeGenerators"
        role="tab"
        aria-controls="flagNodeGenerators"
-       aria-selected="{{ 'true' if active_generator_catalog_tab == 'flag-node-generators' else 'false' }}">Flag-Node-Generators</a>
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'flag-node-generators' else 'false' }}"
+       {% endif %}>Flag-Node-Generators</a>
   </li>
   <li class="nav-item" role="presentation">
     <a class="nav-link {% if active_generator_catalog_tab == 'batch-test' %}active{% endif %}"
        id="flagBatchTab"
+       {% if generator_catalog_tabs_on_builder_page %}
+       href="{{ url_for('flag_catalog_page') }}#flagBatch"
+       {% else %}
        data-bs-toggle="tab"
        href="#flagBatch"
        role="tab"
        aria-controls="flagBatch"
-       aria-selected="{{ 'true' if active_generator_catalog_tab == 'batch-test' else 'false' }}">Batch Test</a>
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'batch-test' else 'false' }}"
+       {% endif %}>Batch Test</a>
   </li>
   <li class="nav-item" role="presentation">
     <a class="nav-link {% if active_generator_catalog_tab == 'image-cache' %}active{% endif %}"
        id="flagImageCacheTab"
+       {% if generator_catalog_tabs_on_builder_page %}
+       href="{{ url_for('flag_catalog_page') }}#flagImageCache"
+       {% else %}
        data-bs-toggle="tab"
        href="#flagImageCache"
        role="tab"
        aria-controls="flagImageCache"
-       aria-selected="{{ 'true' if active_generator_catalog_tab == 'image-cache' else 'false' }}">Image Cache</a>
+       aria-selected="{{ 'true' if active_generator_catalog_tab == 'image-cache' else 'false' }}"
+       {% endif %}>Image Cache</a>
   </li>
   <li class="nav-item" role="presentation">
     <a class="nav-link {% if active_generator_catalog_tab == 'generator-builder' %}active{% endif %}"

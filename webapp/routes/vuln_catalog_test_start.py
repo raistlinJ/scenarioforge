@@ -634,14 +634,18 @@ def register(app, *, backend_module: Any) -> None:
                     inner = f"sudo -S -p '' -k docker images -q {shlex.quote(image)}"
                     cmd = f"bash -lc {shlex.quote(inner)}"
                     rc, out, _err = _exec_ssh_sudo_capture(ssh_client, cmd, pw)
-                    if rc == 0 and out:
+                    # Over a PTY, stdout/stderr merge, so a sudo lecture or other
+                    # noise can land in `out` alongside (or instead of) the real
+                    # image id. A real "docker images -q" hit is a bare hex id
+                    # with no whitespace, so require that shape before trusting it.
+                    if rc == 0 and backend._parse_docker_ref_lines(out):
                         existing_images.append(image)
                 for cname in containers:
                     filter_arg = f'name=^{cname}$'
                     inner = f"sudo -S -p '' -k docker ps -a --filter {shlex.quote(filter_arg)} --format {{.Names}}"
                     cmd = f"bash -lc {shlex.quote(inner)}"
                     rc, out, _err = _exec_ssh_sudo_capture(ssh_client, cmd, pw)
-                    if rc == 0 and out:
+                    if rc == 0 and backend._parse_docker_ref_lines(out):
                         existing_containers.append(cname)
                 if (existing_images or existing_containers) and not force_replace:
                     try:

@@ -209,9 +209,12 @@ def register(
             'required_files': required_files,
             'missing_required_files': _missing_dependency_paths_from_required(required_files),
             'compose_dependency_warning': str(summary.get('warning') or '').strip() if isinstance(summary, dict) else '',
+            'requires_build_network': bool(summary.get('requires_build_network')) if isinstance(summary, dict) else False,
+            'build_network_notes': list(summary.get('build_network_notes') or []) if isinstance(summary, dict) else [],
         }
 
     def _recheck_generator_dependency_cache(kind: str) -> dict[str, int]:
+        from scenarioforge.compose_dependencies import apply_dependency_auto_disable
         state = load_installed_generator_packs_state()
         packs = state.get('packs') if isinstance(state, dict) else None
         if not isinstance(packs, list):
@@ -230,7 +233,8 @@ def register(
                 if str(item.get('kind') or '').strip() != kind:
                     continue
                 metadata = _scan_generator_dependency_metadata(str(item.get('path') or ''))
-                for key in ('required_files', 'missing_required_files', 'compose_dependency_warning'):
+                for key in ('required_files', 'missing_required_files', 'compose_dependency_warning',
+                            'requires_build_network', 'build_network_notes'):
                     if item.get(key) != metadata.get(key):
                         item[key] = metadata.get(key)
                         changed = True
@@ -239,18 +243,11 @@ def register(
                     changed = True
                 checked += 1
                 missing = metadata.get('missing_required_files') if isinstance(metadata.get('missing_required_files'), list) else []
-                if missing:
-                    if item.get('disabled') is not True:
-                        item['disabled'] = True
-                        changed = True
-                    if item.get('disabled_due_to_missing_files') is not True:
-                        item['disabled_due_to_missing_files'] = True
-                        changed = True
-                elif item.get('disabled_due_to_missing_files') is True:
-                    if item.get('disabled') is not False:
-                        item['disabled'] = False
-                        changed = True
-                    item['disabled_due_to_missing_files'] = False
+                if apply_dependency_auto_disable(
+                    item,
+                    missing=bool(missing),
+                    needs_build_network=bool(metadata.get('requires_build_network')),
+                ):
                     changed = True
                 missing_count += len(missing)
         if changed:

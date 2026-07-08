@@ -1132,6 +1132,26 @@ def _strip_ansi(text: str) -> str:
         return text
 
 
+def _parse_docker_ref_lines(raw: str) -> list[str]:
+    """Parse single-token docker/docker-compose CLI output (image refs,
+    container/image names, tags) into a clean list.
+
+    Over an SSH+sudo session with a PTY allocated (needed for the sudo
+    password prompt), stdout and stderr get merged, so Compose's own
+    log/warning lines (e.g. "the attribute `version` is obsolete") or an
+    echoed sudo password can end up mixed in with the real output. None of
+    these tokens ever contain whitespace, so any line that still has
+    whitespace after stripping ANSI color codes is noise, not real output.
+    """
+    out: list[str] = []
+    for line in (raw or '').splitlines():
+        text = _strip_ansi(line).strip()
+        if not text or any(ch.isspace() for ch in text):
+            continue
+        out.append(text)
+    return out
+
+
 def _redact_sensitive_text(text: str, redact_tokens: Optional[list[str]] = None) -> str:
     try:
         out = str(text or '')
@@ -1334,6 +1354,7 @@ def _exec_ssh_sudo_command(
     *,
     password: str | None = None,
     timeout: float | None = 120.0,
+    cancel_check: Any = None,
 ) -> tuple[int, str, str]:
     """Execute a command over SSH via sudo and capture stdout/stderr."""
     sudo_cmd = (
@@ -1359,6 +1380,19 @@ def _exec_ssh_sudo_command(
         while True:
             if channel is None:
                 break
+            try:
+                if cancel_check is not None and bool(cancel_check()):
+                    try:
+                        if not channel.closed:
+                            channel.close()
+                    except Exception:
+                        pass
+                    raise TimeoutError('SSH sudo command cancelled')
+            except TimeoutError:
+                raise
+            except Exception:
+                # Never allow cancel_check bugs to wedge execution.
+                pass
             try:
                 if channel.recv_ready():
                     stdout_chunks.append(channel.recv(REMOTE_LOG_CHUNK_SIZE))
@@ -1394,6 +1428,68 @@ def _exec_ssh_sudo_command(
         return exit_code, _decode(b''.join(stdout_chunks)), _decode(b''.join(stderr_chunks))
     finally:
         _close_ssh_command_streams(stdin, stdout, stderr)
+
+
+def _list_remote_running_containers(core_cfg: Dict[str, Any], *, client: Any = None) -> list[str]:
+    """Return names of currently running docker containers on the CORE VM.
+
+    Used as a pre-flight check before operations (like an image-cache pull) that
+    shouldn't run alongside containers someone may still be using.
+    """
+    sudo = _coerce_bool(core_cfg.get('docker_use_sudo', True))
+    pw = str(core_cfg.get('ssh_password') or '')
+    own_client = client is None
+    if own_client:
+        client = _open_ssh_client(core_cfg)
+    try:
+        cmd = "docker ps --format '{{.Names}}'"
+        if sudo:
+            rc, out, err = _exec_ssh_sudo_command(client, cmd, password=pw, timeout=30.0)
+        else:
+            rc, out, err = _exec_ssh_command(client, cmd, timeout=30.0, check=False)
+        if rc != 0:
+            raise RuntimeError((str(err or out or 'docker ps failed')).strip()[:500])
+        return _parse_docker_ref_lines(out)
+    finally:
+        if own_client:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def _stop_remote_containers(
+    core_cfg: Dict[str, Any], names: list[str], *, client: Any = None,
+) -> tuple[list[str], list[str]]:
+    """Stop the given docker containers on the CORE VM. Returns (stopped, errors)."""
+    sudo = _coerce_bool(core_cfg.get('docker_use_sudo', True))
+    pw = str(core_cfg.get('ssh_password') or '')
+    own_client = client is None
+    if own_client:
+        client = _open_ssh_client(core_cfg)
+    stopped: list[str] = []
+    errors: list[str] = []
+    try:
+        for name in names:
+            cmd = f"docker stop {shlex.quote(name)}"
+            try:
+                if sudo:
+                    rc, out, err = _exec_ssh_sudo_command(client, cmd, password=pw, timeout=60.0)
+                else:
+                    rc, out, err = _exec_ssh_command(client, cmd, timeout=60.0, check=False)
+                if rc == 0:
+                    stopped.append(name)
+                else:
+                    errors.append(f"{name}: {(str(err or out or 'stop failed')).strip()[:200]}")
+            except Exception as exc:
+                errors.append(f'{name}: {exc}')
+    finally:
+        if own_client:
+            try:
+                client.close()
+            except Exception:
+                pass
+    return stopped, errors
 
 
 def _catalog_ids_with_persistent_items() -> list[str]:
@@ -1501,10 +1597,7 @@ def _persistent_image_keep_set(*, client: Any | None = None) -> set[str]:
                     'done',
                 ])
                 _rc, out, _err = _exec_ssh_command(client, f"sh -c {shlex.quote(script)}", timeout=60.0, check=False)
-                for line in str(out or '').splitlines():
-                    line = line.strip()
-                    if line:
-                        keep.add(line)
+                keep.update(_parse_docker_ref_lines(out))
         except Exception:
             pass
 
@@ -1586,7 +1679,7 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
             )
             images_cmd = f"docker compose -f {shlex.quote(compose_path)} config --images 2>/dev/null || true"
             rc, out, err = _exec_ssh_sudo_command(client, images_cmd, password=pw, timeout=60.0)
-            compose_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+            compose_images = _parse_docker_ref_lines(out)
             _rmi_excluding_keep_set(client, compose_images, keep_set=keep_set, password=pw, log=_log)
 
         node_id = str(meta.get('test_docker_node_id') or '').strip()
@@ -1606,7 +1699,7 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
             image_ref = ''
             inspect_node_cmd = f"docker inspect -f '{{{{.Image}}}}' {shlex.quote(node_token)} 2>/dev/null || true"
             rc, out, err = _exec_ssh_sudo_command(client, inspect_node_cmd, password=pw, timeout=60.0)
-            inspect_lines = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+            inspect_lines = _parse_docker_ref_lines(out)
             if inspect_lines:
                 image_ref = inspect_lines[0]
             _log(
@@ -1631,7 +1724,7 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
                 f"docker compose -f {shlex.quote(node_compose)} config --images 2>/dev/null; fi"
             )
             rc, out, err = _exec_ssh_sudo_command(client, node_images_cmd, password=pw, timeout=60.0)
-            node_compose_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+            node_compose_images = _parse_docker_ref_lines(out)
 
             rm_node_cmd = f"docker rm -f {shlex.quote(node_token)} >/dev/null 2>&1 || true"
             rc, out, err = _exec_ssh_sudo_command(client, rm_node_cmd, password=pw, timeout=60.0)
@@ -1652,7 +1745,7 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
                 f"| grep -F {shlex.quote(scenario_tag)} || true"
             )
             rc, out, err = _exec_ssh_sudo_command(client, list_images_cmd, password=pw, timeout=60.0)
-            scenario_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+            scenario_images = _parse_docker_ref_lines(out)
             _rmi_excluding_keep_set(client, scenario_images, keep_set=keep_set, password=pw, log=_log)
 
         # Ensure lingering CORE session state is cleaned up as part of test teardown.
@@ -1827,6 +1920,55 @@ def _remote_path_join(*parts: str) -> str:
     if not cleaned:
         return '/'
     return posixpath.normpath(posixpath.join(*cleaned))
+
+
+def _compose_env_file_relpaths(local_compose_path: str) -> list[str]:
+    """Return the relative `env_file:` paths a compose file references.
+
+    Handles the three forms Compose accepts: a bare string, a list of strings,
+    and a list of `{path|file: ..., required: ...}` objects (Compose 2.24+).
+    Only relative references are returned (absolute ones are the caller's own
+    responsibility); the paths are as-written, resolved by the caller against
+    the compose file's directory.
+    """
+    try:
+        import yaml  # type: ignore
+        with open(local_compose_path, 'r', encoding='utf-8') as fh:
+            doc = yaml.safe_load(fh)
+    except Exception:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    services = doc.get('services')
+    if not isinstance(services, dict):
+        return []
+    refs: list[str] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            refs.append(value.strip())
+        elif isinstance(value, dict):
+            p = value.get('path') or value.get('file')
+            if isinstance(p, str) and p.strip():
+                refs.append(p.strip())
+
+    for svc in services.values():
+        if not isinstance(svc, dict):
+            continue
+        env_file = svc.get('env_file')
+        if isinstance(env_file, list):
+            for entry in env_file:
+                _add(entry)
+        else:
+            _add(env_file)
+
+    # De-dup, drop absolute paths (caller resolves relatives against compose dir).
+    seen: list[str] = []
+    for r in refs:
+        if r.startswith('/') or r in seen:
+            continue
+        seen.append(r)
+    return seen
 
 
 def _remote_mkdirs(client: Any, path: str) -> None:
@@ -2155,8 +2297,19 @@ def _should_exclude_repo_member(rel_path: str, *, allowed_outputs: Optional[List
         pass
     for part in parts:
         # If outputs is allowlisted, don't treat the literal "outputs" path
-        # segment as excluded (we still exclude nested ".git", venvs, etc.).
+        # segment as excluded.
         if outputs_allowed and part == 'outputs':
+            continue
+        if outputs_allowed:
+            # Content under an allowlisted outputs/ subtree is externally
+            # sourced (vuln-catalog / generator-catalog pack content), not
+            # our own dev artifacts. It can legitimately reuse directory
+            # names our own exclusions target - e.g. a vulhub item's own
+            # "env/" directory of docker env-files, or a generator's
+            # "node_modules"/"build" build output - so only guard against
+            # nested VCS metadata there, never the generic dev-tool dirs.
+            if part in ('.git', '.hg', '.svn'):
+                return True
             continue
         # Exclude Python virtualenv directories beyond literal ".venv".
         # Example: ".venv312" is common in this repo and should never be synced to remote CORE VMs.
@@ -2172,6 +2325,14 @@ def _should_exclude_repo_member(rel_path: str, *, allowed_outputs: Optional[List
             return True
         if part in REPO_PUSH_EXCLUDE_DIRS:
             return True
+    if outputs_allowed:
+        # Same reasoning as above: a vuln-catalog item's own fixture file
+        # (e.g. a seed "access.log" or a ".tmp" file a vulnerable app reads)
+        # is real content, not a stray editor/bytecode artifact, and must not
+        # be dropped just because its extension matches our own dev-artifact
+        # cleanup patterns. This also matches _repo_rsync_filters, which
+        # already places the outputs/ allowlist ahead of these patterns.
+        return False
     leaf = parts[-1]
     for pattern in REPO_PUSH_EXCLUDE_PATTERNS:
         if fnmatch.fnmatch(leaf, pattern):
@@ -2248,25 +2409,12 @@ def _safe_posix_relpath(rel_path: str) -> str:
 def _repo_rsync_filters(*, allowed_outputs: Optional[List[str]]) -> list[str]:
     """Return rsync filter rules that match _should_exclude_repo_member() semantics."""
     # We use rsync --filter rules so we can express "exclude outputs/** except allowlist".
+    # rsync applies these in order and stops at the first match, so the outputs/
+    # allowlist block MUST come before the generic dev-artifact exclusions below -
+    # otherwise a rule like "- **/env/" (meant to keep our own Python venvs out of
+    # the sync) would also match a vuln-catalog item's own "env/" directory of
+    # docker env-files nested under an allowlisted outputs/ subtree.
     rules: list[str] = []
-
-    # Exclude patterns (leaf-based)
-    for pat in REPO_PUSH_EXCLUDE_PATTERNS:
-        rules.append(f"- {pat}")
-
-    # Exclude common virtualenv directory patterns.
-    rules.append('- .venv*/')
-    rules.append('- **/.venv*/')
-    rules.append('- venv*/')
-    rules.append('- **/venv*/')
-
-    # Exclude directories anywhere in path.
-    for d in sorted(REPO_PUSH_EXCLUDE_DIRS):
-        # outputs handled separately below
-        if d == 'outputs':
-            continue
-        rules.append(f"- {d}/")
-        rules.append(f"- **/{d}/")
 
     # outputs/ special-case allowlist
     allowed_outputs = list(allowed_outputs or [])
@@ -2292,6 +2440,24 @@ def _repo_rsync_filters(*, allowed_outputs: Optional[List[str]]) -> list[str]:
         rules.append('- outputs/**')
     else:
         rules.append('- outputs/**')
+
+    # Exclude patterns (leaf-based)
+    for pat in REPO_PUSH_EXCLUDE_PATTERNS:
+        rules.append(f"- {pat}")
+
+    # Exclude common virtualenv directory patterns.
+    rules.append('- .venv*/')
+    rules.append('- **/.venv*/')
+    rules.append('- venv*/')
+    rules.append('- **/venv*/')
+
+    # Exclude directories anywhere in path.
+    for d in sorted(REPO_PUSH_EXCLUDE_DIRS):
+        # outputs handled separately above
+        if d == 'outputs':
+            continue
+        rules.append(f"- {d}/")
+        rules.append(f"- **/{d}/")
 
     # Default include is everything else.
     return rules
@@ -2500,8 +2666,15 @@ def _push_repo_to_remote_via_sftp_delta(
                         if not _should_exclude_repo_member(os.path.join(rel_dir, d) if rel_dir else d, allowed_outputs=allowed_outputs)
                     ]
                 else:
-                    # For include-only mode, still skip dot dirs for sanity.
-                    dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                    # For include-only mode, the caller already selected these
+                    # specific paths to sync in full - mirroring
+                    # _create_local_repo_archive_from_paths() and the rsync
+                    # staging copytree(), neither of which filter at all. Only
+                    # guard against nested VCS metadata; don't blanket-drop
+                    # every dotdir, since a generator/vuln-catalog item may
+                    # legitimately need a hidden directory (e.g. a
+                    # ".well-known/" ACME-challenge fixture).
+                    dirnames[:] = [d for d in dirnames if d not in ('.git', '.hg', '.svn')]
 
                 # Record directory so we can keep it during delete.
                 if rel_dir:
@@ -3606,7 +3779,11 @@ def _compute_repo_fingerprint_includes(repo_root: str, include_paths: list[str])
                 rel_dir = os.path.relpath(dirpath, root)
                 if rel_dir == '.':
                     rel_dir = ''
-                dirnames[:] = [d for d in dirnames if not d.startswith('.')]  # keep minimal
+                # Must match the sftp-delta walk's filtering above, or a
+                # change confined to a legitimate hidden directory wouldn't
+                # bump this fingerprint - causing the "unchanged, skip
+                # upload" fast path to skip a sync that was actually needed.
+                dirnames[:] = [d for d in dirnames if d not in ('.git', '.hg', '.svn')]
                 for fname in filenames:
                     rel_path = os.path.join(rel_dir, fname) if rel_dir else fname
                     full_file = os.path.join(dirpath, fname)
@@ -7142,7 +7319,7 @@ def _run_postrun_remote_maintenance(meta: Dict[str, Any], client: Any | None = N
     try:
         list_wrapper_cmd = "docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' || true"
         rc, out, err = _exec_ssh_sudo_command(client, list_wrapper_cmd, password=pw, timeout=60.0)
-        wrapper_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+        wrapper_images = _parse_docker_ref_lines(out)
         _rmi_excluding_keep_set(
             client,
             wrapper_images,
@@ -7180,7 +7357,7 @@ def _run_postrun_remote_maintenance(meta: Dict[str, Any], client: Any | None = N
                     "done"
                 )
                 rc, out, err = _exec_ssh_sudo_command(client, unused_script, password=pw, timeout=180.0)
-                unused_images = [line.strip() for line in str(out or '').splitlines() if line.strip()]
+                unused_images = _parse_docker_ref_lines(out)
                 _rmi_excluding_keep_set(
                     client,
                     unused_images,
@@ -30777,6 +30954,26 @@ except Exception:
 
 
 try:
+    from webapp.routes import vuln_test_core_credentials as _vulncat_test_core_credentials_routes
+
+    _vulncat_test_core_credentials_routes.register(
+        app,
+        current_user_getter=lambda: _current_user(),
+        outputs_dir=lambda: _outputs_dir(),
+        save_core_credentials=lambda payload: _save_core_credentials(payload),
+        load_core_credentials=lambda secret_id: _load_core_credentials(secret_id),
+        core_port=CORE_PORT,
+        default_core_venv_bin=DEFAULT_CORE_VENV_BIN,
+        logger=app.logger,
+    )
+except Exception:
+    try:
+        app.logger.exception('Failed to register vuln_test_core_credentials routes.')
+    except Exception:
+        pass
+
+
+try:
     from webapp.routes import flag_node_generators_test as _flag_node_generators_test_routes
 
     _flag_node_generators_test_routes.register(
@@ -43154,6 +43351,7 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
 
     pack_by_id: dict[str, dict[str, Any]] = {}
     gen_by_kind_id: dict[tuple[str, str], dict[str, Any]] = {}
+    entries: list[tuple[str, str, str, dict[str, Any]]] = []
 
     for p in packs:
         if not isinstance(p, dict):
@@ -43200,26 +43398,23 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
                 'cache_checked_at': str(it.get('cache_checked_at') or '').strip() or None,
                 'cache_last_core_host': str(it.get('cache_last_core_host') or '').strip() or None,
                 'cache_missing_images': [str(v) for v in it.get('cache_missing_images')] if isinstance(it.get('cache_missing_images'), list) else [],
+                'cache_size_bytes': it.get('cache_size_bytes') if isinstance(it.get('cache_size_bytes'), int) else None,
                 'cache_error': str(it.get('cache_error') or '').strip() or None,
+                'requires_build_network': bool(it.get('requires_build_network', False)),
+                'build_network_notes': [str(v) for v in it.get('build_network_notes')] if isinstance(it.get('build_network_notes'), list) else [],
             }
 
-            # Back-compat: generator packs may use numeric ids in the packs state,
-            # but Flow/UI operate on stable `source_generator_id`. If we can
-            # resolve a source id from the installed pack marker, map both.
-            gen_by_kind_id[(kind, gid)] = info_obj
-            try:
-                pack_path = str(it.get('path') or '').strip()
-                if pack_path:
-                    marker_path = os.path.join(pack_path, '.coretg_pack.json')
-                    if os.path.exists(marker_path) and os.path.isfile(marker_path):
-                        with open(marker_path, 'r', encoding='utf-8') as fh:
-                            marker = json.load(fh)
-                        if isinstance(marker, dict):
-                            src_id = str(marker.get('source_generator_id') or '').strip()
-                            if src_id:
-                                gen_by_kind_id.setdefault((kind, src_id), info_obj)
-            except Exception:
-                pass
+            entries.append((kind, gid, _installed_generator_marker_source_id(it), info_obj))
+
+    # Back-compat: generator packs may use numeric ids in the packs state, but
+    # Flow/UI operate on stable `source_generator_id`, so map source ids first —
+    # a numeric source id from one pack must not be shadowed by another item's
+    # sequential state id. Raw state ids remain only as a fallback key.
+    for kind, _gid, src_id, info_obj in entries:
+        if src_id:
+            gen_by_kind_id.setdefault((kind, src_id), info_obj)
+    for kind, gid, _src_id, info_obj in entries:
+        gen_by_kind_id.setdefault((kind, gid), info_obj)
 
     return pack_by_id, gen_by_kind_id
 
@@ -43254,7 +43449,10 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_cache_checked_at'] = info.get('cache_checked_at')
             g['_cache_last_core_host'] = info.get('cache_last_core_host')
             g['_cache_missing_images'] = info.get('cache_missing_images') or []
+            g['_cache_size_bytes'] = info.get('cache_size_bytes') if isinstance(info.get('cache_size_bytes'), int) else None
             g['_cache_error'] = info.get('cache_error')
+            g['_requires_build_network'] = bool(info.get('requires_build_network', False))
+            g['_build_network_notes'] = info.get('build_network_notes') if isinstance(info.get('build_network_notes'), list) else []
         else:
             g['_disabled'] = False
             g['_disabled_due_to_missing_files'] = False
@@ -43269,7 +43467,10 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_cache_checked_at'] = None
             g['_cache_last_core_host'] = None
             g['_cache_missing_images'] = []
+            g['_cache_size_bytes'] = None
             g['_cache_error'] = None
+            g['_requires_build_network'] = False
+            g['_build_network_notes'] = []
         out.append(g)
     return out
 
@@ -43281,6 +43482,24 @@ def _is_installed_generator_disabled(*, kind: str, generator_id: str) -> bool:
     _pack_by_id, gen_by_kind_id = _build_installed_disable_maps()
     info = gen_by_kind_id.get((str(kind or '').strip(), gid))
     return bool(info and info.get('disabled') is True)
+
+
+def _installed_generator_marker_source_id(item: dict[str, Any]) -> str:
+    """Stable `source_generator_id` recorded in an installed item's pack marker."""
+    try:
+        pack_path = str(item.get('path') or '').strip()
+        if not pack_path:
+            return ''
+        marker_path = os.path.join(pack_path, '.coretg_pack.json')
+        if not os.path.isfile(marker_path):
+            return ''
+        with open(marker_path, 'r', encoding='utf-8') as fh:
+            marker = json.load(fh)
+        if not isinstance(marker, dict):
+            return ''
+        return str(marker.get('source_generator_id') or '').strip()
+    except Exception:
+        return ''
 
 
 def _installed_generator_state_item_matches(*, item: dict[str, Any], kind: str, generator_id: str) -> bool:
@@ -43296,21 +43515,41 @@ def _installed_generator_state_item_matches(*, item: dict[str, Any], kind: str, 
         return False
     if str(item.get('id') or '').strip() == gid:
         return True
+    return _installed_generator_marker_source_id(item) == gid
 
-    try:
-        pack_path = str(item.get('path') or '').strip()
-        if not pack_path:
-            return False
-        marker_path = os.path.join(pack_path, '.coretg_pack.json')
-        if not os.path.isfile(marker_path):
-            return False
-        with open(marker_path, 'r', encoding='utf-8') as fh:
-            marker = json.load(fh)
-        if not isinstance(marker, dict):
-            return False
-        return str(marker.get('source_generator_id') or '').strip() == gid
-    except Exception:
-        return False
+
+def _find_installed_generator_state_item(
+    packs: list, *, kind: str, generator_id: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return (pack, item) for a UI-level generator id, or (None, None).
+
+    UI/Flow ids are the stable marker `source_generator_id` when one exists, so
+    a source-id match takes precedence over a raw state-item id match: a numeric
+    source id from one pack can collide with another item's sequential state id,
+    and first-match scanning would pick whichever happens to come first.
+    """
+    gid = str(generator_id or '').strip()
+    k = str(kind or '').strip().lower().replace('_', '-')
+    if not gid:
+        return None, None
+    raw_pack: dict[str, Any] | None = None
+    raw_item: dict[str, Any] | None = None
+    for p in (packs or []):
+        if not isinstance(p, dict):
+            continue
+        items = p.get('installed')
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get('kind') or '').strip().lower().replace('_', '-') != k:
+                continue
+            if _installed_generator_marker_source_id(it) == gid:
+                return p, it
+            if raw_item is None and str(it.get('id') or '').strip() == gid:
+                raw_pack, raw_item = p, it
+    return raw_pack, raw_item
 
 
 def _set_generator_validation_state(
@@ -43335,34 +43574,26 @@ def _set_generator_validation_state(
     if not isinstance(packs, list):
         packs = []
 
-    for pack in packs:
-        if not isinstance(pack, dict):
-            continue
-        items = pack.get('installed')
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not _installed_generator_state_item_matches(item=item, kind=k, generator_id=gid):
-                continue
-            if validated_ok is None:
-                item['validated_ok'] = None
-            else:
-                item['validated_ok'] = bool(validated_ok)
-            item['validated_incomplete'] = bool(validated_incomplete)
-            item['validated_at'] = _local_timestamp_display()
-            if isinstance(log_path, str) and log_path.strip():
-                item['last_test_log_path'] = str(log_path).strip()
-            if isinstance(log_filename, str) and log_filename.strip():
-                item['last_test_log_filename'] = str(log_filename).strip()
-            state['packs'] = packs
-            _save_installed_generator_packs_state(state)
-            if validated_ok is None:
-                status_label = 'incomplete'
-            else:
-                status_label = 'success' if bool(validated_ok) else 'fail'
-            return True, f'Updated {k} {gid} as {status_label}'
-
-    return False, 'Installed generator not found'
+    _pack, item = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
+    if item is None:
+        return False, 'Installed generator not found'
+    if validated_ok is None:
+        item['validated_ok'] = None
+    else:
+        item['validated_ok'] = bool(validated_ok)
+    item['validated_incomplete'] = bool(validated_incomplete)
+    item['validated_at'] = _local_timestamp_display()
+    if isinstance(log_path, str) and log_path.strip():
+        item['last_test_log_path'] = str(log_path).strip()
+    if isinstance(log_filename, str) and log_filename.strip():
+        item['last_test_log_filename'] = str(log_filename).strip()
+    state['packs'] = packs
+    _save_installed_generator_packs_state(state)
+    if validated_ok is None:
+        status_label = 'incomplete'
+    else:
+        status_label = 'success' if bool(validated_ok) else 'fail'
+    return True, f'Updated {k} {gid} as {status_label}'
 
 
 def _persist_generator_test_result(
@@ -43634,7 +43865,11 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                     compose_dependency_summary = {}
             required_files = compose_dependency_summary.get('requires') or []
             missing_required_files = missing_dependency_paths(compose_dependency_summary) if missing_dependency_paths is not None else []
-            auto_disabled = bool(missing_required_files)
+            needs_build_network = bool(compose_dependency_summary.get('requires_build_network'))
+            # Auto-disable items that can't run on this deployment's CORE VM:
+            # missing required files, or a Dockerfile that needs build-time
+            # internet (which a locked-down CORE VM build container lacks).
+            auto_disabled = bool(missing_required_files) or needs_build_network
             compose_items.append({
                 'id': idx,
                 'name': display_name,
@@ -43646,10 +43881,13 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 'dir': os.path.relpath(os.path.dirname(compose_path), _get_repo_root()).replace('\\', '/'),
                 'from_source': norm_label,
                 'disabled': auto_disabled,
-                'disabled_due_to_missing_files': auto_disabled,
+                'disabled_due_to_missing_files': bool(missing_required_files),
+                'disabled_due_to_build_network': needs_build_network,
                 'required_files': required_files,
                 'missing_required_files': missing_required_files,
                 'compose_dependency_warning': str(compose_dependency_summary.get('warning') or '').strip(),
+                'requires_build_network': needs_build_network,
+                'build_network_notes': list(compose_dependency_summary.get('build_network_notes') or []),
             })
 
         # Generate a catalog CSV from discovered compose directories.
@@ -43928,6 +44166,7 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['id'] = iid_int
         it['disabled'] = bool(it.get('disabled', False))
         it['disabled_due_to_missing_files'] = bool(it.get('disabled_due_to_missing_files', False))
+        it['disabled_due_to_build_network'] = bool(it.get('disabled_due_to_build_network', False))
         it['name'] = str(it.get('name') or '').strip() or 'root'
         it['rel_dir'] = str(it.get('rel_dir') or '').strip()
         it['dir_rel'] = str(it.get('dir_rel') or '').strip()
@@ -43938,7 +44177,11 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['cache_last_core_host'] = str(it.get('cache_last_core_host') or '').strip() or None
         cache_missing = it.get('cache_missing_images')
         it['cache_missing_images'] = [str(v) for v in cache_missing] if isinstance(cache_missing, list) else []
+        it['cache_size_bytes'] = it.get('cache_size_bytes') if isinstance(it.get('cache_size_bytes'), int) else None
         it['cache_error'] = str(it.get('cache_error') or '').strip() or None
+        it['requires_build_network'] = bool(it.get('requires_build_network', False))
+        bn = it.get('build_network_notes')
+        it['build_network_notes'] = [str(v) for v in bn] if isinstance(bn, list) else []
         out.append(it)
     out.sort(key=lambda d: int(d.get('id') or 0))
     return out
@@ -43987,6 +44230,7 @@ def _update_vuln_catalog_item_cache_state(
     item_id: int,
     cached: bool | None,
     missing_images: list[str] | None = None,
+    cache_size_bytes: int | None = None,
     error: str | None = None,
     core_host: str | None = None,
 ) -> bool:
@@ -44005,6 +44249,7 @@ def _update_vuln_catalog_item_cache_state(
             item['cache_checked_at'] = _local_timestamp_display()
             item['cache_last_core_host'] = str(core_host or '').strip() or None
             item['cache_missing_images'] = list(missing_images or [])
+            item['cache_size_bytes'] = cache_size_bytes if isinstance(cache_size_bytes, int) else None
             item['cache_error'] = str(error or '').strip() or None
             updated = True
             break
@@ -45426,6 +45671,15 @@ def _install_generator_pack_payload(
                     installed_item['disabled_due_to_missing_files'] = True
             if isinstance(compose_dependency_summary, dict) and compose_dependency_summary.get('warning'):
                 installed_item['compose_dependency_warning'] = str(compose_dependency_summary.get('warning') or '').strip()
+            if isinstance(compose_dependency_summary, dict):
+                needs_build_network = bool(compose_dependency_summary.get('requires_build_network'))
+                installed_item['requires_build_network'] = needs_build_network
+                installed_item['build_network_notes'] = list(compose_dependency_summary.get('build_network_notes') or [])
+                # Auto-disable: this Dockerfile needs build-time internet, which a
+                # locked-down CORE VM build container can't provide.
+                if needs_build_network:
+                    installed_item['disabled'] = True
+                    installed_item['disabled_due_to_build_network'] = True
             installed.append(installed_item)
 
         return True, note, installed, next_numeric, warnings
@@ -45842,22 +46096,14 @@ def _set_generator_disabled_state(*, kind: str, generator_id: str, disabled: boo
     if not isinstance(packs, list):
         packs = []
 
-    for p in packs:
-        if not isinstance(p, dict):
-            continue
-        items = p.get('installed')
-        if not isinstance(items, list):
-            continue
-        for it in items:
-            if not _installed_generator_state_item_matches(item=it, kind=k, generator_id=gid):
-                continue
-            it['disabled'] = bool(disabled)
-            it['disabled_due_to_missing_files'] = False
-            state['packs'] = packs
-            _save_installed_generator_packs_state(state)
-            return True, ('Disabled' if disabled else 'Enabled') + f' {k} {gid}'
-
-    return False, 'Installed generator not found'
+    _pack, it = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
+    if it is None:
+        return False, 'Installed generator not found'
+    it['disabled'] = bool(disabled)
+    it['disabled_due_to_missing_files'] = False
+    state['packs'] = packs
+    _save_installed_generator_packs_state(state)
+    return True, ('Disabled' if disabled else 'Enabled') + f' {k} {gid}'
 
 
 def _set_generator_persistent_state(*, kind: str, generator_id: str, persistent: bool) -> tuple[bool, str]:
@@ -45873,21 +46119,13 @@ def _set_generator_persistent_state(*, kind: str, generator_id: str, persistent:
     if not isinstance(packs, list):
         packs = []
 
-    for p in packs:
-        if not isinstance(p, dict):
-            continue
-        items = p.get('installed')
-        if not isinstance(items, list):
-            continue
-        for it in items:
-            if not _installed_generator_state_item_matches(item=it, kind=k, generator_id=gid):
-                continue
-            it['persistent'] = bool(persistent)
-            state['packs'] = packs
-            _save_installed_generator_packs_state(state)
-            return True, ('Marked persistent' if persistent else 'Unmarked persistent') + f' {k} {gid}'
-
-    return False, 'Installed generator not found'
+    _pack, it = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
+    if it is None:
+        return False, 'Installed generator not found'
+    it['persistent'] = bool(persistent)
+    state['packs'] = packs
+    _save_installed_generator_packs_state(state)
+    return True, ('Marked persistent' if persistent else 'Unmarked persistent') + f' {k} {gid}'
 
 
 def _update_generator_item_cache_state(
@@ -45896,6 +46134,7 @@ def _update_generator_item_cache_state(
     generator_id: str,
     cached: bool | None,
     missing_images: list[str] | None = None,
+    cache_size_bytes: int | None = None,
     error: str | None = None,
     core_host: str | None = None,
 ) -> bool:
@@ -45912,25 +46151,18 @@ def _update_generator_item_cache_state(
     if not isinstance(packs, list):
         packs = []
 
-    for p in packs:
-        if not isinstance(p, dict):
-            continue
-        items = p.get('installed')
-        if not isinstance(items, list):
-            continue
-        for it in items:
-            if not _installed_generator_state_item_matches(item=it, kind=k, generator_id=gid):
-                continue
-            it['cached'] = cached
-            it['cache_checked_at'] = _local_timestamp_display()
-            it['cache_last_core_host'] = str(core_host or '').strip() or None
-            it['cache_missing_images'] = list(missing_images or [])
-            it['cache_error'] = str(error or '').strip() or None
-            state['packs'] = packs
-            _save_installed_generator_packs_state(state)
-            return True
-
-    return False
+    _pack, it = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
+    if it is None:
+        return False
+    it['cached'] = cached
+    it['cache_checked_at'] = _local_timestamp_display()
+    it['cache_last_core_host'] = str(core_host or '').strip() or None
+    it['cache_missing_images'] = list(missing_images or [])
+    it['cache_size_bytes'] = cache_size_bytes if isinstance(cache_size_bytes, int) else None
+    it['cache_error'] = str(error or '').strip() or None
+    state['packs'] = packs
+    _save_installed_generator_packs_state(state)
+    return True
 
 
 try:
@@ -46040,24 +46272,8 @@ def _delete_installed_generator(*, kind: str, generator_id: str) -> tuple[bool, 
     if not isinstance(packs, list):
         packs = []
 
-    state_target_item: dict[str, Any] | None = None
-    state_target_pack: dict[str, Any] | None = None
-    state_target_path = ''
-    for pack in packs:
-        if not isinstance(pack, dict):
-            continue
-        installed_items = pack.get('installed') if isinstance(pack.get('installed'), list) else []
-        for item in installed_items:
-            if not isinstance(item, dict):
-                continue
-            if not _installed_generator_state_item_matches(item=item, kind=k, generator_id=gid):
-                continue
-            state_target_pack = pack
-            state_target_item = item
-            state_target_path = str(item.get('path') or '').strip()
-            break
-        if state_target_item is not None:
-            break
+    state_target_pack, state_target_item = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
+    state_target_path = str(state_target_item.get('path') or '').strip() if state_target_item is not None else ''
 
     if state_target_item is not None:
         abs_state_path = os.path.abspath(state_target_path) if state_target_path else ''
@@ -46163,7 +46379,9 @@ def _delete_installed_generator(*, kind: str, generator_id: str) -> tuple[bool, 
                 if not isinstance(it, dict):
                     continue
                 it_path = str(it.get('path') or '').strip()
-                if _installed_generator_state_item_matches(item=it, kind=k, generator_id=gid):
+                it_kind = str(it.get('kind') or '').strip().lower().replace('_', '-')
+                it_src_id = _installed_generator_marker_source_id(it)
+                if it_kind == k and (it_src_id == gid or (not it_src_id and str(it.get('id') or '').strip() == gid)):
                     removed_refs += 1
                     continue
                 if it_path and os.path.abspath(it_path) == abs_target:
