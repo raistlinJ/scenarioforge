@@ -132,7 +132,7 @@
                   <input id="vulnCatalogFilter" class="form-control" placeholder="Filter vulnerabilities…" />
                 </div>
                 <div class="col-md-6 d-flex flex-wrap align-items-center justify-content-md-end gap-3">
-                  <button class="btn btn-sm btn-outline-secondary" type="button" id="vulnDependencyRecheckBtn">Recheck Files</button>
+                  <button class="btn btn-sm btn-outline-secondary" type="button" id="vulnDependencyRecheckBtn">Dependency Check</button>
                   <div class="form-check mt-2 mt-md-0">
                     <input class="form-check-input" type="checkbox" id="vulnCatalogCheckAllVisible" aria-label="Select all viewable vulnerabilities">
                     <label class="form-check-label" for="vulnCatalogCheckAllVisible">Select all viewable</label>
@@ -312,6 +312,7 @@
         </div>
 
         <div class="tab-pane fade" id="vulnImageCache" role="tabpanel">
+          <div class="small text-muted mb-2" id="vulnCacheCoreAddressLabel">CORE VM: not yet checked</div>
           <div class="card mb-3">
             <div class="card-body">
               <div class="small text-muted mb-3">
@@ -321,7 +322,7 @@
                 Vulnerability Catalog tab) are never removed by ScenarioForge's own cleanup routines.
               </div>
               <div class="row g-2 align-items-end">
-                <div class="col-md-5">
+                <div class="col-md-4">
                   <label class="form-label">Filter</label>
                   <input id="vulnCacheFilter" class="form-control" placeholder="Name, id, source, or path…" />
                 </div>
@@ -329,9 +330,18 @@
                   <label class="form-label">Max Items</label>
                   <input id="vulnCacheLimit" class="form-control" type="number" min="1" max="500" placeholder="All" />
                 </div>
-                <div class="col-md-5 d-flex justify-content-md-end gap-2">
+                <div class="col-md-3">
+                  <label class="form-label">Scope</label>
+                  <select id="vulnCacheScope" class="form-select" title="Which matching items to act on">
+                    <option value="all" selected>All matching</option>
+                    <option value="uncached">Uncached only</option>
+                    <option value="failed">Failed only</option>
+                  </select>
+                </div>
+                <div class="col-12 d-flex flex-wrap gap-2 justify-content-end">
                   <button class="btn btn-primary" type="button" id="vulnCacheStartBtn">Cache Images</button>
                   <button class="btn btn-outline-primary" type="button" id="vulnCacheRefreshBtn">Refresh Image Cache</button>
+                  <button class="btn btn-outline-danger" type="button" id="vulnCacheClearBtn" title="Remove cached images for matching items (persistent ones are protected)">Clear Cache</button>
                   <button class="btn btn-outline-danger" type="button" id="vulnCacheStopBtn" style="display:none;">Stop</button>
                 </div>
                 <div class="col-12 d-flex flex-wrap gap-3 align-items-center small text-muted">
@@ -378,11 +388,12 @@
                           <th style="width: 70px;">#</th>
                           <th>Item</th>
                           <th style="width: 110px;">Cached</th>
+                          <th style="width: 90px;">Size</th>
                           <th>Missing Images / Error</th>
                         </tr>
                       </thead>
                       <tbody id="vulnCacheResultsBody">
-                        <tr><td colspan="4" class="text-muted">No results yet.</td></tr>
+                        <tr><td colspan="5" class="text-muted">No results yet.</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -1074,6 +1085,7 @@
             ${isCleaning ? `<span class="badge text-bg-secondary ms-2">Cleaning up</span>` : ''}
             ${isBatchRunning ? `<span class="badge text-bg-primary ms-2">Batch Active</span>` : ''}
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
+            ${it.requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(it.build_network_notes) ? it.build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
           </div>
           <div class="small text-muted">ID: ${escapeHtml(it.id ?? '')}</div>
           ${missingRequiredHtml}
@@ -1097,11 +1109,9 @@
             : (it.cached === false
               ? '<span class="badge text-bg-secondary">Not cached</span>'
               : '<span class="text-muted">—</span>')}
+          ${it.cached === true && Number.isFinite(it.cache_size_bytes) ? ` <span class="text-muted">(${escapeHtml(_fmtBytes(it.cache_size_bytes))})</span>` : ''}
+          <button class="btn btn-link btn-sm p-0 ms-1 align-baseline" data-action="persist" type="button" ${mutationsLocked ? 'disabled' : ''} title="${it.persistent ? 'Persistent: this cached image is locked — Clear Cache and cleanup will not remove it. Click to unmark.' : 'Not persistent: this cached image can be removed by Clear Cache and cleanup. Click to mark persistent.'}" aria-label="${it.persistent ? 'Unmark persistent' : 'Mark persistent'} for ${escapeHtml(it.name || '')}"><i class="bi ${it.persistent ? 'bi-lock-fill' : 'bi-unlock text-muted'}"></i></button>
           ${it.cache_checked_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(it.cache_checked_at)}${it.cache_last_core_host ? ' @ ' + escapeHtml(it.cache_last_core_host) : ''}</div>` : ''}
-          <div class="form-check mt-1">
-            <input class="form-check-input" type="checkbox" data-action="persistent" data-item-id="${escapeHtml(itemId)}" ${it.persistent ? 'checked' : ''} aria-label="Keep image cache persistent for ${escapeHtml(it.name || '')}">
-            <label class="form-check-label" style="font-size:11px;">Persistent</label>
-          </div>
         </td>
         <td>
           <div class="btn-group btn-group-sm" role="group">
@@ -1117,17 +1127,6 @@
         if (checked) _vulnCatalogState.selectedItemIds.add(itemId);
         else _vulnCatalogState.selectedItemIds.delete(itemId);
         _updateVulnSelectionUi();
-      });
-
-      tr.querySelector('[data-action="persistent"]')?.addEventListener('change', async (event) => {
-        const checked = !!(event && event.target && event.target.checked);
-        try {
-          await _postJson('/vuln_catalog_items/set_persistent', { item_id: it.id, persistent: checked });
-          it.persistent = checked;
-        } catch (e) {
-          if (event && event.target) event.target.checked = !checked;
-          _appendLog('vulnCatalogLog', `[error] Failed to update persistent flag for #${it.id}: ${e}`);
-        }
       });
 
       tr.querySelector('[data-action="test"]').addEventListener('click', () => openVulnTestModal(it));
@@ -1147,6 +1146,16 @@
           _setText('vulnCatalogLog', '');
           _appendLog('vulnCatalogLog', `Deleting #${it.id} (${it.name})…`);
           await _postJson('/vuln_catalog_items/delete', { item_id: it.id });
+          await loadVulnCatalogItems();
+        } catch (e) {
+          _appendLog('vulnCatalogLog', `Error: ${e}`);
+        }
+      });
+      tr.querySelector('[data-action="persist"]')?.addEventListener('click', async () => {
+        try {
+          _setText('vulnCatalogLog', '');
+          _appendLog('vulnCatalogLog', `${it.persistent ? 'Unmarking' : 'Marking'} persistent for #${it.id} (${it.name})…`);
+          await _postJson('/vuln_catalog_items/set_persistent', { item_id: it.id, persistent: !it.persistent });
           await loadVulnCatalogItems();
         } catch (e) {
           _appendLog('vulnCatalogLog', `Error: ${e}`);
@@ -1697,6 +1706,24 @@
     }, Math.max(250, Number(delayMs || 1500)));
   }
 
+  function _resetVulnCacheIdleState() {
+    _vulnCacheState.done = true;
+    _vulnCacheState.runId = null;
+    _saveVulnCacheRunId('');
+    if (_vulnCachePollTimer) {
+      clearTimeout(_vulnCachePollTimer);
+      _vulnCachePollTimer = null;
+    }
+    const startBtn = _qs('vulnCacheStartBtn');
+    const refreshBtn = _qs('vulnCacheRefreshBtn');
+    const clearBtn = _qs('vulnCacheClearBtn');
+    const stopBtn = _qs('vulnCacheStopBtn');
+    if (startBtn) startBtn.disabled = false;
+    if (refreshBtn) refreshBtn.disabled = false;
+    if (clearBtn) clearBtn.disabled = false;
+    if (stopBtn) stopBtn.style.display = 'none';
+  }
+
   function _collectVulnCacheSelection() {
     const selectedOnlyEl = _qs('vulnCacheSelectedOnly');
     if (selectedOnlyEl && selectedOnlyEl.checked) {
@@ -1705,15 +1732,18 @@
     const queryEl = _qs('vulnCacheFilter');
     const limitEl = _qs('vulnCacheLimit');
     const includeDisabledEl = _qs('vulnCacheIncludeDisabled');
+    const scopeEl = _qs('vulnCacheScope');
     const limitRaw = String((limitEl && limitEl.value) || '').trim();
     let limit = null;
     if (limitRaw) {
       const parsed = parseInt(limitRaw, 10);
       if (Number.isFinite(parsed) && parsed > 0) limit = Math.min(parsed, 500);
     }
+    const scopeRaw = String((scopeEl && scopeEl.value) || 'all').trim().toLowerCase();
     return {
       query: String((queryEl && queryEl.value) || '').trim(),
       include_disabled: !!(includeDisabledEl && includeDisabledEl.checked),
+      scope: ['all', 'uncached', 'failed'].includes(scopeRaw) ? scopeRaw : 'all',
       limit,
     };
   }
@@ -1723,7 +1753,7 @@
     if (!body) return;
     const rows = Array.isArray(results) ? results : [];
     if (!rows.length) {
-      body.innerHTML = '<tr><td colspan="4" class="text-muted">No results yet.</td></tr>';
+      body.innerHTML = '<tr><td colspan="5" class="text-muted">No results yet.</td></tr>';
       return;
     }
     body.innerHTML = rows.map((r, idx) => {
@@ -1736,11 +1766,15 @@
       const detail = missing.length
         ? escapeHtml(missing.join(', '))
         : (r && r.error ? escapeHtml(String(r.error)) : '<span class="text-muted">—</span>');
+      const sizeText = (r && Number.isFinite(r.cache_size_bytes))
+        ? escapeHtml(_fmtBytes(r.cache_size_bytes))
+        : '<span class="text-muted">—</span>';
       return `
         <tr>
           <td class="text-muted">${idx + 1}</td>
           <td>${escapeHtml(String((r && r.item_name) || ''))} <span class="text-muted small">#${escapeHtml(String((r && r.item_id) || ''))}</span></td>
           <td>${cachedBadge}</td>
+          <td class="small">${sizeText}</td>
           <td class="small">${detail}</td>
         </tr>
       `;
@@ -1749,7 +1783,7 @@
 
   function _renderVulnCacheStatus(payload) {
     if (!payload) return;
-    _setText('vulnCacheMode', payload.mode === 'status' ? 'Refresh status' : 'Cache (pull)');
+    _setText('vulnCacheMode', payload.mode === 'status' ? 'Refresh status' : (payload.mode === 'clear' ? 'Clear cache' : 'Cache (pull)'));
     const progress = payload.progress || {};
     _setText('vulnCacheCountTotal', String(progress.total || 0));
     _setText('vulnCacheCountCompleted', String(progress.completed || 0));
@@ -1769,12 +1803,14 @@
 
     const startBtn = _qs('vulnCacheStartBtn');
     const refreshBtn = _qs('vulnCacheRefreshBtn');
+    const clearBtn = _qs('vulnCacheClearBtn');
     const stopBtn = _qs('vulnCacheStopBtn');
     const done = !!payload.done;
     _vulnCacheState.done = done;
     _vulnCacheState.runId = payload.run_id || null;
     if (startBtn) startBtn.disabled = !done;
     if (refreshBtn) refreshBtn.disabled = !done;
+    if (clearBtn) clearBtn.disabled = !done;
     if (stopBtn) stopBtn.style.display = done ? 'none' : '';
 
     const metaEl = _qs('vulnCacheMeta');
@@ -1806,20 +1842,94 @@
       _renderVulnCacheStatus(payload);
     } catch (e) {
       const msg = String(e || '');
+      _resetVulnCacheIdleState();
       if (!msg.toLowerCase().includes('not found')) {
         _setText('vulnCacheMeta', `Cache status error: ${msg}`);
       }
     }
   }
 
+  function _updateVulnCacheCoreAddressLabel(host, port) {
+    const el = _qs('vulnCacheCoreAddressLabel');
+    if (!el) return;
+    el.textContent = host ? `CORE VM checked: ${host}${port ? ':' + port : ''}` : 'CORE VM: not yet checked';
+  }
+
+  async function _checkCoreVmForCache(coreCfg, { enforceStopRunning }) {
+    const precheck = await _postJson('/vuln_catalog_items/cache/precheck', { core: coreCfg, stop_running: false });
+    _updateVulnCacheCoreAddressLabel(precheck && precheck.core_host, precheck && precheck.core_port);
+    if (!precheck || precheck.ok === false) {
+      throw new Error((precheck && precheck.error) ? precheck.error : 'Unable to check the CORE VM.');
+    }
+    if (!enforceStopRunning || !precheck.active) return true;
+
+    const names = Array.isArray(precheck.container_names) ? precheck.container_names : [];
+    const warningMessage = [
+      `${names.length} container(s) are currently running on the CORE VM:`,
+      '',
+      names.map(n => `  - ${n}`).join('\n'),
+      '',
+      'To continue caching images, these containers must be stopped first.',
+      '',
+      'Stop them and continue?',
+    ].join('\n');
+
+    let shouldStop = false;
+    if (typeof window.confirmWithModal === 'function') {
+      shouldStop = await window.confirmWithModal('Running Containers', warningMessage, 'Stop & Continue', 'danger');
+    } else {
+      shouldStop = window.confirm(warningMessage);
+    }
+    if (!shouldStop) return false;
+
+    const stopResp = await _postJson('/vuln_catalog_items/cache/precheck', { core: coreCfg, stop_running: true });
+    _updateVulnCacheCoreAddressLabel(stopResp && stopResp.core_host, stopResp && stopResp.core_port);
+    if (!stopResp || stopResp.ok === false) {
+      throw new Error((stopResp && stopResp.error) ? stopResp.error : 'Failed to stop running containers.');
+    }
+    return true;
+  }
+
   async function startVulnCache(mode) {
     if (!_vulnCacheState.done) return;
+    if (mode === 'clear') {
+      const scopeEl = _qs('vulnCacheScope');
+      const scopeLabel = scopeEl ? String(scopeEl.options[scopeEl.selectedIndex].text || 'matching') : 'matching';
+      const confirmMsg = [
+        `This will remove cached docker images for ${scopeLabel.toLowerCase()} item(s) from the CORE VM.`,
+        '',
+        'Items marked Persistent will NOT be removed. To clear a persistent item’s image, first unmark it (Unmark Persistent), then run Clear Cache again.',
+        '',
+        'Continue?',
+      ].join('\n');
+      let confirmed = false;
+      if (typeof window.confirmWithModal === 'function') {
+        confirmed = await window.confirmWithModal('Clear Image Cache', confirmMsg, 'Clear Cache', 'danger');
+      } else {
+        confirmed = window.confirm(confirmMsg);
+      }
+      if (!confirmed) return;
+    }
     const creds = await resolveVulnBatchCoreConfig();
     if (!creds) return;
-    const selection = _collectVulnCacheSelection();
-    _setText('vulnCacheMeta', mode === 'status' ? 'Starting refresh…' : 'Starting cache pull…');
+    _setText('vulnCacheMeta', 'Checking CORE VM…');
     try {
-      const url = mode === 'status' ? '/vuln_catalog_items/cache/refresh/start' : '/vuln_catalog_items/cache/start';
+      const canProceed = await _checkCoreVmForCache(creds, { enforceStopRunning: mode !== 'status' });
+      if (!canProceed) {
+        _setText('vulnCacheMeta', 'Cache run cancelled.');
+        return;
+      }
+    } catch (e) {
+      _setText('vulnCacheMeta', `Failed to start: ${String(e)}`);
+      return;
+    }
+    const selection = _collectVulnCacheSelection();
+    const startingText = mode === 'status' ? 'Starting refresh…' : (mode === 'clear' ? 'Starting cache clear…' : 'Starting cache pull…');
+    _setText('vulnCacheMeta', startingText);
+    try {
+      const url = mode === 'status'
+        ? '/vuln_catalog_items/cache/refresh/start'
+        : (mode === 'clear' ? '/vuln_catalog_items/cache/clear/start' : '/vuln_catalog_items/cache/start');
       const result = await _postJson(url, { ...selection, core: creds });
       if (!result || result.ok === false) {
         throw new Error((result && result.error) ? result.error : 'Failed to start');
@@ -2056,6 +2166,27 @@
     } catch (e) {}
   }
 
+  async function _loadSavedVulnTestCredsFromServer() {
+    try {
+      const resp = await _postJson('/api/vuln_catalog_test/core_credentials/get', {});
+      if (resp && resp.ok && resp.credentials) {
+        return resp.credentials;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  async function _saveVulnTestCredsToServer(creds) {
+    try {
+      await _postJson('/api/vuln_catalog_test/core_credentials/save', {
+        ssh_host: (creds && creds.ssh_host) || '',
+        ssh_port: (creds && creds.ssh_port) || 22,
+        ssh_username: (creds && creds.ssh_username) || '',
+        ssh_password: (creds && creds.ssh_password) || '',
+      });
+    } catch (e) {}
+  }
+
   async function promptVulnTestCreds() {
     return new Promise((resolve) => {
       const modalEl = _qs('vulnTestCredsModal');
@@ -2067,12 +2198,17 @@
       const contBtn = _qs('vulnTestCredsContinue');
       if (!modalEl) return resolve(null);
 
-      const saved = _loadSavedVulnTestCreds() || {};
-      if (hostEl) hostEl.value = saved.ssh_host || '';
-      if (portEl) portEl.value = saved.ssh_port || 22;
-      if (userEl) userEl.value = saved.ssh_username || '';
-      if (passEl) passEl.value = saved.ssh_password || '';
-      if (saveEl) saveEl.checked = saved.save !== false;
+      // Prefer server-stored creds (works across localhost vs 127.0.0.1),
+      // fall back to browser localStorage.
+      (async () => {
+        const serverSaved = await _loadSavedVulnTestCredsFromServer();
+        const saved = serverSaved || _loadSavedVulnTestCreds() || {};
+        if (hostEl) hostEl.value = saved.ssh_host || '';
+        if (portEl) portEl.value = saved.ssh_port || 22;
+        if (userEl) userEl.value = saved.ssh_username || '';
+        if (passEl) passEl.value = saved.ssh_password || '';
+        if (saveEl) saveEl.checked = saved.save !== false;
+      })();
 
       const modalObj = window.bootstrap ? (bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl)) : null;
       const onHidden = () => {
@@ -2091,7 +2227,10 @@
             ssh_password: (passEl && passEl.value || '').toString(),
           };
           const shouldSave = !!(saveEl && saveEl.checked);
-          if (shouldSave) _saveVulnTestCreds({ ...creds, save: true });
+          if (shouldSave) {
+            _saveVulnTestCreds({ ...creds, save: true });
+            _saveVulnTestCredsToServer(creds);
+          }
           resolve(creds);
           try { modalObj?.hide(); } catch (e) {}
         };
@@ -2425,6 +2564,15 @@
         await startVulnCache('status');
       } catch (e) {
         _setText('vulnCacheMeta', `Refresh failed: ${String(e)}`);
+      }
+    });
+    const cacheClearBtn = _qs('vulnCacheClearBtn');
+    if (cacheClearBtn) cacheClearBtn.addEventListener('click', async () => {
+      try {
+        await loadVulnCatalogItems();
+        await startVulnCache('clear');
+      } catch (e) {
+        _setText('vulnCacheMeta', `Cache clear failed: ${String(e)}`);
       }
     });
     const cacheStopBtn = _qs('vulnCacheStopBtn');
