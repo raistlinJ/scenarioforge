@@ -1425,7 +1425,22 @@ def _exec_ssh_sudo_command(
                 return blob.decode('utf-8', 'ignore')
             return str(blob or '')
 
-        return exit_code, _decode(b''.join(stdout_chunks)), _decode(b''.join(stderr_chunks))
+        stdout_text = _decode(b''.join(stdout_chunks))
+        stderr_text = _decode(b''.join(stderr_chunks))
+        pw = str(password or '').strip()
+        if pw:
+            # The PTY (required for the sudo prompt) echoes the password we
+            # type back into stdout; drop any line that is exactly the echoed
+            # password so it can never leak into parsed output or UI logs.
+            def _without_pw_echo(text: str) -> str:
+                return ''.join(
+                    ln for ln in text.splitlines(keepends=True)
+                    if _strip_ansi(ln).strip() != pw
+                )
+            stdout_text = _without_pw_echo(stdout_text)
+            stderr_text = _without_pw_echo(stderr_text)
+
+        return exit_code, stdout_text, stderr_text
     finally:
         _close_ssh_command_streams(stdin, stdout, stderr)
 
@@ -1442,14 +1457,26 @@ def _list_remote_running_containers(core_cfg: Dict[str, Any], *, client: Any = N
     if own_client:
         client = _open_ssh_client(core_cfg)
     try:
-        cmd = "docker ps --format '{{.Names}}'"
+        # The sentinel prefix in the format string isolates real `docker ps`
+        # output from PTY noise (login banners, sudo lecture, compose
+        # warnings) that gets merged into stdout on a sudo+PTY session.
+        sentinel = '@CTR@'
+        cmd = f"docker ps --format '{sentinel}{{{{.Names}}}}'"
         if sudo:
             rc, out, err = _exec_ssh_sudo_command(client, cmd, password=pw, timeout=30.0)
         else:
             rc, out, err = _exec_ssh_command(client, cmd, timeout=30.0, check=False)
         if rc != 0:
             raise RuntimeError((str(err or out or 'docker ps failed')).strip()[:500])
-        return _parse_docker_ref_lines(out)
+        names: list[str] = []
+        for line in (out or '').splitlines():
+            text = _strip_ansi(line).strip()
+            if not text.startswith(sentinel):
+                continue
+            name = text[len(sentinel):].strip()
+            if name and not any(ch.isspace() for ch in name):
+                names.append(name)
+        return names
     finally:
         if own_client:
             try:
