@@ -1152,6 +1152,26 @@ def _parse_docker_ref_lines(raw: str) -> list[str]:
     return out
 
 
+def _scrub_password_echo(text: str, password: str | None) -> str:
+    """Remove a sudo/SSH password from captured remote output.
+
+    A PTY (required for the sudo password prompt) echoes the password typed to
+    stdin back into the output stream — either as its own line, or embedded in
+    shell noise (e.g. `bash: <password>: command not found` when sudo was
+    passwordless and the shell consumed the line instead). Drop exact-match
+    lines so parsers never see a bogus token, then mask any embedded
+    occurrence so the password can never reach logs or API responses.
+    """
+    pw = str(password or '').strip()
+    if not pw or not text:
+        return text
+    kept = [
+        ln for ln in str(text).splitlines(keepends=True)
+        if _strip_ansi(ln).strip() != pw
+    ]
+    return ''.join(kept).replace(pw, '[REDACTED]')
+
+
 def _redact_sensitive_text(text: str, redact_tokens: Optional[list[str]] = None) -> str:
     try:
         out = str(text or '')
@@ -1208,7 +1228,19 @@ def _redact_sensitive_payload(payload: Any, redact_tokens: Optional[list[str]] =
 
 
 def _relay_remote_channel_to_log(channel: Any, log_handle: Any, *, redact_tokens: Optional[list[str]] = None) -> None:
-    """Stream bytes from an SSH channel into the local log file."""
+    """Stream bytes from an SSH channel into the local log file.
+
+    Output is buffered per line before redaction so a sensitive token split
+    across two received chunks can never evade the token replacement.
+    """
+
+    pending = ''
+    max_pending = 8192
+
+    def _emit(text: str) -> None:
+        cleaned = _strip_ansi(text)
+        cleaned = _redact_sensitive_text(cleaned, redact_tokens=redact_tokens)
+        log_handle.write(cleaned)
 
     try:
         while True:
@@ -1232,10 +1264,20 @@ def _relay_remote_channel_to_log(channel: Any, log_handle: Any, *, redact_tokens
                 text = chunk.decode('utf-8', 'replace')
             except Exception:
                 text = chunk.decode('latin-1', 'replace')
-            cleaned = _strip_ansi(text)
-            cleaned = _redact_sensitive_text(cleaned, redact_tokens=redact_tokens)
-            log_handle.write(cleaned)
+            pending += text
+            newline_index = pending.rfind('\n')
+            if newline_index >= 0:
+                _emit(pending[:newline_index + 1])
+                pending = pending[newline_index + 1:]
+            if len(pending) > max_pending:
+                _emit(pending)
+                pending = ''
     finally:
+        if pending:
+            try:
+                _emit(pending)
+            except Exception:
+                pass
         try:
             log_handle.flush()
         except Exception:
@@ -1425,20 +1467,8 @@ def _exec_ssh_sudo_command(
                 return blob.decode('utf-8', 'ignore')
             return str(blob or '')
 
-        stdout_text = _decode(b''.join(stdout_chunks))
-        stderr_text = _decode(b''.join(stderr_chunks))
-        pw = str(password or '').strip()
-        if pw:
-            # The PTY (required for the sudo prompt) echoes the password we
-            # type back into stdout; drop any line that is exactly the echoed
-            # password so it can never leak into parsed output or UI logs.
-            def _without_pw_echo(text: str) -> str:
-                return ''.join(
-                    ln for ln in text.splitlines(keepends=True)
-                    if _strip_ansi(ln).strip() != pw
-                )
-            stdout_text = _without_pw_echo(stdout_text)
-            stderr_text = _without_pw_echo(stderr_text)
+        stdout_text = _scrub_password_echo(_decode(b''.join(stdout_chunks)), password)
+        stderr_text = _scrub_password_echo(_decode(b''.join(stderr_chunks)), password)
 
         return exit_code, stdout_text, stderr_text
     finally:
@@ -8491,8 +8521,8 @@ def _start_remote_core_daemon(client: Any, sudo_password: str | None, logger: lo
         stdout_data = stdout.read()
         stderr_data = stderr.read()
         exit_code = stdout.channel.recv_exit_status() if hasattr(stdout, 'channel') else 0
-        out_text = stdout_data.decode('utf-8', 'ignore') if isinstance(stdout_data, bytes) else str(stdout_data or '')
-        err_text = stderr_data.decode('utf-8', 'ignore') if isinstance(stderr_data, bytes) else str(stderr_data or '')
+        out_text = _scrub_password_echo(stdout_data.decode('utf-8', 'ignore') if isinstance(stdout_data, bytes) else str(stdout_data or ''), sudo_password)
+        err_text = _scrub_password_echo(stderr_data.decode('utf-8', 'ignore') if isinstance(stderr_data, bytes) else str(stderr_data or ''), sudo_password)
         logger.info('[core] auto-start daemon executed: exit=%d stdout=%s stderr=%s', exit_code, out_text.strip(), err_text.strip())
         return exit_code, out_text, err_text
     finally:
@@ -8535,8 +8565,8 @@ def _stop_remote_core_daemon_conflict(
                 exit_code = stdout.channel.recv_exit_status() if (stdout and hasattr(stdout, 'channel')) else 0
             except Exception:
                 exit_code = 0
-            out_text = out.decode('utf-8', 'ignore') if isinstance(out, (bytes, bytearray)) else str(out or '')
-            err_text = err.decode('utf-8', 'ignore') if isinstance(err, (bytes, bytearray)) else str(err or '')
+            out_text = _scrub_password_echo(out.decode('utf-8', 'ignore') if isinstance(out, (bytes, bytearray)) else str(out or ''), sudo_password)
+            err_text = _scrub_password_echo(err.decode('utf-8', 'ignore') if isinstance(err, (bytes, bytearray)) else str(err or ''), sudo_password)
             return exit_code, out_text, err_text
         finally:
             _close_ssh_command_streams(stdin, stdout, stderr)
@@ -8729,8 +8759,8 @@ def _install_custom_services_to_core_vm(
                 exit_code = stdout.channel.recv_exit_status() if (stdout and hasattr(stdout, 'channel')) else 0
             except Exception:
                 exit_code = 0
-            out_text = out.decode('utf-8', 'ignore') if isinstance(out, (bytes, bytearray)) else str(out or '')
-            err_text = err.decode('utf-8', 'ignore') if isinstance(err, (bytes, bytearray)) else str(err or '')
+            out_text = _scrub_password_echo(out.decode('utf-8', 'ignore') if isinstance(out, (bytes, bytearray)) else str(out or ''), sudo_password)
+            err_text = _scrub_password_echo(err.decode('utf-8', 'ignore') if isinstance(err, (bytes, bytearray)) else str(err or ''), sudo_password)
             return exit_code, out_text, err_text
         finally:
             _close_ssh_command_streams(stdin, stdout, stderr)
@@ -10370,8 +10400,8 @@ def _run_core_connection_advanced_checks(
                 exit_code = stdout.channel.recv_exit_status() if (stdout and hasattr(stdout, 'channel')) else 0
             except Exception:
                 exit_code = 0
-            out_text = stdout_data.decode('utf-8', 'ignore') if isinstance(stdout_data, (bytes, bytearray)) else str(stdout_data or '')
-            err_text = stderr_data.decode('utf-8', 'ignore') if isinstance(stderr_data, (bytes, bytearray)) else str(stderr_data or '')
+            out_text = _scrub_password_echo(stdout_data.decode('utf-8', 'ignore') if isinstance(stdout_data, (bytes, bytearray)) else str(stdout_data or ''), sudo_password)
+            err_text = _scrub_password_echo(stderr_data.decode('utf-8', 'ignore') if isinstance(stderr_data, (bytes, bytearray)) else str(stderr_data or ''), sudo_password)
             return exit_code, out_text, err_text
         finally:
             _close_ssh_command_streams(stdin, stdout, stderr)
@@ -40264,8 +40294,8 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
                 exit_code = stdout.channel.recv_exit_status() if hasattr(stdout, 'channel') else 0
             except Exception:
                 exit_code = 0
-            out_text = stdout_data.decode('utf-8', 'ignore') if isinstance(stdout_data, bytes) else str(stdout_data or '')
-            err_text = stderr_data.decode('utf-8', 'ignore') if isinstance(stderr_data, bytes) else str(stderr_data or '')
+            out_text = _scrub_password_echo(stdout_data.decode('utf-8', 'ignore') if isinstance(stdout_data, bytes) else str(stdout_data or ''), sudo_password)
+            err_text = _scrub_password_echo(stderr_data.decode('utf-8', 'ignore') if isinstance(stderr_data, bytes) else str(stderr_data or ''), sudo_password)
             try:
                 log_f.write(
                     f"{log_prefix}{stage}: {sudo_cmd} -> exit={exit_code} stdout={_summarize_for_log(out_text.strip())} stderr={_summarize_for_log(err_text.strip())}\n"

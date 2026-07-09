@@ -77,6 +77,7 @@ def register(
                     }), 409
 
             def _sudo_exec(cmd: str, *, timeout: float = 40.0) -> tuple[int, str, str]:
+                from webapp.app_backend import _scrub_password_echo
                 sudo_password = core_cfg.get('ssh_password')
                 wrapped = f"sh -c 'timeout {int(max(5, timeout))}s {cmd.strip()}'"
                 sudo_cmd = f"sudo -S -p '' {wrapped}" if sudo_password else f"sudo -n {wrapped}"
@@ -95,8 +96,8 @@ def register(
                         code = stdout.channel.recv_exit_status() if (stdout and hasattr(stdout, 'channel')) else 0
                     except Exception:
                         code = 0
-                    out_text = out_bytes.decode('utf-8', 'ignore') if isinstance(out_bytes, (bytes, bytearray)) else str(out_bytes or '')
-                    err_text = err_bytes.decode('utf-8', 'ignore') if isinstance(err_bytes, (bytes, bytearray)) else str(err_bytes or '')
+                    out_text = _scrub_password_echo(out_bytes.decode('utf-8', 'ignore') if isinstance(out_bytes, (bytes, bytearray)) else str(out_bytes or ''), sudo_password)
+                    err_text = _scrub_password_echo(err_bytes.decode('utf-8', 'ignore') if isinstance(err_bytes, (bytes, bytearray)) else str(err_bytes or ''), sudo_password)
                     return int(code), out_text, err_text
                 finally:
                     try:

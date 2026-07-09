@@ -20229,6 +20229,17 @@
                 } catch (e) { }
             });
             executeConfirmModalEl.addEventListener('hidden.bs.modal', () => {
+                // Auto-closed to hand off to the execution summary modal: keep the
+                // run state (validation summary, run status) alive for the summary
+                // UI instead of wiping it. State is reset on the next modal open.
+                try {
+                    if (executeProgressState && executeProgressState._summaryHandoff) {
+                        executeProgressState._summaryHandoff = false;
+                        settleExecuteConfirm({ confirmed: false });
+                        executeConfirmState.coreTestFailed = false;
+                        return;
+                    }
+                } catch (e) { }
                 // If the modal is closed while a run is in progress, treat it as a cancel.
                 // Otherwise there is no way to cancel after closing.
                 try {
@@ -20351,9 +20362,9 @@
                 ));
                 return;
             }
-            executeSummaryStatusEl.textContent = 'Summarizing, please wait…';
+            executeSummaryStatusEl.textContent = 'Generating execution summary…';
             if (executeSummarySpinnerEl) executeSummarySpinnerEl.classList.remove('d-none');
-            executeSummaryListEl.appendChild(renderExecuteSummaryItem('Validation summary available', false, 'No summary data received'));
+            executeSummaryListEl.appendChild(renderExecuteSummaryItem('Validation summary', false, 'Generating execution summary…'));
             return;
         }
         if (summary.validation_unavailable) {
@@ -20663,16 +20674,52 @@
         return lines.join('\n');
     }
 
+    function transitionExecuteProgressToSummary(success, runId = null) {
+        // Auto-close the execute dialog first, then open the validation summary
+        // once the hide transition completes (timer fallback in case the hidden
+        // event never fires). Avoids the modal hide/show stacking race.
+        ensureExecuteSummaryElements();
+        const summaryRunId = runId || executeProgressState.runId || getLatestRunIdForSummary();
+        let opened = false;
+        const openSummary = () => {
+            if (opened) return;
+            opened = true;
+            try {
+                showExecuteSummaryModal(success, summaryRunId);
+            } catch (e) {
+                try { dockLog('[summary] failed to open summary modal: ' + e, 'ERROR'); } catch (e2) { }
+            }
+        };
+        const confirmEl = executeConfirmModalEl || document.getElementById('executeConfirmModal');
+        if (confirmEl && confirmEl.classList.contains('show') && window.bootstrap) {
+            try { executeProgressState._summaryHandoff = true; } catch (e) { }
+            try { executeProgressState._allowHide = true; } catch (e) { }
+            try { confirmEl.addEventListener('hidden.bs.modal', () => openSummary(), { once: true }); } catch (e) { }
+            setTimeout(openSummary, 800);
+            try {
+                bootstrap.Modal.getOrCreateInstance(confirmEl).hide();
+            } catch (e) {
+                openSummary();
+            }
+        } else {
+            openSummary();
+        }
+    }
+
     function showExecuteSummaryModal(success, runId = null) {
         ensureExecuteSummaryElements();
         const summaryRunId = runId || getLatestRunIdForSummary();
         try { dockLog(`[summary] showExecuteSummaryModal(${success ? 'success' : 'failure'})`, 'INFO'); } catch (e) { }
         try { closeRunProgress(); } catch (e) { }
-        renderExecuteSummary(!!success);
+        try {
+            renderExecuteSummary(!!success);
+        } catch (e) {
+            try { dockLog('[summary] render failed: ' + e, 'ERROR'); } catch (e2) { }
+        }
         if (executeSummaryModalEl && window.bootstrap) {
+            // Restore confirm modal close controls before hiding so state is clean for next use
             try {
-                // Restore confirm modal close controls before hiding so state is clean for next use
-                if (executeConfirmModalEl && window.bootstrap) {
+                if (executeConfirmModalEl && executeConfirmModalEl.classList.contains('show')) {
                     try {
                         const closeX = document.getElementById('executeConfirmCloseX');
                         if (closeX) closeX.classList.remove('d-none');
@@ -20681,12 +20728,20 @@
                             executeConfirmCancelBtn.disabled = false;
                         }
                     } catch (e) { }
-                    // Allow the programmatic hide through the hide guard
+                    // Allow the programmatic hide through the hide guard and keep
+                    // run state alive for the summary UI (see hidden.bs.modal).
+                    try { executeProgressState._summaryHandoff = true; } catch (e) { }
                     try { executeProgressState._allowHide = true; } catch (e) { }
                     bootstrap.Modal.getOrCreateInstance(executeConfirmModalEl).hide();
                 }
+            } catch (e) {
+                try { dockLog('[summary] failed to hide execute dialog: ' + e, 'ERROR'); } catch (e2) { }
+            }
+            try {
                 bootstrap.Modal.getOrCreateInstance(executeSummaryModalEl).show();
-            } catch (e) { }
+            } catch (e) {
+                try { dockLog('[summary] failed to show summary modal: ' + e, 'ERROR'); } catch (e2) { }
+            }
         }
         try { refreshValidationSummaryFromRunStatus(summaryRunId); } catch (e) { }
         try {
@@ -21453,6 +21508,7 @@
         }
         // Reset summarizing-phase lock state
         executeProgressState._allowHide = false;
+        executeProgressState._summaryHandoff = false;
         try {
             const closeX = document.getElementById('executeConfirmCloseX');
             if (closeX) closeX.classList.remove('d-none');
@@ -21586,7 +21642,7 @@
                 updateExecuteConfirmAlert(msg, 'warning');
             }
         } catch (e) { }
-        if (executePhaseHeaderEl) executePhaseHeaderEl.textContent = success ? 'Phase: Summarizing…' : 'Phase: Error';
+        if (executePhaseHeaderEl) executePhaseHeaderEl.textContent = success ? 'Phase: Generating execution summary…' : 'Phase: Error';
         if (executeProgressCancelBtn) {
             executeProgressCancelBtn.classList.add('d-none');
             executeProgressCancelBtn.disabled = true;
@@ -21594,9 +21650,9 @@
         if (executeConfirmRunBtn) {
             executeConfirmRunBtn.disabled = true;
         }
-        // Make the modal non-closable while summarizing results
+        // Make the modal non-closable while the summary is being generated
         if (executeConfirmCancelBtn) {
-            executeConfirmCancelBtn.textContent = 'Summarizing results, please wait…';
+            executeConfirmCancelBtn.textContent = 'Generating execution summary…';
             executeConfirmCancelBtn.disabled = true;
         }
         try {
@@ -21605,12 +21661,16 @@
         } catch (e) { }
         // Show summarizing spinner in the progress status area
         if (executeProgressSpinnerEl) executeProgressSpinnerEl.classList.remove('d-none');
-        setExecuteProgressStatus('Summarizing results, please wait…', '');
-        // Safety fallback: re-enable close controls if summary modal doesn't appear within 15s
+        setExecuteProgressStatus('Generating execution summary…', '');
+        // Safety fallback: if the summary modal didn't appear within 15s, retry
+        // opening it once and re-enable the close controls either way.
         try {
+            const fallbackSuccess = success;
+            const fallbackRunId = executeProgressState.runId;
             setTimeout(() => {
                 try {
                     if (executeSummaryModalEl && executeSummaryModalEl.classList.contains('show')) return;
+                    try { showExecuteSummaryModal(fallbackSuccess, fallbackRunId); } catch (e) { }
                     // Allow closing again
                     try { executeProgressState._allowHide = true; } catch (e) { }
                     const closeX = document.getElementById('executeConfirmCloseX');
@@ -21628,7 +21688,7 @@
         try {
             if (!executeProgressState.summaryShown) {
                 executeProgressState.summaryShown = true;
-                showExecuteSummaryModal(success, executeProgressState.runId);
+                transitionExecuteProgressToSummary(success, executeProgressState.runId);
             }
         } catch (e) {
             try { showExecuteSummaryModal(success, executeProgressState.runId); } catch (err) { }
@@ -25033,9 +25093,9 @@
                     executeProgressState.summaryShown = true;
                     if (data.returncode === 0) {
                         queueExecuteSummaryRedirect("{{ url_for('reports_page') }}", 500);
-                        showExecuteSummaryModal(true, runId);
+                        transitionExecuteProgressToSummary(true, runId);
                     } else {
-                        showExecuteSummaryModal(false, runId);
+                        transitionExecuteProgressToSummary(false, runId);
                     }
                 }
             }

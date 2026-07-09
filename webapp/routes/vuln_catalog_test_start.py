@@ -405,6 +405,8 @@ def register(app, *, backend_module: Any) -> None:
                 err = b''.join(stderr_chunks).decode('utf-8', 'replace')
             except Exception:
                 err = b''.join(stderr_chunks).decode('latin-1', 'replace')
+            out = backend._scrub_password_echo(out, password)
+            err = backend._scrub_password_echo(err, password)
             return rc, out.strip(), err.strip()
 
         def _remote_compose_preflight(
