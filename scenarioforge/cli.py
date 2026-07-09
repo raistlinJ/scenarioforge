@@ -4743,6 +4743,39 @@ def _add_cli_phase_arg(container: Any) -> None:
 
 _LATEST_ERRORS_HANDLER_FLAG = '_scenarioforge_latest_errors_handler'
 
+_SECRET_ENV_KEYS = ('CORE_SSH_PASSWORD', 'CORETG_DOCKER_SUDO_PASSWORD')
+
+
+def _redact_secret_values(text: str) -> str:
+    """Mask known secret values (SSH/sudo passwords) in arbitrary log text.
+
+    Reads the environment on every call so secrets provided after logging was
+    configured (e.g. the docker sudo password delivered via stdin) are covered.
+    """
+    if not text:
+        return text
+    out = str(text)
+    for key in _SECRET_ENV_KEYS:
+        token = str(os.environ.get(key) or '').strip()
+        if len(token) >= 3 and token in out:
+            out = out.replace(token, '[REDACTED]')
+    return out
+
+
+class _SecretRedactionFilter(logging.Filter):
+    """Ensure secret values never reach any logging handler's output."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = _redact_secret_values(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
+        return True
+
 
 def _remove_latest_errors_handlers() -> None:
     root = logging.getLogger()
@@ -4809,6 +4842,7 @@ def _install_latest_errors_handler(path: str) -> str:
                     self.orig_stderr = orig_stderr
                     self.log_path = log_path
                 def write(self, data):
+                    data = _redact_secret_values(data)
                     self.orig_stderr.write(data)
                     try:
                         with open(self.log_path, 'a', encoding='utf-8') as f:
@@ -4837,6 +4871,12 @@ def _configure_cli_logging(args: Any) -> str:
     except Exception:
         pass
     latest_errors_path = _install_latest_errors_handler(_resolve_latest_errors_path(args))
+    try:
+        redaction_filter = _SecretRedactionFilter()
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(redaction_filter)
+    except Exception:
+        pass
     if latest_errors_path:
         try:
             logging.getLogger(__name__).info('Writing latest warnings/errors to %s', latest_errors_path)
