@@ -278,26 +278,20 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
     except Exception:
         pass
 
-    latest_saved_xml_path = None
-    try:
-        latest_xml_resolver = getattr(deps, '_latest_xml_path_for_scenario', None)
-        if callable(latest_xml_resolver):
-            latest_saved_xml_path = deps._existing_xml_path_or_none(latest_xml_resolver(scenario_norm) or '')
-    except Exception:
-        latest_saved_xml_path = None
-
-    base_plan_path = deps._latest_preview_plan_for_scenario_norm_origin(scenario_norm, origin='planner')
+    # The caller passes the XML that was just saved/planned for this Generate
+    # action.  That XML is authoritative; indexes are only recovery fallbacks
+    # for reloads and older clients without an explicit path.
+    base_plan_path = str(j.get('preview_plan') or '').strip() or None
+    if base_plan_path:
+        base_plan_path = deps._existing_xml_path_or_none(base_plan_path)
+    if not base_plan_path:
+        base_plan_path = deps._latest_preview_plan_for_scenario_norm_origin(scenario_norm, origin='planner')
     if not base_plan_path:
         base_plan_path = deps._latest_preview_plan_for_scenario_norm(scenario_norm)
-    if not base_plan_path and latest_saved_xml_path:
-        return {
-            'response': (jsonify({'ok': False, 'error': 'No preview plan found for this scenario. Generate a Full Preview first.'}), 404),
-        }
-
-    if not base_plan_path:
-        base_plan_path = str(j.get('preview_plan') or '').strip() or None
-        if base_plan_path:
-            base_plan_path = deps._existing_xml_path_or_none(base_plan_path)
+    # If the current XML is newer than the planner's index, the browser may
+    # have the exact plan path returned by "ensure plan" or sequencing.  Do
+    # not reject that valid explicit path merely because the latest saved XML
+    # does not itself embed a preview payload.
     if not base_plan_path:
         try:
             entry = deps._planner_get_plan(scenario_norm)
