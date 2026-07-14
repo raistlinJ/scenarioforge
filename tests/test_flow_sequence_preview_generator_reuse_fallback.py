@@ -34,6 +34,32 @@ def test_sequence_preview_streams_json_and_coalesces_duplicate_request_ids(monke
     assert normalize_calls == 1
 
 
+def test_prepare_preview_streams_json_and_coalesces_duplicate_request_ids(monkeypatch):
+    """A lost resolve response must not start another resolve/generator run."""
+    app.config["TESTING"] = True
+    original_normalize = app_backend._normalize_scenario_label
+    normalize_calls = 0
+
+    def _counting_normalize(value):
+        nonlocal normalize_calls
+        normalize_calls += 1
+        return original_normalize(value)
+
+    monkeypatch.setattr(app_backend, "_normalize_scenario_label", _counting_normalize)
+    request_id = f"resolve-single-flight-{uuid.uuid4().hex}"
+    payload = {"scenario": "", "resolve_request_id": request_id, "progress_id": "progress-a"}
+
+    for _ in range(2):
+        with app.test_request_context("/api/flag-sequencing/prepare_preview_for_execute", method="POST", json=payload):
+            response = app.view_functions["api_flow_prepare_preview_for_execute"]()
+            body = response.get_data()
+        assert response.status_code == 200
+        assert body.startswith(b" \n")
+        assert json.loads(body.decode("utf-8"))["error"] == "No scenario specified."
+
+    assert normalize_calls == 1
+
+
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_sequence_preview_plan_hard_fails_when_duplicate_generators_disallowed(monkeypatch):
     app.config["TESTING"] = True

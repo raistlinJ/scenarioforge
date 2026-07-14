@@ -11081,6 +11081,9 @@
               '/api/flag-sequencing/prepare_preview_for_execute',
               {
                 scenario,
+                // Stable across transient retries of this one resolve, but
+                // regenerated for a new resolve attempt/resequenced chain.
+                resolve_request_id: resolveProgressId,
                 length: chain_ids.length,
                 dependency_level: dependencyLevel,
                 preset,
@@ -11094,8 +11097,21 @@
                 goal_facts: flowGoalFactsOverride,
                 progress_id: resolveProgressId,
               },
-              { timeoutMs: (resolveTimeoutSeconds * 1000) + 30000, throwOnHttpError: true } // Ensure HTTP errors (422) throw so we can catch them.
+              {
+                timeoutMs: (resolveTimeoutSeconds * 1000) + 30000,
+                networkRetries: 2,
+                retryDelayMs: 350,
+                throwOnHttpError: true,
+              } // Ensure HTTP errors (422) throw so we can catch them.
             );
+            // The resolve endpoint streams heartbeats while work runs, so its
+            // final JSON result is delivered with HTTP 200 even for a normal
+            // validation/generator failure.  Preserve the old error path.
+            if (prepData && prepData.ok === false) {
+              const err = new Error(String(prepData.error || prepData.message || 'Resolve failed'));
+              err.payload = prepData;
+              throw err;
+            }
             try { if (stopProgressPoll) stopProgressPoll(); } catch (e) { }
             lastResolvePayload = prepData;
             try {

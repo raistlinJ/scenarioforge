@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from werkzeug.security import generate_password_hash
 
 from webapp.routes import ai_provider
@@ -2005,9 +2005,9 @@ def test_flag_sequencing_prepare_preview_route_delegates_to_module(monkeypatch):
     backend_module = type('BackendModule', (), {})()
     calls: list[object] = []
 
-    def _fake_execute(*, backend):
-        calls.append(backend)
-        return ('delegated', 200)
+    def _fake_execute(*, backend, payload=None):
+        calls.append((backend, payload))
+        return jsonify({'delegated': True}), 200
 
     monkeypatch.setattr(flag_sequencing_prepare_preview.flow_prepare_preview_execute, 'execute', _fake_execute)
 
@@ -2017,8 +2017,9 @@ def test_flag_sequencing_prepare_preview_route_delegates_to_module(monkeypatch):
         resp = client.post('/api/flag-sequencing/prepare_preview_for_execute', json={})
 
     assert resp.status_code == 200
-    assert resp.get_data(as_text=True) == 'delegated'
-    assert calls == [backend_module]
+    assert resp.get_data().startswith(b" \n")
+    assert resp.get_json() == {'delegated': True}
+    assert calls == [(backend_module, {})]
 
 
 def test_backend_prepare_preview_wrapper_delegates_to_module(monkeypatch):
