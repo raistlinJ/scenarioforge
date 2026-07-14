@@ -8,13 +8,16 @@ from webapp import flow_prepare_preview_execute
 
 def test_prepare_preview_context_uses_saved_page_core_cfg_when_xml_lacks_password(tmp_path):
     xml_path = tmp_path / 'scenario.xml'
+    latest_xml_path = tmp_path / 'latest-without-preview.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor/></Scenario></Scenarios>', encoding='utf-8')
+    latest_xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor/></Scenario></Scenarios>', encoding='utf-8')
 
     deps = SimpleNamespace(
         _coerce_bool=lambda value: bool(value),
         _normalize_scenario_label=lambda value: str(value or '').strip().lower(),
         _flow_preset_steps=lambda preset: [],
-        _existing_xml_path_or_none=lambda value: str(xml_path) if value and str(value) == str(xml_path) else None,
+        _existing_xml_path_or_none=lambda value: str(value) if value and str(value) in {str(xml_path), str(latest_xml_path)} else None,
+        _latest_xml_path_for_scenario=lambda scenario_norm: str(latest_xml_path),
         _planner_get_plan=lambda scenario_norm: None,
         _latest_preview_plan_for_scenario_norm_origin=lambda scenario_norm, origin=None: None,
         _latest_preview_plan_for_scenario_norm=lambda scenario_norm: None,
@@ -80,7 +83,7 @@ def test_prepare_preview_context_uses_saved_page_core_cfg_when_xml_lacks_passwor
     }
 
 
-def test_prepare_preview_context_prefers_latest_preview_plan_for_scenario(tmp_path):
+def test_prepare_preview_context_prefers_explicit_current_preview_plan(tmp_path):
     stale_xml = tmp_path / 'stale.xml'
     latest_xml = tmp_path / 'latest.xml'
     stale_xml.write_text('<Scenarios />', encoding='utf-8')
@@ -130,4 +133,4 @@ def test_prepare_preview_context_prefers_latest_preview_plan_for_scenario(tmp_pa
             )
 
     assert result.get('response') is None
-    assert result.get('base_plan_path') == str(latest_xml)
+    assert result.get('base_plan_path') == str(stale_xml)

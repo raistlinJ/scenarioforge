@@ -2840,6 +2840,13 @@
   }
 
   function previewPlanForRequest() {
+    try {
+      const knownPath = String(lastPreviewPlanPath || '').trim();
+      if (knownPath) return knownPath;
+      if (activeScenario && typeof window.coretgGetPreviewPlanPathForScenario === 'function') {
+        return String(window.coretgGetPreviewPlanPathForScenario(activeScenario) || '').trim();
+      }
+    } catch (e) { }
     return '';
   }
 
@@ -3300,6 +3307,11 @@
     try {
       const xmlPathInput = document.getElementById('scenariosPreviewXmlPath');
       if (xmlPathInput) xmlPathInput.value = xmlPath;
+    } catch (e) { }
+    try {
+      if (scenario && typeof window.coretgSetLatestXmlPathForScenario === 'function') {
+        window.coretgSetLatestXmlPathForScenario(scenario, xmlPath);
+      }
     } catch (e) { }
 
     return xmlPath;
@@ -10745,10 +10757,19 @@
             window.coretgSetSeedForScenario(scenario, persisted.seed);
           }
         } catch (e) { }
-        const previewPlan = (persisted && persisted.preview_plan_path) ? String(persisted.preview_plan_path) : '';
+        const persistedXmlPath = (persisted && persisted.xml_path) ? String(persisted.xml_path).trim() : xmlPath;
+        const previewPlan = (persisted && persisted.preview_plan_path) ? String(persisted.preview_plan_path).trim() : persistedXmlPath;
         if (!previewPlan) {
           throw new Error('Failed to persist preview plan');
         }
+        xmlPath = persistedXmlPath || xmlPath;
+        try {
+          if (scenario && typeof window.coretgSetLatestXmlPathForScenario === 'function') {
+            window.coretgSetLatestXmlPathForScenario(scenario, xmlPath);
+          }
+          const xmlPathInput = document.getElementById('scenariosPreviewXmlPath');
+          if (xmlPathInput) xmlPathInput.value = xmlPath;
+        } catch (e) { }
         try {
           if (scenario && typeof window.coretgSetPreviewPlanPathForScenario === 'function') {
             window.coretgSetPreviewPlanPathForScenario(scenario, previewPlan);
@@ -11017,7 +11038,7 @@
       } catch (e) { }
       lastStats = data.stats || null;
       updateLengthSpinnerMax();
-      lastPreviewPlanPath = data.preview_plan_path || '';
+      lastPreviewPlanPath = data.preview_plan_path || data.xml_path || '';
       lastParticipantNetworkSetup = (data && data.participant_network_setup) ? data.participant_network_setup : null;
       try {
         const summary = summarizeChainForLog(currentChain, currentFlagAssignments);
@@ -11027,6 +11048,10 @@
       try {
         if (scenario && lastPreviewPlanPath && typeof window.coretgSetPreviewPlanPathForScenario === 'function') {
           window.coretgSetPreviewPlanPathForScenario(scenario, lastPreviewPlanPath);
+        }
+        const resolvedXmlPath = String((data && (data.xml_path || data.preview_plan_path)) || '').trim();
+        if (scenario && resolvedXmlPath && typeof window.coretgSetLatestXmlPathForScenario === 'function') {
+          window.coretgSetLatestXmlPathForScenario(scenario, resolvedXmlPath);
         }
       } catch (e) { }
       try {
@@ -11156,6 +11181,10 @@
               try {
                 if (scenario && typeof window.coretgSetPreviewPlanPathForScenario === 'function') {
                   window.coretgSetPreviewPlanPathForScenario(scenario, lastPreviewPlanPath);
+                }
+                const resolvedXmlPath = String(prepData.xml_path || prepData.preview_plan_path || '').trim();
+                if (scenario && resolvedXmlPath && typeof window.coretgSetLatestXmlPathForScenario === 'function') {
+                  window.coretgSetLatestXmlPathForScenario(scenario, resolvedXmlPath);
                 }
               } catch (e) { }
             }
