@@ -19,9 +19,12 @@ Remote CORE VM support:
 From the repo root:
 
 ```bash
-python webapp/app_backend.py
+uv sync --extra dev
+CORETG_USE_RELOADER=0 uv run python webapp/app_backend.py
 open http://localhost:9090
 ```
+
+For native VM deployments, keep `CORETG_USE_RELOADER=0`. The Web UI writes XML previews, Flow state, generator artifacts, and logs while requests are active; automatic Flask reloads can interrupt those requests.
 
 ## Docker
 

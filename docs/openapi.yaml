@@ -1196,9 +1196,10 @@ paths:
         - Flag Sequencing
       summary: Prepare a preview plan for hint resolution/execution
       description: >-
-        Runs best-effort preparation steps (e.g., resolving hint placeholders) using the provided chain
-        and preview plan path. This endpoint is used by the Flow UI to materialize `hint.txt` after
-        generator outputs are available.
+        Resolves hint placeholders and may run generators using the supplied chain and XML-embedded
+        preview plan. The explicit `preview_plan` XML path is authoritative over a latest-plan lookup.
+        The response starts with JSON-compatible whitespace heartbeats while work runs; the final body
+        is JSON, and clients must inspect `ok` even when HTTP status is 200.
       requestBody:
         required: true
         content:
@@ -1207,29 +1208,36 @@ paths:
               $ref: '#/components/schemas/PreparePreviewForExecuteRequest'
       responses:
         '200':
-          description: Preparation results.
+          description: Preparation result (success or application-level error payload).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PreparePreviewForExecuteResponse'
-        '400':
-          description: Validation error.
+
+  /api/flag-sequencing/sequence_preview_plan:
+    post:
+      tags:
+        - Flag Sequencing
+      summary: Build and persist a Flow sequence from an XML-embedded preview
+      description: >-
+        Selects chain nodes, assigns generators, validates dependency order, and persists Flow metadata
+        in the supplied scenario XML. The explicit `preview_plan` XML path is preferred. The response
+        streams JSON-compatible whitespace heartbeats while work runs; use a stable
+        `sequence_request_id` only when retrying the same logical request so the retry attaches to the
+        existing worker instead of creating another sequence operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SequencePreviewPlanRequest'
+      responses:
+        '200':
+          description: Sequence result (success or application-level error payload).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Missing preview plan.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '422':
-          description: Preparation failed.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/SequencePreviewPlanResponse'
 
   /api/flag-sequencing/save_flow_substitutions:
     post:
@@ -1238,7 +1246,7 @@ paths:
       summary: Persist Flow substitutions and overrides
       description: >-
         Persists user-edited chain positions plus generator overrides into the canonical
-        per-scenario plan (plan_<scenario>.json). Used by the Flow UI “Save Overrides” action.
+        scenario XML's embedded Flow state. Used by the Flow UI “Save Overrides” action.
       requestBody:
         required: true
         content:
@@ -3127,7 +3135,7 @@ components:
         preview_plan:
           type: string
           nullable: true
-          description: Optional absolute path to a persisted plan preview JSON file.
+          description: Optional absolute path to the scenario XML containing embedded PlanPreview and Flow metadata.
     RunCliAsyncResponse:
       type: object
       required:
@@ -4187,6 +4195,7 @@ components:
         preview_plan:
           type: string
           nullable: true
+          description: Absolute path to the authoritative scenario XML containing PlanPreview metadata.
         mode:
           type: string
           nullable: true
@@ -4202,6 +4211,22 @@ components:
         timeout_s:
           type: integer
           nullable: true
+        resolve_request_id:
+          type: string
+          nullable: true
+          description: Stable id for transient retries of one logical resolve operation.
+        progress_id:
+          type: string
+          nullable: true
+          description: Optional Flow progress polling id.
+        initial_facts:
+          type: object
+          nullable: true
+          additionalProperties: true
+        goal_facts:
+          type: object
+          nullable: true
+          additionalProperties: true
       additionalProperties: true
 
     PreparePreviewForExecuteResponse:
@@ -4211,6 +4236,116 @@ components:
       properties:
         ok:
           type: boolean
+        error:
+          type: string
+        preview_plan_path:
+          type: string
+          nullable: true
+        xml_path:
+          type: string
+          nullable: true
+        chain:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        flag_assignments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+
+    SequencePreviewPlanRequest:
+      type: object
+      required:
+        - scenario
+      properties:
+        scenario:
+          type: string
+        preview_plan:
+          type: string
+          nullable: true
+          description: Absolute path to the authoritative scenario XML containing PlanPreview metadata.
+        xml_path:
+          type: string
+          nullable: true
+        length:
+          type: integer
+          minimum: 1
+          maximum: 50
+          nullable: true
+        dependency_level:
+          type: integer
+          minimum: 1
+          maximum: 5
+          nullable: true
+        preset:
+          type: string
+          nullable: true
+        allow_node_duplicates:
+          type: boolean
+          nullable: true
+        include_all_topology_vulns:
+          type: boolean
+          nullable: true
+        include_all_topology_pivots:
+          type: boolean
+          nullable: true
+        best_effort:
+          type: boolean
+          nullable: true
+        retry_index:
+          type: integer
+          nullable: true
+        flow_seed:
+          type: integer
+          nullable: true
+        sequence_request_id:
+          type: string
+          nullable: true
+          description: Stable id for transient retries of one logical sequence operation.
+        progress_id:
+          type: string
+          nullable: true
+          description: Optional Flow progress polling id.
+        initial_facts:
+          type: object
+          nullable: true
+          additionalProperties: true
+        goal_facts:
+          type: object
+          nullable: true
+          additionalProperties: true
+      additionalProperties: true
+
+    SequencePreviewPlanResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+        validation_error:
+          type: boolean
+        preview_plan_path:
+          type: string
+          nullable: true
+        xml_path:
+          type: string
+          nullable: true
+        chain:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        flag_assignments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
       additionalProperties: true
     SaveFlowStateToXmlRequest:
       type: object

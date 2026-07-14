@@ -1499,11 +1499,14 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const participantNetworkSetup = normalizeParticipantNetworkSetup(opts.participantNetworkSetup || opts.participant_network_setup || (opts.preview && opts.preview.participant_network_setup));
 
   const appendParticipantNetworkSetup = (targetLines) => {
+    // This is the participant VM's interface, not the CORE VM's HITL NIC
+    // (which may be named ens19 or similar in the saved topology).
+    const participantGuideInterface = 'eth0';
     targetLines.push('## Participant Network Setup');
     targetLines.push('');
     targetLines.push(participantNetworkSetup.length
-      ? 'Before starting, configure the participant VM interface with the assigned IP/CIDR and default gateway.'
-      : 'Before starting, configure the participant VM interface with the assigned IP/CIDR and default gateway. The saved plan did not include HITL addressing metadata, so fill in the values for this event.');
+      ? 'Before starting, configure participant interface eth0 with the assigned IP/CIDR and default gateway.'
+      : 'Before starting, configure participant interface eth0 with the assigned IP/CIDR and default gateway. The saved plan did not include HITL addressing metadata, so fill in the values for this event.');
     targetLines.push('');
     targetLines.push('```bash');
     const setupItems = participantNetworkSetup.length ? participantNetworkSetup : [{ interfaceName: '<participant-interface>', addressCidr: '<participant-ip>/<prefix>', gateway: '<default-gateway-ip>' }];
@@ -1511,7 +1514,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       if (setupItems.length > 1) {
         targetLines.push(`# Participant link ${setupIndex + 1}`);
       }
-      targetLines.push(`IFACE="${escapeGuideShellValue(item.interfaceName || '<participant-interface>')}"`);
+      targetLines.push(`IFACE="${participantGuideInterface}"`);
       targetLines.push(`ADDR="${escapeGuideShellValue(item.addressCidr || '<participant-ip>/<prefix>')}"`);
       targetLines.push(`GW="${escapeGuideShellValue(item.gateway || '<default-gateway-ip>')}"`);
       targetLines.push('');

@@ -6,7 +6,7 @@ This guide documents the HTTP surface exposed by the ScenarioForge web backend (
 
 - **Default base URL:** `http://localhost:9090`
 - **Entry modules:**
-	- Web server: `python webapp/app_backend.py`
+	- Web server: `CORETG_USE_RELOADER=0 uv run python webapp/app_backend.py`
 	- CLI: `core-python -m scenarioforge.cli` (fall back to `python -m scenarioforge.cli` if `core-python` is unavailable)
 	- Catalog REST batch CLI: `uv run catalog-rest-batch-test --target all --scope all`
 	- Vulnerability catalog preflight CLI: `uv run preflight-vuln-catalog --repo-root .`
@@ -36,6 +36,7 @@ The web UI uses cookie sessions. Script clients must authenticate once and reuse
 - Absolute paths are recommended (`os.path.abspath`). When a relative path is supplied, the server resolves it against the repo root where possible.
 - Safe-delete operations only touch files under `uploads/` or `outputs/`; reports in `./reports/` are preserved.
 - Planning preview results are cached in `outputs/plan_cache.json`, keyed by `(xml_hash, scenario, seed)`. Override the location with `TOPO_PLAN_CACHE_PATH`.
+- The saved scenario XML is the authoritative preview and Flow-state document. `PlanPreview` and `metadata.flow` are embedded in that XML; `preview_plan_path` normally equals `xml_path` rather than naming a separate JSON plan file.
 
 ## Endpoint Groups
 
@@ -180,7 +181,7 @@ When `xml_path` is omitted and `scenarios` is provided, the server renders a tem
 : Request JSON `{ "xml_path": "/abs/path.xml", "scenario"?: "Name", "seed"?: 12345 }`. Computes the full preview and persists `PlanPreview` metadata into the XML. Returns `{ "ok": true, "xml_path": "...", "scenario": "...", "seed": 12345, "preview_plan_path": "/abs/path.xml" }`.
 
 `POST /api/planner/ensure_plan`
-: Lightweight helper that ensures a preview plan exists for a saved XML without writing extra plan files. Returns the same shape as `persist_flow_plan`.
+: Lightweight helper that computes a full preview and embeds it in the supplied saved XML without writing an extra plan file. Returns the same shape as `persist_flow_plan`; use its returned `xml_path` / `preview_plan_path` for the following Flow requests.
 
 `GET /api/planner/latest_plan`
 : Query `scenario=<name>`. Returns the latest XML path associated with the scenario. Despite the name, `preview_plan_path` currently points at the scenario XML file because preview metadata is embedded in XML.
@@ -194,6 +195,27 @@ Important notes:
 - **Eligibility rules:** `flag-generators` are placed on vulnerability nodes only; `flag-node-generators` require non-vulnerability Docker-role nodes.
 - **Initial Facts / Goal Facts:** Flow accepts optional `initial_facts` and `goal_facts` overrides (artifacts + fields). Flag facts (`Flag(...)`) are filtered out.
 - **Sequencing algorithm:** Goal-aware scoring with pruning/backtracking (bounded by a 30s timeout) is used to select feasible generator assignments.
+- **XML handoff:** Save XML, call `POST /api/planner/ensure_plan`, then pass the returned XML path as `preview_plan` to Sequence and Resolve. An explicit `preview_plan` takes precedence over index-based “latest plan” lookup.
+- **Long requests:** Sequence and Resolve stream JSON-compatible whitespace heartbeats. Their final result is JSON; clients should inspect `ok`, even when the HTTP status is `200`. Send the stable request ID fields below on retries.
+
+`POST /api/flag-sequencing/sequence_preview_plan`
+: Builds and persists a chain and generator assignments from the supplied XML-embedded preview. This is the Flow UI's Sequence step.
+
+Typical request JSON:
+```json
+{
+  "scenario": "My Scenario",
+  "preview_plan": "/abs/path/to/scenario.xml",
+  "xml_path": "/abs/path/to/scenario.xml",
+  "length": 3,
+  "dependency_level": 3,
+  "allow_node_duplicates": false,
+  "sequence_request_id": "stable-id-for-retries",
+  "progress_id": "optional-progress-stream-id"
+}
+```
+
+Reuse `sequence_request_id` only when retrying the same logical request. Generate a new ID for a new chain request or changed inputs.
 
 `GET /api/flag-sequencing/attackflow_preview`
 : Returns a chain preview derived from the latest preview plan for the scenario. Response includes `chain`, `flag_assignments`, and validity metadata (`flow_valid`, `flow_errors`, `flags_enabled`).
@@ -218,13 +240,17 @@ Request JSON (typical):
 	"length": 5,
 	"preset": "",
 	"chain_ids": ["n1", "n2"],
-	"preview_plan": "/abs/path/to/outputs/plans/plan_<scenario>.json",
-	"mode": "hint",
-	"best_effort": true,
+	"preview_plan": "/abs/path/to/scenario.xml",
+	"mode": "resolve",
+	"best_effort": false,
 	"allow_node_duplicates": false,
-	"timeout_s": 30
+	"timeout_s": 630,
+	"resolve_request_id": "stable-id-for-retries",
+	"progress_id": "optional-progress-stream-id"
 }
 ```
+
+Reuse `resolve_request_id` only for a transient retry of the same Resolve operation. The endpoint persists resolved Flow data back into the provided XML.
 
 `POST /api/flag-sequencing/afb_from_chain`
 : Generates an Attack Flow Builder export for a user-specified ordered chain.
@@ -245,14 +271,14 @@ Response JSON includes:
 - `flag_assignments` and validity metadata
 
 `POST /api/flag-sequencing/save_flow_substitutions`
-: Persists a user-edited chain + generator overrides into the canonical per-scenario plan `outputs/plans/plan_<scenario>.json`.
+: Persists a user-edited chain and generator overrides into the supplied scenario XML's embedded Flow state.
 
 Request JSON (typical):
 ```json
 {
 	"scenario": "My Scenario",
 	"chain_ids": ["n1", "n2"],
-	"preview_plan": "/abs/path/to/outputs/plans/plan_<scenario>.json",
+	"preview_plan": "/abs/path/to/scenario.xml",
 	"allow_node_duplicates": false,
 	"flag_assignments": [
 		{
