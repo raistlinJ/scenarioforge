@@ -10767,6 +10767,8 @@
       } catch (e) { retriesRemaining = 10; }
       let attemptedRetries = 0;
       let retryIndex = 0;
+      const newSequenceRequestId = () => `seqreq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      let sequenceRequestId = newSequenceRequestId();
       const _resolvedFlagValue = (fa) => {
         try {
           if (fa && typeof fa.flag_value === 'string' && fa.flag_value.trim()) return fa.flag_value.trim();
@@ -10833,6 +10835,7 @@
                 initial_facts: flowInitialFactsOverride,
                 goal_facts: flowGoalFactsOverride,
                 progress_id: sequenceProgressId,
+                sequence_request_id: sequenceRequestId,
               }, { timeoutMs: 60000 });
             } finally {
               try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
@@ -10846,6 +10849,7 @@
           try {
             const liveCap = dockerNodeCapFromStats(data && data.stats ? data.stats : null);
             if (applyDockerCapIfNeeded(liveCap, 'topology')) {
+              sequenceRequestId = newSequenceRequestId();
               if (!allowDupes) {
                 retryIndex = 0;
                 params.set('retry_index', '0');
@@ -10865,6 +10869,7 @@
                 attemptedRetries += 1;
                 retriesRemaining -= 1;
                 retryIndex += 1;
+                sequenceRequestId = newSequenceRequestId();
                 // Increment flow seed for different chain/generator combinations
                 if (flowSeedInputEl) flowSeedInputEl.value = String((parseInt(flowSeedInputEl.value, 10) || 0) + 1);
                 setStatus(`Generate produced duplicates; retrying (${attemptedRetries})…`, true);
@@ -10903,6 +10908,7 @@
               return;
             }
             if (runSavePreviewResolve) {
+              sequenceRequestId = newSequenceRequestId();
               appendLoadingLog(`Retrying best-effort length ${offer.available}`);
               const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
               let stopSequenceProgressPoll = null;
@@ -10922,6 +10928,7 @@
                   initial_facts: flowInitialFactsOverride,
                   goal_facts: flowGoalFactsOverride,
                   progress_id: sequenceProgressId,
+                  sequence_request_id: sequenceRequestId,
                 }, { timeoutMs: 60000 });
               } finally {
                 try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
@@ -10950,6 +10957,7 @@
             attemptedRetries += 1;
             retriesRemaining -= 1;
             retryIndex += 1;
+            sequenceRequestId = newSequenceRequestId();
             // Increment flow seed for different chain/generator combinations
             if (flowSeedInputEl) flowSeedInputEl.value = String((parseInt(flowSeedInputEl.value, 10) || 0) + 1);
             setStatus(`Generate failed; retrying (${attemptedRetries})…`, true);
@@ -10975,6 +10983,7 @@
               retriesRemaining = 0;
               attemptedRetries = 0;
               retryIndex = 0;
+              sequenceRequestId = newSequenceRequestId();
               appendLoadingLog('Enabled duplicates and retrying generate');
               continue;
             }

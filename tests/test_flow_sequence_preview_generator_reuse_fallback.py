@@ -1,10 +1,37 @@
 import os
+import json
 import uuid
 
 import pytest
 
 from webapp.app_backend import app
 from webapp import app_backend
+
+
+def test_sequence_preview_streams_json_and_coalesces_duplicate_request_ids(monkeypatch):
+    """A lost response must not make a retry run the same sequence twice."""
+    app.config["TESTING"] = True
+    original_normalize = app_backend._normalize_scenario_label
+    normalize_calls = 0
+
+    def _counting_normalize(value):
+        nonlocal normalize_calls
+        normalize_calls += 1
+        return original_normalize(value)
+
+    monkeypatch.setattr(app_backend, "_normalize_scenario_label", _counting_normalize)
+    request_id = f"single-flight-{uuid.uuid4().hex}"
+    payload = {"scenario": "", "sequence_request_id": request_id, "progress_id": "progress-a"}
+
+    for _ in range(2):
+        with app.test_request_context("/api/flag-sequencing/sequence_preview_plan", method="POST", json=payload):
+            response = app.view_functions["api_flow_sequence_preview_plan"]()
+            body = response.get_data()
+        assert response.status_code == 200
+        assert body.startswith(b" \n")
+        assert json.loads(body.decode("utf-8"))["error"] == "No scenario specified."
+
+    assert normalize_calls == 1
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
