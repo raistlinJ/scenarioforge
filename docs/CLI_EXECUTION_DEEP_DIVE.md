@@ -380,7 +380,7 @@ This is intentional and mirrors the Web UI execute path.
 
 `flag-sequencing` says no preview plan exists:
 
-- Run `preview-plan` first for that XML/scenario.
+- Run `preview-plan` first for that XML/scenario. The resulting `PlanPreview` is embedded in the XML; pass that same XML to subsequent Flow commands.
 
 `execute` fails with Flow runtime path errors:
 
@@ -400,5 +400,5 @@ This is intentional and mirrors the Web UI execute path.
 
 - There is no single `run-all` phase yet.
 - `new` creates a starter XML but does not populate scenario rows for you.
-- `flag-sequencing` depends on an existing preview plan.
+- `flag-sequencing` depends on an existing XML-embedded `PlanPreview`.
 - The CLI is designed for ScenarioForge planning XML, not for raw CORE session XML as a planning input.

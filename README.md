@@ -87,9 +87,11 @@ Key runtime variables in [.scenarioforge.env.example](.scenarioforge.env.example
 - `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target for that VM-mode interface: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
 - `CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION` – optional label/description applied to that VM-mode HITL interface entry.
 - `CORETG_VM_MODE_PARTICIPANT_URL` – optional participant UI URL shown in VM-mode flows.
-- `CORETG_FLOW_SEQUENCE_TIMEOUT_S` – minimum browser-side timeout (seconds, default `300`) for the Flag Sequencing "Sequence" step. Raise it if sequencing large/constrained chains reports a lost connection before the backend finishes.
-- `CORETG_FLOW_EXECUTE_TIMEOUT_S` – upper cap (seconds, default `3600`) on the browser-side timeout for the Flag Sequencing "Resolve"/"Execute" step, which scales with chain length up to this value. Raise it if resolving long chains or slow generators reports a lost connection before the backend finishes.
+- `CORETG_FLOW_SEQUENCE_TIMEOUT_S` – minimum browser-side timeout (seconds, default `300`) for the Flag Sequencing **Sequence** step.
+- `CORETG_FLOW_EXECUTE_TIMEOUT_S` – upper cap (seconds, default `3600`) on the browser-side timeout for the Flag Sequencing **Resolve** step, which scales with chain length up to this value.
 - `CORETG_NGINX_PROXY_READ_TIMEOUT_S` – nginx `proxy_read_timeout` (seconds, default `3700`) for the Docker Compose deployment only. Keep it at or above `CORETG_FLOW_EXECUTE_TIMEOUT_S` so nginx doesn't cut a long Resolve/Execute request before the browser's own timeout would. Not used for direct Python launches.
+
+The timeout settings bound client-side waits; they do not change the Flow data model. Flow first saves the scenario XML, then embeds the generated `PlanPreview` and Flow state in that same XML. Sequence and Resolve use that exact XML path rather than a separate JSON plan file. Long Sequence and Resolve responses stream whitespace heartbeats and use request IDs so a transient browser retry attaches to the original work instead of starting duplicate generator runs.
 
 Minimum VM-mode override example:
 
@@ -125,8 +127,10 @@ Direct Python launch for development:
 
 ```bash
 uv sync --extra dev
-uv run python webapp/app_backend.py
+CORETG_USE_RELOADER=0 uv run python webapp/app_backend.py
 ```
+
+`CORETG_USE_RELOADER=0` is recommended for native VM hosts: sequencing and generator workflows write XML, logs, and artifacts during requests, and the development reloader can otherwise restart the web process mid-request. This setting affects only automatic Flask reloads; it does not change VM mode or CORE connectivity.
 
 After launch, use the CORE Management and Execute views to validate CORE connectivity, save VM/Proxmox credentials, apply participant bridge wiring, preview the scenario, and execute it.
 
