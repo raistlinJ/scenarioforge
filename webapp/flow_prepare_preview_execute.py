@@ -222,8 +222,8 @@ def _prepare_remote_generator_execution(
     }
 
 
-def _load_prepare_preview_request_context(*, deps, flow_progress) -> dict[str, Any]:
-    j = request.get_json(silent=True) or {}
+def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    j = payload if isinstance(payload, dict) else (request.get_json(silent=True) or {})
     scenario_label = str(j.get('scenario') or '').strip()
     scenario_norm = deps._normalize_scenario_label(scenario_label)
     preset = str(j.get('preset') or '').strip()
@@ -1718,11 +1718,11 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
     }
 
 
-def execute_impl(*, backend: Any):
+def execute_impl(*, backend: Any, payload: dict[str, Any] | None = None):
     deps = _backend_dependencies(backend)
     phase_timings: dict[str, float] = {}
     try:
-        progress_payload = request.get_json(silent=True) or {}
+        progress_payload = payload if isinstance(payload, dict) else (request.get_json(silent=True) or {})
         progress_id = str(progress_payload.get('progress_id') or '').strip()
     except Exception:
         progress_id = ''
@@ -1742,7 +1742,11 @@ def execute_impl(*, backend: Any):
 
     from webapp import flow_prepare_preview_helpers as _flow_prepare_preview_helpers
 
-    request_context = _load_prepare_preview_request_context(deps=deps, flow_progress=_flow_progress)
+    request_context = _load_prepare_preview_request_context(
+        deps=deps,
+        flow_progress=_flow_progress,
+        payload=payload,
+    )
     response = request_context.get('response')
     if response is not None:
         return response
@@ -1967,5 +1971,5 @@ def execute_impl(*, backend: Any):
     )
 
 
-def execute(*, backend: Any):
-    return execute_impl(backend=backend)
+def execute(*, backend: Any, payload: dict[str, Any] | None = None):
+    return execute_impl(backend=backend, payload=payload)
