@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
 import time
 from typing import Any
 
-from flask import jsonify, request
+from flask import Response, jsonify, request, stream_with_context
 
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
 
@@ -14,10 +17,33 @@ def register(app, *, backend_module: Any) -> None:
 
     backend = backend_module
 
-    @app.route('/api/flag-sequencing/sequence_preview_plan', methods=['POST'])
-    def api_flow_sequence_preview_plan():
+    # Sequencing can take minutes when a catalog is large.  A browser/network
+    # timeout must not start another copy of the same mutating request: each
+    # copy rescans the catalog and writes the same plan, making every active
+    # request slower.  Keep one worker per request signature and let all
+    # callers attach to its eventual result.
+    _sequence_jobs_lock = threading.Lock()
+    _sequence_jobs: dict[str, dict[str, Any]] = {}
+
+    def _sequence_job_key(payload: dict[str, Any]) -> str:
+        request_id = str((payload or {}).get('sequence_request_id') or '').strip()
+        if request_id:
+            # A request ID is stable only for one user-initiated Generate
+            # action.  It lets retries attach to the same worker without
+            # making a later deliberate Generate reuse an old random chain.
+            return f'request:{request_id}'
+        stable_payload = dict(payload or {})
+        # progress_id identifies a caller/poll stream, not the work itself.
+        stable_payload.pop('progress_id', None)
+        try:
+            encoded = json.dumps(stable_payload, sort_keys=True, separators=(',', ':'), default=str)
+        except Exception:
+            encoded = repr(sorted((str(key), repr(value)) for key, value in stable_payload.items()))
+        return hashlib.sha256(encoded.encode('utf-8', errors='ignore')).hexdigest()
+
+    def _run_sequence_preview_plan(payload_in: dict[str, Any]):
         """Generate a Flow chain from an existing preview plan and persist sequence metadata."""
-        payload_in = request.get_json(silent=True) or {}
+        payload_in = payload_in if isinstance(payload_in, dict) else {}
         started_at = time.monotonic()
         progress_id = str(payload_in.get('progress_id') or '').strip()
 
@@ -593,6 +619,83 @@ def register(app, *, backend_module: Any) -> None:
                 **({'warning': warning} if warning else {}),
                 **({'host_ip_map': host_ip_map} if host_ip_map else {}),
             }
+        )
+
+    @app.route('/api/flag-sequencing/sequence_preview_plan', methods=['POST'])
+    def api_flow_sequence_preview_plan():
+        """Run one sequence job per request signature and stream keep-alives.
+
+        The initial whitespace and one whitespace byte per second are valid JSON
+        whitespace.  They let a browser (or an intermediate TCP idle timeout)
+        observe response activity while the worker computes the final JSON
+        payload.  ``Response.json()`` still receives one normal JSON document
+        once the worker is done.
+        """
+        payload_in = request.get_json(silent=True) or {}
+        if not isinstance(payload_in, dict):
+            payload_in = {}
+        job_key = _sequence_job_key(payload_in)
+        now = time.monotonic()
+
+        with _sequence_jobs_lock:
+            # Keep finished results briefly: a retry after a dropped response
+            # receives the prior result instead of recomputing and rewriting
+            # the plan.
+            for key, old_job in list(_sequence_jobs.items()):
+                completed_at = float(old_job.get('completed_at') or 0.0)
+                if completed_at and now - completed_at > 600.0:
+                    _sequence_jobs.pop(key, None)
+
+            job = _sequence_jobs.get(job_key)
+            if job is None:
+                job = {
+                    'done': threading.Event(),
+                    'payload': dict(payload_in),
+                    'body': b'',
+                    'completed_at': 0.0,
+                }
+                _sequence_jobs[job_key] = job
+
+                def _worker() -> None:
+                    try:
+                        # The route logic only uses the parsed payload, but
+                        # jsonify() still needs an application context.
+                        with app.app_context():
+                            response = app.make_response(_run_sequence_preview_plan(job['payload']))
+                            job['body'] = response.get_data()
+                    except Exception as exc:
+                        try:
+                            with app.app_context():
+                                job['body'] = jsonify({'ok': False, 'error': f'Sequence preview failed: {exc}'}).get_data()
+                        except Exception:
+                            job['body'] = b'{"ok":false,"error":"Sequence preview failed."}'
+                        try:
+                            app.logger.exception('Sequence preview worker failed.')
+                        except Exception:
+                            pass
+                    finally:
+                        job['completed_at'] = time.monotonic()
+                        job['done'].set()
+
+                threading.Thread(
+                    target=_worker,
+                    name=f'flow-sequence-{job_key[:8]}',
+                    daemon=True,
+                ).start()
+
+        def _stream_result():
+            # Flush headers immediately, then keep the response active while
+            # the worker runs.  JSON permits leading/interstitial whitespace.
+            yield b' \n'
+            while not job['done'].wait(timeout=1.0):
+                yield b' \n'
+            yield bytes(job.get('body') or b'{"ok":false,"error":"Sequence preview produced no response."}')
+
+        return Response(
+            stream_with_context(_stream_result()),
+            status=200,
+            content_type='application/json; charset=utf-8',
+            headers={'Cache-Control': 'no-store'},
         )
 
     mark_routes_registered(app, 'flag_sequencing_sequence_preview_routes')
