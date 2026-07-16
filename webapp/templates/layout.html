@@ -244,6 +244,10 @@
         {% endblock %}
     </div>
 
+    {# Embedded pages (such as the Preview graph iframe) must not display a
+       second, iframe-local navigation spinner.  The containing page owns the
+       transition overlay. #}
+    {% if not hide_chrome %}
     <div class="coretg-loading-overlay" id="coretgLoadingOverlay" aria-hidden="true" aria-live="polite" role="status">
         <div class="coretg-loading-card text-center">
             <div class="spinner-border text-primary mb-2" role="status" aria-hidden="true"></div>
@@ -251,6 +255,7 @@
             <div class="small text-muted" id="coretgLoadingText">Please Wait</div>
         </div>
     </div>
+    {% endif %}
 
     <!-- CORE Daemon Start Modal -->
     <div class="modal fade" id="coreDaemonModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static"

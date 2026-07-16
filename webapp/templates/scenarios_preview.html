@@ -471,6 +471,10 @@
             const url = base + '?xml_path=' + encodeURIComponent(xmlPath)
               + (scenario ? ('&scenario=' + encodeURIComponent(scenario)) : '')
               + '&auto_execute=1';
+            // The preview iframe has its own initial-load modal.  Do not let
+            // that modal overlap the page-level navigation spinner used for
+            // Execute.
+            hideLoading('execute-navigation');
             if (typeof window.CORETG_NAVIGATE_WITH_LOADING === 'function') {
               window.CORETG_NAVIGATE_WITH_LOADING(url, {
                 title: 'Retrieving Page Details',

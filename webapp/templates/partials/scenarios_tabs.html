@@ -1013,10 +1013,6 @@
 
   function resolveScenarioNameFromUrlOrHidden(){
     try {
-      const liveScenarios = (window.state && Array.isArray(window.state.scenarios)) ? window.state.scenarios : [];
-      if (!liveScenarios.length) return '';
-    } catch (e) {}
-    try {
       const params = new URLSearchParams(window.location.search || '');
       const qp = (params.get('scenario') || '').trim();
       if (qp) return qp;
@@ -1027,6 +1023,21 @@
       if (val) return val;
     } catch (e) {}
     return '';
+  }
+
+  function resolveScenarioNameForTabNavigation(){
+    // The Topology page exposes window.state, but Flow and Preview do not.  The
+    // active scenario must therefore be recoverable without the editor state.
+    try {
+      const params = new URLSearchParams(window.location.search || '');
+      const qp = (params.get('scenario') || '').trim();
+      if (qp) return qp;
+    } catch (e) {}
+    try {
+      const saved = getLastSelectedScenario();
+      if (saved) return saved;
+    } catch (e) {}
+    return resolveScenarioNameFromUrlOrHidden();
   }
 
   function syncScenarioTabLinks(scenarioName){
@@ -1082,19 +1093,14 @@
           // ignore
         }
       });
+      // Keep reloads and browser history on the same scenario as the tab links.
+      syncCurrentScenarioUrl(scen, xmlPath);
     } catch (e) {}
   }
 
   async function ensureScenarioPersistedAndTabsSynced(){
     try {
-      const hasScenarios = !!(window.state && Array.isArray(window.state.scenarios) && window.state.scenarios.length);
-      const scen = hasScenarios ? (resolveScenarioNameFromUrlOrHidden() || getLastSelectedScenario()) : '';
-      if (!hasScenarios) {
-        try {
-          const hidden = document.getElementById('scenariosPreviewScenario');
-          if (hidden) hidden.value = '';
-        } catch (e) {}
-      }
+      const scen = resolveScenarioNameForTabNavigation();
       if (scen) setLastSelectedScenario(scen);
       if (scen) {
         try { await refreshScenarioStateFromXml(scen, { updateHidden: true }); } catch (e) {}
