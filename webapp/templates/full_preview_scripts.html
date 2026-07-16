@@ -16,6 +16,7 @@
     var previewData = {};
     var planFlow = null;
     var flowSourceOk = true;
+    let scenarioMeta = { scenario: '', xml_basename: '' };
 
     const flowNodeFlagModalEl = document.getElementById('flowNodeFlagModal');
     const flowNodeFlagModalTitleEl = document.getElementById('flowNodeFlagModalTitle');
@@ -47,6 +48,21 @@
     }
 
     syncSavedXmlGroundTruthAlert();
+
+    function buildScenarioUrl(basePath) {
+      if (!basePath || typeof basePath !== 'string') return basePath;
+      const scen = (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '').trim();
+      if (!scen) return basePath;
+      try {
+        const isAbsolute = /^https?:/i.test(basePath);
+        const url = new URL(basePath, window.location.origin);
+        url.searchParams.set('scenario', scen);
+        return isAbsolute ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
+      } catch (e) {
+        const sep = basePath.includes('?') ? '&' : '?';
+        return `${basePath}${sep}scenario=${encodeURIComponent(scen)}`;
+      }
+    }
 
     function toRoman(num) {
       const n = Number(num);
@@ -619,7 +635,7 @@
       if (!Array.isArray(hitlConfig.interfaces)) {
         hitlConfig.interfaces = [];
       }
-      let scenarioMeta = { scenario: null, xml_basename: '' };
+      scenarioMeta = { scenario: null, xml_basename: '' };
       const scenarioMetaEl = document.getElementById('fpScenarioMetaJson');
       if (scenarioMetaEl) {
         try {
@@ -639,23 +655,6 @@
           ? scenarioNameRaw.trim()
           : (xmlBaseNameRaw || '__default__'));
       hitlConfig.scenario_key = scenarioKey;
-
-
-      // Make buildScenarioUrl globally available for all scripts (including execute/redirect logic)
-      function buildScenarioUrl(basePath) {
-        if (!basePath || typeof basePath !== 'string') return basePath;
-        const scen = (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '').trim();
-        if (!scen) return basePath;
-        try {
-          const isAbsolute = /^https?:/i.test(basePath);
-          const url = new URL(basePath, window.location.origin);
-          url.searchParams.set('scenario', scen);
-          return isAbsolute ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
-        } catch (e) {
-          const sep = basePath.includes('?') ? '&' : '?';
-          return `${basePath}${sep}scenario=${encodeURIComponent(scen)}`;
-        }
-      }
 
       // Simple graph using d3-force (assumes d3 is loaded in base template). Fallback to textual if not.
       function normalizeVulnerabilitiesByNode(source) {
@@ -3292,12 +3291,6 @@
         if (animate === true) { bar.classList.add('progress-bar-animated', 'progress-bar-striped'); }
         else if (animate === false) { bar.classList.remove('progress-bar-animated', 'progress-bar-striped'); }
       }
-      try {
-        const hideBtn = document.getElementById('executeProgressHideBtn');
-        if (hideBtn) {
-          hideBtn.textContent = (animate === false) ? 'Close' : 'Hide';
-        }
-      } catch (e) { }
     }
 
     function openExecuteProgress(title) {
@@ -3528,8 +3521,8 @@
               const runSucceeded = didExecuteRunSucceed(data);
               const runCode = getExecuteRunReturnCode(data);
               if (runSucceeded) {
-                appendExecuteProgressLog('Execution complete: success; redirecting to Reports');
-                setExecuteProgressUI({ status: 'Scenario started', meta: 'Completed', barText: 'Done', animate: false });
+                appendExecuteProgressLog('Execution complete: success; generating execution summary');
+                setExecuteProgressUI({ status: 'Generating Execution Summary', meta: 'Preparing Reports…', barText: 'Generating Summary…', animate: true });
                 try {
                   const reportsHref = buildScenarioUrl("{{ url_for('reports_page') }}");
                   setTimeout(() => {
@@ -3648,8 +3641,8 @@
                           const retryRunSucceeded = didExecuteRunSucceed(data2);
                           const retryRunCode = getExecuteRunReturnCode(data2);
                           if (retryRunSucceeded) {
-                        appendExecuteProgressLog('Execution complete: success; redirecting to Reports');
-                        setExecuteProgressUI({ status: 'Scenario started', meta: 'Completed', barText: 'Done', animate: false });
+                        appendExecuteProgressLog('Execution complete: success; generating execution summary');
+                        setExecuteProgressUI({ status: 'Generating Execution Summary', meta: 'Preparing Reports…', barText: 'Generating Summary…', animate: true });
                         try {
                           const reportsHref = buildScenarioUrl("{{ url_for('reports_page') }}");
                           setTimeout(() => {

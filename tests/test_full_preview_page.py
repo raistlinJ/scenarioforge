@@ -108,6 +108,24 @@ def test_embedded_preview_executes_in_place_instead_of_redirecting_to_topology()
     assert "'?auto_execute=1'" not in text
 
 
+def test_full_preview_execute_redirect_has_an_outer_scope_scenario_url_builder() -> None:
+    text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    assert "let scenarioMeta = { scenario: '', xml_basename: '' };" in text
+    assert text.index('function buildScenarioUrl(basePath) {') < text.index('function init() {')
+    assert text.count('function buildScenarioUrl(basePath) {') == 1
+    assert text.count('const reportsHref = buildScenarioUrl') == 2
+
+
+def test_preview_execution_modal_shows_summary_generation_and_cannot_be_hidden() -> None:
+    page_text = (Path(__file__).resolve().parent.parent / 'webapp' / 'templates' / 'full_preview.html').read_text(encoding='utf-8', errors='ignore')
+    script_text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    assert 'id="executeProgressHideBtn"' not in page_text
+    assert script_text.count("status: 'Generating Execution Summary'") == 2
+    assert "id('executeProgressHideBtn')" not in script_text
+
+
 def test_full_preview_page_includes_saved_xml_warning_banner() -> None:
     html_text = (Path(__file__).resolve().parent.parent / 'webapp' / 'templates' / 'full_preview.html').read_text(encoding='utf-8', errors='ignore')
 
