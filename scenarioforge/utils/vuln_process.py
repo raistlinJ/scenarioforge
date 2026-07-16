@@ -2103,6 +2103,27 @@ def _copy_path_replace_wrong_type(src_path: str, dst_path: str) -> None:
 		shutil.copy2(src_path, dst_path)
 
 
+def _restore_executable_support_script(dst_path: str) -> None:
+	"""Restore execute bits for a staged, shebang-based catalog support script.
+
+	Older catalog installs used a safe ZIP extractor that did not restore Unix
+	permission bits.  A bind-mounted CGI file consequently reached Apache as a
+	non-executable regular file and failed with a generic CGI error.  Restrict the
+	repair to files that explicitly declare an interpreter, so data files are not
+	made executable.
+	"""
+	try:
+		if not os.path.isfile(dst_path):
+			return
+		with open(dst_path, 'rb') as handle:
+			if handle.read(2) != b'#!':
+				return
+		mode = os.stat(dst_path).st_mode
+		os.chmod(dst_path, mode | 0o111)
+	except Exception:
+		pass
+
+
 def _compose_env_file_example_candidates(src_dir: str, rel_path: str) -> List[str]:
 	rel_norm = os.path.normpath(rel_path)
 	parent, filename = os.path.split(rel_norm)
@@ -2196,6 +2217,7 @@ def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, ba
 			dst_path = os.path.normpath(os.path.join(base_dir, rel))
 			try:
 				_copy_path_replace_wrong_type(src_path, dst_path)
+				_restore_executable_support_script(dst_path)
 			except Exception:
 				# Best-effort: continue even if some optional paths fail.
 				pass

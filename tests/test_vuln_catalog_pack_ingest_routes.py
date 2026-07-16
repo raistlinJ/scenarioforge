@@ -18,6 +18,20 @@ def _make_zip(files: dict[str, str | bytes]) -> bytes:
     return buf.getvalue()
 
 
+def test_safe_vuln_catalog_zip_extraction_preserves_regular_executable_bits(tmp_path):
+    archive_path = tmp_path / 'catalog.zip'
+    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        info = zipfile.ZipInfo('bash/CVE-2014-6271/victim.cgi')
+        info.create_system = 3  # Unix permissions are stored in external_attr.
+        info.external_attr = 0o100755 << 16
+        archive.writestr(info, '#!/bin/bash\necho vulnerable\n')
+
+    extracted_dir = tmp_path / 'content'
+    backend._safe_extract_zip_to_dir(str(archive_path), str(extracted_dir))
+
+    assert (extracted_dir / 'bash/CVE-2014-6271/victim.cgi').stat().st_mode & 0o777 == 0o755
+
+
 def _login(client):
     resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
     assert resp.status_code in (200, 302)

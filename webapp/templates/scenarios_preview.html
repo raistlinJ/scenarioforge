@@ -442,7 +442,9 @@
 
 
 
-      // Shared Scenarios Execute button: hand off to Topology execution flow.
+      // Shared Scenarios Execute button: run inside the embedded Full Preview.
+      // This keeps the user on Preview after a cancellation or failed run so it
+      // can be inspected and executed again without rebuilding the page.
       try {
         document.getElementById('scenariosExecuteBtn')?.addEventListener('click', async (ev) => {
           try {
@@ -467,22 +469,19 @@
               });
               if (!proceedWithSavedXml) return;
             }
-            const base = '/';
-            const url = base + '?xml_path=' + encodeURIComponent(xmlPath)
-              + (scenario ? ('&scenario=' + encodeURIComponent(scenario)) : '')
-              + '&auto_execute=1';
             // The preview iframe has its own initial-load modal.  Do not let
-            // that modal overlap the page-level navigation spinner used for
-            // Execute.
+            // that modal overlap the embedded execution progress modal.
             hideLoading('execute-navigation');
-            if (typeof window.CORETG_NAVIGATE_WITH_LOADING === 'function') {
-              window.CORETG_NAVIGATE_WITH_LOADING(url, {
-                title: 'Retrieving Page Details',
-                message: 'Retrieving page details…',
-              });
-            } else {
-              window.location.href = url;
+            const previewFrame = document.getElementById('scenariosPreviewFrame');
+            if (!previewFrame || !previewFrame.contentWindow) {
+              alert('Preview is still loading. Wait for it to finish, then execute.');
+              return;
             }
+            previewFrame.contentWindow.postMessage({
+              type: 'coretg-preview-execute',
+              scenario,
+              xmlPath,
+            }, window.location.origin);
           } catch (e) { }
         });
       } catch (e) { }

@@ -7426,7 +7426,20 @@
                 const btn = document.getElementById('scenariosExecuteBtn');
                 const action = (btn?.dataset?.coretgAction || '').toString().trim().toLowerCase();
                 if (action === 'continue') {
-                    const scenario = (btn?.dataset?.coretgScenario || '').toString().trim();
+                    // Prefer the live cross-page selection over the button's
+                    // server-rendered value.  The latter can belong to the
+                    // first project if the user selected a different project
+                    // after the Topology page was rendered.
+                    let scenario = '';
+                    try {
+                        scenario = (window.coretgGetLastSelectedScenario?.() || '').toString().trim();
+                    } catch (e) { scenario = ''; }
+                    if (!scenario) scenario = (btn?.dataset?.coretgScenario || '').toString().trim();
+                    try {
+                        if (scenario && typeof window.coretgSetActiveScenarioForNav === 'function') {
+                            window.coretgSetActiveScenarioForNav(scenario);
+                        }
+                    } catch (e) { }
                     // Clear the post-save continue state so returning to Topology doesn't stay "Continue" forever.
                     try { sessionStorage.removeItem('coretg_topology_continue_after_save_v3'); } catch (e) { }
                     const url = '/scenarios/flag-sequencing' + (scenario ? ('?scenario=' + encodeURIComponent(scenario)) : '');

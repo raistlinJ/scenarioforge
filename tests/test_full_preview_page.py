@@ -99,6 +99,15 @@ def test_full_preview_scripts_guard_execute_when_saved_xml_warning_is_active() -
     assert not missing, 'Missing saved-XML execute guard wiring in full_preview_scripts.html: ' + '; '.join(missing)
 
 
+def test_embedded_preview_executes_in_place_instead_of_redirecting_to_topology() -> None:
+    text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    assert "event.data?.type !== 'coretg-preview-execute'" in text
+    assert 'executeRunBtn.click();' in text
+    assert "Preview is an execution surface in its own right." in text
+    assert "'?auto_execute=1'" not in text
+
+
 def test_full_preview_page_includes_saved_xml_warning_banner() -> None:
     html_text = (Path(__file__).resolve().parent.parent / 'webapp' / 'templates' / 'full_preview.html').read_text(encoding='utf-8', errors='ignore')
 

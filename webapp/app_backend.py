@@ -45599,6 +45599,17 @@ def _safe_extract_zip_to_dir(zip_path: str, dest_dir: str) -> None:
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             with z.open(info, 'r') as src, open(out_path, 'wb') as dst:
                 dst.write(src.read())
+            # zipfile.extract() preserves the Unix mode stored in a ZIP entry,
+            # but this safe extractor writes entries manually to prevent path
+            # traversal. Restore only ordinary rwx bits so executable catalog
+            # support scripts (for example CGI files) remain executable while
+            # never restoring setuid, setgid, or sticky bits.
+            try:
+                unix_mode = (int(getattr(info, 'external_attr', 0)) >> 16) & 0o777
+                if unix_mode:
+                    os.chmod(out_path, unix_mode)
+            except Exception:
+                pass
 
 
 def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[dict[str, Any]], list[dict[str, Any]]]:
