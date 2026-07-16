@@ -3364,61 +3364,219 @@
       executeProgressRunId = null;
     }
 
+    function renderExecuteSummaryItem(label, ok, detail, items = []) {
+      const row = document.createElement('li');
+      row.className = 'list-group-item d-flex align-items-start gap-2';
+      const icon = document.createElement('span');
+      icon.className = 'me-1';
+      icon.textContent = ok ? '✅' : '❌';
+      const body = document.createElement('div');
+      body.className = 'flex-grow-1';
+      const title = document.createElement('div');
+      title.className = 'fw-semibold';
+      title.textContent = label;
+      const meta = document.createElement('div');
+      meta.className = 'small text-muted';
+      meta.textContent = detail || (ok ? 'OK' : 'Needs attention');
+      body.append(title, meta);
+      const detailsItems = Array.isArray(items) ? items.filter(Boolean) : [];
+      const details = document.createElement('details');
+      details.className = 'mt-2';
+      const summary = document.createElement('summary');
+      summary.className = 'small';
+      summary.textContent = detailsItems.length ? `Details (${detailsItems.length})` : 'Details (none)';
+      const list = document.createElement('ul');
+      list.className = 'small text-muted mt-2 mb-0';
+      if (detailsItems.length) {
+        detailsItems.forEach((item) => {
+          const entry = document.createElement('li');
+          if (item && typeof item === 'object' && item.url) {
+            const link = document.createElement('a');
+            link.href = String(item.url);
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = String(item.label || item.text || item.url);
+            entry.appendChild(link);
+          } else {
+            entry.textContent = String(item);
+          }
+          list.appendChild(entry);
+        });
+      } else {
+        const entry = document.createElement('li');
+        entry.textContent = 'None';
+        list.appendChild(entry);
+      }
+      details.append(summary, list);
+      body.appendChild(details);
+      row.append(icon, body);
+      return row;
+    }
+
+    function normalizeExecuteRunError(value) {
+      const message = String(value || '').trim();
+      return message.toLowerCase().includes('did not reach runtime') && message.toLowerCase().includes('state=configuration')
+        ? 'CORE session stayed in "configuration"'
+        : message;
+    }
+
+    function renderExecuteSummary(runStatus) {
+      const statusEl = document.getElementById('executeSummaryStatus');
+      const listEl = document.getElementById('executeSummaryList');
+      const spinnerEl = document.getElementById('executeSummarySpinner');
+      if (!statusEl || !listEl) return;
+      listEl.replaceChildren();
+      const summary = runStatus?.validation_summary && typeof runStatus.validation_summary === 'object'
+        ? runStatus.validation_summary : null;
+      const count = (key) => Array.isArray(summary?.[key]) ? summary[key].length : 0;
+      const values = (key) => Array.isArray(summary?.[key]) ? summary[key].filter(Boolean) : [];
+      if (!summary) {
+        statusEl.textContent = 'Validation summary unavailable for this run.';
+        spinnerEl?.classList.add('d-none');
+        listEl.appendChild(renderExecuteSummaryItem(
+          'Session validation unavailable', false,
+          normalizeExecuteRunError(runStatus?.error) || 'Post-run validation did not return a summary.'
+        ));
+        return;
+      }
+      if (summary.validation_unavailable) {
+        statusEl.textContent = 'Validation unavailable for this run.';
+        spinnerEl?.classList.add('d-none');
+        listEl.appendChild(renderExecuteSummaryItem(
+          'Session validation unavailable', false,
+          String(summary.error || 'Post-run session XML could not be exported.'),
+          values('validation_unavailable_details')
+        ));
+        return;
+      }
+      spinnerEl?.classList.add('d-none');
+      const returnCode = Number(runStatus?.returncode);
+      const hasReturnCode = Number.isFinite(returnCode);
+      const runFailed = (hasReturnCode && returnCode !== 0) || !!runStatus?.error;
+      statusEl.textContent = runFailed
+        ? 'Run failed during initialization or execution.'
+        : (summary.ok === true ? 'All validation checks passed.' : 'Validation checks found issues.');
+      if (runFailed) {
+        const details = [
+          normalizeExecuteRunError(runStatus?.error),
+          normalizeExecuteRunError(runStatus?.error_detail),
+          runStatus?.error_code ? `code: ${runStatus.error_code}` : '',
+          hasReturnCode ? `return code: ${returnCode}` : '',
+        ].filter((value, index, all) => value && all.indexOf(value) === index);
+        listEl.appendChild(renderExecuteSummaryItem(
+          'Run initialization/execution status', false,
+          details[0] || 'Run failed before completing startup.', details
+        ));
+      }
+      const errorLogs = values('error_logs').filter((item) => item && typeof item === 'object' && item.url);
+      if (errorLogs.length) {
+        listEl.appendChild(renderExecuteSummaryItem('Error logs', false, `${errorLogs.length} log file(s) available for download`, errorLogs));
+      }
+      const expectedDocker = count('expected_docker_nodes');
+      if (expectedDocker) {
+        listEl.appendChild(renderExecuteSummaryItem(
+          'Expected docker nodes present', count('missing_docker_nodes') === 0,
+          count('missing_docker_nodes') ? `${count('missing_docker_nodes')} missing` : `${expectedDocker} expected`,
+          values('missing_docker_nodes')
+        ));
+        listEl.appendChild(renderExecuteSummaryItem(
+          'Unexpected docker nodes', count('extra_docker_nodes') === 0,
+          count('extra_docker_nodes') ? `${count('extra_docker_nodes')} unexpected` : 'None',
+          values('extra_docker_nodes')
+        ));
+      }
+      const expectedVulns = count('expected_vuln_nodes');
+      if (expectedVulns) {
+        listEl.appendChild(renderExecuteSummaryItem(
+          'Expected vulnerability nodes present', count('missing_vuln_nodes') === 0,
+          count('missing_vuln_nodes') ? `${count('missing_vuln_nodes')} missing` : `${expectedVulns} expected`,
+          count('missing_vuln_nodes') ? values('missing_vuln_nodes') : values('expected_vuln_nodes')
+        ));
+      }
+      listEl.appendChild(renderExecuteSummaryItem(
+        'Expected nodes created', count('missing_nodes') === 0,
+        count('missing_nodes') ? `${count('missing_nodes')} missing` : 'All expected nodes present',
+        count('missing_nodes') ? values('missing_nodes') : (values('actual_nodes_detail').length ? values('actual_nodes_detail') : values('expected_nodes'))
+      ));
+      listEl.appendChild(renderExecuteSummaryItem(
+        'No unexpected nodes', count('extra_nodes') === 0,
+        count('extra_nodes') ? `${count('extra_nodes')} unexpected` : 'No extras detected',
+        count('extra_nodes') ? values('extra_nodes') : values('actual_nodes')
+      ));
+      const dockerNodes = count('docker_nodes');
+      if (dockerNodes) {
+        listEl.appendChild(renderExecuteSummaryItem('Docker containers present', count('docker_missing') === 0,
+          count('docker_missing') ? `${count('docker_missing')} missing` : `${dockerNodes} containers detected`,
+          count('docker_missing') ? values('docker_missing') : values('docker_nodes')));
+        listEl.appendChild(renderExecuteSummaryItem('Docker containers running', count('docker_not_running') === 0,
+          count('docker_not_running') ? `${count('docker_not_running')} not running` : 'All containers running',
+          count('docker_not_running') ? values('docker_not_running') : values('docker_running')));
+        listEl.appendChild(renderExecuteSummaryItem('Docker startup pending (transient)', true,
+          count('docker_start_pending') ? `${count('docker_start_pending')} container(s) still starting` : 'None',
+          values('docker_start_pending')));
+        const expectedInjectFiles = values('inject_files_expected');
+        const expectedByNode = summary.inject_files_expected_by_node && typeof summary.inject_files_expected_by_node === 'object'
+          ? summary.inject_files_expected_by_node : {};
+        const missingInjects = values('injects_missing');
+        const injectDetails = missingInjects.length
+          ? missingInjects.map((node) => {
+              const expectedForNode = Array.isArray(expectedByNode[node]) ? expectedByNode[node] : expectedInjectFiles;
+              return `${node}: expected ${expectedForNode.join(', ') || 'injects/sources'}`;
+            })
+          : (values('injects_detail').length ? values('injects_detail') : expectedInjectFiles);
+        listEl.appendChild(renderExecuteSummaryItem('Injected files present', missingInjects.length === 0,
+          missingInjects.length ? `${missingInjects.length} containers missing injects/sources` : 'Injects detected', injectDetails));
+        const generatorDetail = values('generator_validation_detail');
+        const detailFor = (field, fallback) => generatorDetail.length
+          ? generatorDetail.map((entry) => {
+              const files = Array.isArray(entry?.[field]) ? entry[field].filter(Boolean) : [];
+              if (!files.length) return '';
+              return `${entry.generator_type || 'generator'} ${entry.generator_name || entry.generator_id || entry.node_id || ''}: ${files.join(', ')}`;
+            }).filter(Boolean)
+          : values(fallback);
+        listEl.appendChild(renderExecuteSummaryItem('Generator outputs present on CORE VM', count('generator_outputs_missing') === 0,
+          count('generator_outputs_missing') ? `${count('generator_outputs_missing')} output(s) missing` : 'All outputs present',
+          detailFor(count('generator_outputs_missing') ? 'outputs_missing' : 'outputs_checked', 'generator_outputs_missing')));
+        listEl.appendChild(renderExecuteSummaryItem('Generator inject sources present on CORE VM', count('generator_injects_missing') === 0,
+          count('generator_injects_missing') ? `${count('generator_injects_missing')} inject source(s) missing` : 'All inject sources present',
+          detailFor(count('generator_injects_missing') ? 'inject_missing' : 'inject_checked', 'generator_injects_missing')));
+        const liveMissing = values('flow_live_paths_missing');
+        const liveMissingCount = Number.isFinite(Number(summary.flow_live_paths_missing_count))
+          ? Number(summary.flow_live_paths_missing_count) : liveMissing.length;
+        listEl.appendChild(renderExecuteSummaryItem('Flow live paths present', liveMissingCount === 0,
+          liveMissingCount ? `${liveMissingCount} missing` : 'All live paths present', liveMissing));
+      } else if (expectedDocker) {
+        listEl.appendChild(renderExecuteSummaryItem('Docker containers detected', false, 'No docker nodes found in session XML'));
+      }
+    }
+
+    function buildExecuteSummaryText(runStatus) {
+      const summary = runStatus?.validation_summary && typeof runStatus.validation_summary === 'object'
+        ? runStatus.validation_summary : {};
+      const count = (key) => Array.isArray(summary[key]) ? summary[key].length : 0;
+      return [
+        'ScenarioForge Execution Summary',
+        `Return code: ${Number.isFinite(Number(runStatus?.returncode)) ? Number(runStatus.returncode) : 'unknown'}`,
+        `Validation: ${summary.ok === true ? 'passed' : 'needs attention'}`,
+        `Missing nodes: ${count('missing_nodes')}`,
+        `Unexpected nodes: ${count('extra_nodes')}`,
+        `Missing Docker containers: ${count('docker_missing')}`,
+        `Docker containers not running: ${count('docker_not_running')}`,
+        `Missing injects: ${count('injects_missing')}`,
+        `Missing generator outputs: ${count('generator_outputs_missing')}`,
+        `Missing generator injects: ${count('generator_injects_missing')}`,
+        `Missing flow live paths: ${count('flow_live_paths_missing')}`,
+      ].join('\n');
+    }
+
     function presentExecuteSummary(runStatus, reportsHref) {
       const modalEl = document.getElementById('executeSummaryModal');
-      const statusEl = document.getElementById('executeSummaryStatus');
-      const checksEl = document.getElementById('executeSummaryChecks');
-      if (!modalEl || !checksEl || !window.bootstrap) {
+      const listEl = document.getElementById('executeSummaryList');
+      if (!modalEl || !listEl || !window.bootstrap) {
         navigateToReports(reportsHref);
         return;
       }
-      const summary = runStatus?.validation_summary && typeof runStatus.validation_summary === 'object'
-        ? runStatus.validation_summary
-        : null;
-      const count = (key) => Array.isArray(summary?.[key]) ? summary[key].length : 0;
-      const addCheck = (label, ok, detail) => {
-        const row = document.createElement('label');
-        row.className = 'd-flex align-items-start gap-2 border rounded p-2';
-        const input = document.createElement('input');
-        input.type = 'checkbox';
-        input.className = 'form-check-input mt-1';
-        input.checked = !!ok;
-        input.disabled = true;
-        const body = document.createElement('span');
-        body.className = 'small';
-        const title = document.createElement('span');
-        title.className = 'fw-semibold d-block';
-        title.textContent = label;
-        const meta = document.createElement('span');
-        meta.className = 'text-muted d-block';
-        meta.textContent = detail;
-        body.append(title, meta);
-        row.append(input, body);
-        checksEl.appendChild(row);
-      };
-
-      checksEl.replaceChildren();
-      const returnCode = Number(runStatus?.returncode);
-      addCheck('Execution completed', Number.isFinite(returnCode) ? returnCode === 0 : true,
-        Number.isFinite(returnCode) ? `CLI exit code ${returnCode}` : 'Run completed successfully.');
-      if (!summary) {
-        if (statusEl) statusEl.textContent = 'The scenario completed, but no validation summary was returned.';
-        addCheck('Session validation', false, 'Validation summary unavailable. See Reports for run artifacts.');
-      } else {
-        if (statusEl) statusEl.textContent = summary.ok === true
-          ? 'Execution and post-run validation completed successfully.'
-          : 'Execution completed; review the validation checks below.';
-        addCheck('Session validation', summary.ok === true,
-          summary.ok === true ? 'All post-run checks passed.' : String(summary.error || 'One or more checks need attention.'));
-        addCheck('Expected topology nodes', count('missing_nodes') === 0,
-          count('missing_nodes') === 0 ? 'All expected nodes are present.' : `${count('missing_nodes')} expected node(s) missing.`);
-        const dockerIssues = count('docker_missing') + count('docker_not_running');
-        addCheck('Docker runtime', dockerIssues === 0,
-          dockerIssues === 0 ? 'Docker nodes are available.' : `${dockerIssues} Docker runtime issue(s) found.`);
-        const injectIssues = count('injects_missing') + count('generator_injects_missing');
-        addCheck('Generator injects', injectIssues === 0,
-          injectIssues === 0 ? 'Required generated injects are present.' : `${injectIssues} inject source issue(s) found.`);
-      }
+      renderExecuteSummary(runStatus);
       executeSummaryReportsHref = reportsHref || '';
       const reportsBtn = document.getElementById('executeSummaryReportsBtn');
       if (reportsBtn && !reportsBtn.dataset.boundExecuteSummary) {
@@ -3427,6 +3585,15 @@
           if (executeSummaryReportsHref) navigateToReports(executeSummaryReportsHref);
         });
       }
+      const copyBtn = document.getElementById('executeSummaryCopyBtn');
+      if (copyBtn && !copyBtn.dataset.boundExecuteSummary) {
+        copyBtn.dataset.boundExecuteSummary = '1';
+        copyBtn.addEventListener('click', async () => {
+          const text = buildExecuteSummaryText(copyBtn._runStatus);
+          try { await navigator.clipboard.writeText(text); } catch (e) { window.prompt('Copy execution summary:', text); }
+        });
+      }
+      if (copyBtn) copyBtn._runStatus = runStatus;
       executeSummaryModalInst = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
       const progressEl = document.getElementById('executeProgressModal');
       const showSummary = () => executeSummaryModalInst?.show();

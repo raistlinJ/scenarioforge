@@ -4,7 +4,8 @@
 {% block header_icon %}<i class="bi bi-bezier2 fs-4"></i>{% endblock %}
 {% block header_title %}Flag Sequencing{% endblock %}
 {% block extra_head %}
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script async src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"
+  onload="window.dispatchEvent(new Event('coretg-mermaid-ready'))"></script>
 <style>
   body {
     padding-bottom: 0;
@@ -6655,7 +6656,7 @@
             const wrap = document.getElementById('flowDiagram');
             if (wrap && wrap.querySelector('svg')) hideFlowDiagramWait();
           } catch (e) { }
-        } else if (retryAttempt < 20 && Array.isArray(currentChain) && currentChain.length) {
+        } else if (retryAttempt < 2 && Array.isArray(currentChain) && currentChain.length) {
           queueMermaidRenderRetry(retryAttempt + 1);
         }
       } catch (e) { }
@@ -10456,7 +10457,7 @@
         try {
           const renderedText = String(wrap.textContent || '').toLowerCase();
           if (renderedText.includes('syntax error in text')) {
-            if (Array.isArray(currentChain) && currentChain.length && attempt < 20) {
+            if (Array.isArray(currentChain) && currentChain.length && attempt < 2) {
               showFlowDiagramWait('Please wait, rendering visualization…');
               queueMermaidRenderRetry(attempt + 1);
               return;
@@ -10476,13 +10477,14 @@
           }, 0);
         } catch (e) { hideFlowDiagramWait(); }
       } else {
-        showFlowDiagramWait('Please wait, rendering visualization…');
-        queueMermaidRenderRetry(attempt);
+        hideFlowDiagramWait();
+        wrap.textContent = 'Diagram renderer is loading. Chain details are available below.';
+        wrap.removeAttribute('data-processed');
       }
     } catch (e) {
       try {
         if (Array.isArray(currentChain) && currentChain.length) {
-          if (attempt < 20) {
+          if (attempt < 2) {
             showFlowDiagramWait('Please wait, rendering visualization…');
             queueMermaidRenderRetry(attempt + 1);
             return;
@@ -10500,6 +10502,14 @@
       }
     }
   }
+
+  window.addEventListener('coretg-mermaid-ready', () => {
+    try {
+      if (Array.isArray(currentChain) && currentChain.length) {
+        renderMermaid(buildMermaid(currentChain));
+      }
+    } catch (e) { }
+  });
 
   function shouldOfferBestEffort(err) {
     try {
