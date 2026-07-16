@@ -3,6 +3,20 @@ from pathlib import Path
 
 FLOW_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "flow.html"
 REPORTS_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "reports.html"
+LAYOUT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "layout.html"
+SCENARIOS_PREVIEW_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "scenarios_preview.html"
+
+
+def test_embedded_preview_does_not_show_a_second_navigation_spinner_on_execute() -> None:
+    layout_text = LAYOUT_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    preview_text = SCENARIOS_PREVIEW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "{% if not hide_chrome %}\n    <div class=\"coretg-loading-overlay\"" in layout_text
+    assert "{% endif %}\n\n    <!-- CORE Daemon Start Modal -->" in layout_text
+    assert "hideLoading('execute-navigation');" in preview_text
+    assert preview_text.index("hideLoading('execute-navigation');") < preview_text.index(
+        "window.CORETG_NAVIGATE_WITH_LOADING(url,"
+    )
 
 
 def test_flow_assignment_persists_resolved_paths() -> None:
