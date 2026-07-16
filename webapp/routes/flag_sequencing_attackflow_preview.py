@@ -197,6 +197,17 @@ def register(app, *, backend_module: Any) -> None:
         except Exception:
             flow_state_from_xml = None
 
+        # Reports and guide exports use ``prefer_flow``.  Do not reinterpret an
+        # invalid saved Flow as a longer generated chain: that silently changes
+        # the facilitator guide from what was executed.
+        if prefer_flow and isinstance(flow_state_from_xml, dict):
+            try:
+                flow_ok, flow_error = backend._flow_validate_state_against_preview(flow_state_from_xml, preview)
+            except Exception as exc:
+                flow_ok, flow_error = False, f'Unable to validate saved FlowState: {exc}'
+            if not flow_ok:
+                return jsonify({'ok': False, 'error': flow_error}), 422
+
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
         required_vulnerability_count = 0
