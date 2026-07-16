@@ -1890,6 +1890,17 @@
     try {
       const scen = (scenarioName || '').toString().trim();
       if (scen) setLastSelectedScenario(scen);
+      // Topology's fixed Continue button is not a tab link, so keep its
+      // destination in sync when the active project changes in the editor.
+      // Without this, it can retain the server-rendered first scenario even
+      // though the navbar correctly reflects the newly selected project.
+      try {
+        const btn = document.getElementById('scenariosExecuteBtn');
+        const action = (btn?.dataset?.coretgAction || '').toString().trim().toLowerCase();
+        if (btn && scen && (action === 'continue' || action === 'continue-topology')) {
+          btn.dataset.coretgScenario = scen;
+        }
+      } catch (e) {}
       syncScenarioTabLinks(scen);
     } catch (e) {}
   };

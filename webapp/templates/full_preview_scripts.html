@@ -3389,7 +3389,9 @@
       executeRunBtn.addEventListener('click', async () => {
         if (executing) return;
 
-        // Always delegate to the Topology Execute flow so the UX and backend path are consistent.
+        // Preview is an execution surface in its own right.  Keeping the run
+        // here lets a cancelled or failed execution remain on Preview for an
+        // immediate retry rather than navigating back to Topology.
         try {
           const scen = (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '{{ (scenario or "")|e }}').trim();
           const proceedWithSavedXml = await ((window.top || window).coretgConfirmSavedXmlGroundTruth?.('Execute', {
@@ -3400,17 +3402,6 @@
           if (!proceedWithSavedXml) {
             return;
           }
-          const baseUrl = '{{ url_for("index") }}';
-          const url = baseUrl
-            + '?auto_execute=1'
-            + '&xml_path=' + encodeURIComponent('{{ xml_path }}')
-            + (scen ? ('&scenario=' + encodeURIComponent(scen)) : '');
-          if (typeof (window.top || window).CORETG_NAVIGATE_PAGE_DETAILS === 'function') {
-            (window.top || window).CORETG_NAVIGATE_PAGE_DETAILS(url);
-          } else {
-            (window.top || window).location.href = url;
-          }
-          return;
         } catch (e) { }
 
         const confirmMsg = 'Execute scenario now? This will invoke the CLI and start a CORE session.';
@@ -3699,6 +3690,17 @@
           if (originalLabel) { executeRunBtn.textContent = originalLabel; }
           executing = false;
         }
+      });
+
+      // The parent Preview page owns the visible Execute button while this
+      // embedded document owns the execution progress UI.
+      window.addEventListener('message', (event) => {
+        try {
+          if (event.origin !== window.location.origin) return;
+          if (window.parent === window || event.source !== window.parent) return;
+          if (event.data?.type !== 'coretg-preview-execute') return;
+          executeRunBtn.click();
+        } catch (e) { }
       });
     }
   })();

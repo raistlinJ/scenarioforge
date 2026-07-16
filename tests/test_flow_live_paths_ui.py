@@ -14,9 +14,8 @@ def test_embedded_preview_does_not_show_a_second_navigation_spinner_on_execute()
     assert "{% if not hide_chrome %}\n    <div class=\"coretg-loading-overlay\"" in layout_text
     assert "{% endif %}\n\n    <!-- CORE Daemon Start Modal -->" in layout_text
     assert "hideLoading('execute-navigation');" in preview_text
-    assert preview_text.index("hideLoading('execute-navigation');") < preview_text.index(
-        "window.CORETG_NAVIGATE_WITH_LOADING(url,"
-    )
+    assert "type: 'coretg-preview-execute'" in preview_text
+    assert "&auto_execute=1" not in preview_text
 
 
 def test_flow_assignment_persists_resolved_paths() -> None:
