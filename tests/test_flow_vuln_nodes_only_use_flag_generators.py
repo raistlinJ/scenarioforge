@@ -1,7 +1,9 @@
+import json
 import os
 import shutil
 import tempfile
 import uuid
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -148,8 +150,8 @@ def test_attackflow_preview_docker_only_uses_flag_node_generators(monkeypatch: p
         shutil.rmtree(plan_dir, ignore_errors=True)
 
 
-def test_attackflow_preview_uses_only_vuln_when_length_equals_vuln_count(monkeypatch: pytest.MonkeyPatch):
-    """Mandatory vulnerabilities consume the requested total chain length."""
+def test_attackflow_preview_rejects_stale_flow_missing_required_vulnerability(monkeypatch: pytest.MonkeyPatch):
+    """Exports must not silently expand an incompatible saved Flow."""
     scenario = f"zz-required-vuln-{uuid.uuid4().hex[:8]}"
     full_preview = {
         "seed": 5,
@@ -169,7 +171,13 @@ def test_attackflow_preview_uses_only_vuln_when_length_equals_vuln_count(monkeyp
         "chain": [{"id": "worker", "name": "worker", "type": "docker"}],
         "flag_assignments": [{"node_id": "worker", "id": "nodegen", "type": "flag-node-generator"}],
     }
-    xml_path, plan_dir = _seed_xml_plan_for_vuln_test(scenario, full_preview, stale_flow)
+    xml_path, plan_dir = _seed_xml_plan_for_vuln_test(scenario, full_preview)
+    tree = ET.parse(xml_path)
+    editor = tree.getroot().find("Scenario/ScenarioEditor")
+    assert editor is not None
+    sequencing = ET.SubElement(editor, "FlagSequencing")
+    ET.SubElement(sequencing, "FlowState").text = json.dumps(stale_flow)
+    tree.write(xml_path, encoding="utf-8", xml_declaration=True)
 
     def _fake_assignments(_preview, chain_nodes, _scenario_label, **_kwargs):
         return [
@@ -200,9 +208,8 @@ def test_attackflow_preview_uses_only_vuln_when_length_equals_vuln_count(monkeyp
             query_string={"scenario": scenario, "length": 1, "preview_plan": xml_path, "prefer_flow": "1"},
         )
         data = resp.get_json() or {}
-        assert resp.status_code == 200, data
-        assert [node.get("id") for node in data.get("chain", [])] == ["web"]
-        assert [assignment.get("type") for assignment in data.get("flag_assignments", [])] == ["flag-generator"]
+        assert resp.status_code == 422, data
+        assert "missing required vulnerability node" in str(data.get("error") or "").lower()
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
 

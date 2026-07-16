@@ -34065,6 +34065,20 @@ def _update_flow_state_in_xml(xml_path: str, scenario_label: str | None, flow_st
         return False, 'ScenarioEditor not found'
 
     try:
+        preview_el = se_target.find('PlanPreview')
+        preview_raw = str(preview_el.text or '').strip() if preview_el is not None else ''
+        preview_payload = json.loads(preview_raw) if preview_raw else None
+        full_preview = preview_payload.get('full_preview') if isinstance(preview_payload, dict) else None
+        if isinstance(full_preview, dict):
+            flow_ok, flow_error = _flow_validate_state_against_preview(flow_state, full_preview)
+            if not flow_ok:
+                return False, flow_error
+    except json.JSONDecodeError:
+        return False, 'PlanPreview is not valid JSON; cannot validate FlowState placement.'
+    except Exception as exc:
+        return False, f'Failed to validate FlowState placement: {exc}'
+
+    try:
         fs_el = se_target.find('FlagSequencing')
         if fs_el is None:
             fs_el = ET.SubElement(se_target, 'FlagSequencing')
@@ -34078,6 +34092,82 @@ def _update_flow_state_in_xml(xml_path: str, scenario_label: str | None, flow_st
         return True, 'ok'
     except Exception as e:
         return False, f'failed to update xml: {e}'
+
+
+def _flow_validate_state_against_preview(
+    flow_state: dict[str, Any],
+    full_preview: dict[str, Any],
+) -> tuple[bool, str]:
+    """Validate a saved Flow against the topology it will be executed on.
+
+    FlowState is persisted independently from PlanPreview, so this guard prevents a
+    stale chain from being accepted and later expanded into a different guide or
+    execution plan.  Every vulnerability node is mandatory, and generator kinds
+    must match their node roles.
+    """
+    if not isinstance(flow_state, dict) or not isinstance(full_preview, dict):
+        return False, 'FlowState and PlanPreview are required for validation.'
+    if ('flow_enabled' in flow_state) and not _coerce_bool(flow_state.get('flow_enabled')):
+        return True, ''
+
+    chain_ids = _flow_state_chain_ids(flow_state)
+    if not chain_ids:
+        return False, 'Flow chain is empty. Generate a valid sequence before saving.'
+
+    nodes, _links, _adj = _build_topology_graph_from_preview_plan(full_preview)
+    node_by_id = {
+        str(node.get('id') or '').strip(): node
+        for node in (nodes or [])
+        if isinstance(node, dict) and str(node.get('id') or '').strip()
+    }
+    if not node_by_id:
+        return False, 'PlanPreview has no topology nodes for Flow validation.'
+
+    unknown_ids = [node_id for node_id in chain_ids if node_id not in node_by_id]
+    if unknown_ids:
+        return False, f'Flow chain references node(s) absent from PlanPreview: {", ".join(unknown_ids)}.'
+
+    required_vuln_ids = {
+        node_id for node_id, node in node_by_id.items()
+        if _flow_node_is_vuln(node)
+    }
+    missing_vuln_ids = sorted(required_vuln_ids - set(chain_ids))
+    if missing_vuln_ids:
+        return False, (
+            'Flow chain is missing required vulnerability node(s): '
+            + ', '.join(missing_vuln_ids)
+            + '. Regenerate the sequence.'
+        )
+
+    assignments = flow_state.get('flag_assignments')
+    if not isinstance(assignments, list) or len(assignments) != len(chain_ids):
+        return False, 'Flow assignments must contain exactly one generator for every chain node.'
+
+    for index, node_id in enumerate(chain_ids):
+        assignment = assignments[index]
+        if not isinstance(assignment, dict):
+            return False, f'Flow assignment {index + 1} is invalid.'
+        assignment_node_id = str(assignment.get('node_id') or '').strip()
+        if assignment_node_id != node_id:
+            return False, f'Flow assignment {index + 1} does not match chain node {node_id}.'
+        generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+        if not generator_id:
+            return False, f'Flow assignment for node {node_id} has no generator id.'
+
+        node = node_by_id[node_id]
+        kind = str(assignment.get('type') or '').strip() or 'flag-generator'
+        is_vuln = _flow_node_is_vuln(node)
+        is_docker = _flow_node_is_docker_role(node)
+        if kind == 'flag-generator' and not is_vuln:
+            return False, f'Generator assignment for node {node_id} is incompatible: flag-generator requires vulnerability node.'
+        if kind == 'flag-node-generator' and (is_vuln or not is_docker):
+            return False, (
+                f'Generator assignment for node {node_id} is incompatible: '
+                'flag-node-generator requires a non-vulnerability Docker node.'
+            )
+        if kind not in {'flag-generator', 'flag-node-generator'}:
+            return False, f'Generator assignment for node {node_id} has unknown generator type: {kind}.'
+    return True, ''
 
 
 def _write_xml_tree_atomic(tree: ET.ElementTree, xml_path: str) -> None:
