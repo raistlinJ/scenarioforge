@@ -89,14 +89,14 @@ def test_sequence_preview_always_includes_topology_vulns_without_consuming_node_
         data = resp.get_json() or {}
         assert data.get("ok") is True, data
         assert data.get("requested_length") == 2
-        assert data.get("length") == 4
-        assert [entry.get("id") for entry in data.get("chain", [])] == ["worker", "worker-2", "web", "api"]
+        assert data.get("length") == 2
+        assert [entry.get("id") for entry in data.get("chain", [])] == ["web", "api"]
         assert data.get("topology_inclusion", {}).get("added_vuln_node_ids") == ["web", "api"]
 
         flow_state = app_backend._flow_state_from_xml_path(tmp_xml, scenario)
         assert "include_all_topology_vulns" not in flow_state
         assert flow_state.get("include_all_topology_pivots") is False
-        assert [entry.get("id") for entry in flow_state.get("chain", [])] == ["worker", "worker-2", "web", "api"]
+        assert [entry.get("id") for entry in flow_state.get("chain", [])] == ["web", "api"]
     finally:
         try:
             os.remove(tmp_xml)
@@ -198,10 +198,10 @@ def test_sequence_preview_include_all_topology_pivots_recovers_xml_plan_before_d
         data = resp.get_json() or {}
         assert data.get("ok") is True, data
         assert [entry.get("id") for entry in data.get("chain", [])] == ["jump", "db"]
-        # The vulnerable jump host is already mandatory, so enabling pivots
-        # does not add it a second time.
+        # The vulnerable jump host is mandatory; the pivot option adds the
+        # non-vulnerability database host.
         assert data.get("topology_inclusion", {}).get("added_vuln_node_ids") == ["jump"]
-        assert data.get("topology_inclusion", {}).get("added_pivot_node_ids") == []
+        assert data.get("topology_inclusion", {}).get("added_pivot_node_ids") == ["db"]
         assert dag_seen == {"pivot_output": True, "pivot_input": True}
         assignments = data.get("flag_assignments") or []
         assert "Pivot(jump-web)" in (assignments[0].get("outputs") or [])

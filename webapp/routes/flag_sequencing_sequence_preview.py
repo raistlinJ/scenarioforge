@@ -195,6 +195,7 @@ def register(app, *, backend_module: Any) -> None:
         _flow_progress('Phase: building topology graph')
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
+        required_vulnerability_count = 0
         if not preset_steps:
             required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
             if length < required_vulnerability_count:
@@ -218,7 +219,7 @@ def register(app, *, backend_module: Any) -> None:
             chain_nodes = backend._pick_flow_nonvulnerability_docker_nodes(
                 nodes,
                 adj,
-                length=length,
+                length=max(0, length - required_vulnerability_count),
                 allow_node_duplicates=allow_node_duplicates,
                 seed=seed_val,
             )
@@ -237,13 +238,14 @@ def register(app, *, backend_module: Any) -> None:
             'effective_length': len(chain_nodes or []),
         }
 
-        if (not preset_steps) and (not allow_node_duplicates) and len(chain_nodes) < length:
+        nonvulnerability_target = max(0, length - required_vulnerability_count)
+        if (not preset_steps) and (not allow_node_duplicates) and len(chain_nodes) < nonvulnerability_target:
             if best_effort:
-                warning = f'Only {len(chain_nodes)} eligible nodes found; using chain length {len(chain_nodes)} instead of requested {length}.'
-                length = len(chain_nodes)
+                warning = f'Only {len(chain_nodes)} eligible non-vulnerability Docker nodes found; using a shorter chain.'
+                length = len(chain_nodes) + required_vulnerability_count
             else:
                 return _validation_failure(
-                    'Not enough eligible nodes in preview plan to build the requested chain.',
+                    'Not enough eligible non-vulnerability Docker nodes to build the requested chain.',
                     available=len(chain_nodes),
                     requested_length=requested_length,
                     stats=stats,

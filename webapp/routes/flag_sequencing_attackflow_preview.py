@@ -199,6 +199,7 @@ def register(app, *, backend_module: Any) -> None:
 
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
+        required_vulnerability_count = 0
         if not preset_steps:
             required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
             if length < required_vulnerability_count:
@@ -389,7 +390,10 @@ def register(app, *, backend_module: Any) -> None:
             try:
                 meta = payload.get('metadata') if isinstance(payload, dict) else None
                 flow_meta = meta.get('flow') if isinstance(meta, dict) else None
-                chain_nodes, _saved_chain_source = _saved_chain_nodes_from_flow_state(flow_meta, max_length=length)
+                chain_nodes, _saved_chain_source = _saved_chain_nodes_from_flow_state(
+                    flow_meta,
+                    max_length=max(0, length - required_vulnerability_count),
+                )
                 if chain_nodes:
                     used_saved_chain = True
             except Exception:
@@ -406,7 +410,7 @@ def register(app, *, backend_module: Any) -> None:
                 chain_nodes = backend._pick_flow_nonvulnerability_docker_nodes(
                     nodes,
                     adj,
-                    length=length,
+                    length=max(0, length - required_vulnerability_count),
                     allow_node_duplicates=allow_node_duplicates,
                     seed=seed_val,
                 )
@@ -424,9 +428,10 @@ def register(app, *, backend_module: Any) -> None:
                 available = len(chain_nodes)
             except Exception:
                 available = 0
-            if available > 0 and available < length:
-                warning = f'Only {available} eligible nodes found; using chain length {available} instead of requested {length}.'
-                length = available
+            nonvulnerability_target = max(0, length - required_vulnerability_count)
+            if available < nonvulnerability_target:
+                warning = f'Only {available} eligible non-vulnerability Docker nodes found; using a shorter chain.'
+                length = available + required_vulnerability_count
 
         topology_inclusion_info: dict[str, Any] = {
             'requested': {

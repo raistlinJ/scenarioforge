@@ -510,12 +510,14 @@ def _prepare_chain_and_assignments(
         _progress('Solve: building topology graph from preview plan')
         nodes, _links, adj = deps._build_topology_graph_from_preview_plan(preview)
         stats = deps._flow_compose_docker_stats(nodes)
+        required_vulnerability_count = 0
         if not preset_steps:
             required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
             if length < required_vulnerability_count:
                 length = required_vulnerability_count
                 requested_length = length
                 _progress(f'Solve: adjusted requested length to required vulnerability count={required_vulnerability_count}')
+        nonvulnerability_target = max(0, length - required_vulnerability_count)
         eligible_debug = helpers.eligible_debug_summary(nodes, backend=backend)
         try:
             _progress(f'Solve: topology graph ready nodes={len(nodes or [])} links={len(_links or [])}')
@@ -539,6 +541,22 @@ def _prepare_chain_and_assignments(
                     chain_ids.append(value)
             chain_ids = chain_ids[:length]
 
+        if (not preset_steps) and chain_ids:
+            nodes_by_id = {
+                str(node.get('id') or '').strip(): node
+                for node in (nodes or [])
+                if isinstance(node, dict) and str(node.get('id') or '').strip()
+            }
+            requested_nonvulnerability_ids: list[str] = []
+            for chain_id in chain_ids:
+                node = nodes_by_id.get(chain_id)
+                if not isinstance(node, dict) or deps._flow_node_is_vuln(node):
+                    continue
+                requested_nonvulnerability_ids.append(chain_id)
+                if len(requested_nonvulnerability_ids) >= nonvulnerability_target:
+                    break
+            chain_ids = requested_nonvulnerability_ids
+
         explicit_chain = bool(chain_ids)
 
         if chain_ids:
@@ -550,7 +568,7 @@ def _prepare_chain_and_assignments(
                 preview=preview,
                 preset_steps=preset_steps,
                 allow_node_duplicates=allow_node_duplicates,
-                length=length,
+                length=nonvulnerability_target,
                 requested_length=requested_length,
                 best_effort=best_effort,
                 mode=mode,
@@ -579,10 +597,10 @@ def _prepare_chain_and_assignments(
                 preview=preview,
                 preset_steps=preset_steps,
                 allow_node_duplicates=allow_node_duplicates,
-                length=length,
+                length=nonvulnerability_target,
                 backend=backend,
             )
-            if len(chain_nodes) < 1:
+            if len(chain_nodes) < 1 and nonvulnerability_target > 0:
                 return {
                     'response': (
                         jsonify({
@@ -595,7 +613,7 @@ def _prepare_chain_and_assignments(
                         422,
                     ),
                 }
-            if (not allow_node_duplicates) and len(chain_nodes) < length:
+            if (not allow_node_duplicates) and len(chain_nodes) < nonvulnerability_target:
                 return {
                     'response': (
                         jsonify({

@@ -148,8 +148,8 @@ def test_attackflow_preview_docker_only_uses_flag_node_generators(monkeypatch: p
         shutil.rmtree(plan_dir, ignore_errors=True)
 
 
-def test_attackflow_preview_adds_missing_vulnerability_to_saved_flow(monkeypatch: pytest.MonkeyPatch):
-    """A stale saved chain cannot omit a vulnerability node from the Flow."""
+def test_attackflow_preview_uses_only_vuln_when_length_equals_vuln_count(monkeypatch: pytest.MonkeyPatch):
+    """Mandatory vulnerabilities consume the requested total chain length."""
     scenario = f"zz-required-vuln-{uuid.uuid4().hex[:8]}"
     full_preview = {
         "seed": 5,
@@ -201,11 +201,8 @@ def test_attackflow_preview_adds_missing_vulnerability_to_saved_flow(monkeypatch
         )
         data = resp.get_json() or {}
         assert resp.status_code == 200, data
-        assert [node.get("id") for node in data.get("chain", [])] == ["worker", "web"]
-        assert [assignment.get("type") for assignment in data.get("flag_assignments", [])] == [
-            "flag-node-generator",
-            "flag-generator",
-        ]
+        assert [node.get("id") for node in data.get("chain", [])] == ["web"]
+        assert [assignment.get("type") for assignment in data.get("flag_assignments", [])] == ["flag-generator"]
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
 

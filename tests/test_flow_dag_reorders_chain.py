@@ -145,6 +145,44 @@ def test_flow_dependency_level_prefers_real_generator_io_contracts(monkeypatch):
     assert independent_assignments[1].get("id") != "consumer"
 
 
+def test_flow_generator_selection_is_seeded_weighted_not_hard_ranked(monkeypatch):
+    """Broad-output starters should be preferred, but not selected every time."""
+    preview = {
+        "hosts": [{"node_id": "d1", "name": "Docker 1", "role": "Docker", "vulnerabilities": []}],
+    }
+    chain_nodes = [{"id": "d1", "name": "Docker 1", "type": "docker", "is_vuln": False}]
+    broad = {
+        "id": "broad",
+        "name": "Broad starter",
+        "inputs": [],
+        "outputs": [{"name": f"Fact({index})"} for index in range(10)],
+        "_source_name": "test",
+    }
+    narrow = {
+        "id": "narrow",
+        "name": "Narrow starter",
+        "inputs": [],
+        "outputs": [{"name": "Fact(one)"}],
+        "_source_name": "test",
+    }
+    monkeypatch.setattr(app_backend, "_flag_generators_from_enabled_sources", lambda: ([], []))
+    monkeypatch.setattr(app_backend, "_flag_node_generators_from_enabled_sources", lambda: ([broad, narrow], []))
+    monkeypatch.setattr(app_backend, "_flow_enabled_plugin_contracts_by_id", lambda: {})
+
+    selected = [
+        app_backend._flow_compute_flag_assignments(
+            preview,
+            chain_nodes,
+            "scenario",
+            seed_override=seed,
+        )[0]["id"]
+        for seed in range(128)
+    ]
+
+    assert set(selected) == {"broad", "narrow"}
+    assert selected.count("broad") > selected.count("narrow")
+
+
 def test_high_dependency_reorder_preserves_adjacent_dependency_pairs():
     chain_nodes = [
         {"id": "n1", "name": "Node 1", "type": "docker"},
