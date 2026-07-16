@@ -148,6 +148,68 @@ def test_attackflow_preview_docker_only_uses_flag_node_generators(monkeypatch: p
         shutil.rmtree(plan_dir, ignore_errors=True)
 
 
+def test_attackflow_preview_adds_missing_vulnerability_to_saved_flow(monkeypatch: pytest.MonkeyPatch):
+    """A stale saved chain cannot omit a vulnerability node from the Flow."""
+    scenario = f"zz-required-vuln-{uuid.uuid4().hex[:8]}"
+    full_preview = {
+        "seed": 5,
+        "routers": [],
+        "switches": [],
+        "switches_detail": [],
+        "hosts": [
+            {"node_id": "worker", "name": "worker", "role": "Docker", "vulnerabilities": []},
+            {"node_id": "web", "name": "web", "role": "Docker", "vulnerabilities": ["bash/CVE-2014-6271"]},
+        ],
+        "host_router_map": {},
+        "r2r_links_preview": [],
+    }
+    stale_flow = {
+        "scenario": scenario,
+        "length": 1,
+        "chain": [{"id": "worker", "name": "worker", "type": "docker"}],
+        "flag_assignments": [{"node_id": "worker", "id": "nodegen", "type": "flag-node-generator"}],
+    }
+    xml_path, plan_dir = _seed_xml_plan_for_vuln_test(scenario, full_preview, stale_flow)
+
+    def _fake_assignments(_preview, chain_nodes, _scenario_label, **_kwargs):
+        return [
+            {
+                "node_id": str(node.get("id") or ""),
+                "id": f"generator-{node.get('id')}",
+                "type": "flag-generator" if app_backend._flow_node_is_vuln(node) else "flag-node-generator",
+                "inputs": [],
+                "outputs": ["Flag(flag_id)"],
+                "requires": [],
+                "produces": [],
+            }
+            for node in chain_nodes
+        ]
+
+    monkeypatch.setattr(app_backend, "_flow_compute_flag_assignments", _fake_assignments)
+    monkeypatch.setattr(app_backend, "_flow_validate_chain_order_by_requires_produces", lambda *args, **kwargs: (True, []))
+    monkeypatch.setattr(app_backend, "_flow_reorder_chain_by_generator_dag", lambda chain, assignments, **kwargs: (chain, assignments, {}))
+
+    try:
+        app_backend.app.config["TESTING"] = True
+        client = app_backend.app.test_client()
+        login_resp = client.post("/login", data={"username": "coreadmin", "password": "coreadmin"})
+        assert login_resp.status_code in (302, 303)
+
+        resp = client.get(
+            "/api/flag-sequencing/attackflow_preview",
+            query_string={"scenario": scenario, "length": 1, "preview_plan": xml_path, "prefer_flow": "1"},
+        )
+        data = resp.get_json() or {}
+        assert resp.status_code == 200, data
+        assert [node.get("id") for node in data.get("chain", [])] == ["worker", "web"]
+        assert [assignment.get("type") for assignment in data.get("flag_assignments", [])] == [
+            "flag-node-generator",
+            "flag-generator",
+        ]
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
 def _seed_xml_plan_for_vuln_test(scenario: str, full_preview: dict, flow_meta: dict | None = None) -> tuple[str, str]:
     td = tempfile.mkdtemp(prefix="coretg-vuln-only-")
     xml_path = os.path.join(td, f"{scenario}.xml")

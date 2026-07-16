@@ -42,9 +42,7 @@ def register(app, *, backend_module: Any) -> None:
         prefer_flow = str(request.args.get('prefer_flow') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         best_effort_query = str(request.args.get('best_effort') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         allow_node_duplicates = str(request.args.get('allow_node_duplicates') or request.args.get('allow_duplicates') or '').strip().lower() in ('1', 'true', 'yes', 'y')
-        include_all_topology_vulns_arg = request.args.get('include_all_topology_vulns')
         include_all_topology_pivots_arg = request.args.get('include_all_topology_pivots')
-        include_all_topology_vulns = str(include_all_topology_vulns_arg or '').strip().lower() in ('1', 'true', 'yes', 'y')
         include_all_topology_pivots = str(include_all_topology_pivots_arg or '').strip().lower() in ('1', 'true', 'yes', 'y')
         debug_mode = str(request.args.get('debug') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         dependency_level = backend._flow_normalize_dependency_level(request.args.get('dependency_level'))
@@ -201,13 +199,16 @@ def register(app, *, backend_module: Any) -> None:
 
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
+        if not preset_steps:
+            required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
+            if length < required_vulnerability_count:
+                length = required_vulnerability_count
+                requested_length = length
 
         try:
             metadata_for_options = payload.get('metadata') if isinstance(payload, dict) else None
             flow_for_options = metadata_for_options.get('flow') if isinstance(metadata_for_options, dict) and isinstance(metadata_for_options.get('flow'), dict) else None
             if isinstance(flow_for_options, dict):
-                if include_all_topology_vulns_arg is None:
-                    include_all_topology_vulns = bool(flow_for_options.get('include_all_topology_vulns'))
                 if include_all_topology_pivots_arg is None:
                     include_all_topology_pivots = bool(flow_for_options.get('include_all_topology_pivots'))
         except Exception:
@@ -221,7 +222,7 @@ def register(app, *, backend_module: Any) -> None:
                 )
             except Exception:
                 pass
-        if include_all_topology_vulns or include_all_topology_pivots:
+        if include_all_topology_pivots:
             ignore_saved_flow = True
 
         runtime_ip_by_id: dict[str, str] = {}
@@ -398,14 +399,17 @@ def register(app, *, backend_module: Any) -> None:
             if preset_steps:
                 chain_nodes = backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
             else:
-                if allow_node_duplicates:
-                    try:
-                        seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
-                    except Exception:
-                        seed_val = 0
-                    chain_nodes = backend._pick_flag_chain_nodes_allow_duplicates(nodes, adj, length=length, seed=seed_val)
-                else:
-                    chain_nodes = backend._pick_flag_chain_nodes(nodes, adj, length=length)
+                try:
+                    seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
+                except Exception:
+                    seed_val = 0
+                chain_nodes = backend._pick_flow_nonvulnerability_docker_nodes(
+                    nodes,
+                    adj,
+                    length=length,
+                    allow_node_duplicates=allow_node_duplicates,
+                    seed=seed_val,
+                )
 
         warning: str | None = None
         if used_saved_chain:
@@ -426,7 +430,7 @@ def register(app, *, backend_module: Any) -> None:
 
         topology_inclusion_info: dict[str, Any] = {
             'requested': {
-                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'required_vulnerability_nodes': True,
                 'include_all_topology_pivots': bool(include_all_topology_pivots),
             },
             'added_node_ids': [],
@@ -434,17 +438,17 @@ def register(app, *, backend_module: Any) -> None:
             'added_pivot_node_ids': [],
             'effective_length': len(chain_nodes or []),
         }
-        if (not preset_steps) and (include_all_topology_vulns or include_all_topology_pivots):
+        if not preset_steps:
             chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
                 nodes,
                 chain_nodes,
                 preview,
-                include_all_topology_vulns=include_all_topology_vulns,
+                include_all_topology_vulns=True,
                 include_all_topology_pivots=include_all_topology_pivots,
                 pivot_context=payload,
             )
             length = max(length, len(chain_nodes or []))
-        elif preset_steps and (include_all_topology_vulns or include_all_topology_pivots):
+        elif preset_steps and include_all_topology_pivots:
             topology_inclusion_info['ignored'] = 'preset'
 
         try:
@@ -497,24 +501,23 @@ def register(app, *, backend_module: Any) -> None:
             if (not ignore_saved_flow) and flow_state_from_xml is None:
                 flow_state_from_xml = backend._flow_state_from_xml_path(preview_plan_path, scenario_label or scenario_norm)
             if flow_state_from_xml:
-                candidate_nodes, _saved_flow_source = _saved_chain_nodes_from_flow_state(flow_state_from_xml)
-                if candidate_nodes:
-                    chain_nodes = candidate_nodes
-                    fas = flow_state_from_xml.get('flag_assignments') if isinstance(flow_state_from_xml, dict) else None
-                    if isinstance(fas, list) and fas:
-                        ordered: list[dict[str, Any]] = []
-                        for idx in range(len(chain_nodes)):
-                            assignment = fas[idx] if idx < len(fas) else {}
-                            if not isinstance(assignment, dict):
-                                ordered.append({})
-                                continue
-                            assignment_copy = dict(assignment)
-                            try:
-                                assignment_copy['node_id'] = str((chain_nodes[idx] or {}).get('id') or '').strip()
-                            except Exception:
-                                pass
-                            ordered.append(assignment_copy)
-                        flag_assignments = ordered
+                fas = flow_state_from_xml.get('flag_assignments') if isinstance(flow_state_from_xml, dict) else None
+                active_ids = [
+                    str(node.get('id') or '').strip()
+                    for node in (chain_nodes or [])
+                    if isinstance(node, dict) and str(node.get('id') or '').strip()
+                ]
+                if isinstance(fas, list) and fas and active_ids:
+                    saved_by_node_id = {
+                        str(assignment.get('node_id') or '').strip(): assignment
+                        for assignment in fas
+                        if isinstance(assignment, dict) and str(assignment.get('node_id') or '').strip()
+                    }
+                    # Never restore a saved subset over the active chain.  This
+                    # is especially important now that vulnerability nodes are
+                    # mandatory and may have been appended to an older chain.
+                    if all(node_id in saved_by_node_id for node_id in active_ids):
+                        flag_assignments = [dict(saved_by_node_id[node_id]) for node_id in active_ids]
                         try:
                             flag_assignments = backend._flow_enrich_saved_flag_assignments(
                                 flag_assignments,
@@ -1202,7 +1205,6 @@ def register(app, *, backend_module: Any) -> None:
             **({'flow_errors_detail': flow_errors_detail} if flow_errors_detail else {}),
             'flags_enabled': bool(flags_enabled),
             'allow_node_duplicates': bool(allow_node_duplicates),
-            'include_all_topology_vulns': bool(include_all_topology_vulns),
             'include_all_topology_pivots': bool(include_all_topology_pivots),
             'topology_inclusion': dict(topology_inclusion_info or {}),
             'dependency_level': dependency_level,

@@ -12626,10 +12626,9 @@ def _canonicalize_flow_state_paths(flow_state: dict[str, Any], *, xml_path: str 
         out['allow_node_duplicates'] = bool(_coerce_bool(out.get('allow_node_duplicates') or out.get('allow_duplicates')))
     except Exception:
         out['allow_node_duplicates'] = False
-    try:
-        out['include_all_topology_vulns'] = bool(_coerce_bool(out.get('include_all_topology_vulns')))
-    except Exception:
-        out['include_all_topology_vulns'] = False
+    # Vulnerability nodes are always required Flow steps now.  Drop the retired
+    # opt-in field from older XML rather than preserving contradictory state.
+    out.pop('include_all_topology_vulns', None)
     try:
         out['include_all_topology_pivots'] = bool(_coerce_bool(out.get('include_all_topology_pivots')))
     except Exception:
@@ -16706,6 +16705,33 @@ def _pick_flag_chain_nodes_allow_duplicates(
             pass
 
     return [id_to_node[nid] for nid in chain_ids if nid in id_to_node]
+
+
+def _pick_flow_nonvulnerability_docker_nodes(
+    nodes: list[dict[str, Any]],
+    adj: dict[str, set[str]],
+    *,
+    length: int,
+    allow_node_duplicates: bool = False,
+    seed: int = 0,
+) -> list[dict[str, Any]]:
+    """Pick the requested Flow quota from non-vulnerability Docker nodes.
+
+    Vulnerability nodes are mandatory Flow steps and are appended separately by
+    ``_flow_expand_chain_for_topology_requirements``.  They must never consume
+    the user-selected Docker-node quota.
+    """
+    eligible = [
+        node for node in (nodes or [])
+        if isinstance(node, dict)
+        and _flow_node_is_docker_role(node)
+        and not _flow_node_is_vuln(node)
+    ]
+    if not eligible:
+        return []
+    if allow_node_duplicates:
+        return _pick_flag_chain_nodes_allow_duplicates(eligible, adj, length=length, seed=seed)
+    return _pick_flag_chain_nodes(eligible, adj, length=length)
 
 
 def _pick_flag_chain_nodes_for_preset(
@@ -21166,7 +21192,7 @@ def _flow_expand_chain_for_topology_requirements(
     requested_pivots = bool(include_all_topology_pivots)
     info: dict[str, Any] = {
         'requested': {
-            'include_all_topology_vulns': requested_vulns,
+            'required_vulnerability_nodes': requested_vulns,
             'include_all_topology_pivots': requested_pivots,
         },
         'added_node_ids': [],

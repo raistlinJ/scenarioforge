@@ -860,8 +860,15 @@ def run_cmd_capture(cmd: list[str], workdir: Path, env: dict[str, str]) -> subpr
 
 
 def _python_fallback_enabled() -> bool:
-    raw = str(os.getenv('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK', '1') or '').strip().lower()
-    return raw not in ('0', 'false', 'no', 'n', 'off')
+    """Return whether an explicitly requested emergency Python fallback is enabled.
+
+    Compose generators are expected to run through their declared Compose
+    runtime.  Falling back silently changes the execution model and can mask a
+    Docker or image-build failure, so this is disabled unless an operator opts
+    in for a diagnostic recovery attempt.
+    """
+    raw = str(os.getenv('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK', '0') or '').strip().lower()
+    return raw in ('1', 'true', 'yes', 'y', 'on')
 
 
 def _python_direct_first_enabled() -> bool:
@@ -880,14 +887,37 @@ def run_direct_python_generator(
     if not generator_py.exists():
         raise FileNotFoundError(f'direct Python fallback unavailable: {generator_py} not found')
 
-    cmd = [
-        sys.executable,
-        str(generator_py),
-        '--config',
-        str(config_path.resolve()),
-        '--out-dir',
-        str(outputs_dir.resolve()),
-    ]
+    # Generator packs use two supported CLIs.  Older/simple packs take a JSON
+    # config file directly, while service-node packs take input/output
+    # directories and select their service variant explicitly.  Detect the
+    # latter from its declared argparse flags so Docker-less fallback produces
+    # the same artifacts as `docker compose run`.
+    try:
+        source_text = generator_py.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        source_text = ''
+    dir_cli = ('--input' in source_text and '--output' in source_text)
+    if dir_cli:
+        cmd = [
+            sys.executable,
+            str(generator_py),
+            '--input',
+            str(config_path.resolve().parent),
+            '--output',
+            str(outputs_dir.resolve()),
+        ]
+        variant = str(env.get('SERVICE_VARIANT_ID') or '').strip()
+        if variant and '--variant' in source_text:
+            cmd.extend(['--variant', variant])
+    else:
+        cmd = [
+            sys.executable,
+            str(generator_py),
+            '--config',
+            str(config_path.resolve()),
+            '--out-dir',
+            str(outputs_dir.resolve()),
+        ]
     print(f"[direct-python-fallback] running: {' '.join(cmd)}")
     p = subprocess.run(
         cmd,

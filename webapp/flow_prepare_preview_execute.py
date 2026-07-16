@@ -34,7 +34,9 @@ def _backend_dependencies(backend: Any) -> Any:
         '_flow_compose_docker_stats',
         '_flow_compute_flag_assignments_for_preset',
         '_flow_compute_flag_assignments',
+        '_pick_flow_nonvulnerability_docker_nodes',
         '_flow_apply_pivot_context_to_assignments',
+        '_flow_expand_chain_for_topology_requirements',
         '_flow_reorder_chain_by_generator_dag',
         '_flag_generators_from_enabled_sources',
         '_flag_node_generators_from_enabled_sources',
@@ -508,6 +510,12 @@ def _prepare_chain_and_assignments(
         _progress('Solve: building topology graph from preview plan')
         nodes, _links, adj = deps._build_topology_graph_from_preview_plan(preview)
         stats = deps._flow_compose_docker_stats(nodes)
+        if not preset_steps:
+            required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
+            if length < required_vulnerability_count:
+                length = required_vulnerability_count
+                requested_length = length
+                _progress(f'Solve: adjusted requested length to required vulnerability count={required_vulnerability_count}')
         eligible_debug = helpers.eligible_debug_summary(nodes, backend=backend)
         try:
             _progress(f'Solve: topology graph ready nodes={len(nodes or [])} links={len(_links or [])}')
@@ -602,6 +610,21 @@ def _prepare_chain_and_assignments(
                 }
             chain_ids = [str(node.get('id') or '').strip() for node in chain_nodes if str(node.get('id') or '').strip()]
             _progress(f'Solve: picked chain count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
+
+        if not preset_steps:
+            chain_nodes, _required_vuln_info = deps._flow_expand_chain_for_topology_requirements(
+                nodes,
+                chain_nodes,
+                preview,
+                include_all_topology_vulns=True,
+                pivot_context=pivot_context,
+            )
+            chain_ids = [
+                str(node.get('id') or '').strip()
+                for node in (chain_nodes or [])
+                if isinstance(node, dict) and str(node.get('id') or '').strip()
+            ]
+            _progress(f'Solve: required vulnerability nodes included count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
     except Exception as exc:
         current_app.logger.exception('[flow.prepare_preview_for_execute] internal error: %s', exc)
         return {

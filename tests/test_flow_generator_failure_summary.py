@@ -29,8 +29,8 @@ failed to do request: Head "https://registry-1.docker.io/v2/library/python/manif
     assert "Traceback (most recent call last)" not in note
 
 
-def test_remote_generator_runner_enables_direct_python_first_for_core_vm() -> None:
+def test_remote_generator_runner_uses_declared_compose_runtime_for_core_vm() -> None:
     helper_text = Path("webapp/flow_prepare_preview_helpers.py").read_text(encoding="utf-8", errors="ignore")
 
-    assert "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK','1')" in helper_text
-    assert "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FIRST','1')" in helper_text
+    assert "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK','1')" not in helper_text
+    assert "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FIRST','1')" not in helper_text
