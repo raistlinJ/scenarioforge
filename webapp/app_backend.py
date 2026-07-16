@@ -16718,9 +16718,11 @@ def _pick_flow_nonvulnerability_docker_nodes(
     """Pick the requested Flow quota from non-vulnerability Docker nodes.
 
     Vulnerability nodes are mandatory Flow steps and are appended separately by
-    ``_flow_expand_chain_for_topology_requirements``.  They must never consume
-    the user-selected Docker-node quota.
+    ``_flow_expand_chain_for_topology_requirements``.  Callers pass only the
+    remaining slots after those mandatory nodes have been counted.
     """
+    if int(length or 0) <= 0:
+        return []
     eligible = [
         node for node in (nodes or [])
         if isinstance(node, dict)
@@ -19702,40 +19704,38 @@ def _flow_compute_flag_assignments(
             goal_new = (set(goal_facts) - set(state)) & set(provides)
             score = max(1, len(new_facts) + (3 * len(goal_new)))
             scored.append((g, score))
-        if rnd is not None:
+        return _weighted_candidate_order(scored)
+
+    def _weighted_candidate_order(scored: list[tuple[dict[str, Any], int]]) -> list[dict[str, Any]]:
+        """Return a seeded weighted-random ordering of candidates.
+
+        Scores express preference, rather than a hard ranking.  This preserves
+        dependency and goal guidance while preventing a broad-output generator
+        from winning every otherwise-equivalent first slot.
+        """
+        remaining = [(g, max(1, int(score))) for g, score in scored]
+        ordered: list[dict[str, Any]] = []
+        while remaining:
+            if rnd is None:
+                # Keep a deterministic preference if no Flow seed is available.
+                remaining.sort(key=lambda item: item[1], reverse=True)
+                ordered.extend(g for g, _score in remaining)
+                break
+            total_weight = sum(weight for _g, weight in remaining)
             try:
-                rnd.shuffle(scored)
+                choice = rnd.randrange(total_weight)
             except Exception:
-                pass
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return [g for g, _ in scored]
-
-    def _prefer_by_dependency_target(candidates: list[dict[str, Any]], idx: int) -> list[dict[str, Any]]:
-        if not candidates:
-            return []
-        if idx <= 0:
-            if _slot_should_depend(idx + 1):
-                try:
-                    future_required = remaining_requires_by_idx[idx + 1] if (idx + 1) < len(remaining_requires_by_idx) else set()
-                except Exception:
-                    future_required = set()
-                unlocking = [g for g in candidates if (_provides_cached(g) & future_required)]
-                if unlocking:
-                    return unlocking
-            return candidates
-
-        wants_dependency = _slot_should_depend(idx)
-        if wants_dependency:
-            previous_dependent = [g for g in candidates if (_requires_cached(g) & previous_produced)]
-            if previous_dependent:
-                return previous_dependent
-            chain_dependent = [g for g in candidates if (_requires_cached(g) & chain_produced)]
-            if chain_dependent:
-                return chain_dependent
-            return candidates
-
-        independent = [g for g in candidates if not (_requires_cached(g) & chain_produced)]
-        return independent or candidates
+                choice = 0
+            running_weight = 0
+            selected_index = len(remaining) - 1
+            for index, (_g, weight) in enumerate(remaining):
+                running_weight += weight
+                if choice < running_weight:
+                    selected_index = index
+                    break
+            selected, _score = remaining.pop(selected_index)
+            ordered.append(selected)
+        return ordered
 
     def _dependency_score(g: dict[str, Any], state: set[str], idx: int) -> int:
         provides = _provides_cached(g)
@@ -19756,15 +19756,8 @@ def _flow_compute_flag_assignments(
         return score
 
     def _choose_candidate(candidates: list[dict[str, Any]], state: set[str], idx: int) -> dict[str, Any]:
-        preferred = _prefer_by_dependency_target(candidates, idx)
-        scored = [(g, _dependency_score(g, state, idx)) for g in (preferred or candidates)]
-        if rnd is not None:
-            try:
-                rnd.shuffle(scored)
-            except Exception:
-                pass
-        scored.sort(key=lambda item: item[1], reverse=True)
-        return scored[0][0]
+        scored = [(g, _dependency_score(g, state, idx)) for g in candidates]
+        return _weighted_candidate_order(scored)[0]
 
     chosen_gens: list[dict[str, Any]] | None = None
     if goal_facts:

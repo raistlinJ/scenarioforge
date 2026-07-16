@@ -202,8 +202,7 @@
             </div>
             <div class="small text-muted mt-2">Current rule: <span class="font-monospace">flag-generator</span> steps
               are placed on vulnerability nodes only. Non-vulnerability Docker nodes use <span
-                class="font-monospace">flag-node-generator</span>. Default chain order is randomized; you can tweak it
-              below.</div>
+                class="font-monospace">flag-node-generator</span>.</div>
           </div>
         </div>
 
@@ -10083,8 +10082,10 @@
 
   function dockerNodeCapFromStats(stats) {
     if (!stats || typeof stats !== 'object') return null;
+    const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : null;
     const dockerOther = Number.isFinite(+stats.docker_nonvuln_total) ? (+stats.docker_nonvuln_total) : null;
-    return dockerOther === null ? null : Math.max(0, dockerOther);
+    if (vuln === null && dockerOther === null) return null;
+    return Math.max(0, (vuln || 0) + (dockerOther || 0));
   }
 
   function vulnerabilityNodeMinimumFromStats(stats) {
@@ -10103,7 +10104,7 @@
       const cap = dockerNodeCapFromStats(lastStats);
       if (cap !== null && cap > 0) {
         lengthEl.max = String(Math.max(minimum, cap));
-        lengthEl.title = `Minimum ${minimum} for vulnerability nodes; limited to ${cap} non-vulnerability Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
+        lengthEl.title = `Minimum ${minimum} for vulnerability nodes; limited to ${cap} Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
         if (parseInt(lengthEl.value, 10) > cap) lengthEl.value = String(cap);
         if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
         return;
@@ -10583,7 +10584,7 @@
       const dockerCap = Math.max(0, parseInt(String(cap), 10) || 0);
       const minimum = vulnerabilityNodeMinimumFromStats(lastStats);
       if (dockerCap <= 0) {
-        throw new Error('No non-vulnerability Docker nodes found in topology. Increase Docker nodes or enable duplicates.');
+        throw new Error('No Docker nodes found in topology. Increase Docker nodes or enable duplicates.');
       }
       // Do not silently lower the requested count beneath the mandatory
       // vulnerability-node minimum. The backend will return the capacity
