@@ -6162,12 +6162,19 @@ def main():
             docker_slot_plan=docker_slot_plan,
             preview_plan=preview_full,
         )
-        # Star topologies don't use preview realization, but log for consistency.
+        # Star topologies retain their lightweight builder, but it realizes every
+        # host address from the persisted preview plan.
         try:
-            logging.info("Preview parity: preview_attached=%s preview_realized=%s", bool(preview_full), False)
+            address_plan_realized = bool(preview_full)
+            logging.info(
+                "Preview address parity: preview_attached=%s address_plan_realized=%s",
+                bool(preview_full),
+                address_plan_realized,
+            )
             try:
                 generation_meta['preview_attached'] = bool(preview_full)
                 generation_meta['preview_realized'] = False
+                generation_meta['preview_address_plan_realized'] = address_plan_realized
             except Exception:
                 pass
         except Exception:

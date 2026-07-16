@@ -263,18 +263,6 @@ def plan_r2s_grouping(
         if not lan_subnet:
             lan_subnet = str(_fallback_subnet())
 
-        rsw_subnet = lan_subnet
-        router_ip = None
-        try:
-            net = ipaddress.ip_network(lan_subnet, strict=False)
-            # Use the first host as the synthetic gateway/router interface IP.
-            host_iter = net.hosts()
-            first_host = next(host_iter, None)
-            if first_host is not None:
-                router_ip = f"{first_host}/{net.prefixlen}"
-        except Exception:
-            router_ip = None
-
         switch_nodes = [{'node_id': switch_id, 'name': f'sw-{switch_id}'}] if host_ids else []
         switches_detail = []
         if host_ids:
@@ -283,11 +271,10 @@ def plan_r2s_grouping(
                 # IMPORTANT: keep router_id null so frontends don't materialize a fake router.
                 'router_id': None,
                 'hosts': host_ids,
-                # Under the single-subnet policy, rsw_subnet and lan_subnet must match.
-                'rsw_subnet': rsw_subnet,
+                # A star has no router-to-switch link or gateway address.
+                'rsw_subnet': None,
                 'lan_subnet': lan_subnet,
-                # Validator expects a router_ip; in no-router mode we provide a synthetic gateway IP.
-                'router_ip': router_ip,
+                'router_ip': None,
                 'host_if_ips': {},
             })
 
@@ -309,7 +296,7 @@ def plan_r2s_grouping(
             'switch_nodes': switch_nodes,
             'switches_detail': switches_detail,
             'ptp_subnets': [],
-            'router_switch_subnets': [rsw_subnet] if host_ids else [],
+            'router_switch_subnets': [],
             'lan_subnets': [lan_subnet] if host_ids else [],
             'r2r_subnets': [],
         }

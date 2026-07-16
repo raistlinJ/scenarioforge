@@ -487,7 +487,7 @@
                     <tbody>
                       {% for sw in sw_detail %}
                       {% set router_obj = (full_preview.routers|selectattr('node_id','equalto', sw.router_id)|first) %}
-                      {% set router_label = router_obj.name if router_obj else 'r' ~ (sw.router_id or '-') %}
+                      {% set router_label = router_obj.name if router_obj else ('-' if sw.router_id is none else 'r' ~ sw.router_id) %}
                       <tr>
                         <td>{{ router_label }}</td>
                         <td>sw-{{ sw.switch_id }}</td>
