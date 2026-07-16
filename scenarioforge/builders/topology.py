@@ -3272,6 +3272,37 @@ def build_star_from_roles(core,
         if isinstance(raw_preview_hosts, list):
             preview_hosts = [h for h in raw_preview_hosts if isinstance(h, dict)]
 
+    def _preview_host_address(host: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+        """Return the planned IPv4 address for a star host, if it is usable.
+
+        The no-router path has one authoritative address plan: ``full_preview``.
+        Runtime must realize those values verbatim, otherwise reports and guides
+        describe a different network from the one CORE starts.
+        """
+        raw_ip4 = host.get('ip4') if isinstance(host, dict) else None
+        if not raw_ip4:
+            return None
+        try:
+            address = ipaddress.ip_interface(str(raw_ip4).strip())
+        except ValueError:
+            logger.warning("Ignoring invalid preview host address for star topology: %r", raw_ip4)
+            return None
+        if not isinstance(address, ipaddress.IPv4Interface):
+            logger.warning("Ignoring non-IPv4 preview host address for star topology: %r", raw_ip4)
+            return None
+        return str(address.ip), int(address.network.prefixlen)
+
+    def _next_star_host_address(host: Dict[str, Any]) -> Tuple[str, int]:
+        planned = _preview_host_address(host)
+        if planned is not None:
+            return planned
+        if isinstance(preview_plan, dict):
+            raise RuntimeError(
+                "Preview plan is missing a valid IPv4 address for a star-topology host; "
+                "refusing to generate an address that would diverge from the preview"
+            )
+        return mac_alloc.next_ip()
+
     sw_ifid = 0
     dev_next_ifid: Dict[int, int] = {}
     docker_ifid_start = _docker_ifid_start()
@@ -3390,7 +3421,7 @@ def build_star_from_roles(core,
         effective_role = _effective_host_role(role, node_type)
 
         if node_type == NodeType.DEFAULT:
-            host_ip, host_mask = mac_alloc.next_ip()
+            host_ip, host_mask = _next_star_host_address(hdata)
             host_mac = mac_alloc.next_mac()
             host_iface = Interface(id=0, name="eth0", ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
             node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=effective_role))
@@ -3410,7 +3441,7 @@ def build_star_from_roles(core,
             dev_ifid = dev_next_ifid.get(node.id, docker_ifid_start if is_docker else 0)
             dev_iface_name = f"eth{dev_ifid}" if is_docker else f"{node_name}-uplink"
             if is_docker:
-                host_ip, host_mask = mac_alloc.next_ip()
+                host_ip, host_mask = _next_star_host_address(hdata)
                 host_mac = mac_alloc.next_mac()
                 dev_iface = Interface(id=dev_ifid, name=dev_iface_name, ip4=host_ip, ip4_mask=host_mask, mac=host_mac)
                 node_infos.append(NodeInfo(node_id=node.id, ip4=f"{host_ip}/{host_mask}", role=effective_role))

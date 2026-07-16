@@ -23,8 +23,9 @@ def validate_full_preview(preview: Dict[str, Any]) -> List[str]:
     - All subnets are valid IPv4 networks and use DEFAULT_IPV4_PREFIXLEN.
         - No duplicate subnet CIDRs across ptp/r2r/router-switch subnet lists.
             (lan_subnets may mirror router_switch_subnets under the single-subnet R2S policy.)
-        - Switch details: rsw_subnet and lan_subnet match (single shared subnet);
-            router/switch IPs and host_if_ips belong to that shared subnet.
+        - Routed switch details: rsw_subnet and lan_subnet match (single shared
+            subnet); router/switch IPs and host_if_ips belong to that subnet.
+          A no-router star has only a LAN subnet and host interface addresses.
     - R2R link details: per-router interface IPs belong to the declared link subnet.
     """
 
@@ -73,28 +74,37 @@ def validate_full_preview(preview: Dict[str, Any]) -> List[str]:
                 issues.append("switches_detail contains non-dict")
                 continue
             switch_id = detail.get("switch_id")
+            router_id = detail.get("router_id")
             rsw = detail.get("rsw_subnet")
             lan = detail.get("lan_subnet")
-            if not rsw or not lan:
-                issues.append(f"switch {switch_id} missing rsw_subnet/lan_subnet")
+            if not lan:
+                issues.append(f"switch {switch_id} missing lan_subnet")
                 continue
             try:
-                rsw_net = ipaddress.ip_network(str(rsw), strict=False)
                 lan_net = ipaddress.ip_network(str(lan), strict=False)
             except Exception as e:
-                issues.append(f"switch {switch_id} invalid subnet: {e}")
+                issues.append(f"switch {switch_id} invalid lan_subnet: {e}")
                 continue
 
-            if rsw_net.network_address != lan_net.network_address or rsw_net.prefixlen != lan_net.prefixlen:
-                issues.append(f"switch {switch_id} subnet mismatch: rsw_subnet={rsw_net} lan_subnet={lan_net}")
+            shared_net = lan_net
+            if router_id is not None:
+                if not rsw:
+                    issues.append(f"switch {switch_id} missing rsw_subnet")
+                    continue
+                try:
+                    rsw_net = ipaddress.ip_network(str(rsw), strict=False)
+                except Exception as e:
+                    issues.append(f"switch {switch_id} invalid rsw_subnet: {e}")
+                    continue
+                if rsw_net.network_address != lan_net.network_address or rsw_net.prefixlen != lan_net.prefixlen:
+                    issues.append(f"switch {switch_id} subnet mismatch: rsw_subnet={rsw_net} lan_subnet={lan_net}")
+                shared_net = rsw_net
 
-            shared_net = rsw_net
-
-            # router_ip is required; switch_ip is optional (switches are L2).
+            # Routed switches require a router address; a star deliberately has none.
             router_ip_cidr = detail.get("router_ip")
-            if not router_ip_cidr:
+            if router_id is not None and not router_ip_cidr:
                 issues.append(f"switch {switch_id} missing router_ip")
-            else:
+            elif router_ip_cidr:
                 try:
                     iface = ipaddress.ip_interface(str(router_ip_cidr))
                     if iface.ip not in shared_net:

@@ -1,3 +1,5 @@
+import pytest
+
 from scenarioforge.planning.full_preview import build_full_preview
 from scenarioforge.builders import topology as topo_mod
 from tests.test_router_mesh import DummyClient, FakeSession, _patch_safe_create_session
@@ -38,6 +40,9 @@ def test_full_preview_no_routers_star_topology():
 
     detail = switches_detail[0]
     assert detail.get('router_id') is None
+    assert detail.get('router_ip') is None
+    assert detail.get('rsw_subnet') is None
+    assert preview.get('router_switch_subnets') == []
 
     host_ids = sorted(int(h.get('node_id')) for h in hosts)
     assert sorted(int(x) for x in (detail.get('hosts') or [])) == host_ids
@@ -45,6 +50,55 @@ def test_full_preview_no_routers_star_topology():
     # Should include a LAN subnet so host IP assignment can be deterministic.
     lan = detail.get('lan_subnet')
     assert isinstance(lan, str) and '/' in lan
+
+
+def test_star_runtime_realizes_exact_host_addresses_from_preview(monkeypatch):
+    """No-router runtime must use the persisted preview address plan verbatim."""
+    session = FakeSession()
+    _patch_safe_create_session(monkeypatch, session)
+
+    monkeypatch.setattr(topo_mod, '_ensure_docker_node_compose_prepared', lambda *_a, **_k: None)
+    monkeypatch.setattr(topo_mod, '_docker_node_add_node_kwargs', lambda *_a, **_k: {})
+    monkeypatch.setattr(topo_mod, '_apply_docker_compose_meta', lambda *_a, **_k: None)
+    monkeypatch.setattr(topo_mod, '_ensure_default_route_for_docker', lambda *_a, **_k: None)
+
+    preview = build_full_preview(
+        role_counts={'Docker': 2},
+        routers_planned=0,
+        services_plan={},
+        vulnerabilities_plan={},
+        r2r_policy=None,
+        r2s_policy=None,
+        routing_items=None,
+        routing_plan={},
+        segmentation_density=0.0,
+        segmentation_items=[],
+        traffic_plan=None,
+        seed=123,
+        ip4_prefix='172.30.123.0/24',
+    )
+    expected = [str(host['ip4']) for host in preview['hosts']]
+
+    _session, _switches, host_infos, _svc_assignments, _docker_by_name = topo_mod.build_star_from_roles(
+        DummyClient(),
+        role_counts={'Docker': 2},
+        ip4_prefix='10.0.0.0/24',
+        preview_plan=preview,
+    )
+
+    assert [host.ip4 for host in host_infos] == expected
+
+
+def test_star_runtime_rejects_preview_without_host_address(monkeypatch):
+    session = FakeSession()
+    _patch_safe_create_session(monkeypatch, session)
+
+    with pytest.raises(RuntimeError, match='missing a valid IPv4 address'):
+        topo_mod.build_star_from_roles(
+            DummyClient(),
+            role_counts={'Workstation': 1},
+            preview_plan={'hosts': [{'node_id': 1, 'name': 'workstation-1'}]},
+        )
 
 
 def test_star_topology_merges_flow_overlay_from_preview_into_docker_slot(monkeypatch):
@@ -61,6 +115,7 @@ def test_star_topology_merges_flow_overlay_from_preview_into_docker_slot(monkeyp
             {
                 'node_id': 1,
                 'name': 'docker-1',
+                'ip4': '10.55.0.3/24',
                 'metadata': {
                     'flow_flag': {
                         'type': 'flag-generator',
