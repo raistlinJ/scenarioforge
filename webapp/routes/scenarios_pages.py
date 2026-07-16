@@ -137,6 +137,13 @@ def register(app, *, backend_module: Any) -> None:
 
         active_scenario_xml_path = ''
         xml_path = (request.args.get('xml_path') or '').strip()
+        try:
+            if xml_path:
+                xml_path_abs = os.path.abspath(xml_path)
+                if os.path.exists(xml_path_abs):
+                    active_scenario_xml_path = xml_path_abs
+        except Exception:
+            active_scenario_xml_path = ''
         if not active_scenario_xml_path:
             try:
                 if scenario_norm:
@@ -147,13 +154,6 @@ def register(app, *, backend_module: Any) -> None:
                             active_scenario_xml_path = latest_abs
             except Exception:
                 active_scenario_xml_path = ''
-        try:
-            if (not active_scenario_xml_path) and xml_path:
-                xml_path_abs = os.path.abspath(xml_path)
-                if os.path.exists(xml_path_abs):
-                    active_scenario_xml_path = xml_path_abs
-        except Exception:
-            active_scenario_xml_path = ''
         if not active_scenario_xml_path:
             try:
                 if scenario_norm and isinstance(scenario_paths, dict):
@@ -274,6 +274,13 @@ def register(app, *, backend_module: Any) -> None:
 
         xml_path = (request.args.get('xml_path') or '').strip()
         xml_path_abs = ''
+        try:
+            if xml_path:
+                candidate = os.path.abspath(xml_path)
+                if os.path.exists(candidate):
+                    xml_path_abs = candidate
+        except Exception:
+            xml_path_abs = ''
         if not xml_path_abs:
             try:
                 if scenario_norm:
@@ -284,13 +291,6 @@ def register(app, *, backend_module: Any) -> None:
                             xml_path_abs = latest_abs
             except Exception:
                 xml_path_abs = ''
-        try:
-            if (not xml_path_abs) and xml_path:
-                xml_path_abs = os.path.abspath(xml_path)
-                if not os.path.exists(xml_path_abs):
-                    xml_path_abs = ''
-        except Exception:
-            xml_path_abs = ''
         if not xml_path_abs:
             try:
                 raw_path = ''

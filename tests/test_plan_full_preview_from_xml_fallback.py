@@ -8,7 +8,7 @@ def _login(client):
     assert resp.status_code in (302, 303)
 
 
-def test_plan_full_preview_from_xml_falls_back_to_latest_scenario_xml(tmp_path, monkeypatch):
+def test_plan_full_preview_from_xml_rejects_missing_preview_in_selected_xml(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 
     client = app.test_client()
@@ -67,11 +67,11 @@ def test_plan_full_preview_from_xml_falls_back_to_latest_scenario_xml(tmp_path, 
         },
     )
 
-    assert resp.status_code == 200
-    assert resp.data == b'ok'
+    assert resp.status_code == 422
+    assert b'PlanPreview is missing from the selected XML' in resp.data
 
 
-def test_plan_full_preview_from_xml_recomputes_when_planpreview_missing(tmp_path, monkeypatch):
+def test_plan_full_preview_from_xml_does_not_recompute_when_planpreview_missing(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 
     client = app.test_client()
@@ -118,11 +118,11 @@ def test_plan_full_preview_from_xml_recomputes_when_planpreview_missing(tmp_path
         },
     )
 
-    assert resp.status_code == 200
-    assert resp.data == b'ok'
+    assert resp.status_code == 422
+    assert b'PlanPreview is missing from the selected XML' in resp.data
 
 
-def test_plan_full_preview_from_xml_ignores_no_scenario_fallback_when_metadata_mismatch(tmp_path, monkeypatch):
+def test_plan_full_preview_from_xml_rejects_selected_xml_with_wrong_scenario_preview(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 
     client = app.test_client()
@@ -193,12 +193,12 @@ def test_plan_full_preview_from_xml_ignores_no_scenario_fallback_when_metadata_m
         },
     )
 
-    assert resp.status_code == 200
-    assert resp.data == b'ok'
-    assert calls['recompute'] == 1
+    assert resp.status_code == 422
+    assert b'PlanPreview is missing from the selected XML' in resp.data
+    assert calls['recompute'] == 0
 
 
-def test_plan_full_preview_from_xml_recomputes_when_embedded_planpreview_effectively_empty(tmp_path, monkeypatch):
+def test_plan_full_preview_from_xml_rejects_topology_dirty_preview_without_recompute(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 
     client = app.test_client()
@@ -278,9 +278,9 @@ def test_plan_full_preview_from_xml_recomputes_when_embedded_planpreview_effecti
         },
     )
 
-    assert resp.status_code == 200
-    assert resp.data == b'ok'
-    assert calls['recompute'] == 1
+    assert resp.status_code == 409
+    assert b'Preview is stale because the topology changed' in resp.data
+    assert calls['recompute'] == 0
 
 
 def test_plan_full_preview_from_xml_recomputes_when_routers_missing_but_plan_expects_them(tmp_path, monkeypatch):
@@ -451,7 +451,7 @@ def test_plan_full_preview_from_xml_uses_embedded_plan_when_not_dirty(tmp_path, 
     assert calls['recompute'] == 0
 
 
-def test_plan_full_preview_from_xml_sets_preview_source_recomputed_on_read(tmp_path, monkeypatch):
+def test_plan_full_preview_from_xml_does_not_recompute_dirty_preview_on_read(tmp_path, monkeypatch):
     from webapp import app_backend as backend
 
     client = app.test_client()
@@ -528,6 +528,6 @@ def test_plan_full_preview_from_xml_sets_preview_source_recomputed_on_read(tmp_p
         },
     )
 
-    assert resp.status_code == 200
-    assert resp.data == b'ok'
-    assert captured.get('preview_source') == 'recomputed_on_read'
+    assert resp.status_code == 409
+    assert b'Preview is stale because the topology changed' in resp.data
+    assert not captured

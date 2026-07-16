@@ -7,6 +7,7 @@ from webapp.app_backend import app
 
 
 FULL_PREVIEW_SCRIPTS_PATH = Path(__file__).resolve().parent.parent / 'webapp' / 'templates' / 'full_preview_scripts.html'
+TOPOLOGY_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / 'webapp' / 'templates' / 'index.html'
 
 
 def _sample_xml_path() -> str:
@@ -129,11 +130,26 @@ def test_preview_execution_modal_shows_summary_generation_and_cannot_be_hidden()
     assert 'id="executeProgressModal"' in page_text
     assert 'aria-label="Close"' not in page_text[page_text.index('id="executeProgressModal"'):page_text.index('id="executeSummaryModal"')]
     assert 'id="executeSummaryModal"' in page_text
-    assert 'id="executeSummaryChecks"' in page_text
+    assert 'id="executeSummaryList"' in page_text
+    assert 'id="executeSummaryCopyBtn"' in page_text
     assert 'id="executeSummaryReportsBtn"' in page_text
     assert script_text.count("status: 'Generating Execution Summary'") == 2
     assert "id('executeProgressHideBtn')" not in script_text
-    assert 'input.type = \'checkbox\';' in script_text
+    assert 'function renderExecuteSummaryItem(label, ok, detail, items = [])' in script_text
+    assert "'Generator inject sources present on CORE VM'" in script_text
+
+
+def test_topology_has_no_legacy_execution_modals_or_controls() -> None:
+    text = TOPOLOGY_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    for marker in (
+        'id="executeConfirmModal"',
+        'id="runProgressModal"',
+        'id="executeSummaryModal"',
+        'id="runSuccessModal"',
+        'id="fpExecuteBtn"',
+    ):
+        assert marker not in text
 
 
 def test_full_preview_page_includes_saved_xml_warning_banner() -> None:

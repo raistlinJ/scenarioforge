@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 import os
 import time
 from typing import Any
@@ -392,132 +391,17 @@ def register(app, *, backend_module: Any) -> None:
                 preview_dirty = False
 
             if preview_dirty:
-                try:
-                    recomputed = backend._planner_persist_flow_plan(
-                        xml_path=xml_path,
-                        scenario=scenario,
-                        seed=None,
-                        persist_plan_file=False,
-                    )
-                except Exception:
-                    recomputed = None
-                if isinstance(recomputed, dict) and isinstance(recomputed.get('full_preview'), dict):
-                    payload = recomputed
-                    try:
-                        meta_re = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
-                        if not isinstance(meta_re, dict):
-                            meta_re = {}
-                        meta_re['preview_source'] = 'recomputed_on_read'
-                        payload['metadata'] = meta_re
-                    except Exception:
-                        pass
-                    try:
-                        app.logger.info(
-                            '[plan.full_preview_from_xml] recomputed due to topology_dirty xml=%s scenario=%s',
-                            xml_path,
-                            scenario or '',
-                        )
-                    except Exception:
-                        pass
-
-            def _payload_matches_requested_scenario(payload_obj: Any, requested: str | None) -> bool:
-                if not requested:
-                    return True
-                req_norm = backend._normalize_scenario_label(requested)
-                if not req_norm:
-                    return True
-                try:
-                    meta_obj = payload_obj.get('metadata') if isinstance(payload_obj, dict) else None
-                    scen = str((meta_obj or {}).get('scenario') or '').strip() if isinstance(meta_obj, dict) else ''
-                except Exception:
-                    scen = ''
-                return bool(scen and backend._normalize_scenario_label(scen) == req_norm)
-
+                return Response(
+                    'Preview is stale because the topology changed. Run Generate and save the XML before opening Preview.',
+                    status=409,
+                    mimetype='text/plain',
+                )
             if not payload:
-                try:
-                    candidate = backend._load_preview_payload_from_path(xml_path, None)
-                    payload = candidate if _payload_matches_requested_scenario(candidate, scenario) else None
-                    try:
-                        app.logger.info(
-                            '[plan.full_preview_from_xml] fallback same-xml no-scenario xml=%s requested=%s candidate_match=%s',
-                            xml_path,
-                            scenario or '',
-                            bool(payload),
-                        )
-                    except Exception:
-                        pass
-                except Exception:
-                    payload = None
-            if not payload and scenario:
-                try:
-                    scen_norm = backend._normalize_scenario_label(scenario)
-                    latest_xml = backend._latest_xml_path_for_scenario(scen_norm) if scen_norm else None
-                except Exception:
-                    latest_xml = None
-                if latest_xml:
-                    try:
-                        latest_xml_abs = os.path.abspath(latest_xml)
-                    except Exception:
-                        latest_xml_abs = latest_xml
-                    if latest_xml_abs and os.path.exists(latest_xml_abs):
-                        try:
-                            payload = backend._load_preview_payload_from_path(latest_xml_abs, scenario)
-                            selected_via = 'latest-xml+scenario' if payload else ''
-                            if not payload:
-                                candidate = backend._load_preview_payload_from_path(latest_xml_abs, None)
-                                payload = candidate if _payload_matches_requested_scenario(candidate, scenario) else None
-                                if payload:
-                                    selected_via = 'latest-xml+no-scenario(match)'
-                            if payload:
-                                xml_path = latest_xml_abs
-                            try:
-                                app.logger.info(
-                                    '[plan.full_preview_from_xml] fallback latest-xml requested=%s latest_xml=%s selected=%s via=%s',
-                                    scenario or '',
-                                    latest_xml_abs,
-                                    bool(payload),
-                                    selected_via,
-                                )
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-            if not payload:
-                try:
-                    recomputed = backend._planner_persist_flow_plan(
-                        xml_path=xml_path,
-                        scenario=scenario,
-                        seed=None,
-                        persist_plan_file=False,
-                    )
-                except Exception:
-                    recomputed = None
-                if isinstance(recomputed, dict) and isinstance(recomputed.get('full_preview'), dict):
-                    payload = recomputed
-                    try:
-                        meta_re = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
-                        if not isinstance(meta_re, dict):
-                            meta_re = {}
-                        meta_re['preview_source'] = 'recomputed_on_read'
-                        payload['metadata'] = meta_re
-                    except Exception:
-                        pass
-                    try:
-                        app.logger.info(
-                            '[plan.full_preview_from_xml] recomputed planpreview xml=%s scenario=%s',
-                            xml_path,
-                            scenario or '',
-                        )
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        payload = backend._load_preview_payload_from_path(xml_path, scenario) or backend._load_preview_payload_from_path(xml_path, None)
-                    except Exception:
-                        payload = None
-            if not payload:
-                flash('PlanPreview not found in XML')
-                return redirect(url_for('index'))
+                return Response(
+                    'PlanPreview is missing from the selected XML. Run Generate and save the XML before opening Preview.',
+                    status=422,
+                    mimetype='text/plain',
+                )
 
             full_prev = payload.get('full_preview') if isinstance(payload, dict) else None
             if not isinstance(full_prev, dict):
@@ -526,43 +410,6 @@ def register(app, *, backend_module: Any) -> None:
             meta = payload.get('metadata') if isinstance(payload, dict) else None
             if not isinstance(meta, dict):
                 meta = {}
-
-            force_refresh = str(request.form.get('force') or '').strip().lower() in ['1', 'true', 'yes', 'y', 'on']
-            if force_refresh:
-                try:
-                    plan_ts = None
-                    updated_at = str(meta.get('updated_at') or meta.get('created_at') or '').strip()
-                    if updated_at:
-                        try:
-                            if updated_at.endswith('Z'):
-                                updated_at = updated_at[:-1] + '+00:00'
-                            plan_ts = datetime.datetime.fromisoformat(updated_at).timestamp()
-                        except Exception:
-                            plan_ts = None
-                    if plan_ts is not None:
-                        xml_mtime = os.path.getmtime(xml_path)
-                        if xml_mtime > plan_ts:
-                            try:
-                                app.logger.info('[plan.full_preview_from_xml] PlanPreview stale; recomputing for %s', xml_path)
-                            except Exception:
-                                pass
-                            try:
-                                recomputed = backend._planner_persist_flow_plan(
-                                    xml_path=xml_path,
-                                    scenario=scenario,
-                                    seed=meta.get('seed'),
-                                    persist_plan_file=False,
-                                )
-                                if isinstance(recomputed, dict) and isinstance(recomputed.get('full_preview'), dict):
-                                    full_prev = recomputed.get('full_preview')
-                                payload = backend._load_preview_payload_from_path(xml_path, scenario) or payload
-                                meta = payload.get('metadata') if isinstance(payload, dict) else meta
-                                if not isinstance(meta, dict):
-                                    meta = {}
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
 
             scenario_name = str(meta.get('scenario') or '') or scenario or None
             try:

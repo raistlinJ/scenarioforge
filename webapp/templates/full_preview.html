@@ -845,16 +845,21 @@
   </div>
 </div>
 <div class="modal fade" id="executeSummaryModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
-  <div class="modal-dialog modal-dialog-centered">
+  <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">Execution Summary</h5>
+        <div class="d-flex align-items-center gap-2">
+          <h5 class="modal-title mb-0">Execution Summary</h5>
+          <span class="spinner-border spinner-border-sm text-muted d-none" id="executeSummarySpinner"
+            role="status" aria-hidden="true"></span>
+        </div>
       </div>
       <div class="modal-body">
-        <div class="small text-muted mb-3" id="executeSummaryStatus">Preparing validation summary…</div>
-        <div class="vstack gap-2" id="executeSummaryChecks"></div>
+        <div class="small text-muted mb-2" id="executeSummaryStatus">Preparing validation summary…</div>
+        <ul class="list-group" id="executeSummaryList"></ul>
       </div>
       <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" id="executeSummaryCopyBtn">Copy summary</button>
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Stay on Preview</button>
         <button type="button" class="btn btn-primary" id="executeSummaryReportsBtn">View Reports</button>
       </div>

@@ -20,26 +20,6 @@
 {% endblock %}
 {% block extra_head %}
 <style>
-    #executeSummaryModal .modal-dialog {
-        max-width: 960px;
-    }
-
-    #executeSummaryList.execute-summary-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 12px;
-    }
-
-    #executeSummaryList.execute-summary-grid>.list-group-item {
-        margin: 0;
-    }
-
-    @media (max-width: 992px) {
-        #executeSummaryList.execute-summary-grid {
-            grid-template-columns: 1fr;
-        }
-    }
-
     body {
         padding-bottom: 42vh;
     }
@@ -473,26 +453,6 @@
         opacity: 0.85;
     }
 
-    #executeConfirmModal .modal-dialog {
-        max-width: min(960px, 95vw);
-    }
-
-    #executeConfirmModal .modal-content {
-        min-height: auto;
-    }
-
-    #runProgressModal .modal-dialog {
-        --bs-modal-width: 2000px;
-        max-width: min(var(--bs-modal-width), 95vw);
-    }
-
-    #executeProgressWrap .progress {
-        height: 18px;
-    }
-
-    #executeProgressLog {
-        height: 320px;
-    }
 </style>
 {% endblock %}
 <!-- hs-bounds-wrapper styles moved into style block above -->
@@ -721,36 +681,6 @@
             </div>
         </div>
 
-    </div>
-</div>
-<!-- Run Progress Modal -->
-<div class="modal fade" id="runProgressModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Running CLI…</h5>
-                <button type="button" class="btn-close" id="runProgressCloseBtn" data-bs-dismiss="modal"
-                    aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
-                    <div id="runProgressStatus">Starting…</div>
-                    <div id="runProgressMeta"></div>
-                </div>
-                <div id="runProgressModeHint" class="mb-2 fw-bold text-warning d-none"></div>
-                <div class="progress mb-2">
-                    <div class="progress-bar progress-bar-striped progress-bar-animated" id="runProgressBar"
-                        style="width: 100%">Working…</div>
-                </div>
-                <div class="border rounded" style="max-height: 260px; overflow: auto;">
-                    <pre class="m-0 p-2 small" id="runProgressLog" style="white-space: pre-wrap;"></pre>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" id="runProgressHideBtn"
-                    data-bs-dismiss="modal">Hide</button>
-            </div>
-        </div>
     </div>
 </div>
 <div class="modal fade" id="aiGeneratorStreamModal" tabindex="-1" aria-hidden="true">
@@ -1223,170 +1153,6 @@
     </div>
 </div>
 
-<!-- Success Modal -->
-<div class="modal fade" id="runSuccessModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Run Completed</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <p class="mb-1" id="runSuccessBody">Generation complete.</p>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
-</div>
-<!-- Execute Confirm Modal -->
-<div class="modal fade" id="executeConfirmModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <div>
-                    <h5 class="modal-title mb-0">Execute Scenario</h5>
-                    <div class="small text-muted" id="executePhaseHeader">Phase: —</div>
-                </div>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" id="executeConfirmCloseX"></button>
-            </div>
-            <div class="modal-body">
-                <p class="mb-3" id="executeConfirmMessage">Execute this scenario now?</p>
-                <div class="alert alert-warning small d-none" id="executeConfirmAlert"></div>
-                <div class="border rounded-3 p-3 bg-body-tertiary mb-3">
-                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
-                        <div class="flex-grow-1"></div>
-                    </div>
-                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mt-3 d-none"
-                        id="executeCoreNotConfiguredRow">
-                        <div class="flex-grow-1">
-                            <div class="text-uppercase small text-muted fw-semibold">Remote CORE Connection</div>
-                            <div class="small text-danger" id="executeCoreNotConfiguredStatus">CORE VM not configured.
-                            </div>
-                        </div>
-                        <button type="button" class="btn btn-outline-primary btn-sm" id="executeSelectCoreVmBtn">Select
-                            CORE VM</button>
-                    </div>
-                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mt-3 d-none"
-                        id="executeCoreTestRow">
-                        <div class="flex-grow-1">
-                            <div class="text-uppercase small text-muted fw-semibold">Remote CORE Connection</div>
-                            <div class="small text-muted" id="executeCoreStatus">Connection status unknown.</div>
-                        </div>
-                        <div class="d-flex align-items-center gap-2">
-                            <button type="button" class="btn btn-outline-primary btn-sm" id="executeCoreTestBtn">Test
-                                Connection</button>
-                        </div>
-                    </div>
-                </div>
-
-                <details class="border rounded-3 p-3 bg-body-tertiary mb-3 d-none" id="executeAdvancedWrap">
-                    <summary class="fw-semibold">Advanced</summary>
-                    <div class="small text-muted mt-2">Applies to remote execution only.</div>
-                    <div class="mt-3 d-grid gap-2">
-                        {% if not webui_running_in_docker %}
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="executeAdvFixDockerDaemon">
-                            <label class="form-check-label" for="executeAdvFixDockerDaemon">Fix Docker daemon for CORE
-                                (disable default bridge + iptables)</label>
-                        </div>
-                        {% endif %}
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="executeAdvRunCoreCleanup" checked>
-                            <label class="form-check-label" for="executeAdvRunCoreCleanup">Run core-cleanup</label>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="executeAdvDeepCleanupAfterRun" checked>
-                            <label class="form-check-label" for="executeAdvDeepCleanupAfterRun">Deep post-run cleanup</label>
-                            <div class="form-text">Runs <code>docker system prune -af --volumes</code> on the CORE VM after the run. This is the most aggressive reclaim option.</div>
-                        </div>
-                        {% if not webui_running_in_docker %}
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="executeAdvDockerCleanupBeforeRun"
-                                checked>
-                            <label class="form-check-label" for="executeAdvDockerCleanupBeforeRun">Remove old Docker
-                                containers/images before run</label>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="executeAdvDockerNukeAll" checked>
-                            <label class="form-check-label" for="executeAdvDockerNukeAll">Delete all docker containers
-                                (use with caution!)</label>
-                            <div class="form-text">This will stop and remove all containers (does not remove images).
-                            </div>
-                        </div>
-                        {% else %}
-                        <div class="small text-muted">Docker repair/cleanup options are hidden while Web UI runs in Docker.</div>
-                        {% endif %}
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="executeAdvRestartCoreDaemon">
-                            <label class="form-check-label" for="executeAdvRestartCoreDaemon">Restart
-                                core-daemon</label>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="executeAdvAutoKillSessions" checked>
-                            <label class="form-check-label" for="executeAdvAutoKillSessions">Auto-kill any running
-                                sessions</label>
-                        </div>
-                    </div>
-                </details>
-
-                <div class="border rounded p-3 mt-3 bg-body-tertiary d-none" id="executeProgressWrap">
-                    <div class="d-flex align-items-center gap-2">
-                        <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"
-                            id="executeProgressSpinner"></div>
-                        <div class="flex-grow-1">
-                            <div class="fw-semibold" id="executeProgressStatus">Preparing…</div>
-                            <div class="small text-muted" id="executeProgressMeta"></div>
-                        </div>
-                        <button type="button" class="btn btn-sm btn-outline-danger d-none"
-                            id="executeProgressCancelBtn">Cancel run</button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary d-none"
-                            id="executeProgressPopoutBtn">Open run logs</button>
-                    </div>
-                    <div class="progress mt-3" style="height: 12px;">
-                        <div class="progress-bar progress-bar-striped" id="executeProgressBar" role="progressbar"
-                            style="width: 0%" aria-valuemin="0" aria-valuemax="100">0%</div>
-                    </div>
-                    <pre class="form-control bg-dark text-white border-0 mt-3 small" id="executeProgressLog"
-                        style="height: 190px; overflow:auto; font-family: SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;"></pre>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal"
-                    id="executeConfirmCancelBtn">Cancel</button>
-                <button type="button" class="btn btn-primary" id="executeConfirmRunBtn">Execute</button>
-            </div>
-        </div>
-    </div>
-</div>
-<!-- Execute Summary Modal -->
-<div class="modal fade" id="executeSummaryModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static"
-    data-bs-keyboard="false">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <div class="d-flex align-items-center gap-2">
-                    <h5 class="modal-title mb-0">Execute Summary</h5>
-                    <span class="spinner-border spinner-border-sm text-muted d-none" id="executeSummarySpinner"
-                        role="status" aria-hidden="true"></span>
-                </div>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-                    <div class="small text-muted" id="executeSummaryStatus">Summary pending.</div>
-                </div>
-                <ul class="list-group execute-summary-grid" id="executeSummaryList"></ul>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-secondary" data-execute-summary-copy="1">Copy
-                    summary</button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
-</div>
 <!-- Full Preview Modal -->
 <div class="modal fade" id="fullPreviewModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-fullscreen-lg-down modal-xl modal-dialog-scrollable">
@@ -1575,11 +1341,7 @@
                     </div>
                 </div>
             </div>
-            <div class="modal-footer d-flex justify-content-between align-items-center">
-                <div class="d-flex gap-2">
-                    <button class="btn btn-warning" type="button" id="fpExecuteBtn"
-                        title="Execute scenario now">Execute</button>
-                </div>
+            <div class="modal-footer d-flex justify-content-end align-items-center">
                 <button class="btn btn-secondary" data-bs-dismiss="modal" type="button">Close</button>
             </div>
         </div>
@@ -7196,6 +6958,11 @@
         if (!modalEl) return;
         const execBtn = modalEl.querySelector('#previewModalExecuteBtn');
         if (!execBtn) return;
+        // Execution belongs to the dedicated Preview page.  Retain this
+        // topology-only plan modal for inspection, but remove its legacy
+        // execution control before it becomes interactive.
+        execBtn.remove();
+        return;
         if (execBtn.dataset.enhanced === '1') return;
         execBtn.dataset.enhanced = '1';
         execBtn.addEventListener('click', async () => {
@@ -7522,19 +7289,8 @@
                 } catch (e) { }
             }
             if (autoExecute) {
-                // Auto-execute comes from the Preview tab's Execute button.
-                // The shared bottom-bar button is now "Preview", so we must call the actual
-                // execution entrypoint.
-                setTimeout(() => {
-                    try {
-                        if (typeof runSyncWithModal === 'function') {
-                            runSyncWithModal({ showProgressModal: true, skipConfirm: false });
-                            return;
-                        }
-                    } catch (e) { }
-                    try { alert('Execute unavailable: runSyncWithModal not found.'); } catch (e) { }
-                }, 250);
-                // Prevent repeated execution prompts on reload/back.
+                // Preview now executes in place.  Consume stale legacy URLs
+                // without starting an execution from Topology.
                 params.delete('auto_execute');
                 params.delete('xml_path');
                 const qs = params.toString();
@@ -26931,65 +26687,4 @@
     // Dock setup handled by partial
 </script>
 </body>
-<!-- Success Modal -->
-<div class="modal fade" id="runSuccessModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Run Completed</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <p class="mb-1" id="runSuccessBody">Generation complete.</p>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
-</div>
-<script>
-    function showRunSuccessModal(msg) {
-        try { if (msg) document.getElementById('runSuccessBody').textContent = msg; new bootstrap.Modal(document.getElementById('runSuccessModal')).show(); } catch (e) { }
-    }
-    document.addEventListener('DOMContentLoaded', () => {
-        if (window.runSuccessFlag) {
-            scheduleScenarioRedirect("{{ url_for('reports_page') }}", { delay: 300 });
-        }
-    });
-    // Capture server-provided flag (injected if present)
-    // Inject run success flag
-    window.runSuccessFlag = ("{{ '1' if (run_success is defined and run_success) else '0' }}" === '1');
-    // Wrap pollRunStatus to detect async completion success
-    function installRunSuccessHook() {
-        const original = window.pollRunStatus;
-        if (typeof original !== 'function') {
-            console.warn('pollRunStatus hook skipped: function unavailable');
-            return;
-        }
-        if (original.__runSuccessWrapped) {
-            return;
-        }
-        const wrapped = async function (runId) {
-            await original(runId);
-            try {
-                const res = await fetch('/run_status/' + runId);
-                if (!res.ok) return;
-                const data = await res.json();
-                if (data.done && didExecuteRunSucceed(data)) {
-                    showRunSuccessModal('Asynchronous run completed successfully.');
-                } else if (!data.done) {
-                    setTimeout(() => pollRunStatus(runId), 800);
-                }
-            } catch (e) { }
-        };
-        wrapped.__runSuccessWrapped = true;
-        window.pollRunStatus = wrapped;
-    }
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', installRunSuccessHook);
-    } else {
-        installRunSuccessHook();
-    }
-</script>
 {% endblock %}
