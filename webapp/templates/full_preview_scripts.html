@@ -64,6 +64,23 @@
       }
     }
 
+    function navigateToReports(reportsHref) {
+      // The embedded Preview owns execution, but Reports is a top-level page.
+      // Navigating this iframe would render the application chrome inside Preview.
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({
+          type: 'coretg-preview-execution-complete',
+          reportsHref,
+        }, window.location.origin);
+        return;
+      }
+      if (typeof window.CORETG_NAVIGATE_PAGE_DETAILS === 'function') {
+        window.CORETG_NAVIGATE_PAGE_DETAILS(reportsHref);
+      } else {
+        window.location.assign(reportsHref);
+      }
+    }
+
     function toRoman(num) {
       const n = Number(num);
       if (!Number.isFinite(n) || n <= 0 || n >= 4000) return '';
@@ -3264,6 +3281,8 @@
     let executeProgressModalInst = null;
     let executeProgressEvtSrc = null;
     let executeProgressRunId = null;
+    let executeSummaryModalInst = null;
+    let executeSummaryReportsHref = '';
 
     function ensureExecuteProgressModal() {
       const modalEl = document.getElementById('executeProgressModal');
@@ -3343,6 +3362,80 @@
       }
       executeProgressEvtSrc = null;
       executeProgressRunId = null;
+    }
+
+    function presentExecuteSummary(runStatus, reportsHref) {
+      const modalEl = document.getElementById('executeSummaryModal');
+      const statusEl = document.getElementById('executeSummaryStatus');
+      const checksEl = document.getElementById('executeSummaryChecks');
+      if (!modalEl || !checksEl || !window.bootstrap) {
+        navigateToReports(reportsHref);
+        return;
+      }
+      const summary = runStatus?.validation_summary && typeof runStatus.validation_summary === 'object'
+        ? runStatus.validation_summary
+        : null;
+      const count = (key) => Array.isArray(summary?.[key]) ? summary[key].length : 0;
+      const addCheck = (label, ok, detail) => {
+        const row = document.createElement('label');
+        row.className = 'd-flex align-items-start gap-2 border rounded p-2';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.className = 'form-check-input mt-1';
+        input.checked = !!ok;
+        input.disabled = true;
+        const body = document.createElement('span');
+        body.className = 'small';
+        const title = document.createElement('span');
+        title.className = 'fw-semibold d-block';
+        title.textContent = label;
+        const meta = document.createElement('span');
+        meta.className = 'text-muted d-block';
+        meta.textContent = detail;
+        body.append(title, meta);
+        row.append(input, body);
+        checksEl.appendChild(row);
+      };
+
+      checksEl.replaceChildren();
+      const returnCode = Number(runStatus?.returncode);
+      addCheck('Execution completed', Number.isFinite(returnCode) ? returnCode === 0 : true,
+        Number.isFinite(returnCode) ? `CLI exit code ${returnCode}` : 'Run completed successfully.');
+      if (!summary) {
+        if (statusEl) statusEl.textContent = 'The scenario completed, but no validation summary was returned.';
+        addCheck('Session validation', false, 'Validation summary unavailable. See Reports for run artifacts.');
+      } else {
+        if (statusEl) statusEl.textContent = summary.ok === true
+          ? 'Execution and post-run validation completed successfully.'
+          : 'Execution completed; review the validation checks below.';
+        addCheck('Session validation', summary.ok === true,
+          summary.ok === true ? 'All post-run checks passed.' : String(summary.error || 'One or more checks need attention.'));
+        addCheck('Expected topology nodes', count('missing_nodes') === 0,
+          count('missing_nodes') === 0 ? 'All expected nodes are present.' : `${count('missing_nodes')} expected node(s) missing.`);
+        const dockerIssues = count('docker_missing') + count('docker_not_running');
+        addCheck('Docker runtime', dockerIssues === 0,
+          dockerIssues === 0 ? 'Docker nodes are available.' : `${dockerIssues} Docker runtime issue(s) found.`);
+        const injectIssues = count('injects_missing') + count('generator_injects_missing');
+        addCheck('Generator injects', injectIssues === 0,
+          injectIssues === 0 ? 'Required generated injects are present.' : `${injectIssues} inject source issue(s) found.`);
+      }
+      executeSummaryReportsHref = reportsHref || '';
+      const reportsBtn = document.getElementById('executeSummaryReportsBtn');
+      if (reportsBtn && !reportsBtn.dataset.boundExecuteSummary) {
+        reportsBtn.dataset.boundExecuteSummary = '1';
+        reportsBtn.addEventListener('click', () => {
+          if (executeSummaryReportsHref) navigateToReports(executeSummaryReportsHref);
+        });
+      }
+      executeSummaryModalInst = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
+      const progressEl = document.getElementById('executeProgressModal');
+      const showSummary = () => executeSummaryModalInst?.show();
+      if (progressEl?.classList.contains('show') && executeProgressModalInst) {
+        progressEl.addEventListener('hidden.bs.modal', showSummary, { once: true });
+        ensureExecuteProgressModal()?.hide();
+      } else {
+        showSummary();
+      }
     }
 
     function attachExecuteProgressStream(runId) {
@@ -3525,18 +3618,7 @@
                 setExecuteProgressUI({ status: 'Generating Execution Summary', meta: 'Preparing Reports…', barText: 'Generating Summary…', animate: true });
                 try {
                   const reportsHref = buildScenarioUrl("{{ url_for('reports_page') }}");
-                  setTimeout(() => {
-                    try {
-                      // Use assign so the browser treats it as a navigation.
-                      if (typeof window.CORETG_NAVIGATE_PAGE_DETAILS === 'function') {
-                        window.CORETG_NAVIGATE_PAGE_DETAILS(reportsHref);
-                      } else {
-                        window.location.assign(reportsHref);
-                      }
-                    } catch (navErr) {
-                      try { appendExecuteProgressLog('Redirect to Reports failed: ' + navErr); } catch (_) { }
-                    }
-                  }, 700);
+                  presentExecuteSummary(data, reportsHref);
                 } catch (err) {
                   try { appendExecuteProgressLog('Could not build Reports URL: ' + err); } catch (_) { }
                 }
@@ -3645,13 +3727,7 @@
                         setExecuteProgressUI({ status: 'Generating Execution Summary', meta: 'Preparing Reports…', barText: 'Generating Summary…', animate: true });
                         try {
                           const reportsHref = buildScenarioUrl("{{ url_for('reports_page') }}");
-                          setTimeout(() => {
-                            if (typeof window.CORETG_NAVIGATE_PAGE_DETAILS === 'function') {
-                              window.CORETG_NAVIGATE_PAGE_DETAILS(reportsHref);
-                            } else {
-                              window.location.assign(reportsHref);
-                            }
-                          }, 700);
+                          presentExecuteSummary(data2, reportsHref);
                         } catch (_) { }
                         return;
                       }

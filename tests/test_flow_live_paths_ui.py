@@ -15,6 +15,7 @@ def test_embedded_preview_does_not_show_a_second_navigation_spinner_on_execute()
     assert "{% endif %}\n\n    <!-- CORE Daemon Start Modal -->" in layout_text
     assert "hideLoading('execute-navigation');" in preview_text
     assert "type: 'coretg-preview-execute'" in preview_text
+    assert "data.type === 'coretg-preview-execution-complete'" in preview_text
     assert "&auto_execute=1" not in preview_text
 
 

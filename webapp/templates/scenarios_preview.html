@@ -261,6 +261,14 @@
             try { console.debug('[preview] message full-preview-ready'); } catch (e) { }
             previewExplicitReadyReceived = true;
             completePreviewLoading('postMessage', 'Preview ready.');
+          } else if (data && data.type === 'coretg-preview-execution-complete') {
+            const previewFrame = document.getElementById('scenariosPreviewFrame');
+            if (!previewFrame || ev.source !== previewFrame.contentWindow) return;
+            const href = String(data.reportsHref || '').trim();
+            if (!href) return;
+            const target = new URL(href, window.location.origin);
+            if (target.origin !== window.location.origin) return;
+            window.location.assign(`${target.pathname}${target.search}${target.hash}`);
           }
         } catch (e) { }
       });
