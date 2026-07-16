@@ -1972,6 +1972,102 @@ def _remote_static_repo_dir(sftp: Any) -> str:
     return _remote_expand_path(sftp, REMOTE_STATIC_REPO_ENV)
 
 
+def _ensure_remote_repo_workspace(
+    client: Any,
+    remote_repo: str,
+    core_cfg: Dict[str, Any],
+    *,
+    log_handle: Any | None = None,
+) -> None:
+    """Ensure the SSH user can create and replace the remote repo workspace.
+
+    A previous CORE/bootstrap operation can leave the default /tmp/scenarioforge
+    directory owned by root.  The old snapshot extraction intentionally ignored
+    errors while clearing that directory, which made a successful-looking upload
+    fail later with a stream of SFTP/tar permission errors.  Detect that state
+    before transferring anything and repair only the default /tmp workspace when
+    the configured SSH account can use sudo.
+    """
+    repo = posixpath.normpath(str(remote_repo or '').strip())
+    parent = posixpath.dirname(repo) or '/'
+    if not repo or repo in {'.', '/'} or not repo.startswith('/'):
+        raise RuntimeError(f'Unsafe remote repository path: {remote_repo!r}')
+    # Never recursively change ownership through a symlink, even in /tmp.
+    link_rc, _link_out, _link_err = _exec_ssh_command(
+        client,
+        f"test -L {shlex.quote(repo)}",
+        timeout=15.0,
+        check=False,
+    )
+    if link_rc == 0:
+        raise RuntimeError(f'Remote repository path must not be a symlink: {repo}')
+
+    def _probe() -> tuple[int, str, str]:
+        script = (
+            'set -eu; '
+            f'parent={shlex.quote(parent)}; repo={shlex.quote(repo)}; '
+            'mkdir -p -- "$parent"; '
+            'if [ ! -e "$repo" ]; then mkdir -- "$repo"; fi; '
+            '[ -d "$repo" ]; '
+            'probe="$repo/.coretg_repo_write_probe.$$"; '
+            ': > "$probe"; rm -f -- "$probe"'
+        )
+        return _exec_ssh_command(
+            client,
+            f"sh -lc {shlex.quote(script)}",
+            timeout=30.0,
+            check=False,
+        )
+
+    rc, out, err = _probe()
+    if rc == 0:
+        return
+
+    # Only self-repair the conventional temporary workspace.  A custom path
+    # may intentionally be managed by an administrator and must not be chowned
+    # by this application.
+    can_repair = repo == '/tmp/scenarioforge' or repo.startswith('/tmp/scenarioforge/')
+    ssh_user = str((core_cfg or {}).get('ssh_username') or '').strip()
+    repair_error = ''
+    if can_repair and ssh_user:
+        try:
+            if log_handle:
+                log_handle.write(
+                    f'[remote] repository workspace is not writable; repairing ownership of {repo}…\n'
+                )
+                log_handle.flush()
+            user_q = shlex.quote(ssh_user)
+            repair_cmd = (
+                f'mkdir -p -- {shlex.quote(parent)} {shlex.quote(repo)}; '
+                f'group=$(id -gn {user_q}); '
+                f'chown -R -- {user_q}:"$group" {shlex.quote(repo)}'
+            )
+            repair_rc, repair_out, repair_err = _exec_ssh_sudo_command(
+                client,
+                repair_cmd,
+                password=str((core_cfg or {}).get('ssh_password') or ''),
+                timeout=60.0,
+            )
+            if repair_rc == 0:
+                rc, out, err = _probe()
+                if rc == 0:
+                    if log_handle:
+                        log_handle.write(f'[remote] repository workspace ownership repaired: {repo}\n')
+                        log_handle.flush()
+                    return
+            repair_error = (repair_err or repair_out or '').strip()
+        except Exception as exc:
+            repair_error = str(exc)
+
+    detail = (err or out or repair_error or 'write probe failed').strip()
+    hint = (
+        f' Remote path {repo} is not writable by SSH user {ssh_user or "(unknown)"}. '
+        'Choose a user-writable CORE_REMOTE_STATIC_REPO path (for example ~/scenarioforge) '
+        'or repair ownership on the CORE VM.'
+    )
+    raise RuntimeError(f'Remote repository workspace is not writable: {detail[:500]}.{hint}')
+
+
 def _remote_path_join(*parts: str) -> str:
     cleaned = [p for p in parts if p not in (None, '', '.')]
     if not cleaned:
@@ -3976,6 +4072,12 @@ def _push_repo_to_remote(
         log.info('[remote-sync] remote_repo=%s', remote_repo)
         remote_parent = posixpath.dirname(remote_repo.rstrip('/')) or '/'
         base_name = os.path.basename(remote_repo.rstrip('/')) or 'scenarioforge'
+        _ensure_remote_repo_workspace(
+            client,
+            remote_repo,
+            cfg,
+            log_handle=log_handle,
+        )
         allowed_outputs = allowed_outputs_override
         if not allowed_outputs:
             allowed_outputs = _resolve_repo_push_allowed_outputs(bool(upload_only_injected_artifacts))
@@ -4186,12 +4288,24 @@ def _push_repo_to_remote(
         _update_repo_push_progress(progress_id, status='uploading', stage='uploaded', percent=40.0, detail='Upload complete; preparing remote finalize…')
         if finalize_async:
             _update_repo_push_progress(progress_id, status='finalizing', stage='remote', percent=45.0, detail='Remote finalization queued…')
+            remote_hash_value = None
+            try:
+                if _repo_skip_if_unchanged_enabled():
+                    if include_repo_paths:
+                        remote_hash_value = _compute_repo_fingerprint_includes(repo_root, include_repo_paths)
+                    else:
+                        remote_hash_value = _compute_repo_fingerprint(repo_root, allowed_outputs=allowed_outputs)
+            except Exception:
+                # The snapshot itself is still valid if the optional skip hash
+                # cannot be calculated.
+                remote_hash_value = None
             _schedule_remote_repo_finalize(
                 progress_id,
                 cfg,
                 remote_repo=remote_repo,
                 remote_parent=remote_parent,
                 remote_archive=remote_archive,
+                remote_hash_value=remote_hash_value,
                 logger=log,
             )
             return {'repo_path': remote_repo, 'progress_id': progress_id, 'finalizing': True}
@@ -4257,6 +4371,7 @@ def _schedule_remote_repo_finalize(
     remote_repo: str,
     remote_parent: str,
     remote_archive: str,
+    remote_hash_value: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
 ) -> None:
     if not progress_id:
@@ -4274,6 +4389,8 @@ def _schedule_remote_repo_finalize(
             client = _open_ssh_client(core_cfg)
             try:
                 _exec_ssh_command(client, f"bash -lc {shlex.quote(extract_script)}", timeout=None, check=True)
+                if remote_hash_value:
+                    _write_remote_repo_hash(client, remote_repo, remote_hash_value)
             finally:
                 client.close()
         except Exception:
@@ -4366,6 +4483,8 @@ def _schedule_remote_repo_finalize(
                 cancel_check=lambda: _is_repo_push_cancel_requested(progress_id),
                 check=True,
             )
+            if remote_hash_value:
+                _write_remote_repo_hash(client, remote_repo, remote_hash_value)
             _update_repo_push_progress(progress_id, status='complete', stage='complete', percent=100.0, detail='Repository ready on remote host.')
             if logger:
                 logger.info('[remote-sync] Repository finalized at %s', remote_repo)
@@ -5977,6 +6096,7 @@ def _prepare_remote_cli_context(
         label: str = 'scenario XML',
     ) -> None:
         uploaded_files: set[str] = set()
+        source_xml_abs = os.path.abspath(source_xml_path)
 
         def _upload_wrapper_dir(local_dir: str, remote_dir: str) -> None:
             for root_dir, _dirs, files in os.walk(local_dir):
@@ -5985,6 +6105,13 @@ def _prepare_remote_cli_context(
                 _remote_mkdirs(client, remote_root)
                 for file_name in files:
                     local_file = os.path.join(root_dir, file_name)
+                    # A generated XML and a compose file commonly share a
+                    # temporary directory.  The XML is uploaded below after
+                    # its compose references are rewritten; copying it here
+                    # first both wastes a transfer and briefly leaves the
+                    # remote target with the un-rewritten version.
+                    if os.path.abspath(local_file) == source_xml_abs:
+                        continue
                     remote_file = _remote_path_join(remote_root, file_name)
                     _put_required_file(local_file, remote_file, label='compose asset')
 
