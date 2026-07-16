@@ -262,26 +262,13 @@ def register(app, *, backend_module: Any) -> None:
             except Exception:
                 pass
         if not os.path.exists(xml_path):
-            try:
-                recovered = backend._try_resolve_latest_outputs_xml(xml_path)
-                if recovered and os.path.exists(recovered):
-                    app.logger.warning('[sync] XML path missing; recovered to newest match: %s -> %s', xml_path, recovered)
-                    xml_path = recovered
-            except Exception:
-                pass
-        if not os.path.exists(xml_path):
             flash(f'XML path not found: {xml_path}')
             return redirect(url_for('index'))
 
-        preview_plan_path = request.form.get('preview_plan') or xml_path
-        preview_plan_path = str(preview_plan_path or '').strip() or None
-        if preview_plan_path:
-            try:
-                preview_plan_path = os.path.abspath(preview_plan_path)
-            except Exception:
-                preview_plan_path = xml_path
-            if not os.path.exists(preview_plan_path):
-                preview_plan_path = xml_path
+        # The execution preview must be embedded in the exact XML selected above.
+        # Do not accept a separate preview source, which could describe a different
+        # saved scenario than the one that is about to run.
+        preview_plan_path = xml_path
 
         core_override = None
         try:
@@ -1072,14 +1059,6 @@ def register(app, *, backend_module: Any) -> None:
                 if alt != xml_path and os.path.exists(alt):
                     app.logger.info('[async] Remapped XML path %s -> %s', xml_path, alt)
                     xml_path = alt
-            except Exception:
-                pass
-        if not os.path.exists(xml_path):
-            try:
-                recovered = backend._try_resolve_latest_outputs_xml(xml_path)
-                if recovered and os.path.exists(recovered):
-                    app.logger.warning('[async] XML path missing; recovered to newest match: %s -> %s', xml_path, recovered)
-                    xml_path = recovered
             except Exception:
                 pass
         if not os.path.exists(xml_path):

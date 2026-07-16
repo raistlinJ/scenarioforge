@@ -1721,6 +1721,19 @@ def _plan_summary_from_full_preview(full_prev: dict[str, Any]) -> dict[str, Any]
                     vuln_plan = counts
         except Exception:
             pass
+    host_addresses: list[dict[str, Any]] = []
+    try:
+        for host in full_prev.get('hosts') or []:
+            if not isinstance(host, dict):
+                continue
+            host_addresses.append({
+                'node_id': host.get('node_id'),
+                'name': str(host.get('name') or ''),
+                'ip4': str(host.get('ip4') or ''),
+            })
+        host_addresses.sort(key=lambda item: (str(item.get('node_id') or ''), item.get('name') or ''))
+    except Exception:
+        host_addresses = []
     return {
         'hosts_total': hosts_total,
         'routers_planned': routers_planned,
@@ -1734,6 +1747,7 @@ def _plan_summary_from_full_preview(full_prev: dict[str, Any]) -> dict[str, Any]
         'r2r_policy': full_prev.get('r2r_policy_preview') or {},
         'r2s_policy': full_prev.get('r2s_policy_preview') or {},
         'switches_allocated': len(switches),
+        'host_addresses': host_addresses,
         'notes': ['generated_from_full_preview'],
         'full_preview_seed': full_prev.get('seed'),
     }
@@ -1814,7 +1828,7 @@ def _diff_plan_summaries(flow_summary: dict[str, Any], xml_summary: dict[str, An
     flow_norm = _normalize_plan_summary(flow_summary)
     xml_norm = _normalize_plan_summary(xml_summary)
 
-    for key in ['hosts_total', 'routers_planned', 'switches_allocated']:
+    for key in ['hosts_total', 'routers_planned', 'switches_allocated', 'host_addresses']:
         flow_value = flow_norm.get(key)
         xml_value = xml_norm.get(key)
         if flow_value != xml_value:
@@ -5605,7 +5619,27 @@ def main():
             "FlowState runtime values were validated, but the current XML-derived plan has no Docker or vulnerability targets; downstream Flow-specific execution behavior may be skipped"
         )
 
-    if preview_full is not None and flow_execute_active:
+    if args.phase == 'execute' and preview_full is None:
+        logging.error(
+            "Execute requires a valid PlanPreview embedded in the selected XML. "
+            "Regenerate preview metadata and save that XML before executing."
+        )
+        return 1
+
+    if args.phase == 'execute' and preview_full is not None:
+        try:
+            from .planning.preview_validation import validate_full_preview
+            preview_issues = validate_full_preview(preview_full)
+        except Exception as exc:
+            logging.error("Unable to validate PlanPreview embedded in XML: %s", exc)
+            return 1
+        if preview_issues:
+            logging.error("PlanPreview embedded in XML is invalid; regenerate and save before executing.")
+            for issue in preview_issues:
+                logging.error("PlanPreview validation: %s", issue)
+            return 1
+
+    if preview_full is not None:
         try:
             preview_summary = _plan_summary_from_full_preview(preview_full)
             current_summary = _current_plan_summary_for_execute(
@@ -5637,7 +5671,8 @@ def main():
                     )
                 return 1
         except Exception as exc:
-            logging.warning("Failed validating saved PlanPreview against the current XML: %s", exc)
+            logging.error("Failed validating saved PlanPreview against the current XML: %s", exc)
+            return 1
 
     if preview_full is None:
         try:

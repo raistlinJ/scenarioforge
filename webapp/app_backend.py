@@ -33921,7 +33921,20 @@ def _latest_xml_path_for_scenario(scenario_norm: str) -> str | None:
 
 
 def _resolve_preexecute_xml_path(xml_path: Any, scenario_name: Any) -> str:
-    """Prefer the latest saved scenario XML during preview/plan/execute flows."""
+    """Resolve the XML selected for preview/plan/execute without replacing it.
+
+    A supplied saved XML is the scenario's source of truth.  Choosing a newer
+    same-named file here can pair a preview and guide from one save with a run
+    from another, so only fall back to the latest XML when the caller supplied
+    no path at all.
+    """
+    try:
+        requested = _abs_path_or_original(xml_path)
+    except Exception:
+        requested = str(xml_path or '').strip()
+    if requested:
+        return str(requested).strip()
+
     try:
         scenario_norm = _normalize_scenario_label(scenario_name or '')
     except Exception:
@@ -33933,11 +33946,7 @@ def _resolve_preexecute_xml_path(xml_path: Any, scenario_name: Any) -> str:
             latest_xml = None
         if latest_xml:
             return latest_xml
-    try:
-        resolved = _abs_path_or_original(xml_path)
-    except Exception:
-        resolved = str(xml_path or '').strip()
-    return str(resolved or '').strip()
+    return ''
 
 
 def _is_autosave_xml_path(path_value: str) -> bool:
