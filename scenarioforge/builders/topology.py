@@ -3020,6 +3020,33 @@ def _flow_flag_record_from_host_metadata(hdata: Any) -> Optional[Dict[str, str]]
         return None
 
 
+def _compose_record_for_docker_slot(base_rec: Dict[str, str], hdata: Any) -> Dict[str, str]:
+    """Choose the effective compose record for a Flow-targeted Docker slot.
+
+    A flag-node-generator emits a complete compose stack, including its service
+    listener.  It must therefore replace a vulnerability selected for the same
+    Docker slot.  A plain flag-generator only emits artifacts, so it remains an
+    overlay on the selected vulnerability compose.
+    """
+    try:
+        flow_rec = _flow_flag_record_from_host_metadata(hdata)
+        vector = str((flow_rec or {}).get('Vector') or '').strip().lower()
+        if isinstance(flow_rec, dict) and vector in ('flag-nodegen', 'flag-node-generator'):
+            logger.info(
+                '[flow] using flag-node-generator compose instead of vulnerability compose name=%s path=%s',
+                flow_rec.get('Name'),
+                flow_rec.get('Path'),
+            )
+            return flow_rec
+    except Exception:
+        pass
+    try:
+        overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+        return {**base_rec, **overlay} if overlay else base_rec
+    except Exception:
+        return base_rec
+
+
 def _flow_flag_artifacts_overlay_from_host_metadata(hdata: Any) -> Optional[Dict[str, str]]:
     """Return a dict overlay for mounting Flow flag-generator artifacts onto an existing docker-compose record.
 
@@ -3037,7 +3064,7 @@ def _flow_flag_artifacts_overlay_from_host_metadata(hdata: Any) -> Optional[Dict
             return _flow_flag_artifacts_overlay_from_env(hdata)
         ftype = str(flow_flag.get('type') or '').strip().lower()
         # Only flag-generators inject artifacts into an existing docker-compose.
-        # flag-node-generators are expected to provide their own docker-compose.yml.
+        # flag-node-generators provide a complete docker-compose.yml instead.
         if ftype != 'flag-generator':
             return None
         artifacts_dir = str(flow_flag.get('artifacts_dir') or flow_flag.get('run_dir') or '').strip()
@@ -3289,8 +3316,7 @@ def build_star_from_roles(core,
                         logger.warning("NodeType.DOCKER not available in this CORE build; cannot apply docker slot plan")
                 if is_docker_node:
                     base_rec = docker_slot_plan[slot_key]
-                    overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
-                    docker_by_name[node_name] = {**base_rec, **overlay} if overlay else base_rec
+                    docker_by_name[node_name] = _compose_record_for_docker_slot(base_rec, hdata)
                     _apply_mount_overlays(docker_by_name.get(node_name))
                     docker_slots_used.add(slot_key)
         except Exception:
@@ -4092,12 +4118,8 @@ def _try_build_segmented_topology_from_preview(
                     else:
                         logger.warning("NodeType.DOCKER not available; cannot apply docker slot plan during preview realization")
                 if is_docker_node:
-                    # IMPORTANT: slot-plan docker-compose records (e.g., vulnerabilities) must remain
-                    # the base record. Flow flag-generators should only overlay artifacts/injects,
-                    # not replace the compose stack with the standard ubuntu template.
                     base_rec = docker_slot_plan[slot_key]
-                    overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
-                    docker_by_name[name] = {**base_rec, **overlay} if overlay else base_rec
+                    docker_by_name[name] = _compose_record_for_docker_slot(base_rec, hdata)
                     _apply_mount_overlays(docker_by_name.get(name))
                     docker_slots_used.add(slot_key)
         except Exception:
