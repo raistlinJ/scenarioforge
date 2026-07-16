@@ -606,15 +606,14 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
         "grep outputs/logs/webui-${logPort}.log and the webapp terminal for progress_id=${ctx.progressId || '-'}",
         "dependency_level: getFlowDependencyLevel(),",
         "dependency_level: dependencyLevel,",
-        'id="flowIncludeAllTopologyVulns"',
-        'Include All Topology Vulns',
+        "function vulnerabilityNodeMinimumFromStats(stats)",
+        "lengthEl.min = String(minimum);",
+        "if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);",
         'id="flowIncludeAllTopologyPivots"',
         'Include all Topology Pivots',
         'expands the chain beyond Number of Challenges',
         'syncTopologyInclusionOptionsFromUi()',
-        "include_all_topology_vulns: !!includeAllTopologyVulns,",
         "include_all_topology_pivots: !!includeAllTopologyPivots,",
-        "params.set('include_all_topology_vulns', '1')",
         "params.set('include_all_topology_pivots', '1')",
         "dependencyLevelEl.addEventListener('input'",
         "setFlowDependencyLevel(dependencyLevelEl.value",
@@ -623,6 +622,8 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing dependency slider/challenge count wiring in flow template: " + "; ".join(missing)
 
+    assert 'flowIncludeAllTopologyVulns' not in text
+    assert 'include_all_topology_vulns' not in text
     assert "Max Chain length" not in text
 
 

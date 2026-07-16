@@ -44,6 +44,28 @@ out_dir.mkdir(parents=True, exist_ok=True)
     )
 
 
+def _write_directory_cli_generator(path: Path) -> None:
+    (path / "generator.py").write_text(
+        """
+import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--input')
+parser.add_argument('--output')
+parser.add_argument('--variant')
+args = parser.parse_args()
+cfg = json.loads((Path(args.input) / 'config.json').read_text(encoding='utf-8'))
+out_dir = Path(args.output)
+out_dir.mkdir(parents=True, exist_ok=True)
+(out_dir / 'outputs.json').write_text(json.dumps({'outputs': {'variant': args.variant, 'port': cfg['service_port']}}), encoding='utf-8')
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_find_generator_suppresses_unrelated_manifest_warnings_on_success(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_manifest(tmp_path / "flag_generators" / "dupe_a", generator_id="dupe")
     _write_manifest(tmp_path / "flag_generators" / "dupe_b", generator_id="dupe")
@@ -139,6 +161,7 @@ def test_compose_failure_uses_direct_python_fallback(tmp_path: Path, monkeypatch
         raise subprocess.CalledProcessError(1, ["docker", "compose", "run"], output="docker failed", stderr="pull failed")
 
     monkeypatch.setattr(rfg, "run_compose", _fail_compose)
+    monkeypatch.setenv("CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK", "1")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -162,6 +185,35 @@ def test_compose_failure_uses_direct_python_fallback(tmp_path: Path, monkeypatch
     assert "docker compose generator failed; trying direct Python fallback" in stdout
     assert "direct-python-fallback" in stdout
     assert (tmp_path / "run-out" / "outputs.json").is_file()
+
+
+def test_compose_failure_errors_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_dir = tmp_path / "flag_generators" / "strict_gen"
+    _write_manifest(source_dir, generator_id="strict_gen")
+    (source_dir / "docker-compose.yml").write_text("services:\n  generator:\n    image: python:3.11-slim\n", encoding="utf-8")
+    _write_python_generator(source_dir, flag_value="FLAG{must-not-run}")
+
+    def _fail_compose(**_kwargs):
+        raise subprocess.CalledProcessError(1, ["docker", "compose", "run"])
+
+    monkeypatch.delenv("CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK", raising=False)
+    monkeypatch.setattr(rfg, "run_compose", _fail_compose)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_flag_generator.py",
+            "--kind", "flag-generator",
+            "--generator-id", "strict_gen",
+            "--out-dir", str(tmp_path / "run-out"),
+            "--config", '{"seed":"s"}',
+            "--repo-root", str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        rfg.main()
+    assert not (tmp_path / "run-out" / "outputs.json").exists()
 
 
 def test_direct_python_first_skips_compose_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -199,6 +251,27 @@ def test_direct_python_first_skips_compose_when_enabled(tmp_path: Path, monkeypa
     assert (tmp_path / "run-out" / "outputs.json").is_file()
 
 
+def test_direct_python_fallback_supports_directory_cli_and_variant(tmp_path: Path) -> None:
+    source_dir = tmp_path / "service_node_generator"
+    source_dir.mkdir()
+    _write_directory_cli_generator(source_dir)
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir()
+    config_path = inputs_dir / "config.json"
+    config_path.write_text('{"service_port": 19418}\n', encoding="utf-8")
+    outputs_dir = tmp_path / "outputs"
+
+    rfg.run_direct_python_generator(
+        source_dir=source_dir,
+        config_path=config_path,
+        outputs_dir=outputs_dir,
+        env={"SERVICE_VARIANT_ID": "git_deploy_key_repo"},
+    )
+
+    payload = json.loads((outputs_dir / "outputs.json").read_text(encoding="utf-8"))
+    assert payload["outputs"] == {"variant": "git_deploy_key_repo", "port": 19418}
+
+
 def test_compose_system_exit_uses_direct_python_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     source_dir = tmp_path / "flag_generators" / "timeout_gen"
     _write_manifest(source_dir, generator_id="timeout_gen")
@@ -209,6 +282,7 @@ def test_compose_system_exit_uses_direct_python_fallback(tmp_path: Path, monkeyp
         raise SystemExit("docker command timed out after 180s")
 
     monkeypatch.setattr(rfg, "run_compose", _timeout_compose)
+    monkeypatch.setenv("CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK", "1")
     monkeypatch.setattr(
         sys,
         "argv",

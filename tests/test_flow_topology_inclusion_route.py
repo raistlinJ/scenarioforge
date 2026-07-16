@@ -13,7 +13,7 @@ def _login(client):
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-def test_sequence_preview_include_all_topology_vulns_expands_and_persists(monkeypatch):
+def test_sequence_preview_always_includes_topology_vulns_without_consuming_node_quota(monkeypatch):
     app.config["TESTING"] = True
     client = app.test_client()
     _login(client)
@@ -26,6 +26,7 @@ def test_sequence_preview_include_all_topology_vulns_expands_and_persists(monkey
         "switches_detail": [],
         "hosts": [
             {"node_id": "worker", "name": "worker", "role": "Docker", "type": "docker", "ip4": "10.0.0.10", "vulnerabilities": []},
+            {"node_id": "worker-2", "name": "worker-2", "role": "Docker", "type": "docker", "ip4": "10.0.0.13", "vulnerabilities": []},
             {"node_id": "web", "name": "web", "role": "Docker", "type": "docker", "ip4": "10.0.0.11", "vulnerabilities": ["rce"]},
             {"node_id": "api", "name": "api", "role": "Docker", "type": "docker", "ip4": "10.0.0.12", "vulnerabilities": ["token-leak"]},
         ],
@@ -39,7 +40,7 @@ def test_sequence_preview_include_all_topology_vulns_expands_and_persists(monkey
     tmp_xml = os.path.join(plans_dir, f"plan_{scenario}.xml")
 
     def _fake_pick(nodes, _adj, length=5):
-        return [next(node for node in nodes if str(node.get("id") or "") == "worker")]
+        return [node for node in nodes if str(node.get("id") or "").startswith("worker")][:length]
 
     def _fake_assignments(_preview, chain_nodes, _scenario_label, **_kwargs):
         out = []
@@ -81,22 +82,21 @@ def test_sequence_preview_include_all_topology_vulns_expands_and_persists(monkey
                 "scenario": scenario,
                 "length": 1,
                 "preview_plan": tmp_xml,
-                "include_all_topology_vulns": True,
                 "allow_node_duplicates": False,
             },
         )
         assert resp.status_code == 200, resp.get_json()
         data = resp.get_json() or {}
         assert data.get("ok") is True, data
-        assert data.get("requested_length") == 1
-        assert data.get("length") == 3
-        assert [entry.get("id") for entry in data.get("chain", [])] == ["worker", "web", "api"]
+        assert data.get("requested_length") == 2
+        assert data.get("length") == 4
+        assert [entry.get("id") for entry in data.get("chain", [])] == ["worker", "worker-2", "web", "api"]
         assert data.get("topology_inclusion", {}).get("added_vuln_node_ids") == ["web", "api"]
 
         flow_state = app_backend._flow_state_from_xml_path(tmp_xml, scenario)
-        assert flow_state.get("include_all_topology_vulns") is True
+        assert "include_all_topology_vulns" not in flow_state
         assert flow_state.get("include_all_topology_pivots") is False
-        assert [entry.get("id") for entry in flow_state.get("chain", [])] == ["worker", "web", "api"]
+        assert [entry.get("id") for entry in flow_state.get("chain", [])] == ["worker", "worker-2", "web", "api"]
     finally:
         try:
             os.remove(tmp_xml)
@@ -198,7 +198,10 @@ def test_sequence_preview_include_all_topology_pivots_recovers_xml_plan_before_d
         data = resp.get_json() or {}
         assert data.get("ok") is True, data
         assert [entry.get("id") for entry in data.get("chain", [])] == ["jump", "db"]
-        assert data.get("topology_inclusion", {}).get("added_pivot_node_ids") == ["jump"]
+        # The vulnerable jump host is already mandatory, so enabling pivots
+        # does not add it a second time.
+        assert data.get("topology_inclusion", {}).get("added_vuln_node_ids") == ["jump"]
+        assert data.get("topology_inclusion", {}).get("added_pivot_node_ids") == []
         assert dag_seen == {"pivot_output": True, "pivot_input": True}
         assignments = data.get("flag_assignments") or []
         assert "Pivot(jump-web)" in (assignments[0].get("outputs") or [])

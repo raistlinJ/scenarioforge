@@ -114,7 +114,7 @@
               <div class="col-sm-6 col-md-2">
                 <label class="form-label" for="flowLength">Number of Challenges</label>
                 <input id="flowLength" class="form-control" type="number" min="1" max="50" value="5"
-                  title="Limited to number of Docker nodes when duplicates is off.">
+                  title="Must be at least the number of vulnerability nodes; limited to non-vulnerability Docker nodes when duplicates is off.">
               </div>
               <div class="col-sm-6 col-md-3">
                 <label class="form-label">Preset</label>
@@ -183,14 +183,6 @@
                   <div class="form-check form-switch mb-1">
                     <input class="form-check-input" type="checkbox" id="flowGenerateNoDuplicates">
                     <label class="form-check-label small text-nowrap" for="flowGenerateNoDuplicates">Allow duplicates</label>
-                  </div>
-                </div>
-                <div class="col-sm-6 col-lg-auto">
-                  <div class="form-check form-switch mb-1">
-                    <input class="form-check-input" type="checkbox" id="flowIncludeAllTopologyVulns"
-                      title="When enabled, Generate expands the chain beyond Number of Challenges if needed so every topology vulnerability node is included.">
-                    <label class="form-check-label small text-nowrap" for="flowIncludeAllTopologyVulns"
-                      title="When enabled, Generate expands the chain beyond Number of Challenges if needed so every topology vulnerability node is included.">Include All Topology Vulns</label>
                   </div>
                 </div>
                 <div class="col-sm-6 col-lg-auto">
@@ -474,7 +466,6 @@
     const loadingLogLabelEl = document.getElementById('flowLoadingLogLabel');
     const loadingLogEl = document.getElementById('flowLoadingLog');
     const generateNoDuplicatesEl = document.getElementById('flowGenerateNoDuplicates');
-    const includeAllTopologyVulnsEl = document.getElementById('flowIncludeAllTopologyVulns');
     const includeAllTopologyPivotsEl = document.getElementById('flowIncludeAllTopologyPivots');
     const flowEnabledToggleEl = document.getElementById('flowEnabledToggle');
     const flowEnabledHelpEl = document.getElementById('flowEnabledHelp');
@@ -631,7 +622,6 @@
         chain_ids: [],
         flag_assignments: [],
         allow_node_duplicates: false,
-        include_all_topology_vulns: false,
         include_all_topology_pivots: false,
         initial_facts: null,
         goal_facts: null,
@@ -812,7 +802,6 @@
   let lastFlagsEnabled = true;
   let lastHostIpMap = new Map();
   let allowNodeDuplicates = false;
-  let includeAllTopologyVulns = false;
   let includeAllTopologyPivots = false;
   let generateInFlight = false;
   let heldChainIndices = new Set();
@@ -830,10 +819,8 @@
   }
 
   function syncTopologyInclusionOptionsFromUi() {
-    includeAllTopologyVulns = !!(includeAllTopologyVulnsEl && includeAllTopologyVulnsEl.checked);
     includeAllTopologyPivots = !!(includeAllTopologyPivotsEl && includeAllTopologyPivotsEl.checked);
     return {
-      include_all_topology_vulns: !!includeAllTopologyVulns,
       include_all_topology_pivots: !!includeAllTopologyPivots,
     };
   }
@@ -901,7 +888,6 @@
         chain_ids: chain_ids,
         flag_assignments: buildPersistAssignments(chain_ids),
         allow_node_duplicates: !!allowNodeDuplicates,
-        include_all_topology_vulns: !!includeAllTopologyVulns,
         include_all_topology_pivots: !!includeAllTopologyPivots,
         initial_facts: flowInitialFactsOverride,
         goal_facts: flowGoalFactsOverride,
@@ -955,7 +941,6 @@
       chain_ids,
       flag_assignments: (!flowEnabled) ? [] : buildPersistAssignments(chain_ids),
       allow_node_duplicates: !!allowNodeDuplicates,
-      include_all_topology_vulns: !!includeAllTopologyVulns,
       include_all_topology_pivots: !!includeAllTopologyPivots,
       initial_facts: flowInitialFactsOverride,
       goal_facts: flowGoalFactsOverride,
@@ -982,7 +967,6 @@
       chain_ids,
       flag_assignments: Array.isArray(state.flag_assignments) ? state.flag_assignments : [],
       allow_node_duplicates: !!state.allow_node_duplicates,
-      include_all_topology_vulns: !!state.include_all_topology_vulns,
       include_all_topology_pivots: !!state.include_all_topology_pivots,
       initial_facts: normalizeFactsOverride(state.initial_facts),
       goal_facts: normalizeFactsOverride(state.goal_facts),
@@ -1736,9 +1720,7 @@
       }
     } catch (e) { }
     try {
-      includeAllTopologyVulns = !!(saved && saved.include_all_topology_vulns);
       includeAllTopologyPivots = !!(saved && saved.include_all_topology_pivots);
-      if (includeAllTopologyVulnsEl) includeAllTopologyVulnsEl.checked = !!includeAllTopologyVulns;
       if (includeAllTopologyPivotsEl) includeAllTopologyPivotsEl.checked = !!includeAllTopologyPivots;
     } catch (e) { }
     const chainLen = saved.chain_ids.length;
@@ -1840,10 +1822,6 @@
         }
         if (flowState.flow_enabled !== undefined) {
           setFlowEnabled(!!flowState.flow_enabled, { skipPersist: true });
-        }
-        if (flowState.include_all_topology_vulns !== undefined) {
-          includeAllTopologyVulns = !!flowState.include_all_topology_vulns;
-          if (includeAllTopologyVulnsEl) includeAllTopologyVulnsEl.checked = !!includeAllTopologyVulns;
         }
         if (flowState.include_all_topology_pivots !== undefined) {
           includeAllTopologyPivots = !!flowState.include_all_topology_pivots;
@@ -10105,26 +10083,34 @@
 
   function dockerNodeCapFromStats(stats) {
     if (!stats || typeof stats !== 'object') return null;
-    const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : null;
     const dockerOther = Number.isFinite(+stats.docker_nonvuln_total) ? (+stats.docker_nonvuln_total) : null;
-    if (vuln === null && dockerOther === null) return null;
-    return Math.max(0, (vuln || 0) + (dockerOther || 0));
+    return dockerOther === null ? null : Math.max(0, dockerOther);
+  }
+
+  function vulnerabilityNodeMinimumFromStats(stats) {
+    if (!stats || typeof stats !== 'object') return 1;
+    const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : 0;
+    return Math.max(1, vuln);
   }
 
   function updateLengthSpinnerMax() {
     if (!lengthEl) return;
+    const minimum = vulnerabilityNodeMinimumFromStats(lastStats);
+    lengthEl.min = String(minimum);
+    if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
     const allowDupes = generateNoDuplicatesEl ? !!generateNoDuplicatesEl.checked : true;
     if (!allowDupes) {
       const cap = dockerNodeCapFromStats(lastStats);
       if (cap !== null && cap > 0) {
-        lengthEl.max = String(cap);
-        lengthEl.title = `Limited to ${cap} Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
+        lengthEl.max = String(Math.max(minimum, cap));
+        lengthEl.title = `Minimum ${minimum} for vulnerability nodes; limited to ${cap} non-vulnerability Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
         if (parseInt(lengthEl.value, 10) > cap) lengthEl.value = String(cap);
+        if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
         return;
       }
     }
     lengthEl.max = '50';
-    lengthEl.title = 'Limited to number of Docker nodes when duplicates is off.';
+    lengthEl.title = `Minimum ${minimum} for vulnerability nodes.`;
   }
 
   function mermaidSafeLabel(value) {
@@ -10587,8 +10573,6 @@
       }
     };
     const syncTopologyInclusionParams = () => {
-      if (topologyInclusionOptions.include_all_topology_vulns) params.set('include_all_topology_vulns', '1');
-      else params.delete('include_all_topology_vulns');
       if (topologyInclusionOptions.include_all_topology_pivots) params.set('include_all_topology_pivots', '1');
       else params.delete('include_all_topology_pivots');
     };
@@ -10597,9 +10581,14 @@
       if (allowDupes) return false;
       if (cap === null || cap === undefined || !Number.isFinite(+cap)) return false;
       const dockerCap = Math.max(0, parseInt(String(cap), 10) || 0);
+      const minimum = vulnerabilityNodeMinimumFromStats(lastStats);
       if (dockerCap <= 0) {
-        throw new Error('No Docker nodes found in topology. Increase Docker nodes or enable duplicates.');
+        throw new Error('No non-vulnerability Docker nodes found in topology. Increase Docker nodes or enable duplicates.');
       }
+      // Do not silently lower the requested count beneath the mandatory
+      // vulnerability-node minimum. The backend will return the capacity
+      // error if duplicates remain disabled.
+      if (minimum > dockerCap) return false;
       if (length <= dockerCap) return false;
       length = dockerCap;
       params.set('length', String(length));
@@ -11397,7 +11386,6 @@
             chain_ids: chain_ids,
             flag_assignments: buildPersistAssignments(chain_ids),
             allow_node_duplicates: !!allowNodeDuplicates,
-            include_all_topology_vulns: !!includeAllTopologyVulns,
             include_all_topology_pivots: !!includeAllTopologyPivots,
             initial_facts: flowInitialFactsOverride,
             goal_facts: flowGoalFactsOverride,
@@ -13544,13 +13532,6 @@ ${out.join('\n')}
 
   if (generateNoDuplicatesEl) {
     generateNoDuplicatesEl.addEventListener('change', () => { updateLengthSpinnerMax(); });
-  }
-
-  if (includeAllTopologyVulnsEl) {
-    includeAllTopologyVulnsEl.addEventListener('change', () => {
-      syncTopologyInclusionOptionsFromUi();
-      persistFlowStateAndXmlBestEffort();
-    });
   }
 
   if (includeAllTopologyPivotsEl) {

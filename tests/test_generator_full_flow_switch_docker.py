@@ -53,7 +53,7 @@ def test_generator_test_traverses_basic_switch_plus_docker_scenario(monkeypatch)
     tmpdir = tempfile.mkdtemp(prefix='coretg-gen-flow-')
 
     fake_flag_generator = {
-        'id': 'binary_embed_text',
+            'id': 'test_binary_embed_text',
         'name': 'Binary Embed Text',
         'language': 'python',
         'inputs': [],
@@ -148,7 +148,7 @@ def test_generator_test_traverses_basic_switch_plus_docker_scenario(monkeypatch)
 
         assignment = assignments[0]
         assert str(assignment.get('type') or '') == 'flag-generator'
-        assert str(assignment.get('id') or '') == 'binary_embed_text'
+        assert str(assignment.get('id') or '') == 'test_binary_embed_text'
         assert str(assignment.get('node_id') or '') == docker_node_id
 
         created_run_dirs = [str(p) for p in (prepare_data.get('created_run_dirs') or []) if str(p).strip()]

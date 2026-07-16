@@ -478,8 +478,6 @@ def flow_try_run_generator_remote(
         "env=os.environ.copy()\n"
         "env['CORETG_DOCKER_USE_SUDO']='1'\n"
         "env['CORETG_DOCKER_HOST_NETWORK']='1'\n"
-        "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FALLBACK','1')\n"
-        "env.setdefault('CORETG_RUN_FLAG_GENERATOR_PY_FIRST','1')\n"
         "preflight=''\n"
         "deps_dir='/tmp/coretg_pydeps'\n"
         "try:\n"
@@ -1583,13 +1581,17 @@ def pick_chain_nodes(
 ) -> list[Any]:
     if preset_steps:
         return backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
-    if allow_node_duplicates:
-        try:
-            seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
-        except Exception:
-            seed_val = 0
-        return backend._pick_flag_chain_nodes_allow_duplicates(nodes, adj, length=length, seed=seed_val)
-    return backend._pick_flag_chain_nodes(nodes, adj, length=length)
+    try:
+        seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
+    except Exception:
+        seed_val = 0
+    return backend._pick_flow_nonvulnerability_docker_nodes(
+        nodes,
+        adj,
+        length=length,
+        allow_node_duplicates=allow_node_duplicates,
+        seed=seed_val,
+    )
 
 
 def repair_explicit_chain_nodes(

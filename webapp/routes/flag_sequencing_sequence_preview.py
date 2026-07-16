@@ -86,7 +86,6 @@ def register(app, *, backend_module: Any) -> None:
         scenario_norm = backend._normalize_scenario_label(scenario_label)
         preset = str(payload_in.get('preset') or '').strip()
         allow_node_duplicates = str(payload_in.get('allow_node_duplicates') or payload_in.get('allow_duplicates') or '').strip().lower() in ('1', 'true', 'yes', 'y')
-        include_all_topology_vulns = str(payload_in.get('include_all_topology_vulns') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         include_all_topology_pivots = str(payload_in.get('include_all_topology_pivots') or '').strip().lower() in ('1', 'true', 'yes', 'y')
         length = 5
         try:
@@ -105,7 +104,7 @@ def register(app, *, backend_module: Any) -> None:
             f"Sequence start: scenario={scenario_norm or scenario_label or '-'} length={length} "
             f"dependency={dependency_level}/5 preset={preset or 'random'} "
             f"duplicates={'on' if allow_node_duplicates else 'off'} "
-            f"include_vulns={int(include_all_topology_vulns)} include_pivots={int(include_all_topology_pivots)}"
+            f"required_vulns=1 include_pivots={int(include_all_topology_pivots)}"
         )
 
         flow_seed_param: int | None = None
@@ -196,6 +195,12 @@ def register(app, *, backend_module: Any) -> None:
         _flow_progress('Phase: building topology graph')
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
+        if not preset_steps:
+            required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
+            if length < required_vulnerability_count:
+                length = required_vulnerability_count
+                requested_length = length
+                _flow_progress(f'Adjusted requested length to required vulnerability count={required_vulnerability_count}')
         try:
             _flow_progress(
                 f"Topology graph ready: nodes={len(nodes or [])} links={len(_links or [])} "
@@ -209,26 +214,21 @@ def register(app, *, backend_module: Any) -> None:
         if preset_steps:
             chain_nodes = backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
         else:
-            if allow_node_duplicates:
-                seed_val = backend._get_flow_seed(preview, flow_seed_param)
-                chain_nodes = backend._pick_flag_chain_nodes_allow_duplicates(nodes, adj, length=length, seed=seed_val)
-            else:
-                chain_nodes = backend._pick_flag_chain_nodes(nodes, adj, length=length)
+            seed_val = backend._get_flow_seed(preview, flow_seed_param)
+            chain_nodes = backend._pick_flow_nonvulnerability_docker_nodes(
+                nodes,
+                adj,
+                length=length,
+                allow_node_duplicates=allow_node_duplicates,
+                seed=seed_val,
+            )
 
         _flow_progress(f'Selected chain nodes: count={len(chain_nodes or [])} ids={_chain_ids(chain_nodes) or "-"}')
-
-        if not chain_nodes:
-            return _validation_failure(
-                'No eligible nodes found in preview plan.',
-                available=0,
-                requested_length=requested_length,
-                stats=stats,
-            )
 
         warning: str | None = None
         topology_inclusion_info: dict[str, Any] = {
             'requested': {
-                'include_all_topology_vulns': bool(include_all_topology_vulns),
+                'required_vulnerability_nodes': True,
                 'include_all_topology_pivots': bool(include_all_topology_pivots),
             },
             'added_node_ids': [],
@@ -249,13 +249,13 @@ def register(app, *, backend_module: Any) -> None:
                     stats=stats,
                 )
 
-        if (not preset_steps) and (include_all_topology_vulns or include_all_topology_pivots):
-            _flow_progress('Phase: expanding chain for requested topology inclusions')
+        if not preset_steps:
+            _flow_progress('Phase: adding required vulnerability nodes')
             chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
                 nodes,
                 chain_nodes,
                 preview,
-                include_all_topology_vulns=include_all_topology_vulns,
+                include_all_topology_vulns=True,
                 include_all_topology_pivots=include_all_topology_pivots,
                 pivot_context=payload,
             )
@@ -268,8 +268,16 @@ def register(app, *, backend_module: Any) -> None:
                 )
             except Exception:
                 pass
-        elif preset_steps and (include_all_topology_vulns or include_all_topology_pivots):
+        elif preset_steps and include_all_topology_pivots:
             topology_inclusion_info['ignored'] = 'preset'
+
+        if not chain_nodes:
+            return _validation_failure(
+                'No eligible Flow nodes found in preview plan.',
+                available=0,
+                requested_length=requested_length,
+                stats=stats,
+            )
 
         host_by_id: dict[str, dict[str, Any]] = {}
         try:
@@ -504,7 +512,6 @@ def register(app, *, backend_module: Any) -> None:
                 'requested_length': requested_length,
                 'dependency_level': dependency_level,
                 'allow_node_duplicates': bool(allow_node_duplicates),
-                'include_all_topology_vulns': bool(include_all_topology_vulns),
                 'include_all_topology_pivots': bool(include_all_topology_pivots),
                 'topology_inclusion': dict(topology_inclusion_info or {}),
                 'chain': list(chain_payload or []),
@@ -611,7 +618,6 @@ def register(app, *, backend_module: Any) -> None:
                 'flow_errors': list(flow_errors or []),
                 'flow_seed': response_flow_seed,
                 'dependency_level': dependency_level,
-                'include_all_topology_vulns': bool(include_all_topology_vulns),
                 'include_all_topology_pivots': bool(include_all_topology_pivots),
                 'topology_inclusion': dict(topology_inclusion_info or {}),
                 'preview_plan_path': out_path,
