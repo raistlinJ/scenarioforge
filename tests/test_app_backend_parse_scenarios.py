@@ -4,6 +4,18 @@ import xml.etree.ElementTree as ET
 from webapp import app_backend as backend
 
 
+def test_preexecute_xml_resolution_preserves_explicit_selected_xml(tmp_path, monkeypatch):
+    selected = tmp_path / 'selected.xml'
+    newer_same_name = tmp_path / 'newer.xml'
+    selected.write_text('<Scenarios />', encoding='utf-8')
+    newer_same_name.write_text('<Scenarios />', encoding='utf-8')
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _scenario: str(newer_same_name))
+
+    resolved = backend._resolve_preexecute_xml_path(str(selected), 'Scenario1')
+
+    assert resolved == str(selected.resolve())
+
+
 def test_parse_sample_xml_summary_counts():
     """The canonical Web UI parser can read the checked-in example XML."""
     sample_path = Path(__file__).resolve().parent.parent / "examples" / "sample.xml"

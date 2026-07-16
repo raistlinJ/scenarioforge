@@ -52,9 +52,14 @@ def test_cli_execute_saved_xml_rejects_stale_embedded_plan_preview(tmp_path, mon
     }
     saved_preview = {
         'role_counts': {'Docker': 1},
-        'hosts': [{'node_id': '1', 'role': 'Docker'}],
+        'hosts': [{'node_id': '1', 'name': 'docker-1', 'role': 'Docker', 'ip4': '10.0.0.3/24'}],
         'routers': [{'node_id': 'r1'}],
-        'switches_detail': [{'node_id': 'sw1'}],
+        'switches_detail': [{
+            'switch_id': 'sw1',
+            'router_id': None,
+            'lan_subnet': '10.0.0.0/24',
+            'host_if_ips': {'1': '10.0.0.3/24'},
+        }],
         'services_plan': {},
         'vulnerabilities_plan': {},
         'r2r_policy_preview': {},
@@ -98,6 +103,50 @@ def test_cli_execute_saved_xml_rejects_stale_embedded_plan_preview(tmp_path, mon
     assert ret == 1
     assert any('Saved PlanPreview does not match the current XML-derived plan' in rec.message for rec in caplog.records)
     assert any('PlanPreview mismatch:' in rec.message for rec in caplog.records)
+
+
+def test_cli_execute_requires_embedded_plan_preview(tmp_path, monkeypatch, caplog):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    plan = {
+        'routers_planned': 0,
+        'role_counts': {'Host': 1},
+        'service_plan': {},
+        'vulnerability_plan': {},
+        'traffic_plan': None,
+        'breakdowns': {
+            'router': {'simple_plan': {}},
+            'segmentation': {'density': 0.0, 'raw_items_serialized': []},
+        },
+    }
+    argv0 = cli.sys.argv[:]
+
+    _patch_basic_cli_execute_dependencies(monkeypatch, flow_state=None)
+    monkeypatch.setattr(cli, '_load_preview_plan', lambda *_a, **_k: ({'metadata': {}}, None))
+    monkeypatch.setattr(orchestrator, 'compute_full_plan', lambda *a, **k: dict(plan))
+
+    caplog.set_level(logging.ERROR)
+    try:
+        cli.sys.argv = ['scenarioforge.cli', '--xml', str(xml_path), '--scenario', 's']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    assert any('requires a valid PlanPreview embedded in the selected XML' in rec.message for rec in caplog.records)
+
+
+def test_plan_summary_detects_host_address_drift():
+    expected = cli._plan_summary_from_full_preview({
+        'hosts': [{'node_id': 1, 'name': 'docker-1', 'ip4': '172.30.0.3/24'}],
+    })
+    actual = cli._plan_summary_from_full_preview({
+        'hosts': [{'node_id': 1, 'name': 'docker-1', 'ip4': '10.0.0.3/24'}],
+    })
+
+    diffs = cli._diff_plan_summaries(expected, actual)
+
+    assert any(item['field'] == 'host_addresses' for item in diffs)
 
 
 def test_cli_execute_saved_xml_rejects_missing_flow_runtime_paths(tmp_path, monkeypatch, caplog):
