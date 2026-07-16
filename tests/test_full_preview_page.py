@@ -128,12 +128,15 @@ def test_preview_execution_modal_shows_summary_generation_and_cannot_be_hidden()
 
     assert 'id="executeProgressHideBtn"' not in page_text
     assert 'id="executeProgressModal"' in page_text
+    assert '--bs-modal-width: 1600px' in page_text
+    assert 'max-height: 520px' in page_text
     assert 'aria-label="Close"' not in page_text[page_text.index('id="executeProgressModal"'):page_text.index('id="executeSummaryModal"')]
     assert 'id="executeSummaryModal"' in page_text
     assert 'id="executeSummaryList"' in page_text
     assert 'id="executeSummaryCopyBtn"' in page_text
     assert 'id="executeSummaryReportsBtn"' in page_text
     assert script_text.count("status: 'Generating Execution Summary'") == 2
+    assert "status: 'Calculating Execution Report Summary, please wait...'" in script_text
     assert "id('executeProgressHideBtn')" not in script_text
     assert 'function renderExecuteSummaryItem(label, ok, detail, items = [])' in script_text
     assert "'Generator inject sources present on CORE VM'" in script_text

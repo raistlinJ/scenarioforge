@@ -3615,6 +3615,12 @@
       };
       executeProgressEvtSrc.addEventListener('end', () => {
         appendExecuteProgressLog('Execution stream ended');
+        setExecuteProgressUI({
+          status: 'Calculating Execution Report Summary, please wait...',
+          meta: 'Validating the completed scenario and preparing the report.',
+          barText: 'Calculating Summary…',
+          animate: true,
+        });
         cleanupExecuteProgress();
       });
       executeProgressEvtSrc.addEventListener('ping', () => {
