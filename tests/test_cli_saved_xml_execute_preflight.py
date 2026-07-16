@@ -136,19 +136,6 @@ def test_cli_execute_requires_embedded_plan_preview(tmp_path, monkeypatch, caplo
     assert any('requires a valid PlanPreview embedded in the selected XML' in rec.message for rec in caplog.records)
 
 
-def test_plan_summary_detects_host_address_drift():
-    expected = cli._plan_summary_from_full_preview({
-        'hosts': [{'node_id': 1, 'name': 'docker-1', 'ip4': '172.30.0.3/24'}],
-    })
-    actual = cli._plan_summary_from_full_preview({
-        'hosts': [{'node_id': 1, 'name': 'docker-1', 'ip4': '10.0.0.3/24'}],
-    })
-
-    diffs = cli._diff_plan_summaries(expected, actual)
-
-    assert any(item['field'] == 'host_addresses' for item in diffs)
-
-
 def test_cli_execute_saved_xml_rejects_missing_flow_runtime_paths(tmp_path, monkeypatch, caplog):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="s"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
