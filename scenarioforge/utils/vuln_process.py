@@ -1497,10 +1497,37 @@ def _force_service_network_mode_none(service: Dict[str, object]) -> None:
 
 
 def _drop_service_dependencies_for_no_network(service: Dict[str, object]) -> None:
-	"""Remove Compose service dependencies that cannot work without Compose networking."""
+	"""Remove network-dependent Compose dependencies while retaining inject helpers.
+
+	`inject_copy*` services only populate a shared named volume; they do not need
+	Compose DNS or a Docker-managed network.  CORE starts the selected compose
+	service by name, so retaining this dependency is what causes Compose to start
+	the helper before the vulnerability node.  Dropping it leaves `/flow_injects`
+	empty even when the generated source artifacts are present on the CORE host.
+	"""
 	if not isinstance(service, dict):
 		return
-	service.pop('depends_on', None)
+	depends_on = service.get('depends_on')
+	if isinstance(depends_on, list):
+		kept = [
+			item for item in depends_on
+			if str(item or '').strip().startswith('inject_copy')
+		]
+		if kept:
+			service['depends_on'] = kept
+		else:
+			service.pop('depends_on', None)
+	elif isinstance(depends_on, dict):
+		kept = {
+			key: value for key, value in depends_on.items()
+			if str(key or '').strip().startswith('inject_copy')
+		}
+		if kept:
+			service['depends_on'] = kept
+		else:
+			service.pop('depends_on', None)
+	else:
+		service.pop('depends_on', None)
 	service.pop('links', None)
 
 
