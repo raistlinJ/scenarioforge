@@ -1420,10 +1420,7 @@
                             </div>
                             <div class="card-body p-2">
                                 <div id="fpGraph"
-                                    style="height:480px; position:relative; background:#fafafa; border:1px solid #e0e0e0; border-radius:4px; overflow:hidden;">
-                                    <div class="position-absolute top-50 start-50 translate-middle text-muted"
-                                        id="fpGraphLoading">Rendering...</div>
-                                </div>
+                                    style="height:480px; position:relative; background:#fafafa; border:1px solid #e0e0e0; border-radius:4px; overflow:hidden;"></div>
                                 <div class="form-text mt-1">Drag to reposition nodes. Hover for details. PNG exports
                                     current view.</div>
                             </div>
@@ -8066,7 +8063,11 @@
         if (labelToggle) {
             labelToggle.dataset.graphLabelsState = shouldShowLabels ? 'on' : 'off';
         }
-        if (!window.d3) { const g = document.getElementById('fpGraphLoading'); if (g) g.textContent = 'd3 not loaded'; return; }
+        if (!window.d3) {
+            const graph = document.getElementById('fpGraph');
+            if (graph) graph.textContent = 'd3 not loaded';
+            return;
+        }
         const container = d3.select('#fpGraph');
         container.selectAll('*').remove();
         const w = container.node().clientWidth || 800; const h = container.node().clientHeight || 480;
@@ -8435,7 +8436,6 @@
         if (nodes.length === 0) {
             svg.remove();
             container.append('div').attr('class', 'text-muted small p-2').text('No nodes to display');
-            document.getElementById('fpGraphLoading')?.remove();
             return;
         }
 
@@ -8800,7 +8800,6 @@
             d.layoutX = d.x;
             d.layoutY = d.y;
         }
-        document.getElementById('fpGraphLoading')?.remove();
         const resetBtn = document.getElementById('fpGraphResetBtn');
         if (resetBtn) {
             resetBtn.addEventListener('click', () => {
