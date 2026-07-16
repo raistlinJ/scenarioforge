@@ -32567,13 +32567,34 @@ def _sync_local_vulns_to_remote(
     try:
         client = _open_ssh_client(core_cfg)
         sftp = client.open_sftp()
+
+        def _put_file_preserving_execute_mode(local_path: str, remote_path: str) -> None:
+            """Upload a generated artifact and retain its executable bits on CORE.
+
+            SFTP uploads commonly create regular files with the remote umask,
+            even when the local staged source is executable.  That breaks
+            bind-mounted CGI support scripts such as Vulhub Bashbug's
+            ``victim.cgi``.  Preserve the local mode only when it carries an
+            executable bit, leaving ordinary data files under the server's
+            normal permissions.
+            """
+            sftp.put(local_path, remote_path)
+            try:
+                local_mode = os.stat(local_path).st_mode & 0o777
+                if local_mode & 0o111:
+                    chmod = getattr(sftp, 'chmod', None)
+                    if callable(chmod):
+                        chmod(remote_path, local_mode)
+            except Exception:
+                log.warning("[sync] Uploaded %s but could not preserve executable mode on %s", local_path, remote_path)
+
         remote_dir_resolved = _remote_expand_path(sftp, remote_dir)
         _remote_mkdirs(client, remote_dir_resolved)
         made_dirs: set[str] = set()
         for lp in local_files:
             rp = _remote_path_join(remote_dir_resolved, os.path.basename(lp))
             try:
-                sftp.put(lp, rp)
+                _put_file_preserving_execute_mode(lp, rp)
                 uploaded += 1
             except Exception:
                 log.exception("[sync] Failed uploading %s -> %s", lp, rp)
@@ -32623,7 +32644,7 @@ def _sync_local_vulns_to_remote(
                             if remote_parent and remote_parent not in made_dirs:
                                 _remote_mkdirs(client, remote_parent)
                                 made_dirs.add(remote_parent)
-                            sftp.put(local_child_file, remote_child_file)
+                            _put_file_preserving_execute_mode(local_child_file, remote_child_file)
                             uploaded += 1
                         except Exception:
                             log.exception("[sync] Failed uploading bind source %s -> %s", local_child_file, remote_child_file)
@@ -32633,7 +32654,7 @@ def _sync_local_vulns_to_remote(
                     if remote_parent and remote_parent not in made_dirs:
                         _remote_mkdirs(client, remote_parent)
                         made_dirs.add(remote_parent)
-                    sftp.put(source, remote_source)
+                    _put_file_preserving_execute_mode(source, remote_source)
                     uploaded += 1
                 except Exception:
                     log.exception("[sync] Failed uploading bind source %s -> %s", source, remote_source)
@@ -32687,7 +32708,7 @@ def _sync_local_vulns_to_remote(
                     except Exception:
                         pass
                     try:
-                        sftp.put(lp_file, rp_file)
+                        _put_file_preserving_execute_mode(lp_file, rp_file)
                         uploaded += 1
                     except Exception:
                         log.exception("[sync] Failed uploading %s -> %s", lp_file, rp_file)
@@ -32744,7 +32765,7 @@ def _sync_local_vulns_to_remote(
                     except Exception:
                         pass
                     try:
-                        sftp.put(lp_file, rp_file)
+                        _put_file_preserving_execute_mode(lp_file, rp_file)
                         uploaded += 1
                     except Exception:
                         log.exception("[sync] Failed uploading %s -> %s", lp_file, rp_file)

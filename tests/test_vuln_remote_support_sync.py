@@ -6,9 +6,13 @@ import os
 class _FakeSFTP:
     def __init__(self):
         self.put_calls: list[tuple[str, str]] = []
+        self.chmod_calls: list[tuple[str, int]] = []
 
     def put(self, localpath, remotepath, *args, **kwargs):
         self.put_calls.append((str(localpath), str(remotepath)))
+
+    def chmod(self, path, mode):
+        self.chmod_calls.append((str(path), int(mode)))
 
     def close(self):
         pass
@@ -34,6 +38,7 @@ def test_remote_vuln_sync_uploads_generated_compose_bind_source(tmp_path, monkey
     staged_dir.mkdir(parents=True)
     victim = staged_dir / "victim.cgi"
     victim.write_text("#!/bin/bash\necho vulnerable\n", encoding="utf-8")
+    victim.chmod(0o755)
 
     compose = local_dir / "docker-compose-bash-1.yml"
     compose.write_text(
@@ -55,6 +60,7 @@ def test_remote_vuln_sync_uploads_generated_compose_bind_source(tmp_path, monkey
     )
 
     assert (str(victim), "/tmp/vulns/bash-cve-2014-6271/node-bash-1/victim.cgi") in sftp.put_calls
+    assert ("/tmp/vulns/bash-cve-2014-6271/node-bash-1/victim.cgi", 0o755) in sftp.chmod_calls
 
 
 def test_staging_repairs_non_executable_shebang_cgi_support_file(tmp_path):
