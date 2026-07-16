@@ -32507,7 +32507,39 @@ def _sync_local_vulns_to_remote(
     except Exception:
         wrapper_dirs = []
 
-    if not local_files and not wrapper_dirs and not local_dirs:
+    # Generated compose files use absolute bind-mount paths for catalog support
+    # files (for example Vulhub's `safe.cgi` and `victim.cgi`).  Those files live
+    # under local_dir after preparation, but are not part of the compose YAML or
+    # wrapper build context themselves.  Discover them from the generated compose
+    # files so the remote CORE host receives the exact sources Docker will mount.
+    bind_sources: List[str] = []
+    try:
+        from scenarioforge.compose_dependencies import scan_compose_dependencies
+
+        local_dir_abs = os.path.abspath(local_dir)
+        for compose_file in local_files:
+            if not str(compose_file).lower().endswith(('.yml', '.yaml')):
+                continue
+            summary = scan_compose_dependencies(compose_file)
+            for requirement in summary.get('requires') or []:
+                if not isinstance(requirement, dict) or requirement.get('kind') != 'bind_mount':
+                    continue
+                source = str(requirement.get('resolved_path') or '').strip()
+                if not source or not os.path.exists(source):
+                    continue
+                source_abs = os.path.abspath(source)
+                try:
+                    if os.path.commonpath([local_dir_abs, source_abs]) != local_dir_abs:
+                        continue
+                except ValueError:
+                    continue
+                bind_sources.append(source_abs)
+    except Exception:
+        # This is an additive sync safeguard; preserve existing execution when a
+        # compose file is malformed or its optional parser is unavailable.
+        bind_sources = []
+
+    if not local_files and not wrapper_dirs and not local_dirs and not bind_sources:
         return False
 
     client = None
@@ -32526,6 +32558,66 @@ def _sync_local_vulns_to_remote(
                 uploaded += 1
             except Exception:
                 log.exception("[sync] Failed uploading %s -> %s", lp, rp)
+
+        # Upload the bind sources discovered above, retaining each path relative
+        # to local_dir.  This keeps generated absolute mount paths valid on the
+        # remote host without copying unrelated paths outside /tmp/vulns.
+        for source in sorted(set(bind_sources)):
+            try:
+                rel = os.path.relpath(source, local_dir)
+            except Exception:
+                continue
+            if not rel or rel == '.' or rel.startswith('..'):
+                continue
+            remote_source = _remote_path_join(remote_dir_resolved, rel)
+            if os.path.isdir(source):
+                try:
+                    if remote_source not in made_dirs:
+                        _remote_mkdirs(client, remote_source)
+                        made_dirs.add(remote_source)
+                except Exception:
+                    pass
+                for root, dirs, files in os.walk(source):
+                    for dn in dirs:
+                        local_child_dir = os.path.join(root, dn)
+                        try:
+                            child_rel = os.path.relpath(local_child_dir, local_dir)
+                        except Exception:
+                            continue
+                        remote_child_dir = _remote_path_join(remote_dir_resolved, child_rel)
+                        if remote_child_dir in made_dirs:
+                            continue
+                        try:
+                            _remote_mkdirs(client, remote_child_dir)
+                            made_dirs.add(remote_child_dir)
+                        except Exception:
+                            pass
+                    for fn in files:
+                        local_child_file = os.path.join(root, fn)
+                        try:
+                            child_rel = os.path.relpath(local_child_file, local_dir)
+                        except Exception:
+                            continue
+                        remote_child_file = _remote_path_join(remote_dir_resolved, child_rel)
+                        remote_parent = os.path.dirname(remote_child_file)
+                        try:
+                            if remote_parent and remote_parent not in made_dirs:
+                                _remote_mkdirs(client, remote_parent)
+                                made_dirs.add(remote_parent)
+                            sftp.put(local_child_file, remote_child_file)
+                            uploaded += 1
+                        except Exception:
+                            log.exception("[sync] Failed uploading bind source %s -> %s", local_child_file, remote_child_file)
+            elif os.path.isfile(source):
+                remote_parent = os.path.dirname(remote_source)
+                try:
+                    if remote_parent and remote_parent not in made_dirs:
+                        _remote_mkdirs(client, remote_parent)
+                        made_dirs.add(remote_parent)
+                    sftp.put(source, remote_source)
+                    uploaded += 1
+                except Exception:
+                    log.exception("[sync] Failed uploading bind source %s -> %s", source, remote_source)
 
         # Upload wrapper build contexts, preserving relative paths.
         for d in sorted(set(wrapper_dirs)):
