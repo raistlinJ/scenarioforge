@@ -22548,14 +22548,14 @@
             const note = String(generator?.note || '').trim();
             const color = String(generator?.note_color || '').trim().toLowerCase();
             if (mode === 'has-note') return !!note;
-            return !['red', 'yellow', 'green'].includes(mode) || (!!note && color === mode);
+            return !['red', 'yellow', 'green'].includes(mode) || color === mode;
         };
         const noteHtml = generator => {
             const note = String(generator?.note || '').trim();
-            if (!note) return '';
             const color = String(generator?.note_color || '').trim().toLowerCase();
-            const colorClass = ({ red: 'text-danger', yellow: 'text-warning', green: 'text-success' })[color] || 'text-secondary';
-            return `<span class="d-block small ${colorClass}"><i class="bi bi-circle-fill me-1" aria-hidden="true"></i>${esc(note)}</span>`;
+            const colorClass = ({ red: 'text-danger', yellow: 'text-warning', green: 'text-success' })[color];
+            if (!note && !colorClass) return '';
+            return `<span class="d-block small ${colorClass || 'text-secondary'}"><i class="bi bi-circle-fill me-1" aria-hidden="true"></i>${esc(note || 'Color marker')}</span>`;
         };
         const render = () => {
             const query = String(filter?.value || '').trim().toLowerCase();
@@ -23096,10 +23096,10 @@
                 })();
                 const noteHtml = (() => {
                     const note = String(it?.note || '').trim();
-                    if (!note) return '<span class="text-muted small">—</span>';
                     const color = String(it?.note_color || '').trim().toLowerCase();
-                    const colorClass = ({ red: 'text-danger', yellow: 'text-warning', green: 'text-success' })[color] || 'text-secondary';
-                    return `<span class="small ${colorClass}" title="${esc(note)}"><i class="bi bi-circle-fill me-1" aria-hidden="true"></i>${esc(note)}</span>`;
+                    const colorClass = ({ red: 'text-danger', yellow: 'text-warning', green: 'text-success' })[color];
+                    if (!note && !colorClass) return '<span class="text-muted small">—</span>';
+                    return `<span class="small ${colorClass || 'text-secondary'}" title="${esc(note || 'Color marker')}"><i class="bi bi-circle-fill me-1" aria-hidden="true"></i>${esc(note || 'Color marker')}</span>`;
                 })();
                 const pickable = isPickable(st, it);
                 const blockedReason = pickable ? '' : selectionBlockReason(it);
@@ -23411,7 +23411,7 @@
                 const note = String(it?.note || '').trim();
                 const color = String(it?.note_color || '').trim().toLowerCase();
                 if (noteMode === 'has-note') return !!note;
-                return !['red', 'yellow', 'green'].includes(noteMode) || (!!note && color === noteMode);
+                return !['red', 'yellow', 'green'].includes(noteMode) || color === noteMode;
             });
             const filterLabels = [];
             if (cachedOnly) filterLabels.push('cached images only');

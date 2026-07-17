@@ -24,12 +24,22 @@ def test_vuln_catalog_pack_download_streams_zip(monkeypatch, tmp_path):
 
     monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
     monkeypatch.setattr(backend, '_vuln_catalog_pack_zip_path', lambda catalog_id: str(pack_zip))
+    monkeypatch.setattr(backend, '_load_vuln_catalogs_state', lambda: {
+        'catalogs': [{
+            'id': 'cat-1',
+            'compose_items': [{'id': 1, 'compose_rel': 'demo/docker-compose.yml', 'note': '', 'note_color': 'red'}],
+        }],
+    })
 
     resp = client.get('/vuln_catalog_packs/download/cat-1')
 
     assert resp.status_code == 200
     assert resp.data[:2] == b'PK'
     assert 'attachment; filename=vuln_catalog_cat-1.zip' in resp.headers.get('Content-Disposition', '')
+    with zipfile.ZipFile(io.BytesIO(resp.data), 'r') as archive:
+        notes = archive.read('.scenarioforge/catalog_notes.json').decode('utf-8')
+    assert 'demo/docker-compose.yml' in notes
+    assert '"red"' in notes
 
 
 def test_vuln_catalog_export_all_bundles_catalog_zips(monkeypatch, tmp_path):
@@ -47,7 +57,10 @@ def test_vuln_catalog_export_all_bundles_catalog_zips(monkeypatch, tmp_path):
     monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
     monkeypatch.setattr(backend, '_load_vuln_catalogs_state', lambda: {
         'catalogs': [
-            {'id': 'cat-1', 'label': 'alpha', 'origin': 'test', 'installed_at': 'now', 'compose_count': 1},
+            {
+                'id': 'cat-1', 'label': 'alpha', 'origin': 'test', 'installed_at': 'now', 'compose_count': 1,
+                'compose_items': [{'id': 1, 'compose_rel': 'one/docker-compose.yml', 'note': 'important', 'note_color': 'green'}],
+            },
             {'id': 'cat-2', 'label': 'beta', 'origin': 'test', 'installed_at': 'now', 'compose_count': 1},
             {'id': 'missing', 'label': 'missing'},
         ]
@@ -65,8 +78,12 @@ def test_vuln_catalog_export_all_bundles_catalog_zips(monkeypatch, tmp_path):
         assert 'catalogs/cat-2-beta.zip' in names
         assert 'catalogs/missing-missing.zip' not in names
         manifest = archive.read('catalogs.json').decode('utf-8')
+        nested = archive.read('catalogs/cat-1-alpha.zip')
+    with zipfile.ZipFile(io.BytesIO(nested), 'r') as nested_archive:
+        notes = nested_archive.read('.scenarioforge/catalog_notes.json').decode('utf-8')
     assert 'cat-1' in manifest
     assert 'cat-2' in manifest
+    assert 'important' in notes
 
 
 def test_vuln_catalog_pack_browse_lists_entries_and_redirects_files(monkeypatch, tmp_path):

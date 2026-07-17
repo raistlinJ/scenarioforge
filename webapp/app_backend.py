@@ -44835,7 +44835,7 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
                 continue
             note_text = str(raw_note.get('note') or '').strip()
             raw_color = str(raw_note.get('note_color') or '').strip().lower()
-            note_color = raw_color if raw_color in {'red', 'yellow', 'green'} and note_text else None
+            note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else None
             info_obj = gen_by_kind_id.get((note_kind, note_gid))
             if info_obj is None:
                 info_obj = {
@@ -45301,11 +45301,36 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
 
     csv_rel_paths: list[str] = []
     compose_items: list[dict[str, Any]] = []
+    imported_notes_by_compose_rel: dict[str, dict[str, str]] = {}
     try:
         # Extract the entire ZIP directory tree so compose directories (and their
         # support files) are preserved.
         content_dir = _vuln_catalog_pack_content_dir(catalog_id)
         _safe_extract_zip_to_dir(zip_path, content_dir)
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                raw_notes = archive.read('.scenarioforge/catalog_notes.json').decode('utf-8', errors='ignore')
+            notes_doc = json.loads(raw_notes or '{}')
+            note_entries = notes_doc.get('notes') if isinstance(notes_doc, dict) else []
+            if isinstance(note_entries, list):
+                for raw_entry in note_entries:
+                    if not isinstance(raw_entry, dict):
+                        continue
+                    compose_rel = str(raw_entry.get('compose_rel') or '').replace('\\', '/').strip().lstrip('/')
+                    if not compose_rel or '..' in compose_rel.split('/'):
+                        continue
+                    note_text = str(raw_entry.get('note') or '').strip()
+                    raw_color = str(raw_entry.get('note_color') or '').strip().lower()
+                    note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else ''
+                    if note_text or note_color:
+                        imported_notes_by_compose_rel[compose_rel] = {
+                            'note': note_text,
+                            'note_color': note_color,
+                        }
+        except KeyError:
+            pass
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f'Invalid ScenarioForge catalog notes metadata: {exc}') from exc
         try:
             from scenarioforge.compose_dependencies import missing_dependency_paths, scan_compose_dependencies
         except Exception:
@@ -45359,7 +45384,7 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             # missing required files, or a Dockerfile that needs build-time
             # internet (which a locked-down CORE VM build container lacks).
             auto_disabled = bool(missing_required_files) or needs_build_network
-            compose_items.append({
+            item = {
                 'id': idx,
                 'name': display_name,
                 'rel_dir': rel_dir,
@@ -45377,7 +45402,12 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 'compose_dependency_warning': str(compose_dependency_summary.get('warning') or '').strip(),
                 'requires_build_network': needs_build_network,
                 'build_network_notes': list(compose_dependency_summary.get('build_network_notes') or []),
-            })
+            }
+            imported_note = imported_notes_by_compose_rel.get(compose_rel)
+            if imported_note:
+                item['note'] = imported_note['note']
+                item['note_color'] = imported_note['note_color'] or None
+            compose_items.append(item)
 
         # Generate a catalog CSV from discovered compose directories.
         out_path = os.path.join(pack_dir, 'vuln_list_w_url.csv')
@@ -45663,7 +45693,7 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['persistent'] = bool(it.get('persistent', False))
         it['note'] = str(it.get('note') or '').strip()
         raw_note_color = str(it.get('note_color') or '').strip().lower()
-        it['note_color'] = raw_note_color if raw_note_color in {'red', 'yellow', 'green'} and it['note'] else None
+        it['note_color'] = raw_note_color if raw_note_color in {'red', 'yellow', 'green'} else None
         it['cached'] = it.get('cached') if isinstance(it.get('cached'), bool) else None
         it['cache_checked_at'] = str(it.get('cache_checked_at') or '').strip() or None
         it['cache_last_core_host'] = str(it.get('cache_last_core_host') or '').strip() or None
@@ -47077,6 +47107,7 @@ def _install_generator_pack_payload(
     safe_label: str,
     pack_origin: str,
     next_numeric: int,
+    imported_catalog_notes: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, str, list[dict[str, Any]], int, list[dict[str, Any]]]:
     """Install a pack zip payload and return installed items.
 
@@ -47092,6 +47123,20 @@ def _install_generator_pack_payload(
         return False, f'Pack install requires PyYAML: {exc}', [], next_numeric, []
 
     root = _installed_generators_root()
+    imported_note_map: dict[tuple[str, str], dict[str, str | None]] = {}
+    for raw_note in (imported_catalog_notes or []):
+        if not isinstance(raw_note, dict):
+            continue
+        note_kind = str(raw_note.get('kind') or '').strip().lower().replace('_', '-')
+        note_generator_id = str(raw_note.get('generator_id') or raw_note.get('id') or '').strip()
+        note_text = str(raw_note.get('note') or '').strip()
+        raw_color = str(raw_note.get('note_color') or '').strip().lower()
+        note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else None
+        if note_kind in {'flag-generator', 'flag-node-generator'} and note_generator_id and (note_text or note_color):
+            imported_note_map[(note_kind, note_generator_id)] = {
+                'note': note_text,
+                'note_color': note_color,
+            }
     tmp_dir = tempfile.mkdtemp(prefix='coretg_pack_')
     try:
         _safe_extract_zip_to_dir(zip_path, tmp_dir)
@@ -47178,6 +47223,10 @@ def _install_generator_pack_payload(
                 pass
 
             installed_item: dict[str, Any] = {'id': assigned_gid, 'kind': kind, 'path': dest_dir}
+            imported_note = imported_note_map.get((kind, source_gid))
+            if imported_note:
+                installed_item['note'] = str(imported_note.get('note') or '').strip()
+                installed_item['note_color'] = imported_note.get('note_color')
             compose_dependency_summary = it.get('compose_dependencies') if isinstance(it.get('compose_dependencies'), dict) else {}
             required_files = compose_dependency_summary.get('requires') if isinstance(compose_dependency_summary, dict) else []
             if isinstance(required_files, list):
@@ -47225,12 +47274,15 @@ def _install_generator_pack(*, zip_path: str, pack_label: str, pack_origin: str)
         pack_id = _local_timestamp_safe() + '-' + uuid.uuid4().hex[:6]
         next_numeric = _compute_next_numeric_generator_id(repo_root=repo_root)
 
+        source_meta = _read_generator_pack_zip_metadata(zip_path)
+        imported_catalog_notes = source_meta.get('catalog_notes') if isinstance(source_meta.get('catalog_notes'), list) else []
         ok, note, installed, _next, warnings = _install_generator_pack_payload(
             zip_path=zip_path,
             pack_id=pack_id,
             safe_label=safe_label,
             pack_origin=pack_origin,
             next_numeric=next_numeric,
+            imported_catalog_notes=imported_catalog_notes,
         )
         if not ok:
             return False, note
@@ -47348,6 +47400,7 @@ def _install_generator_pack_or_bundle(*, zip_path: str, pack_label: str, pack_or
                             safe_label=safe_inner_label,
                             pack_origin=inner_origin,
                             next_numeric=next_numeric,
+                            imported_catalog_notes=source_meta.get('catalog_notes') if isinstance(source_meta.get('catalog_notes'), list) else [],
                         )
                         if ok_inner:
                             if isinstance(warnings_inner, list) and warnings_inner:
@@ -47672,9 +47725,6 @@ def _set_generator_note_state(*, kind: str, generator_id: str, note: str, note_c
     color = str(note_color or '').strip().lower()
     if color and color not in {'red', 'yellow', 'green'}:
         return False, 'Note color must be red, yellow, or green'
-    if not text:
-        color = ''
-
     state = _load_installed_generator_packs_state()
     packs = state.get('packs') if isinstance(state, dict) else None
     if not isinstance(packs, list):
@@ -47688,14 +47738,14 @@ def _set_generator_note_state(*, kind: str, generator_id: str, note: str, note_c
     if not isinstance(catalog_notes, dict):
         catalog_notes = {}
     note_key = f'{k}:{gid}'
-    if text:
+    if text or color:
         catalog_notes[note_key] = {'note': text, 'note_color': color or None}
     else:
         catalog_notes.pop(note_key, None)
     state['packs'] = packs
     state['catalog_notes'] = catalog_notes
     _save_installed_generator_packs_state(state)
-    return True, ('Saved note for' if text else 'Cleared note for') + f' {k} {gid}'
+    return True, ('Saved note/color for' if (text or color) else 'Cleared note/color for') + f' {k} {gid}'
 
 
 def _update_generator_item_cache_state(
@@ -47764,10 +47814,37 @@ def _pack_to_zip_bytes(pack: dict) -> bytes:
     installed = pack.get('installed') if isinstance(pack, dict) else []
     with zipfile.ZipFile(mem, 'w', zipfile.ZIP_DEFLATED) as z:
         # Pack metadata
-        try:
-            meta = json.dumps(pack, indent=2)
-        except Exception:
-            meta = '{}'
+        state = _load_installed_generator_packs_state()
+        catalog_notes = state.get('catalog_notes') if isinstance(state, dict) else {}
+        catalog_notes = catalog_notes if isinstance(catalog_notes, dict) else {}
+        exported_notes: list[dict[str, str]] = []
+        for item in (installed or []):
+            if not isinstance(item, dict) or item.get('uninstalled') is True:
+                continue
+            kind = str(item.get('kind') or '').strip().lower().replace('_', '-')
+            generator_id = str(item.get('id') or '').strip()
+            if kind not in {'flag-generator', 'flag-node-generator'} or not generator_id:
+                continue
+            note_data = None
+            for candidate_id in (generator_id, _installed_generator_marker_source_id(item)):
+                candidate = catalog_notes.get(f'{kind}:{candidate_id}') if candidate_id else None
+                if isinstance(candidate, dict):
+                    note_data = candidate
+                    break
+            note_text = str((note_data or item).get('note') or '').strip()
+            raw_color = str((note_data or item).get('note_color') or '').strip().lower()
+            note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else ''
+            if note_text or note_color:
+                exported_notes.append({
+                    'kind': kind,
+                    'generator_id': generator_id,
+                    'note': note_text,
+                    'note_color': note_color,
+                })
+        export_meta = dict(pack)
+        export_meta['catalog_notes'] = exported_notes
+        export_meta['catalog_notes_format'] = 1
+        meta = json.dumps(export_meta, indent=2)
         z.writestr('pack.json', meta + '\n')
 
         seen_sources: set[str] = set()

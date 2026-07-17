@@ -153,9 +153,6 @@ def register(
         color = str(payload.get('note_color') or '').strip().lower()
         if color and color not in {'red', 'yellow', 'green'}:
             return jsonify({'ok': False, 'error': 'Note color must be red, yellow, or green'}), 400
-        if not note:
-            color = ''
-
         state, entry, cid, catalogs, _items = _load_active_catalog_and_items()
         if not entry:
             return jsonify({'ok': False, 'error': 'No active catalog pack'}), 404
@@ -177,7 +174,7 @@ def register(
             return jsonify({'ok': False, 'error': 'Unknown item id'}), 404
         state['catalogs'] = catalogs
         write_vuln_catalogs_state(state)
-        return jsonify({'ok': True, 'message': 'Saved note' if note else 'Cleared note'})
+        return jsonify({'ok': True, 'message': 'Saved note/color' if (note or color) else 'Cleared note/color'})
 
     @app.route('/vuln_catalog_items/delete', methods=['POST'])
     def vuln_catalog_items_delete():

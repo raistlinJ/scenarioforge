@@ -25,6 +25,42 @@ def register(
     if not begin_route_registration(app, 'vuln_catalog_pack_files_routes'):
         return
 
+    def _export_catalog_zip_with_notes(catalog: dict[str, Any], zip_path: str) -> bytes:
+        """Copy a catalog ZIP and add current user note metadata.
+
+        Notes deliberately live outside the imported compose tree, so exporting
+        them in a small ScenarioForge metadata file keeps the original catalog
+        content untouched while allowing an import to restore the annotations.
+        """
+        notes: list[dict[str, str]] = []
+        for item in normalize_vuln_catalog_items(catalog):
+            if not isinstance(item, dict):
+                continue
+            note = str(item.get('note') or '').strip()
+            color = str(item.get('note_color') or '').strip().lower()
+            if not note and color not in {'red', 'yellow', 'green'}:
+                continue
+            compose_rel = str(item.get('compose_rel') or '').replace('\\', '/').strip()
+            if not compose_rel:
+                continue
+            notes.append({
+                'compose_rel': compose_rel,
+                'note': note,
+                'note_color': color if color in {'red', 'yellow', 'green'} else '',
+            })
+
+        mem = io.BytesIO()
+        with zipfile.ZipFile(zip_path, 'r') as source, zipfile.ZipFile(mem, 'w', zipfile.ZIP_DEFLATED) as output:
+            for info in source.infolist():
+                if info.filename.replace('\\', '/') == '.scenarioforge/catalog_notes.json':
+                    continue
+                output.writestr(info, source.read(info.filename))
+            output.writestr(
+                '.scenarioforge/catalog_notes.json',
+                json.dumps({'version': 1, 'notes': notes}, indent=2, sort_keys=True) + '\n',
+            )
+        return mem.getvalue()
+
     @app.route('/vuln_catalog_packs/download/<catalog_id>')
     def vuln_catalog_packs_download(catalog_id: str):
         require_builder_or_admin()
@@ -34,7 +70,16 @@ def register(
         zip_path = vuln_catalog_pack_zip_path(cid)
         if not os_module.path.exists(zip_path):
             abort(404)
-        return send_file(zip_path, as_attachment=True, download_name=f'vuln_catalog_{cid}.zip')
+        state = load_vuln_catalogs_state()
+        catalogs = state.get('catalogs') if isinstance(state, dict) else []
+        catalog = next((item for item in (catalogs or []) if isinstance(item, dict) and str(item.get('id') or '').strip() == cid), None)
+        if catalog is None:
+            abort(404)
+        return send_file(
+            io.BytesIO(_export_catalog_zip_with_notes(catalog, zip_path)),
+            as_attachment=True,
+            download_name=f'vuln_catalog_{cid}.zip',
+        )
 
     @app.route('/vuln_catalog_packs/export_all')
     def vuln_catalog_packs_export_all():
@@ -59,7 +104,7 @@ def register(
                 label = secure_filename(str(catalog.get('label') or '')).strip() or 'catalog'
                 arcname = f'catalogs/{cid}-{label}.zip'
                 try:
-                    archive.write(zip_path, arcname=arcname)
+                    archive.writestr(arcname, _export_catalog_zip_with_notes(catalog, zip_path))
                     manifest.append({
                         'id': cid,
                         'label': str(catalog.get('label') or '').strip(),
