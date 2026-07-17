@@ -29,7 +29,7 @@ def test_parse_sample_xml_summary_counts():
 
     sections = scenario.get("sections") if isinstance(scenario, dict) else None
     assert isinstance(sections, dict)
-    assert set(sections) >= {"Node Information", "Routing", "Services", "Traffic", "Segmentation"}
+    assert set(sections) >= {"Node Information", "Routing", "Services", "Traffic", "Flag Node Generators", "Segmentation"}
     assert all((section.get("items") or []) == [] for section in sections.values() if isinstance(section, dict))
 
 

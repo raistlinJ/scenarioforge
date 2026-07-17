@@ -88,3 +88,29 @@ def test_staging_repairs_non_executable_shebang_cgi_support_file(tmp_path):
     assert staged_victim.is_file()
     assert os.stat(staged_victim).st_mode & 0o111 == 0o111
     assert updated["services"]["web"]["volumes"] == [f"{staged_victim}:/var/www/html/victim.cgi"]
+
+
+def test_node_bind_isolation_repairs_non_executable_cgi_at_final_mount_path(tmp_path):
+    """The per-node bind copy, rather than an earlier staging copy, is what Docker mounts."""
+    from scenarioforge.utils.vuln_process import _rewrite_abs_paths_from_dir_to_dir
+
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    victim = shared_dir / "victim.cgi"
+    victim.write_text("#!/bin/bash\necho vulnerable\n", encoding="utf-8")
+    victim.chmod(0o644)
+    node_dir = shared_dir / "node-docker-4"
+
+    compose = {
+        "services": {
+            "web": {
+                "volumes": [f"{victim}:/var/www/html/victim.cgi"],
+            }
+        }
+    }
+    updated = _rewrite_abs_paths_from_dir_to_dir(compose, str(shared_dir), str(node_dir))
+
+    final_victim = node_dir / "victim.cgi"
+    assert final_victim.is_file()
+    assert os.stat(final_victim).st_mode & 0o111 == 0o111
+    assert updated["services"]["web"]["volumes"] == [f"{final_victim}:/var/www/html/victim.cgi"]

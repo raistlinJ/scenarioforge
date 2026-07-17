@@ -35164,6 +35164,15 @@ def _parse_scenario_editor(se):
         notes_el = notes_sec.find("notes")
         if notes_el is not None and notes_el.text:
             scen["notes"] = notes_el.text
+
+    # Keep older scenario XML compatible with the topology editor.  The UI
+    # renders cards from the section keys present in the selected scenario, so
+    # without this migration legacy XML would have no Flag Node Generators
+    # card at all (rather than an empty card ready to configure).
+    scen["sections"].setdefault(
+        "Flag Node Generators",
+        {"density": 0.5, "total_nodes": None, "items": []},
+    )
     return scen
 
 
