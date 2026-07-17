@@ -598,6 +598,8 @@
                                 <span class="badge text-bg-secondary">HITL settings managed by admin</span>
                                 {% endif %}
                             </div>
+                            <span id="scenarioEstimatedNodeBadge" class="badge text-bg-primary"
+                                title="Estimated topology nodes">Estimated nodes: 0</span>
                         </div>
                     </div>
                     <div class="card-body">
@@ -16917,6 +16919,52 @@
             </div>
             ${densityBoundsRow}
         </div>`;
+        // This follows the same count/weight planning inputs displayed by the
+        // editor cards.  Services, Traffic, and Segmentation configure the
+        // existing topology; they do not themselves create topology nodes.
+        const estimateSectionNodes = (sectionName, { routing = false } = {}) => {
+            const section = scen.sections?.[sectionName] || { items: [], density: 0 };
+            const rows = Array.isArray(section.items) ? section.items : [];
+            const metricFor = (item) => item?.v_metric
+                || (((sectionName === 'Vulnerabilities' || sectionName === 'Flag Node Generators')
+                    && item?.selected === 'Specific') ? 'Count' : 'Weight');
+            const explicit = rows
+                .filter(item => metricFor(item) === 'Count')
+                .reduce((sum, item) => sum + Math.max(0, parseInt(item?.v_count, 10) || 0), 0);
+            const hasWeightRows = rows.some(item => metricFor(item) === 'Weight');
+            let density = Math.max(0, parseFloat(section.density) || 0);
+            let derived = 0;
+            if (hasWeightRows && density > 0) {
+                if (routing && density >= 1) derived = Math.round(density);
+                else derived = Math.round(baseHostPool * Math.min(1, density));
+            }
+            return { explicit, derived, total: explicit + derived };
+        };
+        const nodeInformationEstimate = {
+            weight: niWeightRows.length ? niBase : 0,
+            count: niAdd,
+        };
+        nodeInformationEstimate.total = nodeInformationEstimate.weight + nodeInformationEstimate.count;
+        const routingNodeEstimate = estimateSectionNodes('Routing', { routing: true });
+        const vulnerabilityNodeEstimate = estimateSectionNodes('Vulnerabilities');
+        const flagNodeGeneratorEstimate = estimateSectionNodes('Flag Node Generators');
+        const estimatedTopologyNodes = nodeInformationEstimate.total
+            + routingNodeEstimate.total
+            + vulnerabilityNodeEstimate.total
+            + flagNodeGeneratorEstimate.total;
+        const estimatedTopologyNodesTitle = [
+            `Node Information: ${nodeInformationEstimate.total} (weight ${nodeInformationEstimate.weight} + count ${nodeInformationEstimate.count})`,
+            `Routing: ${routingNodeEstimate.total} (weight ${routingNodeEstimate.derived} + count ${routingNodeEstimate.explicit})`,
+            `Vulnerabilities: ${vulnerabilityNodeEstimate.total} (weight ${vulnerabilityNodeEstimate.derived} + count ${vulnerabilityNodeEstimate.explicit})`,
+            `Flag-node generators: ${flagNodeGeneratorEstimate.total} (weight ${flagNodeGeneratorEstimate.derived} + count ${flagNodeGeneratorEstimate.explicit})`,
+            'Services, Traffic, and Segmentation configure existing nodes.',
+        ].join(' | ');
+        const estimatedNodeBadge = document.getElementById('scenarioEstimatedNodeBadge');
+        if (estimatedNodeBadge) {
+            estimatedNodeBadge.textContent = `Estimated nodes: ${estimatedTopologyNodes}`;
+            estimatedNodeBadge.title = estimatedTopologyNodesTitle;
+            estimatedNodeBadge.setAttribute('data-bs-title', estimatedTopologyNodesTitle);
+        }
         const headerRow = document.createElement('div');
         const rawSectionNames = Object.keys(scen.sections || {});
         const filteredSectionNames = rawSectionNames.filter(name => name !== 'Notes' && name !== 'HITL');

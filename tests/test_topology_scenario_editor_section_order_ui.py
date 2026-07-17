@@ -23,3 +23,19 @@ def test_scenario_editor_cards_use_a_stable_requested_order() -> None:
 
     assert positions == sorted(positions)
     assert ".filter(name => !scenarioEditorSectionOrder.includes(name))" in text
+
+
+def test_scenario_editor_header_displays_estimated_topology_node_count() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        'id="scenarioEstimatedNodeBadge"',
+        'const estimateSectionNodes =',
+        "estimateSectionNodes('Routing', { routing: true })",
+        "estimateSectionNodes('Vulnerabilities')",
+        "estimateSectionNodes('Flag Node Generators')",
+        'Estimated nodes: ${estimatedTopologyNodes}',
+        'Services, Traffic, and Segmentation configure existing nodes.',
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Scenario Editor estimated-node badge wiring: " + "; ".join(missing)
