@@ -278,7 +278,6 @@ def register(
             user = current_user_getter()
             data = request.get_json(silent=True) or {}
             scenarios = data.get('scenarios')
-            clear_flow_preview = bool(data.get('clear_flow_preview'))
             core_meta = data.get('core')
             normalized_core = normalize_core_config(core_meta, include_password=True) if isinstance(core_meta, (dict, list)) or core_meta else None
             raw_project_hint = data.get('project_key_hint') if isinstance(data, dict) else None
@@ -762,20 +761,13 @@ def register(
                     preserved.append(_preserve_hitl_if_missing(scen, project_key_hint, source_scen=source_by_norm.get(norm)))
                 scenarios = preserved
 
-            if clear_flow_preview and isinstance(scenarios, list):
-                cleaned: list[Any] = []
-                for scen in scenarios:
-                    if not isinstance(scen, dict):
-                        cleaned.append(scen)
-                        continue
-                    scen2 = dict(scen)
-                    for key in ('flow_state', 'plan_preview', 'full_preview', 'fullPreview', 'preview'):
-                        try:
-                            scen2.pop(key, None)
-                        except Exception:
-                            pass
-                    cleaned.append(scen2)
-                scenarios = cleaned
+            # Do not let a client-side dirty indicator delete FlowState.  A page can
+            # become generally dirty for reasons unrelated to topology (for example,
+            # restoring UI state while navigating between Scenario pages).  The
+            # comparison above is the authoritative check: it clears FlowState only
+            # when the topology represented by the incoming XML actually differs
+            # from the source XML.  Keeping this server-side also protects a saved
+            # chain from stale browser state.
             try:
                 normalize_scenario_names_strict(scenarios)
                 scenarios = _concretize_scenarios_for_save(scenarios, seed=data.get('seed'))

@@ -80,6 +80,40 @@ def test_latest_preview_plan_reports_missing_flag_generators_for_vuln_nodes(tmp_
     assert 'No enabled flag-generators are available for vulnerability nodes.' in data['flow_eligibility_reasons']
 
 
+def test_latest_preview_plan_reports_topology_selected_node_generator_count(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios/>', encoding='utf-8')
+
+    payload = {
+        'metadata': {'scenario': 'Scenario One'},
+        'full_preview': {
+            'hosts': [
+                {'node_id': 'vuln-1', 'role': 'docker', 'vulnerabilities': ['vuln-a']},
+                {'node_id': 'nodegen-1', 'role': 'docker', 'vulnerabilities': []},
+            ],
+            'vulnerabilities_by_node': {'vuln-1': ['vuln-a']},
+            'flag_node_generators_by_node': {'nodegen-1': 'node-generator-a'},
+        },
+    }
+
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _scenario: str(xml_path))
+    monkeypatch.setattr(backend, '_load_plan_preview_from_xml', lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(backend, '_core_config_from_xml_path', lambda *_args, **_kwargs: {'validated': True, 'ssh_enabled': True})
+    monkeypatch.setattr(backend, '_apply_core_secret_to_config', lambda cfg, *_args, **_kwargs: cfg)
+    monkeypatch.setattr(backend, '_flag_generators_from_enabled_sources', lambda: ([{'id': 'flag-generator-a'}], []))
+    monkeypatch.setattr(backend, '_flag_node_generators_from_enabled_sources', lambda: ([{'id': 'node-generator-a'}], []))
+    monkeypatch.setattr(backend, '_load_backend_vuln_catalog_items', lambda selectable_only=True: [{'Name': 'Example Vuln'}])
+
+    resp = client.get('/api/flag-sequencing/latest_preview_plan', query_string={'scenario': 'Scenario One'})
+    assert resp.status_code == 200
+    data = resp.get_json() or {}
+    assert data['vuln_count'] == 1
+    assert data['topology_flag_node_generator_count'] == 1
+
+
 def test_latest_preview_plan_reports_no_validated_tested_vulns_when_catalog_is_present_but_unselectable(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)

@@ -83,6 +83,60 @@ def _post_sequence(client, payload):
 
 
 @pytest.mark.filterwarnings('ignore::DeprecationWarning')
+def test_topology_vulnerability_and_node_generator_form_two_steps_without_duplicates(monkeypatch):
+    """The two mandatory topology slots are a valid two-step chain on their own."""
+    app.config['TESTING'] = True
+    client = app.test_client()
+    _login(client)
+
+    scenario = f'zz-flow-topology-only-{uuid.uuid4().hex[:10]}'
+    with tempfile.TemporaryDirectory(prefix='flow-topology-only-') as directory:
+        xml_path = os.path.join(directory, f'{scenario}.xml')
+        # Both selected topology items are additive Docker slots.  There is no
+        # ordinary Docker node available to pad the chain.
+        _write_xml(xml_path, scenario, generic_docker_count=0)
+        app_backend._planner_persist_flow_plan(xml_path=xml_path, scenario=scenario, seed=2468)
+
+        flag_generator = {
+            'id': 'fg-vuln', 'name': 'Vulnerability flag generator',
+            'inputs': [], 'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+        }
+        node_generator = {
+            'id': 'ng-topology', 'name': 'Topology node generator',
+            'inputs': [], 'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+        }
+        monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_generator], []))
+        monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_generator], []))
+        monkeypatch.setattr(
+            app_backend,
+            '_flow_reorder_chain_by_generator_dag',
+            lambda chain, assignments, **_kwargs: (chain, assignments, {}),
+        )
+        monkeypatch.setattr(app_backend, '_flow_validate_chain_order_by_requires_produces', lambda *_args, **_kwargs: (True, []))
+
+        generated = _post_sequence(
+            client,
+            {
+                'scenario': scenario,
+                # The server must raise this to the two specified topology
+                # items; it must not require duplicate nodes or generators.
+                'length': 1,
+                'preview_plan': xml_path,
+                'chain_expansion_mode': 'strict',
+                'allow_node_duplicates': False,
+            },
+        )
+
+        assert generated.get('ok') is True, generated
+        assert generated.get('requested_length') == 2
+        assert generated.get('length') == 2
+        chain = generated.get('chain') or []
+        assert len({str(node.get('id') or '') for node in chain}) == 2
+        assignments = generated.get('flag_assignments') or []
+        assert {assignment.get('id') for assignment in assignments} == {'fg-vuln', 'ng-topology'}
+
+
+@pytest.mark.filterwarnings('ignore::DeprecationWarning')
 def test_flow_requires_confirmation_before_reusing_existing_docker_and_syncs_xml(monkeypatch):
     app.config['TESTING'] = True
     client = app.test_client()
