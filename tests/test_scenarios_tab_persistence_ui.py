@@ -60,6 +60,15 @@ def test_flag_node_generator_catalog_refreshes_topology_options_after_loading() 
     assert "try { renderMain(); } catch (e) { }" in loader
 
 
+def test_topology_prompts_before_removing_unavailable_flag_node_generator_rows() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert "promptToRemoveUnavailableTopologyGenerators" in topology_template
+    assert "no longer installed" in topology_template
+    assert "Remove those topology rows and save the corrected XML?" in topology_template
+    assert "await autoSaveXml();" in topology_template
+
+
 def test_specific_vuln_and_flag_node_generator_rows_keep_choose_controls_compact() -> None:
     topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
 

@@ -80,3 +80,23 @@ def test_flow_required_generator_paths_include_imported_node_generator(tmp_path,
 
     required_norm = {p.replace("\\", "/") for p in required}
     assert os.path.relpath(generator_dir, repo_root).replace('\\', '/') in required_norm
+
+
+def test_flow_required_generator_paths_do_not_sync_unavailable_generator(tmp_path, monkeypatch):
+    repo_root = tmp_path / 'repo'
+    repo_root.mkdir()
+    generator_dir = _write_installed_generator(repo_root, kind_dir='flag_node_generators', source_id='removed_generator')
+    monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([], []))
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([], []))
+
+    required = _flow_required_generator_repo_paths(
+        repo_root=str(repo_root),
+        flag_assignments=[{
+            'generator_id': 'removed_generator',
+            'type': 'flag-node-generator',
+        }],
+    )
+
+    required_norm = {p.replace('\\', '/') for p in required}
+    assert os.path.relpath(generator_dir, repo_root).replace('\\', '/') not in required_norm
+    assert required_norm == {'scripts/run_flag_generator.py', 'scenarioforge'}

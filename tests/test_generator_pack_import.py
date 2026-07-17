@@ -83,6 +83,47 @@ services:
     assert (install_root / "flag_generators").exists()
 
 
+def test_generator_pack_upload_rejects_duplicate_stable_generator_ids(tmp_path, monkeypatch):
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+
+    manifest_one = """manifest_version: 1
+id: first_numeric_id
+kind: flag-node-generator
+name: First
+runtime: {type: docker-compose, compose_file: docker-compose.yml, service: generator}
+artifacts: {produces: [Flag(flag_id)]}
+"""
+    manifest_two = manifest_one.replace('first_numeric_id', 'second_numeric_id').replace('name: First', 'name: Second')
+    compose = """services:
+  generator:
+    image: python:3.11-slim
+"""
+    marker = '{"source_generator_id":"same_stable_id"}'
+    zip_bytes = _make_zip({
+        'flag_node_generators/one/manifest.yaml': manifest_one,
+        'flag_node_generators/one/docker-compose.yml': compose,
+        'flag_node_generators/one/.coretg_pack.json': marker,
+        'flag_node_generators/two/manifest.yaml': manifest_two,
+        'flag_node_generators/two/docker-compose.yml': compose,
+        'flag_node_generators/two/.coretg_pack.json': marker,
+    })
+
+    client = app.test_client()
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (200, 302)
+    response = client.post(
+        '/generator_packs/upload',
+        data={'zip_file': (io.BytesIO(zip_bytes), 'duplicate.zip')},
+        content_type='multipart/form-data',
+        headers={'X-Requested-With': 'XMLHttpRequest'},
+    )
+
+    assert response.status_code == 400
+    assert 'duplicate stable generator id' in response.get_json()['error']
+    assert not list(install_root.rglob('manifest.yaml'))
+
+
 def test_generator_pack_zip_upload_xhr_returns_confirmation_payload(tmp_path, monkeypatch):
     install_root = tmp_path / "installed_generators"
     monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))

@@ -880,6 +880,55 @@ def _prepare_chain_and_assignments(
             flag_assignments,
             scenario_label=(scenario_label or scenario_norm),
         )
+        # A Flow resolve must never execute an assignment from a pack that was
+        # uninstalled after the saved FlowState was created.  Check the
+        # catalog *kind* as well as the ID so an ID collision in the other
+        # catalog cannot keep a stale assignment alive.
+        if mode in {'resolve', 'resolve_hints', 'hint', 'hint_only'}:
+            enabled_by_catalog: dict[str, set[str]] = {
+                'flag_generators': set(),
+                'flag_node_generators': set(),
+            }
+            try:
+                enabled, _ = deps._flag_generators_from_enabled_sources()
+                enabled_by_catalog['flag_generators'] = {
+                    str(item.get('id') or '').strip()
+                    for item in (enabled or [])
+                    if isinstance(item, dict) and str(item.get('id') or '').strip()
+                }
+            except Exception:
+                pass
+            try:
+                enabled, _ = deps._flag_node_generators_from_enabled_sources()
+                enabled_by_catalog['flag_node_generators'] = {
+                    str(item.get('id') or '').strip()
+                    for item in (enabled or [])
+                    if isinstance(item, dict) and str(item.get('id') or '').strip()
+                }
+            except Exception:
+                pass
+            unavailable: list[str] = []
+            for assignment in (flag_assignments or []):
+                if not isinstance(assignment, dict):
+                    continue
+                generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+                if not generator_id:
+                    continue
+                catalog = str(assignment.get('generator_catalog') or '').strip()
+                if catalog not in enabled_by_catalog:
+                    catalog = (
+                        'flag_node_generators'
+                        if str(assignment.get('type') or '').strip() == 'flag-node-generator'
+                        else 'flag_generators'
+                    )
+                if generator_id not in enabled_by_catalog[catalog]:
+                    unavailable.append(f'{catalog}/{generator_id}')
+            if unavailable:
+                flow_valid = False
+                flow_errors = list(flow_errors or []) + [
+                    f'generator not found/enabled: {entry}'
+                    for entry in sorted(set(unavailable))
+                ]
         _progress(f'Solve: final validation flow_valid={int(bool(flow_valid))} errors={len(flow_errors or [])}')
     try:
         assign_ids = [str(assignment.get('id') or assignment.get('generator_id') or '').strip() for assignment in (flag_assignments or []) if isinstance(assignment, dict)]
