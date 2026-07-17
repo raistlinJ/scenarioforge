@@ -39,6 +39,15 @@ def test_flow_generation_does_not_automatically_relax_no_duplicates() -> None:
     assert "Retry With Duplicates?" not in text
 
 
+def test_flow_prompts_before_clearing_saved_assignments_for_uninstalled_generators() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "promptToRemoveUnavailableSavedFlowGenerators" in text
+    assert "no longer installed" in text
+    assert "Remove the unavailable assignments and clear this saved sequence?" in text
+    assert "await ensureGeneratorCatalogsLoaded();" in text
+
+
 def test_flow_challenge_bounds_include_mandatory_and_generic_docker_nodes() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -634,7 +643,7 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
         "function setGenerateBusy(value) {",
         "if (generateInFlight) {",
         "Generate ignored: another Generate/Resolve request is already running.",
-        "resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));",
+        "resolveTimeoutSeconds = Math.min(executeTimeoutCapS, Math.max(600, (chain_ids.length * 150) + 180));",
         "resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;",
         "onLines: (lines) => {",
         "resolveProgressLines = resolveProgressLines.concat(lines || []).slice(-20);",
@@ -754,7 +763,7 @@ def test_flow_restore_refreshes_xml_only_when_server_state_missing() -> None:
     expected_snippets = [
         "const hasServerFlowState = !!getFlowStateForScenario(scenarioName);",
         "if (!hasServerFlowState && hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {",
-        "const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath });",
+        "const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath, forceXmlPath: true });",
         "if (key) flowStateByScenario[key] = fs;",
     ]
 

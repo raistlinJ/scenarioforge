@@ -2134,6 +2134,67 @@ def _remote_remove_path(client: Any, path: str) -> None:
     _exec_ssh_command(client, f"rm -rf {quoted}")
 
 
+def _cleanup_remote_generator_pack(pack: dict[str, Any]) -> tuple[bool, str]:
+    """Remove the CORE-runtime copies of one catalog pack before local uninstall.
+
+    Catalog packs are mirrored to the CORE VM for generator execution.  Leaving
+    those directories behind means a future remote run can resolve an
+    uninstalled, stale generator.  This is intentionally strict: local removal
+    is aborted if the selected CORE runtime cannot be cleaned too.
+    """
+    if not isinstance(pack, dict):
+        return False, 'Invalid generator pack.'
+    installed = [item for item in (pack.get('installed') or []) if isinstance(item, dict)]
+    if not installed:
+        return True, 'no remote generator directories to remove'
+
+    repo_root = os.path.abspath(_get_repo_root())
+    local_root = os.path.abspath(_installed_generators_root())
+    relative_paths: list[str] = []
+    for item in installed:
+        raw_path = str(item.get('path') or '').strip()
+        if not raw_path:
+            return False, 'Pack contains an installed generator with no path.'
+        local_path = os.path.abspath(raw_path)
+        try:
+            if os.path.commonpath([local_root, local_path]) != local_root:
+                return False, f'Refusing remote cleanup for path outside installed generators: {local_path}'
+            if os.path.commonpath([repo_root, local_path]) != repo_root:
+                return False, f'Refusing remote cleanup for path outside the repository: {local_path}'
+            relative_paths.append(os.path.relpath(local_path, repo_root).replace('\\', '/'))
+        except Exception:
+            return False, f'Refusing remote cleanup for path: {local_path}'
+
+    try:
+        core_cfg = _require_core_ssh_credentials(_core_config_for_request(include_password=True))
+        client = _open_ssh_client(core_cfg)
+    except Exception as exc:
+        return False, f'CORE SSH configuration is required: {exc}'
+
+    sftp = None
+    try:
+        sftp = client.open_sftp()
+        remote_repo = _remote_static_repo_dir(sftp)
+        # Confirm this is the expected static repo before deleting any child.
+        sftp.stat(remote_repo)
+        for relative_path in sorted(set(relative_paths)):
+            remote_path = _remote_path_join(remote_repo, relative_path)
+            _remote_remove_path(client, remote_path)
+        return True, f'removed {len(set(relative_paths))} CORE runtime generator directory(s)'
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        try:
+            if sftp is not None:
+                sftp.close()
+        except Exception:
+            pass
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 def _resolve_repo_push_allowed_outputs(upload_only_injected_artifacts: bool) -> List[str]:
     if REPO_PUSH_ALLOWED_OUTPUTS_ENV:
         out: List[str] = []
@@ -2248,15 +2309,19 @@ def _flow_required_generator_repo_paths(
     if not flag_assignments:
         return sorted(required)
 
+    # This path controls what is copied to CORE for Flow execution.  It must
+    # use the exact same enabled-only catalog as selection and validation.
+    # Looking through all manifests here made an uninstalled pack executable
+    # again whenever a stale FlowState referenced its ID.
     try:
-        gens, _plugins_by_id, _errors = _flag_generators_from_manifests(kind='flag-generator')
+        gens, _errors = _flag_generators_from_enabled_sources()
     except Exception as exc:
-        app.logger.error('[flow.generator] failed to load flag_generators: %s', exc)
+        app.logger.error('[flow.generator] failed to load enabled flag_generators: %s', exc)
         gens = []
     try:
-        node_gens, _plugins_by_id2, _errors2 = _flag_generators_from_manifests(kind='flag-node-generator')
+        node_gens, _errors2 = _flag_node_generators_from_enabled_sources()
     except Exception as exc:
-        app.logger.error('[flow.generator] failed to load flag_node_generators: %s', exc)
+        app.logger.error('[flow.generator] failed to load enabled flag_node_generators: %s', exc)
         node_gens = []
 
     gen_by_key: dict[tuple[str, str], dict[str, Any]] = {}
@@ -2272,68 +2337,6 @@ def _flow_required_generator_repo_paths(
         gid = str(g.get('id') or '').strip()
         if gid:
             gen_by_key[('flag_node_generators', gid)] = g
-
-    # Some IDs exist both as repo samples and as installed packs. The manifest loader
-    # intentionally prefers installed packs when IDs collide, which can cause remote
-    # sync to omit the repo copy. For remote execution we include both when present.
-    _repo_manifest_cache: dict[tuple[str, str], list[str]] = {}
-
-    def _repo_manifest_dirs_for(cat: str, gid: str) -> list[str]:
-        key = (cat, gid)
-        if key in _repo_manifest_cache:
-            return _repo_manifest_cache[key]
-
-        out: list[str] = []
-        try:
-            from pathlib import Path
-        except Exception:
-            _repo_manifest_cache[key] = out
-            return out
-        try:
-            import yaml  # type: ignore
-        except Exception:
-            yaml = None  # type: ignore
-
-        if yaml is None:
-            _repo_manifest_cache[key] = out
-            return out
-
-        base_rel = 'flag_generators' if cat == 'flag_generators' else 'flag_node_generators'
-        expected_kind = 'flag-generator' if cat == 'flag_generators' else 'flag-node-generator'
-        base = Path(repo_root_abs) / base_rel
-        if not base.exists() or not base.is_dir():
-            _repo_manifest_cache[key] = out
-            return out
-
-        # Scan only repo sources (not outputs/installed_generators). Keep it small.
-        try:
-            candidates = list(base.rglob('manifest.yaml')) + list(base.rglob('manifest.yml'))
-        except Exception:
-            candidates = []
-        for mp in candidates:
-            try:
-                doc = yaml.safe_load(mp.read_text('utf-8', errors='ignore'))
-            except Exception:
-                continue
-            if not isinstance(doc, dict):
-                continue
-            mid = str(doc.get('id') or '').strip()
-            if mid != gid:
-                continue
-            declared_kind = str(doc.get('kind') or expected_kind).strip().lower().replace('_', '-').replace(' ', '-')
-            if declared_kind != expected_kind:
-                continue
-            try:
-                rel_dir = os.path.relpath(str(mp.parent), repo_root_abs).replace('\\', '/').lstrip('/')
-            except Exception:
-                continue
-            if rel_dir:
-                out.append(rel_dir)
-
-        # Deterministic output.
-        out = sorted(set(out))
-        _repo_manifest_cache[key] = out
-        return out
 
     # Track lookup failures for diagnostics
     lookup_failures: list[str] = []
@@ -2358,9 +2361,6 @@ def _flow_required_generator_repo_paths(
         gen = gen_by_key.get((cat, gid))
         if not isinstance(gen, dict):
             lookup_failures.append(f'{cat}/{gid}')
-            # Still try to include a repo copy by scanning manifests.
-            for rel_dir in _repo_manifest_dirs_for(cat, gid):
-                required.add(rel_dir)
             continue
         src_path = str(gen.get('source', {}).get('path') or gen.get('_source_path') or '').strip()
         if not src_path:
@@ -2382,10 +2382,6 @@ def _flow_required_generator_repo_paths(
             rel = posixpath.dirname(rel)
         if rel:
             required.add(rel)
-
-        # Include repo copy if present (even when installed pack is preferred).
-        for rel_dir in _repo_manifest_dirs_for(cat, gid):
-            required.add(rel_dir)
 
     # Log diagnostic information about failures
     if lookup_failures:
@@ -46949,6 +46945,27 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             'compose_dependencies': compose_dependency_summary,
         })
 
+    # An installed pack is remapped to numeric directory ids, but Flow resolves
+    # generators by their stable source ids.  Allowing two entries with the same
+    # (kind, source id) into one archive produces an ambiguous catalog that can
+    # select a different generator merely from directory enumeration order.
+    seen_source_ids: dict[tuple[str, str], str] = {}
+    for item in items:
+        kind = str(item.get('kind') or '').strip()
+        source_id = str(item.get('source_id') or item.get('id') or '').strip()
+        manifest_path = str(item.get('manifest_path') or '').strip()
+        if not kind or not source_id:
+            continue
+        key = (kind, source_id)
+        previous_manifest = seen_source_ids.get(key)
+        if previous_manifest:
+            errors.append(
+                f'{manifest_path}: duplicate stable generator id {source_id!r} '
+                f'for {kind}; already declared by {previous_manifest}'
+            )
+            continue
+        seen_source_ids[key] = manifest_path
+
     if errors:
         # Show first few errors.
         return False, '; '.join(errors[:4]) + (f' (+{len(errors)-4} more)' if len(errors) > 4 else ''), [], warnings
@@ -47488,6 +47505,7 @@ try:
         download_zip_from_url=lambda url: _download_zip_from_url(url),
         pack_to_zip_bytes=lambda pack: _pack_to_zip_bytes(pack),
         catalog_packs_for_export=lambda: _flag_catalog_packs_for_export(),
+        cleanup_remote_pack=lambda pack: _cleanup_remote_generator_pack(pack),
         os_module=os,
         tempfile_module=tempfile,
         uuid_module=uuid,

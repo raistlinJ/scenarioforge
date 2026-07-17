@@ -848,9 +848,10 @@
 
   let _flagGeneratorsCatalog = null;
   let _flagNodeGeneratorsCatalog = null;
+  let staleSavedFlowGeneratorPrompted = false;
 
-  async function ensureGeneratorCatalogsLoaded() {
-    if (Array.isArray(_flagGeneratorsCatalog) && Array.isArray(_flagNodeGeneratorsCatalog)) return;
+  async function ensureGeneratorCatalogsLoaded(forceRefresh = false) {
+    if (!forceRefresh && Array.isArray(_flagGeneratorsCatalog) && Array.isArray(_flagNodeGeneratorsCatalog)) return;
     try {
       const [fg, fng] = await Promise.all([
         fetchJson('/flag_generators_data'),
@@ -862,6 +863,74 @@
       _flagGeneratorsCatalog = Array.isArray(_flagGeneratorsCatalog) ? _flagGeneratorsCatalog : [];
       _flagNodeGeneratorsCatalog = Array.isArray(_flagNodeGeneratorsCatalog) ? _flagNodeGeneratorsCatalog : [];
       throw e;
+    }
+  }
+
+  async function promptToRemoveUnavailableSavedFlowGenerators(scenarioName) {
+    const saved = getFlowStateForScenario(scenarioName);
+    if (!saved || !Array.isArray(saved.flag_assignments) || !saved.flag_assignments.length) return false;
+    const enabled = {
+      flag_generators: new Set((Array.isArray(_flagGeneratorsCatalog) ? _flagGeneratorsCatalog : [])
+        .map(item => String(item && item.id || '').trim()).filter(Boolean)),
+      flag_node_generators: new Set((Array.isArray(_flagNodeGeneratorsCatalog) ? _flagNodeGeneratorsCatalog : [])
+        .map(item => String(item && item.id || '').trim()).filter(Boolean)),
+    };
+    const stale = saved.flag_assignments.map((assignment, index) => {
+      if (!assignment || typeof assignment !== 'object') return null;
+      const id = String(assignment.id || assignment.generator_id || '').trim();
+      if (!id) return null;
+      const kind = String(assignment.generator_catalog || '').trim() === 'flag_node_generators'
+        || String(assignment.type || '').trim() === 'flag-node-generator'
+        ? 'flag_node_generators'
+        : 'flag_generators';
+      return enabled[kind].has(id) ? null : { id, kind, index };
+    }).filter(Boolean);
+    if (!stale.length) return false;
+    if (staleSavedFlowGeneratorPrompted) return false;
+    staleSavedFlowGeneratorPrompted = true;
+
+    const ids = [...new Set(stale.map(item => item.id))].join(', ');
+    const remove = window.confirm(
+      `The saved Flow sequence references generator(s) that are no longer installed: ${ids}.\n\nRemove the unavailable assignments and clear this saved sequence? You can then generate a new sequence.`
+    );
+    if (!remove) return false;
+
+    const cleared = {
+      ...saved,
+      length: 0,
+      chain: [],
+      chain_ids: [],
+      flag_assignments: [],
+      flags_enabled: false,
+      flow_valid: false,
+      flow_errors: ['Saved flow cleared because it referenced uninstalled generator(s).'],
+      first_hint: '',
+      first_hints: [],
+      updated_at: Date.now(),
+    };
+    try {
+      if (typeof window.coretgSetSavedFlowStateForScenario === 'function') {
+        window.coretgSetSavedFlowStateForScenario(scenarioName, cleared);
+      }
+      const key = normalizeScenarioNorm(scenarioName);
+      if (key && flowStateByScenario && typeof flowStateByScenario === 'object') flowStateByScenario[key] = cleared;
+      currentChain = [];
+      currentFlagAssignments = [];
+      selectedChainIndex = -1;
+      const xmlPath = (typeof window.coretgGetLatestXmlPathForScenario === 'function')
+        ? String(window.coretgGetLatestXmlPathForScenario(scenarioName) || '').trim()
+        : '';
+      if (xmlPath) {
+        await postJson('/api/flag-sequencing/save_flow_state_to_xml', {
+          xml_path: xmlPath,
+          scenario: scenarioName,
+          flow_state: cleared,
+        });
+      }
+      return true;
+    } catch (err) {
+      setStatus('Unable to save removal of unavailable Flow generators: ' + String(err && err.message || err), true);
+      return false;
     }
   }
 
@@ -11463,6 +11532,20 @@
           } catch (e) {
             const duplicateFlagError = _isDuplicateFlagError(e);
             try { if (stopProgressPoll) stopProgressPoll(); } catch (ex) { }
+            const resolveErrorText = String((e && e.payload && (e.payload.error || e.payload.message)) || (e && e.message) || e || '');
+            if (resolveErrorText.includes('generator not found/enabled')) {
+              try {
+                await ensureGeneratorCatalogsLoaded(true);
+                const removed = await promptToRemoveUnavailableSavedFlowGenerators(scenario);
+                if (removed) {
+                  renderChainEditor();
+                  const diagram = buildMermaid([]);
+                  await renderMermaid(diagram);
+                  setStatus('Removed unavailable generator references. Generate a new sequence.', false);
+                  break;
+                }
+              } catch (_) { }
+            }
             // Handling for strict generation failures (best_effort=false)
             // postJson sets err.payload = data, so we check e.payload.
             if (e && e.payload && Array.isArray(e.payload.generation_failures) && e.payload.generation_failures.length > 0) {
@@ -14156,7 +14239,25 @@ ${out.join('\n')}
   }
   try { updateMeta(); } catch (e) { }
   const initialLatestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');
+  try {
+    await ensureGeneratorCatalogsLoaded();
+    await promptToRemoveUnavailableSavedFlowGenerators(activeScenario);
+  } catch (err) {
+    // Do not treat a catalog load failure as proof that saved generators were
+    // removed. Preserve the FlowState and surface the failed catalog request.
+    setStatus('Unable to load generator catalog: ' + String(err && err.message || err), true);
+  }
   const restored = await restoreSavedFlowForScenario(activeScenario);
+  try {
+    // XML-backed FlowState may only be loaded during restore, so make one
+    // post-restore pass before rendering an unavailable saved assignment.
+    if (await promptToRemoveUnavailableSavedFlowGenerators(activeScenario)) {
+      currentChain = [];
+      currentFlagAssignments = [];
+      renderChainEditor();
+      await renderMermaid(buildMermaid([]));
+    }
+  } catch (_) { }
   if (!restored) {
     setStatus('Chain does not exist. Click Generate to start.', false);
     initialLatestPreviewPromise.then(() => {

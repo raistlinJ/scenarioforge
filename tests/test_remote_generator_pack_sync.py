@@ -54,3 +54,40 @@ def test_remote_flow_refuses_to_run_when_selected_generator_has_no_sync_path() -
     response, status = result['response']
     assert status == 500
     assert 'No generator paths resolved for Flow sync' in response.get_json()['error']
+
+
+def test_pack_uninstall_removes_matching_core_runtime_directory(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / 'repo'
+    local_pack_dir = repo_root / 'outputs' / 'installed_generators' / 'flag_node_generators' / 'p_current__51'
+    local_pack_dir.mkdir(parents=True)
+    removed: list[str] = []
+
+    class FakeSftp:
+        def stat(self, _path):
+            return object()
+
+        def close(self):
+            return None
+
+    class FakeClient:
+        def open_sftp(self):
+            return FakeSftp()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(app_backend, '_get_repo_root', lambda: str(repo_root))
+    monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(repo_root / 'outputs' / 'installed_generators'))
+    monkeypatch.setattr(app_backend, '_core_config_for_request', lambda **_kwargs: {'ssh_host': 'core.example'})
+    monkeypatch.setattr(app_backend, '_require_core_ssh_credentials', lambda cfg: cfg)
+    monkeypatch.setattr(app_backend, '_open_ssh_client', lambda _cfg: FakeClient())
+    monkeypatch.setattr(app_backend, '_remote_static_repo_dir', lambda _sftp: '/tmp/scenarioforge')
+    monkeypatch.setattr(app_backend, '_remote_remove_path', lambda _client, path: removed.append(path))
+
+    ok, note = app_backend._cleanup_remote_generator_pack({
+        'installed': [{'path': str(local_pack_dir)}],
+    })
+
+    assert ok is True
+    assert note == 'removed 1 CORE runtime generator directory(s)'
+    assert removed == ['/tmp/scenarioforge/outputs/installed_generators/flag_node_generators/p_current__51']

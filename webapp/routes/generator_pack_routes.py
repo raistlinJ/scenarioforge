@@ -29,6 +29,7 @@ def register(
     io_module: Any,
     zipfile_module: Any,
     catalog_packs_for_export: Callable[[], list[dict[str, Any]]] | None = None,
+    cleanup_remote_pack: Callable[[dict[str, Any]], tuple[bool, str]] | None = None,
 ) -> None:
     if not begin_route_registration(app, 'generator_pack_routes'):
         return
@@ -214,6 +215,16 @@ def register(
             flash('Pack not found')
             return redirect(url_for('flag_catalog_page'))
 
+        remote_cleanup_note = ''
+        if target.get('repo_local') is not True and cleanup_remote_pack is not None:
+            try:
+                remote_ok, remote_cleanup_note = cleanup_remote_pack(target)
+            except Exception as exc:
+                remote_ok, remote_cleanup_note = False, str(exc)
+            if not remote_ok:
+                flash(f'Uninstall aborted: failed removing the CORE runtime copy: {remote_cleanup_note}')
+                return redirect(url_for('flag_catalog_page'))
+
         if isinstance(target, dict) and target.get('repo_local') is True:
             target = dict(target)
             target['disabled'] = True
@@ -257,7 +268,8 @@ def register(
         if failures:
             flash(f'Uninstalled pack {pid} with warnings: removed={removed}; {failures[0]}')
         else:
-            flash(f'Uninstalled pack {pid} (removed {removed} item(s))')
+            suffix = f'; {remote_cleanup_note}' if remote_cleanup_note else ''
+            flash(f'Uninstalled pack {pid} (removed {removed} item(s)){suffix}')
         return redirect(url_for('flag_catalog_page'))
 
     @app.route('/generator_packs/download/<pack_id>')

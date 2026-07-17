@@ -22435,16 +22435,71 @@
         return window.VULN_CATALOG;
     }
 
+    let staleTopologyGeneratorReferencesPrompted = false;
+
+    async function promptToRemoveUnavailableTopologyGenerators() {
+        if (staleTopologyGeneratorReferencesPrompted) return false;
+        staleTopologyGeneratorReferencesPrompted = true;
+        const enabledIds = new Set((Array.isArray(window.FLAG_NODE_GENERATORS) ? window.FLAG_NODE_GENERATORS : [])
+            .map(item => String(item && item.id || '').trim())
+            .filter(Boolean));
+        const stale = [];
+        (Array.isArray(state && state.scenarios) ? state.scenarios : []).forEach((scenario, scenarioIndex) => {
+            const rows = scenario && scenario.sections && scenario.sections['Flag Node Generators']
+                && Array.isArray(scenario.sections['Flag Node Generators'].items)
+                ? scenario.sections['Flag Node Generators'].items
+                : [];
+            rows.forEach((row, rowIndex) => {
+                if (!row || String(row.selected || '').trim().toLowerCase() !== 'specific') return;
+                const id = String(row.g_id || '').trim();
+                if (!id || !enabledIds.has(id)) {
+                    stale.push({ scenarioIndex, rowIndex, id: id || String(row.g_name || '(missing id)') });
+                }
+            });
+        });
+        if (!stale.length) return false;
+
+        const ids = [...new Set(stale.map(item => item.id))].join(', ');
+        const remove = window.confirm(
+            `This topology references flag-node-generator(s) that are no longer installed: ${ids}.\n\nRemove those topology rows and save the corrected XML?`
+        );
+        if (!remove) return false;
+
+        const byScenario = new Map();
+        stale.forEach(item => {
+            if (!byScenario.has(item.scenarioIndex)) byScenario.set(item.scenarioIndex, new Set());
+            byScenario.get(item.scenarioIndex).add(item.rowIndex);
+        });
+        byScenario.forEach((rowIndexes, scenarioIndex) => {
+            const rows = state.scenarios[scenarioIndex].sections['Flag Node Generators'].items;
+            state.scenarios[scenarioIndex].sections['Flag Node Generators'].items = rows.filter((_row, rowIndex) => !rowIndexes.has(rowIndex));
+        });
+        persistEditorState();
+        renderMain();
+        try {
+            const saved = await autoSaveXml();
+            if (!saved) throw new Error('XML save did not return a path');
+            showToast('Removed unavailable flag-node-generator rows and saved the corrected XML.', { autohide: true, delay: 4000 });
+        } catch (err) {
+            showToast('Removed unavailable flag-node-generator rows. Save Topology to persist the corrected XML.', { autohide: false });
+        }
+        return true;
+    }
+
     async function setupFlagNodeGenerators() {
+        let catalogLoaded = false;
         try {
             const res = await fetch('/flag_node_generators_data', { credentials: 'same-origin' });
-            const payload = res.ok ? await res.json() : {};
+            if (!res.ok) throw new Error(`Flag-node-generator catalog request failed (HTTP ${res.status})`);
+            const payload = await res.json();
             window.FLAG_NODE_GENERATORS = Array.isArray(payload.generators)
                 ? payload.generators.filter(item => item && item.disabled !== true && item.id)
                 : [];
+            catalogLoaded = true;
         } catch (e) {
             window.FLAG_NODE_GENERATORS = [];
         }
+        if (catalogLoaded) await promptToRemoveUnavailableTopologyGenerators();
         // The topology row options depend on this catalog.  Unlike the
         // vulnerability loader, this previously left the initial empty-state
         // render in place, which hid the Random option until a full reload.
