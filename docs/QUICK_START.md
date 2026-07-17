@@ -128,9 +128,10 @@ Saved-XML execute notes:
 Phase command notes:
 - `new` creates a starter ScenarioForge XML with one scenario and canonical section keys using the same XML builder as the Web UI.
 - `--density-count` sets the scenario-level Count for Density base host pool used by density-based planning for routing, services, traffic, segmentation, and vulnerabilities. If omitted, it defaults to the same starter value used by the Web UI (`10`).
-- `new` can also seed basic scenario rows with `--seed-role`, `--seed-routing`, `--seed-service`, `--seed-traffic`, `--seed-segmentation`, `--seed-vulnerability`, and `--seed-random-vulnerability-count`.
+- `new` can also seed basic scenario rows with `--seed-role`, `--seed-routing`, `--seed-service`, `--seed-traffic`, `--seed-segmentation`, `--seed-vulnerability`, `--seed-random-vulnerability-count`, `--seed-flag-node-generator`, and `--seed-random-flag-node-generator-count`.
 - `--seed-role` is repeatable and always uses `ROLE=COUNT` semantics for Node Information rows.
 - `--seed-routing`, `--seed-service`, `--seed-traffic`, `--seed-segmentation`, and `--seed-vulnerability` are repeatable and accept `NAME`, `NAME=density`, or `NAME=COUNT`.
+- `--seed-flag-node-generator ID` adds one required non-vulnerability Docker challenge slot bound to that enabled flag-node-generator; use `ID=COUNT` for more slots. `--seed-random-flag-node-generator-count COUNT` writes a Random topology row that resolves during save/planning.
 - Omitting `=COUNT` on those section seed flags uses density semantics; `=density` is an explicit alias for the same behavior.
 - When you provide multiple density-style seed rows in the same section, the CLI assigns equal `factor` weights that add up to `1.0` for that section.
 - `new` can also embed top-level CORE SSH connection details directly into the XML with `--ssh-host`, `--ssh-port`, `--ssh-username`, and `--ssh-password`.

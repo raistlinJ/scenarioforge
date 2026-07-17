@@ -31,6 +31,35 @@ def test_flag_node_generator_picker_can_limit_specific_choices_to_cached_images(
     assert "generator._cached !== true" in topology_template
 
 
+def test_topology_specific_pickers_show_and_filter_catalog_notes() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert 'id="flagNodeGeneratorNoteFilter"' in topology_template
+    assert "flagNodeGeneratorPickerNoteFilter" in topology_template
+    assert "noteMatchesFilter(generator, noteMode)" in topology_template
+    assert 'id="vulnFilterNotes"' in topology_template
+    assert "vulnPickerNoteFilter" in topology_template
+    assert "has note" in topology_template
+    assert '<option value="red">Red</option>' in topology_template
+    assert '<option value="yellow">Yellow</option>' in topology_template
+    assert '<option value="green">Green</option>' in topology_template
+    assert '<th style="width:11rem;">Notes</th>' in topology_template
+    assert "const hoverText = note.length > 300" in topology_template
+    assert "const displayText = note.length > 90" in topology_template
+
+
+def test_flag_node_generator_picker_shows_validation_status() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    start = topology_template.index("async function openFlagNodeGeneratorPicker")
+    end = topology_template.index("// Modal for Specific selection", start)
+    picker = topology_template[start:end]
+    assert "const validationBadgeHtml = generator =>" in picker
+    assert 'badge text-bg-success">Validated</span>' in picker
+    assert 'badge text-bg-danger">Failed</span>' in picker
+    assert "generator.validated_at" in picker
+
+
 def test_topology_migrates_existing_projects_to_show_flag_node_generator_card() -> None:
     topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
 
@@ -58,6 +87,15 @@ def test_flag_node_generator_catalog_refreshes_topology_options_after_loading() 
     end = topology_template.index("async function openFlagNodeGeneratorPicker", start)
     loader = topology_template[start:end]
     assert "try { renderMain(); } catch (e) { }" in loader
+
+
+def test_topology_prompts_before_removing_unavailable_flag_node_generator_rows() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert "promptToRemoveUnavailableTopologyGenerators" in topology_template
+    assert "no longer installed" in topology_template
+    assert "Remove those topology rows and save the corrected XML?" in topology_template
+    assert "await autoSaveXml();" in topology_template
 
 
 def test_specific_vuln_and_flag_node_generator_rows_keep_choose_controls_compact() -> None:

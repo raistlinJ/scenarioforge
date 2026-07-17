@@ -32,6 +32,43 @@ def test_flow_assignment_persists_resolved_paths() -> None:
     assert not missing, "Missing resolved_paths persistence snippets in flow template: " + "; ".join(missing)
 
 
+def test_flow_generation_does_not_automatically_relax_no_duplicates() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "Generate failed after retries. Enable duplicates and retry?" not in text
+    assert "Retry With Duplicates?" not in text
+
+
+def test_flow_prompts_before_clearing_saved_assignments_for_uninstalled_generators() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "promptToRemoveUnavailableSavedFlowGenerators" in text
+    assert "no longer installed" in text
+    assert "Remove the unavailable assignments and clear this saved sequence?" in text
+    assert "await ensureGeneratorCatalogsLoaded();" in text
+
+
+def test_flow_challenge_bounds_include_mandatory_and_generic_docker_nodes() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const genericDocker = Number.isFinite(+stats.generic_docker_total)",
+        "(vuln || 0) + nodeGenerators + genericDocker",
+        "generic_docker_total: genericDockerCount",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Challenge bounds must include generic Docker capacity: " + "; ".join(missing)
+
+
+def test_flow_has_no_allow_duplicates_toggle_and_download_follows_options() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert 'id="flowGenerateNoDuplicates"' not in text
+    assert 'Allow duplicates' not in text
+    assert text.index('data-bs-target="#flowAdvancedOptions"') < text.index('id="flowDownloadDropdown"')
+    assert 'allow_node_duplicates: false,' in text
+
+
 def test_flow_generator_output_shows_phase_timings() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -606,7 +643,7 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
         "function setGenerateBusy(value) {",
         "if (generateInFlight) {",
         "Generate ignored: another Generate/Resolve request is already running.",
-        "resolveTimeoutSeconds = Math.min(1800, Math.max(600, (chain_ids.length * 150) + 180));",
+        "resolveTimeoutSeconds = Math.min(executeTimeoutCapS, Math.max(600, (chain_ids.length * 150) + 180));",
         "resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;",
         "onLines: (lines) => {",
         "resolveProgressLines = resolveProgressLines.concat(lines || []).slice(-20);",
@@ -639,6 +676,25 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
     assert 'flowIncludeAllTopologyVulns' not in text
     assert 'include_all_topology_vulns' not in text
     assert "Max Chain length" not in text
+
+
+def test_flow_summary_card_reports_seed_slots_and_maximum_challenges() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        '<strong>Summary</strong>',
+        'for="flowSeedInput">Flow seed</label>',
+        'Flag-node-generator slots:',
+        'Vulnerability slots:',
+        'Docker slots:',
+        'Max challenges:',
+        'function updateFlowSummary(stats)',
+        'const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;',
+        'updateFlowSummary(lastStats);',
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow summary wiring: " + "; ".join(missing)
 
 
 def test_flow_page_does_not_auto_generate_on_load() -> None:
@@ -707,7 +763,7 @@ def test_flow_restore_refreshes_xml_only_when_server_state_missing() -> None:
     expected_snippets = [
         "const hasServerFlowState = !!getFlowStateForScenario(scenarioName);",
         "if (!hasServerFlowState && hasAuthoritativeXmlPathForScenario(scenarioName) && typeof window.coretgRefreshScenarioStateFromXml === 'function') {",
-        "const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath });",
+        "const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, { updateHidden: true, xml_path: xmlPath, forceXmlPath: true });",
         "if (key) flowStateByScenario[key] = fs;",
     ]
 
@@ -912,7 +968,7 @@ def test_flow_visualization_self_heals_placeholder_for_existing_chain() -> None:
         "let flowDiagramRepairQueued = false;",
         "let flowMermaidRetryQueued = false;",
         "function queueMermaidRenderRetry(attempt) {",
-        'script async src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"',
+        'script async src="/static/vendor/mermaid-10.min.js"',
         "window.addEventListener('coretg-mermaid-ready'",
         "Diagram renderer is loading. Chain details are available below.",
         "const retryAttempt = Number.isFinite(+attempt) ? Math.max(1, +attempt) : 1;",
@@ -968,7 +1024,7 @@ def test_flow_generate_button_and_options_are_wired() -> None:
         'data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions"',
         'id="flowGenerateMaxRetries"',
         "if (btnEl) btnEl.addEventListener('click'",
-        'generate(true, { savePreviewResolve: true, allow_node_duplicates: !!allowNodeDuplicates, resolveOnGenerate: true });',
+        'generate(true, { savePreviewResolve: true, allow_node_duplicates: false, resolveOnGenerate: true });',
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]

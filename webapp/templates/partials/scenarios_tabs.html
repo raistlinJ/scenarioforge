@@ -1550,41 +1550,20 @@
     const payload = buildSaveXmlApiPayload();
     const scenarioNameForSig = resolveScenarioNameForSave();
     const topologySignature = buildTopologySignature(payload);
-    let topologyChanged = null;
+    // `previewState.dirty` covers general editor/UI changes and is not evidence of
+    // a topology change.  Only the stable topology fingerprint may invalidate a
+    // saved flow chain.
+    let topologyChanged = false;
     try {
-      if (typeof previewState !== 'undefined' && previewState && typeof previewState.dirty === 'boolean') {
-        topologyChanged = !!previewState.dirty;
+      const prevSig = scenarioNameForSig ? getTopologySignatureForScenario(scenarioNameForSig) : null;
+      if (prevSig && topologySignature) {
+        topologyChanged = prevSig !== topologySignature;
       }
-    } catch (e) {}
-    if (topologyChanged === null) {
-      try {
-        const prevSig = scenarioNameForSig ? getTopologySignatureForScenario(scenarioNameForSig) : null;
-        if (prevSig && topologySignature) {
-          topologyChanged = prevSig !== topologySignature;
-        } else {
-          topologyChanged = false;
-        }
-      } catch (e) { topologyChanged = false; }
-    }
+    } catch (e) { topologyChanged = false; }
 
     if (topologyChanged === true) {
-      try {
-        if (Array.isArray(payload.scenarios)) {
-          payload.scenarios = payload.scenarios.map((sc) => {
-            if (!sc || typeof sc !== 'object') return sc;
-            const clone = { ...sc };
-            try { delete clone.plan_preview; } catch (e) {}
-            try { delete clone.full_preview; } catch (e) {}
-            try { delete clone.fullPreview; } catch (e) {}
-            try { delete clone.preview; } catch (e) {}
-            try { delete clone.flow_state; } catch (e) {}
-            return clone;
-          });
-        }
-      } catch (e) {}
-      try { payload.clear_flow_preview = true; } catch (e) {}
       persistPreviewPlan = false;
-      try { logInfoSafe('[xml-save] Topology changed: clearing embedded Flow/Preview and marking topology dirty'); } catch (e) {}
+      try { logInfoSafe('[xml-save] Topology changed: server will invalidate the saved FlowState'); } catch (e) {}
     }
 
     if (!Array.isArray(payload.scenarios) || !payload.scenarios.length) {

@@ -57,6 +57,8 @@ def register(
             item['validated_ok'] = item.get('_validated_ok')
             item['validated_incomplete'] = bool(item.get('_validated_incomplete') is True)
             item['validated_at'] = item.get('_validated_at')
+            item['note'] = item.get('_note')
+            item['note_color'] = item.get('_note_color')
             log_path = str(item.get('_last_test_log_path') or '').strip()
             log_download_url = None
             if log_path:

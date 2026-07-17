@@ -168,6 +168,7 @@
                       <th style="width: 140px;">Validated</th>
                       <th>From Source</th>
                       <th style="width: 130px;">Image Cache</th>
+                      <th style="width: 82px;">Notes</th>
                       <th style="width: 160px;">Actions</th>
                     </tr>
                   </thead>
@@ -522,6 +523,33 @@
   </div>
 </div>
 
+<div class="modal fade" id="vulnCatalogNoteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Catalog Note</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="small text-muted mb-2" id="vulnCatalogNoteTarget"></div>
+        <label class="form-label" for="vulnCatalogNoteText">Note</label>
+        <textarea class="form-control" id="vulnCatalogNoteText" rows="5" maxlength="4000" placeholder="Optional note…"></textarea>
+        <div class="form-label mt-3 mb-2">Color</div>
+        <div class="btn-group" id="vulnCatalogNoteColors" role="group" aria-label="Note color">
+          <button type="button" class="btn btn-outline-danger" data-note-color="red" title="Red"><i class="bi bi-circle-fill"></i></button>
+          <button type="button" class="btn btn-outline-warning" data-note-color="yellow" title="Yellow"><i class="bi bi-circle-fill"></i></button>
+          <button type="button" class="btn btn-outline-success" data-note-color="green" title="Green"><i class="bi bi-circle-fill"></i></button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-outline-danger me-auto" id="vulnCatalogNoteClear">Clear</button>
+        <button type="button" class="btn btn-primary" id="vulnCatalogNoteSave">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   const VULN_CATALOG_RUNTIME_MODE = {{ (webui_runtime_mode or 'native')|tojson }};
   const VULN_CATALOG_VM_MODE = VULN_CATALOG_RUNTIME_MODE === 'vm';
@@ -543,6 +571,94 @@
     sortKey: 'name',
     sortDir: 'asc',
   };
+  let vulnCatalogNoteTarget = null;
+  let vulnCatalogNoteColor = 'yellow';
+
+  function vulnCatalogNoteIndicatorHtml(note, color) {
+    const text = String(note || '').trim();
+    const suppliedColor = String(color || '').toLowerCase();
+    const hasColor = ['red', 'yellow', 'green'].includes(suppliedColor);
+    const selected = hasColor ? suppliedColor : 'yellow';
+    const iconColor = (text || hasColor) ? ({ red: '#dc3545', yellow: '#d39e00', green: '#198754' }[selected]) : '#adb5bd';
+    const title = text ? `Note: ${text}` : (hasColor ? `${selected[0].toUpperCase()}${selected.slice(1)} marker` : 'No note');
+    return `<i class="bi bi-circle-fill" style="color:${iconColor}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></i>`;
+  }
+
+  function updateVulnCatalogNoteColorButtons() {
+    document.querySelectorAll('#vulnCatalogNoteColors [data-note-color]').forEach((button) => {
+      const active = button.getAttribute('data-note-color') === vulnCatalogNoteColor;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function updateVulnCatalogNoteRow(target, note, color) {
+    if (!target) return;
+    const item = (_vulnCatalogState.items || []).find((entry) => String(entry?.id || '') === String(target.id || ''));
+    if (!item) return;
+    const text = String(note || '').trim();
+    const selectedColor = String(color || '').toLowerCase();
+    item.note = text || null;
+    item.note_color = ['red', 'yellow', 'green'].includes(selectedColor) ? selectedColor : null;
+    _renderVulnCatalogTable();
+  }
+
+  async function saveVulnCatalogNote({ clear = false } = {}) {
+    if (!vulnCatalogNoteTarget) return;
+    const target = { ...vulnCatalogNoteTarget };
+    const noteEl = _qs('vulnCatalogNoteText');
+    const note = clear ? '' : String(noteEl?.value || '');
+    const noteColor = clear ? '' : vulnCatalogNoteColor;
+    const response = await _postJson('/vuln_catalog_items/set_note', {
+      item_id: target.id,
+      note,
+      note_color: noteColor,
+    });
+    if (!response || response.ok === false) throw new Error((response && response.error) || 'Unable to save note');
+    updateVulnCatalogNoteRow(target, note, noteColor);
+    if (clear && noteEl) noteEl.value = '';
+    if (clear) {
+      vulnCatalogNoteColor = '';
+      updateVulnCatalogNoteColorButtons();
+    }
+    try { bootstrap.Modal.getInstance(_qs('vulnCatalogNoteModal'))?.hide(); } catch (e) { }
+    await loadVulnCatalogItems();
+  }
+
+  function openVulnCatalogNoteModal(item) {
+    if (!item || item.id == null) return;
+    vulnCatalogNoteTarget = { id: item.id, name: String(item.name || item.id) };
+    const noteEl = _qs('vulnCatalogNoteText');
+    if (noteEl) noteEl.value = String(item.note || '');
+    _setText('vulnCatalogNoteTarget', `${vulnCatalogNoteTarget.name} (#${vulnCatalogNoteTarget.id})`);
+    const suppliedColor = String(item.note_color || '').toLowerCase();
+    vulnCatalogNoteColor = ['red', 'yellow', 'green'].includes(suppliedColor) ? suppliedColor : 'yellow';
+    updateVulnCatalogNoteColorButtons();
+    try { bootstrap.Modal.getOrCreateInstance(_qs('vulnCatalogNoteModal')).show(); } catch (e) { }
+  }
+
+  document.addEventListener('click', (event) => {
+    const colorButton = event.target && event.target.closest ? event.target.closest('#vulnCatalogNoteColors [data-note-color]') : null;
+    if (!colorButton) return;
+    vulnCatalogNoteColor = String(colorButton.getAttribute('data-note-color') || 'yellow');
+    updateVulnCatalogNoteColorButtons();
+  });
+
+  _qs('vulnCatalogNoteSave')?.addEventListener('click', async () => {
+    try {
+      await saveVulnCatalogNote();
+    } catch (error) {
+      window.alert(`Unable to save note: ${String(error)}`);
+    }
+  });
+
+  _qs('vulnCatalogNoteClear')?.addEventListener('click', async () => {
+    try {
+      await saveVulnCatalogNote({ clear: true });
+    } catch (error) {
+      window.alert(`Unable to clear note: ${String(error)}`);
+    }
+  });
 
   function escapeHtml(s) {
     try {
@@ -1017,6 +1133,7 @@
       `ID: ${item.id ?? ''}`,
       item.readme_url ? 'README' : '—',
       validation,
+      item.note || '',
       item.log_download_url ? 'Log' : '',
       item.validated_at || '',
       item.from_source || '',
@@ -1113,6 +1230,10 @@
           <button class="btn btn-link btn-sm p-0 ms-1 align-baseline" data-action="persist" type="button" ${mutationsLocked ? 'disabled' : ''} title="${it.persistent ? 'Persistent: this cached image is locked — Clear Cache and cleanup will not remove it. Click to unmark.' : 'Not persistent: this cached image can be removed by Clear Cache and cleanup. Click to mark persistent.'}" aria-label="${it.persistent ? 'Unmark persistent' : 'Mark persistent'} for ${escapeHtml(it.name || '')}"><i class="bi ${it.persistent ? 'bi-lock-fill' : 'bi-unlock text-muted'}"></i></button>
           ${it.cache_checked_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(it.cache_checked_at)}${it.cache_last_core_host ? ' @ ' + escapeHtml(it.cache_last_core_host) : ''}</div>` : ''}
         </td>
+        <td class="small text-nowrap">
+          ${vulnCatalogNoteIndicatorHtml(it.note, it.note_color)}
+          <button class="btn btn-link btn-sm p-0 ms-2 align-baseline" data-action="note" type="button" ${mutationsLocked ? 'disabled' : ''} title="${it.note ? 'Edit note' : 'Add note'}" aria-label="${it.note ? 'Edit note' : 'Add note'} for ${escapeHtml(it.name || '')}"><i class="bi bi-pencil-square"></i></button>
+        </td>
         <td>
           <div class="btn-group btn-group-sm" role="group">
             <button class="btn btn-sm btn-outline-primary" data-action="test" type="button" ${(it.disabled || isBusy) ? 'disabled' : ''} title="${it.disabled ? 'Disabled' : (isBusy ? 'Another test or batch is active' : 'Test vulnerability')}">Test</button>
@@ -1130,6 +1251,7 @@
       });
 
       tr.querySelector('[data-action="test"]').addEventListener('click', () => openVulnTestModal(it));
+      tr.querySelector('[data-action="note"]')?.addEventListener('click', () => openVulnCatalogNoteModal(it));
       tr.querySelector('[data-action="toggle"]').addEventListener('click', async () => {
         try {
           _setText('vulnCatalogLog', '');
@@ -1167,7 +1289,7 @@
 
     if (!rows.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td colspan="8" class="text-muted">No vulnerabilities found.</td>`;
+      tr.innerHTML = `<td colspan="9" class="text-muted">No vulnerabilities found.</td>`;
       body.appendChild(tr);
     }
 
@@ -2522,7 +2644,9 @@
     });
     const runBtn = _qs('vulnTestRunBtn');
     if (runBtn) runBtn.addEventListener('click', async () => {
-      const creds = await promptVulnTestCreds();
+      // VM mode uses the server's .scenarioforge.env CORE VM configuration.
+      // Do not prompt for a second copy of the same credentials.
+      const creds = await resolveVulnBatchCoreConfig();
       if (!creds) return;
       _vulnCatalogState.testCoreCfg = creds;
       await runVulnTest();

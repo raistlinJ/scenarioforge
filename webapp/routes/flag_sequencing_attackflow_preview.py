@@ -802,17 +802,20 @@ def register(app, *, backend_module: Any) -> None:
             node_gens_enabled, _ = backend._flag_node_generators_from_enabled_sources()
         except Exception:
             node_gens_enabled = []
-        enabled_ids: set[str] = set()
+        enabled_ids_by_catalog: dict[str, set[str]] = {
+            'flag_generators': set(),
+            'flag_node_generators': set(),
+        }
         for gen in (gens_enabled or []):
             if isinstance(gen, dict):
                 gid = str(gen.get('id') or '').strip()
                 if gid:
-                    enabled_ids.add(gid)
+                    enabled_ids_by_catalog['flag_generators'].add(gid)
         for gen in (node_gens_enabled or []):
             if isinstance(gen, dict):
                 gid = str(gen.get('id') or '').strip()
                 if gid:
-                    enabled_ids.add(gid)
+                    enabled_ids_by_catalog['flag_node_generators'].add(gid)
 
         missing_refs: list[str] = []
         try:
@@ -822,37 +825,19 @@ def register(app, *, backend_module: Any) -> None:
                 gid = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
                 if not gid:
                     continue
-                if gid not in enabled_ids:
+                catalog = str(assignment.get('generator_catalog') or '').strip()
+                if catalog not in {'flag_generators', 'flag_node_generators'}:
+                    catalog = (
+                        'flag_node_generators'
+                        if str(assignment.get('type') or '').strip() == 'flag-node-generator'
+                        else 'flag_generators'
+                    )
+                if gid not in enabled_ids_by_catalog[catalog]:
                     missing_refs.append(gid)
         except Exception:
             missing_refs = []
 
         missing_refs = sorted(list(dict.fromkeys(missing_refs)))
-        if missing_refs:
-            try:
-                if not preset_steps:
-                    flag_assignments = backend._flow_compute_flag_assignments(
-                        preview,
-                        chain_nodes,
-                        scenario_label or scenario_norm,
-                        initial_facts_override=initial_facts_override,
-                        goal_facts_override=goal_facts_override,
-                        dependency_level=dependency_level,
-                        pivot_context=payload,
-                    )
-                    missing_refs = []
-                    try:
-                        for assignment in (flag_assignments or []):
-                            if not isinstance(assignment, dict):
-                                continue
-                            gid = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
-                            if gid and gid not in enabled_ids:
-                                missing_refs.append(gid)
-                    except Exception:
-                        missing_refs = []
-                    missing_refs = sorted(list(dict.fromkeys(missing_refs)))
-            except Exception:
-                pass
         if missing_refs:
             flow_errors = list(flow_errors or []) + [f'generator not found/enabled: {gid}' for gid in missing_refs]
             flow_valid = False
@@ -1190,6 +1175,11 @@ def register(app, *, backend_module: Any) -> None:
             'stats': stats,
             'flow_valid': bool(flow_valid),
             'flow_errors': list(flow_errors or []),
+            # The UI uses this structured value to ask whether the user wants
+            # to discard a saved sequence that references an uninstalled pack.
+            # Do not regenerate or substitute it here: that would change the
+            # scenario without the user's approval.
+            'stale_generator_references': list(missing_refs),
             **({'flow_errors_detail': flow_errors_detail} if flow_errors_detail else {}),
             'flags_enabled': bool(flags_enabled),
             'allow_node_duplicates': bool(allow_node_duplicates),

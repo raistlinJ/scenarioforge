@@ -118,40 +118,44 @@ def _prepare_remote_generator_execution(
                 current_app.logger.info('[flow.generator] Syncing repo to CORE VM (no installed generators needed)')
         except Exception as exc:
             current_app.logger.error('[flow.generator] failed to resolve generator paths: %s', exc, exc_info=True)
-            allowed_outputs_override = None
-            include_repo_paths = None
+            return {
+                'flow_run_remote': flow_run_remote,
+                'flow_core_cfg': flow_core_cfg,
+                'flow_remote_repo_dir': flow_remote_repo_dir,
+                'response': (jsonify({'ok': False, 'error': f'Failed to resolve the selected generator sources for CORE sync: {exc}'}), 500),
+            }
+        if not include_repo_paths:
+            # Never run the remote runner against whatever catalog happens to
+            # be left on CORE.  A selected assignment must resolve to concrete
+            # local generator files that are included in this sync.
+            return {
+                'flow_run_remote': flow_run_remote,
+                'flow_core_cfg': flow_core_cfg,
+                'flow_remote_repo_dir': flow_remote_repo_dir,
+                'response': (jsonify({'ok': False, 'error': 'No concrete generator source paths were resolved for CORE sync.'}), 500),
+            }
         try:
-            if not allowed_outputs_override:
-                current_app.logger.info('[flow.generator] Syncing repo to CORE VM (reduced snapshot)')
-        except Exception:
-            pass
-        try:
-            if not include_repo_paths:
-                current_app.logger.info('[flow.generator] repo sync skipped (no generator paths resolved)')
-            else:
-                deps._push_repo_to_remote(
-                    flow_core_cfg,
-                    logger=current_app.logger,
-                    upload_only_injected_artifacts=True,
-                    allowed_outputs_override=allowed_outputs_override,
-                    include_repo_paths=include_repo_paths,
-                )
-                try:
-                    flow_progress('Repo sync complete')
-                except Exception:
-                    pass
-        except Exception as exc:
-            if flow_remote_forced:
-                return {
-                    'flow_run_remote': flow_run_remote,
-                    'flow_core_cfg': flow_core_cfg,
-                    'flow_remote_repo_dir': flow_remote_repo_dir,
-                    'response': (jsonify({'ok': False, 'error': f'Failed to sync repo to CORE VM: {exc}'}), 500),
-                }
+            deps._push_repo_to_remote(
+                flow_core_cfg,
+                logger=current_app.logger,
+                upload_only_injected_artifacts=True,
+                allowed_outputs_override=allowed_outputs_override,
+                include_repo_paths=include_repo_paths,
+            )
             try:
-                current_app.logger.warning('[flow.generator] repo sync failed (continuing): %s', exc)
+                flow_progress('Repo sync complete')
             except Exception:
                 pass
+        except Exception as exc:
+            # The remote generator catalog is part of the execution contract.
+            # Continuing would let CORE resolve a stale installed pack and run
+            # different generator code than the validated local assignment.
+            return {
+                'flow_run_remote': flow_run_remote,
+                'flow_core_cfg': flow_core_cfg,
+                'flow_remote_repo_dir': flow_remote_repo_dir,
+                'response': (jsonify({'ok': False, 'error': f'Failed to sync repo to CORE VM: {exc}'}), 500),
+            }
 
     if not isinstance(flow_core_cfg, dict):
         if flow_remote_forced:
@@ -643,6 +647,43 @@ def _prepare_chain_and_assignments(
                 if isinstance(node, dict) and str(node.get('id') or '').strip()
             ]
             _progress(f'Solve: required vulnerability nodes included count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
+
+            # An existing Docker node becomes a generic Flow challenge only
+            # after the user explicitly approved that conversion during
+            # sequencing.  Preserve that recorded decision from XML rather
+            # than treating a blank topology generator field as permission.
+            # This is not a fallback: every accepted node id is audited in
+            # FlowState.chain_expansion and must be non-vulnerable Docker.
+            approved_generic_node_ids: set[str] = set()
+            try:
+                saved_expansion = flow_state_for_prepare.get('chain_expansion') if isinstance(flow_state_for_prepare, dict) else None
+                if isinstance(saved_expansion, dict):
+                    for raw_id in (saved_expansion.get('converted_existing_docker_node_ids') or []):
+                        value = str(raw_id or '').strip()
+                        if value:
+                            approved_generic_node_ids.add(value)
+            except Exception:
+                approved_generic_node_ids = set()
+            if approved_generic_node_ids:
+                normalized_chain: list[dict[str, Any]] = []
+                for node in (chain_nodes or []):
+                    if not isinstance(node, dict):
+                        continue
+                    node_copy = dict(node)
+                    node_id = str(node_copy.get('id') or '').strip()
+                    if (
+                        node_id in approved_generic_node_ids
+                        and deps._flow_node_is_docker_role(node_copy)
+                        and not deps._flow_node_is_vuln(node_copy)
+                        and not str(node_copy.get('flag_node_generator_id') or '').strip()
+                    ):
+                        node_copy['_topology_flag_node_generators_configured'] = False
+                    normalized_chain.append(node_copy)
+                chain_nodes = normalized_chain
+                _progress(
+                    'Solve: restored explicitly approved Docker challenge nodes='
+                    + ','.join(sorted(approved_generic_node_ids))
+                )
     except Exception as exc:
         current_app.logger.exception('[flow.prepare_preview_for_execute] internal error: %s', exc)
         return {
@@ -695,6 +736,7 @@ def _prepare_chain_and_assignments(
                 scenario_label or scenario_norm,
                 initial_facts_override=initial_facts_override,
                 goal_facts_override=goal_facts_override,
+                disallow_generator_reuse=(not allow_node_duplicates),
                 dependency_level=dependency_level,
                 pivot_context=pivot_context,
             )
@@ -838,6 +880,55 @@ def _prepare_chain_and_assignments(
             flag_assignments,
             scenario_label=(scenario_label or scenario_norm),
         )
+        # A Flow resolve must never execute an assignment from a pack that was
+        # uninstalled after the saved FlowState was created.  Check the
+        # catalog *kind* as well as the ID so an ID collision in the other
+        # catalog cannot keep a stale assignment alive.
+        if mode in {'resolve', 'resolve_hints', 'hint', 'hint_only'}:
+            enabled_by_catalog: dict[str, set[str]] = {
+                'flag_generators': set(),
+                'flag_node_generators': set(),
+            }
+            try:
+                enabled, _ = deps._flag_generators_from_enabled_sources()
+                enabled_by_catalog['flag_generators'] = {
+                    str(item.get('id') or '').strip()
+                    for item in (enabled or [])
+                    if isinstance(item, dict) and str(item.get('id') or '').strip()
+                }
+            except Exception:
+                pass
+            try:
+                enabled, _ = deps._flag_node_generators_from_enabled_sources()
+                enabled_by_catalog['flag_node_generators'] = {
+                    str(item.get('id') or '').strip()
+                    for item in (enabled or [])
+                    if isinstance(item, dict) and str(item.get('id') or '').strip()
+                }
+            except Exception:
+                pass
+            unavailable: list[str] = []
+            for assignment in (flag_assignments or []):
+                if not isinstance(assignment, dict):
+                    continue
+                generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+                if not generator_id:
+                    continue
+                catalog = str(assignment.get('generator_catalog') or '').strip()
+                if catalog not in enabled_by_catalog:
+                    catalog = (
+                        'flag_node_generators'
+                        if str(assignment.get('type') or '').strip() == 'flag-node-generator'
+                        else 'flag_generators'
+                    )
+                if generator_id not in enabled_by_catalog[catalog]:
+                    unavailable.append(f'{catalog}/{generator_id}')
+            if unavailable:
+                flow_valid = False
+                flow_errors = list(flow_errors or []) + [
+                    f'generator not found/enabled: {entry}'
+                    for entry in sorted(set(unavailable))
+                ]
         _progress(f'Solve: final validation flow_valid={int(bool(flow_valid))} errors={len(flow_errors or [])}')
     try:
         assign_ids = [str(assignment.get('id') or assignment.get('generator_id') or '').strip() for assignment in (flag_assignments or []) if isinstance(assignment, dict)]
@@ -851,7 +942,10 @@ def _prepare_chain_and_assignments(
     except Exception:
         flow_errors_detail = None
     flags_enabled = bool(flow_valid)
-    run_generators = bool(flags_enabled or j.get('mode') in {'resolve', 'resolve_hints', 'hint', 'hint_only'})
+    # Resolve mode must not execute a generator just to discover that its
+    # required inputs are unavailable.  That previously allowed a stale or
+    # fallback assignment to fail remotely after Docker had already started.
+    run_generators = bool(flags_enabled)
     _progress(f'Solve complete: chain={len(chain_nodes or [])} assignments={len(flag_assignments or [])} run_generators={int(bool(run_generators))}')
     try:
         if not flow_valid:
@@ -1180,6 +1274,10 @@ def _execute_or_prepare_assignments(
                             assignment_type=assignment_type,
                             gen_timeout_s=gen_timeout_s,
                             effective_injects=effective_injects,
+                            generator_source_dir=(
+                                str(((gen_def or {}).get('source') or {}).get('path') or '').strip()
+                                if isinstance(gen_def, dict) else ''
+                            ),
                             flow_try_run_generator_remote=flow_try_run_generator_remote,
                             flow_try_run_generator=flow_try_run_generator,
                         )
@@ -1736,6 +1834,7 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
         kind: str = 'flag-generator',
         timeout_s: int = 120,
         inject_files_override: list[str] | None = None,
+        source_dir: str | None = None,
         core_cfg: dict[str, Any],
         repo_dir: str,
     ) -> tuple[bool, str, str | None, dict[str, Any] | None, str | None, str | None]:
@@ -1746,6 +1845,7 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
             kind=kind,
             timeout_s=timeout_s,
             inject_files_override=inject_files_override,
+            source_dir=source_dir,
             core_cfg=core_cfg,
             repo_dir=repo_dir,
             backend=backend,
@@ -1876,6 +1976,29 @@ def execute_impl(*, backend: Any, payload: dict[str, Any] | None = None):
     flow_errors_detail = prepared_chain['flow_errors_detail']
     flags_enabled = bool(prepared_chain['flags_enabled'])
     run_generators = bool(prepared_chain['run_generators'])
+
+    if not flow_valid:
+        validation_error = '; '.join(str(error or '').strip() for error in (flow_errors or []) if str(error or '').strip())
+        return jsonify({
+            'ok': False,
+            'error': 'Flow validation failed before generator execution'
+                + (f': {validation_error}' if validation_error else '.'),
+            'scenario': scenario_label or scenario_norm,
+            'length': length,
+            'chain': [
+                {
+                    'id': str(node.get('id') or ''),
+                    'name': str(node.get('name') or ''),
+                    'type': str(node.get('type') or ''),
+                }
+                for node in (chain_nodes or [])
+                if isinstance(node, dict)
+            ],
+            'flag_assignments': flag_assignments,
+            'flow_valid': False,
+            'flow_errors': list(flow_errors or []),
+            'stats': stats,
+        }), 422
 
     _gen_by_id: dict[str, dict[str, Any]] = {}
 

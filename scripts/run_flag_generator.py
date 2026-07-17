@@ -591,7 +591,13 @@ def _image_exists_locally(image_tag: str) -> bool:
         return False
 
 
-def find_generator(repo_root: Path, kind: str, generator_id: str) -> tuple[dict[str, Any], Path]:
+def find_generator(
+    repo_root: Path,
+    kind: str,
+    generator_id: str,
+    *,
+    source_dir: Path | None = None,
+) -> tuple[dict[str, Any], Path]:
     # When executed as a script (python scripts/run_flag_generator.py), Python
     # adds only the scripts/ directory to sys.path. Ensure the repo root is on
     # sys.path so imports like `scenarioforge.*` work without requiring an
@@ -605,6 +611,14 @@ def find_generator(repo_root: Path, kind: str, generator_id: str) -> tuple[dict[
         pass
 
     manifest_warnings: list[Any] = []
+    requested_source: Path | None = None
+    if source_dir is not None:
+        try:
+            requested_source = source_dir.resolve()
+            if os.path.commonpath([str(repo_root.resolve()), str(requested_source)]) != str(repo_root.resolve()):
+                raise SystemExit(f"Generator source is outside repo root: {requested_source}")
+        except ValueError:
+            raise SystemExit(f"Generator source is outside repo root: {source_dir}")
 
     # Strict: per-generator YAML manifests (repo + installed generator packs)
     try:
@@ -619,7 +633,10 @@ def find_generator(repo_root: Path, kind: str, generator_id: str) -> tuple[dict[
         for g in gens:
             if str(g.get('id') or '') == generator_id:
                 # Return the generator view dict and the manifest path as a hint.
-                return g, Path(str(g.get('_source_path') or ''))
+                manifest_path = Path(str(g.get('_source_path') or '')).resolve()
+                if requested_source is not None and manifest_path.parent != requested_source:
+                    continue
+                return g, manifest_path
     except Exception as exc:
         print(f"[manifest] failed to load manifests: {exc}")
 
@@ -638,6 +655,8 @@ def find_generator(repo_root: Path, kind: str, generator_id: str) -> tuple[dict[
         if remaining > 0:
             print(f"[manifest] warning: ... {remaining} more")
 
+    if requested_source is not None:
+        raise SystemExit(f"Generator not found at requested source: {generator_id} ({requested_source})")
     raise SystemExit(f"Generator not found: {generator_id}")
 
 
@@ -1019,15 +1038,28 @@ def run_compose(
         "OUTPUTS_DIR": str(outputs_dir.resolve()),
     }
 
-    # If a stable image tag is provided and already cached, skip the build step.
-    # This avoids needing internet access (e.g. to pull the base image) on every run.
+    # If a stable image tag is provided and already cached, skip the build step
+    # only when this Compose supports the explicit --no-build contract.  Older
+    # Compose releases offer no equivalent run flag, so build explicitly before
+    # running; using its implicit image selection could execute stale source.
     no_build_requested = bool(stable_image_tag and _image_exists_locally(stable_image_tag))
     no_build_supported = _compose_run_supports_no_build(source_dir, compose_env) if no_build_requested else False
     no_build = bool(no_build_requested and no_build_supported)
     if no_build:
         print(f'[compose] using cached generator image {stable_image_tag} (--no-build)')
     elif no_build_requested:
-        print(f'[compose] using cached generator image {stable_image_tag} (compose lacks --no-build; falling back)')
+        print(f'[compose] compose lacks --no-build; rebuilding generator image {stable_image_tag} explicitly')
+        build_cmd = [
+            _docker_executable(),
+            'compose',
+            '-f',
+            str(compose_path),
+            '-p',
+            project,
+            'build',
+            service,
+        ]
+        run_cmd(build_cmd, source_dir, compose_env)
     elif stable_image_tag:
         print(f'[compose] generator image {stable_image_tag} not cached; will build now')
 
@@ -1093,6 +1125,7 @@ def main() -> int:
     ap.add_argument("--out-dir", default="/tmp/flag_generator_out")
     ap.add_argument("--config", default="{}", help="JSON object of inputs")
     ap.add_argument("--repo-root", default="", help="Path to repo root (optional)")
+    ap.add_argument("--source-dir", default="", help="Exact generator source directory, relative to repo root")
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root).resolve() if args.repo_root else repo_root_from_here()
@@ -1110,7 +1143,18 @@ def main() -> int:
     if not isinstance(config, dict):
         raise SystemExit("--config must be a JSON object")
 
-    gen, _src_path = find_generator(repo_root, str(args.kind or "flag-generator"), args.generator_id)
+    source_override = str(args.source_dir or '').strip()
+    source_override_path = None
+    if source_override:
+        source_override_path = Path(source_override)
+        if not source_override_path.is_absolute():
+            source_override_path = repo_root / source_override_path
+    gen, _src_path = find_generator(
+        repo_root,
+        str(args.kind or "flag-generator"),
+        args.generator_id,
+        source_dir=source_override_path,
+    )
     inject_files = gen.get('inject_files')
     if not isinstance(inject_files, list):
         inject_files = []

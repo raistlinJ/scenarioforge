@@ -125,8 +125,9 @@ def register(
                     normalize_scenario_names_strict(scenarios_list)
                     scenarios_list = _concretize_scenarios_for_save(scenarios_list, seed=data.get('seed'))
                     data['scenarios'] = scenarios_list
-            except Exception:
-                pass
+            except ValueError as exc:
+                flash(f'Failed to save XML: {exc}')
+                return redirect(url_for('index'))
             scenario_count = len(data.get('scenarios') or []) if isinstance(data.get('scenarios'), list) else 0
             scenario_names_desc = []
             try:
@@ -277,7 +278,6 @@ def register(
             user = current_user_getter()
             data = request.get_json(silent=True) or {}
             scenarios = data.get('scenarios')
-            clear_flow_preview = bool(data.get('clear_flow_preview'))
             core_meta = data.get('core')
             normalized_core = normalize_core_config(core_meta, include_password=True) if isinstance(core_meta, (dict, list)) or core_meta else None
             raw_project_hint = data.get('project_key_hint') if isinstance(data, dict) else None
@@ -761,25 +761,21 @@ def register(
                     preserved.append(_preserve_hitl_if_missing(scen, project_key_hint, source_scen=source_by_norm.get(norm)))
                 scenarios = preserved
 
-            if clear_flow_preview and isinstance(scenarios, list):
-                cleaned: list[Any] = []
-                for scen in scenarios:
-                    if not isinstance(scen, dict):
-                        cleaned.append(scen)
-                        continue
-                    scen2 = dict(scen)
-                    for key in ('flow_state', 'plan_preview', 'full_preview', 'fullPreview', 'preview'):
-                        try:
-                            scen2.pop(key, None)
-                        except Exception:
-                            pass
-                    cleaned.append(scen2)
-                scenarios = cleaned
+            # Do not let a client-side dirty indicator delete FlowState.  A page can
+            # become generally dirty for reasons unrelated to topology (for example,
+            # restoring UI state while navigating between Scenario pages).  The
+            # comparison above is the authoritative check: it clears FlowState only
+            # when the topology represented by the incoming XML actually differs
+            # from the source XML.  Keeping this server-side also protects a saved
+            # chain from stale browser state.
             try:
                 normalize_scenario_names_strict(scenarios)
                 scenarios = _concretize_scenarios_for_save(scenarios, seed=data.get('seed'))
-            except Exception:
-                pass
+            except ValueError as exc:
+                # A topology request must never be downgraded into an empty
+                # Specific generator row.  Return the actionable validation
+                # error to the page and leave the existing XML untouched.
+                return jsonify({'ok': False, 'error': str(exc)}), 422
             scenario_names: list[str] = []
             try:
                 scenario_names = [str((s or {}).get('name') or '').strip() for s in scenarios if isinstance(s, dict)]
@@ -904,7 +900,14 @@ def register(
                     persist_scenario_catalog(names_for_catalog, source_path=scenario_paths_map or out_path)
             except Exception:
                 pass
-            response_payload = {'ok': True, 'result_path': out_path, 'core': resp_core}
+            response_payload = {
+                'ok': True,
+                'result_path': out_path,
+                'core': resp_core,
+                # The browser normally resolves Random before save, but this
+                # keeps API clients able to adopt the server's ground truth.
+                'scenarios': scenarios,
+            }
             if scenario_paths_map:
                 response_payload['scenario_paths'] = scenario_paths_map
             response_payload['scenario_paths_by_index'] = scenario_paths_by_index

@@ -71,6 +71,8 @@ def register(
                             'files_api_url': files_api_url,
                             'validated_ok': bool(item.get('validated_ok')) if item.get('validated_ok') is not None else None,
                             'validated_at': str(item.get('validated_at') or '').strip() or None,
+                            'note': str(item.get('note') or '').strip() or None,
+                            'note_color': str(item.get('note_color') or '').strip().lower() or None,
                             'eligible_for_selection': bool(item.get('validated_ok') is True and item.get('validated_incomplete') is not True),
                             # This is the result of the catalog's most recent
                             # CORE image-cache check.  The Topology picker uses
