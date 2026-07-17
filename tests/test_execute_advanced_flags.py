@@ -614,6 +614,8 @@ def test_run_cli_async_uses_scenario_xml_as_preview_source_for_execute_parity(tm
         'venv_bin': '',
     }
     flow_state = {
+        'chain_expansion': {'mode': 'add_docker', 'added_docker_nodes': 1},
+        'topology_inclusion': {'converted_existing_docker_node_ids': ['7']},
         'flag_assignments': [
             {
                 'node_id': '7',
@@ -623,6 +625,7 @@ def test_run_cli_async_uses_scenario_xml_as_preview_source_for_execute_parity(tm
         ]
     }
     loaded_preview_paths = []
+    persisted_plan_payloads = []
 
     def _fake_preview_payload(path, _scenario):
         loaded_preview_paths.append(str(path))
@@ -640,7 +643,11 @@ def test_run_cli_async_uses_scenario_xml_as_preview_source_for_execute_parity(tm
     monkeypatch.setattr(backend, '_load_run_history', lambda: [])
     monkeypatch.setattr(backend, '_select_core_config_for_page', lambda *a, **k: dict(remote_core_cfg))
     monkeypatch.setattr(backend, '_load_preview_payload_from_path', _fake_preview_payload)
-    monkeypatch.setattr(backend, '_update_plan_preview_in_xml', lambda *_a, **_k: (True, 'ok'))
+    def _capture_plan_preview(_path, _scenario, payload):
+        persisted_plan_payloads.append(payload)
+        return True, 'ok'
+
+    monkeypatch.setattr(backend, '_update_plan_preview_in_xml', _capture_plan_preview)
     monkeypatch.setattr(backend, '_flow_state_from_xml_path', lambda *_a, **_k: dict(flow_state))
     monkeypatch.setattr(backend, '_summary_from_preview_plan_path', lambda *_a, **_k: ({}, {'scenario': 'NewScenario1'}))
     monkeypatch.setattr(backend, '_summary_from_xml_plan', lambda *_a, **_k: ({}, None))
@@ -670,6 +677,8 @@ def test_run_cli_async_uses_scenario_xml_as_preview_source_for_execute_parity(tm
     assert job_spec.get('xml_path') == str(xml_path)
     assert job_spec.get('preview_plan_path') == str(xml_path)
     assert str(xml_path) in loaded_preview_paths
+    assert persisted_plan_payloads
+    assert (persisted_plan_payloads[-1].get('metadata') or {}).get('flow') == flow_state
 
 
 def test_run_cli_async_hitl_rewrite_keeps_preview_plan_path_aligned(tmp_path, monkeypatch):

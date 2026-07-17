@@ -3456,16 +3456,33 @@ def persist_prepare_preview_plan(
         if isinstance(meta_out, dict):
             meta_out['xml_path'] = xml_target
         out_payload = {'full_preview': preview, 'metadata': meta_out}
-        ok, err = backend._update_plan_preview_in_xml(xml_target, scenario_label or scenario_norm, out_payload)
-        if not ok:
-            return {'ok': False, 'error': f'Failed to persist flow-modified preview plan: {err}'}
-        try:
-            flow_ok, flow_err = backend._update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
-        except Exception as exc:
-            return {
-                'ok': False,
-                'error': f'Failed to persist flow-modified preview plan FlowState: {exc}',
-            }
+        atomic_persist = getattr(backend, '_persist_plan_preview_and_flow_state_in_xml', None)
+        if callable(atomic_persist):
+            try:
+                flow_ok, flow_err = atomic_persist(
+                    xml_target,
+                    scenario_label or scenario_norm,
+                    out_payload,
+                    flow_meta,
+                )
+            except Exception as exc:
+                return {
+                    'ok': False,
+                    'error': f'Failed to persist flow-modified preview plan FlowState: {exc}',
+                }
+        else:
+            # Compatibility for narrow test/backport backends that have only
+            # the legacy individual persistence methods.
+            ok, err = backend._update_plan_preview_in_xml(xml_target, scenario_label or scenario_norm, out_payload)
+            if not ok:
+                return {'ok': False, 'error': f'Failed to persist flow-modified preview plan: {err}'}
+            try:
+                flow_ok, flow_err = backend._update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
+            except Exception as exc:
+                return {
+                    'ok': False,
+                    'error': f'Failed to persist flow-modified preview plan FlowState: {exc}',
+                }
         if not flow_ok:
             return {
                 'ok': False,

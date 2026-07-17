@@ -1104,6 +1104,10 @@ def test_save_xml_api_marks_topology_dirty_when_topology_changes(tmp_path, monke
                 "base": {"filepath": ""},
                 "flow_state": {
                     "length": 2,
+                    "chain": [
+                        {"id": "n1", "name": "docker-1", "type": "docker"},
+                        {"id": "n2", "name": "docker-2", "type": "docker"},
+                    ],
                     "chain_ids": ["n1", "n2"],
                     "flow_enabled": True,
                 },
@@ -1178,9 +1182,93 @@ def test_save_xml_api_marks_topology_dirty_when_topology_changes(tmp_path, monke
     flow_state = scen0.get('flow_state') or {}
     assert flow_state.get('topology_dirty') is True
     assert flow_state.get('topology_dirty_reason') == 'topology_or_ip_changed'
+    assert (flow_state.get('chain') or []) == []
     assert (flow_state.get('chain_ids') or []) == []
     assert (flow_state.get('flag_assignments') or []) == []
     assert flow_state.get('length') == 0
+    canonical_flow_state = backend._flow_state_from_xml_path(result_xml, 'DirtyTopo') or {}
+    assert (canonical_flow_state.get('chain_ids') or []) == []
+
+
+def test_save_xml_api_marks_flow_dirty_when_flag_node_generator_selection_changes(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: ([
+            {'id': 'test-node-generator-a', 'name': 'Test Node Generator A'},
+            {'id': 'test-node-generator-b', 'name': 'Test Node Generator B'},
+        ], []),
+    )
+
+    def payload_for(generator_id: str, *, include_flow: bool) -> dict:
+        scenario = {
+            'name': 'DirtyFlagNodeGenerator',
+            'base': {'filepath': ''},
+            'sections': {
+                'Node Information': {'density': 0, 'items': [
+                    {'selected': 'Docker', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 2},
+                ]},
+                'Routing': {'density': 0.0, 'items': []},
+                'Services': {'density': 0.0, 'items': []},
+                'Traffic': {'density': 0.0, 'items': []},
+                'Vulnerabilities': {'density': 0.0, 'items': []},
+                'Flag Node Generators': {'density': 0.0, 'items': [
+                    {
+                        'selected': 'Specific',
+                        'g_id': generator_id,
+                        'g_name': generator_id,
+                        'v_metric': 'Count',
+                        'v_count': 1,
+                    },
+                ]},
+                'Segmentation': {'density': 0.0, 'items': []},
+            },
+        }
+        if include_flow:
+            scenario['flow_state'] = {
+                'flow_enabled': True,
+                'length': 1,
+                'chain_ids': ['docker-3'],
+                'chain': [{'id': 'docker-3', 'name': 'docker-3', 'type': 'docker'}],
+                'flag_assignments': [
+                    {'node_id': 'docker-3', 'id': generator_id, 'type': 'flag-node-generator'},
+                ],
+                'chain_expansion': {'mode': 'existing_docker'},
+            }
+        return {'scenarios': [scenario]}
+
+    first = client.post(
+        '/save_xml_api',
+        data=json.dumps(payload_for('test-node-generator-a', include_flow=True)),
+        content_type='application/json',
+    )
+    assert first.status_code == 200
+    source_xml = (first.get_json() or {}).get('result_path')
+    assert source_xml and os.path.exists(source_xml)
+
+    second_payload = payload_for('test-node-generator-b', include_flow=False)
+    second_payload['project_key_hint'] = source_xml
+    second_payload['scenario_query'] = 'DirtyFlagNodeGenerator'
+    second = client.post('/save_xml_api', data=json.dumps(second_payload), content_type='application/json')
+    assert second.status_code == 200
+    result_xml = (second.get_json() or {}).get('result_path')
+    assert result_xml and os.path.exists(result_xml)
+
+    saved = backend._flow_state_from_xml_path(result_xml, 'DirtyFlagNodeGenerator') or {}
+    assert saved.get('topology_dirty') is True
+    assert (saved.get('chain') or []) == []
+    assert (saved.get('chain_ids') or []) == []
+    assert (saved.get('flag_assignments') or []) == []
+    assert (saved.get('chain_expansion') or {}).get('mode') == 'existing_docker'
 
 
 def test_save_xml_api_preserves_hitl_validation_state_roundtrip(tmp_path, monkeypatch):
