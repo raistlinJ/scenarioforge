@@ -1271,6 +1271,106 @@ def test_save_xml_api_marks_flow_dirty_when_flag_node_generator_selection_change
     assert (saved.get('chain_expansion') or {}).get('mode') == 'existing_docker'
 
 
+def test_save_xml_api_resolves_random_flag_node_generator_to_enabled_generator(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: ([
+            {'id': 'node-generator-a', 'name': 'Node Generator A'},
+            {'id': 'node-generator-b', 'name': 'Node Generator B'},
+        ], []),
+    )
+
+    payload = {
+        'seed': 2468,
+        'scenarios': [{
+            'name': 'RandomFlagNodeGenerator',
+            'base': {'filepath': ''},
+            'sections': {
+                'Node Information': {'density': 0, 'items': [
+                    {'selected': 'Docker', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 1},
+                ]},
+                'Routing': {'density': 0.0, 'items': []},
+                'Services': {'density': 0.0, 'items': []},
+                'Traffic': {'density': 0.0, 'items': []},
+                'Vulnerabilities': {'density': 0.0, 'items': []},
+                'Flag Node Generators': {'density': 0.0, 'items': [
+                    {'selected': 'Random', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 1},
+                ]},
+                'Segmentation': {'density': 0.0, 'items': []},
+            },
+        }],
+    }
+
+    response = client.post('/save_xml_api', data=json.dumps(payload), content_type='application/json')
+
+    assert response.status_code == 200
+    data = response.get_json() or {}
+    assert data.get('ok') is True
+    resolved_row = data['scenarios'][0]['sections']['Flag Node Generators']['items'][0]
+    assert resolved_row['selected'] == 'Specific'
+    assert resolved_row['g_id'] in {'node-generator-a', 'node-generator-b'}
+    assert resolved_row['g_name'] in {'Node Generator A', 'Node Generator B'}
+
+    xml_path = data.get('result_path')
+    assert xml_path and os.path.exists(xml_path)
+    parsed = backend._parse_scenarios_xml(xml_path)
+    saved_row = parsed['scenarios'][0]['sections']['Flag Node Generators']['items'][0]
+    assert saved_row['selected'] == 'Specific'
+    assert saved_row['g_id'] == resolved_row['g_id']
+    assert saved_row['g_name'] == resolved_row['g_name']
+
+
+def test_save_xml_api_rejects_random_flag_node_generator_without_enabled_generator(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    monkeypatch.setattr(backend, '_flag_node_generators_from_enabled_sources', lambda: ([], []))
+
+    payload = {
+        'scenarios': [{
+            'name': 'MissingRandomFlagNodeGenerator',
+            'base': {'filepath': ''},
+            'sections': {
+                'Node Information': {'density': 0, 'items': [
+                    {'selected': 'Docker', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 1},
+                ]},
+                'Routing': {'density': 0.0, 'items': []},
+                'Services': {'density': 0.0, 'items': []},
+                'Traffic': {'density': 0.0, 'items': []},
+                'Vulnerabilities': {'density': 0.0, 'items': []},
+                'Flag Node Generators': {'density': 0.0, 'items': [
+                    {'selected': 'Random', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 1},
+                ]},
+                'Segmentation': {'density': 0.0, 'items': []},
+            },
+        }],
+    }
+
+    response = client.post('/save_xml_api', data=json.dumps(payload), content_type='application/json')
+
+    assert response.status_code == 422
+    data = response.get_json() or {}
+    assert data.get('ok') is False
+    assert 'no enabled flag-node-generators are available' in str(data.get('error') or '')
+    assert not list(outdir.rglob('*.xml'))
+
+
 def test_save_xml_api_preserves_hitl_validation_state_roundtrip(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)

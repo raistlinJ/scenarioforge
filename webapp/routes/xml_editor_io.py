@@ -125,8 +125,9 @@ def register(
                     normalize_scenario_names_strict(scenarios_list)
                     scenarios_list = _concretize_scenarios_for_save(scenarios_list, seed=data.get('seed'))
                     data['scenarios'] = scenarios_list
-            except Exception:
-                pass
+            except ValueError as exc:
+                flash(f'Failed to save XML: {exc}')
+                return redirect(url_for('index'))
             scenario_count = len(data.get('scenarios') or []) if isinstance(data.get('scenarios'), list) else 0
             scenario_names_desc = []
             try:
@@ -778,8 +779,11 @@ def register(
             try:
                 normalize_scenario_names_strict(scenarios)
                 scenarios = _concretize_scenarios_for_save(scenarios, seed=data.get('seed'))
-            except Exception:
-                pass
+            except ValueError as exc:
+                # A topology request must never be downgraded into an empty
+                # Specific generator row.  Return the actionable validation
+                # error to the page and leave the existing XML untouched.
+                return jsonify({'ok': False, 'error': str(exc)}), 422
             scenario_names: list[str] = []
             try:
                 scenario_names = [str((s or {}).get('name') or '').strip() for s in scenarios if isinstance(s, dict)]
@@ -904,7 +908,14 @@ def register(
                     persist_scenario_catalog(names_for_catalog, source_path=scenario_paths_map or out_path)
             except Exception:
                 pass
-            response_payload = {'ok': True, 'result_path': out_path, 'core': resp_core}
+            response_payload = {
+                'ok': True,
+                'result_path': out_path,
+                'core': resp_core,
+                # The browser normally resolves Random before save, but this
+                # keeps API clients able to adopt the server's ground truth.
+                'scenarios': scenarios,
+            }
             if scenario_paths_map:
                 response_payload['scenario_paths'] = scenario_paths_map
             response_payload['scenario_paths_by_index'] = scenario_paths_by_index

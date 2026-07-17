@@ -30632,6 +30632,31 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
     except Exception:
         seed_int = 1
 
+    # Flag-node-generator rows are topology requirements, not a generic
+    # "Specific" dropdown.  A Random row must therefore resolve to one real,
+    # enabled generator before XML is written.  Only load this catalog when a
+    # row exists, so unrelated topology saves remain independent of generator
+    # catalog availability.
+    has_flag_node_generator_rows = any(
+        isinstance(scenario, dict)
+        and isinstance(scenario.get('sections'), dict)
+        and isinstance(scenario['sections'].get('Flag Node Generators'), dict)
+        and bool(scenario['sections']['Flag Node Generators'].get('items'))
+        for scenario in scenarios_payload
+    )
+    nodegen_catalog_items: list[dict[str, Any]] = []
+    nodegen_catalog_error = ''
+    if has_flag_node_generator_rows:
+        try:
+            nodegen_catalog_items, _nodegen_catalog_errors = _flag_node_generators_from_enabled_sources()
+            nodegen_catalog_items = [
+                item for item in (nodegen_catalog_items or [])
+                if isinstance(item, dict) and str(item.get('id') or '').strip()
+            ]
+        except Exception as exc:
+            nodegen_catalog_items = []
+            nodegen_catalog_error = str(exc)
+
     concretized: list[Any] = []
     for scenario in scenarios_payload:
         if not isinstance(scenario, dict):
@@ -30642,6 +30667,58 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
             scenario_name = str(next_scenario.get('name') or '').strip() or 'Scenario'
             sections = next_scenario.get('sections') if isinstance(next_scenario.get('sections'), dict) else None
             if isinstance(sections, dict):
+                flag_node_generator_section = sections.get('Flag Node Generators') if isinstance(sections.get('Flag Node Generators'), dict) else None
+                flag_node_generator_items = flag_node_generator_section.get('items') if isinstance(flag_node_generator_section, dict) and isinstance(flag_node_generator_section.get('items'), list) else None
+                if isinstance(flag_node_generator_items, list):
+                    resolved_items: list[Any] = []
+                    for index, raw_item in enumerate(flag_node_generator_items):
+                        if not isinstance(raw_item, dict):
+                            resolved_items.append(raw_item)
+                            continue
+
+                        item = copy.deepcopy(raw_item)
+                        selected = str(item.get('selected') or '').strip().lower()
+                        if not selected or selected == 'random':
+                            chosen = _deterministic_pick(
+                                nodegen_catalog_items,
+                                f'{seed_int}|{scenario_name}|Flag Node Generators|{index}|g_id|save-xml',
+                            )
+                            generator_id = str((chosen or {}).get('id') or '').strip()
+                            if not generator_id:
+                                detail = f' ({nodegen_catalog_error})' if nodegen_catalog_error else ''
+                                raise ValueError(
+                                    'Flag Node Generators contains Random, but no enabled '
+                                    f'flag-node-generators are available{detail}.'
+                                )
+                            item['selected'] = 'Specific'
+                            item['g_id'] = generator_id
+                            item['g_name'] = str((chosen or {}).get('name') or generator_id).strip() or generator_id
+                        else:
+                            requested_id = str(item.get('g_id') or '').strip()
+                            match = next(
+                                (candidate for candidate in nodegen_catalog_items
+                                 if str(candidate.get('id') or '').strip() == requested_id),
+                                None,
+                            )
+                            if not requested_id or not isinstance(match, dict):
+                                raise ValueError(
+                                    'Topology-selected flag-node-generator is not enabled: '
+                                    f"{requested_id or item.get('g_name') or '(missing id)'}"
+                                )
+                            item['selected'] = 'Specific'
+                            item['g_id'] = requested_id
+                            item['g_name'] = str(match.get('name') or requested_id).strip() or requested_id
+
+                        if str(item.get('v_metric') or '').strip() in {'', 'Weight'}:
+                            item['v_metric'] = 'Count'
+                        if item.get('v_count') in (None, '', 0):
+                            item['v_count'] = 1
+                        resolved_items.append(item)
+
+                    flag_node_generator_section['items'] = resolved_items
+                    sections['Flag Node Generators'] = flag_node_generator_section
+                    next_scenario['sections'] = sections
+
                 routing_section = sections.get('Routing') if isinstance(sections.get('Routing'), dict) else None
                 routing_items = routing_section.get('items') if isinstance(routing_section, dict) and isinstance(routing_section.get('items'), list) else None
                 if isinstance(routing_items, list):
@@ -30752,6 +30829,8 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
                     next_scenario['sections'] = sections
 
             concretized.append(next_scenario)
+        except ValueError:
+            raise
         except Exception:
             concretized.append(copy.deepcopy(scenario))
     return concretized
@@ -36056,8 +36135,9 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                 if name == 'Flag Node Generators' and sel_for_xml == 'Specific':
                     generator_id = str(item.get('g_id') or '').strip()
                     generator_name = str(item.get('g_name') or '').strip()
-                    if generator_id:
-                        it.set('g_id', generator_id)
+                    if not generator_id:
+                        raise ValueError('Flag Node Generators row is Specific but no generator is selected.')
+                    it.set('g_id', generator_id)
                     if generator_name:
                         it.set('g_name', generator_name)
                 if name == 'Segmentation':
@@ -36770,8 +36850,9 @@ def save_xml():
                 _normalize_scenario_names_strict(scenarios_list)
                 scenarios_list = _concretize_scenarios_for_save(scenarios_list, seed=data.get('seed'))
                 data['scenarios'] = scenarios_list
-        except Exception:
-            pass
+        except ValueError as exc:
+            flash(f'Failed to save XML: {exc}')
+            return redirect(url_for('index'))
         scenario_count = len(data.get('scenarios') or []) if isinstance(data.get('scenarios'), list) else 0
         scenario_names_desc = []
         try:
@@ -36934,8 +37015,8 @@ def save_xml_api():
         try:
             _normalize_scenario_names_strict(scenarios)
             scenarios = _concretize_scenarios_for_save(scenarios, seed=data.get('seed'))
-        except Exception:
-            pass
+        except ValueError as exc:
+            return jsonify({ 'ok': False, 'error': str(exc) }), 422
         scenario_names: list[str] = []
         try:
             scenario_names = [str((s or {}).get('name') or '').strip() for s in scenarios if isinstance(s, dict)]
@@ -37207,7 +37288,12 @@ def save_xml_api():
                 _persist_scenario_catalog(names_for_catalog, source_path=scenario_paths_map or out_path)
         except Exception:
             pass
-        response_payload = { 'ok': True, 'result_path': out_path, 'core': resp_core }
+        response_payload = {
+            'ok': True,
+            'result_path': out_path,
+            'core': resp_core,
+            'scenarios': scenarios,
+        }
         if scenario_paths_map:
             response_payload['scenario_paths'] = scenario_paths_map
         response_payload['scenario_paths_by_index'] = scenario_paths_by_index
