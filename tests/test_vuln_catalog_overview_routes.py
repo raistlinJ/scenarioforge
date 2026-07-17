@@ -150,6 +150,7 @@ def test_vuln_catalog_table_offers_persistent_colored_notes() -> None:
     assert 'data-note-color="green"' in text
     assert '/vuln_catalog_items/set_note' in text
     assert 'function updateVulnCatalogNoteRow' in text
+    assert 'const hasColor = [\'red\', \'yellow\', \'green\'].includes(suppliedColor);' in text
 
 
 def test_vuln_catalog_batch_reuses_core_session_prompt() -> None:

@@ -777,11 +777,11 @@
 
   function catalogNoteIndicatorHtml(note, color) {
     const text = String(note || '').trim();
-    const selected = ['red', 'yellow', 'green'].includes(String(color || '').toLowerCase())
-      ? String(color).toLowerCase()
-      : 'yellow';
-    const iconColor = text ? ({ red: '#dc3545', yellow: '#d39e00', green: '#198754' }[selected]) : '#adb5bd';
-    const title = text ? `Note: ${text}` : 'No note';
+    const suppliedColor = String(color || '').toLowerCase();
+    const hasColor = ['red', 'yellow', 'green'].includes(suppliedColor);
+    const selected = hasColor ? suppliedColor : 'yellow';
+    const iconColor = (text || hasColor) ? ({ red: '#dc3545', yellow: '#d39e00', green: '#198754' }[selected]) : '#adb5bd';
+    const title = text ? `Note: ${text}` : (hasColor ? `${selected[0].toUpperCase()}${selected.slice(1)} marker` : 'No note');
     return `<i class="bi bi-circle-fill" style="color:${iconColor}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></i>`;
   }
 
@@ -799,8 +799,9 @@
     const generator = (state.generators || []).find((item) => String(item?.id || '') === String(target.id || ''));
     if (!generator) return;
     const text = String(note || '').trim();
+    const selectedColor = String(color || '').toLowerCase();
     generator.note = text || null;
-    generator.note_color = text ? (['red', 'yellow', 'green'].includes(String(color || '').toLowerCase()) ? String(color).toLowerCase() : null) : null;
+    generator.note_color = ['red', 'yellow', 'green'].includes(selectedColor) ? selectedColor : null;
     if (target.kind === 'flag-node-generator') renderNodeGenerators();
     else renderGenerators();
   }

@@ -120,7 +120,13 @@ def test_vuln_catalog_export_all_bundle_upload_installs_nested_catalogs(monkeypa
     monkeypatch.setattr(backend, '_outputs_dir', lambda: str(tmp_path / 'outputs'))
     monkeypatch.setattr(backend, '_get_repo_root', lambda: str(tmp_path))
 
-    alpha_zip = _make_zip({'alpha/docker-compose.yml': 'services: {}\n'})
+    alpha_zip = _make_zip({
+        'alpha/docker-compose.yml': 'services: {}\n',
+        '.scenarioforge/catalog_notes.json': json.dumps({
+            'version': 1,
+            'notes': [{'compose_rel': 'alpha/docker-compose.yml', 'note': 'verify before use', 'note_color': 'yellow'}],
+        }),
+    })
     beta_zip = _make_zip({'beta/docker-compose.yml': 'services: {}\n'})
     bundle_zip = _make_zip(
         {
@@ -149,6 +155,8 @@ def test_vuln_catalog_export_all_bundle_upload_installs_nested_catalogs(monkeypa
     catalogs = state.get('catalogs') or []
     assert [catalog.get('label') for catalog in catalogs] == ['Alpha Catalog', 'Beta Catalog']
     assert all(catalog.get('compose_count') == 1 for catalog in catalogs)
+    assert catalogs[0]['compose_items'][0]['note'] == 'verify before use'
+    assert catalogs[0]['compose_items'][0]['note_color'] == 'yellow'
 
 
 def test_vuln_catalog_pack_import_url_blocks_unsafe_url(monkeypatch):

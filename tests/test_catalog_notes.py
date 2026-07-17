@@ -77,6 +77,29 @@ def test_generator_notes_can_be_saved_for_a_visible_catalog_id_without_a_pack_st
     assert generators[('flag-node-generator', 'manifest-id-not-yet-indexed-in-pack-state')]['note_color'] == 'green'
 
 
+def test_generator_color_marker_can_be_saved_without_note_text(monkeypatch, tmp_path):
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+    app_backend._save_installed_generator_packs_state({'packs': []})
+
+    ok, _message = app_backend._set_generator_note_state(
+        kind='flag-generator',
+        generator_id='color-only-generator',
+        note='',
+        note_color='red',
+    )
+
+    assert ok is True
+    saved = app_backend._load_installed_generator_packs_state()
+    assert saved['catalog_notes']['flag-generator:color-only-generator'] == {
+        'note': '',
+        'note_color': 'red',
+    }
+    _packs, generators = app_backend._build_installed_disable_maps()
+    assert generators[('flag-generator', 'color-only-generator')]['note'] is None
+    assert generators[('flag-generator', 'color-only-generator')]['note_color'] == 'red'
+
+
 def test_vulnerability_note_endpoint_persists_note_and_color(monkeypatch):
     state = {
         'active_id': 'catalog-1',
@@ -102,3 +125,14 @@ def test_vulnerability_note_endpoint_persists_note_and_color(monkeypatch):
     item = state['catalogs'][0]['compose_items'][0]
     assert item['note'] == 'needs a stable image'
     assert item['note_color'] == 'yellow'
+
+    response = client.post(
+        '/vuln_catalog_items/set_note',
+        json={'item_id': 7, 'note': '', 'note_color': 'green'},
+    )
+
+    assert response.status_code == 200
+    assert (response.get_json() or {}).get('ok') is True
+    updated_item = state['catalogs'][0]['compose_items'][0]
+    assert updated_item['note'] == ''
+    assert updated_item['note_color'] == 'green'

@@ -162,6 +162,7 @@ def test_flag_catalog_tables_offer_persistent_colored_notes() -> None:
     assert '/api/flag_generators/set_note' in text
     assert '/api/flag_node_generators/set_note' in text
     assert 'function updateFlagCatalogNoteRow' in text
+    assert 'const hasColor = [\'red\', \'yellow\', \'green\'].includes(suppliedColor);' in text
 
 
 def test_flag_catalog_batch_reuses_core_session_prompt() -> None:

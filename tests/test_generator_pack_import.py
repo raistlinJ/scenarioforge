@@ -537,6 +537,13 @@ services:
     pack = packs[-1]
     pack_id = pack.get("id")
     assert pack_id
+    saved_note, _message = app_backend._set_generator_note_state(
+        kind='flag-generator',
+        generator_id=gen_id,
+        note='',
+        note_color='green',
+    )
+    assert saved_note is True
     label = secure_filename(str(pack.get("label") or "")).strip() or "pack"
     expected_inner = f"packs/{pack_id}-{label}.zip"
 
@@ -555,6 +562,13 @@ services:
     inner_names = set(inner.namelist())
     assert "pack.json" in inner_names
     assert any(n.endswith("/manifest.yaml") and n.startswith("flag_generators/") for n in inner_names)
+    export_metadata = __import__('json').loads(inner.read('pack.json').decode('utf-8'))
+    assert export_metadata['catalog_notes'] == [{
+        'kind': 'flag-generator',
+        'generator_id': str((pack.get('installed') or [{}])[0]['id']),
+        'note': '',
+        'note_color': 'green',
+    }]
 
 
 def test_generator_pack_export_all_without_installed_packs_is_empty_bundle(tmp_path, monkeypatch):
@@ -614,7 +628,17 @@ injects: []
 """
     source_pack = _make_zip(
         {
-            "pack.json": '{"id":"repo-local:flag_generators:archive","label":"Archive","origin":"flag_generators/archive"}\n',
+            "pack.json": __import__('json').dumps({
+                'id': 'repo-local:flag_generators:archive',
+                'label': 'Archive',
+                'origin': 'flag_generators/archive',
+                'catalog_notes': [{
+                    'kind': 'flag-generator',
+                    'generator_id': 'source_path_archive_demo',
+                    'note': 'preserve this note',
+                    'note_color': 'red',
+                }],
+            }) + '\n',
             "flag_generators/archive/_runtime/docker-compose.yml": compose,
             "flag_generators/archive/_runtime/generator.py": "print('archive')\n",
             "flag_generators/archive/source_path_archive_demo/manifest.yaml": source_path_manifest,
@@ -661,6 +685,8 @@ injects: []
     assert (Path(archive_path) / "generator.py").is_file()
     installed_manifest = (Path(archive_path) / "manifest.yaml").read_text(encoding="utf-8")
     assert "source_path:" not in installed_manifest
+    assert archive_installed[0]['note'] == 'preserve this note'
+    assert archive_installed[0]['note_color'] == 'red'
 
 
 def test_generator_pack_can_roundtrip_export_all_zip(tmp_path, monkeypatch):
