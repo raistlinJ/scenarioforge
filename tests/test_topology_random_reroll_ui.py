@@ -37,13 +37,13 @@ def test_random_switches_use_reroll_tokens_and_reset_dependents() -> None:
         "delete item.g_name;",
         "if (sectionName === 'Flag Node Generators') {",
         "Flag Node Generators contains Random, but no enabled flag-node-generators are available.",
-        "const isLegacyBlankSpecific = rawSelected.toLowerCase() === 'specific'",
         "it.g_id = generatorId;",
         "it.g_name = String(generator.name || generatorId).trim() || generatorId;",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, 'Missing random reroll UI snippets: ' + '; '.join(missing)
+    assert 'isLegacyBlankSpecific' not in text
 
 
 def test_traffic_random_visibility_hierarchy_is_explicit() -> None:

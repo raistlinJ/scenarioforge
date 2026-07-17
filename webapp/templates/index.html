@@ -9988,14 +9988,7 @@
                         if (!it || typeof it !== 'object') continue;
                         const rawSelected = (it.selected !== undefined && it.selected !== null) ? String(it.selected).trim() : '';
                         const isRandomSelected = !rawSelected || rawSelected.toLowerCase() === 'random';
-                        const selectedGeneratorId = String(it.g_id || '').trim();
-                        const selectedGeneratorName = String(it.g_name || '').trim();
-                        // Repair only the blank Specific rows created by the
-                        // previous Random-resolution bug.  A named or ID'd
-                        // Specific row is still validated by the save API.
-                        const isLegacyBlankSpecific = rawSelected.toLowerCase() === 'specific'
-                            && !selectedGeneratorId && !selectedGeneratorName;
-                        if (!isRandomSelected && !isLegacyBlankSpecific) continue;
+                        if (!isRandomSelected) continue;
                         if (!generators.length) {
                             throw new Error('Flag Node Generators contains Random, but no enabled flag-node-generators are available.');
                         }

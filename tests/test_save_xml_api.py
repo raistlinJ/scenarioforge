@@ -1330,22 +1330,17 @@ def test_save_xml_api_resolves_random_flag_node_generator_to_enabled_generator(t
     assert saved_row['g_id'] == resolved_row['g_id']
     assert saved_row['g_name'] == resolved_row['g_name']
 
-    # Older topology saves could leave the exact malformed state
-    # `Specific` with neither g_id nor g_name.  It is a recoverable record of
-    # the old Random bug and must now be repaired to a real enabled generator.
-    legacy_blank_payload = copy.deepcopy(payload)
-    legacy_blank_payload['scenarios'][0]['name'] = 'LegacyBlankFlagNodeGenerator'
-    legacy_blank_row = legacy_blank_payload['scenarios'][0]['sections']['Flag Node Generators']['items'][0]
-    legacy_blank_row['selected'] = 'Specific'
-    legacy_blank_row.pop('g_id', None)
-    legacy_blank_row.pop('g_name', None)
-    legacy_response = client.post('/save_xml_api', data=json.dumps(legacy_blank_payload), content_type='application/json')
-    assert legacy_response.status_code == 200
-    legacy_data = legacy_response.get_json() or {}
-    legacy_resolved_row = legacy_data['scenarios'][0]['sections']['Flag Node Generators']['items'][0]
-    assert legacy_resolved_row['selected'] == 'Specific'
-    assert legacy_resolved_row['g_id'] in {'node-generator-a', 'node-generator-b'}
-    assert legacy_resolved_row['g_name'] in {'Node Generator A', 'Node Generator B'}
+    # A malformed Specific selection must fail instead of being silently
+    # converted into a different generator choice.
+    malformed_payload = copy.deepcopy(payload)
+    malformed_payload['scenarios'][0]['name'] = 'MalformedSpecificFlagNodeGenerator'
+    malformed_row = malformed_payload['scenarios'][0]['sections']['Flag Node Generators']['items'][0]
+    malformed_row['selected'] = 'Specific'
+    malformed_row.pop('g_id', None)
+    malformed_row.pop('g_name', None)
+    malformed_response = client.post('/save_xml_api', data=json.dumps(malformed_payload), content_type='application/json')
+    assert malformed_response.status_code == 422
+    assert '(missing id)' in str((malformed_response.get_json() or {}).get('error') or '')
 
 
 def test_save_xml_api_rejects_random_flag_node_generator_without_enabled_generator(tmp_path, monkeypatch):
