@@ -643,6 +643,43 @@ def _prepare_chain_and_assignments(
                 if isinstance(node, dict) and str(node.get('id') or '').strip()
             ]
             _progress(f'Solve: required vulnerability nodes included count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
+
+            # An existing Docker node becomes a generic Flow challenge only
+            # after the user explicitly approved that conversion during
+            # sequencing.  Preserve that recorded decision from XML rather
+            # than treating a blank topology generator field as permission.
+            # This is not a fallback: every accepted node id is audited in
+            # FlowState.chain_expansion and must be non-vulnerable Docker.
+            approved_generic_node_ids: set[str] = set()
+            try:
+                saved_expansion = flow_state_for_prepare.get('chain_expansion') if isinstance(flow_state_for_prepare, dict) else None
+                if isinstance(saved_expansion, dict):
+                    for raw_id in (saved_expansion.get('converted_existing_docker_node_ids') or []):
+                        value = str(raw_id or '').strip()
+                        if value:
+                            approved_generic_node_ids.add(value)
+            except Exception:
+                approved_generic_node_ids = set()
+            if approved_generic_node_ids:
+                normalized_chain: list[dict[str, Any]] = []
+                for node in (chain_nodes or []):
+                    if not isinstance(node, dict):
+                        continue
+                    node_copy = dict(node)
+                    node_id = str(node_copy.get('id') or '').strip()
+                    if (
+                        node_id in approved_generic_node_ids
+                        and deps._flow_node_is_docker_role(node_copy)
+                        and not deps._flow_node_is_vuln(node_copy)
+                        and not str(node_copy.get('flag_node_generator_id') or '').strip()
+                    ):
+                        node_copy['_topology_flag_node_generators_configured'] = False
+                    normalized_chain.append(node_copy)
+                chain_nodes = normalized_chain
+                _progress(
+                    'Solve: restored explicitly approved Docker challenge nodes='
+                    + ','.join(sorted(approved_generic_node_ids))
+                )
     except Exception as exc:
         current_app.logger.exception('[flow.prepare_preview_for_execute] internal error: %s', exc)
         return {
