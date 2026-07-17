@@ -22528,6 +22528,19 @@
         const cachedOnly = modal.querySelector('#flagNodeGeneratorCachedOnly');
         const cachedOnlyStorageKey = 'flagNodeGeneratorPickerCachedOnly';
         const esc = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const validationBadgeHtml = generator => {
+            if (!generator || typeof generator !== 'object') return '<span class="text-muted small">—</span>';
+            if (generator.validated_incomplete === true) {
+                return '<span class="badge text-bg-secondary">Incomplete</span>';
+            }
+            if (generator.validated_ok === true) {
+                return '<span class="badge text-bg-success">Validated</span>';
+            }
+            if (generator.validated_ok === false) {
+                return '<span class="badge text-bg-danger">Failed</span>';
+            }
+            return '<span class="text-muted small">Not validated</span>';
+        };
         const render = () => {
             const query = String(filter?.value || '').trim().toLowerCase();
             const requireCached = !!(cachedOnly && cachedOnly.checked);
@@ -22536,7 +22549,10 @@
                 return !query || `${generator.name || ''} ${generator.id || ''} ${generator.description || ''}`.toLowerCase().includes(query);
             });
             if (!list) return;
-            list.innerHTML = visible.length ? visible.map(generator => `<button type="button" class="list-group-item list-group-item-action" data-generator-id="${esc(generator.id)}"><strong>${esc(generator.name || generator.id)}</strong><div class="small text-muted">${esc(generator.id)}${generator.description ? ' — ' + esc(generator.description) : ''}${generator._cached === true ? ' · Cached' : ''}</div></button>`).join('') : '<div class="text-muted p-2">No enabled flag-node-generators found for this filter.</div>';
+            list.innerHTML = visible.length ? visible.map(generator => {
+                const validatedAt = generator.validated_at ? `<div class="small text-muted">${esc(generator.validated_at)}</div>` : '';
+                return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-start gap-3" data-generator-id="${esc(generator.id)}"><span><strong>${esc(generator.name || generator.id)}</strong><span class="d-block small text-muted">${esc(generator.id)}${generator.description ? ' — ' + esc(generator.description) : ''}${generator._cached === true ? ' · Cached' : ''}</span></span><span class="text-end flex-shrink-0">${validationBadgeHtml(generator)}${validatedAt}</span></button>`;
+            }).join('') : '<div class="text-muted p-2">No enabled flag-node-generators found for this filter.</div>';
             list.querySelectorAll('[data-generator-id]').forEach(button => button.addEventListener('click', () => {
                 const id = String(button.getAttribute('data-generator-id') || '');
                 const generator = generators.find(item => String(item.id || '') === id);

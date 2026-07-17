@@ -1274,6 +1274,10 @@ def _execute_or_prepare_assignments(
                             assignment_type=assignment_type,
                             gen_timeout_s=gen_timeout_s,
                             effective_injects=effective_injects,
+                            generator_source_dir=(
+                                str(((gen_def or {}).get('source') or {}).get('path') or '').strip()
+                                if isinstance(gen_def, dict) else ''
+                            ),
                             flow_try_run_generator_remote=flow_try_run_generator_remote,
                             flow_try_run_generator=flow_try_run_generator,
                         )
@@ -1830,6 +1834,7 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
         kind: str = 'flag-generator',
         timeout_s: int = 120,
         inject_files_override: list[str] | None = None,
+        source_dir: str | None = None,
         core_cfg: dict[str, Any],
         repo_dir: str,
     ) -> tuple[bool, str, str | None, dict[str, Any] | None, str | None, str | None]:
@@ -1840,6 +1845,7 @@ def _build_runtime_adapters(*, helpers, backend: Any, scenario_norm: str, flag_s
             kind=kind,
             timeout_s=timeout_s,
             inject_files_override=inject_files_override,
+            source_dir=source_dir,
             core_cfg=core_cfg,
             repo_dir=repo_dir,
             backend=backend,

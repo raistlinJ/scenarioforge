@@ -226,6 +226,8 @@ def register(
                 'validated_ok': bool(item.get('validated_ok')) if item.get('validated_ok') is not None else None,
                 'validated_incomplete': bool(item.get('validated_incomplete') is True),
                 'validated_at': str(item.get('validated_at') or '').strip() or None,
+                'note': str(item.get('note') or '').strip() or None,
+                'note_color': str(item.get('note_color') or '').strip().lower() or None,
                 'log_download_url': log_download_url or None,
                 'required_files': required_files,
                 'missing_required_files': missing_required_files,

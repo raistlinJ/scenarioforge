@@ -44780,6 +44780,8 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
                 'validated_ok': bool(it.get('validated_ok')) if it.get('validated_ok') is not None else None,
                 'validated_incomplete': bool(it.get('validated_incomplete') is True),
                 'validated_at': str(it.get('validated_at') or '').strip() or None,
+                'note': str(it.get('note') or '').strip() or None,
+                'note_color': str(it.get('note_color') or '').strip().lower() or None,
                 'last_test_log_path': str(it.get('last_test_log_path') or '').strip() or None,
                 'last_test_log_filename': str(it.get('last_test_log_filename') or '').strip() or None,
                 'disabled_due_to_missing_files': bool(it.get('disabled_due_to_missing_files') is True),
@@ -44836,6 +44838,8 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_validated_ok'] = info.get('validated_ok')
             g['_validated_incomplete'] = bool(info.get('validated_incomplete') is True)
             g['_validated_at'] = info.get('validated_at')
+            g['_note'] = info.get('note')
+            g['_note_color'] = info.get('note_color')
             g['_last_test_log_path'] = info.get('last_test_log_path')
             g['_last_test_log_filename'] = info.get('last_test_log_filename')
             g['_persistent'] = bool(info.get('persistent'))
@@ -44854,6 +44858,8 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_validated_ok'] = None
             g['_validated_incomplete'] = False
             g['_validated_at'] = None
+            g['_note'] = None
+            g['_note_color'] = None
             g['_last_test_log_path'] = None
             g['_last_test_log_filename'] = None
             g['_persistent'] = False
@@ -45596,6 +45602,9 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['dir_rel'] = str(it.get('dir_rel') or '').strip()
         it['compose_rel'] = str(it.get('compose_rel') or '').strip()
         it['persistent'] = bool(it.get('persistent', False))
+        it['note'] = str(it.get('note') or '').strip()
+        raw_note_color = str(it.get('note_color') or '').strip().lower()
+        it['note_color'] = raw_note_color if raw_note_color in {'red', 'yellow', 'green'} and it['note'] else None
         it['cached'] = it.get('cached') if isinstance(it.get('cached'), bool) else None
         it['cache_checked_at'] = str(it.get('cache_checked_at') or '').strip() or None
         it['cache_last_core_host'] = str(it.get('cache_last_core_host') or '').strip() or None
@@ -47585,6 +47594,37 @@ def _set_generator_persistent_state(*, kind: str, generator_id: str, persistent:
     return True, ('Marked persistent' if persistent else 'Unmarked persistent') + f' {k} {gid}'
 
 
+def _set_generator_note_state(*, kind: str, generator_id: str, note: str, note_color: str | None) -> tuple[bool, str]:
+    """Persist a short user-authored catalog note and its indicator color."""
+    gid = str(generator_id or '').strip()
+    if not gid:
+        return False, 'Missing generator id'
+    k = str(kind or '').strip().lower().replace('_', '-')
+    if k not in ('flag-generator', 'flag-node-generator'):
+        return False, f'Invalid kind: {kind}'
+    text = str(note or '').strip()
+    if len(text) > 4000:
+        return False, 'Note must be 4000 characters or fewer'
+    color = str(note_color or '').strip().lower()
+    if color and color not in {'red', 'yellow', 'green'}:
+        return False, 'Note color must be red, yellow, or green'
+    if not text:
+        color = ''
+
+    state = _load_installed_generator_packs_state()
+    packs = state.get('packs') if isinstance(state, dict) else None
+    if not isinstance(packs, list):
+        packs = []
+    _pack, item = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
+    if item is None:
+        return False, 'Installed generator not found'
+    item['note'] = text
+    item['note_color'] = color or None
+    state['packs'] = packs
+    _save_installed_generator_packs_state(state)
+    return True, ('Saved note for' if text else 'Cleared note for') + f' {k} {gid}'
+
+
 def _update_generator_item_cache_state(
     *,
     kind: str,
@@ -47632,6 +47672,7 @@ try:
         set_generator_disabled_state=lambda **kwargs: _set_generator_disabled_state(**kwargs),
         set_generator_validation_state=lambda **kwargs: _set_generator_validation_state(**kwargs),
         set_generator_persistent_state=lambda **kwargs: _set_generator_persistent_state(**kwargs),
+        set_generator_note_state=lambda **kwargs: _set_generator_note_state(**kwargs),
         delete_installed_generator=lambda **kwargs: _delete_installed_generator(**kwargs),
     )
 except Exception:
@@ -47900,6 +47941,17 @@ def _flagnodegen_run_dir_for_id(run_id: str) -> str:
 def _parse_flag_test_core_cfg_from_form(form: Any) -> Dict[str, Any] | None:
     raw = str((form or {}).get('core') or '').strip()
     if not raw:
+        # VM mode has one authoritative CORE VM connection in
+        # .scenarioforge.env.  Generator tests must use that same connection as
+        # generate/execute, rather than requiring a browser credential modal.
+        if _webui_runtime_mode() == 'vm':
+            core_cfg = _core_backend_defaults(include_password=True)
+            core_cfg = _prefer_explicit_or_ssh_core_host(core_cfg)
+            if not core_cfg.get('host'):
+                core_cfg['host'] = core_cfg.get('ssh_host') or '127.0.0.1'
+            if not core_cfg.get('port'):
+                core_cfg['port'] = CORE_PORT
+            return _require_core_ssh_credentials(core_cfg)
         return None
     try:
         payload = json.loads(raw)

@@ -435,6 +435,7 @@ def flow_try_run_generator_remote(
     kind: str = 'flag-generator',
     timeout_s: int = 120,
     inject_files_override: list[str] | None = None,
+    source_dir: str | None = None,
     core_cfg: dict[str, Any],
     repo_dir: str,
     backend: Any,
@@ -464,6 +465,7 @@ def flow_try_run_generator_remote(
         f"REPO={json.dumps(str(repo_dir))}\n"
         f"OUT={json.dumps(str(out_dir))}\n"
         f"GEN={json.dumps(str(generator_id))}\n"
+        f"SOURCE={json.dumps(str(source_dir or ''))}\n"
         f"KIND={json.dumps(str(kind or 'flag-generator'))}\n"
         f"CFG={json.dumps(cfg_json)}\n"
         f"INJECT={inject_json if inject_json is not None else 'None'}\n"
@@ -510,6 +512,7 @@ def flow_try_run_generator_remote(
         "  except Exception:\n"
         "    env['CORETG_INJECT_FILES_JSON']=INJECT\n"
         "cmd=[sys.executable, runner, '--kind', KIND, '--generator-id', GEN, '--out-dir', OUT, '--config', CFG, '--repo-root', REPO]\n"
+        "if SOURCE: cmd.extend(['--source-dir', SOURCE])\n"
         f"p=subprocess.run(cmd, cwd=REPO, env=env, check=False, capture_output=True, text=True, timeout=max(1, int({timeout_literal})))\n"
         "OUT_ARTIFACTS=OUT\n"
         "manifest=os.path.join(OUT,'outputs.json')\n"
@@ -3330,6 +3333,7 @@ def invoke_generator_run(
     assignment_type: str,
     gen_timeout_s: int,
     effective_injects: list[str] | None,
+    generator_source_dir: str | None = None,
     flow_try_run_generator_remote: Any,
     flow_try_run_generator: Any,
 ) -> dict[str, Any]:
@@ -3345,6 +3349,7 @@ def invoke_generator_run(
             kind=assignment_type,
             timeout_s=gen_timeout_s,
             inject_files_override=effective_injects,
+            source_dir=generator_source_dir,
             core_cfg=flow_core_cfg,
             repo_dir=flow_remote_repo_dir,
         )

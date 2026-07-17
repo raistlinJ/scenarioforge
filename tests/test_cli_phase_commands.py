@@ -169,6 +169,40 @@ def test_cli_new_phase_writes_starter_xml(tmp_path, monkeypatch, capsys):
     assert 'Vulnerabilities' in section_names
 
 
+def test_cli_new_phase_seeds_topology_flag_node_generators(tmp_path, monkeypatch, capsys):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'flag-node-generators.xml'
+    argv0 = cli.sys.argv[:]
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: ([{'id': 'git_deploy_key_repo', 'name': 'Git deploy key repository'}], []),
+    )
+    monkeypatch.setattr(backend, '_concretize_scenarios_for_save', lambda scenarios, **_kwargs: scenarios)
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli', 'new', '--xml', str(xml_path), '--scenario', 'CliFlagNodes',
+            '--seed-flag-node-generator', 'git_deploy_key_repo=2',
+            '--seed-random-flag-node-generator-count', '3',
+        ]
+        assert cli.main() == 0
+    finally:
+        cli.sys.argv = argv0
+
+    assert json.loads(capsys.readouterr().out)['ok'] is True
+    section = ET.parse(xml_path).getroot().find("./Scenario/ScenarioEditor/section[@name='Flag Node Generators']")
+    assert section is not None
+    items = section.findall('item')
+    assert [(item.get('selected'), item.get('g_id'), item.get('v_count')) for item in items] == [
+        ('Specific', 'git_deploy_key_repo', '2'),
+        ('Random', None, '3'),
+    ]
+
+
 def test_cli_new_phase_persists_core_ssh_credentials_when_provided(tmp_path, monkeypatch, capsys):
     from webapp import app_backend as backend
 

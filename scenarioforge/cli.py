@@ -4375,6 +4375,83 @@ def _run_new_phase(args: Any) -> int:
         sections['Vulnerabilities'] = vuln_section
         seeded_any = True
 
+    flag_node_generator_specs = list(getattr(args, 'seed_flag_node_generators', None) or [])
+    if flag_node_generator_specs:
+        try:
+            enabled_node_generators, _ = backend._flag_node_generators_from_enabled_sources()
+        except Exception:
+            enabled_node_generators = []
+        enabled_node_generators = [
+            item for item in (enabled_node_generators or [])
+            if isinstance(item, dict) and str(item.get('id') or '').strip()
+        ]
+        node_generator_items: list[dict[str, Any]] = []
+        for raw_spec in flag_node_generator_specs:
+            try:
+                requested, requested_count = _parse_seed_selection_spec(
+                    raw_spec,
+                    option_name='--seed-flag-node-generator',
+                )
+            except ValueError as exc:
+                _emit_phase_json({'ok': False, 'phase': 'new', 'xml_path': xml_path, 'scenario': scenario_name, 'error': str(exc)}, output_path=args.plan_output, stream=sys.stderr)
+                return 1
+            if requested_count == 0:
+                continue
+            requested_key = str(requested or '').strip()
+            match = next((
+                item for item in enabled_node_generators
+                if requested_key == str(item.get('id') or '').strip()
+                or requested_key.lower() == str(item.get('name') or '').strip().lower()
+            ), None)
+            if not isinstance(match, dict):
+                _emit_phase_json(
+                    {
+                        'ok': False,
+                        'phase': 'new',
+                        'xml_path': xml_path,
+                        'scenario': scenario_name,
+                        'error': f'Invalid --seed-flag-node-generator value: {str(raw_spec)!r}. Specific flag-node-generator must match an enabled generator ID or name.',
+                    },
+                    output_path=args.plan_output,
+                    stream=sys.stderr,
+                )
+                return 1
+            item: dict[str, Any] = {
+                'selected': 'Specific',
+                'factor': 1.0,
+                'g_id': str(match.get('id') or '').strip(),
+                'g_name': str(match.get('name') or match.get('id') or '').strip(),
+            }
+            # Specific topology node generators are concrete required Docker
+            # slots, just like a Specific vulnerability row in the editor.
+            item['v_metric'] = 'Count'
+            item['v_count'] = requested_count if requested_count is not None else 1
+            node_generator_items.append(item)
+
+        if node_generator_items:
+            _equalize_density_item_factors(node_generator_items)
+            section = sections.get('Flag Node Generators') if isinstance(sections.get('Flag Node Generators'), dict) else {}
+            existing = list(section.get('items') or []) if isinstance(section.get('items'), list) else []
+            section['density'] = float(section.get('density') or 0.0)
+            section['items'] = [*existing, *node_generator_items]
+            sections['Flag Node Generators'] = section
+            seeded_any = True
+
+    random_node_generator_count = int(getattr(args, 'seed_random_flag_node_generator_count', 0) or 0)
+    if random_node_generator_count > 0:
+        section = sections.get('Flag Node Generators') if isinstance(sections.get('Flag Node Generators'), dict) else {}
+        if 'density' not in section:
+            section['density'] = 0.0
+        existing = list(section.get('items') or []) if isinstance(section.get('items'), list) else []
+        section['items'] = [*existing, {
+            'selected': 'Random',
+            'factor': 1.0,
+            'v_metric': 'Count',
+            'v_count': random_node_generator_count,
+        }]
+        sections['Flag Node Generators'] = section
+        seeded_any = True
+
     if seeded_any:
         try:
             scenario_payload['sections'] = sections
@@ -5007,6 +5084,8 @@ def _add_cli_new_args(container: Any) -> None:
     container.add_argument('--seed-vulnerability', dest='seed_vulnerabilities', action='append', help='Seed a specific Vulnerabilities row for the new phase using an active catalog entry name or path (repeatable; density rows are equal-weighted, for example jboss/CVE-2017-12149, weblogic/CVE-2017-10271=density, or jboss/CVE-2017-12149=2)')
     container.add_argument('--seed-vulnerability-density', type=float, default=defaults['seed_vulnerability_density'], help='Vulnerabilities density to use with --seed-vulnerability when count is omitted or set to density')
     container.add_argument('--seed-random-vulnerability-count', type=int, default=0, help='Seed this many random vulnerability targets for the new phase')
+    container.add_argument('--seed-flag-node-generator', dest='seed_flag_node_generators', action='append', help='Seed a specific Flag Node Generators row using an enabled generator ID or name (repeatable; for example git_deploy_key_repo or git_deploy_key_repo=2)')
+    container.add_argument('--seed-random-flag-node-generator-count', type=int, default=0, help='Seed this many random flag-node-generator topology targets for the new phase')
 
 
 def _add_cli_preview_plan_args(container: Any) -> None:

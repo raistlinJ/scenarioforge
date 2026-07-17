@@ -139,6 +139,46 @@ def register(
         write_vuln_catalogs_state(state)
         return jsonify({'ok': True})
 
+    @app.route('/vuln_catalog_items/set_note', methods=['POST'])
+    def vuln_catalog_items_set_note():
+        require_builder_or_admin()
+        payload = request.get_json(silent=True) or {}
+        try:
+            item_id = int(payload.get('item_id'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'Invalid item_id'}), 400
+        note = str(payload.get('note') or '').strip()
+        if len(note) > 4000:
+            return jsonify({'ok': False, 'error': 'Note must be 4000 characters or fewer'}), 400
+        color = str(payload.get('note_color') or '').strip().lower()
+        if color and color not in {'red', 'yellow', 'green'}:
+            return jsonify({'ok': False, 'error': 'Note color must be red, yellow, or green'}), 400
+        if not note:
+            color = ''
+
+        state, entry, cid, catalogs, _items = _load_active_catalog_and_items()
+        if not entry:
+            return jsonify({'ok': False, 'error': 'No active catalog pack'}), 404
+        updated = False
+        for catalog in catalogs:
+            if str(catalog.get('id') or '').strip() != cid:
+                continue
+            items = normalize_vuln_catalog_items(catalog)
+            for item in items:
+                if int(item.get('id') or 0) != item_id:
+                    continue
+                item['note'] = note
+                item['note_color'] = color or None
+                updated = True
+                break
+            catalog['compose_items'] = items
+            break
+        if not updated:
+            return jsonify({'ok': False, 'error': 'Unknown item id'}), 404
+        state['catalogs'] = catalogs
+        write_vuln_catalogs_state(state)
+        return jsonify({'ok': True, 'message': 'Saved note' if note else 'Cleared note'})
+
     @app.route('/vuln_catalog_items/delete', methods=['POST'])
     def vuln_catalog_items_delete():
         require_builder_or_admin()
