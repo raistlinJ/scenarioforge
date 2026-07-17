@@ -787,7 +787,7 @@ def test_ai_generate_scenario_preview_compiler_overrides_services_and_traffic_ro
     assert traffic_items[1].get('content_type') == 'text'
 
 
-def test_ai_generate_scenario_preview_compiler_overrides_vulnerability_rows_and_allocates_docker_targets(tmp_path, monkeypatch):
+def test_ai_generate_scenario_preview_compiler_keeps_vulnerability_targets_additive(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)
 
@@ -861,8 +861,7 @@ def test_ai_generate_scenario_preview_compiler_overrides_vulnerability_rows_and_
     vuln_items = (((generated_scenario.get('sections') or {}).get('Vulnerabilities')) or {}).get('items') or []
 
     assert node_items == [
-        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 7},
-        {'selected': 'Docker', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 2},
+        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 9},
     ]
     assert vuln_items == [
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'appweb/CVE-2018-8715', 'v_path': '/catalog/appweb/CVE-2018-8715/docker-compose.yml'},

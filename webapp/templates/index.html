@@ -2143,6 +2143,7 @@
                 'Services': { density: 0.5, items: [] },
                 'Traffic': { density: 0.5, items: [] },
                 'Vulnerabilities': { density: 0.5, items: [], flag_type: 'text' },
+                'Flag Node Generators': { density: 0.5, items: [] },
                 'Segmentation': { density: 0.5, items: [] }
             },
             notes: ''
@@ -9698,6 +9699,7 @@
         'Services': ['SSH', 'HTTP', 'DHCPClient', 'Random'],
         'Traffic': ['Random', 'TCP', 'UDP'],
         'Vulnerabilities': ['Random', 'Specific'],
+        'Flag Node Generators': ['Random', 'Specific'],
         'Segmentation': ['Random', 'Firewall', 'NAT']
     };
 
@@ -9880,7 +9882,7 @@
             const sections = (scen.sections && typeof scen.sections === 'object') ? scen.sections : {};
 
             // These are the Topology-box cards where the UI allows Random selections.
-            const targetSections = ['Node Information', 'Routing', 'Services', 'Traffic', 'Vulnerabilities', 'Segmentation'];
+            const targetSections = ['Node Information', 'Routing', 'Services', 'Traffic', 'Vulnerabilities', 'Flag Node Generators', 'Segmentation'];
             for (const sectionName of targetSections) {
                 const sec = sections[sectionName];
                 if (!sec || typeof sec !== 'object') continue;
@@ -17138,7 +17140,8 @@
                 const sidx = parseInt(btn.getAttribute('data-scen-idx'));
                 const sec = btn.getAttribute('data-sec');
                 const iidx = parseInt(btn.getAttribute('data-item-idx'));
-                openVulnPicker(sidx, sec, iidx, { revertToRandomOnCancel: false });
+                if (sec === 'Flag Node Generators') openFlagNodeGeneratorPicker(sidx, sec, iidx);
+                else openVulnPicker(sidx, sec, iidx, { revertToRandomOnCancel: false });
             };
             // Attach the click handler (fix: previously not wired)
             btn.addEventListener('click', handler);
@@ -17512,11 +17515,13 @@
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
         let opts = '';
-        if (secName === 'Vulnerabilities') {
+        if (secName === 'Vulnerabilities' || secName === 'Flag Node Generators') {
             const curRaw = (it.selected || 'Random');
             const cur = curRaw;
-            const vulnCatalogItems = (window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) ? window.VULN_CATALOG.items : [];
-            const hasCatalogItems = vulnCatalogItems.length > 0;
+            const catalogItems = secName === 'Vulnerabilities'
+                ? ((window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) ? window.VULN_CATALOG.items : [])
+                : (Array.isArray(window.FLAG_NODE_GENERATORS) ? window.FLAG_NODE_GENERATORS : []);
+            const hasCatalogItems = catalogItems.length > 0;
             const options = hasCatalogItems ? ['Random', 'Specific'] : ['Specific'];
             const effectiveCur = hasCatalogItems ? cur : 'Specific';
             opts = options.map(o => `<option ${o === effectiveCur ? 'selected' : ''}>${o}</option>`).join('');
@@ -17658,6 +17663,12 @@
                 }
                 return '';
             }
+            if (secName === 'Flag Node Generators') {
+                const generatorName = it.g_name || it.g_id || '';
+                return generatorName
+                    ? `<span class="small">${escAttr(generatorName)}</span>`
+                    : '<span class="small text-muted">No generator selected</span>';
+            }
             if (secName === 'Segmentation') {
                 const pivotEnabledRaw = it.pivot_enabled;
                 const pivotEnabled = pivotEnabledRaw === true || ['1', 'true', 'yes', 'on'].includes(String(pivotEnabledRaw || '').trim().toLowerCase());
@@ -17691,16 +17702,19 @@
         // Build first cell content, optionally augmenting Selected with Vulnerabilities controls
         const firstCell = (() => {
             const selectedCtl = `<select class="form-select form-select-sm" data-field="selected" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}">${opts}</select>`;
-            if (secName !== 'Vulnerabilities') return selectedCtl;
+            if (secName !== 'Vulnerabilities' && secName !== 'Flag Node Generators') return selectedCtl;
             const modeRaw = it.selected || 'Random';
             const mode = modeRaw;
-            const vulnCatalogItems = (window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) ? window.VULN_CATALOG.items : [];
-            const hasCatalogItems = vulnCatalogItems.length > 0;
+            const isVuln = secName === 'Vulnerabilities';
+            const catalogItems = isVuln
+                ? ((window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) ? window.VULN_CATALOG.items : [])
+                : (Array.isArray(window.FLAG_NODE_GENERATORS) ? window.FLAG_NODE_GENERATORS : []);
+            const hasCatalogItems = catalogItems.length > 0;
             if (mode === 'Specific') {
                 const nm = it.v_name || '';
                 // Try to obtain full description (prefer stored v_desc, else look up in catalog)
                 let fullDesc = it.v_desc || '';
-                if (!fullDesc && nm && window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) {
+                if (isVuln && !fullDesc && nm && window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) {
                     const match = window.VULN_CATALOG.items.find(x => x.Name === nm && (!it.v_path || x.Path === it.v_path));
                     if (match && match.Description) { fullDesc = match.Description; }
                 }
@@ -17712,17 +17726,19 @@
                     .replace(/"/g, '&quot;')
                     .replace(/'/g, '&#39;');
                 const descShort = abbr(fullDesc);
+                const nodegenName = it.g_name || it.g_id || '';
                 return `
             <div class="d-flex flex-wrap gap-2 align-items-center">
                 <div style="min-width:160px">${selectedCtl}</div>
-                <button type="button" class="btn btn-sm btn-outline-primary" data-action="pick-specific" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}" ${hasCatalogItems ? '' : 'disabled title="Install a vulnerability catalog pack first"'}>Choose...</button>
+                <span class="small text-muted">${isVuln ? esc(nm ? `${nm}${descShort ? ' — ' + descShort : ''}` : 'No selection') : esc(nodegenName || 'No selection')}</span>
+                <button type="button" class="btn btn-sm btn-outline-primary" data-action="pick-specific" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}" ${hasCatalogItems ? '' : `disabled title="${isVuln ? 'Install a vulnerability catalog pack first' : 'No enabled flag-node-generators are available'}"`}>Choose...</button>
             </div>`;
             }
             return selectedCtl;
         })();
         // Right-most: Weight or Count cell
         const weightCell = (() => {
-            if (secName === 'Vulnerabilities') {
+            if (secName === 'Vulnerabilities' || secName === 'Flag Node Generators') {
                 const modeRaw = it.selected || 'Random';
                 const mode = modeRaw;
                 const metric = it.v_metric || (mode === 'Specific' ? 'Count' : 'Weight');
@@ -17940,7 +17956,7 @@
                                     }
                                 }
 
-                                const shouldAutoOpenSpecific = (sec === 'Vulnerabilities' && item.selected === 'Specific' && prev !== 'Specific');
+                                const shouldAutoOpenSpecific = ((sec === 'Vulnerabilities' || sec === 'Flag Node Generators') && item.selected === 'Specific' && prev !== 'Specific');
 
                                 if (item.selected === 'Specific') {
                                     if (!item.v_count) item.v_count = 5;
@@ -17957,7 +17973,9 @@
                                 if (shouldAutoOpenSpecific) {
                                     setTimeout(async () => {
                                         try {
-                                            const res = await openVulnPicker(sidx, sec, rowIdx, { revertToRandomOnCancel: true });
+                                            const res = sec === 'Flag Node Generators'
+                                                ? await openFlagNodeGeneratorPicker(sidx, sec, rowIdx)
+                                                : await openVulnPicker(sidx, sec, rowIdx, { revertToRandomOnCancel: true });
                                             // openVulnPicker handles revert-on-cancel when requested.
                                             if (res && res.selected) return;
                                         } catch (e) {
@@ -19326,7 +19344,7 @@
         // Initialize warnings per section
         const scen = state.scenarios[activeIdx];
         if (scen) {
-            ['Node Information', 'Routing', 'Services', 'Traffic', 'Vulnerabilities', 'Segmentation'].forEach(sec => updateWeightWarning(activeIdx, sec));
+            ['Node Information', 'Routing', 'Services', 'Traffic', 'Vulnerabilities', 'Flag Node Generators', 'Segmentation'].forEach(sec => updateWeightWarning(activeIdx, sec));
         }
     }
     function prepareRunCli() {
@@ -22286,6 +22304,7 @@
         let __serverLogsAtLoad = '';
         try { __serverLogsAtLoad = (document.getElementById('logsPre')?.textContent || '').trim(); } catch (e) { }
         setupVulnCatalog();
+        setupFlagNodeGenerators();
     });
 
     // Vulnerability catalog and UI helpers
@@ -22301,6 +22320,76 @@
         } catch (e) { window.VULN_CATALOG = { types: [], vectors: [], items: [] }; }
         try { renderMain(); } catch (e) { }
         return window.VULN_CATALOG;
+    }
+
+    async function setupFlagNodeGenerators() {
+        try {
+            const res = await fetch('/flag_node_generators_data', { credentials: 'same-origin' });
+            const payload = res.ok ? await res.json() : {};
+            window.FLAG_NODE_GENERATORS = Array.isArray(payload.generators)
+                ? payload.generators.filter(item => item && item.disabled !== true && item.id)
+                : [];
+        } catch (e) {
+            window.FLAG_NODE_GENERATORS = [];
+        }
+        return window.FLAG_NODE_GENERATORS;
+    }
+
+    async function openFlagNodeGeneratorPicker(sidx, secName, iidx) {
+        const generators = await setupFlagNodeGenerators();
+        let modal = document.getElementById('flagNodeGeneratorModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.className = 'modal fade';
+            modal.id = 'flagNodeGeneratorModal';
+            modal.innerHTML = '<div class="modal-dialog modal-lg"><div class="modal-content">'
+                + '<div class="modal-header"><h5 class="modal-title">Select Flag Node Generator</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>'
+                + '<div class="modal-body"><input id="flagNodeGeneratorFilter" class="form-control mb-2" placeholder="Filter generators">'
+                + '<div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" role="switch" id="flagNodeGeneratorCachedOnly"><label class="form-check-label" for="flagNodeGeneratorCachedOnly">Cached images only</label></div>'
+                + '<div id="flagNodeGeneratorList" class="list-group"></div></div>'
+                + '<div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div>'
+                + '</div></div>';
+            document.body.appendChild(modal);
+        }
+        const list = modal.querySelector('#flagNodeGeneratorList');
+        const filter = modal.querySelector('#flagNodeGeneratorFilter');
+        const cachedOnly = modal.querySelector('#flagNodeGeneratorCachedOnly');
+        const cachedOnlyStorageKey = 'flagNodeGeneratorPickerCachedOnly';
+        const esc = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const render = () => {
+            const query = String(filter?.value || '').trim().toLowerCase();
+            const requireCached = !!(cachedOnly && cachedOnly.checked);
+            const visible = generators.filter(generator => {
+                if (requireCached && generator._cached !== true) return false;
+                return !query || `${generator.name || ''} ${generator.id || ''} ${generator.description || ''}`.toLowerCase().includes(query);
+            });
+            if (!list) return;
+            list.innerHTML = visible.length ? visible.map(generator => `<button type="button" class="list-group-item list-group-item-action" data-generator-id="${esc(generator.id)}"><strong>${esc(generator.name || generator.id)}</strong><div class="small text-muted">${esc(generator.id)}${generator.description ? ' — ' + esc(generator.description) : ''}${generator._cached === true ? ' · Cached' : ''}</div></button>`).join('') : '<div class="text-muted p-2">No enabled flag-node-generators found for this filter.</div>';
+            list.querySelectorAll('[data-generator-id]').forEach(button => button.addEventListener('click', () => {
+                const id = String(button.getAttribute('data-generator-id') || '');
+                const generator = generators.find(item => String(item.id || '') === id);
+                const item = state?.scenarios?.[sidx]?.sections?.[secName]?.items?.[iidx];
+                if (!generator || !item) return;
+                item.selected = 'Specific';
+                item.g_id = String(generator.id || '');
+                item.g_name = String(generator.name || generator.id || '');
+                item.v_metric = 'Count';
+                if (!(parseInt(item.v_count, 10) > 0)) item.v_count = 1;
+                try { bootstrap.Modal.getOrCreateInstance(modal).hide(); } catch (e) { }
+                renderMain();
+                persistEditorState();
+            }));
+        };
+        if (filter) { filter.value = ''; filter.oninput = render; }
+        if (cachedOnly) {
+            try { cachedOnly.checked = localStorage.getItem(cachedOnlyStorageKey) === 'true'; } catch (e) { cachedOnly.checked = false; }
+            cachedOnly.onchange = () => {
+                try { localStorage.setItem(cachedOnlyStorageKey, cachedOnly.checked ? 'true' : 'false'); } catch (e) { }
+                render();
+            };
+        }
+        render();
+        try { bootstrap.Modal.getOrCreateInstance(modal).show(); } catch (e) { }
     }
 
     // Modal for Specific selection
@@ -22323,6 +22412,10 @@
                             <div class="invalid-feedback" id="vulnFilterError">Invalid regex</div>
                         </div>
                         <button class="btn btn-outline-secondary" type="button" id="vulnFilterClear" title="Clear filter">Clear</button>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" role="switch" id="vulnFilterCachedOnly">
+                        <label class="form-check-label" for="vulnFilterCachedOnly" title="Uses the latest image-cache result saved for the active vulnerability catalog.">Cached images only</label>
                     </div>
                     <div class="text-muted small mb-2" id="vulnFilterMeta"></div>
                     <div class="table-responsive" id="vulnTableWrap" style="max-height:50vh; overflow:auto;">
@@ -22478,6 +22571,7 @@
         const modalObj = window.bootstrap ? (bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl, { backdrop: true, keyboard: true })) : null;
         const filterInput = modalEl.querySelector('#vulnFilter');
         const filterClearBtn = modalEl.querySelector('#vulnFilterClear');
+        const cachedOnlyInput = modalEl.querySelector('#vulnFilterCachedOnly');
         const filterMeta = modalEl.querySelector('#vulnFilterMeta');
         const filterError = modalEl.querySelector('#vulnFilterError');
         const tbody = modalEl.querySelector('#vulnList');
@@ -23073,14 +23167,18 @@
         };
         const applyFilter = () => {
             const raw = (filterInput.value || '').trim();
+            const cachedOnly = !!cachedOnlyInput?.checked;
             try { localStorage.setItem('vulnPickerFilter', raw); } catch (e) { }
+            try { localStorage.setItem('vulnPickerCachedOnly', cachedOnly ? '1' : '0'); } catch (e) { }
             try { persistUserScopedUiPrefsSoon(); } catch (e) { }
             filterInput.classList.remove('is-invalid');
             if (filterError) filterError.style.display = '';
+            const filterCached = (items) => cachedOnly ? items.filter((it) => it?.cached === true) : items;
+            const filterLabel = cachedOnly ? ' • cached images only' : '';
             if (!raw) {
-                current = eligible;
+                current = filterCached(eligible);
                 renderRows();
-                if (filterMeta) filterMeta.textContent = `${current.length}/${eligible.length} shown`;
+                if (filterMeta) filterMeta.textContent = `${current.length}/${eligible.length} shown${filterLabel}`;
                 return;
             }
             let matcher = null;
@@ -23091,15 +23189,15 @@
                     if (filterMeta) filterMeta.textContent = `Invalid regex`;
                     return;
                 }
-                current = eligible.filter((it) => {
+                current = filterCached(eligible.filter((it) => {
                     const haystack = `${it.Name || ''} ${it.Type || ''} ${it.Vector || ''} ${it.Path || ''}`;
                     return matcher.test(haystack);
-                });
+                }));
             } else {
                 const needle = raw.toLowerCase();
-                current = eligible.filter((it) => {
+                current = filterCached(eligible.filter((it) => {
                     return [it.Name, it.Type, it.Vector, it.Path].some(val => (val || '').toLowerCase().includes(needle));
-                });
+                }));
             }
             renderRows();
             try {
@@ -23107,17 +23205,21 @@
                     const st = statusByKey.get(itemKey(it)) || null;
                     return isPickable(st, it);
                 }).length;
-                if (filterMeta) filterMeta.textContent = `${current.length}/${eligible.length} shown (ready: ${ready})`;
+                if (filterMeta) filterMeta.textContent = `${current.length}/${eligible.length} shown${filterLabel} (ready: ${ready})`;
             } catch (e) {
-                if (filterMeta) filterMeta.textContent = `${current.length}/${eligible.length} shown`;
+                if (filterMeta) filterMeta.textContent = `${current.length}/${eligible.length} shown${filterLabel}`;
             }
         };
         filterInput.oninput = applyFilter;
         filterClearBtn.onclick = () => { filterInput.value = ''; applyFilter(); };
+        if (cachedOnlyInput) cachedOnlyInput.onchange = applyFilter;
         // Load last-used filter, if any
         try {
             const saved = localStorage.getItem('vulnPickerFilter');
             if (saved) filterInput.value = saved;
+        } catch (e) { }
+        try {
+            if (cachedOnlyInput) cachedOnlyInput.checked = localStorage.getItem('vulnPickerCachedOnly') === '1';
         } catch (e) { }
         // Render immediately and show counts
         try {

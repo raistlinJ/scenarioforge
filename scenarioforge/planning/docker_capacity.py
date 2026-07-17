@@ -90,6 +90,32 @@ def vulnerability_plan_from_section(vuln_section: Any, base_host_pool: int) -> t
     return compute_vulnerability_plan(max(0, int(base_host_pool or 0)), vuln_density, vuln_items)
 
 
+def flag_node_generator_plan_from_section(section_value: Any, base_host_pool: int) -> tuple[Dict[str, int], dict]:
+    """Use the same Count/Weight semantics as vulnerabilities for node generators."""
+    section = section_value if isinstance(section_value, dict) else {}
+    density = _coerce_float(section.get('density'), 0.0)
+    items: List[VulnerabilityItem] = []
+    for raw_item in (section.get('items') or []):
+        if not isinstance(raw_item, dict):
+            continue
+        selected = str(raw_item.get('selected') or '').strip() or 'Random'
+        if selected == 'Specific':
+            name = str(raw_item.get('g_id') or raw_item.get('g_name') or '').strip()
+            if not name:
+                continue
+        elif selected == 'Random':
+            name = 'Random'
+        else:
+            continue
+        metric = str(raw_item.get('v_metric') or '').strip()
+        if not metric:
+            metric = 'Count' if (selected == 'Specific' and raw_item.get('v_count') not in (None, '')) else 'Weight'
+        count = max(0, _coerce_int(raw_item.get('v_count'), 0)) if metric.lower() == 'count' else 0
+        items.append(VulnerabilityItem(name=name, density=density, abs_count=count, kind=selected,
+                                       factor=_coerce_float(raw_item.get('factor'), 0.0), metric=metric))
+    return compute_vulnerability_plan(max(0, int(base_host_pool or 0)), density, items)
+
+
 def ensure_role_counts_docker_capacity(role_counts: Dict[str, int], required_docker_hosts: int) -> tuple[Dict[str, int], dict]:
     current_counts: Dict[str, int] = {}
     for role, count in (role_counts or {}).items():
@@ -97,8 +123,11 @@ def ensure_role_counts_docker_capacity(role_counts: Dict[str, int], required_doc
         current_counts[normalized_role] = current_counts.get(normalized_role, 0) + max(0, _coerce_int(count, 0))
 
     current_docker_hosts = current_counts.get('Docker', 0)
-    shortfall = max(0, _coerce_int(required_docker_hosts, 0) - current_docker_hosts)
-    if shortfall > 0:
+    # Vulnerability and topology-selected node-generator hosts are additive.
+    # They must never consume a Docker count explicitly requested in Node
+    # Information, even when that count already exceeds the number of slots.
+    shortfall = max(0, _coerce_int(required_docker_hosts, 0))
+    if shortfall:
         current_counts['Docker'] = current_docker_hosts + shortfall
 
     return current_counts, {
@@ -111,47 +140,20 @@ def ensure_role_counts_docker_capacity(role_counts: Dict[str, int], required_doc
 def ensure_scenario_payload_docker_capacity(scenario_payload: Any) -> tuple[Dict[str, Any], dict]:
     scenario = deepcopy(scenario_payload) if isinstance(scenario_payload, dict) else {}
     sections = scenario.get('sections') if isinstance(scenario.get('sections'), dict) else {}
-    node_section = sections.get('Node Information') if isinstance(sections.get('Node Information'), dict) else {'items': []}
     vuln_section = sections.get('Vulnerabilities') if isinstance(sections.get('Vulnerabilities'), dict) else {'items': [], 'density': 0.0}
+    nodegen_section = sections.get('Flag Node Generators') if isinstance(sections.get('Flag Node Generators'), dict) else {'items': [], 'density': 0.0}
 
     density_base, weight_items, count_items = extract_node_plan_inputs_from_scenario_payload(scenario)
     role_counts, _node_breakdown = compute_node_plan(density_base, weight_items, count_items)
     vulnerability_plan, _vuln_breakdown = vulnerability_plan_from_section(vuln_section, density_base)
-    required_docker_hosts = sum(max(0, _coerce_int(count, 0)) for count in (vulnerability_plan or {}).values())
+    nodegen_plan, _nodegen_breakdown = flag_node_generator_plan_from_section(nodegen_section, density_base)
+    required_docker_hosts = (
+        sum(max(0, _coerce_int(count, 0)) for count in (vulnerability_plan or {}).values())
+        + sum(max(0, _coerce_int(count, 0)) for count in (nodegen_plan or {}).values())
+    )
     _adjusted_counts, repair = ensure_role_counts_docker_capacity(role_counts, required_docker_hosts)
-    if repair['added_docker_hosts'] <= 0:
-        return scenario, repair
-
-    items = list(node_section.get('items') or [])
-    docker_count_row = None
-    for raw_item in items:
-        if not isinstance(raw_item, dict):
-            continue
-        role = _normalize_role_name(raw_item.get('selected') or raw_item.get('role') or raw_item.get('type') or '')
-        metric = str(raw_item.get('v_metric') or '').strip().lower()
-        if role == 'Docker' and metric == 'count':
-            docker_count_row = raw_item
-            break
-
-    if docker_count_row is None:
-        items.append({
-            'selected': 'Docker',
-            'v_metric': 'Count',
-            'v_count': repair['added_docker_hosts'],
-            'factor': 1.0,
-        })
-    else:
-        existing_count = _coerce_int(
-            docker_count_row.get('v_count') if docker_count_row.get('v_count') not in (None, '') else docker_count_row.get('count'),
-            0,
-        )
-        docker_count_row['selected'] = 'Docker'
-        docker_count_row['v_metric'] = 'Count'
-        docker_count_row['v_count'] = max(0, existing_count) + repair['added_docker_hosts']
-        if docker_count_row.get('factor') in (None, ''):
-            docker_count_row['factor'] = 1.0
-
-    node_section['items'] = items
-    sections['Node Information'] = node_section
-    scenario['sections'] = sections
+    # Do not rewrite Node Information to materialize additive slots.  That
+    # would make normalization non-idempotent and would blur the user's base
+    # Docker count with topology-required challenge nodes.  The planner applies
+    # this repair when it builds the preview/runtime topology.
     return scenario, repair

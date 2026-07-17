@@ -62,6 +62,7 @@ class AiTopologyIntent:
     segmentation_counts: dict[str, int]
     vulnerability_target_count: int
     r2r_density: str
+    flag_node_generator_target_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,18 @@ def _extract_vulnerability_target_count(user_prompt: str) -> int:
         return len(listed_hints)
 
     if re.search(r'\bvulnerabilit(?:y|ies)\b|\bvulns?\b', text):
+        return 1
+    return 0
+
+
+def _extract_flag_node_generator_target_count(user_prompt: str) -> int:
+    text = str(user_prompt or '').strip().lower().replace('_', '-')
+    if not text:
+        return 0
+    match = re.search(rf'\b({_COUNT_TOKEN_PATTERN})\s+(?:flag[-\s]+node[-\s]*generators?|node[-\s]+flag[-\s]*generators?)\b', text)
+    if match:
+        return max(0, int(_parse_count_token(match.group(1)) or 0))
+    if re.search(r'\b(?:flag[-\s]+node[-\s]*generator|node[-\s]+flag[-\s]*generator)\b', text):
         return 1
     return 0
 
@@ -599,6 +612,7 @@ def extract_ai_topology_intent(user_prompt: str) -> AiTopologyIntent:
         segmentation_counts=extract_segmentation_control_count_intent(user_prompt),
         vulnerability_target_count=_extract_vulnerability_target_count(user_prompt),
         r2r_density=extract_r2r_density_intent(user_prompt),
+        flag_node_generator_target_count=_extract_flag_node_generator_target_count(user_prompt),
     )
 
 
@@ -641,13 +655,8 @@ def compile_ai_topology_intent(
 
     node_role_counts = dict(intent.node_role_counts)
     host_budget = intent.derived_host_count if intent.derived_host_count is not None else intent.total_nodes
-    if host_budget is not None and intent.vulnerability_target_count > 0:
-        existing_docker = int(node_role_counts.get('Docker') or 0)
-        remaining_capacity = max(0, int(host_budget) - sum(node_role_counts.values()))
-        required_extra_docker = max(0, int(intent.vulnerability_target_count) - existing_docker)
-        reserved_vuln_docker = min(required_extra_docker, remaining_capacity)
-        if reserved_vuln_docker > 0:
-            node_role_counts['Docker'] = existing_docker + reserved_vuln_docker
+    # Vulnerability and flag-node-generator challenge hosts are additive
+    # topology slots.  Do not consume the user's requested host budget here.
     if host_budget is not None:
         remaining_hosts = max(0, int(host_budget) - sum(node_role_counts.values()))
         if remaining_hosts > 0:
@@ -844,6 +853,21 @@ def compile_ai_topology_intent(
             }
             locked_sections.append('Vulnerabilities')
 
+    if intent.flag_node_generator_target_count > 0:
+        requested_count = max(1, int(intent.flag_node_generator_target_count))
+        section_payloads['Flag Node Generators'] = {
+            'density': 0.0,
+            'items': [{
+                'selected': 'Random',
+                'factor': 1.0,
+                'v_metric': 'Count',
+                'v_count': requested_count,
+            }],
+        }
+        tool_seed_ops.append({'kind': 'flag-node-generator', 'count': requested_count})
+        applied_actions.append(f'Flag Node Generators={requested_count}')
+        locked_sections.append('Flag Node Generators')
+
     return CompiledAiTopologyIntent(
         intent=intent,
         section_payloads=section_payloads,
@@ -866,4 +890,3 @@ def apply_compiled_sections_to_scenario(
         next_sections[section_name] = deepcopy(section_payload)
     result['sections'] = next_sections
     return result
-

@@ -109,6 +109,7 @@ def _scenario_payload(name: str = 'AiScenario') -> dict[str, Any]:
             'Services': {'density': 0.0, 'items': []},
             'Traffic': {'density': 0.0, 'items': []},
             'Vulnerabilities': {'density': 0.0, 'items': [], 'flag_type': 'text'},
+            'Flag Node Generators': {'density': 0.0, 'items': []},
             'Segmentation': {'density': 0.0, 'items': []},
         },
         'notes': '',
@@ -212,6 +213,7 @@ def _default_provider_scenario(case: dict[str, Any]) -> dict[str, Any]:
             'Services': {'density': 0.0, 'items': []},
             'Traffic': {'density': 0.0, 'items': []},
             'Vulnerabilities': {'density': 0.0, 'items': [], 'flag_type': 'text'},
+            'Flag Node Generators': {'density': 0.0, 'items': []},
             'Segmentation': {'density': 0.0, 'items': []},
         },
     }

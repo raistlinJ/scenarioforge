@@ -57,6 +57,7 @@ _SUPPORTED_SECTION_NAMES = [
     'Services',
     'Traffic',
     'Vulnerabilities',
+    'Flag Node Generators',
     'Segmentation',
     'Notes',
 ]
@@ -452,7 +453,7 @@ def _build_mcp_bridge_execution_guidance(user_prompt: str) -> list[str]:
     guidance: list[str] = []
     if router_count is not None and vulnerability_target_count > 0:
         guidance.append(
-            'Complete this request in order: author Routing first, then Node Information host rows, then Vulnerabilities, and only then any optional remaining sections.'
+            'Complete this request in order: author Routing first, then Node Information host rows, then Vulnerabilities and Flag Node Generators, and only then any optional remaining sections.'
         )
         guidance.append(
             'Do not postpone the Routing section until after vulnerability search. Add the requested router row before you search the vulnerability catalog so the draft already satisfies the router-count part of the request.'
@@ -2325,6 +2326,8 @@ def _scenario_generation_schema() -> dict[str, Any]:
             'v_metric': {'type': ['string', 'null']},
             'v_count': {'type': ['number', 'integer', 'string', 'null']},
             'v_name': {'type': ['string', 'null']},
+            'g_id': {'type': ['string', 'null']},
+            'g_name': {'type': ['string', 'null']},
             'v_type': {'type': ['string', 'null']},
             'v_vector': {'type': ['string', 'null']},
         },
@@ -2535,6 +2538,8 @@ def _default_section_payload(name: str) -> dict[str, Any]:
         return {'total_nodes': 0, 'density': 0, 'items': []}
     if name == 'Vulnerabilities':
         return {'density': 0.5, 'items': [], 'flag_type': 'text'}
+    if name == 'Flag Node Generators':
+        return {'density': 0.5, 'items': []}
     return {'density': 0.5, 'items': []}
 
 
@@ -2758,6 +2763,8 @@ def _build_intent_compiler_guidance(compiled: Any, *, strict_json: bool = False)
         guidance.append('If you add or adjust traffic rows beyond the seed, use selected="TCP" or "UDP" and backend-supported pattern labels only.')
     if 'Vulnerabilities' in locked_set:
         guidance.append('If you add or adjust vulnerabilities beyond the seed, use concrete Specific rows with explicit v_name and v_path from catalog matches.')
+    if 'Flag Node Generators' in locked_set:
+        guidance.append('If you add or adjust Flag Node Generators beyond the seed, use Random or Specific rows. Specific rows require enabled-generator g_id and g_name values; use v_metric="Count" and v_count.')
     return guidance
 
 
@@ -2787,6 +2794,7 @@ def _build_ollama_prompt(current_scenario: dict[str, Any], user_prompt: str) -> 
             'Services': 'items contain selected and factor.',
             'Traffic': 'items contain selected, factor, pattern, rate_kbps, period_s, jitter_pct, content_type. Use selected="TCP" or "UDP" plus either v_metric="Count" with v_count or a positive factor so traffic flows materialize.',
             'Vulnerabilities': 'items contain selected plus vulnerability fields such as v_metric, v_count, v_name, and v_path. Prefer concrete Specific rows chosen from the vulnerability catalog.',
+            'Flag Node Generators': 'items contain selected plus v_metric and v_count. Use selected="Specific" with g_id and g_name for an enabled flag-node-generator, or selected="Random" when the request intentionally leaves generator choice open.',
             'Segmentation': 'items contain selected and factor.',
         },
         'user_request': user_prompt,

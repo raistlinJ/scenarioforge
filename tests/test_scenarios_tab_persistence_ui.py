@@ -21,3 +21,11 @@ def test_topology_continue_uses_the_current_selected_scenario() -> None:
     assert topology_template.index("window.coretgGetLastSelectedScenario?.()") < topology_template.index(
         "btn?.dataset?.coretgScenario"
     )
+
+
+def test_flag_node_generator_picker_can_limit_specific_choices_to_cached_images() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert 'id="flagNodeGeneratorCachedOnly"' in topology_template
+    assert "flagNodeGeneratorPickerCachedOnly" in topology_template
+    assert "generator._cached !== true" in topology_template

@@ -352,6 +352,7 @@ def build_full_preview(
     routing_plan: Dict[str, Any],
     segmentation_density: Optional[float],
     segmentation_items: Optional[List[Dict[str, Any]]],
+    flag_node_generators_plan: Optional[Dict[str, int]] = None,
     traffic_plan: Optional[List[Dict[str, Any]]] = None,
     seed: Optional[int] = None,
     ip4_prefix: str = '10.0.0.0/16',
@@ -533,7 +534,10 @@ def build_full_preview(
     for r, c in role_counts.items():
         nr = _normalize_role_name(r)
         normalized_counts[nr] = normalized_counts.get(nr, 0) + int(c)
-    required_docker_hosts = sum(max(0, int(count or 0)) for count in (vulnerabilities_plan or {}).values())
+    required_docker_hosts = (
+        sum(max(0, int(count or 0)) for count in (vulnerabilities_plan or {}).values())
+        + sum(max(0, int(count or 0)) for count in (flag_node_generators_plan or {}).values())
+    )
     role_counts, docker_capacity_repair = ensure_role_counts_docker_capacity(normalized_counts, required_docker_hosts)
     total_hosts = sum(int(c) for c in role_counts.values())
     role_expanded = _expand_roles(role_counts)
@@ -1156,6 +1160,25 @@ def build_full_preview(
         node_vulns = vuln_assignments.get(h.node_id) or []
         h.vulnerabilities = list(node_vulns)
 
+    # Topology-selected flag-node-generators are their own Docker slots.  They
+    # are assigned after vulnerability slots so a generator can never land on a
+    # vulnerability host.  Metadata survives into Flow candidate construction.
+    nodegen_assignments: Dict[int, str] = {}
+    if flag_node_generators_plan:
+        target_hosts = sorted(
+            [h for h in host_nodes if str(getattr(h, 'role', '') or '').strip().lower() == 'docker' and not h.vulnerabilities],
+            key=lambda h: getattr(h, 'node_id', 0),
+        )
+        flat_nodegens: List[str] = []
+        for generator_id, count in flag_node_generators_plan.items():
+            flat_nodegens.extend([str(generator_id)] * max(0, int(count or 0)))
+        for idx, generator_id in enumerate(flat_nodegens):
+            if idx >= len(target_hosts):
+                break
+            host = target_hosts[idx]
+            host.metadata['flag_node_generator_id'] = generator_id
+            nodegen_assignments[host.node_id] = generator_id
+
     # ---- Traffic Materialization (resolve abstract items to concrete flows) ----
     traffic_summary: Dict[str, Any] = {}
     if traffic_plan:
@@ -1486,6 +1509,8 @@ def build_full_preview(
         'routing_plan': routing_plan,
         'services_plan': services_plan,
         'vulnerabilities_plan': vulnerabilities_plan,
+        'flag_node_generators_plan': flag_node_generators_plan or {},
+        'flag_node_generators_by_node': {str(node_id): generator_id for node_id, generator_id in nodegen_assignments.items()},
         'docker_capacity_repair': docker_capacity_repair,
         'base_scenario_reference': base_scenario,
         'base_bridge_preview': base_bridge_info,
