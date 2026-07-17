@@ -44,6 +44,8 @@ def test_topology_specific_pickers_show_and_filter_catalog_notes() -> None:
     assert '<option value="yellow">Yellow</option>' in topology_template
     assert '<option value="green">Green</option>' in topology_template
     assert '<th style="width:11rem;">Notes</th>' in topology_template
+    assert "const hoverText = note.length > 300" in topology_template
+    assert "const displayText = note.length > 90" in topology_template
 
 
 def test_flag_node_generator_picker_shows_validation_status() -> None:
