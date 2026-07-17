@@ -2915,6 +2915,9 @@
         const dockerCount = Number.isFinite(+data.docker_count) ? (+data.docker_count) : 0;
         const vulnCount = Number.isFinite(+data.vuln_count) ? (+data.vuln_count) : 0;
         const dockerNonvulnCount = Number.isFinite(+data.docker_nonvuln_count) ? (+data.docker_nonvuln_count) : 0;
+        const topologyFlagNodeGeneratorCount = Number.isFinite(+data.topology_flag_node_generator_count)
+          ? (+data.topology_flag_node_generator_count)
+          : 0;
         flowEligible = (eligible || (dockerCount > 0 || vulnCount > 0));
         if (!flowEligible) {
           // Guardrail: do not clear/persist FlowState on transient ineligibility checks
@@ -2922,7 +2925,13 @@
           setFlowEnabled(false, { skipPersist: true, clearStateOnDisable: false });
         }
         if (dockerCount > 0 || vulnCount > 0) {
-          lastStats = { vuln_total: vulnCount, docker_nonvuln_total: dockerNonvulnCount, docker_total: dockerCount };
+          lastStats = {
+            vuln_total: vulnCount,
+            docker_nonvuln_total: dockerNonvulnCount,
+            docker_total: dockerCount,
+            topology_flag_node_generator_total: topologyFlagNodeGeneratorCount,
+            flag_node_generator_eligible_total: topologyFlagNodeGeneratorCount || dockerNonvulnCount,
+          };
           updateLengthSpinnerMax();
         }
         updateFlowEnabledUi();
