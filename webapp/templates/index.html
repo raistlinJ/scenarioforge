@@ -49,11 +49,6 @@
         max-width: 420px;
     }
 
-    .host-total-badge+.badge,
-    .host-total-badge+button {
-        margin-left: .25rem;
-    }
-
     /* Hide H/S bounds by default; JS adds .hs-show to display them */
     .hs-bounds-wrapper {
         display: none;
@@ -16919,6 +16914,11 @@
             </div>
             ${densityBoundsRow}
         </div>`;
+        // Shared base host pool for density-driven Routing, Vulnerability,
+        // and Flag Node Generator estimates below and their editor cards.
+        const baseHostPool = (scen.density_count !== undefined && scen.density_count !== null && scen.density_count !== ''
+            ? (parseInt(scen.density_count, 10) || 0)
+            : 10);
         // This follows the same count/weight planning inputs displayed by the
         // editor cards.  Services, Traffic, and Segmentation configure the
         // existing topology; they do not themselves create topology nodes.
@@ -16961,7 +16961,7 @@
         ].join(' | ');
         const estimatedNodeBadge = document.getElementById('scenarioEstimatedNodeBadge');
         if (estimatedNodeBadge) {
-            estimatedNodeBadge.textContent = `Estimated nodes: ${estimatedTopologyNodes}`;
+            estimatedNodeBadge.textContent = `Estimated Total Nodes: ${estimatedTopologyNodes}`;
             estimatedNodeBadge.title = estimatedTopologyNodesTitle;
             estimatedNodeBadge.setAttribute('data-bs-title', estimatedTopologyNodesTitle);
         }
@@ -16985,8 +16985,6 @@
                 .filter(name => !scenarioEditorSectionOrder.includes(name))
                 .sort((a, b) => String(a).localeCompare(String(b))),
         ];
-        // Base host pool for density-driven (weight) allocations comes from scenario.density_count
-        const baseHostPool = (scen.density_count !== undefined && scen.density_count !== null && scen.density_count !== '' ? (parseInt(scen.density_count, 10) || 0) : 10);
         secNames.forEach(name => {
             const sec = scen.sections[name] || { items: [] };
             const hasNodes = (name === 'Node Information');
@@ -17039,13 +17037,9 @@
                     hostBadge = `<span class=\"badge rounded-pill text-bg-primary ms-2 host-total-badge\" data-bs-toggle=\"tooltip\" title=\"${allocTip.replace(/"/g, '&quot;')}\">Hosts: ${display}</span>`;
                 }
             }
-            const hostSummaryBlock = (name === 'Node Information' && (niBase > 0 || niAdd > 0 || hasWeightRows))
-                ? `<div class="d-flex align-items-center gap-2">${hostSummaryHtml}</div>`
-                : '';
             const nodeMetaHtml = (name === 'Node Information')
                 ? `<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
                     ${densityBaseHtml}
-                    ${hostSummaryBlock}
                 </div>`
                 : '';
             let routingBadge = '';
@@ -17077,7 +17071,7 @@
                 const total = explicit + derived;
                 if (total > 0) vulnBadge = `<span class=\"badge rounded-pill text-bg-info ms-2\" title=\"Vulnerability assignments additive: Count rows + (Density * Base Hosts). Density clipped to 1.0 when fractional.\">Vulns: ${total}</span>`;
             }
-            const badgeSpan = hostBadge + routingBadge + vulnBadge;
+            const badgeSpan = routingBadge + vulnBadge;
             card.innerHTML = `
             <div class="card-header d-flex align-items-center gap-2">
                 ${iconHtml}
