@@ -16920,15 +16920,23 @@
         const headerRow = document.createElement('div');
         const rawSectionNames = Object.keys(scen.sections || {});
         const filteredSectionNames = rawSectionNames.filter(name => name !== 'Notes' && name !== 'HITL');
-        const secNames = [];
-        if (filteredSectionNames.includes('Node Information')) {
-            secNames.push('Node Information');
-        }
-        filteredSectionNames.forEach(name => {
-            if (name !== 'Node Information') {
-                secNames.push(name);
-            }
-        });
+        // Keep the Scenario Editor planning cards stable regardless of the
+        // order in which XML/state sections were created or hydrated.
+        const scenarioEditorSectionOrder = [
+            'Node Information',
+            'Services',
+            'Routing',
+            'Traffic',
+            'Segmentation',
+            'Flag Node Generators',
+            'Vulnerabilities',
+        ];
+        const secNames = [
+            ...scenarioEditorSectionOrder.filter(name => filteredSectionNames.includes(name)),
+            ...filteredSectionNames
+                .filter(name => !scenarioEditorSectionOrder.includes(name))
+                .sort((a, b) => String(a).localeCompare(String(b))),
+        ];
         // Base host pool for density-driven (weight) allocations comes from scenario.density_count
         const baseHostPool = (scen.density_count !== undefined && scen.density_count !== null && scen.density_count !== '' ? (parseInt(scen.density_count, 10) || 0) : 10);
         secNames.forEach(name => {
