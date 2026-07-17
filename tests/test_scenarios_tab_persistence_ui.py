@@ -39,11 +39,14 @@ def test_topology_migrates_existing_projects_to_show_flag_node_generator_card() 
     assert "state.scenarios.forEach((scenario) => ensureTopologySectionSchema(scenario));" in topology_template
 
 
-def test_adding_flag_node_generator_starts_a_specific_count_one_row() -> None:
+def test_adding_flag_node_generator_starts_a_random_count_one_row() -> None:
     topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
 
-    assert "if (sec === 'Flag Node Generators')" in topology_template
-    assert "item.selected = 'Specific';" in topology_template
+    start = topology_template.index('document.querySelectorAll(\'[data-action="add-item"]\')')
+    end = topology_template.index('document.querySelectorAll(\'[data-action="toggle-collapse"]\')', start)
+    add_handler = topology_template[start:end]
+    assert "let defaultSelected = 'Random';" in add_handler
+    assert "if (sec === 'Flag Node Generators')" not in add_handler
     assert "sec === 'Vulnerabilities' || sec === 'Flag Node Generators'" in topology_template
     assert "item.v_metric = 'Count'; item.v_count = 1;" in topology_template
 

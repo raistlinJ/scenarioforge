@@ -18184,12 +18184,6 @@
                     const vulnCatalogItems = (window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) ? window.VULN_CATALOG.items : [];
                     item.selected = vulnCatalogItems.length ? 'Random' : 'Specific';
                 }
-                if (sec === 'Flag Node Generators') {
-                    // A topology generator has no useful random placeholder:
-                    // add a concrete, count-based row so its Choose button is
-                    // immediately available, matching the vulnerability flow.
-                    item.selected = 'Specific';
-                }
                 // Default new rows: Node Information -> Count; Vulnerabilities
                 // and Flag Node Generators -> Count (1); others -> Weight.
                 if (sec === 'Node Information') { item.v_metric = 'Count'; item.v_count = 5; }

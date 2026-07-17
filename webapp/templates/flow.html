@@ -608,6 +608,8 @@
 
   async function clearFlowStateInXml() {
     try {
+      lastChainExpansion = null;
+      lastTopologyInclusion = null;
       const scenario = (scenarioEl && scenarioEl.value || activeScenario || '').trim();
       let xmlPath = (document.getElementById('scenariosPreviewXmlPath')?.value || '').trim();
       if (!xmlPath && scenario && typeof window.coretgGetLatestXmlPathForScenario === 'function') {
@@ -629,6 +631,8 @@
         flags_enabled: false,
         topology_dirty: false,
         topology_dirty_reason: '',
+        chain_expansion: null,
+        topology_inclusion: null,
         updated_at: Date.now(),
       };
       await postJson('/api/flag-sequencing/save_flow_state_to_xml', {
@@ -808,6 +812,11 @@
   let heldFactRows = new Set();
   let flowInitialFactsOverride = null;
   let flowGoalFactsOverride = null;
+  // These describe an explicitly accepted chain-expansion decision.  Keep them
+  // with the saved FlowState so a later page load cannot lose why a generic or
+  // newly-added Docker node appears in the generated chain.
+  let lastChainExpansion = null;
+  let lastTopologyInclusion = null;
 
   function setGenerateBusy(value) {
     generateInFlight = !!value;
@@ -892,6 +901,8 @@
         initial_facts: flowInitialFactsOverride,
         goal_facts: flowGoalFactsOverride,
         flow_enabled: !!flowEnabled,
+        chain_expansion: lastChainExpansion,
+        topology_inclusion: lastTopologyInclusion,
       });
     } catch (e) { }
   }
@@ -947,6 +958,8 @@
       flow_enabled: !!flowEnabled,
       topology_dirty: !!topologyDirty,
       topology_dirty_reason: topologyDirtyReason || '',
+      chain_expansion: lastChainExpansion,
+      topology_inclusion: lastTopologyInclusion,
     };
     if (opts.includeUpdatedAt !== false) {
       payload.updated_at = Date.now();
@@ -973,6 +986,12 @@
       flow_enabled: !!state.flow_enabled,
       topology_dirty: !!state.topology_dirty,
       topology_dirty_reason: state.topology_dirty ? String(state.topology_dirty_reason || '').trim() : '',
+      chain_expansion: (state.chain_expansion && typeof state.chain_expansion === 'object' && !Array.isArray(state.chain_expansion))
+        ? state.chain_expansion
+        : null,
+      topology_inclusion: (state.topology_inclusion && typeof state.topology_inclusion === 'object' && !Array.isArray(state.topology_inclusion))
+        ? state.topology_inclusion
+        : null,
     };
   }
 
@@ -1094,6 +1113,8 @@
       currentChain = [];
       currentFlagAssignments = [];
       selectedChainIndex = -1;
+      lastChainExpansion = null;
+      lastTopologyInclusion = null;
       updateMeta();
       renderChainEditor();
       if (jsonEl) {
@@ -1672,6 +1693,17 @@
     } catch (e) { }
 
     const saved = getSavedFlowStateForScenario(scenarioName);
+    try {
+      lastChainExpansion = (saved && saved.chain_expansion && typeof saved.chain_expansion === 'object' && !Array.isArray(saved.chain_expansion))
+        ? saved.chain_expansion
+        : null;
+      lastTopologyInclusion = (saved && saved.topology_inclusion && typeof saved.topology_inclusion === 'object' && !Array.isArray(saved.topology_inclusion))
+        ? saved.topology_inclusion
+        : null;
+    } catch (e) {
+      lastChainExpansion = null;
+      lastTopologyInclusion = null;
+    }
     try {
       console.debug('[flow.restore] selected state', {
         scenario: scenarioName,
@@ -10516,16 +10548,132 @@
     } catch (e) { }
   });
 
-  function shouldOfferBestEffort(err) {
+  function getChainExpansionOffer(err) {
     try {
-      const p = err && err.payload && typeof err.payload === 'object' ? err.payload : null;
-      const available = p && Number.isFinite(+p.available) ? (+p.available) : null;
-      if (!available || available <= 0) return null;
-      const msg = (p && (p.error || p.message)) ? String(p.error || p.message) : '';
-      if (msg && !msg.toLowerCase().includes('eligible')) return null;
-      return { available, message: msg, requested: p && Number.isFinite(+p.requested_length) ? (+p.requested_length) : null };
+      const payload = err && err.payload && typeof err.payload === 'object' ? err.payload : null;
+      if (!payload || !(payload.confirmation_required === true || String(payload.confirmation_required).toLowerCase() === 'true')) {
+        return null;
+      }
+      const stage = String(
+        payload.expansion_stage ||
+        (payload.chain_expansion && payload.chain_expansion.stage) ||
+        ''
+      ).trim().toLowerCase();
+      if (stage !== 'existing_docker' && stage !== 'add_docker') return null;
+      const offer = ((payload.chain_expansion_offer && typeof payload.chain_expansion_offer === 'object' && !Array.isArray(payload.chain_expansion_offer))
+        ? payload.chain_expansion_offer
+        : ((payload.expansion_offer && typeof payload.expansion_offer === 'object' && !Array.isArray(payload.expansion_offer))
+          ? payload.expansion_offer
+          : {}));
+      return {
+        stage,
+        offer,
+        message: String(payload.error || payload.message || offer.message || '').trim(),
+      };
     } catch (e) {
       return null;
+    }
+  }
+
+  function sequenceResponseWithRefreshPayload(rawData) {
+    const data = (rawData && typeof rawData === 'object') ? rawData : rawData;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+    const refresh = (data.refresh_payload && typeof data.refresh_payload === 'object' && !Array.isArray(data.refresh_payload))
+      ? data.refresh_payload
+      : null;
+    if (!refresh) return data;
+
+    // A route can put plan refresh fields in refresh_payload while retaining the
+    // normal sequence result at the top level.  Surface missing fields without
+    // replacing the chain/assignments returned by the sequencing operation.
+    const merged = { ...data };
+    Object.keys(refresh).forEach((key) => {
+      if (merged[key] === undefined || merged[key] === null || merged[key] === '') {
+        merged[key] = refresh[key];
+      }
+    });
+    return merged;
+  }
+
+  function applySequenceFlowMetadata(data, fallbackMode, fallbackTopologyFingerprint) {
+    try {
+      const expansion = (data && data.chain_expansion && typeof data.chain_expansion === 'object' && !Array.isArray(data.chain_expansion))
+        ? data.chain_expansion
+        : null;
+      const inclusion = (data && data.topology_inclusion && typeof data.topology_inclusion === 'object' && !Array.isArray(data.topology_inclusion))
+        ? data.topology_inclusion
+        : null;
+      lastChainExpansion = expansion ? { ...expansion } : { mode: String(fallbackMode || 'strict') };
+      if (!lastChainExpansion.topology_fingerprint && fallbackTopologyFingerprint) {
+        lastChainExpansion.topology_fingerprint = String(fallbackTopologyFingerprint);
+      }
+      lastTopologyInclusion = inclusion;
+    } catch (e) {
+      lastChainExpansion = { mode: String(fallbackMode || 'strict') };
+      if (fallbackTopologyFingerprint) lastChainExpansion.topology_fingerprint = String(fallbackTopologyFingerprint);
+      lastTopologyInclusion = null;
+    }
+  }
+
+  async function applySequenceResponseRefresh(data, scenarioName) {
+    try {
+      const response = (data && typeof data === 'object') ? data : {};
+      const refresh = (response.refresh_payload && typeof response.refresh_payload === 'object' && !Array.isArray(response.refresh_payload))
+        ? response.refresh_payload
+        : null;
+      const expansion = (response.chain_expansion && typeof response.chain_expansion === 'object' && !Array.isArray(response.chain_expansion))
+        ? response.chain_expansion
+        : {};
+      const expansionMode = String(expansion.mode || expansion.stage || '').trim().toLowerCase();
+      const topologyChanged = !!(
+        refresh ||
+        response.full_preview ||
+        response.topology_changed ||
+        response.spec_changed ||
+        expansionMode === 'add_docker' ||
+        expansionMode === 'added_docker'
+      );
+      const refreshedXmlPath = String(
+        response.xml_path ||
+        response.preview_plan_path ||
+        (refresh && (refresh.xml_path || refresh.preview_plan_path)) ||
+        ''
+      ).trim();
+
+      if (refreshedXmlPath) {
+        try {
+          if (scenarioName && typeof window.coretgSetLatestXmlPathForScenario === 'function') {
+            window.coretgSetLatestXmlPathForScenario(scenarioName, refreshedXmlPath);
+          }
+          const xmlPathInput = document.getElementById('scenariosPreviewXmlPath');
+          if (xmlPathInput) xmlPathInput.value = refreshedXmlPath;
+        } catch (e) { }
+      }
+      if (response.preview_plan_path) {
+        try {
+          if (scenarioName && typeof window.coretgSetPreviewPlanPathForScenario === 'function') {
+            window.coretgSetPreviewPlanPathForScenario(scenarioName, String(response.preview_plan_path));
+          }
+        } catch (e) { }
+      }
+
+      // Adding nodes changes the topology specification.  Reload the XML-backed
+      // scenario state before any later save so the UI cannot write its stale
+      // topology over the backend's newly-authoritative PlanPreview/XML.
+      if (topologyChanged && scenarioName && typeof window.coretgRefreshScenarioStateFromXml === 'function') {
+        const latest = await window.coretgRefreshScenarioStateFromXml(scenarioName, {
+          updateHidden: true,
+          xml_path: refreshedXmlPath,
+          forceXmlPath: !!refreshedXmlPath,
+        });
+        const latestPath = String((latest && latest.xml_path) || '').trim();
+        if (latestPath && typeof window.coretgSetLatestXmlPathForScenario === 'function') {
+          window.coretgSetLatestXmlPathForScenario(scenarioName, latestPath);
+        }
+      }
+    } catch (e) {
+      // The returned sequence result is still usable if an optional UI refresh
+      // cannot complete; the server-side XML remains authoritative.
     }
   }
 
@@ -10594,25 +10742,17 @@
     };
 
     const applyDockerCapIfNeeded = (cap, sourceLabel) => {
-      if (allowDupes) return false;
-      if (cap === null || cap === undefined || !Number.isFinite(+cap)) return false;
+      // Do not silently clamp the requested chain to today's generic Docker
+      // capacity.  Strict Flow generation now asks for explicit approval to
+      // use existing Docker nodes and, if necessary, explicit approval to add
+      // Docker nodes to the topology.  Clamping here would bypass both choices.
+      if (allowDupes || cap === null || cap === undefined || !Number.isFinite(+cap)) return false;
       const dockerCap = Math.max(0, parseInt(String(cap), 10) || 0);
-      const minimum = vulnerabilityNodeMinimumFromStats(lastStats);
-      if (dockerCap <= 0) {
-        throw new Error('No Docker nodes found in topology. Increase Docker nodes or enable duplicates.');
+      if (length > dockerCap) {
+        const src = sourceLabel ? ` (${sourceLabel})` : '';
+        try { appendLoadingLog(`Requested chain length ${length} exceeds current Docker capacity ${dockerCap}${src}; Flow will request explicit expansion if needed.`); } catch (e) { }
       }
-      // Do not silently lower the requested count beneath the mandatory
-      // vulnerability-node minimum. The backend will return the capacity
-      // error if duplicates remain disabled.
-      if (minimum > dockerCap) return false;
-      if (length <= dockerCap) return false;
-      length = dockerCap;
-      params.set('length', String(length));
-      try { if (lengthEl) lengthEl.value = String(length); } catch (e) { }
-      const src = sourceLabel ? ` (${sourceLabel})` : '';
-      setStatus(`Duplicates are off: clamped challenges to ${length} Docker nodes${src}.`, false);
-      try { appendLoadingLog(`Clamped challenges to Docker node cap ${length}${src}`); } catch (e) { }
-      return true;
+      return false;
     };
 
     // If we already have topology stats, clamp immediately before any sequencing call.
@@ -10647,7 +10787,6 @@
 
     const progressSteps = ['Saving XML', 'Testing connection', 'Generating preview plan', 'Sequencing chain', 'Resolving values', 'Saving resolved data'];
     let resolvedOk = !resolveOnGenerate;
-    let usedBestEffort = false;
     let generateCancelled = false;
     const saveAfterResolve = (options && options.saveAfterResolve !== undefined)
       ? !!options.saveAfterResolve
@@ -10795,6 +10934,19 @@
       let retryIndex = 0;
       const newSequenceRequestId = () => `seqreq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
       let sequenceRequestId = newSequenceRequestId();
+      // Unlike the per-attempt sequence request ID, this remains stable across
+      // the explicit expansion stages so an accepted add-Docker request is
+      // idempotent if its response is interrupted.
+      const expansionRequestId = `expandreq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      // Generation starts strict: only nodes explicitly selected in Topology
+      // (vulnerabilities and flag-node generators) may be used.  The user must
+      // explicitly accept every later expansion stage.
+      let chainExpansionMode = 'strict';
+      const acceptedChainExpansionStages = new Set();
+      // The backend binds an expansion approval to this exact topology snapshot.
+      // It is populated from the structured offer and must accompany the user's
+      // accepted retry so a changed preview cannot be approved accidentally.
+      let chainTopologyFingerprint = '';
       const _resolvedFlagValue = (fa) => {
         try {
           if (fa && typeof fa.flag_value === 'string' && fa.flag_value.trim()) return fa.flag_value.trim();
@@ -10847,7 +10999,7 @@
             let stopSequenceProgressPoll = null;
             try {
               stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
-              data = await postSequencePreviewPlan({
+              data = sequenceResponseWithRefreshPayload(await postSequencePreviewPlan({
                 scenario,
                 length,
                 dependency_level: dependencyLevel,
@@ -10862,7 +11014,10 @@
                 goal_facts: flowGoalFactsOverride,
                 progress_id: sequenceProgressId,
                 sequence_request_id: sequenceRequestId,
-              }, { timeoutMs: 60000 });
+                chain_expansion_mode: chainExpansionMode,
+                topology_fingerprint: chainTopologyFingerprint || undefined,
+                expansion_request_id: expansionRequestId,
+              }, { timeoutMs: 60000 }));
             } finally {
               try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
             }
@@ -10918,56 +11073,84 @@
           } catch (e) { }
           break;
         } catch (err) {
-          // If Generate requested a longer chain than available, ask user whether to
-          // retry in best-effort mode (clamp to available) or cancel.
-          const offer = usePreview ? shouldOfferBestEffort(err) : null;
-          if (offer) {
-            appendLoadingLog(`Eligible nodes: ${offer.available}; requested ${offer.requested || length}`);
-            const want = await confirmFlowAction(
-              'Run Best-Effort Generate?',
-              `Only ${offer.available} eligible nodes are available for this scenario.\n\nRun Generate in best-effort mode and use ${offer.available}?`,
-              'Run Best-Effort'
+          // A failed add-Docker attempt can still have produced an updated
+          // authoritative XML/preview.  Consume its refresh payload before any
+          // retry or error UI so a stale in-memory topology cannot overwrite it.
+          try {
+            const errorPayload = sequenceResponseWithRefreshPayload(err && err.payload);
+            if (errorPayload && err && typeof err === 'object') {
+              err.payload = errorPayload;
+              await applySequenceResponseRefresh(errorPayload, scenario);
+            }
+          } catch (e) { }
+          // Strict generation intentionally does not silently repurpose generic
+          // Docker nodes or change the topology.  The backend returns a
+          // structured offer for each explicit expansion stage.
+          const chainExpansionOffer = runSavePreviewResolve ? getChainExpansionOffer(err) : null;
+          if (chainExpansionOffer) {
+            const stage = chainExpansionOffer.stage;
+            const offerDetails = (chainExpansionOffer.offer && typeof chainExpansionOffer.offer === 'object')
+              ? chainExpansionOffer.offer
+              : {};
+            const offeredTopologyFingerprint = String(offerDetails.topology_fingerprint || '').trim();
+            const priorTopologyFingerprint = chainTopologyFingerprint;
+            const topologyChangedSinceApproval = !!(
+              acceptedChainExpansionStages.has(stage) &&
+              offeredTopologyFingerprint &&
+              offeredTopologyFingerprint !== priorTopologyFingerprint
             );
-            if (!want) {
+            if (acceptedChainExpansionStages.has(stage) && !topologyChangedSinceApproval) {
+              // Do not fall through to best-effort after an already accepted
+              // expansion still cannot produce a valid chain.  That would
+              // silently change the user's requested behavior.
+              throw err;
+            }
+            if (topologyChangedSinceApproval) {
+              // The backend refused a stale confirmation because the preview
+              // changed.  Treat this as a new approval decision rather than
+              // replaying the old consent against a different topology.
+              acceptedChainExpansionStages.delete(stage);
+              appendLoadingLog('Topology changed since the prior expansion approval; requesting confirmation again.');
+            }
+            if (offeredTopologyFingerprint) {
+              chainTopologyFingerprint = offeredTopologyFingerprint;
+            }
+            const offeredCount = [
+              offerDetails.additional_items_needed,
+              offerDetails.additional_nodes,
+              offerDetails.required_additional_nodes,
+              offerDetails.missing_nodes,
+              offerDetails.missing_count,
+            ].map((value) => Number(value)).find((value) => Number.isFinite(value) && value > 0);
+            const countNote = offeredCount ? ` (${offeredCount} needed)` : '';
+            const wantsExpansion = stage === 'existing_docker'
+              ? await confirmFlowAction(
+                  'Use Existing Docker Nodes?',
+                  'The chain cannot be built using only the vulnerabilities and flag-node generators selected in Topology.\n\nUse existing Docker nodes already specified in Topology as additional Flow items' + countNote + '? This does not change the Topology specification.',
+                  'Use Existing Docker Nodes'
+                )
+              : await confirmFlowAction(
+                  'Add Docker Nodes to Topology?',
+                  'The selected topology items and existing Docker nodes still cannot complete this chain.\n\nAdd Docker nodes' + countNote + ' to the Topology specification and continue? This changes the specification, regenerates the plan, and writes the updated XML.',
+                  'Add Docker Nodes'
+                );
+            if (!wantsExpansion) {
               hideLoading();
               setStatus('Generate cancelled.', false);
               return;
             }
-            if (runSavePreviewResolve) {
-              sequenceRequestId = newSequenceRequestId();
-              appendLoadingLog(`Retrying best-effort length ${offer.available}`);
-              const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-              let stopSequenceProgressPoll = null;
-              try {
-                stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
-                data = await postSequencePreviewPlan({
-                  scenario,
-                  length,
-                  dependency_level: dependencyLevel,
-                  preset,
-                  preview_plan: previewPlanForRequest(),
-                  allow_node_duplicates: !!allowDupes,
-                  ...topologyInclusionOptions,
-                  best_effort: true,
-                  flow_seed: (flowSeedInputEl && flowSeedInputEl.value) ? parseInt(flowSeedInputEl.value, 10) : undefined,
-                  xml_path: (typeof window.coretgGetLatestXmlPathForScenario === 'function') ? window.coretgGetLatestXmlPathForScenario(scenario) : '',
-                  initial_facts: flowInitialFactsOverride,
-                  goal_facts: flowGoalFactsOverride,
-                  progress_id: sequenceProgressId,
-                  sequence_request_id: sequenceRequestId,
-                }, { timeoutMs: 60000 });
-              } finally {
-                try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
-              }
-            } else {
-
-              const params2 = new URLSearchParams(params.toString());
-              params2.set('best_effort', '1');
-              const retryUrl = buildAttackflowPreviewUrl(params2);
-              data = await fetchJson(retryUrl, { timeoutMs: 180000, networkRetries: 2, retryDelayMs: 350 });
-            }
-            usedBestEffort = true;
-            break;
+            acceptedChainExpansionStages.add(stage);
+            chainExpansionMode = stage;
+            // The sequence endpoint coalesces equal request IDs.  This is a
+            // different, user-approved request, so it must not attach to the
+            // strict-stage result in the worker cache.
+            sequenceRequestId = newSequenceRequestId();
+            appendLoadingLog(stage === 'existing_docker'
+              ? 'Retrying with explicitly approved existing Docker Flow items.'
+              : 'Retrying with explicitly approved Docker additions to the topology.');
+            setStatus(stage === 'existing_docker' ? 'Expanding chain with existing Docker nodes…' : 'Adding Docker nodes to topology…', false);
+            showLoading(stage === 'existing_docker' ? 'Expanding chain…' : 'Updating topology…');
+            continue;
           }
 
           if (isTransientFetchError(err) && retriesRemaining > 0) {
@@ -11017,6 +11200,11 @@
           throw err;
         }
       }
+      if (runSavePreviewResolve) {
+        data = sequenceResponseWithRefreshPayload(data);
+        applySequenceFlowMetadata(data, chainExpansionMode, chainTopologyFingerprint);
+        await applySequenceResponseRefresh(data, scenario);
+      }
       currentChain = Array.isArray(data.chain) ? data.chain.slice() : [];
       currentFlagAssignments = Array.isArray(data.flag_assignments) ? data.flag_assignments.slice() : [];
       currentFlagAssignments = alignAssignmentsToChain(currentChain, currentFlagAssignments);
@@ -11038,6 +11226,8 @@
           const fs = (flowStateByScenario[key] && typeof flowStateByScenario[key] === 'object') ? { ...flowStateByScenario[key] } : {};
           fs.topology_dirty = false;
           fs.topology_dirty_reason = '';
+          fs.chain_expansion = lastChainExpansion;
+          fs.topology_inclusion = lastTopologyInclusion;
           flowStateByScenario[key] = fs;
         }
       } catch (e) { }
@@ -11323,6 +11513,7 @@
               resolveRetriesRemaining -= 1;
               attemptedRetries += 1;
               retryIndex += 1;
+              sequenceRequestId = newSequenceRequestId();
               if (flowSeedInputEl) flowSeedInputEl.value = String((parseInt(flowSeedInputEl.value, 10) || 0) + 1);
               setStatus(`Resolve hit duplicate flags; retrying (${attemptedRetries})…`, true);
               showLoading('Retrying resolve…');
@@ -11332,7 +11523,7 @@
               let data2 = null;
               try {
                 stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
-                data2 = await postSequencePreviewPlan({
+                data2 = sequenceResponseWithRefreshPayload(await postSequencePreviewPlan({
                   scenario,
                   length,
                   dependency_level: dependencyLevel,
@@ -11346,11 +11537,17 @@
                   initial_facts: flowInitialFactsOverride,
                   goal_facts: flowGoalFactsOverride,
                   progress_id: sequenceProgressId,
-                }, { timeoutMs: 60000 });
+                  sequence_request_id: sequenceRequestId,
+                  chain_expansion_mode: chainExpansionMode,
+                  topology_fingerprint: chainTopologyFingerprint || undefined,
+                  expansion_request_id: expansionRequestId,
+                }, { timeoutMs: 60000 }));
               } finally {
                 try { if (stopSequenceProgressPoll) stopSequenceProgressPoll(); } catch (e) { }
               }
 
+              applySequenceFlowMetadata(data2, chainExpansionMode, chainTopologyFingerprint);
+              await applySequenceResponseRefresh(data2, scenario);
               currentChain = Array.isArray(data2.chain) ? data2.chain.slice() : [];
               currentFlagAssignments = Array.isArray(data2.flag_assignments) ? data2.flag_assignments.slice() : [];
               currentFlagAssignments = alignAssignmentsToChain(currentChain, currentFlagAssignments);
@@ -11406,6 +11603,8 @@
             initial_facts: flowInitialFactsOverride,
             goal_facts: flowGoalFactsOverride,
             flow_enabled: !!flowEnabled,
+            chain_expansion: lastChainExpansion,
+            topology_inclusion: lastTopologyInclusion,
           });
         }
       } catch (e) { }

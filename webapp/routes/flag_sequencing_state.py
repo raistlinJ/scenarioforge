@@ -37,12 +37,23 @@ def register(app, *, backend_module: Any) -> None:
             ok, message = backend._clear_flow_state_in_xml(xml_path, scenario_label)
         else:
             try:
+                # Older clients do not know about the expansion audit fields.
+                # Treat omission as "unchanged" so a routine state save cannot
+                # erase the XML record of an explicit topology decision.
+                if isinstance(flow_state, dict):
+                    persisted_state = backend._flow_state_from_xml_path(xml_path, scenario_label)
+                    if isinstance(persisted_state, dict):
+                        flow_state = dict(flow_state)
+                        for key in ('chain_expansion', 'topology_inclusion'):
+                            if key not in flow_state and isinstance(persisted_state.get(key), dict):
+                                flow_state[key] = dict(persisted_state[key])
                 if (
                     isinstance(flow_state, dict)
                     and ('flow_enabled' in flow_state)
                     and (backend._coerce_bool(flow_state.get('flow_enabled')) is False)
                 ):
                     flow_state = dict(flow_state)
+                    flow_state['chain'] = []
                     flow_state['chain_ids'] = []
                     flow_state['length'] = 0
                     flow_state['flag_assignments'] = []
@@ -50,7 +61,19 @@ def register(app, *, backend_module: Any) -> None:
             except Exception:
                 pass
             flow_state = backend._enrich_flow_state_with_artifacts(flow_state)
-            ok, message = backend._update_flow_state_in_xml(xml_path, scenario_label, flow_state)
+            try:
+                plan_payload = backend._load_plan_preview_from_xml(xml_path, scenario_label)
+            except Exception:
+                plan_payload = None
+            if isinstance(plan_payload, dict) and plan_payload:
+                ok, message = backend._persist_plan_preview_and_flow_state_in_xml(
+                    xml_path,
+                    scenario_label,
+                    plan_payload,
+                    flow_state,
+                )
+            else:
+                ok, message = backend._update_flow_state_in_xml(xml_path, scenario_label, flow_state)
         if not ok:
             try:
                 app.logger.warning(

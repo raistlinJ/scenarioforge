@@ -108,7 +108,19 @@ def test_finalize_prepare_preview_persists_duplicate_node_allowance(tmp_path) ->
             flags_enabled=True,
             flow_valid=True,
             flow_errors=[],
-            meta={"xml_path": str(xml_path)},
+            meta={
+                "xml_path": str(xml_path),
+                "flow": {
+                    "chain_expansion": {
+                        "mode": "add_docker",
+                        "added_docker_nodes": 2,
+                        "expansion_request_id": "expand-123",
+                    },
+                    "topology_inclusion": {
+                        "converted_existing_docker_node_ids": ["docker-2"],
+                    },
+                },
+            },
             preview={"hosts": []},
             host_by_id={},
             preview_host_ip4=lambda _host: "",
@@ -136,6 +148,14 @@ def test_finalize_prepare_preview_persists_duplicate_node_allowance(tmp_path) ->
     assert data["persisted_allow_node_duplicates"] is True
     assert data["persisted_chain_ids"] == ["docker-2", "docker-2"]
     assert helpers.captured_flow_meta["allow_node_duplicates"] is True
+    assert helpers.captured_flow_meta["chain_expansion"] == {
+        "mode": "add_docker",
+        "added_docker_nodes": 2,
+        "expansion_request_id": "expand-123",
+    }
+    assert helpers.captured_flow_meta["topology_inclusion"] == {
+        "converted_existing_docker_node_ids": ["docker-2"],
+    }
 
 
 def test_persist_prepare_preview_plan_fails_when_flow_state_write_fails(tmp_path) -> None:
@@ -203,7 +223,19 @@ def test_persist_prepare_preview_plan_writes_duplicate_flow_state_when_allowed(t
 
     result = flow_prepare_preview_helpers.persist_prepare_preview_plan(
         meta={"xml_path": str(xml_path)},
-        preview={"hosts": []},
+        preview={
+            "hosts": [
+                {
+                    "node_id": "docker-2",
+                    "name": "docker-2",
+                    "role": "Docker",
+                    "vulnerabilities": ["test/CVE-0000-0000"],
+                },
+            ],
+            "routers": [],
+            "switches": [],
+            "r2r_links_preview": [],
+        },
         flow_meta={
             "scenario": scenario,
             "chain": [{"id": "docker-2"}, {"id": "docker-2"}],

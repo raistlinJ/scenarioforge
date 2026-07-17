@@ -12611,6 +12611,22 @@ def _canonicalize_flow_state_paths(flow_state: dict[str, Any], *, xml_path: str 
     xml_abs = _abs_path_or_original(xml_path) if xml_path else ''
     xml_dir = os.path.dirname(xml_abs) if xml_abs else ''
 
+    # A disabled or topology-dirty FlowState is deliberately unusable.  Older
+    # XML could retain a populated ``chain`` while clearing only ``chain_ids``;
+    # do not let the reader derive and resurrect that stale sequence.
+    try:
+        flow_disabled = ('flow_enabled' in out) and (not _coerce_bool(out.get('flow_enabled')))
+        topology_dirty = _coerce_bool(out.get('topology_dirty'))
+    except Exception:
+        flow_disabled = False
+        topology_dirty = False
+    if flow_disabled or topology_dirty:
+        out['chain'] = []
+        out['chain_ids'] = []
+        out['length'] = 0
+        out['flag_assignments'] = []
+        out['flags_enabled'] = False
+
     for key in ('source_preview_plan_path', 'preview_plan_path', 'base_preview_plan_path', 'xml_path'):
         if key in out:
             out[key] = _abs_path_or_original(out.get(key), base_dir=xml_dir or None)
@@ -34263,6 +34279,19 @@ def _flow_validate_state_against_preview(
             + '. Regenerate the sequence.'
         )
 
+    required_node_generator_ids = {
+        node_id: str(node.get('flag_node_generator_id') or '').strip()
+        for node_id, node in node_by_id.items()
+        if str(node.get('flag_node_generator_id') or '').strip()
+    }
+    missing_node_generator_nodes = sorted(set(required_node_generator_ids) - set(chain_ids))
+    if missing_node_generator_nodes:
+        return False, (
+            'Flow chain is missing required topology flag-node-generator node(s): '
+            + ', '.join(missing_node_generator_nodes)
+            + '. Regenerate the sequence.'
+        )
+
     assignments = flow_state.get('flag_assignments')
     if not isinstance(assignments, list) or len(assignments) != len(chain_ids):
         return False, 'Flow assignments must contain exactly one generator for every chain node.'
@@ -34291,6 +34320,13 @@ def _flow_validate_state_against_preview(
             )
         if kind not in {'flag-generator', 'flag-node-generator'}:
             return False, f'Generator assignment for node {node_id} has unknown generator type: {kind}.'
+        requested_generator_id = required_node_generator_ids.get(node_id)
+        if requested_generator_id:
+            if kind != 'flag-node-generator' or generator_id != requested_generator_id:
+                return False, (
+                    f'Generator assignment for topology flag-node-generator node {node_id} '
+                    f'must use {requested_generator_id}.'
+                )
     return True, ''
 
 
@@ -34785,6 +34821,98 @@ def _load_plan_preview_from_xml(xml_path: str, scenario_label: str | None) -> di
         return None
 
 
+def _persist_plan_preview_and_flow_state_in_xml(
+    xml_path: str,
+    scenario_label: str | None,
+    plan_payload: dict[str, Any],
+    flow_state: dict[str, Any],
+) -> tuple[bool, str]:
+    """Atomically persist the topology preview and its authoritative FlowState.
+
+    A sequence has no useful intermediate state where PlanPreview describes one
+    chain and FlagSequencing/FlowState describes another.  This companion to
+    the individual update helpers validates both objects, mirrors FlowState in
+    PlanPreview metadata, and replaces the XML only once.
+    """
+    xml_path = _abs_path_or_original(xml_path)
+    if not xml_path or not os.path.exists(xml_path):
+        return False, 'xml_path not found'
+    if not isinstance(plan_payload, dict) or not plan_payload:
+        return False, 'plan payload empty'
+    if not isinstance(flow_state, dict) or not flow_state:
+        return False, 'flow_state empty'
+
+    try:
+        plan_payload = _canonicalize_plan_payload_paths(dict(plan_payload), xml_path=xml_path)
+        flow_state = _backfill_flow_state_inject_files_from_catalog(flow_state)
+        flow_state = _canonicalize_flow_state_paths(flow_state, xml_path=xml_path)
+        flow_state = _refresh_loaded_flow_state_assignments(flow_state, scenario_label=scenario_label) or flow_state
+        if _flow_state_has_disallowed_duplicate_nodes(flow_state):
+            return False, 'Flow chain reuses nodes while duplicates are disabled. Regenerate or explicitly enable duplicates.'
+        full_preview = plan_payload.get('full_preview') if isinstance(plan_payload.get('full_preview'), dict) else None
+        if not isinstance(full_preview, dict):
+            return False, 'PlanPreview has no full_preview for Flow validation.'
+        valid, validation_error = _flow_validate_state_against_preview(flow_state, full_preview)
+        if not valid:
+            return False, validation_error
+    except Exception as exc:
+        return False, f'failed to prepare synchronized Flow persistence: {exc}'
+
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+    except Exception as exc:
+        return False, f'failed to parse xml: {exc}'
+
+    scenario_norm = _normalize_scenario_label(scenario_label or '')
+    se_target = None
+    try:
+        if root.tag == 'ScenarioEditor':
+            se_target = root
+        elif root.tag == 'Scenario':
+            se_target = root.find('ScenarioEditor')
+            if se_target is None:
+                se_target = ET.SubElement(root, 'ScenarioEditor')
+        elif root.tag == 'Scenarios':
+            for scen_el in root.findall('Scenario'):
+                name = str(scen_el.get('name') or '').strip()
+                if scenario_norm and _normalize_scenario_label(name) != scenario_norm:
+                    continue
+                se_target = scen_el.find('ScenarioEditor')
+                if se_target is None:
+                    se_target = ET.SubElement(scen_el, 'ScenarioEditor')
+                break
+    except Exception:
+        se_target = None
+    if se_target is None:
+        return False, 'ScenarioEditor not found'
+
+    try:
+        metadata = plan_payload.get('metadata') if isinstance(plan_payload.get('metadata'), dict) else {}
+        metadata = dict(metadata or {})
+        metadata['flow'] = flow_state
+        next_payload = dict(plan_payload)
+        next_payload['metadata'] = metadata
+
+        preview_el = se_target.find('PlanPreview')
+        if preview_el is None:
+            preview_el = ET.SubElement(se_target, 'PlanPreview')
+        preview_el.text = json.dumps(next_payload, separators=(',', ':'), ensure_ascii=False)
+
+        fs_el = se_target.find('FlagSequencing')
+        if fs_el is None:
+            fs_el = ET.SubElement(se_target, 'FlagSequencing')
+        for child in list(fs_el):
+            if child.tag == 'FlowState':
+                fs_el.remove(child)
+        state_el = ET.SubElement(fs_el, 'FlowState')
+        state_el.text = json.dumps(flow_state, separators=(',', ':'), ensure_ascii=False)
+        _write_xml_tree_atomic(tree, xml_path)
+        return True, 'ok'
+    except Exception as exc:
+        return False, f'failed to persist synchronized PlanPreview and FlowState: {exc}'
+
+
 def _load_preview_payload_from_path(path: str, scenario_label: str | None = None) -> dict[str, Any] | None:
     """Load a preview payload from embedded XML PlanPreview only.
 
@@ -34979,6 +35107,23 @@ def _parse_scenario_editor(se):
                     scen["flow_state"] = json.loads(raw)
                 except Exception:
                     scen["flow_state"] = {"raw": str(raw)}
+            # A confirmed Flow capacity expansion changes the topology
+            # specification.  Preserve its audit record across topology-page
+            # saves so a retry carrying the same request id cannot append the
+            # same Docker count twice.
+            expansions: list[dict[str, Any]] = []
+            for expansion_el in fs_el.findall("FlowExpansion"):
+                expansion_raw = (expansion_el.text or "").strip()
+                if not expansion_raw:
+                    continue
+                try:
+                    expansion = json.loads(expansion_raw)
+                except Exception:
+                    continue
+                if isinstance(expansion, dict):
+                    expansions.append(expansion)
+            if expansions:
+                scen["flow_expansion"] = expansions
     except Exception:
         pass
     # Plan preview payload (full preview + plan/breakdowns metadata) for UI round-trip.
@@ -35450,10 +35595,20 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
         # Flag Sequencing flow state (resolved values, chain selections).
         try:
             flow_state = scen.get('flow_state')
-            if isinstance(flow_state, dict) and flow_state:
+            flow_expansion = scen.get('flow_expansion')
+            expansion_items = (
+                [item for item in flow_expansion if isinstance(item, dict)]
+                if isinstance(flow_expansion, list)
+                else ([flow_expansion] if isinstance(flow_expansion, dict) else [])
+            )
+            if (isinstance(flow_state, dict) and flow_state) or expansion_items:
                 fs_el = ET.SubElement(se, "FlagSequencing")
-                st_el = ET.SubElement(fs_el, "FlowState")
-                st_el.text = json.dumps(flow_state, separators=(',', ':'), ensure_ascii=False)
+                if isinstance(flow_state, dict) and flow_state:
+                    st_el = ET.SubElement(fs_el, "FlowState")
+                    st_el.text = json.dumps(flow_state, separators=(',', ':'), ensure_ascii=False)
+                for expansion in expansion_items:
+                    expansion_el = ET.SubElement(fs_el, "FlowExpansion")
+                    expansion_el.text = json.dumps(expansion, separators=(',', ':'), ensure_ascii=False)
         except Exception:
             pass
 
@@ -37044,9 +37199,15 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         },
     }
     try:
-        _update_plan_preview_in_xml(xml_path, scenario_name or scenario, plan_payload)
         if isinstance(flow_meta, dict) and flow_meta:
-            _update_flow_state_in_xml(xml_path, scenario_name or scenario, flow_meta)
+            _persist_plan_preview_and_flow_state_in_xml(
+                xml_path,
+                scenario_name or scenario,
+                plan_payload,
+                flow_meta,
+            )
+        else:
+            _update_plan_preview_in_xml(xml_path, scenario_name or scenario, plan_payload)
     except Exception:
         pass
     if persist_plan_file:
@@ -37061,6 +37222,259 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         'full_preview': full_prev,
         'plan': plan,
     }
+
+
+def _flow_add_docker_nodes_and_rebuild_preview_in_xml(
+    *,
+    xml_path: str,
+    scenario_label: str | None,
+    additional_docker_nodes: int,
+    expansion_request_id: str = '',
+    source_topology_fingerprint: str = '',
+    seed: int | None = None,
+) -> tuple[bool, dict[str, Any] | None, str]:
+    """Confirmably expand the Docker topology and rebuild its embedded preview.
+
+    This is intentionally not a sequencing fallback.  Its caller invokes it
+    only after the UI has obtained explicit user consent.  The Node Information
+    Count row, rebuilt PlanPreview, and expansion audit record are written as
+    one XML update; if planning fails, the original XML remains untouched.
+    """
+    xml_abs = _abs_path_or_original(xml_path)
+    if not xml_abs or not os.path.exists(xml_abs):
+        return False, None, 'xml_path not found'
+    try:
+        requested_count = max(0, int(additional_docker_nodes or 0))
+    except Exception:
+        requested_count = 0
+    if requested_count <= 0:
+        return False, None, 'additional Docker node count must be positive'
+
+    scenario_norm = _normalize_scenario_label(scenario_label or '')
+    request_id = str(expansion_request_id or '').strip()
+    try:
+        tree = ET.parse(xml_abs)
+        root = tree.getroot()
+    except Exception as exc:
+        return False, None, f'failed to parse xml: {exc}'
+
+    scenario_el = None
+    editor_el = None
+    try:
+        if root.tag == 'ScenarioEditor':
+            editor_el = root
+        elif root.tag == 'Scenario':
+            scenario_el = root
+            editor_el = root.find('ScenarioEditor')
+        elif root.tag == 'Scenarios':
+            for candidate in root.findall('Scenario'):
+                candidate_name = str(candidate.get('name') or '').strip()
+                if scenario_norm and _normalize_scenario_label(candidate_name) != scenario_norm:
+                    continue
+                scenario_el = candidate
+                editor_el = candidate.find('ScenarioEditor')
+                break
+    except Exception:
+        scenario_el = None
+        editor_el = None
+
+    if editor_el is None:
+        return False, None, 'ScenarioEditor not found'
+    scenario_name = str((scenario_el.get('name') if scenario_el is not None else '') or scenario_label or '').strip()
+    if not scenario_name:
+        scenario_name = scenario_label or ''
+
+    # A dropped browser response must not double-append a Count row when the
+    # same confirmed request is retried.  The audit record is part of the XML
+    # specification and survives future topology saves.
+    flag_seq_el = editor_el.find('FlagSequencing')
+    if request_id and flag_seq_el is not None:
+        for expansion_el in flag_seq_el.findall('FlowExpansion'):
+            try:
+                previous = json.loads((expansion_el.text or '').strip())
+            except Exception:
+                previous = None
+            if not isinstance(previous, dict):
+                continue
+            if str(previous.get('request_id') or '').strip() != request_id:
+                continue
+            existing_payload = _load_plan_preview_from_xml(xml_abs, scenario_name or scenario_label)
+            if not isinstance(existing_payload, dict) or not isinstance(existing_payload.get('full_preview'), dict):
+                return False, None, 'confirmed Docker expansion exists but its rebuilt PlanPreview is missing'
+            return True, {
+                'xml_path': xml_abs,
+                'scenario': scenario_name or scenario_label,
+                'full_preview': existing_payload.get('full_preview'),
+                'metadata': existing_payload.get('metadata') if isinstance(existing_payload.get('metadata'), dict) else {},
+                'plan_payload': existing_payload,
+                'added_docker_nodes': int(previous.get('added_docker_nodes') or requested_count),
+                'expansion': previous,
+                'already_applied': True,
+            }, 'ok'
+
+    old_payload = _load_plan_preview_from_xml(xml_abs, scenario_name or scenario_label)
+    old_metadata = old_payload.get('metadata') if isinstance(old_payload, dict) and isinstance(old_payload.get('metadata'), dict) else {}
+    old_full_preview = old_payload.get('full_preview') if isinstance(old_payload, dict) and isinstance(old_payload.get('full_preview'), dict) else {}
+
+    node_section = editor_el.find("section[@name='Node Information']")
+    if node_section is None:
+        node_section = ET.Element('section', name='Node Information')
+        # Keep the source specification in the same conventional position.
+        insert_at = 0
+        for idx, child in enumerate(list(editor_el)):
+            if child.tag == 'section':
+                insert_at = idx
+                break
+            insert_at = idx + 1
+        editor_el.insert(insert_at, node_section)
+
+    docker_item = ET.SubElement(node_section, 'item')
+    docker_item.set('selected', 'Docker')
+    docker_item.set('factor', '1.000')
+    docker_item.set('v_metric', 'Count')
+    docker_item.set('v_count', str(requested_count))
+
+    def _safe_int(raw: Any, default: int = 0) -> int:
+        try:
+            return int(str(raw).strip())
+        except Exception:
+            return default
+
+    count_items = [
+        item for item in node_section.findall('item')
+        if str(item.get('v_metric') or '').strip().lower() == 'count'
+    ]
+    weight_items = [item for item in node_section.findall('item') if item not in count_items]
+    additive_count = sum(max(0, _safe_int(item.get('v_count'), 0)) for item in count_items)
+    weight_sum = 0.0
+    for item in weight_items:
+        try:
+            weight_sum += float(str(item.get('factor') or '0').strip())
+        except Exception:
+            continue
+    node_section.set('additive_nodes', str(additive_count))
+    node_section.set('count_rows', str(len(count_items)))
+    node_section.set('weight_rows', str(len(weight_items)))
+    node_section.set('weight_sum', f'{weight_sum:.3f}')
+    node_section.set('normalized_weight_sum', '1.000' if weight_items else '0.000')
+    base_count_raw = (
+        (scenario_el.get('density_count') if scenario_el is not None else None)
+        or node_section.get('density_count')
+        or node_section.get('base_nodes')
+        or node_section.get('total_nodes')
+    )
+    try:
+        base_count = max(0, int(str(base_count_raw).strip())) if base_count_raw not in (None, '') else None
+    except Exception:
+        base_count = None
+    if base_count is not None:
+        node_section.set('combined_nodes', str(base_count + additive_count))
+
+    if flag_seq_el is None:
+        flag_seq_el = ET.SubElement(editor_el, 'FlagSequencing')
+    expansion = {
+        'mode': 'add_docker',
+        'request_id': request_id,
+        'added_docker_nodes': requested_count,
+        'scenario': scenario_name or scenario_label,
+        'accepted_at': _iso_now(),
+    }
+    if str(source_topology_fingerprint or '').strip():
+        expansion['source_topology_fingerprint'] = str(source_topology_fingerprint).strip()
+    expansion_el = ET.SubElement(flag_seq_el, 'FlowExpansion')
+    expansion_el.text = json.dumps(expansion, separators=(',', ':'), ensure_ascii=False)
+    # The topology is changing.  Do not leave an old chain claiming to be the
+    # sequence for the newly materialized host list while the caller computes
+    # the new, confirmed chain.
+    for child in list(flag_seq_el):
+        if child.tag == 'FlowState':
+            flag_seq_el.remove(child)
+
+    effective_seed = seed
+    if effective_seed is None:
+        try:
+            effective_seed = old_metadata.get('seed') if isinstance(old_metadata, dict) else None
+            if effective_seed is None and isinstance(old_full_preview, dict):
+                effective_seed = old_full_preview.get('seed')
+        except Exception:
+            effective_seed = None
+    try:
+        effective_seed = int(effective_seed) if effective_seed is not None else None
+    except Exception:
+        effective_seed = None
+    if effective_seed is None:
+        try:
+            from scenarioforge.planning.plan_cache import hash_xml_file
+            effective_seed = _derive_default_seed(hash_xml_file(xml_abs))
+        except Exception:
+            effective_seed = None
+
+    tmp_path = ''
+    try:
+        target_dir = os.path.dirname(xml_abs) or '.'
+        fd, tmp_path = tempfile.mkstemp(prefix='.flow-expand-', suffix='.xml', dir=target_dir)
+        os.close(fd)
+        tree.write(tmp_path, encoding='utf-8', xml_declaration=True)
+
+        from scenarioforge.planning.orchestrator import compute_full_plan
+
+        plan = compute_full_plan(tmp_path, scenario=scenario_name or scenario_label, seed=effective_seed, include_breakdowns=True)
+        try:
+            raw_hitl = parse_hitl_info(tmp_path, scenario_name or scenario_label)
+        except Exception:
+            raw_hitl = {'enabled': False, 'interfaces': []}
+        try:
+            hitl_config = _sanitize_hitl_config(raw_hitl, scenario_name or scenario_label, os.path.basename(xml_abs))
+        except Exception:
+            hitl_config = {'enabled': False, 'interfaces': []}
+        full_preview = _build_full_preview_from_plan(plan, effective_seed, [], [], hitl_config=hitl_config)
+        try:
+            _apply_hitl_config_to_full_preview(full_preview, hitl_config, scenario_name or scenario_label)
+        except Exception:
+            pass
+    except Exception as exc:
+        return False, None, f'failed to rebuild preview after adding Docker nodes: {exc}'
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    metadata = dict(old_metadata or {}) if isinstance(old_metadata, dict) else {}
+    metadata.pop('flow', None)
+    metadata['xml_path'] = xml_abs
+    metadata['scenario'] = scenario_name or scenario_label
+    metadata['seed'] = full_preview.get('seed') if isinstance(full_preview, dict) else effective_seed
+    metadata['origin'] = 'planner'
+    metadata['updated_at'] = _iso_now()
+    metadata['topology_expansion'] = dict(expansion)
+    plan_payload = {'full_preview': full_preview, 'metadata': metadata}
+
+    try:
+        plan_el = editor_el.find('PlanPreview')
+        if plan_el is None:
+            plan_el = ET.SubElement(editor_el, 'PlanPreview')
+        plan_el.text = json.dumps(plan_payload, separators=(',', ':'), ensure_ascii=False)
+        if scenario_el is not None:
+            hosts_count = len(full_preview.get('hosts') or []) if isinstance(full_preview, dict) else 0
+            routers_count = len(full_preview.get('routers') or []) if isinstance(full_preview, dict) else 0
+            scenario_el.set('scenario_total_nodes', str(hosts_count + routers_count))
+        _write_xml_tree_atomic(tree, xml_abs)
+    except Exception as exc:
+        return False, None, f'failed to persist confirmed Docker expansion: {exc}'
+
+    return True, {
+        'xml_path': xml_abs,
+        'scenario': scenario_name or scenario_label,
+        'full_preview': full_preview,
+        'metadata': metadata,
+        'plan_payload': plan_payload,
+        'plan': plan,
+        'added_docker_nodes': requested_count,
+        'expansion': expansion,
+        'already_applied': False,
+    }, 'ok'
 
 def _plan_summary_from_full_preview(full_prev: dict) -> dict:
     try:

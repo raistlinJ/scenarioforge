@@ -97,14 +97,27 @@ def register(app, *, backend_module: Any) -> None:
             length = len(preset_steps)
         length = max(1, min(length, 50))
         requested_length = length
-        best_effort = bool(payload_in.get('best_effort'))
+        # Flow expansion is deliberately staged.  No generic Docker host is
+        # selected or added unless the browser has made a separate, explicit
+        # confirmed request for that stage.
+        expansion_mode_raw = str(payload_in.get('chain_expansion_mode') or 'strict').strip().lower()
+        expansion_mode_aliases = {
+            '': 'strict',
+            'strict': 'strict',
+            'topology_only': 'strict',
+            'existing_docker': 'existing_docker',
+            'add_docker': 'add_docker',
+        }
+        expansion_mode = expansion_mode_aliases.get(expansion_mode_raw, '')
+        expansion_request_id = str(payload_in.get('expansion_request_id') or '').strip()
+        expected_topology_fingerprint = str(payload_in.get('topology_fingerprint') or '').strip()
         dependency_level = backend._flow_normalize_dependency_level(payload_in.get('dependency_level'))
 
         _flow_progress(
             f"Sequence start: scenario={scenario_norm or scenario_label or '-'} length={length} "
             f"dependency={dependency_level}/5 preset={preset or 'random'} "
             f"duplicates={'on' if allow_node_duplicates else 'off'} "
-            f"required_vulns=1 include_pivots={int(include_all_topology_pivots)}"
+            f"expansion={expansion_mode_raw or 'strict'} include_pivots={int(include_all_topology_pivots)}"
         )
 
         flow_seed_param: int | None = None
@@ -124,6 +137,12 @@ def register(app, *, backend_module: Any) -> None:
             failure_payload = {'ok': False, 'error': message, 'validation_error': True}
             failure_payload.update(extra)
             return jsonify(failure_payload)
+
+        if not expansion_mode:
+            return _validation_failure(
+                'Unknown Flow expansion mode. Generate again from the Flag Sequencing page.',
+                requested_mode=expansion_mode_raw,
+            )
 
         _flow_progress('Phase: locating preview plan')
         preview_plan_path = str(payload_in.get('preview_plan') or '').strip() or None
@@ -193,85 +212,336 @@ def register(app, *, backend_module: Any) -> None:
             pass
 
         _flow_progress('Phase: building topology graph')
-        nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
-        stats = backend._flow_compose_docker_stats(nodes)
-        required_vulnerability_count = 0
-        if not preset_steps:
-            required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
-            if length < required_vulnerability_count:
-                length = required_vulnerability_count
-                requested_length = length
-                _flow_progress(f'Adjusted requested length to required vulnerability count={required_vulnerability_count}')
+
+        def _topology_fingerprint(value: Any) -> str:
+            """Hash structural preview data, excluding cached Flow metadata."""
+            try:
+                current = value if isinstance(value, dict) else {}
+                structural = {
+                    'hosts': current.get('hosts') or [],
+                    'routers': current.get('routers') or [],
+                    'switches': current.get('switches') or [],
+                    'switches_detail': current.get('switches_detail') or [],
+                    'host_router_map': current.get('host_router_map') or {},
+                    'r2r_links_preview': current.get('r2r_links_preview') or [],
+                    'vulnerabilities_by_node': current.get('vulnerabilities_by_node') or {},
+                    'flag_node_generators_by_node': current.get('flag_node_generators_by_node') or {},
+                }
+                encoded = json.dumps(structural, sort_keys=True, separators=(',', ':'), default=str)
+                return hashlib.sha256(encoded.encode('utf-8', errors='ignore')).hexdigest()
+            except Exception:
+                return ''
+
+        def _build_graph_and_requirements(current_preview: dict[str, Any]):
+            current_nodes, current_links, current_adj = backend._build_topology_graph_from_preview_plan(current_preview)
+            current_stats = backend._flow_compose_docker_stats(current_nodes)
+            required_nodes, required_info = backend._flow_expand_chain_for_topology_requirements(
+                current_nodes,
+                [],
+                current_preview,
+                include_all_topology_vulns=True,
+                include_all_topology_pivots=include_all_topology_pivots,
+                pivot_context=payload,
+            )
+            return current_nodes, current_links, current_adj, current_stats, required_nodes, required_info
+
+        nodes, _links, adj, stats, required_chain_nodes, topology_inclusion_info = _build_graph_and_requirements(preview)
+        topology_fingerprint = _topology_fingerprint(preview)
+        if expansion_mode in {'existing_docker', 'add_docker'} and not expected_topology_fingerprint:
+            return _validation_failure(
+                'Flow expansion requires a current confirmation from the Flag Sequencing page. Generate again and confirm the offered step.',
+                confirmation_required=True,
+                expansion_stage=expansion_mode,
+                chain_expansion_offer={
+                    'stage': expansion_mode,
+                    'topology_fingerprint': topology_fingerprint,
+                    'topology_change_required': expansion_mode == 'add_docker',
+                },
+                topology_fingerprint=topology_fingerprint,
+                stats=stats,
+            )
+        if expansion_mode == 'add_docker' and not expansion_request_id:
+            return _validation_failure(
+                'Adding Docker nodes requires a confirmed expansion request. Generate again and confirm the offered step.',
+                confirmation_required=True,
+                expansion_stage='add_docker',
+                chain_expansion_offer={
+                    'stage': 'add_docker',
+                    'topology_fingerprint': topology_fingerprint,
+                    'topology_change_required': True,
+                },
+                topology_fingerprint=topology_fingerprint,
+                stats=stats,
+            )
+        if expected_topology_fingerprint and expected_topology_fingerprint != topology_fingerprint:
+            return _validation_failure(
+                'Topology changed after the Flow expansion confirmation. Review the new topology and Generate again.',
+                stale_confirmation=True,
+                topology_fingerprint=topology_fingerprint,
+                stats=stats,
+            )
+
+        required_specified_count = len({
+            str(node.get('id') or '').strip()
+            for node in (required_chain_nodes or [])
+            if isinstance(node, dict) and str(node.get('id') or '').strip()
+        })
+        if not preset_steps and length < required_specified_count:
+            length = required_specified_count
+            requested_length = length
+            _flow_progress(
+                'Adjusted requested length to mandatory topology items '
+                f'(vulnerabilities / flag-node-generators / pivots)={required_specified_count}'
+            )
         try:
             _flow_progress(
                 f"Topology graph ready: nodes={len(nodes or [])} links={len(_links or [])} "
                 f"eligible={stats.get('eligible_total', 'n/a')} vuln={stats.get('vuln_total', 'n/a')} "
+                f"topology_fng={stats.get('topology_flag_node_generator_total', 'n/a')} "
                 f"docker_nonvuln={stats.get('docker_nonvuln_total', 'n/a')}"
             )
         except Exception:
             pass
 
-        _flow_progress('Phase: selecting chain nodes')
-        if preset_steps:
-            chain_nodes = backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
-        else:
-            seed_val = backend._get_flow_seed(preview, flow_seed_param)
-            chain_nodes = backend._pick_flow_nonvulnerability_docker_nodes(
-                nodes,
-                adj,
-                length=max(0, length - required_vulnerability_count),
-                allow_node_duplicates=allow_node_duplicates,
-                seed=seed_val,
-            )
-
-        _flow_progress(f'Selected chain nodes: count={len(chain_nodes or [])} ids={_chain_ids(chain_nodes) or "-"}')
-
         warning: str | None = None
-        topology_inclusion_info: dict[str, Any] = {
-            'requested': {
-                'required_vulnerability_nodes': True,
-                'include_all_topology_pivots': bool(include_all_topology_pivots),
-            },
-            'added_node_ids': [],
-            'added_vuln_node_ids': [],
-            'added_pivot_node_ids': [],
-            'effective_length': len(chain_nodes or []),
+        chain_expansion: dict[str, Any] = {
+            'mode': 'preset' if preset_steps else 'strict',
+            'requested_mode': expansion_mode,
+            'topology_changed': False,
+            'topology_fingerprint': topology_fingerprint,
+            'strict_node_ids': [
+                str(node.get('id') or '').strip()
+                for node in (required_chain_nodes or [])
+                if isinstance(node, dict) and str(node.get('id') or '').strip()
+            ],
+            'strict_vulnerability_node_ids': list(topology_inclusion_info.get('added_vuln_node_ids') or []),
+            'strict_flag_node_generator_node_ids': list(topology_inclusion_info.get('added_flag_node_generator_node_ids') or []),
+            'strict_pivot_node_ids': list(topology_inclusion_info.get('added_pivot_node_ids') or []),
+            'converted_existing_docker_node_ids': [],
+            'added_docker_nodes': 0,
         }
 
-        nonvulnerability_target = max(0, length - required_vulnerability_count)
-        if (not preset_steps) and (not allow_node_duplicates) and len(chain_nodes) < nonvulnerability_target:
-            if best_effort:
-                warning = f'Only {len(chain_nodes)} eligible non-vulnerability Docker nodes found; using a shorter chain.'
-                length = len(chain_nodes) + required_vulnerability_count
-            else:
+        if preset_steps:
+            _flow_progress('Phase: selecting preset chain nodes')
+            chain_nodes = backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
+            if include_all_topology_pivots:
+                topology_inclusion_info['ignored'] = 'preset'
+        else:
+            required_ids = {
+                str(node.get('id') or '').strip()
+                for node in (required_chain_nodes or [])
+                if isinstance(node, dict) and str(node.get('id') or '').strip()
+            }
+            pivot_ids = {
+                str(value or '').strip()
+                for value in (topology_inclusion_info.get('added_pivot_node_ids') or [])
+                if str(value or '').strip()
+            }
+
+            def _working_node(node: dict[str, Any], *, allow_generic_generator: bool = False) -> dict[str, Any]:
+                result = dict(node)
+                if allow_generic_generator:
+                    # This is set only for an explicitly approved existing
+                    # Docker item (or an explicitly configured pivot).  It
+                    # lets the assignment resolver choose a node generator
+                    # while preserving exact bindings for topology FNG nodes.
+                    result['_topology_flag_node_generators_configured'] = False
+                    result.pop('flag_node_generator_id', None)
+                    result.pop('flag_node_generator_name', None)
+                return result
+
+            strict_chain: list[dict[str, Any]] = []
+            for node in (required_chain_nodes or []):
+                if not isinstance(node, dict):
+                    continue
+                node_id = str(node.get('id') or '').strip()
+                allow_pivot_generator = bool(
+                    node_id in pivot_ids
+                    and backend._flow_node_is_docker_role(node)
+                    and not backend._flow_node_is_vuln(node)
+                    and not str(node.get('flag_node_generator_id') or '').strip()
+                )
+                strict_chain.append(_working_node(node, allow_generic_generator=allow_pivot_generator))
+
+            generic_candidates = [
+                _working_node(node, allow_generic_generator=True)
+                for node in (nodes or [])
+                if isinstance(node, dict)
+                and str(node.get('id') or '').strip() not in required_ids
+                and backend._flow_node_is_docker_role(node)
+                and not backend._flow_node_is_vuln(node)
+            ]
+            generic_target = max(0, length - len(strict_chain))
+            available_existing_docker = len(generic_candidates)
+
+            def _generic_docker_shortfall() -> int:
+                if generic_target <= 0:
+                    return 0
+                # Explicit duplicate permission can reuse one eligible host,
+                # but it cannot fabricate an initial eligible Docker host.
+                if allow_node_duplicates:
+                    return 0 if available_existing_docker > 0 else 1
+                return max(0, generic_target - available_existing_docker)
+
+            def _expansion_offer(stage: str, *, additional_needed: int) -> Any:
                 return _validation_failure(
-                    'Not enough eligible non-vulnerability Docker nodes to build the requested chain.',
-                    available=len(chain_nodes),
-                    requested_length=requested_length,
+                    (
+                        'The specified vulnerabilities and flag-node-generators do not fill the requested Flow chain.'
+                        if stage == 'existing_docker'
+                        else 'The approved existing Docker nodes are not enough to complete the requested Flow chain.'
+                    ),
+                    confirmation_required=True,
+                    expansion_stage=stage,
+                    chain_expansion_offer={
+                        'stage': stage,
+                        'requested_length': requested_length,
+                        'effective_required_length': length,
+                        'strict_node_count': len(strict_chain),
+                        'strict_node_ids': list(chain_expansion.get('strict_node_ids') or []),
+                        'existing_docker_available': available_existing_docker,
+                        'additional_items_needed': max(0, int(additional_needed or 0)),
+                        'topology_fingerprint': topology_fingerprint,
+                        'topology_change_required': stage == 'add_docker',
+                    },
                     stats=stats,
+                    requested_length=requested_length,
+                    available=available_existing_docker,
                 )
 
-        if not preset_steps:
-            _flow_progress('Phase: adding required vulnerability nodes')
-            chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
-                nodes,
-                chain_nodes,
-                preview,
-                include_all_topology_vulns=True,
-                include_all_topology_pivots=include_all_topology_pivots,
-                pivot_context=payload,
-            )
-            length = max(length, len(chain_nodes or []))
-            try:
-                _flow_progress(
-                    'Topology inclusion complete: '
-                    f"effective_length={topology_inclusion_info.get('effective_length', len(chain_nodes or []))} "
-                    f"added={','.join(topology_inclusion_info.get('added_node_ids') or []) or '-'}"
+            # Stage 1 is strict: the chain contains only specified topology
+            # items.  A longer requested chain pauses for confirmation rather
+            # than selecting ordinary Docker hosts behind the user's back.
+            if expansion_mode == 'strict' and generic_target > 0:
+                return _expansion_offer('existing_docker', additional_needed=generic_target)
+
+            if expansion_mode == 'existing_docker' and _generic_docker_shortfall() > 0:
+                return _expansion_offer(
+                    'add_docker',
+                    additional_needed=_generic_docker_shortfall(),
                 )
-            except Exception:
-                pass
-        elif preset_steps and include_all_topology_pivots:
-            topology_inclusion_info['ignored'] = 'preset'
+
+            if expansion_mode == 'add_docker' and _generic_docker_shortfall() > 0:
+                shortfall = _generic_docker_shortfall()
+                _flow_progress(f'Phase: applying confirmed Docker topology expansion (+{shortfall})')
+                added_ok, added_result, added_error = backend._flow_add_docker_nodes_and_rebuild_preview_in_xml(
+                    xml_path=preview_plan_path,
+                    scenario_label=scenario_label or scenario_norm,
+                    additional_docker_nodes=shortfall,
+                    expansion_request_id=expansion_request_id,
+                    source_topology_fingerprint=topology_fingerprint,
+                    seed=backend._get_flow_seed(preview, flow_seed_param),
+                )
+                if not added_ok or not isinstance(added_result, dict):
+                    return _validation_failure(
+                        f'Confirmed Docker topology expansion could not be applied: {added_error}',
+                        stats=stats,
+                    )
+                rebuilt_preview = added_result.get('full_preview')
+                if not isinstance(rebuilt_preview, dict):
+                    return _validation_failure('Confirmed Docker topology expansion did not produce a valid preview plan.', stats=stats)
+                preview = rebuilt_preview
+                payload = added_result.get('plan_payload') if isinstance(added_result.get('plan_payload'), dict) else {
+                    'full_preview': preview,
+                    'metadata': added_result.get('metadata') if isinstance(added_result.get('metadata'), dict) else {},
+                }
+                nodes, _links, adj, stats, required_chain_nodes, topology_inclusion_info = _build_graph_and_requirements(preview)
+                topology_fingerprint = _topology_fingerprint(preview)
+                required_ids = {
+                    str(node.get('id') or '').strip()
+                    for node in (required_chain_nodes or [])
+                    if isinstance(node, dict) and str(node.get('id') or '').strip()
+                }
+                pivot_ids = {
+                    str(value or '').strip()
+                    for value in (topology_inclusion_info.get('added_pivot_node_ids') or [])
+                    if str(value or '').strip()
+                }
+                strict_chain = []
+                for node in (required_chain_nodes or []):
+                    if not isinstance(node, dict):
+                        continue
+                    node_id = str(node.get('id') or '').strip()
+                    strict_chain.append(_working_node(
+                        node,
+                        allow_generic_generator=bool(
+                            node_id in pivot_ids
+                            and backend._flow_node_is_docker_role(node)
+                            and not backend._flow_node_is_vuln(node)
+                            and not str(node.get('flag_node_generator_id') or '').strip()
+                        ),
+                    ))
+                generic_candidates = [
+                    _working_node(node, allow_generic_generator=True)
+                    for node in (nodes or [])
+                    if isinstance(node, dict)
+                    and str(node.get('id') or '').strip() not in required_ids
+                    and backend._flow_node_is_docker_role(node)
+                    and not backend._flow_node_is_vuln(node)
+                ]
+                generic_target = max(0, length - len(strict_chain))
+                available_existing_docker = len(generic_candidates)
+                if _generic_docker_shortfall() > 0:
+                    return _validation_failure(
+                        'Confirmed Docker topology expansion completed, but the rebuilt topology still has too few Docker nodes. Review the topology and Generate again.',
+                        stats=stats,
+                        requested_length=requested_length,
+                        available=available_existing_docker,
+                    )
+                chain_expansion.update({
+                    'mode': 'add_docker',
+                    'topology_changed': True,
+                    'topology_fingerprint': topology_fingerprint,
+                    'added_docker_nodes': int(added_result.get('added_docker_nodes') or shortfall),
+                    'expansion_request_id': expansion_request_id,
+                    'expansion': added_result.get('expansion') if isinstance(added_result.get('expansion'), dict) else {},
+                    'already_applied': bool(added_result.get('already_applied')),
+                })
+
+            _flow_progress('Phase: selecting approved Flow chain nodes')
+            selected_generic: list[dict[str, Any]] = []
+            if generic_target > 0:
+                seed_val = backend._get_flow_seed(preview, flow_seed_param)
+                selected_generic = backend._pick_flow_nonvulnerability_docker_nodes(
+                    generic_candidates,
+                    adj,
+                    length=generic_target,
+                    allow_node_duplicates=allow_node_duplicates,
+                    seed=seed_val,
+                )
+            if len(selected_generic) < generic_target:
+                # This protects against graph/selection edge cases without
+                # silently falling back to a shorter chain.
+                if expansion_mode == 'strict':
+                    return _expansion_offer('existing_docker', additional_needed=generic_target)
+                if expansion_mode == 'existing_docker':
+                    return _expansion_offer(
+                        'add_docker',
+                        additional_needed=(1 if allow_node_duplicates and not selected_generic else max(0, generic_target - len(selected_generic))),
+                    )
+                return _validation_failure(
+                    'The confirmed Docker topology expansion completed, but no eligible Docker Flow item could be selected. Check that an enabled flag-node-generator is available, then Generate again.',
+                    stats=stats,
+                    requested_length=requested_length,
+                    available=len(selected_generic),
+                )
+            chain_nodes = list(strict_chain) + list(selected_generic or [])
+            converted_ids = [
+                str(node.get('id') or '').strip()
+                for node in (selected_generic or [])
+                if isinstance(node, dict) and str(node.get('id') or '').strip()
+            ]
+            if converted_ids:
+                topology_inclusion_info = dict(topology_inclusion_info or {})
+                topology_inclusion_info['converted_existing_docker_node_ids'] = list(converted_ids)
+                topology_inclusion_info['selected_existing_docker_node_ids'] = list(converted_ids)
+                chain_expansion['converted_existing_docker_node_ids'] = list(converted_ids)
+                if expansion_mode == 'existing_docker':
+                    chain_expansion['mode'] = 'existing_docker'
+                elif expansion_mode == 'add_docker':
+                    chain_expansion['mode'] = 'add_docker'
+            topology_inclusion_info['effective_length'] = len(chain_nodes or [])
+
+        _flow_progress(f'Selected chain nodes: count={len(chain_nodes or [])} ids={_chain_ids(chain_nodes) or "-"}')
 
         if not chain_nodes:
             return _validation_failure(
@@ -516,6 +786,7 @@ def register(app, *, backend_module: Any) -> None:
                 'allow_node_duplicates': bool(allow_node_duplicates),
                 'include_all_topology_pivots': bool(include_all_topology_pivots),
                 'topology_inclusion': dict(topology_inclusion_info or {}),
+                'chain_expansion': dict(chain_expansion or {}),
                 'chain': list(chain_payload or []),
                 'flag_assignments': backend._flow_strip_runtime_sensitive_fields(flag_assignments),
                 'flags_enabled': bool(flow_valid),
@@ -581,18 +852,15 @@ def register(app, *, backend_module: Any) -> None:
                 'full_preview': preview,
                 'metadata': metadata,
             }
-            ok, err = backend._update_plan_preview_in_xml(xml_path_for_plan, scenario_label or scenario_norm, plan_payload)
+            ok, err = backend._persist_plan_preview_and_flow_state_in_xml(
+                xml_path_for_plan,
+                scenario_label or scenario_norm,
+                plan_payload,
+                flow_meta,
+            )
             if not ok:
                 _flow_progress(f'Failed to persist sequence plan: {err}')
                 return jsonify({'ok': False, 'error': f'Failed to persist sequence plan: {err}'}), 500
-            try:
-                flow_ok, flow_err = backend._update_flow_state_in_xml(xml_path_for_plan, scenario_label or scenario_norm, flow_meta)
-            except Exception as exc:
-                _flow_progress(f'Failed to persist sequence FlowState: {exc}')
-                return jsonify({'ok': False, 'error': f'Failed to persist sequence FlowState: {exc}'}), 500
-            if not flow_ok:
-                _flow_progress(f'Failed to persist sequence FlowState: {flow_err}')
-                return jsonify({'ok': False, 'error': f'Failed to persist sequence FlowState: {flow_err}'}), 500
             try:
                 backend._planner_set_plan(scenario_norm, plan_path=xml_path_for_plan, xml_path=xml_path_for_plan, seed=(metadata or {}).get('seed'))
             except Exception:
@@ -622,8 +890,11 @@ def register(app, *, backend_module: Any) -> None:
                 'dependency_level': dependency_level,
                 'include_all_topology_pivots': bool(include_all_topology_pivots),
                 'topology_inclusion': dict(topology_inclusion_info or {}),
+                'chain_expansion': dict(chain_expansion or {}),
                 'preview_plan_path': out_path,
+                'xml_path': out_path,
                 'base_preview_plan_path': preview_plan_path,
+                **({'full_preview': preview} if bool(chain_expansion.get('topology_changed')) else {}),
                 **({'warning': warning} if warning else {}),
                 **({'host_ip_map': host_ip_map} if host_ip_map else {}),
             }

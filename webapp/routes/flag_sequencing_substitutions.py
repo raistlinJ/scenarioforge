@@ -81,6 +81,14 @@ def register(app, *, backend_module: Any) -> None:
             preview_payload = backend._load_preview_payload_from_path(base_plan_path, scenario_norm)
             if not isinstance(preview_payload, dict):
                 return jsonify({'ok': False, 'error': 'Preview plan not embedded in XML. Save XML with Preview first.'}), 404
+            # PlanPreview metadata is only a mirror.  Start from FlowState in
+            # the selected XML so a manual substitution cannot overwrite an
+            # accepted chain-expansion record with stale preview metadata.
+            backend._canonicalize_payload_flow_from_xml(
+                preview_payload,
+                xml_path=base_plan_path,
+                scenario_label=scenario_label or scenario_norm,
+            )
             meta = preview_payload.get('metadata') if isinstance(preview_payload, dict) else {}
             preview = preview_payload.get('full_preview') if isinstance(preview_payload, dict) else None
             if not isinstance(preview, dict):
@@ -520,6 +528,16 @@ def register(app, *, backend_module: Any) -> None:
             if goal_facts_override:
                 flow_meta['goal_facts'] = goal_facts_override
             if isinstance(meta, dict):
+                flow_existing = meta.get('flow')
+                if isinstance(flow_existing, dict):
+                    # Keep the accepted chain-expansion decision when a user
+                    # edits generator substitutions.  It documents whether
+                    # existing nodes were converted or the topology spec was
+                    # explicitly expanded, and is part of XML ground truth.
+                    for key in ('chain_expansion', 'topology_inclusion'):
+                        value = flow_existing.get(key)
+                        if isinstance(value, dict):
+                            flow_meta[key] = dict(value)
                 meta2 = dict(meta)
                 meta2['flow'] = flow_meta
             else:
@@ -543,13 +561,14 @@ def register(app, *, backend_module: Any) -> None:
                 meta2['xml_path'] = xml_target
             snap_before = backend._xml_trace_snapshot(xml_target, scenario_label or scenario_norm)
             out_payload = {'full_preview': preview, 'metadata': meta2}
-            ok, err = backend._update_plan_preview_in_xml(xml_target, scenario_label or scenario_norm, out_payload)
+            ok, err = backend._persist_plan_preview_and_flow_state_in_xml(
+                xml_target,
+                scenario_label or scenario_norm,
+                out_payload,
+                flow_meta,
+            )
             if not ok:
                 return jsonify({'ok': False, 'error': f'Failed to persist flow-modified preview plan: {err}'}), 500
-            try:
-                backend._update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
-            except Exception:
-                pass
             out_path = xml_target
             try:
                 backend._planner_set_plan(scenario_norm, plan_path=xml_target, xml_path=xml_target, seed=(meta2 or {}).get('seed'))

@@ -1177,6 +1177,15 @@ def register(app, *, backend_module: Any) -> None:
             try:
                 plan_payload = backend._load_preview_payload_from_path(preview_plan_path, scenario_for_plan)
                 if isinstance(plan_payload, dict) and plan_payload:
+                    # FlowState is authoritative.  Before the async execute
+                    # path refreshes PlanPreview, mirror the XML FlowState
+                    # into metadata.flow so this best-effort write cannot
+                    # recreate a stale split-brain preview.
+                    backend._canonicalize_payload_flow_from_xml(
+                        plan_payload,
+                        xml_path=xml_path,
+                        scenario_label=scenario_for_plan,
+                    )
                     backend._update_plan_preview_in_xml(xml_path, scenario_for_plan, plan_payload)
             except Exception:
                 pass

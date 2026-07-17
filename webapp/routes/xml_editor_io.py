@@ -649,6 +649,7 @@ def register(
                     'Services',
                     'Traffic',
                     'Vulnerabilities',
+                    'Flag Node Generators',
                     'Segmentation',
                 )
                 picked: dict[str, Any] = {}
@@ -685,6 +686,7 @@ def register(
                     flow_state = dict(flow_state or {})
                     # Topology/IP changes invalidate saved chain placement and resolved values.
                     # Keep the dirty marker but clear chain payload so Flag Sequencing starts clean.
+                    flow_state['chain'] = []
                     flow_state['chain_ids'] = []
                     flow_state['length'] = 0
                     flow_state['flag_assignments'] = []

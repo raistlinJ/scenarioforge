@@ -1565,6 +1565,13 @@ def _finalize_prepare_preview_response(
                     flow_meta['initial_facts'] = init_facts
                 if goal_facts:
                     flow_meta['goal_facts'] = goal_facts
+                # Chain expansion is a topology decision already accepted by the
+                # user.  Resolving generators/hints must not silently erase that
+                # audit trail from either FlowState or PlanPreview.metadata.flow.
+                for key in ('chain_expansion', 'topology_inclusion'):
+                    value = flow_existing.get(key)
+                    if isinstance(value, dict):
+                        flow_meta[key] = dict(value)
         except Exception:
             pass
     except Exception:
@@ -1582,6 +1589,19 @@ def _finalize_prepare_preview_response(
             'flow_errors': list(flow_errors or []),
             'modified_at': deps._iso_now(),
         }
+
+    # Keep the accepted topology-expansion audit even if an optional
+    # enrichment above failed.  Resolve/prepare is not allowed to turn a
+    # previously explicit topology decision into undocumented behavior.
+    try:
+        flow_existing = meta.get('flow') if isinstance(meta, dict) else None
+        if isinstance(flow_existing, dict):
+            for key in ('chain_expansion', 'topology_inclusion'):
+                value = flow_existing.get(key)
+                if isinstance(value, dict):
+                    flow_meta[key] = dict(value)
+    except Exception:
+        pass
 
     persist_result = helpers.persist_prepare_preview_plan(
         meta=meta if isinstance(meta, dict) else None,
