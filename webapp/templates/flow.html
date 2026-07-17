@@ -92,15 +92,25 @@
 
         <div class="card mb-3" id="flowSeedCard">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <strong>Flow Seed</strong>
+            <strong>Summary</strong>
             <button type="button" class="btn btn-sm btn-outline-secondary" id="flowSeedRerollBtn"
               title="Re-roll seed for different chain/generator combinations">Re-roll</button>
           </div>
           <div class="card-body">
-            <div class="input-group input-group-sm" style="max-width: 260px;">
-              <label class="input-group-text" for="flowSeedInput">Seed</label>
-              <input type="number" class="form-control" id="flowSeedInput" min="1" step="1" inputmode="numeric"
-                placeholder="seed" />
+            <div class="row g-3 align-items-end">
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label small mb-1" for="flowSeedInput">Flow seed</label>
+                <input type="number" class="form-control form-control-sm" id="flowSeedInput" min="1" step="1" inputmode="numeric"
+                  placeholder="seed" />
+              </div>
+              <div class="col-sm-6 col-lg-9">
+                <div class="d-flex flex-wrap gap-3 small">
+                  <span>Flag-node-generator slots: <strong id="flowSummaryFlagNodeGeneratorSlots">0</strong></span>
+                  <span>Vulnerability slots: <strong id="flowSummaryVulnerabilitySlots">0</strong></span>
+                  <span>Docker slots: <strong id="flowSummaryDockerSlots">0</strong></span>
+                  <span class="fw-semibold">Max challenges: <strong id="flowSummaryMaxChallenges">0</strong></span>
+                </div>
+              </div>
             </div>
             <div class="form-text">Seed affects chain node selection and generator assignment. Change seed to get
               different combinations.</div>
@@ -404,6 +414,10 @@
     const generateMaxRetriesEl = document.getElementById('flowGenerateMaxRetries');
     const flowSeedInputEl = document.getElementById('flowSeedInput');
     const flowSeedRerollBtnEl = document.getElementById('flowSeedRerollBtn');
+    const flowSummaryFlagNodeGeneratorSlotsEl = document.getElementById('flowSummaryFlagNodeGeneratorSlots');
+    const flowSummaryVulnerabilitySlotsEl = document.getElementById('flowSummaryVulnerabilitySlots');
+    const flowSummaryDockerSlotsEl = document.getElementById('flowSummaryDockerSlots');
+    const flowSummaryMaxChallengesEl = document.getElementById('flowSummaryMaxChallenges');
     const restoreBadgeEl = document.getElementById('flowRestoreBadge');
     const autoSaveBadgeEl = document.getElementById('flowAutoSaveBadge');
     const saveXmlEl = document.getElementById('saveXmlBtn');
@@ -10139,7 +10153,26 @@
     return Math.max(1, vuln + nodeGenerators);
   }
 
+  function updateFlowSummary(stats) {
+    const flagNodeGeneratorSlots = Number.isFinite(+stats?.topology_flag_node_generator_total)
+      ? Math.max(0, +stats.topology_flag_node_generator_total)
+      : 0;
+    const vulnerabilitySlots = Number.isFinite(+stats?.vuln_total)
+      ? Math.max(0, +stats.vuln_total)
+      : 0;
+    const dockerSlots = Number.isFinite(+stats?.generic_docker_total)
+      ? Math.max(0, +stats.generic_docker_total)
+      : Math.max(0, (Number.isFinite(+stats?.docker_nonvuln_total) ? +stats.docker_nonvuln_total : 0) - flagNodeGeneratorSlots);
+    const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;
+
+    if (flowSummaryFlagNodeGeneratorSlotsEl) flowSummaryFlagNodeGeneratorSlotsEl.textContent = String(flagNodeGeneratorSlots);
+    if (flowSummaryVulnerabilitySlotsEl) flowSummaryVulnerabilitySlotsEl.textContent = String(vulnerabilitySlots);
+    if (flowSummaryDockerSlotsEl) flowSummaryDockerSlotsEl.textContent = String(dockerSlots);
+    if (flowSummaryMaxChallengesEl) flowSummaryMaxChallengesEl.textContent = String(maxChallenges);
+  }
+
   function updateLengthSpinnerMax() {
+    updateFlowSummary(lastStats);
     if (!lengthEl) return;
     const minimum = vulnerabilityNodeMinimumFromStats(lastStats);
     lengthEl.min = String(minimum);

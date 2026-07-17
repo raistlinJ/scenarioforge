@@ -480,6 +480,7 @@ def discover_generator_manifests(
     plugins_by_id: dict[str, dict[str, Any]] = {}
     gen_index_by_id: dict[str, int] = {}
     is_installed_by_id: dict[str, bool] = {}
+    conflicting_installed_ids: set[str] = set()
     errors: list[ManifestLoadError] = []
     installed_state_by_kind_id = _load_installed_generator_state(installed_root)
     disabled_suppressed_ids: set[str] = set()
@@ -784,6 +785,21 @@ def discover_generator_manifests(
                     continue
 
                 errors.append(ManifestLoadError(path=str(manifest_path), error=f'duplicate generator id: {gen_id}'))
+                # Two installed packs resolving to the same stable source ID
+                # make runtime selection ambiguous.  Never keep whichever
+                # directory happened to be enumerated first: callers must sync
+                # or repair the catalog before executing a generator.
+                if is_installed_base and prev_installed:
+                    conflicting_installed_ids.add(gen_id)
+                    plugins_by_id.pop(gen_id, None)
+                    idx = gen_index_by_id.pop(gen_id, None)
+                    if isinstance(idx, int) and 0 <= idx < len(generators):
+                        generators[idx] = {}
+                    is_installed_by_id.pop(gen_id, None)
+                continue
+
+            if gen_id in conflicting_installed_ids:
+                errors.append(ManifestLoadError(path=str(manifest_path), error=f'conflicting installed generator id: {gen_id}'))
                 continue
 
             plugins_by_id[gen_id] = plugin_contract
@@ -803,5 +819,6 @@ def discover_generator_manifests(
             if str(generator_id or '').strip() not in disabled_suppressed_ids
         }
 
+    generators = [generator for generator in generators if generator]
     generators.sort(key=lambda g: (str(g.get('name') or '').lower(), str(g.get('id') or '')))
     return generators, plugins_by_id, errors

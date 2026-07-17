@@ -1019,15 +1019,28 @@ def run_compose(
         "OUTPUTS_DIR": str(outputs_dir.resolve()),
     }
 
-    # If a stable image tag is provided and already cached, skip the build step.
-    # This avoids needing internet access (e.g. to pull the base image) on every run.
+    # If a stable image tag is provided and already cached, skip the build step
+    # only when this Compose supports the explicit --no-build contract.  Older
+    # Compose releases offer no equivalent run flag, so build explicitly before
+    # running; using its implicit image selection could execute stale source.
     no_build_requested = bool(stable_image_tag and _image_exists_locally(stable_image_tag))
     no_build_supported = _compose_run_supports_no_build(source_dir, compose_env) if no_build_requested else False
     no_build = bool(no_build_requested and no_build_supported)
     if no_build:
         print(f'[compose] using cached generator image {stable_image_tag} (--no-build)')
     elif no_build_requested:
-        print(f'[compose] using cached generator image {stable_image_tag} (compose lacks --no-build; falling back)')
+        print(f'[compose] compose lacks --no-build; rebuilding generator image {stable_image_tag} explicitly')
+        build_cmd = [
+            _docker_executable(),
+            'compose',
+            '-f',
+            str(compose_path),
+            '-p',
+            project,
+            'build',
+            service,
+        ]
+        run_cmd(build_cmd, source_dir, compose_env)
     elif stable_image_tag:
         print(f'[compose] generator image {stable_image_tag} not cached; will build now')
 

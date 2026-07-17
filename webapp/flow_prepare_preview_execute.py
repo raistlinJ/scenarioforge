@@ -141,17 +141,15 @@ def _prepare_remote_generator_execution(
                 except Exception:
                     pass
         except Exception as exc:
-            if flow_remote_forced:
-                return {
-                    'flow_run_remote': flow_run_remote,
-                    'flow_core_cfg': flow_core_cfg,
-                    'flow_remote_repo_dir': flow_remote_repo_dir,
-                    'response': (jsonify({'ok': False, 'error': f'Failed to sync repo to CORE VM: {exc}'}), 500),
-                }
-            try:
-                current_app.logger.warning('[flow.generator] repo sync failed (continuing): %s', exc)
-            except Exception:
-                pass
+            # The remote generator catalog is part of the execution contract.
+            # Continuing would let CORE resolve a stale installed pack and run
+            # different generator code than the validated local assignment.
+            return {
+                'flow_run_remote': flow_run_remote,
+                'flow_core_cfg': flow_core_cfg,
+                'flow_remote_repo_dir': flow_remote_repo_dir,
+                'response': (jsonify({'ok': False, 'error': f'Failed to sync repo to CORE VM: {exc}'}), 500),
+            }
 
     if not isinstance(flow_core_cfg, dict):
         if flow_remote_forced:

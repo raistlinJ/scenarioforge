@@ -669,6 +669,25 @@ def test_flow_dependency_slider_and_challenge_label_are_wired() -> None:
     assert "Max Chain length" not in text
 
 
+def test_flow_summary_card_reports_seed_slots_and_maximum_challenges() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        '<strong>Summary</strong>',
+        'for="flowSeedInput">Flow seed</label>',
+        'Flag-node-generator slots:',
+        'Vulnerability slots:',
+        'Docker slots:',
+        'Max challenges:',
+        'function updateFlowSummary(stats)',
+        'const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;',
+        'updateFlowSummary(lastStats);',
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow summary wiring: " + "; ".join(missing)
+
+
 def test_flow_page_does_not_auto_generate_on_load() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
