@@ -25006,18 +25006,139 @@ def _sanitize_snapshot_for_user(snapshot: Dict[str, Any], user: Optional[dict]) 
     snapshot['builder_no_assignments'] = not bool(allowed_norms)
     return snapshot
 
-def _scenario_names_from_xml(xml_path: str) -> list[str]:
+def _file_stat_cache_key(path: str) -> tuple[int, int] | None:
+    """(mtime_ns, size) stamp used to invalidate caches when a file changes.
+
+    The on-disk file stays ground truth: any rewrite bumps the stamp and the
+    cached value is discarded on the next read.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+# Functions the XML/catalog caches depend on. If any of them is replaced at
+# runtime (tests monkeypatch these to inject fixture data), every cache below
+# is bypassed — reads and writes — so the patched behavior is observed exactly
+# as if the caches did not exist. _XML_CACHE_ORIGINAL_DEPS is snapshotted at
+# the end of module import.
+_XML_CACHE_DEP_NAMES = (
+    '_parse_scenarios_xml',
+    '_parse_scenario_editor',
+    '_canonicalize_specific_vulnerability_items',
+    '_canonicalize_plan_preview_vulnerability_names',
+    '_specific_vulnerability_name_map',
+    '_load_backend_vuln_catalog_items',
+    '_load_vuln_catalogs_state',
+    '_get_active_vuln_catalog_entry',
+    '_normalize_vuln_catalog_items',
+    '_vuln_catalog_item_abs_compose_path',
+    '_vuln_catalog_item_is_selectable',
+    '_vuln_catalog_item_display_name',
+    '_extract_optional_core_config',
+    '_normalize_core_config',
+    '_default_core_dict',
+    '_collect_scenario_catalog',
+    '_merge_editor_scenarios_into_catalog',
+    '_load_run_history',
+    '_load_editor_state_snapshot',
+    '_editor_state_snapshot_dir',
+    '_coerce_bool',
+    '_load_installed_generator_packs_state',
+    '_installed_generator_packs_state_path',
+    '_installed_generator_marker_source_id',
+    '_build_installed_disable_maps',
+    '_installed_generators_root',
+    '_outputs_dir',
+    '_get_repo_root',
+)
+_XML_CACHE_ORIGINAL_DEPS: tuple | None = None
+
+
+def _current_xml_cache_deps() -> tuple:
+    module_globals = globals()
+    return tuple(module_globals.get(name) for name in _XML_CACHE_DEP_NAMES)
+
+
+def _xml_caches_enabled() -> bool:
+    deps = _XML_CACHE_ORIGINAL_DEPS
+    return deps is not None and deps == _current_xml_cache_deps()
+
+
+def _vuln_catalog_state_cache_key() -> tuple[Any, ...]:
+    try:
+        return ('vuln-state', _file_stat_cache_key(_vuln_catalogs_state_path()))
+    except Exception:
+        return ('vuln-state', None)
+
+
+_SCENARIO_XML_NAMES_CACHE: dict[str, tuple[tuple[int, int], tuple[str, ...]]] = {}
+_SCENARIO_XML_NAMES_CACHE_LOCK = threading.Lock()
+_SCENARIO_XML_NAMES_CACHE_MAX = 512
+
+
+def _scenario_names_from_xml_uncached(xml_path: str) -> list[str]:
+    """Extract scenario display names without a full scenario parse.
+
+    Mirrors _parse_scenarios_xml naming semantics: a <Scenario> element only
+    counts when it has a <ScenarioEditor> child, and a bare <ScenarioEditor>
+    root falls back to the file's basename.
+    """
     names: list[str] = []
     try:
-        if not xml_path or not os.path.exists(xml_path):
-            return names
-        data = _parse_scenarios_xml(xml_path)
-        for scen in data.get('scenarios', []):
-            nm = scen.get('name')
+        root = ET.parse(xml_path).getroot()
+    except Exception:
+        return names
+    if root.tag == 'Scenarios':
+        for scen_el in root.findall('Scenario'):
+            if scen_el.find('ScenarioEditor') is None:
+                continue
+            nm = scen_el.get('name', 'Scenario')
             if nm and nm not in names:
                 names.append(nm)
+    elif root.tag == 'ScenarioEditor':
+        nm = os.path.splitext(os.path.basename(xml_path))[0]
+        if nm:
+            names.append(nm)
+    return names
+
+
+def _scenario_names_from_xml(xml_path: str) -> list[str]:
+    if not _xml_caches_enabled():
+        # Legacy path (used when parse internals are monkeypatched): derive
+        # names through _parse_scenarios_xml so patched behavior is honored.
+        names: list[str] = []
+        try:
+            if not xml_path or not os.path.exists(xml_path):
+                return names
+            data = _parse_scenarios_xml(xml_path)
+            for scen in data.get('scenarios', []):
+                nm = scen.get('name')
+                if nm and nm not in names:
+                    names.append(nm)
+        except Exception:
+            pass
+        return names
+    try:
+        if not xml_path or not os.path.exists(xml_path):
+            return []
+        abs_path = os.path.abspath(xml_path)
     except Exception:
-        pass
+        return []
+    file_key = _file_stat_cache_key(abs_path)
+    if file_key is None:
+        return _scenario_names_from_xml_uncached(abs_path)
+    with _SCENARIO_XML_NAMES_CACHE_LOCK:
+        cached = _SCENARIO_XML_NAMES_CACHE.get(abs_path)
+        if cached is not None and cached[0] == file_key:
+            return list(cached[1])
+    names = _scenario_names_from_xml_uncached(abs_path)
+    with _SCENARIO_XML_NAMES_CACHE_LOCK:
+        if len(_SCENARIO_XML_NAMES_CACHE) >= _SCENARIO_XML_NAMES_CACHE_MAX:
+            _SCENARIO_XML_NAMES_CACHE.pop(next(iter(_SCENARIO_XML_NAMES_CACHE)), None)
+        _SCENARIO_XML_NAMES_CACHE[abs_path] = (file_key, tuple(names))
     return names
 
 
@@ -27355,13 +27476,55 @@ def _merge_editor_scenarios_into_catalog(
     return _prune_stale_scenario_entries(names_out, paths_out, hints_out, protected_norms=snapshot_norms or None)
 
 
+def _scenario_catalog_memo_key(user: Optional[dict]) -> Optional[str]:
+    """Per-request memo key for GET page views only.
+
+    GET views never mutate scenario stores, so one catalog build per request
+    is safe; POST/PUT requests always rebuild from disk so writes stay
+    synchronized with the XML ground truth.
+    """
+    try:
+        if not _xml_caches_enabled():
+            return None
+        if not has_request_context() or request.method != 'GET':
+            return None
+        if user is None:
+            return '__anon__'
+        if isinstance(user, dict):
+            return 'user::' + str(user.get('username') or '')
+    except Exception:
+        return None
+    return None
+
+
 def _scenario_catalog_for_user(
     history: Optional[List[dict]] = None,
     *,
     user: Optional[dict] = None,
 ) -> tuple[list[str], dict[str, set[str]], dict[str, str]]:
+    memo_key = _scenario_catalog_memo_key(user) if history is None else None
+    if memo_key is not None:
+        try:
+            memo = getattr(g, '_scenario_catalog_memo', None)
+            cached = memo.get(memo_key) if isinstance(memo, dict) else None
+            if cached is not None:
+                names, paths, hints = cached
+                return list(names), {k: set(v) for k, v in paths.items()}, dict(hints)
+        except Exception:
+            memo_key = None
     names, paths, hints = _collect_scenario_catalog(history)
-    return _merge_editor_scenarios_into_catalog(names, paths, hints, user=user)
+    result = _merge_editor_scenarios_into_catalog(names, paths, hints, user=user)
+    if memo_key is not None:
+        try:
+            memo = getattr(g, '_scenario_catalog_memo', None)
+            if not isinstance(memo, dict):
+                memo = {}
+                setattr(g, '_scenario_catalog_memo', memo)
+            r_names, r_paths, r_hints = result
+            memo[memo_key] = (list(r_names), {k: set(v) for k, v in r_paths.items()}, dict(r_hints))
+        except Exception:
+            pass
+    return result
 
 
 _SCENARIO_PARTICIPANT_CACHE: dict[str, dict[str, Any]] = {}
@@ -29962,7 +30125,21 @@ def _concretize_traffic_numeric_placeholder(value: Any, *, options: List[float],
     return numeric
 
 
+_VULN_CATALOG_ITEMS_CACHE: dict[bool, tuple[tuple[Any, ...], list[dict[str, Any]]]] = {}
+_VULN_CATALOG_ITEMS_CACHE_LOCK = threading.Lock()
+
+
 def _load_backend_vuln_catalog_items(*, selectable_only: bool = True) -> List[Dict[str, Any]]:
+    # Cached per catalogs-state stamp: any state rewrite invalidates. The item
+    # dicts only hold scalars, so shallow copies keep callers isolated.
+    cache_key = _vuln_catalog_state_cache_key()
+    cacheable = cache_key[1] is not None and _xml_caches_enabled()
+    if cacheable:
+        with _VULN_CATALOG_ITEMS_CACHE_LOCK:
+            cached = _VULN_CATALOG_ITEMS_CACHE.get(bool(selectable_only))
+            if cached is not None and cached[0] == cache_key:
+                return [dict(item) for item in cached[1]]
+
     try:
         state = _load_vuln_catalogs_state()
         entry = _get_active_vuln_catalog_entry(state)
@@ -29998,6 +30175,9 @@ def _load_backend_vuln_catalog_items(*, selectable_only: bool = True) -> List[Di
                     'validated_at': str(item.get('validated_at') or '').strip() or None,
                     'eligible_for_selection': eligible,
                 })
+            if cacheable:
+                with _VULN_CATALOG_ITEMS_CACHE_LOCK:
+                    _VULN_CATALOG_ITEMS_CACHE[bool(selectable_only)] = (cache_key, [dict(item) for item in out])
             return out
         except Exception:
             if selectable_only:
@@ -33758,7 +33938,50 @@ def _attach_base_upload(payload: Dict[str, Any]):
         pass
 
 
+_PARSED_SCENARIOS_XML_CACHE: dict[str, tuple[tuple[int, int], tuple[Any, ...], dict]] = {}
+_PARSED_SCENARIOS_XML_CACHE_LOCK = threading.Lock()
+_PARSED_SCENARIOS_XML_CACHE_MAX = 64
+
+
 def _parse_scenarios_xml(path):
+    """Parse a scenarios XML file; the on-disk XML stays ground truth.
+
+    Results are cached keyed by the file's (mtime, size) plus the active
+    vulnerability-catalog state stamp (canonicalization depends on it), so any
+    change to either is picked up on the next read. Callers get their own deep
+    copy and may mutate it freely. The default CORE config (used when the XML
+    has no <CoreConnection>) is recomputed on every call because it can change
+    with the runtime mode.
+    """
+    if not _xml_caches_enabled():
+        return _fill_parsed_scenarios_default_core(_parse_scenarios_xml_uncached(path))
+    try:
+        abs_path = os.path.abspath(path)
+    except Exception:
+        abs_path = str(path or '')
+    file_key = _file_stat_cache_key(abs_path)
+    if file_key is None:
+        return _fill_parsed_scenarios_default_core(_parse_scenarios_xml_uncached(path))
+    catalog_key = _vuln_catalog_state_cache_key()
+    with _PARSED_SCENARIOS_XML_CACHE_LOCK:
+        cached = _PARSED_SCENARIOS_XML_CACHE.get(abs_path)
+        if cached is not None and cached[0] == file_key and cached[1] == catalog_key:
+            return _fill_parsed_scenarios_default_core(copy.deepcopy(cached[2]))
+    data = _parse_scenarios_xml_uncached(abs_path)
+    with _PARSED_SCENARIOS_XML_CACHE_LOCK:
+        if len(_PARSED_SCENARIOS_XML_CACHE) >= _PARSED_SCENARIOS_XML_CACHE_MAX:
+            _PARSED_SCENARIOS_XML_CACHE.pop(next(iter(_PARSED_SCENARIOS_XML_CACHE)), None)
+        _PARSED_SCENARIOS_XML_CACHE[abs_path] = (file_key, catalog_key, copy.deepcopy(data))
+    return _fill_parsed_scenarios_default_core(data)
+
+
+def _fill_parsed_scenarios_default_core(data: dict) -> dict:
+    if isinstance(data, dict) and 'core' in data and data.get('core') is None:
+        data['core'] = _default_core_dict()
+    return data
+
+
+def _parse_scenarios_xml_uncached(path):
     data = {"scenarios": []}
     tree = ET.parse(path)
     root = tree.getroot()
@@ -33781,7 +34004,10 @@ def _parse_scenarios_xml(path):
         core_meta = _extract_optional_core_config(dict(core_el.attrib), include_password=True)
         data['core'] = core_meta if isinstance(core_meta, dict) else _normalize_core_config({}, include_password=True)
     else:
-        data['core'] = _default_core_dict()
+        # None marks "no CoreConnection in the XML"; the _parse_scenarios_xml
+        # wrapper fills in the current default so cached entries never pin a
+        # stale runtime-mode default.
+        data['core'] = None
 
     for scen_el in root.findall("Scenario"):
         scen = {"name": scen_el.get("name", "Scenario")}
@@ -44288,8 +44514,44 @@ def _generator_item_abs_compose_path(gen: dict[str, Any]) -> str | None:
         return None
 
 
+_INSTALLED_DISABLE_MAPS_CACHE: dict[str, tuple[tuple[int, int], dict, dict]] = {}
+_INSTALLED_DISABLE_MAPS_CACHE_LOCK = threading.Lock()
+
+
+def _copy_installed_disable_maps(
+    pack_by_id: dict[str, dict[str, Any]],
+    gen_by_kind_id: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
+    def _copy_info(info: dict[str, Any]) -> dict[str, Any]:
+        out = dict(info)
+        for key, value in out.items():
+            if isinstance(value, list):
+                out[key] = list(value)
+        return out
+
+    return (
+        {k: _copy_info(v) for k, v in pack_by_id.items()},
+        {k: _copy_info(v) for k, v in gen_by_kind_id.items()},
+    )
+
+
 def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
-    """Return (pack_by_id, gen_by_kind_id) maps from the installed packs state."""
+    """Return (pack_by_id, gen_by_kind_id) maps from the installed packs state.
+
+    Cached per packs-state file stamp (installs/uninstalls/validation all
+    rewrite that file); callers receive isolated copies.
+    """
+    state_key = None
+    if _xml_caches_enabled():
+        try:
+            state_key = _file_stat_cache_key(_installed_generator_packs_state_path())
+        except Exception:
+            state_key = None
+    if state_key is not None:
+        with _INSTALLED_DISABLE_MAPS_CACHE_LOCK:
+            cached = _INSTALLED_DISABLE_MAPS_CACHE.get('maps')
+            if cached is not None and cached[0] == state_key:
+                return _copy_installed_disable_maps(cached[1], cached[2])
     state = _load_installed_generator_packs_state()
     packs = state.get('packs') if isinstance(state, dict) else None
     if not isinstance(packs, list):
@@ -44362,6 +44624,10 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
     for kind, gid, _src_id, info_obj in entries:
         gen_by_kind_id.setdefault((kind, gid), info_obj)
 
+    if state_key is not None:
+        with _INSTALLED_DISABLE_MAPS_CACHE_LOCK:
+            _INSTALLED_DISABLE_MAPS_CACHE['maps'] = (state_key, pack_by_id, gen_by_kind_id)
+        return _copy_installed_disable_maps(pack_by_id, gen_by_kind_id)
     return pack_by_id, gen_by_kind_id
 
 
@@ -44430,13 +44696,43 @@ def _is_installed_generator_disabled(*, kind: str, generator_id: str) -> bool:
     return bool(info and info.get('disabled') is True)
 
 
+_INSTALLED_MARKER_SOURCE_ID_CACHE: dict[str, tuple[tuple[int, int], str]] = {}
+_INSTALLED_MARKER_SOURCE_ID_CACHE_LOCK = threading.Lock()
+_INSTALLED_MARKER_SOURCE_ID_CACHE_MAX = 2048
+
+
 def _installed_generator_marker_source_id(item: dict[str, Any]) -> str:
-    """Stable `source_generator_id` recorded in an installed item's pack marker."""
+    """Stable `source_generator_id` recorded in an installed item's pack marker.
+
+    Cached per marker-file (mtime, size) stamp; the marker on disk stays
+    ground truth.
+    """
     try:
         pack_path = str(item.get('path') or '').strip()
         if not pack_path:
             return ''
         marker_path = os.path.join(pack_path, '.coretg_pack.json')
+        if _xml_caches_enabled():
+            marker_key = _file_stat_cache_key(marker_path)
+            if marker_key is None:
+                return ''
+            with _INSTALLED_MARKER_SOURCE_ID_CACHE_LOCK:
+                cached = _INSTALLED_MARKER_SOURCE_ID_CACHE.get(marker_path)
+                if cached is not None and cached[0] == marker_key:
+                    return cached[1]
+            value = _installed_generator_marker_source_id_uncached(marker_path)
+            with _INSTALLED_MARKER_SOURCE_ID_CACHE_LOCK:
+                if len(_INSTALLED_MARKER_SOURCE_ID_CACHE) >= _INSTALLED_MARKER_SOURCE_ID_CACHE_MAX:
+                    _INSTALLED_MARKER_SOURCE_ID_CACHE.pop(next(iter(_INSTALLED_MARKER_SOURCE_ID_CACHE)), None)
+                _INSTALLED_MARKER_SOURCE_ID_CACHE[marker_path] = (marker_key, value)
+            return value
+        return _installed_generator_marker_source_id_uncached(marker_path)
+    except Exception:
+        return ''
+
+
+def _installed_generator_marker_source_id_uncached(marker_path: str) -> str:
+    try:
         if not os.path.isfile(marker_path):
             return ''
         with open(marker_path, 'r', encoding='utf-8') as fh:
@@ -48990,3 +49286,9 @@ if __name__ == '__main__':
 """
     ).replace('__CONTAINERS_LITERAL__', containers_literal) \
      .replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal)
+
+
+# Snapshot the cache dependency functions now that every definition above is
+# final. _xml_caches_enabled() compares against this to detect monkeypatching
+# and bypass the XML/catalog caches whenever any dependency is replaced.
+_XML_CACHE_ORIGINAL_DEPS = _current_xml_cache_deps()
