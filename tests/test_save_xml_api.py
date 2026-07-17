@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import re
@@ -1328,6 +1329,23 @@ def test_save_xml_api_resolves_random_flag_node_generator_to_enabled_generator(t
     assert saved_row['selected'] == 'Specific'
     assert saved_row['g_id'] == resolved_row['g_id']
     assert saved_row['g_name'] == resolved_row['g_name']
+
+    # Older topology saves could leave the exact malformed state
+    # `Specific` with neither g_id nor g_name.  It is a recoverable record of
+    # the old Random bug and must now be repaired to a real enabled generator.
+    legacy_blank_payload = copy.deepcopy(payload)
+    legacy_blank_payload['scenarios'][0]['name'] = 'LegacyBlankFlagNodeGenerator'
+    legacy_blank_row = legacy_blank_payload['scenarios'][0]['sections']['Flag Node Generators']['items'][0]
+    legacy_blank_row['selected'] = 'Specific'
+    legacy_blank_row.pop('g_id', None)
+    legacy_blank_row.pop('g_name', None)
+    legacy_response = client.post('/save_xml_api', data=json.dumps(legacy_blank_payload), content_type='application/json')
+    assert legacy_response.status_code == 200
+    legacy_data = legacy_response.get_json() or {}
+    legacy_resolved_row = legacy_data['scenarios'][0]['sections']['Flag Node Generators']['items'][0]
+    assert legacy_resolved_row['selected'] == 'Specific'
+    assert legacy_resolved_row['g_id'] in {'node-generator-a', 'node-generator-b'}
+    assert legacy_resolved_row['g_name'] in {'Node Generator A', 'Node Generator B'}
 
 
 def test_save_xml_api_rejects_random_flag_node_generator_without_enabled_generator(tmp_path, monkeypatch):
