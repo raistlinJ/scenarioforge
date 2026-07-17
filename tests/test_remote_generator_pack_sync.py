@@ -91,3 +91,12 @@ def test_pack_uninstall_removes_matching_core_runtime_directory(tmp_path: Path, 
     assert ok is True
     assert note == 'removed 1 CORE runtime generator directory(s)'
     assert removed == ['/tmp/scenarioforge/outputs/installed_generators/flag_node_generators/p_current__51']
+
+
+def test_remote_runner_binds_execution_to_the_selected_generator_source() -> None:
+    helper_text = Path('webapp/flow_prepare_preview_helpers.py').read_text(encoding='utf-8')
+    runner_text = Path('scripts/run_flag_generator.py').read_text(encoding='utf-8')
+
+    assert "'--source-dir', SOURCE" in helper_text
+    assert 'ap.add_argument("--source-dir"' in runner_text
+    assert 'Generator not found at requested source' in runner_text

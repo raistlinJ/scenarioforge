@@ -1774,6 +1774,7 @@ def test_generator_catalog_mutations_register_is_idempotent():
         set_generator_disabled_state=lambda **kwargs: (True, 'ok'),
         set_generator_validation_state=lambda **kwargs: (True, 'ok'),
         set_generator_persistent_state=lambda **kwargs: (True, 'ok'),
+        set_generator_note_state=lambda **kwargs: (True, 'ok'),
         delete_installed_generator=lambda **kwargs: (True, 'ok'),
     )
     generator_catalog_mutations.register(
@@ -1783,6 +1784,7 @@ def test_generator_catalog_mutations_register_is_idempotent():
         set_generator_disabled_state=lambda **kwargs: (True, 'ok'),
         set_generator_validation_state=lambda **kwargs: (True, 'ok'),
         set_generator_persistent_state=lambda **kwargs: (True, 'ok'),
+        set_generator_note_state=lambda **kwargs: (True, 'ok'),
         delete_installed_generator=lambda **kwargs: (True, 'ok'),
     )
 
@@ -1792,6 +1794,8 @@ def test_generator_catalog_mutations_register_is_idempotent():
     assert '/api/flag_node_generators/delete' in rules
     assert '/api/generator_packs/set_disabled' in rules
     assert '/api/flag_generators/set_disabled' in rules
+    assert '/api/flag_generators/set_note' in rules
+    assert '/api/flag_node_generators/set_note' in rules
     assert '/api/flag_node_generators/set_disabled' in rules
     assert '/api/flag_generators/set_persistent' in rules
     assert '/api/flag_node_generators/set_persistent' in rules

@@ -155,6 +155,7 @@
                       <th style="width: 140px;">Validated</th>
                       <th>From Source</th>
                       <th style="width: 130px;">Image Cache</th>
+                      <th style="width: 82px;">Notes</th>
                       <th style="width: 160px;">Actions</th>
                     </tr>
                   </thead>
@@ -210,6 +211,7 @@
                       <th style="width: 140px;">Validated</th>
                       <th>From Source</th>
                       <th style="width: 130px;">Image Cache</th>
+                      <th style="width: 82px;">Notes</th>
                       <th style="width: 160px;">Actions</th>
                     </tr>
                   </thead>
@@ -639,6 +641,32 @@
   </div>
 </div>
 
+<div class="modal fade" id="flagCatalogNoteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Catalog Note</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="small text-muted mb-2" id="flagCatalogNoteTarget"></div>
+        <label class="form-label" for="flagCatalogNoteText">Note</label>
+        <textarea class="form-control" id="flagCatalogNoteText" rows="5" maxlength="4000" placeholder="Optional note…"></textarea>
+        <div class="form-label mt-3 mb-2">Color</div>
+        <div class="btn-group" id="flagCatalogNoteColors" role="group" aria-label="Note color">
+          <button type="button" class="btn btn-outline-danger" data-note-color="red" title="Red"><i class="bi bi-circle-fill"></i></button>
+          <button type="button" class="btn btn-outline-warning" data-note-color="yellow" title="Yellow"><i class="bi bi-circle-fill"></i></button>
+          <button type="button" class="btn btn-outline-success" data-note-color="green" title="Green"><i class="bi bi-circle-fill"></i></button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="flagCatalogNoteSave">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   const FLAG_CATALOG_RUNTIME_MODE = {{ (webui_runtime_mode or 'native')|tojson }};
   const FLAG_CATALOG_VM_MODE = FLAG_CATALOG_RUNTIME_MODE === 'vm';
@@ -743,6 +771,67 @@
 
   let pendingCleanupRunId = null;
   let pendingCleanupTestBase = null;
+  let flagCatalogNoteTarget = null;
+  let flagCatalogNoteColor = 'yellow';
+
+  function catalogNoteIndicatorHtml(note, color) {
+    const text = String(note || '').trim();
+    const selected = ['red', 'yellow', 'green'].includes(String(color || '').toLowerCase())
+      ? String(color).toLowerCase()
+      : 'yellow';
+    const iconColor = text ? ({ red: '#dc3545', yellow: '#d39e00', green: '#198754' }[selected]) : '#adb5bd';
+    const title = text ? `Note: ${text}` : 'No note';
+    return `<i class="bi bi-circle-fill" style="color:${iconColor}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></i>`;
+  }
+
+  function updateFlagCatalogNoteColorButtons() {
+    document.querySelectorAll('#flagCatalogNoteColors [data-note-color]').forEach((button) => {
+      const active = button.getAttribute('data-note-color') === flagCatalogNoteColor;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function openFlagCatalogNoteModal(generator, kind) {
+    if (!generator || !generator.id) return;
+    flagCatalogNoteTarget = { id: String(generator.id), kind: String(kind), name: String(generator.name || generator.id) };
+    const noteEl = document.getElementById('flagCatalogNoteText');
+    const targetEl = document.getElementById('flagCatalogNoteTarget');
+    if (noteEl) noteEl.value = String(generator.note || '');
+    if (targetEl) targetEl.textContent = `${flagCatalogNoteTarget.name} (${flagCatalogNoteTarget.id})`;
+    const suppliedColor = String(generator.note_color || '').toLowerCase();
+    flagCatalogNoteColor = ['red', 'yellow', 'green'].includes(suppliedColor) ? suppliedColor : 'yellow';
+    updateFlagCatalogNoteColorButtons();
+    try { bootstrap.Modal.getOrCreateInstance(document.getElementById('flagCatalogNoteModal')).show(); } catch (e) { }
+  }
+
+  document.addEventListener('click', (event) => {
+    const colorButton = event.target && event.target.closest ? event.target.closest('#flagCatalogNoteColors [data-note-color]') : null;
+    if (!colorButton) return;
+    flagCatalogNoteColor = String(colorButton.getAttribute('data-note-color') || 'yellow');
+    updateFlagCatalogNoteColorButtons();
+  });
+
+  document.getElementById('flagCatalogNoteSave')?.addEventListener('click', async () => {
+    try {
+      if (!flagCatalogNoteTarget) return;
+      const note = String(document.getElementById('flagCatalogNoteText')?.value || '');
+      const api = flagCatalogNoteTarget.kind === 'flag-node-generator'
+        ? '/api/flag_node_generators/set_note'
+        : '/api/flag_generators/set_note';
+      const response = await fetchJson(api, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ generator_id: flagCatalogNoteTarget.id, note, note_color: flagCatalogNoteColor }),
+      });
+      if (!response || response.ok === false) throw new Error((response && response.error) || 'Unable to save note');
+      try { bootstrap.Modal.getInstance(document.getElementById('flagCatalogNoteModal'))?.hide(); } catch (e) { }
+      if (flagCatalogNoteTarget.kind === 'flag-node-generator') await loadNodeGenerators();
+      else await loadGenerators();
+    } catch (error) {
+      window.alert(`Unable to save note: ${String(error)}`);
+    }
+  });
 
   function _redactSensitiveTestLine(line, extraTokens = []) {
     let text = String(line || '');
@@ -1422,6 +1511,7 @@
       groupedNameSearchText(g.outputs),
       injectedSummary(g.inject_files),
       validation,
+      g.note || '',
       g.log_download_url ? 'Log' : '',
       g.validated_at || '',
       g._source_name || '',
@@ -1536,6 +1626,10 @@
           ${hasCompose ? `<button class="btn btn-link btn-sm p-0 ms-1 align-baseline genCachePersistToggleBtn" type="button" ${(isInstalled && !isDuplicateConflict) ? '' : 'disabled'} title="${g._persistent ? 'Persistent: this cached image is locked — Clear Cache and cleanup will not remove it. Click to unmark.' : 'Not persistent: this cached image can be removed by Clear Cache and cleanup. Click to mark persistent.'}" aria-label="${g._persistent ? 'Unmark persistent' : 'Mark persistent'} for ${escapeHtml(g.name || '')}"><i class="bi ${g._persistent ? 'bi-lock-fill' : 'bi-unlock text-muted'}"></i></button>` : ''}
           ${g._cache_checked_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(g._cache_checked_at)}${g._cache_last_core_host ? ' @ ' + escapeHtml(g._cache_last_core_host) : ''}</div>` : ''}
         </td>
+        <td class="small text-nowrap">
+          ${catalogNoteIndicatorHtml(g.note, g.note_color)}
+          <button class="btn btn-link btn-sm p-0 ms-2 align-baseline genNoteBtn" type="button" ${(isInstalled && !isDuplicateConflict) ? '' : 'disabled'} title="${g.note ? 'Edit note' : 'Add note'}" aria-label="${g.note ? 'Edit note' : 'Add note'} for ${escapeHtml(g.name || '')}"><i class="bi bi-pencil-square"></i></button>
+        </td>
         <td>
           <div class="btn-group btn-group-sm" role="group">
             ${isDuplicateConflict
@@ -1562,6 +1656,8 @@
           buttonIds: ['genBatchEnableBtn', 'genBatchDisableBtn', 'genBatchDeleteBtn', 'genBatchOverrideSuccessBtn', 'genBatchOverrideFailBtn', 'genBatchPersistentBtn', 'genBatchUnpersistentBtn'],
         });
       });
+
+      tr.querySelector('.genNoteBtn')?.addEventListener('click', () => openFlagCatalogNoteModal(g, 'flag-generator'));
 
       const packDeleteBtn = tr.querySelector('.genPackDeleteBtn');
       if (packDeleteBtn && packId) {
@@ -1632,7 +1728,7 @@
 
     if (!filtered.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td colspan="11" class="text-muted">No generators found.</td>';
+      tr.innerHTML = '<td colspan="12" class="text-muted">No generators found.</td>';
       body.appendChild(tr);
     }
 
@@ -1747,6 +1843,10 @@
           ${hasCompose ? `<button class="btn btn-link btn-sm p-0 ms-1 align-baseline genCachePersistToggleBtn" type="button" ${(isInstalled && !isDuplicateConflict) ? '' : 'disabled'} title="${g._persistent ? 'Persistent: this cached image is locked — Clear Cache and cleanup will not remove it. Click to unmark.' : 'Not persistent: this cached image can be removed by Clear Cache and cleanup. Click to mark persistent.'}" aria-label="${g._persistent ? 'Unmark persistent' : 'Mark persistent'} for ${escapeHtml(g.name || '')}"><i class="bi ${g._persistent ? 'bi-lock-fill' : 'bi-unlock text-muted'}"></i></button>` : ''}
           ${g._cache_checked_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(g._cache_checked_at)}${g._cache_last_core_host ? ' @ ' + escapeHtml(g._cache_last_core_host) : ''}</div>` : ''}
         </td>
+        <td class="small text-nowrap">
+          ${catalogNoteIndicatorHtml(g.note, g.note_color)}
+          <button class="btn btn-link btn-sm p-0 ms-2 align-baseline nodeGenNoteBtn" type="button" ${(isInstalled && !isDuplicateConflict) ? '' : 'disabled'} title="${g.note ? 'Edit note' : 'Add note'}" aria-label="${g.note ? 'Edit note' : 'Add note'} for ${escapeHtml(g.name || '')}"><i class="bi bi-pencil-square"></i></button>
+        </td>
         <td>
           <div class="btn-group btn-group-sm" role="group">
             ${isDuplicateConflict
@@ -1773,6 +1873,8 @@
           buttonIds: ['nodeGenBatchEnableBtn', 'nodeGenBatchDisableBtn', 'nodeGenBatchDeleteBtn', 'nodeGenBatchOverrideSuccessBtn', 'nodeGenBatchOverrideFailBtn', 'nodeGenBatchPersistentBtn', 'nodeGenBatchUnpersistentBtn'],
         });
       });
+
+      tr.querySelector('.nodeGenNoteBtn')?.addEventListener('click', () => openFlagCatalogNoteModal(g, 'flag-node-generator'));
 
       const packDeleteBtn = tr.querySelector('.nodeGenPackDeleteBtn');
       if (packDeleteBtn && packId) {
@@ -1843,7 +1945,7 @@
 
     if (!filtered.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td colspan="11" class="text-muted">No node-generators found.</td>';
+      tr.innerHTML = '<td colspan="12" class="text-muted">No node-generators found.</td>';
       body.appendChild(tr);
     }
 
@@ -3742,7 +3844,9 @@
   });
 
   document.getElementById('genTestRunBtn').addEventListener('click', async () => {
-    const creds = await promptGenTestCreds();
+    // In VM mode the server loads the configured CORE VM credentials from
+    // .scenarioforge.env, exactly as generation and execution do.
+    const creds = FLAG_CATALOG_VM_MODE ? {} : await promptGenTestCreds();
     if (!creds) return;
     genTestState.testCoreCfg = creds;
     await runCurrentGenTest();

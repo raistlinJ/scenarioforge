@@ -140,6 +140,16 @@ def test_vuln_catalog_template_redacts_sensitive_test_log_lines() -> None:
     assert 'const text = _redactSensitiveVulnLogLine(line);' in text
 
 
+def test_vuln_catalog_table_offers_persistent_colored_notes() -> None:
+    text = VULN_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert '>Notes</th>' in text
+    assert 'id="vulnCatalogNoteModal"' in text
+    assert 'data-note-color="red"' in text
+    assert 'data-note-color="yellow"' in text
+    assert 'data-note-color="green"' in text
+    assert '/vuln_catalog_items/set_note' in text
+
+
 def test_vuln_catalog_batch_reuses_core_session_prompt() -> None:
     text = VULN_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
     assert 'const VULN_CATALOG_VM_MODE = VULN_CATALOG_RUNTIME_MODE === \'vm\';' in text
@@ -147,6 +157,12 @@ def test_vuln_catalog_batch_reuses_core_session_prompt() -> None:
     assert 'if (VULN_CATALOG_VM_MODE)' in text
     assert 'const canProceed = await _ensureCoreVmReadyForVulnTest(creds);' in text
     assert "_setText('vulnBatchMeta', 'Batch run cancelled.');" in text
+
+
+def test_vuln_catalog_vm_mode_skips_single_test_credential_modal() -> None:
+    text = VULN_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert 'const creds = await resolveVulnBatchCoreConfig();' in text
+    assert '// VM mode uses the server\'s .scenarioforge.env CORE VM configuration.' in text
 
 
 def test_vuln_catalog_template_exposes_selection_and_log_controls() -> None:

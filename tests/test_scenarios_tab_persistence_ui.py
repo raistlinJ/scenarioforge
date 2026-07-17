@@ -31,6 +31,18 @@ def test_flag_node_generator_picker_can_limit_specific_choices_to_cached_images(
     assert "generator._cached !== true" in topology_template
 
 
+def test_flag_node_generator_picker_shows_validation_status() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    start = topology_template.index("async function openFlagNodeGeneratorPicker")
+    end = topology_template.index("// Modal for Specific selection", start)
+    picker = topology_template[start:end]
+    assert "const validationBadgeHtml = generator =>" in picker
+    assert 'badge text-bg-success">Validated</span>' in picker
+    assert 'badge text-bg-danger">Failed</span>' in picker
+    assert "generator.validated_at" in picker
+
+
 def test_topology_migrates_existing_projects_to_show_flag_node_generator_card() -> None:
     topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
 
