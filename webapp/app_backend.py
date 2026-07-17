@@ -16873,6 +16873,7 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     docker_total = 0
     docker_nonvuln_total = 0
     topology_node_generator_total = 0
+    generic_docker_total = 0
     topology_generator_mode = any(bool(n.get('_topology_flag_node_generators_configured')) for n in (nodes or []) if isinstance(n, dict))
     vuln_total = 0
     compose_backed_total = 0
@@ -16896,11 +16897,14 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
             docker_nonvuln_total += 1
             if str(n.get('flag_node_generator_id') or '').strip():
                 topology_node_generator_total += 1
+            else:
+                generic_docker_total += 1
         if is_vuln or (is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_total += 1
     return {
         'docker_total': docker_total,
         'docker_nonvuln_total': docker_nonvuln_total,
+        'generic_docker_total': generic_docker_total,
         'vuln_total': vuln_total,
         'compose_backed_total': compose_backed_total,
         'eligible_total': eligible_total,
@@ -19693,6 +19697,21 @@ def _flow_compute_flag_assignments(
             requires_cache[gid] = r
         return r
 
+    def _requirements_available_at_parallel_start(gen: dict[str, Any], state: set[str]) -> bool:
+        """Whether ``gen`` can run now or begin an independent branch.
+
+        A manifest may explicitly mark a solver-facing input with
+        ``flow_supply_when_first``.  That value is valid at the first step of
+        a parallel branch, so it must not force the solver to reuse a node or
+        generator merely because an earlier sequence did not produce it.
+        Unmarked requirements remain strict: Flow never invents those values.
+        """
+        try:
+            branch_start_inputs = set(_flow_first_step_chain_supplied_input_names(gen))
+        except Exception:
+            branch_start_inputs = set()
+        return (_requires_cached(gen) - branch_start_inputs).issubset(state)
+
     pool_by_pos: list[list[dict[str, Any]]] = []
     for cid in chain_ids:
         node = id_to_node.get(str(cid)) or {}
@@ -19741,10 +19760,11 @@ def _flow_compute_flag_assignments(
             return []
         candidates = [
             g for g in pool
-            if _requires_cached(g).issubset(state) and str(g.get('id') or '').strip() not in deployed_ids
+            if _requirements_available_at_parallel_start(g, state)
+            and str(g.get('id') or '').strip() not in deployed_ids
         ]
         if (not candidates) and (not disallow_generator_reuse):
-            candidates = [g for g in pool if _requires_cached(g).issubset(state)]
+            candidates = [g for g in pool if _requirements_available_at_parallel_start(g, state)]
         if not candidates:
             if disallow_generator_reuse:
                 return []
@@ -19882,10 +19902,11 @@ def _flow_compute_flag_assignments(
         else:
             candidates = [
                 g for g in pool
-                if _requires_cached(g).issubset(state_known) and str(g.get('id') or '').strip() not in deployed
+                if _requirements_available_at_parallel_start(g, state_known)
+                and str(g.get('id') or '').strip() not in deployed
             ]
             if (not candidates) and (not disallow_generator_reuse):
-                candidates = [g for g in pool if _requires_cached(g).issubset(state_known)]
+                candidates = [g for g in pool if _requirements_available_at_parallel_start(g, state_known)]
             if not candidates:
                 if disallow_generator_reuse:
                     return []

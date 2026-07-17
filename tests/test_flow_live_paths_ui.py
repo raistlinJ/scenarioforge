@@ -32,6 +32,25 @@ def test_flow_assignment_persists_resolved_paths() -> None:
     assert not missing, "Missing resolved_paths persistence snippets in flow template: " + "; ".join(missing)
 
 
+def test_flow_generation_does_not_automatically_relax_no_duplicates() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "Generate failed after retries. Enable duplicates and retry?" not in text
+    assert "Retry With Duplicates?" not in text
+
+
+def test_flow_challenge_bounds_include_mandatory_and_generic_docker_nodes() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "const genericDocker = Number.isFinite(+stats.generic_docker_total)",
+        "(vuln || 0) + nodeGenerators + genericDocker",
+        "generic_docker_total: genericDockerCount",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Challenge bounds must include generic Docker capacity: " + "; ".join(missing)
+
+
 def test_flow_generator_output_shows_phase_timings() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

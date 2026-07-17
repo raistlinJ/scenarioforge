@@ -97,22 +97,36 @@ def test_topology_vulnerability_and_node_generator_form_two_steps_without_duplic
         _write_xml(xml_path, scenario, generic_docker_count=0)
         app_backend._planner_persist_flow_plan(xml_path=xml_path, scenario=scenario, seed=2468)
 
+        # Model the Bash + git_deploy_key_repo shape: the vulnerability
+        # generator provides the credential required by the explicitly chosen
+        # topology node generator.  This must remain a valid two-node chain
+        # without relaxing the no-duplicates setting.
         flag_generator = {
             'id': 'fg-vuln', 'name': 'Vulnerability flag generator',
-            'inputs': [], 'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+            'inputs': [{'name': 'seed', 'type': 'string', 'required': True}],
+            'outputs': [
+                {'name': 'Flag(flag_id)'},
+                {'name': 'Credential(user, password)'},
+            ],
+            'language': 'python',
         }
         node_generator = {
             'id': 'ng-topology', 'name': 'Topology node generator',
-            'inputs': [], 'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+            'inputs': [
+                {'name': 'seed', 'type': 'string', 'required': True},
+                {'name': 'node_name', 'type': 'string', 'required': True},
+                {
+                    'name': 'Credential(user, password)',
+                    'type': 'string',
+                    'required': True,
+                    'flow_supply_when_first': True,
+                },
+            ],
+            'outputs': [{'name': 'Flag(flag_id)'}],
+            'language': 'python',
         }
         monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_generator], []))
         monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_generator], []))
-        monkeypatch.setattr(
-            app_backend,
-            '_flow_reorder_chain_by_generator_dag',
-            lambda chain, assignments, **_kwargs: (chain, assignments, {}),
-        )
-        monkeypatch.setattr(app_backend, '_flow_validate_chain_order_by_requires_produces', lambda *_args, **_kwargs: (True, []))
 
         generated = _post_sequence(
             client,
@@ -134,6 +148,58 @@ def test_topology_vulnerability_and_node_generator_form_two_steps_without_duplic
         assert len({str(node.get('id') or '') for node in chain}) == 2
         assignments = generated.get('flag_assignments') or []
         assert {assignment.get('id') for assignment in assignments} == {'fg-vuln', 'ng-topology'}
+        assert assignments[1].get('id') == 'ng-topology'
+        assert 'Credential(user, password)' in (assignments[1].get('inputs') or [])
+
+
+@pytest.mark.filterwarnings('ignore::DeprecationWarning')
+def test_topology_items_can_begin_parallel_branches_without_duplicates(monkeypatch):
+    """A branch-start input must not be mistaken for a duplicate-capacity failure."""
+    app.config['TESTING'] = True
+    client = app.test_client()
+    _login(client)
+
+    scenario = f'zz-flow-topology-parallel-{uuid.uuid4().hex[:10]}'
+    with tempfile.TemporaryDirectory(prefix='flow-topology-parallel-') as directory:
+        xml_path = os.path.join(directory, f'{scenario}.xml')
+        _write_xml(xml_path, scenario, generic_docker_count=0)
+        app_backend._planner_persist_flow_plan(xml_path=xml_path, scenario=scenario, seed=97531)
+
+        flag_generator = {
+            'id': 'fg-vuln', 'name': 'Vulnerability flag generator',
+            'inputs': [{'name': 'seed', 'type': 'string', 'required': True}],
+            'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+        }
+        node_generator = {
+            'id': 'ng-topology', 'name': 'Topology generator with branch input',
+            'inputs': [
+                {'name': 'seed', 'type': 'string', 'required': True},
+                {
+                    'name': 'APIKey(service)', 'type': 'string', 'required': True,
+                    'flow_supply_when_first': True,
+                },
+            ],
+            'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+        }
+        monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_generator], []))
+        monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_generator], []))
+
+        generated = _post_sequence(
+            client,
+            {
+                'scenario': scenario,
+                'length': 2,
+                'preview_plan': xml_path,
+                'chain_expansion_mode': 'strict',
+                'allow_node_duplicates': False,
+            },
+        )
+
+        assert generated.get('ok') is True, generated
+        assignments = generated.get('flag_assignments') or []
+        branch_assignment = next(item for item in assignments if item.get('id') == 'ng-topology')
+        assert branch_assignment.get('chain_supplied_parallel_start') is True
+        assert branch_assignment.get('chain_supplied_inputs') == ['APIKey(service)']
 
 
 @pytest.mark.filterwarnings('ignore::DeprecationWarning')

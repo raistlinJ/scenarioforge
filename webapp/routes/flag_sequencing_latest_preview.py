@@ -153,11 +153,12 @@ def register(app, *, backend_module: Any) -> None:
         except Exception:
             core_validated = False
 
-        def _flow_eligibility_from_payload(payload: dict) -> tuple[int, int, int, int, bool]:
+        def _flow_eligibility_from_payload(payload: dict) -> tuple[int, int, int, int, int, bool]:
             docker_count = 0
             vuln_count = 0
             docker_nonvuln_count = 0
             topology_flag_node_generator_count = 0
+            generic_docker_count = 0
             try:
                 preview = payload.get('full_preview') if isinstance(payload, dict) else None
                 if isinstance(preview, dict):
@@ -171,6 +172,10 @@ def register(app, *, backend_module: Any) -> None:
                             docker_count = 0
                     hosts = preview.get('hosts') if isinstance(preview.get('hosts'), list) else []
                     if isinstance(hosts, list):
+                        # A populated host list is authoritative. role_counts
+                        # describes the same nodes and must not be added again.
+                        if hosts:
+                            docker_count = 0
                         for host in hosts:
                             if not isinstance(host, dict):
                                 continue
@@ -178,10 +183,13 @@ def register(app, *, backend_module: Any) -> None:
                             vulns = host.get('vulnerabilities') if isinstance(host.get('vulnerabilities'), list) else []
                             if role == 'docker':
                                 docker_count += 1
-                                if not vulns and (not topology_nodegen_mode or str((topology_nodegen_map or {}).get(str(host.get('node_id') or '')) or '').strip()):
+                                if not vulns:
                                     docker_nonvuln_count += 1
-                                    if topology_nodegen_mode:
+                                    selected_node_generator = str((topology_nodegen_map or {}).get(str(host.get('node_id') or '')) or '').strip()
+                                    if topology_nodegen_mode and selected_node_generator:
                                         topology_flag_node_generator_count += 1
+                                    else:
+                                        generic_docker_count += 1
                             if vulns:
                                 vuln_count += 1
                     vuln_by_node = preview.get('vulnerabilities_by_node') if isinstance(preview.get('vulnerabilities_by_node'), dict) else None
@@ -192,8 +200,9 @@ def register(app, *, backend_module: Any) -> None:
                 vuln_count = vuln_count
                 docker_nonvuln_count = docker_nonvuln_count
                 topology_flag_node_generator_count = topology_flag_node_generator_count
+                generic_docker_count = generic_docker_count
             flow_eligible = bool((docker_count or 0) > 0 or (vuln_count or 0) > 0)
-            return docker_count, vuln_count, docker_nonvuln_count, topology_flag_node_generator_count, flow_eligible
+            return docker_count, vuln_count, docker_nonvuln_count, topology_flag_node_generator_count, generic_docker_count, flow_eligible
 
         def _flow_eligibility_details(payload: dict | None) -> dict[str, Any]:
             (
@@ -201,6 +210,7 @@ def register(app, *, backend_module: Any) -> None:
                 vuln_count,
                 docker_nonvuln_count,
                 topology_flag_node_generator_count,
+                generic_docker_count,
                 topology_eligible,
             ) = _flow_eligibility_from_payload(payload or {})
             try:
@@ -247,6 +257,7 @@ def register(app, *, backend_module: Any) -> None:
                 'vuln_count': vuln_count,
                 'docker_nonvuln_count': docker_nonvuln_count,
                 'topology_flag_node_generator_count': topology_flag_node_generator_count,
+                'generic_docker_count': generic_docker_count,
                 'flow_topology_eligible': topology_eligible,
                 'flag_generator_count': flag_generator_count,
                 'flag_node_generator_count': flag_node_generator_count,
