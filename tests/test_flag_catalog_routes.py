@@ -155,11 +155,13 @@ def test_flag_catalog_tables_offer_persistent_colored_notes() -> None:
     text = FLAG_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
     assert text.count('>Notes</th>') == 2
     assert 'id="flagCatalogNoteModal"' in text
+    assert 'id="flagCatalogNoteClear"' in text
     assert 'data-note-color="red"' in text
     assert 'data-note-color="yellow"' in text
     assert 'data-note-color="green"' in text
     assert '/api/flag_generators/set_note' in text
     assert '/api/flag_node_generators/set_note' in text
+    assert 'function updateFlagCatalogNoteRow' in text
 
 
 def test_flag_catalog_batch_reuses_core_session_prompt() -> None:

@@ -19,6 +19,8 @@ def test_generator_notes_are_persisted_with_a_validated_color(monkeypatch, tmp_p
         }],
     }
     app_backend._save_installed_generator_packs_state(state)
+    _packs_before, generators_before = app_backend._build_installed_disable_maps()
+    assert generators_before[('flag-generator', 'demo-generator')]['note'] is None
 
     ok, message = app_backend._set_generator_note_state(
         kind='flag-generator',
@@ -33,6 +35,13 @@ def test_generator_notes_are_persisted_with_a_validated_color(monkeypatch, tmp_p
     item = saved['packs'][0]['installed'][0]
     assert item['note'] == 'check login flow'
     assert item['note_color'] == 'green'
+    assert saved['catalog_notes']['flag-generator:demo-generator'] == {
+        'note': 'check login flow',
+        'note_color': 'green',
+    }
+    _packs_after, generators_after = app_backend._build_installed_disable_maps()
+    assert generators_after[('flag-generator', 'demo-generator')]['note'] == 'check login flow'
+    assert generators_after[('flag-generator', 'demo-generator')]['note_color'] == 'green'
 
     ok, message = app_backend._set_generator_note_state(
         kind='flag-generator',
@@ -42,6 +51,30 @@ def test_generator_notes_are_persisted_with_a_validated_color(monkeypatch, tmp_p
     )
     assert ok is False
     assert 'red, yellow, or green' in message
+
+
+def test_generator_notes_can_be_saved_for_a_visible_catalog_id_without_a_pack_state_item(monkeypatch, tmp_path):
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+    app_backend._save_installed_generator_packs_state({'packs': []})
+
+    ok, message = app_backend._set_generator_note_state(
+        kind='flag-node-generator',
+        generator_id='manifest-id-not-yet-indexed-in-pack-state',
+        note='use the green deployment path',
+        note_color='green',
+    )
+
+    assert ok is True
+    assert 'Saved note' in message
+    saved = app_backend._load_installed_generator_packs_state()
+    assert saved['catalog_notes']['flag-node-generator:manifest-id-not-yet-indexed-in-pack-state'] == {
+        'note': 'use the green deployment path',
+        'note_color': 'green',
+    }
+    _packs, generators = app_backend._build_installed_disable_maps()
+    assert generators[('flag-node-generator', 'manifest-id-not-yet-indexed-in-pack-state')]['note'] == 'use the green deployment path'
+    assert generators[('flag-node-generator', 'manifest-id-not-yet-indexed-in-pack-state')]['note_color'] == 'green'
 
 
 def test_vulnerability_note_endpoint_persists_note_and_color(monkeypatch):
