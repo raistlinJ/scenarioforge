@@ -8931,7 +8931,7 @@
                     scenariosJsonInput.value = JSON.stringify({ scenarios: state.scenarios, active_index: activeIdx });
                 } catch (e) {
                     state.scenarios = originalScenarios;
-                    reject('Serialize failed');
+                    reject(e instanceof Error ? e : new Error(String(e || 'Serialize failed')));
                     return;
                 }
                 const latestCoreConfig = getCoreConfig(true);
@@ -9826,6 +9826,12 @@
             return;
         }
 
+        if (section === 'Flag Node Generators' && field === 'selected') {
+            delete item.g_id;
+            delete item.g_name;
+            return;
+        }
+
         if (section === 'Routing') {
             if (field === 'r2r_mode') {
                 delete item.r2r_edges;
@@ -9965,6 +9971,41 @@
                         resolvedCount += 1;
                         bumpSection('Vulnerabilities');
                         pushExample({ scenario: scenName, section: 'Vulnerabilities', row: i + 1, field: 'selected', from, to: `Specific (${pickedName})` });
+                    }
+                    continue;
+                }
+
+                // Flag-node-generators use a catalog identity, not a generic
+                // selected value.  Resolving Random to "Specific" alone
+                // produces an invalid XML row, so assign both id and name or
+                // fail the save with an actionable error.
+                if (sectionName === 'Flag Node Generators') {
+                    const generators = Array.isArray(window.FLAG_NODE_GENERATORS)
+                        ? window.FLAG_NODE_GENERATORS.filter(generator => generator && generator.disabled !== true && String(generator.id || '').trim())
+                        : [];
+                    for (let i = 0; i < items.length; i++) {
+                        const it = items[i];
+                        if (!it || typeof it !== 'object') continue;
+                        const rawSelected = (it.selected !== undefined && it.selected !== null) ? String(it.selected).trim() : '';
+                        const isRandomSelected = !rawSelected || rawSelected.toLowerCase() === 'random';
+                        if (!isRandomSelected) continue;
+                        if (!generators.length) {
+                            throw new Error('Flag Node Generators contains Random, but no enabled flag-node-generators are available.');
+                        }
+                        const rng = makeDeterministicRng(`${seedVal}|${scenName}|${sectionName}|${i}|g_id${getRandomRerollSalt(it, 'selected')}|save-xml`);
+                        const generator = generators[Math.floor(rng() * generators.length) % generators.length];
+                        const generatorId = String(generator.id || '').trim();
+                        if (!generatorId) {
+                            throw new Error('Flag Node Generators could not resolve Random to an enabled generator.');
+                        }
+                        it.selected = 'Specific';
+                        it.g_id = generatorId;
+                        it.g_name = String(generator.name || generatorId).trim() || generatorId;
+                        it.v_metric = 'Count';
+                        if (!(parseInt(it.v_count, 10) > 0)) it.v_count = 1;
+                        resolvedCount += 1;
+                        bumpSection('Flag Node Generators');
+                        pushExample({ scenario: scenName, section: sectionName, row: i + 1, field: 'selected', from: rawSelected || 'Random', to: `Specific (${it.g_name})` });
                     }
                     continue;
                 }
@@ -17542,12 +17583,11 @@
         if (secName === 'Vulnerabilities' || secName === 'Flag Node Generators') {
             const curRaw = (it.selected || 'Random');
             const cur = curRaw;
-            const catalogItems = secName === 'Vulnerabilities'
-                ? ((window.VULN_CATALOG && Array.isArray(window.VULN_CATALOG.items)) ? window.VULN_CATALOG.items : [])
-                : (Array.isArray(window.FLAG_NODE_GENERATORS) ? window.FLAG_NODE_GENERATORS : []);
-            const hasCatalogItems = catalogItems.length > 0;
-            const options = hasCatalogItems ? ['Random', 'Specific'] : ['Specific'];
-            const effectiveCur = hasCatalogItems ? cur : 'Specific';
+            // Do not visually coerce Random into Specific while the
+            // asynchronous catalog request is still loading.  Doing so
+            // made a valid Random row look like an empty selection.
+            const options = ['Random', 'Specific'];
+            const effectiveCur = cur;
             opts = options.map(o => `<option ${o === effectiveCur ? 'selected' : ''}>${o}</option>`).join('');
         } else {
             const cur = it.selected || 'Random';
