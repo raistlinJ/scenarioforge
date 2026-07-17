@@ -4039,6 +4039,79 @@ def _write_remote_repo_hash(client: Any, remote_repo: str, hash_value: str) -> N
         pass
 
 
+def _prune_remote_installed_generator_packs(
+    client: Any,
+    *,
+    repo_root: str,
+    remote_repo: str,
+    log_handle: Any | None = None,
+) -> list[str]:
+    """Remove remote installed generator pack directories absent locally.
+
+    Incremental repository sync intentionally uploads only the paths needed for
+    a run.  It therefore cannot use a broad ``--delete`` without deleting the
+    remote ScenarioForge checkout.  Installed generator packs are different:
+    their directories are a catalog and stale copies can resolve to the wrong
+    logical generator when a pack is updated.  Keep those two catalog roots an
+    exact directory-level mirror of the local checkout.
+    """
+    local_installed = Path(repo_root).resolve() / 'outputs' / 'installed_generators'
+    expected: dict[str, list[str]] = {}
+    for kind in ('flag_generators', 'flag_node_generators'):
+        local_kind = local_installed / kind
+        if not local_kind.is_dir():
+            expected[kind] = []
+            continue
+        expected[kind] = sorted(
+            child.name
+            for child in local_kind.iterdir()
+            if child.is_dir() and not child.name.startswith('.')
+        )
+
+    # This script only operates below the fixed installed-generator roots under
+    # the resolved remote repository.  It takes the expected names as JSON, not
+    # shell fragments, so pack names cannot alter the command.
+    script = (
+        'import json, os, shutil, sys\n'
+        'repo = os.path.abspath(sys.argv[1])\n'
+        'expected = json.loads(sys.argv[2])\n'
+        'removed = []\n'
+        "for kind in ('flag_generators', 'flag_node_generators'):\n"
+        "    root = os.path.join(repo, 'outputs', 'installed_generators', kind)\n"
+        "    if not os.path.isdir(root):\n"
+        "        continue\n"
+        "    allowed = set(expected.get(kind) or [])\n"
+        "    for name in os.listdir(root):\n"
+        "        path = os.path.join(root, name)\n"
+        "        if name.startswith('.') or name in allowed or not os.path.isdir(path):\n"
+        "            continue\n"
+        "        shutil.rmtree(path)\n"
+        "        removed.append(kind + '/' + name)\n"
+        'print(json.dumps(removed))\n'
+    )
+    cmd = (
+        f"python3 -c {shlex.quote(script)} "
+        f"{shlex.quote(str(remote_repo))} {shlex.quote(json.dumps(expected, sort_keys=True))}"
+    )
+    _rc, stdout, _stderr = _exec_ssh_command(client, cmd, timeout=60.0, check=True)
+    try:
+        removed_raw = json.loads((stdout or '').strip() or '[]')
+    except Exception as exc:
+        raise RuntimeError(f'Invalid installed-generator cleanup response: {exc}') from exc
+    if not isinstance(removed_raw, list) or not all(isinstance(item, str) for item in removed_raw):
+        raise RuntimeError('Invalid installed-generator cleanup response.')
+    removed = [str(item) for item in removed_raw]
+    try:
+        if removed:
+            log_handle.write(f"[remote] removed stale installed generator packs: {', '.join(removed)}\n")
+        else:
+            log_handle.write('[remote] installed generator pack catalog is synchronized\n')
+        log_handle.flush()
+    except Exception:
+        pass
+    return removed
+
+
 def _push_repo_to_remote(
     core_cfg: Dict[str, Any],
     *,
@@ -4076,6 +4149,15 @@ def _push_repo_to_remote(
             client,
             remote_repo,
             cfg,
+            log_handle=log_handle,
+        )
+        # A generator pack update creates a new installed directory.  Delta
+        # uploads leave the former directory behind unless we explicitly prune
+        # it, allowing manifest discovery to run stale generator code.
+        _prune_remote_installed_generator_packs(
+            client,
+            repo_root=repo_root,
+            remote_repo=remote_repo,
             log_handle=log_handle,
         )
         allowed_outputs = allowed_outputs_override
