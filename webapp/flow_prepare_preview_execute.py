@@ -695,6 +695,7 @@ def _prepare_chain_and_assignments(
                 scenario_label or scenario_norm,
                 initial_facts_override=initial_facts_override,
                 goal_facts_override=goal_facts_override,
+                disallow_generator_reuse=(not allow_node_duplicates),
                 dependency_level=dependency_level,
                 pivot_context=pivot_context,
             )
@@ -851,7 +852,10 @@ def _prepare_chain_and_assignments(
     except Exception:
         flow_errors_detail = None
     flags_enabled = bool(flow_valid)
-    run_generators = bool(flags_enabled or j.get('mode') in {'resolve', 'resolve_hints', 'hint', 'hint_only'})
+    # Resolve mode must not execute a generator just to discover that its
+    # required inputs are unavailable.  That previously allowed a stale or
+    # fallback assignment to fail remotely after Docker had already started.
+    run_generators = bool(flags_enabled)
     _progress(f'Solve complete: chain={len(chain_nodes or [])} assignments={len(flag_assignments or [])} run_generators={int(bool(run_generators))}')
     try:
         if not flow_valid:
@@ -1876,6 +1880,29 @@ def execute_impl(*, backend: Any, payload: dict[str, Any] | None = None):
     flow_errors_detail = prepared_chain['flow_errors_detail']
     flags_enabled = bool(prepared_chain['flags_enabled'])
     run_generators = bool(prepared_chain['run_generators'])
+
+    if not flow_valid:
+        validation_error = '; '.join(str(error or '').strip() for error in (flow_errors or []) if str(error or '').strip())
+        return jsonify({
+            'ok': False,
+            'error': 'Flow validation failed before generator execution'
+                + (f': {validation_error}' if validation_error else '.'),
+            'scenario': scenario_label or scenario_norm,
+            'length': length,
+            'chain': [
+                {
+                    'id': str(node.get('id') or ''),
+                    'name': str(node.get('name') or ''),
+                    'type': str(node.get('type') or ''),
+                }
+                for node in (chain_nodes or [])
+                if isinstance(node, dict)
+            ],
+            'flag_assignments': flag_assignments,
+            'flow_valid': False,
+            'flow_errors': list(flow_errors or []),
+            'stats': stats,
+        }), 422
 
     _gen_by_id: dict[str, dict[str, Any]] = {}
 
