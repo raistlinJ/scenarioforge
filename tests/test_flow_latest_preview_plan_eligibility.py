@@ -93,6 +93,7 @@ def test_latest_preview_plan_reports_topology_selected_node_generator_count(tmp_
             'hosts': [
                 {'node_id': 'vuln-1', 'role': 'docker', 'vulnerabilities': ['vuln-a']},
                 {'node_id': 'nodegen-1', 'role': 'docker', 'vulnerabilities': []},
+                {'node_id': 'generic-1', 'role': 'docker', 'vulnerabilities': []},
             ],
             'vulnerabilities_by_node': {'vuln-1': ['vuln-a']},
             'flag_node_generators_by_node': {'nodegen-1': 'node-generator-a'},
@@ -112,6 +113,7 @@ def test_latest_preview_plan_reports_topology_selected_node_generator_count(tmp_
     data = resp.get_json() or {}
     assert data['vuln_count'] == 1
     assert data['topology_flag_node_generator_count'] == 1
+    assert data['generic_docker_count'] == 1
 
 
 def test_latest_preview_plan_reports_no_validated_tested_vulns_when_catalog_is_present_but_unselectable(tmp_path, monkeypatch):

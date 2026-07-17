@@ -2918,6 +2918,9 @@
         const topologyFlagNodeGeneratorCount = Number.isFinite(+data.topology_flag_node_generator_count)
           ? (+data.topology_flag_node_generator_count)
           : 0;
+        const genericDockerCount = Number.isFinite(+data.generic_docker_count)
+          ? (+data.generic_docker_count)
+          : Math.max(0, dockerNonvulnCount - topologyFlagNodeGeneratorCount);
         flowEligible = (eligible || (dockerCount > 0 || vulnCount > 0));
         if (!flowEligible) {
           // Guardrail: do not clear/persist FlowState on transient ineligibility checks
@@ -2930,6 +2933,7 @@
             docker_nonvuln_total: dockerNonvulnCount,
             docker_total: dockerCount,
             topology_flag_node_generator_total: topologyFlagNodeGeneratorCount,
+            generic_docker_total: genericDockerCount,
             flag_node_generator_eligible_total: topologyFlagNodeGeneratorCount || dockerNonvulnCount,
           };
           updateLengthSpinnerMax();
@@ -10125,11 +10129,14 @@
   function dockerNodeCapFromStats(stats) {
     if (!stats || typeof stats !== 'object') return null;
     const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : null;
-    const dockerOther = Number.isFinite(+stats.topology_flag_node_generator_total)
+    const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
       ? (+stats.topology_flag_node_generator_total)
-      : (Number.isFinite(+stats.flag_node_generator_eligible_total) ? (+stats.flag_node_generator_eligible_total) : null);
-    if (vuln === null && dockerOther === null) return null;
-    return Math.max(0, (vuln || 0) + (dockerOther || 0));
+      : 0;
+    const genericDocker = Number.isFinite(+stats.generic_docker_total)
+      ? (+stats.generic_docker_total)
+      : Math.max(0, (Number.isFinite(+stats.docker_nonvuln_total) ? (+stats.docker_nonvuln_total) : 0) - nodeGenerators);
+    if (vuln === null && nodeGenerators === 0 && genericDocker === 0) return null;
+    return Math.max(0, (vuln || 0) + nodeGenerators + genericDocker);
   }
 
   function vulnerabilityNodeMinimumFromStats(stats) {
@@ -10146,16 +10153,13 @@
     const minimum = vulnerabilityNodeMinimumFromStats(lastStats);
     lengthEl.min = String(minimum);
     if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
-    const allowDupes = generateNoDuplicatesEl ? !!generateNoDuplicatesEl.checked : true;
-    if (!allowDupes) {
-      const cap = dockerNodeCapFromStats(lastStats);
-      if (cap !== null && cap > 0) {
-        lengthEl.max = String(Math.max(minimum, cap));
-        lengthEl.title = `Minimum ${minimum} for topology challenge nodes; limited to ${cap} Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
-        if (parseInt(lengthEl.value, 10) > cap) lengthEl.value = String(cap);
-        if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
-        return;
-      }
+    const cap = dockerNodeCapFromStats(lastStats);
+    if (cap !== null && cap > 0) {
+      lengthEl.max = String(Math.max(minimum, cap));
+      lengthEl.title = `Minimum ${minimum} for mandatory topology challenge nodes; maximum ${cap} including Docker nodes from Node Information.`;
+      if (parseInt(lengthEl.value, 10) > cap) lengthEl.value = String(cap);
+      if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
+      return;
     }
     lengthEl.max = '50';
     lengthEl.title = `Minimum ${minimum} for topology challenge nodes.`;
@@ -11184,28 +11188,10 @@
             continue;
           }
 
-          if (!allowDupes) {
-            const enableDuplicates = await confirmFlowAction(
-              'Retry With Duplicates?',
-              'Generate failed after retries. Enable duplicates and retry?',
-              'Enable Duplicates'
-            );
-            if (enableDuplicates) {
-              allowDupes = true;
-              options.allow_node_duplicates = true;
-              allowNodeDuplicates = true;
-              if (generateNoDuplicatesEl) {
-                generateNoDuplicatesEl.checked = true;
-              }
-              syncAllowDuplicateParams();
-              retriesRemaining = 0;
-              attemptedRetries = 0;
-              retryIndex = 0;
-              sequenceRequestId = newSequenceRequestId();
-              appendLoadingLog('Enabled duplicates and retrying generate');
-              continue;
-            }
-          }
+          // Do not silently relax the user's no-duplicates choice.  A failed
+          // assignment can be caused by an incompatible topology-selected
+          // generator, a missing dependency, or capacity; surface that error
+          // instead so the topology or generator configuration can be fixed.
           throw err;
         }
       }
