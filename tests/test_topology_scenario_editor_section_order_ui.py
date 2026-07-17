@@ -34,8 +34,17 @@ def test_scenario_editor_header_displays_estimated_topology_node_count() -> None
         "estimateSectionNodes('Routing', { routing: true })",
         "estimateSectionNodes('Vulnerabilities')",
         "estimateSectionNodes('Flag Node Generators')",
-        'Estimated nodes: ${estimatedTopologyNodes}',
+        'Estimated Total Nodes: ${estimatedTopologyNodes}',
         'Services, Traffic, and Segmentation configure existing nodes.',
     ]
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing Scenario Editor estimated-node badge wiring: " + "; ".join(missing)
+    assert text.index("const baseHostPool =", text.index("const densityBaseHtml")) < text.index("const estimateSectionNodes =")
+
+
+def test_topology_does_not_render_hosts_badges() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "const hostSummaryBlock" not in text
+    assert "const badgeSpan = hostBadge +" not in text
+    assert "host-total-badge+.badge" not in text
