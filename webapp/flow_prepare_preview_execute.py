@@ -118,28 +118,34 @@ def _prepare_remote_generator_execution(
                 current_app.logger.info('[flow.generator] Syncing repo to CORE VM (no installed generators needed)')
         except Exception as exc:
             current_app.logger.error('[flow.generator] failed to resolve generator paths: %s', exc, exc_info=True)
-            allowed_outputs_override = None
-            include_repo_paths = None
+            return {
+                'flow_run_remote': flow_run_remote,
+                'flow_core_cfg': flow_core_cfg,
+                'flow_remote_repo_dir': flow_remote_repo_dir,
+                'response': (jsonify({'ok': False, 'error': f'Failed to resolve the selected generator sources for CORE sync: {exc}'}), 500),
+            }
+        if not include_repo_paths:
+            # Never run the remote runner against whatever catalog happens to
+            # be left on CORE.  A selected assignment must resolve to concrete
+            # local generator files that are included in this sync.
+            return {
+                'flow_run_remote': flow_run_remote,
+                'flow_core_cfg': flow_core_cfg,
+                'flow_remote_repo_dir': flow_remote_repo_dir,
+                'response': (jsonify({'ok': False, 'error': 'No concrete generator source paths were resolved for CORE sync.'}), 500),
+            }
         try:
-            if not allowed_outputs_override:
-                current_app.logger.info('[flow.generator] Syncing repo to CORE VM (reduced snapshot)')
-        except Exception:
-            pass
-        try:
-            if not include_repo_paths:
-                current_app.logger.info('[flow.generator] repo sync skipped (no generator paths resolved)')
-            else:
-                deps._push_repo_to_remote(
-                    flow_core_cfg,
-                    logger=current_app.logger,
-                    upload_only_injected_artifacts=True,
-                    allowed_outputs_override=allowed_outputs_override,
-                    include_repo_paths=include_repo_paths,
-                )
-                try:
-                    flow_progress('Repo sync complete')
-                except Exception:
-                    pass
+            deps._push_repo_to_remote(
+                flow_core_cfg,
+                logger=current_app.logger,
+                upload_only_injected_artifacts=True,
+                allowed_outputs_override=allowed_outputs_override,
+                include_repo_paths=include_repo_paths,
+            )
+            try:
+                flow_progress('Repo sync complete')
+            except Exception:
+                pass
         except Exception as exc:
             # The remote generator catalog is part of the execution contract.
             # Continuing would let CORE resolve a stale installed pack and run
