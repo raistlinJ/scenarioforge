@@ -661,6 +661,7 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-outline-danger me-auto" id="flagCatalogNoteClear">Clear</button>
         <button type="button" class="btn btn-primary" id="flagCatalogNoteSave">Save</button>
       </div>
     </div>
@@ -792,6 +793,44 @@
     });
   }
 
+  function updateFlagCatalogNoteRow(target, note, color) {
+    if (!target) return;
+    const state = target.kind === 'flag-node-generator' ? nodeGenState : genState;
+    const generator = (state.generators || []).find((item) => String(item?.id || '') === String(target.id || ''));
+    if (!generator) return;
+    const text = String(note || '').trim();
+    generator.note = text || null;
+    generator.note_color = text ? (['red', 'yellow', 'green'].includes(String(color || '').toLowerCase()) ? String(color).toLowerCase() : null) : null;
+    if (target.kind === 'flag-node-generator') renderNodeGenerators();
+    else renderGenerators();
+  }
+
+  async function saveFlagCatalogNote({ clear = false } = {}) {
+    if (!flagCatalogNoteTarget) return;
+    const target = { ...flagCatalogNoteTarget };
+    const noteEl = document.getElementById('flagCatalogNoteText');
+    const note = clear ? '' : String(noteEl?.value || '');
+    const noteColor = clear ? '' : flagCatalogNoteColor;
+    const api = target.kind === 'flag-node-generator'
+      ? '/api/flag_node_generators/set_note'
+      : '/api/flag_generators/set_note';
+    const response = await fetchJson(api, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ generator_id: target.id, note, note_color: noteColor }),
+    });
+    if (!response || response.ok === false) throw new Error((response && response.error) || 'Unable to save note');
+    updateFlagCatalogNoteRow(target, note, noteColor);
+    if (clear && noteEl) noteEl.value = '';
+    if (clear) {
+      flagCatalogNoteColor = '';
+      updateFlagCatalogNoteColorButtons();
+    }
+    try { bootstrap.Modal.getInstance(document.getElementById('flagCatalogNoteModal'))?.hide(); } catch (e) { }
+    if (target.kind === 'flag-node-generator') await loadNodeGenerators();
+    else await loadGenerators();
+  }
+
   function openFlagCatalogNoteModal(generator, kind) {
     if (!generator || !generator.id) return;
     flagCatalogNoteTarget = { id: String(generator.id), kind: String(kind), name: String(generator.name || generator.id) };
@@ -814,22 +853,17 @@
 
   document.getElementById('flagCatalogNoteSave')?.addEventListener('click', async () => {
     try {
-      if (!flagCatalogNoteTarget) return;
-      const note = String(document.getElementById('flagCatalogNoteText')?.value || '');
-      const api = flagCatalogNoteTarget.kind === 'flag-node-generator'
-        ? '/api/flag_node_generators/set_note'
-        : '/api/flag_generators/set_note';
-      const response = await fetchJson(api, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ generator_id: flagCatalogNoteTarget.id, note, note_color: flagCatalogNoteColor }),
-      });
-      if (!response || response.ok === false) throw new Error((response && response.error) || 'Unable to save note');
-      try { bootstrap.Modal.getInstance(document.getElementById('flagCatalogNoteModal'))?.hide(); } catch (e) { }
-      if (flagCatalogNoteTarget.kind === 'flag-node-generator') await loadNodeGenerators();
-      else await loadGenerators();
+      await saveFlagCatalogNote();
     } catch (error) {
       window.alert(`Unable to save note: ${String(error)}`);
+    }
+  });
+
+  document.getElementById('flagCatalogNoteClear')?.addEventListener('click', async () => {
+    try {
+      await saveFlagCatalogNote({ clear: true });
+    } catch (error) {
+      window.alert(`Unable to clear note: ${String(error)}`);
     }
   });
 

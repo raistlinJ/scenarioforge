@@ -44601,13 +44601,20 @@ def _load_installed_generator_packs_state() -> dict:
 
 def _save_installed_generator_packs_state(state: dict) -> None:
     path = _installed_generator_packs_state_path()
+    tmp = path + '.tmp'
     try:
-        tmp = path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as fh:
             json.dump(state if isinstance(state, dict) else {'packs': []}, fh, indent=2)
         os.replace(tmp, path)
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+        raise RuntimeError(f'Unable to save installed generator state: {exc}') from exc
+    with _INSTALLED_DISABLE_MAPS_CACHE_LOCK:
+        _INSTALLED_DISABLE_MAPS_CACHE.clear()
 
 
 def _snapshot_test_log_copy(*, source_log_path: str, subdir: str, file_stem: str) -> tuple[str | None, str | None]:
@@ -44807,6 +44814,58 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
             gen_by_kind_id.setdefault((kind, src_id), info_obj)
     for kind, gid, _src_id, info_obj in entries:
         gen_by_kind_id.setdefault((kind, gid), info_obj)
+
+    # Catalog notes are user metadata keyed by the generator id exposed to the
+    # UI.  Keep them separate from an installed-pack item so a catalog row can
+    # retain its note even when an old pack state uses a different internal id.
+    # This also lets the catalog report a stale/missing installation normally,
+    # without rejecting a note on a row it just displayed to the user.
+    catalog_notes = state.get('catalog_notes') if isinstance(state, dict) else None
+    if isinstance(catalog_notes, dict):
+        for key, raw_note in catalog_notes.items():
+            if not isinstance(raw_note, dict):
+                continue
+            try:
+                note_kind, note_gid = str(key).split(':', 1)
+            except ValueError:
+                continue
+            note_kind = note_kind.strip().lower().replace('_', '-')
+            note_gid = note_gid.strip()
+            if note_kind not in {'flag-generator', 'flag-node-generator'} or not note_gid:
+                continue
+            note_text = str(raw_note.get('note') or '').strip()
+            raw_color = str(raw_note.get('note_color') or '').strip().lower()
+            note_color = raw_color if raw_color in {'red', 'yellow', 'green'} and note_text else None
+            info_obj = gen_by_kind_id.get((note_kind, note_gid))
+            if info_obj is None:
+                info_obj = {
+                    'pack_id': None,
+                    'pack_label': None,
+                    'pack_disabled': False,
+                    'pack_uninstalled': False,
+                    'uninstalled': False,
+                    'disabled': False,
+                    'item_disabled': False,
+                    'item_uninstalled': False,
+                    'validated_ok': None,
+                    'validated_incomplete': False,
+                    'validated_at': None,
+                    'last_test_log_path': None,
+                    'last_test_log_filename': None,
+                    'disabled_due_to_missing_files': False,
+                    'persistent': False,
+                    'cached': None,
+                    'cache_checked_at': None,
+                    'cache_last_core_host': None,
+                    'cache_missing_images': [],
+                    'cache_size_bytes': None,
+                    'cache_error': None,
+                    'requires_build_network': False,
+                    'build_network_notes': [],
+                }
+                gen_by_kind_id[(note_kind, note_gid)] = info_obj
+            info_obj['note'] = note_text or None
+            info_obj['note_color'] = note_color
 
     if state_key is not None:
         with _INSTALLED_DISABLE_MAPS_CACHE_LOCK:
@@ -47595,7 +47654,12 @@ def _set_generator_persistent_state(*, kind: str, generator_id: str, persistent:
 
 
 def _set_generator_note_state(*, kind: str, generator_id: str, note: str, note_color: str | None) -> tuple[bool, str]:
-    """Persist a short user-authored catalog note and its indicator color."""
+    """Persist a short user-authored catalog note and its indicator color.
+
+    Notes are keyed by the UI/catalog generator id, rather than being limited to
+    a matching installed-state record.  A displayed catalog row may have a
+    stable manifest id that differs from an older pack-state internal id.
+    """
     gid = str(generator_id or '').strip()
     if not gid:
         return False, 'Missing generator id'
@@ -47616,11 +47680,20 @@ def _set_generator_note_state(*, kind: str, generator_id: str, note: str, note_c
     if not isinstance(packs, list):
         packs = []
     _pack, item = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
-    if item is None:
-        return False, 'Installed generator not found'
-    item['note'] = text
-    item['note_color'] = color or None
+    if item is not None:
+        # Keep legacy per-item metadata in sync for pack exports/state readers.
+        item['note'] = text
+        item['note_color'] = color or None
+    catalog_notes = state.get('catalog_notes') if isinstance(state, dict) else None
+    if not isinstance(catalog_notes, dict):
+        catalog_notes = {}
+    note_key = f'{k}:{gid}'
+    if text:
+        catalog_notes[note_key] = {'note': text, 'note_color': color or None}
+    else:
+        catalog_notes.pop(note_key, None)
     state['packs'] = packs
+    state['catalog_notes'] = catalog_notes
     _save_installed_generator_packs_state(state)
     return True, ('Saved note for' if text else 'Cleared note for') + f' {k} {gid}'
 

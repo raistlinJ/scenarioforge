@@ -31,6 +31,21 @@ def test_flag_node_generator_picker_can_limit_specific_choices_to_cached_images(
     assert "generator._cached !== true" in topology_template
 
 
+def test_topology_specific_pickers_show_and_filter_catalog_notes() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert 'id="flagNodeGeneratorNoteFilter"' in topology_template
+    assert "flagNodeGeneratorPickerNoteFilter" in topology_template
+    assert "noteMatchesFilter(generator, noteMode)" in topology_template
+    assert 'id="vulnFilterNotes"' in topology_template
+    assert "vulnPickerNoteFilter" in topology_template
+    assert "has note" in topology_template
+    assert '<option value="red">Red</option>' in topology_template
+    assert '<option value="yellow">Yellow</option>' in topology_template
+    assert '<option value="green">Green</option>' in topology_template
+    assert '<th style="width:11rem;">Notes</th>' in topology_template
+
+
 def test_flag_node_generator_picker_shows_validation_status() -> None:
     topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
 

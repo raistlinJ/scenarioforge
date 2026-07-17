@@ -144,10 +144,12 @@ def test_vuln_catalog_table_offers_persistent_colored_notes() -> None:
     text = VULN_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
     assert '>Notes</th>' in text
     assert 'id="vulnCatalogNoteModal"' in text
+    assert 'id="vulnCatalogNoteClear"' in text
     assert 'data-note-color="red"' in text
     assert 'data-note-color="yellow"' in text
     assert 'data-note-color="green"' in text
     assert '/vuln_catalog_items/set_note' in text
+    assert 'function updateVulnCatalogNoteRow' in text
 
 
 def test_vuln_catalog_batch_reuses_core_session_prompt() -> None:
