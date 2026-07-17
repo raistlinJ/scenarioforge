@@ -29,3 +29,29 @@ def test_flag_node_generator_picker_can_limit_specific_choices_to_cached_images(
     assert 'id="flagNodeGeneratorCachedOnly"' in topology_template
     assert "flagNodeGeneratorPickerCachedOnly" in topology_template
     assert "generator._cached !== true" in topology_template
+
+
+def test_topology_migrates_existing_projects_to_show_flag_node_generator_card() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert "function ensureTopologySectionSchema(scenario)" in topology_template
+    assert "scenario.sections['Flag Node Generators'] = { density: 0.5, items: [] };" in topology_template
+    assert "state.scenarios.forEach((scenario) => ensureTopologySectionSchema(scenario));" in topology_template
+
+
+def test_adding_flag_node_generator_starts_a_specific_count_one_row() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert "if (sec === 'Flag Node Generators')" in topology_template
+    assert "item.selected = 'Specific';" in topology_template
+    assert "sec === 'Vulnerabilities' || sec === 'Flag Node Generators'" in topology_template
+    assert "item.v_metric = 'Count'; item.v_count = 1;" in topology_template
+
+
+def test_flag_node_generator_catalog_refreshes_topology_options_after_loading() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    start = topology_template.index("async function setupFlagNodeGenerators()")
+    end = topology_template.index("async function openFlagNodeGeneratorPicker", start)
+    loader = topology_template[start:end]
+    assert "try { renderMain(); } catch (e) { }" in loader

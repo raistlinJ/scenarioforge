@@ -2124,6 +2124,56 @@ def _restore_executable_support_script(dst_path: str) -> None:
 		pass
 
 
+def _restore_executable_bind_sources(compose_obj: dict) -> None:
+	"""Make shebang scripts executable at the exact sources Docker will mount.
+
+	Compose preparation may copy an already-prepared bind source again while
+	isolating a vulnerability for a node.  Catalog ZIPs frequently lose Unix
+	mode bits, so repairing only the first copy is insufficient: Docker mounts
+	the *final* source named in the generated compose file.  Limit the repair to
+	shebang files in absolute bind sources; ordinary mounted data remains
+	untouched.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return
+		seen: Set[str] = set()
+		for svc in services.values():
+			if not isinstance(svc, dict):
+				continue
+			volumes = svc.get('volumes')
+			if not isinstance(volumes, list):
+				continue
+			for volume in volumes:
+				source = ''
+				if isinstance(volume, str):
+					# Compose short syntax is source:target[:mode].  At this stage
+					# generated support paths are absolute POSIX paths.
+					source = str(volume.split(':', 2)[0] or '').strip()
+				elif isinstance(volume, dict):
+					volume_type = str(volume.get('type') or '').strip().lower()
+					if volume_type and volume_type != 'bind':
+						continue
+					source = str(volume.get('source') or '').strip()
+				if not source or not os.path.isabs(source):
+					continue
+				source = os.path.abspath(source)
+				if source in seen:
+					continue
+				seen.add(source)
+				if os.path.isfile(source):
+					_restore_executable_support_script(source)
+				elif os.path.isdir(source):
+					for root, _dirs, files in os.walk(source):
+						for filename in files:
+							_restore_executable_support_script(os.path.join(root, filename))
+	except Exception:
+		pass
+
+
 def _compose_env_file_example_candidates(src_dir: str, rel_path: str) -> List[str]:
 	rel_norm = os.path.normpath(rel_path)
 	parent, filename = os.path.split(rel_norm)
@@ -2281,6 +2331,8 @@ def _copy_support_paths_and_absolutize_binds(compose_obj: dict, src_dir: str, ba
 					new_env.append(entry)
 				if changed:
 					svc['env_file'] = new_env
+		# Repair the resolved bind sources as well as the catalog copy above.
+		_restore_executable_bind_sources(compose_obj)
 		return compose_obj
 	except Exception:
 		return compose_obj
@@ -2399,6 +2451,9 @@ def _rewrite_abs_paths_from_dir_to_dir(compose_obj: dict, from_dir: str, to_dir:
 					new_env.append(entry)
 				if changed:
 					svc['env_file'] = new_env
+		# Node isolation above may have copied the source files once more.  Docker
+		# mounts these rewritten paths, so this is the last authoritative repair.
+		_restore_executable_bind_sources(compose_obj)
 		return compose_obj
 	except Exception:
 		return compose_obj
