@@ -55,3 +55,10 @@ def test_flag_node_generator_catalog_refreshes_topology_options_after_loading() 
     end = topology_template.index("async function openFlagNodeGeneratorPicker", start)
     loader = topology_template[start:end]
     assert "try { renderMain(); } catch (e) { }" in loader
+
+
+def test_specific_vuln_and_flag_node_generator_rows_keep_choose_controls_compact() -> None:
+    topology_template = Path("webapp/templates/index.html").read_text(encoding="utf-8")
+
+    assert 'class="d-flex flex-nowrap gap-2 align-items-center" style="min-width:250px"' in topology_template
+    assert '<span class="small text-muted">${isVuln ? esc(nm ? `${nm}${descShort ? \' — \' + descShort : \'\'}\' : \'No selection\') : esc(nodegenName || \'No selection\')}</span>' not in topology_template

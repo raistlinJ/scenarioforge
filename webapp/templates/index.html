@@ -17750,11 +17750,9 @@
                     .replace(/"/g, '&quot;')
                     .replace(/'/g, '&#39;');
                 const descShort = abbr(fullDesc);
-                const nodegenName = it.g_name || it.g_id || '';
                 return `
-            <div class="d-flex flex-wrap gap-2 align-items-center">
+            <div class="d-flex flex-nowrap gap-2 align-items-center" style="min-width:250px">
                 <div style="min-width:160px">${selectedCtl}</div>
-                <span class="small text-muted">${isVuln ? esc(nm ? `${nm}${descShort ? ' — ' + descShort : ''}` : 'No selection') : esc(nodegenName || 'No selection')}</span>
                 <button type="button" class="btn btn-sm btn-outline-primary" data-action="pick-specific" data-scen-idx="${sidx}" data-sec="${secName}" data-item-idx="${iidx}" ${hasCatalogItems ? '' : `disabled title="${isVuln ? 'Install a vulnerability catalog pack first' : 'No enabled flag-node-generators are available'}"`}>Choose...</button>
             </div>`;
             }
