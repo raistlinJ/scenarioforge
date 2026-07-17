@@ -30418,12 +30418,7 @@ def _concretize_preview_placeholders(scenario_payload: Any, *, seed: Any = None)
                 item = copy.deepcopy(raw_item)
                 selected = str(item.get('selected') or '').strip().lower()
                 requested_id = str(item.get('g_id') or '').strip()
-                requested_name = str(item.get('g_name') or '').strip()
-                # Repair only the exact malformed shape created by the old UI:
-                # it converted Random to Specific without recording either an
-                # id or a name.  Named/unknown Specific choices remain errors.
-                repair_legacy_blank_specific = selected == 'specific' and not requested_id and not requested_name
-                if (not selected or selected == 'random' or repair_legacy_blank_specific):
+                if not selected or selected == 'random':
                     chosen = _deterministic_pick(
                         nodegen_catalog_items,
                         f'{seed_int}|{scenario_name}|{section_name}|{index}|g_id|save-xml',
@@ -30684,13 +30679,7 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
                         item = copy.deepcopy(raw_item)
                         selected = str(item.get('selected') or '').strip().lower()
                         requested_id = str(item.get('g_id') or '').strip()
-                        requested_name = str(item.get('g_name') or '').strip()
-                        # This is a narrowly scoped migration for rows written
-                        # by the previous UI bug: "Specific" with no id/name.
-                        # It does not accept an unknown named or identified
-                        # generator as a fallback.
-                        repair_legacy_blank_specific = selected == 'specific' and not requested_id and not requested_name
-                        if not selected or selected == 'random' or repair_legacy_blank_specific:
+                        if not selected or selected == 'random':
                             chosen = _deterministic_pick(
                                 nodegen_catalog_items,
                                 f'{seed_int}|{scenario_name}|Flag Node Generators|{index}|g_id|save-xml',
