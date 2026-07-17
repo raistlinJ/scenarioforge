@@ -121,3 +121,31 @@ def test_manifest_discovery_can_exclude_disabled_installed_generators(tmp_path, 
     assert enabled_errors == []
     assert enabled == []
     assert enabled_plugins == {}
+
+
+def test_manifest_discovery_rejects_ambiguous_installed_source_ids(tmp_path, monkeypatch):
+    repo_root = tmp_path / 'repo'
+    repo_root.mkdir()
+    installed_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(installed_root))
+
+    for assigned_id in ('000001', '000002'):
+        installed_path = installed_root / 'flag_generators' / assigned_id
+        _write_flag_generator_manifest(installed_path, generator_id=assigned_id)
+        (installed_path / '.coretg_pack.json').write_text(
+            json.dumps({
+                'pack_id': f'pack-{assigned_id}',
+                'generator_id': assigned_id,
+                'source_generator_id': 'shared_source_id',
+            }),
+            encoding='utf-8',
+        )
+
+    generators, plugins, errors = discover_generator_manifests(
+        repo_root=repo_root,
+        kind='flag-generator',
+    )
+
+    assert generators == []
+    assert plugins == {}
+    assert any('duplicate generator id: shared_source_id' in error.error for error in errors)

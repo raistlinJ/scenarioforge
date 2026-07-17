@@ -435,6 +435,7 @@ def flow_try_run_generator_remote(
     kind: str = 'flag-generator',
     timeout_s: int = 120,
     inject_files_override: list[str] | None = None,
+    source_dir: str | None = None,
     core_cfg: dict[str, Any],
     repo_dir: str,
     backend: Any,
@@ -464,6 +465,7 @@ def flow_try_run_generator_remote(
         f"REPO={json.dumps(str(repo_dir))}\n"
         f"OUT={json.dumps(str(out_dir))}\n"
         f"GEN={json.dumps(str(generator_id))}\n"
+        f"SOURCE={json.dumps(str(source_dir or ''))}\n"
         f"KIND={json.dumps(str(kind or 'flag-generator'))}\n"
         f"CFG={json.dumps(cfg_json)}\n"
         f"INJECT={inject_json if inject_json is not None else 'None'}\n"
@@ -510,6 +512,7 @@ def flow_try_run_generator_remote(
         "  except Exception:\n"
         "    env['CORETG_INJECT_FILES_JSON']=INJECT\n"
         "cmd=[sys.executable, runner, '--kind', KIND, '--generator-id', GEN, '--out-dir', OUT, '--config', CFG, '--repo-root', REPO]\n"
+        "if SOURCE: cmd.extend(['--source-dir', SOURCE])\n"
         f"p=subprocess.run(cmd, cwd=REPO, env=env, check=False, capture_output=True, text=True, timeout=max(1, int({timeout_literal})))\n"
         "OUT_ARTIFACTS=OUT\n"
         "manifest=os.path.join(OUT,'outputs.json')\n"
@@ -1967,10 +1970,13 @@ def reuse_saved_flag_assignments(
                         break
                 if selected_index is not None:
                     break
-            if selected_index is None and index < len(saved_assignments) and index not in used_saved_indexes:
-                selected_index = index
             if selected_index is None:
-                selected_index = next((i for i in range(len(saved_assignments)) if i not in used_saved_indexes), index)
+                # Saved assignments are valid only when they identify the
+                # current node.  Positional/"first unused" substitution can
+                # apply a stale generator to a different node after topology
+                # changes, which is especially unsafe for node generators
+                # with required inputs.  Let the caller recompute instead.
+                return []
             used_saved_indexes.add(selected_index)
             assignment = saved_assignments[selected_index] if selected_index < len(saved_assignments) else {}
             if not isinstance(assignment, dict):
@@ -2010,6 +2016,14 @@ def reuse_saved_flag_assignments(
                 if kind == 'flag-node-generator':
                     if not (is_docker and (not is_vuln)):
                         raise ValueError('flag-node-generator on ineligible node')
+                    # A topology-selected node generator is an exact binding,
+                    # not a hint.  Do not reuse an assignment from an older
+                    # FlowState if it names a different generator.
+                    selected_generator_id = str(node.get('flag_node_generator_id') or '').strip()
+                    if selected_generator_id:
+                        assignment_generator_id = str(assignment.get('id') or '').strip()
+                        if selected_generator_id != assignment_generator_id:
+                            raise ValueError('saved flag-node-generator does not match topology selection')
                 else:
                     # flag-generators require vulnerability nodes only
                     if not is_vuln:
@@ -3319,6 +3333,7 @@ def invoke_generator_run(
     assignment_type: str,
     gen_timeout_s: int,
     effective_injects: list[str] | None,
+    generator_source_dir: str | None = None,
     flow_try_run_generator_remote: Any,
     flow_try_run_generator: Any,
 ) -> dict[str, Any]:
@@ -3334,6 +3349,7 @@ def invoke_generator_run(
             kind=assignment_type,
             timeout_s=gen_timeout_s,
             inject_files_override=effective_injects,
+            source_dir=generator_source_dir,
             core_cfg=flow_core_cfg,
             repo_dir=flow_remote_repo_dir,
         )

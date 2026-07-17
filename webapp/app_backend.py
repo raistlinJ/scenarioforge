@@ -2134,6 +2134,67 @@ def _remote_remove_path(client: Any, path: str) -> None:
     _exec_ssh_command(client, f"rm -rf {quoted}")
 
 
+def _cleanup_remote_generator_pack(pack: dict[str, Any]) -> tuple[bool, str]:
+    """Remove the CORE-runtime copies of one catalog pack before local uninstall.
+
+    Catalog packs are mirrored to the CORE VM for generator execution.  Leaving
+    those directories behind means a future remote run can resolve an
+    uninstalled, stale generator.  This is intentionally strict: local removal
+    is aborted if the selected CORE runtime cannot be cleaned too.
+    """
+    if not isinstance(pack, dict):
+        return False, 'Invalid generator pack.'
+    installed = [item for item in (pack.get('installed') or []) if isinstance(item, dict)]
+    if not installed:
+        return True, 'no remote generator directories to remove'
+
+    repo_root = os.path.abspath(_get_repo_root())
+    local_root = os.path.abspath(_installed_generators_root())
+    relative_paths: list[str] = []
+    for item in installed:
+        raw_path = str(item.get('path') or '').strip()
+        if not raw_path:
+            return False, 'Pack contains an installed generator with no path.'
+        local_path = os.path.abspath(raw_path)
+        try:
+            if os.path.commonpath([local_root, local_path]) != local_root:
+                return False, f'Refusing remote cleanup for path outside installed generators: {local_path}'
+            if os.path.commonpath([repo_root, local_path]) != repo_root:
+                return False, f'Refusing remote cleanup for path outside the repository: {local_path}'
+            relative_paths.append(os.path.relpath(local_path, repo_root).replace('\\', '/'))
+        except Exception:
+            return False, f'Refusing remote cleanup for path: {local_path}'
+
+    try:
+        core_cfg = _require_core_ssh_credentials(_core_config_for_request(include_password=True))
+        client = _open_ssh_client(core_cfg)
+    except Exception as exc:
+        return False, f'CORE SSH configuration is required: {exc}'
+
+    sftp = None
+    try:
+        sftp = client.open_sftp()
+        remote_repo = _remote_static_repo_dir(sftp)
+        # Confirm this is the expected static repo before deleting any child.
+        sftp.stat(remote_repo)
+        for relative_path in sorted(set(relative_paths)):
+            remote_path = _remote_path_join(remote_repo, relative_path)
+            _remote_remove_path(client, remote_path)
+        return True, f'removed {len(set(relative_paths))} CORE runtime generator directory(s)'
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        try:
+            if sftp is not None:
+                sftp.close()
+        except Exception:
+            pass
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 def _resolve_repo_push_allowed_outputs(upload_only_injected_artifacts: bool) -> List[str]:
     if REPO_PUSH_ALLOWED_OUTPUTS_ENV:
         out: List[str] = []
@@ -2248,15 +2309,19 @@ def _flow_required_generator_repo_paths(
     if not flag_assignments:
         return sorted(required)
 
+    # This path controls what is copied to CORE for Flow execution.  It must
+    # use the exact same enabled-only catalog as selection and validation.
+    # Looking through all manifests here made an uninstalled pack executable
+    # again whenever a stale FlowState referenced its ID.
     try:
-        gens, _plugins_by_id, _errors = _flag_generators_from_manifests(kind='flag-generator')
+        gens, _errors = _flag_generators_from_enabled_sources()
     except Exception as exc:
-        app.logger.error('[flow.generator] failed to load flag_generators: %s', exc)
+        app.logger.error('[flow.generator] failed to load enabled flag_generators: %s', exc)
         gens = []
     try:
-        node_gens, _plugins_by_id2, _errors2 = _flag_generators_from_manifests(kind='flag-node-generator')
+        node_gens, _errors2 = _flag_node_generators_from_enabled_sources()
     except Exception as exc:
-        app.logger.error('[flow.generator] failed to load flag_node_generators: %s', exc)
+        app.logger.error('[flow.generator] failed to load enabled flag_node_generators: %s', exc)
         node_gens = []
 
     gen_by_key: dict[tuple[str, str], dict[str, Any]] = {}
@@ -2272,68 +2337,6 @@ def _flow_required_generator_repo_paths(
         gid = str(g.get('id') or '').strip()
         if gid:
             gen_by_key[('flag_node_generators', gid)] = g
-
-    # Some IDs exist both as repo samples and as installed packs. The manifest loader
-    # intentionally prefers installed packs when IDs collide, which can cause remote
-    # sync to omit the repo copy. For remote execution we include both when present.
-    _repo_manifest_cache: dict[tuple[str, str], list[str]] = {}
-
-    def _repo_manifest_dirs_for(cat: str, gid: str) -> list[str]:
-        key = (cat, gid)
-        if key in _repo_manifest_cache:
-            return _repo_manifest_cache[key]
-
-        out: list[str] = []
-        try:
-            from pathlib import Path
-        except Exception:
-            _repo_manifest_cache[key] = out
-            return out
-        try:
-            import yaml  # type: ignore
-        except Exception:
-            yaml = None  # type: ignore
-
-        if yaml is None:
-            _repo_manifest_cache[key] = out
-            return out
-
-        base_rel = 'flag_generators' if cat == 'flag_generators' else 'flag_node_generators'
-        expected_kind = 'flag-generator' if cat == 'flag_generators' else 'flag-node-generator'
-        base = Path(repo_root_abs) / base_rel
-        if not base.exists() or not base.is_dir():
-            _repo_manifest_cache[key] = out
-            return out
-
-        # Scan only repo sources (not outputs/installed_generators). Keep it small.
-        try:
-            candidates = list(base.rglob('manifest.yaml')) + list(base.rglob('manifest.yml'))
-        except Exception:
-            candidates = []
-        for mp in candidates:
-            try:
-                doc = yaml.safe_load(mp.read_text('utf-8', errors='ignore'))
-            except Exception:
-                continue
-            if not isinstance(doc, dict):
-                continue
-            mid = str(doc.get('id') or '').strip()
-            if mid != gid:
-                continue
-            declared_kind = str(doc.get('kind') or expected_kind).strip().lower().replace('_', '-').replace(' ', '-')
-            if declared_kind != expected_kind:
-                continue
-            try:
-                rel_dir = os.path.relpath(str(mp.parent), repo_root_abs).replace('\\', '/').lstrip('/')
-            except Exception:
-                continue
-            if rel_dir:
-                out.append(rel_dir)
-
-        # Deterministic output.
-        out = sorted(set(out))
-        _repo_manifest_cache[key] = out
-        return out
 
     # Track lookup failures for diagnostics
     lookup_failures: list[str] = []
@@ -2358,9 +2361,6 @@ def _flow_required_generator_repo_paths(
         gen = gen_by_key.get((cat, gid))
         if not isinstance(gen, dict):
             lookup_failures.append(f'{cat}/{gid}')
-            # Still try to include a repo copy by scanning manifests.
-            for rel_dir in _repo_manifest_dirs_for(cat, gid):
-                required.add(rel_dir)
             continue
         src_path = str(gen.get('source', {}).get('path') or gen.get('_source_path') or '').strip()
         if not src_path:
@@ -2382,10 +2382,6 @@ def _flow_required_generator_repo_paths(
             rel = posixpath.dirname(rel)
         if rel:
             required.add(rel)
-
-        # Include repo copy if present (even when installed pack is preferred).
-        for rel_dir in _repo_manifest_dirs_for(cat, gid):
-            required.add(rel_dir)
 
     # Log diagnostic information about failures
     if lookup_failures:
@@ -4039,6 +4035,79 @@ def _write_remote_repo_hash(client: Any, remote_repo: str, hash_value: str) -> N
         pass
 
 
+def _prune_remote_installed_generator_packs(
+    client: Any,
+    *,
+    repo_root: str,
+    remote_repo: str,
+    log_handle: Any | None = None,
+) -> list[str]:
+    """Remove remote installed generator pack directories absent locally.
+
+    Incremental repository sync intentionally uploads only the paths needed for
+    a run.  It therefore cannot use a broad ``--delete`` without deleting the
+    remote ScenarioForge checkout.  Installed generator packs are different:
+    their directories are a catalog and stale copies can resolve to the wrong
+    logical generator when a pack is updated.  Keep those two catalog roots an
+    exact directory-level mirror of the local checkout.
+    """
+    local_installed = Path(repo_root).resolve() / 'outputs' / 'installed_generators'
+    expected: dict[str, list[str]] = {}
+    for kind in ('flag_generators', 'flag_node_generators'):
+        local_kind = local_installed / kind
+        if not local_kind.is_dir():
+            expected[kind] = []
+            continue
+        expected[kind] = sorted(
+            child.name
+            for child in local_kind.iterdir()
+            if child.is_dir() and not child.name.startswith('.')
+        )
+
+    # This script only operates below the fixed installed-generator roots under
+    # the resolved remote repository.  It takes the expected names as JSON, not
+    # shell fragments, so pack names cannot alter the command.
+    script = (
+        'import json, os, shutil, sys\n'
+        'repo = os.path.abspath(sys.argv[1])\n'
+        'expected = json.loads(sys.argv[2])\n'
+        'removed = []\n'
+        "for kind in ('flag_generators', 'flag_node_generators'):\n"
+        "    root = os.path.join(repo, 'outputs', 'installed_generators', kind)\n"
+        "    if not os.path.isdir(root):\n"
+        "        continue\n"
+        "    allowed = set(expected.get(kind) or [])\n"
+        "    for name in os.listdir(root):\n"
+        "        path = os.path.join(root, name)\n"
+        "        if name.startswith('.') or name in allowed or not os.path.isdir(path):\n"
+        "            continue\n"
+        "        shutil.rmtree(path)\n"
+        "        removed.append(kind + '/' + name)\n"
+        'print(json.dumps(removed))\n'
+    )
+    cmd = (
+        f"python3 -c {shlex.quote(script)} "
+        f"{shlex.quote(str(remote_repo))} {shlex.quote(json.dumps(expected, sort_keys=True))}"
+    )
+    _rc, stdout, _stderr = _exec_ssh_command(client, cmd, timeout=60.0, check=True)
+    try:
+        removed_raw = json.loads((stdout or '').strip() or '[]')
+    except Exception as exc:
+        raise RuntimeError(f'Invalid installed-generator cleanup response: {exc}') from exc
+    if not isinstance(removed_raw, list) or not all(isinstance(item, str) for item in removed_raw):
+        raise RuntimeError('Invalid installed-generator cleanup response.')
+    removed = [str(item) for item in removed_raw]
+    try:
+        if removed:
+            log_handle.write(f"[remote] removed stale installed generator packs: {', '.join(removed)}\n")
+        else:
+            log_handle.write('[remote] installed generator pack catalog is synchronized\n')
+        log_handle.flush()
+    except Exception:
+        pass
+    return removed
+
+
 def _push_repo_to_remote(
     core_cfg: Dict[str, Any],
     *,
@@ -4076,6 +4145,15 @@ def _push_repo_to_remote(
             client,
             remote_repo,
             cfg,
+            log_handle=log_handle,
+        )
+        # A generator pack update creates a new installed directory.  Delta
+        # uploads leave the former directory behind unless we explicitly prune
+        # it, allowing manifest discovery to run stale generator code.
+        _prune_remote_installed_generator_packs(
+            client,
+            repo_root=repo_root,
+            remote_repo=remote_repo,
             log_handle=log_handle,
         )
         allowed_outputs = allowed_outputs_override
@@ -16796,13 +16874,10 @@ def _pick_flag_chain_nodes_for_preset(
     if length > len(set(eligible_ids)):
         return []
 
-    # Try to keep the chain in a single connected component, starting from a docker node if possible.
-    start = None
-    if docker_ids:
-        start = next(iter(sorted(docker_ids)))
-    else:
-        start = eligible_ids[0]
-
+    # Prefer a connected component for a serial preset, but nodes in separate
+    # components remain valid parallel challenges.  This is deliberate Flow
+    # topology semantics, not an assignment/dependency fallback.
+    start = next(iter(sorted(docker_ids))) if docker_ids else eligible_ids[0]
     visited: list[str] = []
     try:
         seen: set[str] = set()
@@ -16821,7 +16896,6 @@ def _pick_flag_chain_nodes_for_preset(
 
     comp_eligible = [nid for nid in visited if nid in set(eligible_ids)]
     if len(comp_eligible) < length:
-        # Fallback: allow selecting across components rather than erroring.
         comp_eligible = list(dict.fromkeys(eligible_ids))
 
     used: set[str] = set()
@@ -16873,6 +16947,7 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     docker_total = 0
     docker_nonvuln_total = 0
     topology_node_generator_total = 0
+    generic_docker_total = 0
     topology_generator_mode = any(bool(n.get('_topology_flag_node_generators_configured')) for n in (nodes or []) if isinstance(n, dict))
     vuln_total = 0
     compose_backed_total = 0
@@ -16896,11 +16971,14 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
             docker_nonvuln_total += 1
             if str(n.get('flag_node_generator_id') or '').strip():
                 topology_node_generator_total += 1
+            else:
+                generic_docker_total += 1
         if is_vuln or (is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_total += 1
     return {
         'docker_total': docker_total,
         'docker_nonvuln_total': docker_nonvuln_total,
+        'generic_docker_total': generic_docker_total,
         'vuln_total': vuln_total,
         'compose_backed_total': compose_backed_total,
         'eligible_total': eligible_total,
@@ -19693,6 +19771,21 @@ def _flow_compute_flag_assignments(
             requires_cache[gid] = r
         return r
 
+    def _requirements_available_at_parallel_start(gen: dict[str, Any], state: set[str]) -> bool:
+        """Whether ``gen`` can run now or begin an independent branch.
+
+        A manifest may explicitly mark a solver-facing input with
+        ``flow_supply_when_first``.  That value is valid at the first step of
+        a parallel branch, so it must not force the solver to reuse a node or
+        generator merely because an earlier sequence did not produce it.
+        Unmarked requirements remain strict: Flow never invents those values.
+        """
+        try:
+            branch_start_inputs = set(_flow_first_step_chain_supplied_input_names(gen))
+        except Exception:
+            branch_start_inputs = set()
+        return (_requires_cached(gen) - branch_start_inputs).issubset(state)
+
     pool_by_pos: list[list[dict[str, Any]]] = []
     for cid in chain_ids:
         node = id_to_node.get(str(cid)) or {}
@@ -19741,16 +19834,17 @@ def _flow_compute_flag_assignments(
             return []
         candidates = [
             g for g in pool
-            if _requires_cached(g).issubset(state) and str(g.get('id') or '').strip() not in deployed_ids
+            if _requirements_available_at_parallel_start(g, state)
+            and str(g.get('id') or '').strip() not in deployed_ids
         ]
         if (not candidates) and (not disallow_generator_reuse):
-            candidates = [g for g in pool if _requires_cached(g).issubset(state)]
+            candidates = [g for g in pool if _requirements_available_at_parallel_start(g, state)]
         if not candidates:
-            if disallow_generator_reuse:
-                return []
-            # Best-effort fallback: allow assignment even if requires are not yet met.
-            # Validation will surface missing dependencies, but we avoid empty assignments.
-            candidates = list(pool)
+            # Do not assign a generator whose required inputs cannot be met.
+            # A flow_supply_when_first input is already accounted for by
+            # _requirements_available_at_parallel_start(); every other input
+            # must come from synthesized context or an earlier assignment.
+            return []
         return candidates
 
     def _score_order(cands: list[dict[str, Any]], state: set[str]) -> list[dict[str, Any]]:
@@ -19872,6 +19966,11 @@ def _flow_compute_flag_assignments(
         except Exception:
             chosen_gens = None
 
+        # A requested goal is a contract.  Do not fall through to the greedy
+        # solver when it cannot be achieved by this chain.
+        if chosen_gens is None:
+            return []
+
     for i, cid in enumerate(chain_ids):
         pool = pool_by_pos[i] if i < len(pool_by_pos) else []
         if not pool:
@@ -19882,16 +19981,13 @@ def _flow_compute_flag_assignments(
         else:
             candidates = [
                 g for g in pool
-                if _requires_cached(g).issubset(state_known) and str(g.get('id') or '').strip() not in deployed
+                if _requirements_available_at_parallel_start(g, state_known)
+                and str(g.get('id') or '').strip() not in deployed
             ]
             if (not candidates) and (not disallow_generator_reuse):
-                candidates = [g for g in pool if _requires_cached(g).issubset(state_known)]
+                candidates = [g for g in pool if _requirements_available_at_parallel_start(g, state_known)]
             if not candidates:
-                if disallow_generator_reuse:
-                    return []
-                # Best-effort fallback: allow assignment even if requires are not yet met.
-                # Validation will surface missing dependencies, but we avoid empty assignments.
-                candidates = list(pool)
+                return []
 
             remaining_goal = set(goal_facts) - set(state_known)
             if remaining_goal:
@@ -25006,18 +25102,139 @@ def _sanitize_snapshot_for_user(snapshot: Dict[str, Any], user: Optional[dict]) 
     snapshot['builder_no_assignments'] = not bool(allowed_norms)
     return snapshot
 
-def _scenario_names_from_xml(xml_path: str) -> list[str]:
+def _file_stat_cache_key(path: str) -> tuple[int, int] | None:
+    """(mtime_ns, size) stamp used to invalidate caches when a file changes.
+
+    The on-disk file stays ground truth: any rewrite bumps the stamp and the
+    cached value is discarded on the next read.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+# Functions the XML/catalog caches depend on. If any of them is replaced at
+# runtime (tests monkeypatch these to inject fixture data), every cache below
+# is bypassed — reads and writes — so the patched behavior is observed exactly
+# as if the caches did not exist. _XML_CACHE_ORIGINAL_DEPS is snapshotted at
+# the end of module import.
+_XML_CACHE_DEP_NAMES = (
+    '_parse_scenarios_xml',
+    '_parse_scenario_editor',
+    '_canonicalize_specific_vulnerability_items',
+    '_canonicalize_plan_preview_vulnerability_names',
+    '_specific_vulnerability_name_map',
+    '_load_backend_vuln_catalog_items',
+    '_load_vuln_catalogs_state',
+    '_get_active_vuln_catalog_entry',
+    '_normalize_vuln_catalog_items',
+    '_vuln_catalog_item_abs_compose_path',
+    '_vuln_catalog_item_is_selectable',
+    '_vuln_catalog_item_display_name',
+    '_extract_optional_core_config',
+    '_normalize_core_config',
+    '_default_core_dict',
+    '_collect_scenario_catalog',
+    '_merge_editor_scenarios_into_catalog',
+    '_load_run_history',
+    '_load_editor_state_snapshot',
+    '_editor_state_snapshot_dir',
+    '_coerce_bool',
+    '_load_installed_generator_packs_state',
+    '_installed_generator_packs_state_path',
+    '_installed_generator_marker_source_id',
+    '_build_installed_disable_maps',
+    '_installed_generators_root',
+    '_outputs_dir',
+    '_get_repo_root',
+)
+_XML_CACHE_ORIGINAL_DEPS: tuple | None = None
+
+
+def _current_xml_cache_deps() -> tuple:
+    module_globals = globals()
+    return tuple(module_globals.get(name) for name in _XML_CACHE_DEP_NAMES)
+
+
+def _xml_caches_enabled() -> bool:
+    deps = _XML_CACHE_ORIGINAL_DEPS
+    return deps is not None and deps == _current_xml_cache_deps()
+
+
+def _vuln_catalog_state_cache_key() -> tuple[Any, ...]:
+    try:
+        return ('vuln-state', _file_stat_cache_key(_vuln_catalogs_state_path()))
+    except Exception:
+        return ('vuln-state', None)
+
+
+_SCENARIO_XML_NAMES_CACHE: dict[str, tuple[tuple[int, int], tuple[str, ...]]] = {}
+_SCENARIO_XML_NAMES_CACHE_LOCK = threading.Lock()
+_SCENARIO_XML_NAMES_CACHE_MAX = 512
+
+
+def _scenario_names_from_xml_uncached(xml_path: str) -> list[str]:
+    """Extract scenario display names without a full scenario parse.
+
+    Mirrors _parse_scenarios_xml naming semantics: a <Scenario> element only
+    counts when it has a <ScenarioEditor> child, and a bare <ScenarioEditor>
+    root falls back to the file's basename.
+    """
     names: list[str] = []
     try:
-        if not xml_path or not os.path.exists(xml_path):
-            return names
-        data = _parse_scenarios_xml(xml_path)
-        for scen in data.get('scenarios', []):
-            nm = scen.get('name')
+        root = ET.parse(xml_path).getroot()
+    except Exception:
+        return names
+    if root.tag == 'Scenarios':
+        for scen_el in root.findall('Scenario'):
+            if scen_el.find('ScenarioEditor') is None:
+                continue
+            nm = scen_el.get('name', 'Scenario')
             if nm and nm not in names:
                 names.append(nm)
+    elif root.tag == 'ScenarioEditor':
+        nm = os.path.splitext(os.path.basename(xml_path))[0]
+        if nm:
+            names.append(nm)
+    return names
+
+
+def _scenario_names_from_xml(xml_path: str) -> list[str]:
+    if not _xml_caches_enabled():
+        # Legacy path (used when parse internals are monkeypatched): derive
+        # names through _parse_scenarios_xml so patched behavior is honored.
+        names: list[str] = []
+        try:
+            if not xml_path or not os.path.exists(xml_path):
+                return names
+            data = _parse_scenarios_xml(xml_path)
+            for scen in data.get('scenarios', []):
+                nm = scen.get('name')
+                if nm and nm not in names:
+                    names.append(nm)
+        except Exception:
+            pass
+        return names
+    try:
+        if not xml_path or not os.path.exists(xml_path):
+            return []
+        abs_path = os.path.abspath(xml_path)
     except Exception:
-        pass
+        return []
+    file_key = _file_stat_cache_key(abs_path)
+    if file_key is None:
+        return _scenario_names_from_xml_uncached(abs_path)
+    with _SCENARIO_XML_NAMES_CACHE_LOCK:
+        cached = _SCENARIO_XML_NAMES_CACHE.get(abs_path)
+        if cached is not None and cached[0] == file_key:
+            return list(cached[1])
+    names = _scenario_names_from_xml_uncached(abs_path)
+    with _SCENARIO_XML_NAMES_CACHE_LOCK:
+        if len(_SCENARIO_XML_NAMES_CACHE) >= _SCENARIO_XML_NAMES_CACHE_MAX:
+            _SCENARIO_XML_NAMES_CACHE.pop(next(iter(_SCENARIO_XML_NAMES_CACHE)), None)
+        _SCENARIO_XML_NAMES_CACHE[abs_path] = (file_key, tuple(names))
     return names
 
 
@@ -27355,13 +27572,55 @@ def _merge_editor_scenarios_into_catalog(
     return _prune_stale_scenario_entries(names_out, paths_out, hints_out, protected_norms=snapshot_norms or None)
 
 
+def _scenario_catalog_memo_key(user: Optional[dict]) -> Optional[str]:
+    """Per-request memo key for GET page views only.
+
+    GET views never mutate scenario stores, so one catalog build per request
+    is safe; POST/PUT requests always rebuild from disk so writes stay
+    synchronized with the XML ground truth.
+    """
+    try:
+        if not _xml_caches_enabled():
+            return None
+        if not has_request_context() or request.method != 'GET':
+            return None
+        if user is None:
+            return '__anon__'
+        if isinstance(user, dict):
+            return 'user::' + str(user.get('username') or '')
+    except Exception:
+        return None
+    return None
+
+
 def _scenario_catalog_for_user(
     history: Optional[List[dict]] = None,
     *,
     user: Optional[dict] = None,
 ) -> tuple[list[str], dict[str, set[str]], dict[str, str]]:
+    memo_key = _scenario_catalog_memo_key(user) if history is None else None
+    if memo_key is not None:
+        try:
+            memo = getattr(g, '_scenario_catalog_memo', None)
+            cached = memo.get(memo_key) if isinstance(memo, dict) else None
+            if cached is not None:
+                names, paths, hints = cached
+                return list(names), {k: set(v) for k, v in paths.items()}, dict(hints)
+        except Exception:
+            memo_key = None
     names, paths, hints = _collect_scenario_catalog(history)
-    return _merge_editor_scenarios_into_catalog(names, paths, hints, user=user)
+    result = _merge_editor_scenarios_into_catalog(names, paths, hints, user=user)
+    if memo_key is not None:
+        try:
+            memo = getattr(g, '_scenario_catalog_memo', None)
+            if not isinstance(memo, dict):
+                memo = {}
+                setattr(g, '_scenario_catalog_memo', memo)
+            r_names, r_paths, r_hints = result
+            memo[memo_key] = (list(r_names), {k: set(v) for k, v in r_paths.items()}, dict(r_hints))
+        except Exception:
+            pass
+    return result
 
 
 _SCENARIO_PARTICIPANT_CACHE: dict[str, dict[str, Any]] = {}
@@ -29962,7 +30221,21 @@ def _concretize_traffic_numeric_placeholder(value: Any, *, options: List[float],
     return numeric
 
 
+_VULN_CATALOG_ITEMS_CACHE: dict[bool, tuple[tuple[Any, ...], list[dict[str, Any]]]] = {}
+_VULN_CATALOG_ITEMS_CACHE_LOCK = threading.Lock()
+
+
 def _load_backend_vuln_catalog_items(*, selectable_only: bool = True) -> List[Dict[str, Any]]:
+    # Cached per catalogs-state stamp: any state rewrite invalidates. The item
+    # dicts only hold scalars, so shallow copies keep callers isolated.
+    cache_key = _vuln_catalog_state_cache_key()
+    cacheable = cache_key[1] is not None and _xml_caches_enabled()
+    if cacheable:
+        with _VULN_CATALOG_ITEMS_CACHE_LOCK:
+            cached = _VULN_CATALOG_ITEMS_CACHE.get(bool(selectable_only))
+            if cached is not None and cached[0] == cache_key:
+                return [dict(item) for item in cached[1]]
+
     try:
         state = _load_vuln_catalogs_state()
         entry = _get_active_vuln_catalog_entry(state)
@@ -29998,6 +30271,9 @@ def _load_backend_vuln_catalog_items(*, selectable_only: bool = True) -> List[Di
                     'validated_at': str(item.get('validated_at') or '').strip() or None,
                     'eligible_for_selection': eligible,
                 })
+            if cacheable:
+                with _VULN_CATALOG_ITEMS_CACHE_LOCK:
+                    _VULN_CATALOG_ITEMS_CACHE[bool(selectable_only)] = (cache_key, [dict(item) for item in out])
             return out
         except Exception:
             if selectable_only:
@@ -30237,7 +30513,8 @@ def _concretize_preview_placeholders(scenario_payload: Any, *, seed: Any = None)
                     continue
                 item = copy.deepcopy(raw_item)
                 selected = str(item.get('selected') or '').strip().lower()
-                if (not selected or selected == 'random'):
+                requested_id = str(item.get('g_id') or '').strip()
+                if not selected or selected == 'random':
                     chosen = _deterministic_pick(
                         nodegen_catalog_items,
                         f'{seed_int}|{scenario_name}|{section_name}|{index}|g_id|save-xml',
@@ -30250,7 +30527,6 @@ def _concretize_preview_placeholders(scenario_payload: Any, *, seed: Any = None)
                     item['g_id'] = generator_id
                     item['g_name'] = generator_name or generator_id
                 else:
-                    requested_id = str(item.get('g_id') or '').strip()
                     match = next((candidate for candidate in nodegen_catalog_items if str(candidate.get('id') or '').strip() == requested_id), None)
                     if not requested_id or not isinstance(match, dict):
                         raise ValueError(f"Topology-selected flag-node-generator is not enabled: {requested_id or item.get('g_name') or '(missing id)'}")
@@ -30452,6 +30728,31 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
     except Exception:
         seed_int = 1
 
+    # Flag-node-generator rows are topology requirements, not a generic
+    # "Specific" dropdown.  A Random row must therefore resolve to one real,
+    # enabled generator before XML is written.  Only load this catalog when a
+    # row exists, so unrelated topology saves remain independent of generator
+    # catalog availability.
+    has_flag_node_generator_rows = any(
+        isinstance(scenario, dict)
+        and isinstance(scenario.get('sections'), dict)
+        and isinstance(scenario['sections'].get('Flag Node Generators'), dict)
+        and bool(scenario['sections']['Flag Node Generators'].get('items'))
+        for scenario in scenarios_payload
+    )
+    nodegen_catalog_items: list[dict[str, Any]] = []
+    nodegen_catalog_error = ''
+    if has_flag_node_generator_rows:
+        try:
+            nodegen_catalog_items, _nodegen_catalog_errors = _flag_node_generators_from_enabled_sources()
+            nodegen_catalog_items = [
+                item for item in (nodegen_catalog_items or [])
+                if isinstance(item, dict) and str(item.get('id') or '').strip()
+            ]
+        except Exception as exc:
+            nodegen_catalog_items = []
+            nodegen_catalog_error = str(exc)
+
     concretized: list[Any] = []
     for scenario in scenarios_payload:
         if not isinstance(scenario, dict):
@@ -30462,6 +30763,58 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
             scenario_name = str(next_scenario.get('name') or '').strip() or 'Scenario'
             sections = next_scenario.get('sections') if isinstance(next_scenario.get('sections'), dict) else None
             if isinstance(sections, dict):
+                flag_node_generator_section = sections.get('Flag Node Generators') if isinstance(sections.get('Flag Node Generators'), dict) else None
+                flag_node_generator_items = flag_node_generator_section.get('items') if isinstance(flag_node_generator_section, dict) and isinstance(flag_node_generator_section.get('items'), list) else None
+                if isinstance(flag_node_generator_items, list):
+                    resolved_items: list[Any] = []
+                    for index, raw_item in enumerate(flag_node_generator_items):
+                        if not isinstance(raw_item, dict):
+                            resolved_items.append(raw_item)
+                            continue
+
+                        item = copy.deepcopy(raw_item)
+                        selected = str(item.get('selected') or '').strip().lower()
+                        requested_id = str(item.get('g_id') or '').strip()
+                        if not selected or selected == 'random':
+                            chosen = _deterministic_pick(
+                                nodegen_catalog_items,
+                                f'{seed_int}|{scenario_name}|Flag Node Generators|{index}|g_id|save-xml',
+                            )
+                            generator_id = str((chosen or {}).get('id') or '').strip()
+                            if not generator_id:
+                                detail = f' ({nodegen_catalog_error})' if nodegen_catalog_error else ''
+                                raise ValueError(
+                                    'Flag Node Generators contains Random, but no enabled '
+                                    f'flag-node-generators are available{detail}.'
+                                )
+                            item['selected'] = 'Specific'
+                            item['g_id'] = generator_id
+                            item['g_name'] = str((chosen or {}).get('name') or generator_id).strip() or generator_id
+                        else:
+                            match = next(
+                                (candidate for candidate in nodegen_catalog_items
+                                 if str(candidate.get('id') or '').strip() == requested_id),
+                                None,
+                            )
+                            if not requested_id or not isinstance(match, dict):
+                                raise ValueError(
+                                    'Topology-selected flag-node-generator is not enabled: '
+                                    f"{requested_id or item.get('g_name') or '(missing id)'}"
+                                )
+                            item['selected'] = 'Specific'
+                            item['g_id'] = requested_id
+                            item['g_name'] = str(match.get('name') or requested_id).strip() or requested_id
+
+                        if str(item.get('v_metric') or '').strip() in {'', 'Weight'}:
+                            item['v_metric'] = 'Count'
+                        if item.get('v_count') in (None, '', 0):
+                            item['v_count'] = 1
+                        resolved_items.append(item)
+
+                    flag_node_generator_section['items'] = resolved_items
+                    sections['Flag Node Generators'] = flag_node_generator_section
+                    next_scenario['sections'] = sections
+
                 routing_section = sections.get('Routing') if isinstance(sections.get('Routing'), dict) else None
                 routing_items = routing_section.get('items') if isinstance(routing_section, dict) and isinstance(routing_section.get('items'), list) else None
                 if isinstance(routing_items, list):
@@ -30572,6 +30925,8 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
                     next_scenario['sections'] = sections
 
             concretized.append(next_scenario)
+        except ValueError:
+            raise
         except Exception:
             concretized.append(copy.deepcopy(scenario))
     return concretized
@@ -33758,7 +34113,50 @@ def _attach_base_upload(payload: Dict[str, Any]):
         pass
 
 
+_PARSED_SCENARIOS_XML_CACHE: dict[str, tuple[tuple[int, int], tuple[Any, ...], dict]] = {}
+_PARSED_SCENARIOS_XML_CACHE_LOCK = threading.Lock()
+_PARSED_SCENARIOS_XML_CACHE_MAX = 64
+
+
 def _parse_scenarios_xml(path):
+    """Parse a scenarios XML file; the on-disk XML stays ground truth.
+
+    Results are cached keyed by the file's (mtime, size) plus the active
+    vulnerability-catalog state stamp (canonicalization depends on it), so any
+    change to either is picked up on the next read. Callers get their own deep
+    copy and may mutate it freely. The default CORE config (used when the XML
+    has no <CoreConnection>) is recomputed on every call because it can change
+    with the runtime mode.
+    """
+    if not _xml_caches_enabled():
+        return _fill_parsed_scenarios_default_core(_parse_scenarios_xml_uncached(path))
+    try:
+        abs_path = os.path.abspath(path)
+    except Exception:
+        abs_path = str(path or '')
+    file_key = _file_stat_cache_key(abs_path)
+    if file_key is None:
+        return _fill_parsed_scenarios_default_core(_parse_scenarios_xml_uncached(path))
+    catalog_key = _vuln_catalog_state_cache_key()
+    with _PARSED_SCENARIOS_XML_CACHE_LOCK:
+        cached = _PARSED_SCENARIOS_XML_CACHE.get(abs_path)
+        if cached is not None and cached[0] == file_key and cached[1] == catalog_key:
+            return _fill_parsed_scenarios_default_core(copy.deepcopy(cached[2]))
+    data = _parse_scenarios_xml_uncached(abs_path)
+    with _PARSED_SCENARIOS_XML_CACHE_LOCK:
+        if len(_PARSED_SCENARIOS_XML_CACHE) >= _PARSED_SCENARIOS_XML_CACHE_MAX:
+            _PARSED_SCENARIOS_XML_CACHE.pop(next(iter(_PARSED_SCENARIOS_XML_CACHE)), None)
+        _PARSED_SCENARIOS_XML_CACHE[abs_path] = (file_key, catalog_key, copy.deepcopy(data))
+    return _fill_parsed_scenarios_default_core(data)
+
+
+def _fill_parsed_scenarios_default_core(data: dict) -> dict:
+    if isinstance(data, dict) and 'core' in data and data.get('core') is None:
+        data['core'] = _default_core_dict()
+    return data
+
+
+def _parse_scenarios_xml_uncached(path):
     data = {"scenarios": []}
     tree = ET.parse(path)
     root = tree.getroot()
@@ -33781,7 +34179,10 @@ def _parse_scenarios_xml(path):
         core_meta = _extract_optional_core_config(dict(core_el.attrib), include_password=True)
         data['core'] = core_meta if isinstance(core_meta, dict) else _normalize_core_config({}, include_password=True)
     else:
-        data['core'] = _default_core_dict()
+        # None marks "no CoreConnection in the XML"; the _parse_scenarios_xml
+        # wrapper fills in the current default so cached entries never pin a
+        # stale runtime-mode default.
+        data['core'] = None
 
     for scen_el in root.findall("Scenario"):
         scen = {"name": scen_el.get("name", "Scenario")}
@@ -35830,8 +36231,9 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                 if name == 'Flag Node Generators' and sel_for_xml == 'Specific':
                     generator_id = str(item.get('g_id') or '').strip()
                     generator_name = str(item.get('g_name') or '').strip()
-                    if generator_id:
-                        it.set('g_id', generator_id)
+                    if not generator_id:
+                        raise ValueError('Flag Node Generators row is Specific but no generator is selected.')
+                    it.set('g_id', generator_id)
                     if generator_name:
                         it.set('g_name', generator_name)
                 if name == 'Segmentation':
@@ -36544,8 +36946,9 @@ def save_xml():
                 _normalize_scenario_names_strict(scenarios_list)
                 scenarios_list = _concretize_scenarios_for_save(scenarios_list, seed=data.get('seed'))
                 data['scenarios'] = scenarios_list
-        except Exception:
-            pass
+        except ValueError as exc:
+            flash(f'Failed to save XML: {exc}')
+            return redirect(url_for('index'))
         scenario_count = len(data.get('scenarios') or []) if isinstance(data.get('scenarios'), list) else 0
         scenario_names_desc = []
         try:
@@ -36708,8 +37111,8 @@ def save_xml_api():
         try:
             _normalize_scenario_names_strict(scenarios)
             scenarios = _concretize_scenarios_for_save(scenarios, seed=data.get('seed'))
-        except Exception:
-            pass
+        except ValueError as exc:
+            return jsonify({ 'ok': False, 'error': str(exc) }), 422
         scenario_names: list[str] = []
         try:
             scenario_names = [str((s or {}).get('name') or '').strip() for s in scenarios if isinstance(s, dict)]
@@ -36981,7 +37384,12 @@ def save_xml_api():
                 _persist_scenario_catalog(names_for_catalog, source_path=scenario_paths_map or out_path)
         except Exception:
             pass
-        response_payload = { 'ok': True, 'result_path': out_path, 'core': resp_core }
+        response_payload = {
+            'ok': True,
+            'result_path': out_path,
+            'core': resp_core,
+            'scenarios': scenarios,
+        }
         if scenario_paths_map:
             response_payload['scenario_paths'] = scenario_paths_map
         response_payload['scenario_paths_by_index'] = scenario_paths_by_index
@@ -44193,13 +44601,20 @@ def _load_installed_generator_packs_state() -> dict:
 
 def _save_installed_generator_packs_state(state: dict) -> None:
     path = _installed_generator_packs_state_path()
+    tmp = path + '.tmp'
     try:
-        tmp = path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as fh:
             json.dump(state if isinstance(state, dict) else {'packs': []}, fh, indent=2)
         os.replace(tmp, path)
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+        raise RuntimeError(f'Unable to save installed generator state: {exc}') from exc
+    with _INSTALLED_DISABLE_MAPS_CACHE_LOCK:
+        _INSTALLED_DISABLE_MAPS_CACHE.clear()
 
 
 def _snapshot_test_log_copy(*, source_log_path: str, subdir: str, file_stem: str) -> tuple[str | None, str | None]:
@@ -44288,8 +44703,44 @@ def _generator_item_abs_compose_path(gen: dict[str, Any]) -> str | None:
         return None
 
 
+_INSTALLED_DISABLE_MAPS_CACHE: dict[str, tuple[tuple[int, int], dict, dict]] = {}
+_INSTALLED_DISABLE_MAPS_CACHE_LOCK = threading.Lock()
+
+
+def _copy_installed_disable_maps(
+    pack_by_id: dict[str, dict[str, Any]],
+    gen_by_kind_id: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
+    def _copy_info(info: dict[str, Any]) -> dict[str, Any]:
+        out = dict(info)
+        for key, value in out.items():
+            if isinstance(value, list):
+                out[key] = list(value)
+        return out
+
+    return (
+        {k: _copy_info(v) for k, v in pack_by_id.items()},
+        {k: _copy_info(v) for k, v in gen_by_kind_id.items()},
+    )
+
+
 def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
-    """Return (pack_by_id, gen_by_kind_id) maps from the installed packs state."""
+    """Return (pack_by_id, gen_by_kind_id) maps from the installed packs state.
+
+    Cached per packs-state file stamp (installs/uninstalls/validation all
+    rewrite that file); callers receive isolated copies.
+    """
+    state_key = None
+    if _xml_caches_enabled():
+        try:
+            state_key = _file_stat_cache_key(_installed_generator_packs_state_path())
+        except Exception:
+            state_key = None
+    if state_key is not None:
+        with _INSTALLED_DISABLE_MAPS_CACHE_LOCK:
+            cached = _INSTALLED_DISABLE_MAPS_CACHE.get('maps')
+            if cached is not None and cached[0] == state_key:
+                return _copy_installed_disable_maps(cached[1], cached[2])
     state = _load_installed_generator_packs_state()
     packs = state.get('packs') if isinstance(state, dict) else None
     if not isinstance(packs, list):
@@ -44336,6 +44787,8 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
                 'validated_ok': bool(it.get('validated_ok')) if it.get('validated_ok') is not None else None,
                 'validated_incomplete': bool(it.get('validated_incomplete') is True),
                 'validated_at': str(it.get('validated_at') or '').strip() or None,
+                'note': str(it.get('note') or '').strip() or None,
+                'note_color': str(it.get('note_color') or '').strip().lower() or None,
                 'last_test_log_path': str(it.get('last_test_log_path') or '').strip() or None,
                 'last_test_log_filename': str(it.get('last_test_log_filename') or '').strip() or None,
                 'disabled_due_to_missing_files': bool(it.get('disabled_due_to_missing_files') is True),
@@ -44362,6 +44815,62 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
     for kind, gid, _src_id, info_obj in entries:
         gen_by_kind_id.setdefault((kind, gid), info_obj)
 
+    # Catalog notes are user metadata keyed by the generator id exposed to the
+    # UI.  Keep them separate from an installed-pack item so a catalog row can
+    # retain its note even when an old pack state uses a different internal id.
+    # This also lets the catalog report a stale/missing installation normally,
+    # without rejecting a note on a row it just displayed to the user.
+    catalog_notes = state.get('catalog_notes') if isinstance(state, dict) else None
+    if isinstance(catalog_notes, dict):
+        for key, raw_note in catalog_notes.items():
+            if not isinstance(raw_note, dict):
+                continue
+            try:
+                note_kind, note_gid = str(key).split(':', 1)
+            except ValueError:
+                continue
+            note_kind = note_kind.strip().lower().replace('_', '-')
+            note_gid = note_gid.strip()
+            if note_kind not in {'flag-generator', 'flag-node-generator'} or not note_gid:
+                continue
+            note_text = str(raw_note.get('note') or '').strip()
+            raw_color = str(raw_note.get('note_color') or '').strip().lower()
+            note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else None
+            info_obj = gen_by_kind_id.get((note_kind, note_gid))
+            if info_obj is None:
+                info_obj = {
+                    'pack_id': None,
+                    'pack_label': None,
+                    'pack_disabled': False,
+                    'pack_uninstalled': False,
+                    'uninstalled': False,
+                    'disabled': False,
+                    'item_disabled': False,
+                    'item_uninstalled': False,
+                    'validated_ok': None,
+                    'validated_incomplete': False,
+                    'validated_at': None,
+                    'last_test_log_path': None,
+                    'last_test_log_filename': None,
+                    'disabled_due_to_missing_files': False,
+                    'persistent': False,
+                    'cached': None,
+                    'cache_checked_at': None,
+                    'cache_last_core_host': None,
+                    'cache_missing_images': [],
+                    'cache_size_bytes': None,
+                    'cache_error': None,
+                    'requires_build_network': False,
+                    'build_network_notes': [],
+                }
+                gen_by_kind_id[(note_kind, note_gid)] = info_obj
+            info_obj['note'] = note_text or None
+            info_obj['note_color'] = note_color
+
+    if state_key is not None:
+        with _INSTALLED_DISABLE_MAPS_CACHE_LOCK:
+            _INSTALLED_DISABLE_MAPS_CACHE['maps'] = (state_key, pack_by_id, gen_by_kind_id)
+        return _copy_installed_disable_maps(pack_by_id, gen_by_kind_id)
     return pack_by_id, gen_by_kind_id
 
 
@@ -44388,6 +44897,8 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_validated_ok'] = info.get('validated_ok')
             g['_validated_incomplete'] = bool(info.get('validated_incomplete') is True)
             g['_validated_at'] = info.get('validated_at')
+            g['_note'] = info.get('note')
+            g['_note_color'] = info.get('note_color')
             g['_last_test_log_path'] = info.get('last_test_log_path')
             g['_last_test_log_filename'] = info.get('last_test_log_filename')
             g['_persistent'] = bool(info.get('persistent'))
@@ -44406,6 +44917,8 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_validated_ok'] = None
             g['_validated_incomplete'] = False
             g['_validated_at'] = None
+            g['_note'] = None
+            g['_note_color'] = None
             g['_last_test_log_path'] = None
             g['_last_test_log_filename'] = None
             g['_persistent'] = False
@@ -44430,13 +44943,43 @@ def _is_installed_generator_disabled(*, kind: str, generator_id: str) -> bool:
     return bool(info and info.get('disabled') is True)
 
 
+_INSTALLED_MARKER_SOURCE_ID_CACHE: dict[str, tuple[tuple[int, int], str]] = {}
+_INSTALLED_MARKER_SOURCE_ID_CACHE_LOCK = threading.Lock()
+_INSTALLED_MARKER_SOURCE_ID_CACHE_MAX = 2048
+
+
 def _installed_generator_marker_source_id(item: dict[str, Any]) -> str:
-    """Stable `source_generator_id` recorded in an installed item's pack marker."""
+    """Stable `source_generator_id` recorded in an installed item's pack marker.
+
+    Cached per marker-file (mtime, size) stamp; the marker on disk stays
+    ground truth.
+    """
     try:
         pack_path = str(item.get('path') or '').strip()
         if not pack_path:
             return ''
         marker_path = os.path.join(pack_path, '.coretg_pack.json')
+        if _xml_caches_enabled():
+            marker_key = _file_stat_cache_key(marker_path)
+            if marker_key is None:
+                return ''
+            with _INSTALLED_MARKER_SOURCE_ID_CACHE_LOCK:
+                cached = _INSTALLED_MARKER_SOURCE_ID_CACHE.get(marker_path)
+                if cached is not None and cached[0] == marker_key:
+                    return cached[1]
+            value = _installed_generator_marker_source_id_uncached(marker_path)
+            with _INSTALLED_MARKER_SOURCE_ID_CACHE_LOCK:
+                if len(_INSTALLED_MARKER_SOURCE_ID_CACHE) >= _INSTALLED_MARKER_SOURCE_ID_CACHE_MAX:
+                    _INSTALLED_MARKER_SOURCE_ID_CACHE.pop(next(iter(_INSTALLED_MARKER_SOURCE_ID_CACHE)), None)
+                _INSTALLED_MARKER_SOURCE_ID_CACHE[marker_path] = (marker_key, value)
+            return value
+        return _installed_generator_marker_source_id_uncached(marker_path)
+    except Exception:
+        return ''
+
+
+def _installed_generator_marker_source_id_uncached(marker_path: str) -> str:
+    try:
         if not os.path.isfile(marker_path):
             return ''
         with open(marker_path, 'r', encoding='utf-8') as fh:
@@ -44758,11 +45301,36 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
 
     csv_rel_paths: list[str] = []
     compose_items: list[dict[str, Any]] = []
+    imported_notes_by_compose_rel: dict[str, dict[str, str]] = {}
     try:
         # Extract the entire ZIP directory tree so compose directories (and their
         # support files) are preserved.
         content_dir = _vuln_catalog_pack_content_dir(catalog_id)
         _safe_extract_zip_to_dir(zip_path, content_dir)
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                raw_notes = archive.read('.scenarioforge/catalog_notes.json').decode('utf-8', errors='ignore')
+            notes_doc = json.loads(raw_notes or '{}')
+            note_entries = notes_doc.get('notes') if isinstance(notes_doc, dict) else []
+            if isinstance(note_entries, list):
+                for raw_entry in note_entries:
+                    if not isinstance(raw_entry, dict):
+                        continue
+                    compose_rel = str(raw_entry.get('compose_rel') or '').replace('\\', '/').strip().lstrip('/')
+                    if not compose_rel or '..' in compose_rel.split('/'):
+                        continue
+                    note_text = str(raw_entry.get('note') or '').strip()
+                    raw_color = str(raw_entry.get('note_color') or '').strip().lower()
+                    note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else ''
+                    if note_text or note_color:
+                        imported_notes_by_compose_rel[compose_rel] = {
+                            'note': note_text,
+                            'note_color': note_color,
+                        }
+        except KeyError:
+            pass
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f'Invalid ScenarioForge catalog notes metadata: {exc}') from exc
         try:
             from scenarioforge.compose_dependencies import missing_dependency_paths, scan_compose_dependencies
         except Exception:
@@ -44816,7 +45384,7 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             # missing required files, or a Dockerfile that needs build-time
             # internet (which a locked-down CORE VM build container lacks).
             auto_disabled = bool(missing_required_files) or needs_build_network
-            compose_items.append({
+            item = {
                 'id': idx,
                 'name': display_name,
                 'rel_dir': rel_dir,
@@ -44834,7 +45402,12 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 'compose_dependency_warning': str(compose_dependency_summary.get('warning') or '').strip(),
                 'requires_build_network': needs_build_network,
                 'build_network_notes': list(compose_dependency_summary.get('build_network_notes') or []),
-            })
+            }
+            imported_note = imported_notes_by_compose_rel.get(compose_rel)
+            if imported_note:
+                item['note'] = imported_note['note']
+                item['note_color'] = imported_note['note_color'] or None
+            compose_items.append(item)
 
         # Generate a catalog CSV from discovered compose directories.
         out_path = os.path.join(pack_dir, 'vuln_list_w_url.csv')
@@ -45118,6 +45691,9 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['dir_rel'] = str(it.get('dir_rel') or '').strip()
         it['compose_rel'] = str(it.get('compose_rel') or '').strip()
         it['persistent'] = bool(it.get('persistent', False))
+        it['note'] = str(it.get('note') or '').strip()
+        raw_note_color = str(it.get('note_color') or '').strip().lower()
+        it['note_color'] = raw_note_color if raw_note_color in {'red', 'yellow', 'green'} else None
         it['cached'] = it.get('cached') if isinstance(it.get('cached'), bool) else None
         it['cache_checked_at'] = str(it.get('cache_checked_at') or '').strip() or None
         it['cache_last_core_host'] = str(it.get('cache_last_core_host') or '').strip() or None
@@ -46467,6 +47043,27 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             'compose_dependencies': compose_dependency_summary,
         })
 
+    # An installed pack is remapped to numeric directory ids, but Flow resolves
+    # generators by their stable source ids.  Allowing two entries with the same
+    # (kind, source id) into one archive produces an ambiguous catalog that can
+    # select a different generator merely from directory enumeration order.
+    seen_source_ids: dict[tuple[str, str], str] = {}
+    for item in items:
+        kind = str(item.get('kind') or '').strip()
+        source_id = str(item.get('source_id') or item.get('id') or '').strip()
+        manifest_path = str(item.get('manifest_path') or '').strip()
+        if not kind or not source_id:
+            continue
+        key = (kind, source_id)
+        previous_manifest = seen_source_ids.get(key)
+        if previous_manifest:
+            errors.append(
+                f'{manifest_path}: duplicate stable generator id {source_id!r} '
+                f'for {kind}; already declared by {previous_manifest}'
+            )
+            continue
+        seen_source_ids[key] = manifest_path
+
     if errors:
         # Show first few errors.
         return False, '; '.join(errors[:4]) + (f' (+{len(errors)-4} more)' if len(errors) > 4 else ''), [], warnings
@@ -46510,6 +47107,7 @@ def _install_generator_pack_payload(
     safe_label: str,
     pack_origin: str,
     next_numeric: int,
+    imported_catalog_notes: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, str, list[dict[str, Any]], int, list[dict[str, Any]]]:
     """Install a pack zip payload and return installed items.
 
@@ -46525,6 +47123,20 @@ def _install_generator_pack_payload(
         return False, f'Pack install requires PyYAML: {exc}', [], next_numeric, []
 
     root = _installed_generators_root()
+    imported_note_map: dict[tuple[str, str], dict[str, str | None]] = {}
+    for raw_note in (imported_catalog_notes or []):
+        if not isinstance(raw_note, dict):
+            continue
+        note_kind = str(raw_note.get('kind') or '').strip().lower().replace('_', '-')
+        note_generator_id = str(raw_note.get('generator_id') or raw_note.get('id') or '').strip()
+        note_text = str(raw_note.get('note') or '').strip()
+        raw_color = str(raw_note.get('note_color') or '').strip().lower()
+        note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else None
+        if note_kind in {'flag-generator', 'flag-node-generator'} and note_generator_id and (note_text or note_color):
+            imported_note_map[(note_kind, note_generator_id)] = {
+                'note': note_text,
+                'note_color': note_color,
+            }
     tmp_dir = tempfile.mkdtemp(prefix='coretg_pack_')
     try:
         _safe_extract_zip_to_dir(zip_path, tmp_dir)
@@ -46611,6 +47223,10 @@ def _install_generator_pack_payload(
                 pass
 
             installed_item: dict[str, Any] = {'id': assigned_gid, 'kind': kind, 'path': dest_dir}
+            imported_note = imported_note_map.get((kind, source_gid))
+            if imported_note:
+                installed_item['note'] = str(imported_note.get('note') or '').strip()
+                installed_item['note_color'] = imported_note.get('note_color')
             compose_dependency_summary = it.get('compose_dependencies') if isinstance(it.get('compose_dependencies'), dict) else {}
             required_files = compose_dependency_summary.get('requires') if isinstance(compose_dependency_summary, dict) else []
             if isinstance(required_files, list):
@@ -46658,12 +47274,15 @@ def _install_generator_pack(*, zip_path: str, pack_label: str, pack_origin: str)
         pack_id = _local_timestamp_safe() + '-' + uuid.uuid4().hex[:6]
         next_numeric = _compute_next_numeric_generator_id(repo_root=repo_root)
 
+        source_meta = _read_generator_pack_zip_metadata(zip_path)
+        imported_catalog_notes = source_meta.get('catalog_notes') if isinstance(source_meta.get('catalog_notes'), list) else []
         ok, note, installed, _next, warnings = _install_generator_pack_payload(
             zip_path=zip_path,
             pack_id=pack_id,
             safe_label=safe_label,
             pack_origin=pack_origin,
             next_numeric=next_numeric,
+            imported_catalog_notes=imported_catalog_notes,
         )
         if not ok:
             return False, note
@@ -46781,6 +47400,7 @@ def _install_generator_pack_or_bundle(*, zip_path: str, pack_label: str, pack_or
                             safe_label=safe_inner_label,
                             pack_origin=inner_origin,
                             next_numeric=next_numeric,
+                            imported_catalog_notes=source_meta.get('catalog_notes') if isinstance(source_meta.get('catalog_notes'), list) else [],
                         )
                         if ok_inner:
                             if isinstance(warnings_inner, list) and warnings_inner:
@@ -47006,6 +47626,7 @@ try:
         download_zip_from_url=lambda url: _download_zip_from_url(url),
         pack_to_zip_bytes=lambda pack: _pack_to_zip_bytes(pack),
         catalog_packs_for_export=lambda: _flag_catalog_packs_for_export(),
+        cleanup_remote_pack=lambda pack: _cleanup_remote_generator_pack(pack),
         os_module=os,
         tempfile_module=tempfile,
         uuid_module=uuid,
@@ -47085,6 +47706,48 @@ def _set_generator_persistent_state(*, kind: str, generator_id: str, persistent:
     return True, ('Marked persistent' if persistent else 'Unmarked persistent') + f' {k} {gid}'
 
 
+def _set_generator_note_state(*, kind: str, generator_id: str, note: str, note_color: str | None) -> tuple[bool, str]:
+    """Persist a short user-authored catalog note and its indicator color.
+
+    Notes are keyed by the UI/catalog generator id, rather than being limited to
+    a matching installed-state record.  A displayed catalog row may have a
+    stable manifest id that differs from an older pack-state internal id.
+    """
+    gid = str(generator_id or '').strip()
+    if not gid:
+        return False, 'Missing generator id'
+    k = str(kind or '').strip().lower().replace('_', '-')
+    if k not in ('flag-generator', 'flag-node-generator'):
+        return False, f'Invalid kind: {kind}'
+    text = str(note or '').strip()
+    if len(text) > 4000:
+        return False, 'Note must be 4000 characters or fewer'
+    color = str(note_color or '').strip().lower()
+    if color and color not in {'red', 'yellow', 'green'}:
+        return False, 'Note color must be red, yellow, or green'
+    state = _load_installed_generator_packs_state()
+    packs = state.get('packs') if isinstance(state, dict) else None
+    if not isinstance(packs, list):
+        packs = []
+    _pack, item = _find_installed_generator_state_item(packs, kind=k, generator_id=gid)
+    if item is not None:
+        # Keep legacy per-item metadata in sync for pack exports/state readers.
+        item['note'] = text
+        item['note_color'] = color or None
+    catalog_notes = state.get('catalog_notes') if isinstance(state, dict) else None
+    if not isinstance(catalog_notes, dict):
+        catalog_notes = {}
+    note_key = f'{k}:{gid}'
+    if text or color:
+        catalog_notes[note_key] = {'note': text, 'note_color': color or None}
+    else:
+        catalog_notes.pop(note_key, None)
+    state['packs'] = packs
+    state['catalog_notes'] = catalog_notes
+    _save_installed_generator_packs_state(state)
+    return True, ('Saved note/color for' if (text or color) else 'Cleared note/color for') + f' {k} {gid}'
+
+
 def _update_generator_item_cache_state(
     *,
     kind: str,
@@ -47132,6 +47795,7 @@ try:
         set_generator_disabled_state=lambda **kwargs: _set_generator_disabled_state(**kwargs),
         set_generator_validation_state=lambda **kwargs: _set_generator_validation_state(**kwargs),
         set_generator_persistent_state=lambda **kwargs: _set_generator_persistent_state(**kwargs),
+        set_generator_note_state=lambda **kwargs: _set_generator_note_state(**kwargs),
         delete_installed_generator=lambda **kwargs: _delete_installed_generator(**kwargs),
     )
 except Exception:
@@ -47150,10 +47814,37 @@ def _pack_to_zip_bytes(pack: dict) -> bytes:
     installed = pack.get('installed') if isinstance(pack, dict) else []
     with zipfile.ZipFile(mem, 'w', zipfile.ZIP_DEFLATED) as z:
         # Pack metadata
-        try:
-            meta = json.dumps(pack, indent=2)
-        except Exception:
-            meta = '{}'
+        state = _load_installed_generator_packs_state()
+        catalog_notes = state.get('catalog_notes') if isinstance(state, dict) else {}
+        catalog_notes = catalog_notes if isinstance(catalog_notes, dict) else {}
+        exported_notes: list[dict[str, str]] = []
+        for item in (installed or []):
+            if not isinstance(item, dict) or item.get('uninstalled') is True:
+                continue
+            kind = str(item.get('kind') or '').strip().lower().replace('_', '-')
+            generator_id = str(item.get('id') or '').strip()
+            if kind not in {'flag-generator', 'flag-node-generator'} or not generator_id:
+                continue
+            note_data = None
+            for candidate_id in (generator_id, _installed_generator_marker_source_id(item)):
+                candidate = catalog_notes.get(f'{kind}:{candidate_id}') if candidate_id else None
+                if isinstance(candidate, dict):
+                    note_data = candidate
+                    break
+            note_text = str((note_data or item).get('note') or '').strip()
+            raw_color = str((note_data or item).get('note_color') or '').strip().lower()
+            note_color = raw_color if raw_color in {'red', 'yellow', 'green'} else ''
+            if note_text or note_color:
+                exported_notes.append({
+                    'kind': kind,
+                    'generator_id': generator_id,
+                    'note': note_text,
+                    'note_color': note_color,
+                })
+        export_meta = dict(pack)
+        export_meta['catalog_notes'] = exported_notes
+        export_meta['catalog_notes_format'] = 1
+        meta = json.dumps(export_meta, indent=2)
         z.writestr('pack.json', meta + '\n')
 
         seen_sources: set[str] = set()
@@ -47400,6 +48091,17 @@ def _flagnodegen_run_dir_for_id(run_id: str) -> str:
 def _parse_flag_test_core_cfg_from_form(form: Any) -> Dict[str, Any] | None:
     raw = str((form or {}).get('core') or '').strip()
     if not raw:
+        # VM mode has one authoritative CORE VM connection in
+        # .scenarioforge.env.  Generator tests must use that same connection as
+        # generate/execute, rather than requiring a browser credential modal.
+        if _webui_runtime_mode() == 'vm':
+            core_cfg = _core_backend_defaults(include_password=True)
+            core_cfg = _prefer_explicit_or_ssh_core_host(core_cfg)
+            if not core_cfg.get('host'):
+                core_cfg['host'] = core_cfg.get('ssh_host') or '127.0.0.1'
+            if not core_cfg.get('port'):
+                core_cfg['port'] = CORE_PORT
+            return _require_core_ssh_credentials(core_cfg)
         return None
     try:
         payload = json.loads(raw)
@@ -48990,3 +49692,9 @@ if __name__ == '__main__':
 """
     ).replace('__CONTAINERS_LITERAL__', containers_literal) \
      .replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal)
+
+
+# Snapshot the cache dependency functions now that every definition above is
+# final. _xml_caches_enabled() compares against this to detect monkeypatching
+# and bypass the XML/catalog caches whenever any dependency is replaced.
+_XML_CACHE_ORIGINAL_DEPS = _current_xml_cache_deps()

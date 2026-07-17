@@ -627,7 +627,7 @@ def register(app, *, backend_module: Any) -> None:
             )
             if (not flag_assignments) and (not allow_node_duplicates):
                 return _validation_failure(
-                    'Not enough unique generators for this chain length while duplicates are disabled. Reduce chain length or enable duplicates.',
+                    'No distinct compatible generator assignment could be made for every selected Flow node. Check that each topology-selected generator is enabled and that any required inputs are either produced by the sequence or explicitly marked flow_supply_when_first for a parallel branch.',
                     scenario=scenario_label or scenario_norm,
                     length=len(chain_nodes or []),
                     chain=[{'id': str(node.get('id') or ''), 'name': str(node.get('name') or ''), 'type': str(node.get('type') or '')} for node in (chain_nodes or []) if isinstance(node, dict)],

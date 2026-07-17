@@ -151,6 +151,20 @@ def test_flag_catalog_template_redacts_sensitive_test_log_lines() -> None:
     assert '_redactSensitiveTestLine(line)' in text
 
 
+def test_flag_catalog_tables_offer_persistent_colored_notes() -> None:
+    text = FLAG_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert text.count('>Notes</th>') == 2
+    assert 'id="flagCatalogNoteModal"' in text
+    assert 'id="flagCatalogNoteClear"' in text
+    assert 'data-note-color="red"' in text
+    assert 'data-note-color="yellow"' in text
+    assert 'data-note-color="green"' in text
+    assert '/api/flag_generators/set_note' in text
+    assert '/api/flag_node_generators/set_note' in text
+    assert 'function updateFlagCatalogNoteRow' in text
+    assert 'const hasColor = [\'red\', \'yellow\', \'green\'].includes(suppliedColor);' in text
+
+
 def test_flag_catalog_batch_reuses_core_session_prompt() -> None:
     text = FLAG_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
     assert 'const FLAG_CATALOG_VM_MODE = FLAG_CATALOG_RUNTIME_MODE === \'vm\';' in text
@@ -161,6 +175,12 @@ def test_flag_catalog_batch_reuses_core_session_prompt() -> None:
     assert "filters.scope === 'failed'" in text
     assert 'const canProceed = await ensureCoreVmReadyForGenTest(creds);' in text
     assert "if (metaEl) metaEl.textContent = 'Batch run cancelled.';" in text
+
+
+def test_flag_catalog_vm_mode_skips_single_test_credential_modal() -> None:
+    text = FLAG_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert 'const creds = FLAG_CATALOG_VM_MODE ? {} : await promptGenTestCreds();' in text
+    assert '.scenarioforge.env, exactly as generation and execution do.' in text
 
 
 def test_flag_catalog_template_exposes_selection_and_log_controls() -> None:

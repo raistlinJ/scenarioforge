@@ -4,7 +4,7 @@
 {% block header_icon %}<i class="bi bi-bezier2 fs-4"></i>{% endblock %}
 {% block header_title %}Flag Sequencing{% endblock %}
 {% block extra_head %}
-<script async src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"
+<script async src="/static/vendor/mermaid-10.min.js"
   onload="window.dispatchEvent(new Event('coretg-mermaid-ready'))"></script>
 <style>
   body {
@@ -92,15 +92,25 @@
 
         <div class="card mb-3" id="flowSeedCard">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <strong>Flow Seed</strong>
+            <strong>Summary</strong>
             <button type="button" class="btn btn-sm btn-outline-secondary" id="flowSeedRerollBtn"
               title="Re-roll seed for different chain/generator combinations">Re-roll</button>
           </div>
           <div class="card-body">
-            <div class="input-group input-group-sm" style="max-width: 260px;">
-              <label class="input-group-text" for="flowSeedInput">Seed</label>
-              <input type="number" class="form-control" id="flowSeedInput" min="1" step="1" inputmode="numeric"
-                placeholder="seed" />
+            <div class="row g-3 align-items-end">
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label small mb-1" for="flowSeedInput">Flow seed</label>
+                <input type="number" class="form-control form-control-sm" id="flowSeedInput" min="1" step="1" inputmode="numeric"
+                  placeholder="seed" />
+              </div>
+              <div class="col-sm-6 col-lg-9">
+                <div class="d-flex flex-wrap gap-3 small">
+                  <span>Flag-node-generator slots: <strong id="flowSummaryFlagNodeGeneratorSlots">0</strong></span>
+                  <span>Vulnerability slots: <strong id="flowSummaryVulnerabilitySlots">0</strong></span>
+                  <span>Docker slots: <strong id="flowSummaryDockerSlots">0</strong></span>
+                  <span class="fw-semibold">Max challenges: <strong id="flowSummaryMaxChallenges">0</strong></span>
+                </div>
+              </div>
             </div>
             <div class="form-text">Seed affects chain node selection and generator assignment. Change seed to get
               different combinations.</div>
@@ -128,6 +138,12 @@
                   <div>
                     <button id="flowGenerateBtn" class="btn btn-primary text-nowrap" type="button">Generate</button>
                   </div>
+                  <div>
+                    <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="collapse"
+                      data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions">
+                      Options
+                    </button>
+                  </div>
                   <div class="dropdown">
                     <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button"
                       id="flowDownloadDropdown" data-bs-toggle="dropdown" aria-expanded="false" disabled
@@ -143,12 +159,6 @@
                       <li><a class="dropdown-item" href="#" id="flowDownloadParticipantGuide">Participant Steps Guide (html)</a></li>
                       <li><a class="dropdown-item" href="#" id="flowDownloadFacilitatorGuide">Facilitator Guide (html)</a></li>
                     </ul>
-                  </div>
-                  <div>
-                    <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="collapse"
-                      data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions">
-                      Options
-                    </button>
                   </div>
                 </div>
               </div>
@@ -182,12 +192,6 @@
                 </div>
                 <div class="col-sm-6 col-lg-auto">
                   <div class="form-check form-switch mb-1">
-                    <input class="form-check-input" type="checkbox" id="flowGenerateNoDuplicates">
-                    <label class="form-check-label small text-nowrap" for="flowGenerateNoDuplicates">Allow duplicates</label>
-                  </div>
-                </div>
-                <div class="col-sm-6 col-lg-auto">
-                  <div class="form-check form-switch mb-1">
                     <input class="form-check-input" type="checkbox" id="flowIncludeAllTopologyPivots"
                       title="When enabled, Generate expands the chain beyond Number of Challenges if needed so all topology pivot source and target Docker nodes are included.">
                     <label class="form-check-label small text-nowrap" for="flowIncludeAllTopologyPivots"
@@ -201,9 +205,8 @@
                 </div>
               </div>
             </div>
-            <div class="small text-muted mt-2">Current rule: <span class="font-monospace">flag-generator</span> steps
-              are placed on vulnerability nodes only. Non-vulnerability Docker nodes use <span
-                class="font-monospace">flag-node-generator</span>.</div>
+            <div class="small text-muted mt-2">Note: <span class="font-monospace">flag-generators</span>
+              are placed on vulnerability nodes only.</div>
           </div>
         </div>
 
@@ -411,6 +414,10 @@
     const generateMaxRetriesEl = document.getElementById('flowGenerateMaxRetries');
     const flowSeedInputEl = document.getElementById('flowSeedInput');
     const flowSeedRerollBtnEl = document.getElementById('flowSeedRerollBtn');
+    const flowSummaryFlagNodeGeneratorSlotsEl = document.getElementById('flowSummaryFlagNodeGeneratorSlots');
+    const flowSummaryVulnerabilitySlotsEl = document.getElementById('flowSummaryVulnerabilitySlots');
+    const flowSummaryDockerSlotsEl = document.getElementById('flowSummaryDockerSlots');
+    const flowSummaryMaxChallengesEl = document.getElementById('flowSummaryMaxChallenges');
     const restoreBadgeEl = document.getElementById('flowRestoreBadge');
     const autoSaveBadgeEl = document.getElementById('flowAutoSaveBadge');
     const saveXmlEl = document.getElementById('saveXmlBtn');
@@ -465,7 +472,6 @@
     const loadingStepsEl = document.getElementById('flowLoadingSteps');
     const loadingLogLabelEl = document.getElementById('flowLoadingLogLabel');
     const loadingLogEl = document.getElementById('flowLoadingLog');
-    const generateNoDuplicatesEl = document.getElementById('flowGenerateNoDuplicates');
     const includeAllTopologyPivotsEl = document.getElementById('flowIncludeAllTopologyPivots');
     const flowEnabledToggleEl = document.getElementById('flowEnabledToggle');
     const flowEnabledHelpEl = document.getElementById('flowEnabledHelp');
@@ -842,9 +848,10 @@
 
   let _flagGeneratorsCatalog = null;
   let _flagNodeGeneratorsCatalog = null;
+  let staleSavedFlowGeneratorPrompted = false;
 
-  async function ensureGeneratorCatalogsLoaded() {
-    if (Array.isArray(_flagGeneratorsCatalog) && Array.isArray(_flagNodeGeneratorsCatalog)) return;
+  async function ensureGeneratorCatalogsLoaded(forceRefresh = false) {
+    if (!forceRefresh && Array.isArray(_flagGeneratorsCatalog) && Array.isArray(_flagNodeGeneratorsCatalog)) return;
     try {
       const [fg, fng] = await Promise.all([
         fetchJson('/flag_generators_data'),
@@ -856,6 +863,74 @@
       _flagGeneratorsCatalog = Array.isArray(_flagGeneratorsCatalog) ? _flagGeneratorsCatalog : [];
       _flagNodeGeneratorsCatalog = Array.isArray(_flagNodeGeneratorsCatalog) ? _flagNodeGeneratorsCatalog : [];
       throw e;
+    }
+  }
+
+  async function promptToRemoveUnavailableSavedFlowGenerators(scenarioName) {
+    const saved = getFlowStateForScenario(scenarioName);
+    if (!saved || !Array.isArray(saved.flag_assignments) || !saved.flag_assignments.length) return false;
+    const enabled = {
+      flag_generators: new Set((Array.isArray(_flagGeneratorsCatalog) ? _flagGeneratorsCatalog : [])
+        .map(item => String(item && item.id || '').trim()).filter(Boolean)),
+      flag_node_generators: new Set((Array.isArray(_flagNodeGeneratorsCatalog) ? _flagNodeGeneratorsCatalog : [])
+        .map(item => String(item && item.id || '').trim()).filter(Boolean)),
+    };
+    const stale = saved.flag_assignments.map((assignment, index) => {
+      if (!assignment || typeof assignment !== 'object') return null;
+      const id = String(assignment.id || assignment.generator_id || '').trim();
+      if (!id) return null;
+      const kind = String(assignment.generator_catalog || '').trim() === 'flag_node_generators'
+        || String(assignment.type || '').trim() === 'flag-node-generator'
+        ? 'flag_node_generators'
+        : 'flag_generators';
+      return enabled[kind].has(id) ? null : { id, kind, index };
+    }).filter(Boolean);
+    if (!stale.length) return false;
+    if (staleSavedFlowGeneratorPrompted) return false;
+    staleSavedFlowGeneratorPrompted = true;
+
+    const ids = [...new Set(stale.map(item => item.id))].join(', ');
+    const remove = window.confirm(
+      `The saved Flow sequence references generator(s) that are no longer installed: ${ids}.\n\nRemove the unavailable assignments and clear this saved sequence? You can then generate a new sequence.`
+    );
+    if (!remove) return false;
+
+    const cleared = {
+      ...saved,
+      length: 0,
+      chain: [],
+      chain_ids: [],
+      flag_assignments: [],
+      flags_enabled: false,
+      flow_valid: false,
+      flow_errors: ['Saved flow cleared because it referenced uninstalled generator(s).'],
+      first_hint: '',
+      first_hints: [],
+      updated_at: Date.now(),
+    };
+    try {
+      if (typeof window.coretgSetSavedFlowStateForScenario === 'function') {
+        window.coretgSetSavedFlowStateForScenario(scenarioName, cleared);
+      }
+      const key = normalizeScenarioNorm(scenarioName);
+      if (key && flowStateByScenario && typeof flowStateByScenario === 'object') flowStateByScenario[key] = cleared;
+      currentChain = [];
+      currentFlagAssignments = [];
+      selectedChainIndex = -1;
+      const xmlPath = (typeof window.coretgGetLatestXmlPathForScenario === 'function')
+        ? String(window.coretgGetLatestXmlPathForScenario(scenarioName) || '').trim()
+        : '';
+      if (xmlPath) {
+        await postJson('/api/flag-sequencing/save_flow_state_to_xml', {
+          xml_path: xmlPath,
+          scenario: scenarioName,
+          flow_state: cleared,
+        });
+      }
+      return true;
+    } catch (err) {
+      setStatus('Unable to save removal of unavailable Flow generators: ' + String(err && err.message || err), true);
+      return false;
     }
   }
 
@@ -979,7 +1054,7 @@
       dependency_level: normalizeDependencyLevel(state.dependency_level),
       chain_ids,
       flag_assignments: Array.isArray(state.flag_assignments) ? state.flag_assignments : [],
-      allow_node_duplicates: !!state.allow_node_duplicates,
+      allow_node_duplicates: false,
       include_all_topology_pivots: !!state.include_all_topology_pivots,
       initial_facts: normalizeFactsOverride(state.initial_facts),
       goal_facts: normalizeFactsOverride(state.goal_facts),
@@ -1746,10 +1821,9 @@
       }
     } catch (e) { }
     try {
-      allowNodeDuplicates = !!(saved && saved.allow_node_duplicates);
-      if (generateNoDuplicatesEl) {
-        generateNoDuplicatesEl.checked = !!allowNodeDuplicates;
-      }
+      // Node reuse is no longer a Flow option.  Ignore any legacy saved
+      // value so every generated sequence uses distinct topology nodes.
+      allowNodeDuplicates = false;
     } catch (e) { }
     try {
       includeAllTopologyPivots = !!(saved && saved.include_all_topology_pivots);
@@ -2915,6 +2989,12 @@
         const dockerCount = Number.isFinite(+data.docker_count) ? (+data.docker_count) : 0;
         const vulnCount = Number.isFinite(+data.vuln_count) ? (+data.vuln_count) : 0;
         const dockerNonvulnCount = Number.isFinite(+data.docker_nonvuln_count) ? (+data.docker_nonvuln_count) : 0;
+        const topologyFlagNodeGeneratorCount = Number.isFinite(+data.topology_flag_node_generator_count)
+          ? (+data.topology_flag_node_generator_count)
+          : 0;
+        const genericDockerCount = Number.isFinite(+data.generic_docker_count)
+          ? (+data.generic_docker_count)
+          : Math.max(0, dockerNonvulnCount - topologyFlagNodeGeneratorCount);
         flowEligible = (eligible || (dockerCount > 0 || vulnCount > 0));
         if (!flowEligible) {
           // Guardrail: do not clear/persist FlowState on transient ineligibility checks
@@ -2922,7 +3002,14 @@
           setFlowEnabled(false, { skipPersist: true, clearStateOnDisable: false });
         }
         if (dockerCount > 0 || vulnCount > 0) {
-          lastStats = { vuln_total: vulnCount, docker_nonvuln_total: dockerNonvulnCount, docker_total: dockerCount };
+          lastStats = {
+            vuln_total: vulnCount,
+            docker_nonvuln_total: dockerNonvulnCount,
+            docker_total: dockerCount,
+            topology_flag_node_generator_total: topologyFlagNodeGeneratorCount,
+            generic_docker_total: genericDockerCount,
+            flag_node_generator_eligible_total: topologyFlagNodeGeneratorCount || dockerNonvulnCount,
+          };
           updateLengthSpinnerMax();
         }
         updateFlowEnabledUi();
@@ -10116,11 +10203,14 @@
   function dockerNodeCapFromStats(stats) {
     if (!stats || typeof stats !== 'object') return null;
     const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : null;
-    const dockerOther = Number.isFinite(+stats.topology_flag_node_generator_total)
+    const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
       ? (+stats.topology_flag_node_generator_total)
-      : (Number.isFinite(+stats.flag_node_generator_eligible_total) ? (+stats.flag_node_generator_eligible_total) : null);
-    if (vuln === null && dockerOther === null) return null;
-    return Math.max(0, (vuln || 0) + (dockerOther || 0));
+      : 0;
+    const genericDocker = Number.isFinite(+stats.generic_docker_total)
+      ? (+stats.generic_docker_total)
+      : Math.max(0, (Number.isFinite(+stats.docker_nonvuln_total) ? (+stats.docker_nonvuln_total) : 0) - nodeGenerators);
+    if (vuln === null && nodeGenerators === 0 && genericDocker === 0) return null;
+    return Math.max(0, (vuln || 0) + nodeGenerators + genericDocker);
   }
 
   function vulnerabilityNodeMinimumFromStats(stats) {
@@ -10132,21 +10222,37 @@
     return Math.max(1, vuln + nodeGenerators);
   }
 
+  function updateFlowSummary(stats) {
+    const flagNodeGeneratorSlots = Number.isFinite(+stats?.topology_flag_node_generator_total)
+      ? Math.max(0, +stats.topology_flag_node_generator_total)
+      : 0;
+    const vulnerabilitySlots = Number.isFinite(+stats?.vuln_total)
+      ? Math.max(0, +stats.vuln_total)
+      : 0;
+    const dockerSlots = Number.isFinite(+stats?.generic_docker_total)
+      ? Math.max(0, +stats.generic_docker_total)
+      : Math.max(0, (Number.isFinite(+stats?.docker_nonvuln_total) ? +stats.docker_nonvuln_total : 0) - flagNodeGeneratorSlots);
+    const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;
+
+    if (flowSummaryFlagNodeGeneratorSlotsEl) flowSummaryFlagNodeGeneratorSlotsEl.textContent = String(flagNodeGeneratorSlots);
+    if (flowSummaryVulnerabilitySlotsEl) flowSummaryVulnerabilitySlotsEl.textContent = String(vulnerabilitySlots);
+    if (flowSummaryDockerSlotsEl) flowSummaryDockerSlotsEl.textContent = String(dockerSlots);
+    if (flowSummaryMaxChallengesEl) flowSummaryMaxChallengesEl.textContent = String(maxChallenges);
+  }
+
   function updateLengthSpinnerMax() {
+    updateFlowSummary(lastStats);
     if (!lengthEl) return;
     const minimum = vulnerabilityNodeMinimumFromStats(lastStats);
     lengthEl.min = String(minimum);
     if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
-    const allowDupes = generateNoDuplicatesEl ? !!generateNoDuplicatesEl.checked : true;
-    if (!allowDupes) {
-      const cap = dockerNodeCapFromStats(lastStats);
-      if (cap !== null && cap > 0) {
-        lengthEl.max = String(Math.max(minimum, cap));
-        lengthEl.title = `Minimum ${minimum} for topology challenge nodes; limited to ${cap} Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
-        if (parseInt(lengthEl.value, 10) > cap) lengthEl.value = String(cap);
-        if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
-        return;
-      }
+    const cap = dockerNodeCapFromStats(lastStats);
+    if (cap !== null && cap > 0) {
+      lengthEl.max = String(Math.max(minimum, cap));
+      lengthEl.title = `Minimum ${minimum} for mandatory topology challenge nodes; maximum ${cap} including Docker nodes from Node Information.`;
+      if (parseInt(lengthEl.value, 10) > cap) lengthEl.value = String(cap);
+      if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
+      return;
     }
     lengthEl.max = '50';
     lengthEl.title = `Minimum ${minimum} for topology challenge nodes.`;
@@ -10727,15 +10833,9 @@
       }
     }
 
-    let allowDupes = !!options.allow_node_duplicates;
-    const syncAllowDuplicateParams = () => {
-      if (allowDupes) {
-        params.set('allow_node_duplicates', '1');
-        params.delete('retry_index');
-      } else {
-        params.delete('allow_node_duplicates');
-      }
-    };
+    // The UI no longer exposes duplicate-node generation.  Keep the strict
+    // setting explicit for the sequencing and resolve requests below.
+    const allowDupes = false;
     const syncTopologyInclusionParams = () => {
       if (topologyInclusionOptions.include_all_topology_pivots) params.set('include_all_topology_pivots', '1');
       else params.delete('include_all_topology_pivots');
@@ -10746,7 +10846,7 @@
       // capacity.  Strict Flow generation now asks for explicit approval to
       // use existing Docker nodes and, if necessary, explicit approval to add
       // Docker nodes to the topology.  Clamping here would bypass both choices.
-      if (allowDupes || cap === null || cap === undefined || !Number.isFinite(+cap)) return false;
+      if (cap === null || cap === undefined || !Number.isFinite(+cap)) return false;
       const dockerCap = Math.max(0, parseInt(String(cap), 10) || 0);
       if (length > dockerCap) {
         const src = sourceLabel ? ` (${sourceLabel})` : '';
@@ -10764,7 +10864,7 @@
       return;
     }
 
-    syncAllowDuplicateParams();
+    params.delete('allow_node_duplicates');
     syncTopologyInclusionParams();
 
     const buildAttackflowPreviewUrl = (p) => {
@@ -11175,28 +11275,10 @@
             continue;
           }
 
-          if (!allowDupes) {
-            const enableDuplicates = await confirmFlowAction(
-              'Retry With Duplicates?',
-              'Generate failed after retries. Enable duplicates and retry?',
-              'Enable Duplicates'
-            );
-            if (enableDuplicates) {
-              allowDupes = true;
-              options.allow_node_duplicates = true;
-              allowNodeDuplicates = true;
-              if (generateNoDuplicatesEl) {
-                generateNoDuplicatesEl.checked = true;
-              }
-              syncAllowDuplicateParams();
-              retriesRemaining = 0;
-              attemptedRetries = 0;
-              retryIndex = 0;
-              sequenceRequestId = newSequenceRequestId();
-              appendLoadingLog('Enabled duplicates and retrying generate');
-              continue;
-            }
-          }
+          // Do not silently relax the user's no-duplicates choice.  A failed
+          // assignment can be caused by an incompatible topology-selected
+          // generator, a missing dependency, or capacity; surface that error
+          // instead so the topology or generator configuration can be fixed.
           throw err;
         }
       }
@@ -11450,6 +11532,20 @@
           } catch (e) {
             const duplicateFlagError = _isDuplicateFlagError(e);
             try { if (stopProgressPoll) stopProgressPoll(); } catch (ex) { }
+            const resolveErrorText = String((e && e.payload && (e.payload.error || e.payload.message)) || (e && e.message) || e || '');
+            if (resolveErrorText.includes('generator not found/enabled')) {
+              try {
+                await ensureGeneratorCatalogsLoaded(true);
+                const removed = await promptToRemoveUnavailableSavedFlowGenerators(scenario);
+                if (removed) {
+                  renderChainEditor();
+                  const diagram = buildMermaid([]);
+                  await renderMermaid(diagram);
+                  setStatus('Removed unavailable generator references. Generate a new sequence.', false);
+                  break;
+                }
+              } catch (_) { }
+            }
             // Handling for strict generation failures (best_effort=false)
             // postJson sets err.payload = data, so we check e.payload.
             if (e && e.payload && Array.isArray(e.payload.generation_failures) && e.payload.generation_failures.length > 0) {
@@ -13745,10 +13841,6 @@ ${out.join('\n')}
     }
   } catch (e) { }
 
-  if (generateNoDuplicatesEl) {
-    generateNoDuplicatesEl.addEventListener('change', () => { updateLengthSpinnerMax(); });
-  }
-
   if (includeAllTopologyPivotsEl) {
     includeAllTopologyPivotsEl.addEventListener('change', () => {
       syncTopologyInclusionOptionsFromUi();
@@ -13768,9 +13860,8 @@ ${out.join('\n')}
 
   if (btnEl) btnEl.addEventListener('click', (e) => {
     try { e.preventDefault(); } catch (_) { }
-    const allowDupes = generateNoDuplicatesEl ? !!generateNoDuplicatesEl.checked : false;
-    allowNodeDuplicates = !!allowDupes;
-    generate(true, { savePreviewResolve: true, allow_node_duplicates: !!allowNodeDuplicates, resolveOnGenerate: true });
+    allowNodeDuplicates = false;
+    generate(true, { savePreviewResolve: true, allow_node_duplicates: false, resolveOnGenerate: true });
   });
 
   // Flow Seed Re-roll button handler
@@ -13815,7 +13906,6 @@ ${out.join('\n')}
       // Prepare params for sync (similar to generate).
       const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
       let length = preset ? 3 : (parseInt((lengthEl && lengthEl.value) || '5', 10) || 5);
-      const allowDupes = generateNoDuplicatesEl ? !!generateNoDuplicatesEl.checked : false; // Default from UI switch if present
       const chain_ids = (Array.isArray(currentChain) && currentChain.length)
         ? currentChain.map(n => String(n.id || ''))
         : null;
@@ -14149,7 +14239,25 @@ ${out.join('\n')}
   }
   try { updateMeta(); } catch (e) { }
   const initialLatestPreviewPromise = refreshLatestPreviewPlanPathForScenario(activeScenario).catch(() => '');
+  try {
+    await ensureGeneratorCatalogsLoaded();
+    await promptToRemoveUnavailableSavedFlowGenerators(activeScenario);
+  } catch (err) {
+    // Do not treat a catalog load failure as proof that saved generators were
+    // removed. Preserve the FlowState and surface the failed catalog request.
+    setStatus('Unable to load generator catalog: ' + String(err && err.message || err), true);
+  }
   const restored = await restoreSavedFlowForScenario(activeScenario);
+  try {
+    // XML-backed FlowState may only be loaded during restore, so make one
+    // post-restore pass before rendering an unavailable saved assignment.
+    if (await promptToRemoveUnavailableSavedFlowGenerators(activeScenario)) {
+      currentChain = [];
+      currentFlagAssignments = [];
+      renderChainEditor();
+      await renderMermaid(buildMermaid([]));
+    }
+  } catch (_) { }
   if (!restored) {
     setStatus('Chain does not exist. Click Generate to start.', false);
     initialLatestPreviewPromise.then(() => {

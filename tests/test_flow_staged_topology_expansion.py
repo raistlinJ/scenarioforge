@@ -83,6 +83,183 @@ def _post_sequence(client, payload):
 
 
 @pytest.mark.filterwarnings('ignore::DeprecationWarning')
+def test_topology_vulnerability_and_node_generator_form_two_steps_without_duplicates(monkeypatch):
+    """The two mandatory topology slots are a valid two-step chain on their own."""
+    app.config['TESTING'] = True
+    client = app.test_client()
+    _login(client)
+
+    scenario = f'zz-flow-topology-only-{uuid.uuid4().hex[:10]}'
+    with tempfile.TemporaryDirectory(prefix='flow-topology-only-') as directory:
+        xml_path = os.path.join(directory, f'{scenario}.xml')
+        # Both selected topology items are additive Docker slots.  There is no
+        # ordinary Docker node available to pad the chain.
+        _write_xml(xml_path, scenario, generic_docker_count=0)
+        app_backend._planner_persist_flow_plan(xml_path=xml_path, scenario=scenario, seed=2468)
+
+        # Model the Bash + git_deploy_key_repo shape: the vulnerability
+        # generator provides the credential required by the explicitly chosen
+        # topology node generator.  This must remain a valid two-node chain
+        # without relaxing the no-duplicates setting.
+        flag_generator = {
+            'id': 'fg-vuln', 'name': 'Vulnerability flag generator',
+            'inputs': [{'name': 'seed', 'type': 'string', 'required': True}],
+            'outputs': [
+                {'name': 'Flag(flag_id)'},
+                {'name': 'Credential(user, password)'},
+            ],
+            'language': 'python',
+        }
+        node_generator = {
+            'id': 'ng-topology', 'name': 'Topology node generator',
+            'inputs': [
+                {'name': 'seed', 'type': 'string', 'required': True},
+                {'name': 'node_name', 'type': 'string', 'required': True},
+                {
+                    'name': 'Credential(user, password)',
+                    'type': 'string',
+                    'required': True,
+                    'flow_supply_when_first': True,
+                },
+            ],
+            'outputs': [{'name': 'Flag(flag_id)'}],
+            'language': 'python',
+        }
+        monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_generator], []))
+        monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_generator], []))
+
+        generated = _post_sequence(
+            client,
+            {
+                'scenario': scenario,
+                # The server must raise this to the two specified topology
+                # items; it must not require duplicate nodes or generators.
+                'length': 1,
+                'preview_plan': xml_path,
+                'chain_expansion_mode': 'strict',
+                'allow_node_duplicates': False,
+            },
+        )
+
+        assert generated.get('ok') is True, generated
+        assert generated.get('requested_length') == 2
+        assert generated.get('length') == 2
+        chain = generated.get('chain') or []
+        assert len({str(node.get('id') or '') for node in chain}) == 2
+        assignments = generated.get('flag_assignments') or []
+        assert {assignment.get('id') for assignment in assignments} == {'fg-vuln', 'ng-topology'}
+        assert assignments[1].get('id') == 'ng-topology'
+        assert 'Credential(user, password)' in (assignments[1].get('inputs') or [])
+
+
+@pytest.mark.filterwarnings('ignore::DeprecationWarning')
+def test_topology_items_can_begin_parallel_branches_without_duplicates(monkeypatch):
+    """A branch-start input must not be mistaken for a duplicate-capacity failure."""
+    app.config['TESTING'] = True
+    client = app.test_client()
+    _login(client)
+
+    scenario = f'zz-flow-topology-parallel-{uuid.uuid4().hex[:10]}'
+    with tempfile.TemporaryDirectory(prefix='flow-topology-parallel-') as directory:
+        xml_path = os.path.join(directory, f'{scenario}.xml')
+        _write_xml(xml_path, scenario, generic_docker_count=0)
+        app_backend._planner_persist_flow_plan(xml_path=xml_path, scenario=scenario, seed=97531)
+
+        flag_generator = {
+            'id': 'fg-vuln', 'name': 'Vulnerability flag generator',
+            'inputs': [{'name': 'seed', 'type': 'string', 'required': True}],
+            'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+        }
+        node_generator = {
+            'id': 'ng-topology', 'name': 'Topology generator with branch input',
+            'inputs': [
+                {'name': 'seed', 'type': 'string', 'required': True},
+                {
+                    'name': 'APIKey(service)', 'type': 'string', 'required': True,
+                    'flow_supply_when_first': True,
+                },
+            ],
+            'outputs': [{'name': 'Flag(flag_id)'}], 'language': 'python',
+        }
+        monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_generator], []))
+        monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_generator], []))
+
+        generated = _post_sequence(
+            client,
+            {
+                'scenario': scenario,
+                'length': 2,
+                'preview_plan': xml_path,
+                'chain_expansion_mode': 'strict',
+                'allow_node_duplicates': False,
+            },
+        )
+
+        assert generated.get('ok') is True, generated
+        assignments = generated.get('flag_assignments') or []
+        branch_assignment = next(item for item in assignments if item.get('id') == 'ng-topology')
+        assert branch_assignment.get('chain_supplied_parallel_start') is True
+        assert branch_assignment.get('chain_supplied_inputs') == ['APIKey(service)']
+
+
+def test_unmarked_required_input_is_not_assigned_as_a_fallback(monkeypatch):
+    """A dependency consumer cannot run until its required fact is available."""
+    node_generator = {
+        'id': 'ng-key-consumer',
+        'name': 'Key consumer',
+        'inputs': [{'name': 'Key(service)', 'type': 'string', 'required': True}],
+        'outputs': [{'name': 'Flag(flag_id)'}],
+        'language': 'python',
+    }
+    monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([], []))
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_generator], []))
+
+    preview = {
+        'hosts': [{'node_id': '1', 'role': 'Docker', 'vulnerabilities': []}],
+    }
+    chain_nodes = [{
+        'id': '1', 'name': 'docker-1', 'type': 'docker', 'role': 'Docker',
+        '_topology_flag_node_generators_configured': True,
+        'flag_node_generator_id': 'ng-key-consumer',
+    }]
+
+    assert app_backend._flow_compute_flag_assignments(
+        preview,
+        chain_nodes,
+        'strict-required-input',
+        disallow_generator_reuse=False,
+    ) == []
+
+
+def test_unreachable_explicit_goal_does_not_fall_back_to_a_non_goal_assignment(monkeypatch):
+    """An explicit Flow goal must be met, rather than silently ignored."""
+    flag_generator = {
+        'id': 'fg-ordinary',
+        'name': 'Ordinary vulnerability generator',
+        'inputs': [],
+        'outputs': [{'name': 'Flag(flag_id)'}],
+        'language': 'python',
+    }
+    monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_generator], []))
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([], []))
+
+    preview = {
+        'hosts': [{'node_id': '1', 'role': 'Docker', 'vulnerabilities': ['example/CVE-2024-0001']}],
+    }
+    chain_nodes = [{
+        'id': '1', 'name': 'docker-1', 'type': 'docker', 'role': 'Docker',
+        'is_vuln': True,
+    }]
+
+    assert app_backend._flow_compute_flag_assignments(
+        preview,
+        chain_nodes,
+        'strict-goal',
+        goal_facts_override={'fields': ['Key(service)']},
+    ) == []
+
+
+@pytest.mark.filterwarnings('ignore::DeprecationWarning')
 def test_flow_requires_confirmation_before_reusing_existing_docker_and_syncs_xml(monkeypatch):
     app.config['TESTING'] = True
     client = app.test_client()

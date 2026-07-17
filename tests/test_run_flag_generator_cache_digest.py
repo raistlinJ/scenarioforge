@@ -151,6 +151,33 @@ def test_source_cache_digest_tracks_generator_source_and_ignores_transient_compo
     assert rfg._source_cache_digest(tmp_path) != initial
 
 
+def test_cached_image_without_no_build_rebuilds_explicitly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / 'docker-compose.yml').write_text('services:\n  generator:\n    image: example\n', encoding='utf-8')
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(rfg, '_image_exists_locally', lambda _tag: True)
+    monkeypatch.setattr(rfg, '_compose_run_supports_no_build', lambda *_args: False)
+    monkeypatch.setattr(rfg, 'run_cmd', lambda cmd, *_args: calls.append(list(cmd)))
+    monkeypatch.setattr(
+        rfg,
+        'run_cmd_capture',
+        lambda *_args: subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),
+    )
+
+    rfg.run_compose(
+        tmp_path,
+        'docker-compose.yml',
+        'generator',
+        tmp_path / 'inputs',
+        tmp_path / 'outputs',
+        {},
+        stable_image_tag='example:cached',
+    )
+
+    assert [command[-2:] for command in calls] == [['build', 'generator'], ['--rm', 'generator']]
+    assert '--no-build' not in calls[1]
+
+
 def test_compose_failure_uses_direct_python_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     source_dir = tmp_path / "flag_generators" / "fallback_gen"
     _write_manifest(source_dir, generator_id="fallback_gen")
