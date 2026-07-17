@@ -1967,10 +1967,13 @@ def reuse_saved_flag_assignments(
                         break
                 if selected_index is not None:
                     break
-            if selected_index is None and index < len(saved_assignments) and index not in used_saved_indexes:
-                selected_index = index
             if selected_index is None:
-                selected_index = next((i for i in range(len(saved_assignments)) if i not in used_saved_indexes), index)
+                # Saved assignments are valid only when they identify the
+                # current node.  Positional/"first unused" substitution can
+                # apply a stale generator to a different node after topology
+                # changes, which is especially unsafe for node generators
+                # with required inputs.  Let the caller recompute instead.
+                return []
             used_saved_indexes.add(selected_index)
             assignment = saved_assignments[selected_index] if selected_index < len(saved_assignments) else {}
             if not isinstance(assignment, dict):
@@ -2010,6 +2013,14 @@ def reuse_saved_flag_assignments(
                 if kind == 'flag-node-generator':
                     if not (is_docker and (not is_vuln)):
                         raise ValueError('flag-node-generator on ineligible node')
+                    # A topology-selected node generator is an exact binding,
+                    # not a hint.  Do not reuse an assignment from an older
+                    # FlowState if it names a different generator.
+                    if bool(node.get('_topology_flag_node_generators_configured')):
+                        selected_generator_id = str(node.get('flag_node_generator_id') or '').strip()
+                        assignment_generator_id = str(assignment.get('id') or '').strip()
+                        if not selected_generator_id or selected_generator_id != assignment_generator_id:
+                            raise ValueError('saved flag-node-generator does not match topology selection')
                 else:
                     # flag-generators require vulnerability nodes only
                     if not is_vuln:

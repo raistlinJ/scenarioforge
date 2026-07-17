@@ -202,6 +202,63 @@ def test_topology_items_can_begin_parallel_branches_without_duplicates(monkeypat
         assert branch_assignment.get('chain_supplied_inputs') == ['APIKey(service)']
 
 
+def test_unmarked_required_input_is_not_assigned_as_a_fallback(monkeypatch):
+    """A dependency consumer cannot run until its required fact is available."""
+    node_generator = {
+        'id': 'ng-key-consumer',
+        'name': 'Key consumer',
+        'inputs': [{'name': 'Key(service)', 'type': 'string', 'required': True}],
+        'outputs': [{'name': 'Flag(flag_id)'}],
+        'language': 'python',
+    }
+    monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([], []))
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_generator], []))
+
+    preview = {
+        'hosts': [{'node_id': '1', 'role': 'Docker', 'vulnerabilities': []}],
+    }
+    chain_nodes = [{
+        'id': '1', 'name': 'docker-1', 'type': 'docker', 'role': 'Docker',
+        '_topology_flag_node_generators_configured': True,
+        'flag_node_generator_id': 'ng-key-consumer',
+    }]
+
+    assert app_backend._flow_compute_flag_assignments(
+        preview,
+        chain_nodes,
+        'strict-required-input',
+        disallow_generator_reuse=False,
+    ) == []
+
+
+def test_unreachable_explicit_goal_does_not_fall_back_to_a_non_goal_assignment(monkeypatch):
+    """An explicit Flow goal must be met, rather than silently ignored."""
+    flag_generator = {
+        'id': 'fg-ordinary',
+        'name': 'Ordinary vulnerability generator',
+        'inputs': [],
+        'outputs': [{'name': 'Flag(flag_id)'}],
+        'language': 'python',
+    }
+    monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([flag_generator], []))
+    monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([], []))
+
+    preview = {
+        'hosts': [{'node_id': '1', 'role': 'Docker', 'vulnerabilities': ['example/CVE-2024-0001']}],
+    }
+    chain_nodes = [{
+        'id': '1', 'name': 'docker-1', 'type': 'docker', 'role': 'Docker',
+        'is_vuln': True,
+    }]
+
+    assert app_backend._flow_compute_flag_assignments(
+        preview,
+        chain_nodes,
+        'strict-goal',
+        goal_facts_override={'fields': ['Key(service)']},
+    ) == []
+
+
 @pytest.mark.filterwarnings('ignore::DeprecationWarning')
 def test_flow_requires_confirmation_before_reusing_existing_docker_and_syncs_xml(monkeypatch):
     app.config['TESTING'] = True

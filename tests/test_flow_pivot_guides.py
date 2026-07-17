@@ -843,6 +843,45 @@ def test_reuse_saved_flag_assignments_matches_reordered_nodes_by_alias():
     assert [assignment.get("node_id") for assignment in reused] == ["20", "16", "18"]
 
 
+def test_reuse_saved_flag_assignments_refuses_stale_node_or_generator_bindings():
+    class Backend:
+        @staticmethod
+        def _flow_enrich_saved_flag_assignments(assignments, chain_nodes, *, scenario_label):
+            return assignments
+
+        @staticmethod
+        def _flow_node_is_docker_role(node):
+            return str((node or {}).get("type") or "").lower() == "docker"
+
+        @staticmethod
+        def _flow_node_is_vuln(_node):
+            return False
+
+    node = {
+        'id': '20', 'name': 'docker-20', 'type': 'docker',
+        '_topology_flag_node_generators_configured': True,
+        'flag_node_generator_id': 'ng-current',
+    }
+
+    # A stale assignment for another node must not be reused by list position.
+    assert flow_prepare_preview_helpers.reuse_saved_flag_assignments(
+        {'flag_assignments': [{'node_id': '16', 'id': 'ng-current', 'type': 'flag-node-generator'}]},
+        [node],
+        scenario_label='stale-assignment-test',
+        scenario_norm='stale-assignment-test',
+        backend=Backend,
+    ) == []
+
+    # Even matching nodes may not reuse a generator that topology no longer selected.
+    assert flow_prepare_preview_helpers.reuse_saved_flag_assignments(
+        {'flag_assignments': [{'node_id': '20', 'id': 'ng-old', 'type': 'flag-node-generator'}]},
+        [node],
+        scenario_label='stale-generator-test',
+        scenario_norm='stale-generator-test',
+        backend=Backend,
+    ) == []
+
+
 def test_pivot_apply_consolidates_multi_source_hints():
     """When a node is a pivot target of multiple source nodes, only a single
     consolidated 'Pivot required' hint should appear - not one per source rule.

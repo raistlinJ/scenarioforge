@@ -16796,13 +16796,10 @@ def _pick_flag_chain_nodes_for_preset(
     if length > len(set(eligible_ids)):
         return []
 
-    # Try to keep the chain in a single connected component, starting from a docker node if possible.
-    start = None
-    if docker_ids:
-        start = next(iter(sorted(docker_ids)))
-    else:
-        start = eligible_ids[0]
-
+    # Prefer a connected component for a serial preset, but nodes in separate
+    # components remain valid parallel challenges.  This is deliberate Flow
+    # topology semantics, not an assignment/dependency fallback.
+    start = next(iter(sorted(docker_ids))) if docker_ids else eligible_ids[0]
     visited: list[str] = []
     try:
         seen: set[str] = set()
@@ -16821,7 +16818,6 @@ def _pick_flag_chain_nodes_for_preset(
 
     comp_eligible = [nid for nid in visited if nid in set(eligible_ids)]
     if len(comp_eligible) < length:
-        # Fallback: allow selecting across components rather than erroring.
         comp_eligible = list(dict.fromkeys(eligible_ids))
 
     used: set[str] = set()
@@ -19766,11 +19762,11 @@ def _flow_compute_flag_assignments(
         if (not candidates) and (not disallow_generator_reuse):
             candidates = [g for g in pool if _requirements_available_at_parallel_start(g, state)]
         if not candidates:
-            if disallow_generator_reuse:
-                return []
-            # Best-effort fallback: allow assignment even if requires are not yet met.
-            # Validation will surface missing dependencies, but we avoid empty assignments.
-            candidates = list(pool)
+            # Do not assign a generator whose required inputs cannot be met.
+            # A flow_supply_when_first input is already accounted for by
+            # _requirements_available_at_parallel_start(); every other input
+            # must come from synthesized context or an earlier assignment.
+            return []
         return candidates
 
     def _score_order(cands: list[dict[str, Any]], state: set[str]) -> list[dict[str, Any]]:
@@ -19892,6 +19888,11 @@ def _flow_compute_flag_assignments(
         except Exception:
             chosen_gens = None
 
+        # A requested goal is a contract.  Do not fall through to the greedy
+        # solver when it cannot be achieved by this chain.
+        if chosen_gens is None:
+            return []
+
     for i, cid in enumerate(chain_ids):
         pool = pool_by_pos[i] if i < len(pool_by_pos) else []
         if not pool:
@@ -19908,11 +19909,7 @@ def _flow_compute_flag_assignments(
             if (not candidates) and (not disallow_generator_reuse):
                 candidates = [g for g in pool if _requirements_available_at_parallel_start(g, state_known)]
             if not candidates:
-                if disallow_generator_reuse:
-                    return []
-                # Best-effort fallback: allow assignment even if requires are not yet met.
-                # Validation will surface missing dependencies, but we avoid empty assignments.
-                candidates = list(pool)
+                return []
 
             remaining_goal = set(goal_facts) - set(state_known)
             if remaining_goal:
