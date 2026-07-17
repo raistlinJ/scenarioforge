@@ -211,10 +211,13 @@ def register(app, *, backend_module: Any) -> None:
         nodes, _links, adj = backend._build_topology_graph_from_preview_plan(preview)
         stats = backend._flow_compose_docker_stats(nodes)
         required_vulnerability_count = 0
+        required_node_generator_count = 0
         if not preset_steps:
             required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
-            if length < required_vulnerability_count:
-                length = required_vulnerability_count
+            required_node_generator_count = max(0, int(stats.get('topology_flag_node_generator_total') or 0))
+            required_topology_count = required_vulnerability_count + required_node_generator_count
+            if length < required_topology_count:
+                length = required_topology_count
                 requested_length = length
 
         try:
@@ -447,6 +450,7 @@ def register(app, *, backend_module: Any) -> None:
         topology_inclusion_info: dict[str, Any] = {
             'requested': {
                 'required_vulnerability_nodes': True,
+                'required_flag_node_generator_nodes': True,
                 'include_all_topology_pivots': bool(include_all_topology_pivots),
             },
             'added_node_ids': [],
@@ -601,53 +605,21 @@ def register(app, *, backend_module: Any) -> None:
                             pass
 
         if not flag_assignments and chain_nodes:
-            try:
-                gens_enabled, _ = backend._flag_generators_from_enabled_sources()
-            except Exception:
-                gens_enabled = []
-            try:
-                node_gens_enabled, _ = backend._flag_node_generators_from_enabled_sources()
-            except Exception:
-                node_gens_enabled = []
-            try:
-                gens_enabled = [g for g in (gens_enabled or []) if isinstance(g, dict) and str(g.get('id') or '').strip()]
-                node_gens_enabled = [g for g in (node_gens_enabled or []) if isinstance(g, dict) and str(g.get('id') or '').strip()]
-            except Exception:
-                gens_enabled = []
-                node_gens_enabled = []
-
-            fallback: list[dict[str, Any]] = []
-            if gens_enabled or node_gens_enabled:
-                for node in (chain_nodes or []):
-                    if not isinstance(node, dict):
-                        continue
-                    nid = str(node.get('id') or '').strip()
-                    if not nid:
-                        continue
-                    is_vuln = backend._flow_node_is_vuln(node)
-                    is_docker = backend._flow_node_is_docker_role(node)
-                    if is_vuln and gens_enabled:
-                        gen = gens_enabled[0]
-                        fallback.append({
-                            'node_id': nid,
-                            'id': str(gen.get('id') or ''),
-                            'name': str(gen.get('name') or ''),
-                            'type': 'flag-generator',
-                            'flag_generator': str(gen.get('_source_name') or gen.get('source') or '').strip() or 'unknown',
-                            'generator_catalog': 'flag_generators',
-                        })
-                    elif (not is_vuln) and is_docker and node_gens_enabled:
-                        gen = node_gens_enabled[0]
-                        fallback.append({
-                            'node_id': nid,
-                            'id': str(gen.get('id') or ''),
-                            'name': str(gen.get('name') or ''),
-                            'type': 'flag-node-generator',
-                            'flag_generator': str(gen.get('_source_name') or gen.get('source') or '').strip() or 'unknown',
-                            'generator_catalog': 'flag_node_generators',
-                        })
-            if fallback and len(fallback) == len(chain_nodes):
-                flag_assignments = fallback
+            requested = sorted({
+                str(node.get('flag_node_generator_id') or '').strip()
+                for node in chain_nodes
+                if isinstance(node, dict) and str(node.get('flag_node_generator_id') or '').strip()
+            })
+            detail = (
+                f" Topology-selected flag-node-generator(s): {', '.join(requested)}."
+                if requested else ''
+            )
+            return jsonify({
+                'ok': False,
+                'error': 'Unable to generate compatible flag assignments.' + detail,
+                'stats': stats,
+                'preview_plan_path': preview_plan_path,
+            }), 422
 
         try:
             flag_assignments = backend._flow_apply_pivot_context_to_assignments(

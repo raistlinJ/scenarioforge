@@ -1855,10 +1855,11 @@ def _current_plan_summary_for_execute(
     hitl_preview_reservations: dict[str, Any] | None,
 ) -> dict[str, Any]:
     full_prev = build_full_preview(
-        role_counts=orchestrated_plan.get('role_counts') or {},
+        role_counts=orchestrated_plan.get('role_counts_raw') or orchestrated_plan.get('role_counts') or {},
         routers_planned=int(orchestrated_plan.get('routers_planned') or 0),
         services_plan=orchestrated_plan.get('service_plan') or {},
         vulnerabilities_plan=orchestrated_plan.get('vulnerability_plan'),
+        flag_node_generators_plan=orchestrated_plan.get('flag_node_generator_plan') or {},
         r2r_policy=r2r_policy,
         r2s_policy=r2s_policy,
         routing_items=routing_items,
@@ -5663,10 +5664,11 @@ def main():
     if preview_full is None:
         try:
             preview_full = build_full_preview(
-                role_counts=role_counts,
+                role_counts=orchestrated_plan.get('role_counts_raw') or role_counts,
                 routers_planned=prelim_router_count,
                 services_plan=service_plan,
                 vulnerabilities_plan=vulnerabilities_plan,
+                flag_node_generators_plan=orchestrated_plan.get('flag_node_generator_plan') or {},
                 r2r_policy=r2r_policy_plan,
                 r2s_policy=r2s_policy_plan,
                 routing_items=routing_items,
@@ -5767,10 +5769,11 @@ def main():
                         except Exception:
                             pass
                         full_prev = build_full_preview(
-                            role_counts=role_counts,
+                            role_counts=orchestrated_plan.get('role_counts_raw') or role_counts,
                             routers_planned=prelim_router_count,
                             services_plan=service_plan,
                             vulnerabilities_plan=vulnerabilities_plan,
+                            flag_node_generators_plan=orchestrated_plan.get('flag_node_generator_plan') or {},
                             r2r_policy=r2r_policy_plan,
                             r2s_policy=r2s_policy_plan,
                             routing_items=routing_items,

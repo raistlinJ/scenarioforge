@@ -20,6 +20,7 @@ from ..parsers.node_info import parse_node_info
 from ..parsers.routing import parse_routing_info
 from ..parsers.services import parse_services
 from ..parsers.vulnerabilities import parse_vulnerabilities_info
+from ..parsers.flag_node_generators import parse_flag_node_generators_info
 from ..parsers.segmentation import parse_segmentation_info
 from ..parsers.pivoting import parse_pivoting_info
 
@@ -75,7 +76,32 @@ def compute_full_plan(
         kind = selected
         vuln_items.append(VulnerabilityItem(name=name, density=vuln_density, abs_count=abs_c, kind=kind, factor=factor_val, metric=vm))
     vulnerability_plan, vuln_breakdown = compute_vulnerability_plan(density_base, vuln_density, vuln_items)
-    required_docker_hosts = sum(max(0, int(count or 0)) for count in (vulnerability_plan or {}).values())
+    # Flag-node-generators have exactly the same topology cardinality semantics
+    # as vulnerabilities, but their Docker hosts are separate/additive slots.
+    nodegen_density, nodegen_items_xml = parse_flag_node_generators_info(xml_path, scenario)
+    nodegen_items: List[VulnerabilityItem] = []
+    for it in (nodegen_items_xml or []):
+        selected = str(it.get('selected') or '').strip() or 'Random'
+        if selected == 'Specific':
+            name = str(it.get('g_id') or it.get('g_name') or '').strip()
+            if not name:
+                continue
+        elif selected == 'Random':
+            name = 'Random'
+        else:
+            continue
+        metric = str(it.get('v_metric') or '').strip() or ('Count' if selected == 'Specific' else 'Weight')
+        try:
+            count = max(0, int(it.get('v_count') or 0)) if metric.lower() == 'count' else 0
+        except Exception:
+            count = 0
+        nodegen_items.append(VulnerabilityItem(name=name, density=nodegen_density, abs_count=count, kind=selected,
+                                                factor=float(it.get('factor') or 0.0), metric=metric))
+    flag_node_generator_plan, nodegen_breakdown = compute_vulnerability_plan(density_base, nodegen_density, nodegen_items)
+    required_docker_hosts = (
+        sum(max(0, int(count or 0)) for count in (vulnerability_plan or {}).values())
+        + sum(max(0, int(count or 0)) for count in (flag_node_generator_plan or {}).values())
+    )
     role_counts, docker_capacity_repair = ensure_role_counts_docker_capacity(role_counts, required_docker_hosts)
     if docker_capacity_repair.get('added_docker_hosts'):
         try:
@@ -179,6 +205,7 @@ def compute_full_plan(
         'routing_items': routing_items,  # raw objects for downstream preview builder
         'service_plan': service_plan,
         'vulnerability_plan': vulnerability_plan,
+        'flag_node_generator_plan': flag_node_generator_plan,
         'docker_capacity_repair': docker_capacity_repair,
         'vulnerability_flag_type': vuln_flag_type,
         'segmentation_plan': segmentation_plan,
@@ -186,6 +213,7 @@ def compute_full_plan(
         'traffic_plan': traffic_plan_out,
         # raw items for build path reuse (not all JSON-serializable; caller should sanitize if emitting)
         'vulnerability_items_raw': vuln_items_xml,
+        'flag_node_generator_items_raw': nodegen_items_xml,
         'segmentation_items_raw': seg_items,
         'pivoting_items_raw': pivot_items,
     }
@@ -201,6 +229,7 @@ def compute_full_plan(
             'router': router_breakdown,
             'services': service_breakdown,
             'vulnerabilities': vuln_breakdown,
+            'flag_node_generators': nodegen_breakdown,
             'segmentation': seg_breakdown,
             'pivoting': pivot_breakdown,
             'traffic': traffic_breakdown,

@@ -115,7 +115,7 @@
               <div class="col-sm-6 col-md-2">
                 <label class="form-label" for="flowLength">Number of Challenges</label>
                 <input id="flowLength" class="form-control" type="number" min="1" max="50" value="5"
-                  title="Must be at least the number of vulnerability nodes; limited to non-vulnerability Docker nodes when duplicates is off.">
+                  title="Must be at least the number of topology vulnerability and flag-node-generator nodes.">
               </div>
               <div class="col-sm-6 col-md-3">
                 <label class="form-label">Preset</label>
@@ -10084,7 +10084,9 @@
   function dockerNodeCapFromStats(stats) {
     if (!stats || typeof stats !== 'object') return null;
     const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : null;
-    const dockerOther = Number.isFinite(+stats.docker_nonvuln_total) ? (+stats.docker_nonvuln_total) : null;
+    const dockerOther = Number.isFinite(+stats.topology_flag_node_generator_total)
+      ? (+stats.topology_flag_node_generator_total)
+      : (Number.isFinite(+stats.flag_node_generator_eligible_total) ? (+stats.flag_node_generator_eligible_total) : null);
     if (vuln === null && dockerOther === null) return null;
     return Math.max(0, (vuln || 0) + (dockerOther || 0));
   }
@@ -10092,7 +10094,10 @@
   function vulnerabilityNodeMinimumFromStats(stats) {
     if (!stats || typeof stats !== 'object') return 1;
     const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : 0;
-    return Math.max(1, vuln);
+    const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
+      ? (+stats.topology_flag_node_generator_total)
+      : (Number.isFinite(+stats.flag_node_generator_eligible_total) ? (+stats.flag_node_generator_eligible_total) : 0);
+    return Math.max(1, vuln + nodeGenerators);
   }
 
   function updateLengthSpinnerMax() {
@@ -10105,14 +10110,14 @@
       const cap = dockerNodeCapFromStats(lastStats);
       if (cap !== null && cap > 0) {
         lengthEl.max = String(Math.max(minimum, cap));
-        lengthEl.title = `Minimum ${minimum} for vulnerability nodes; limited to ${cap} Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
+        lengthEl.title = `Minimum ${minimum} for topology challenge nodes; limited to ${cap} Docker node${cap !== 1 ? 's' : ''} (duplicates off).`;
         if (parseInt(lengthEl.value, 10) > cap) lengthEl.value = String(cap);
         if (parseInt(lengthEl.value, 10) < minimum) lengthEl.value = String(minimum);
         return;
       }
     }
     lengthEl.max = '50';
-    lengthEl.title = `Minimum ${minimum} for vulnerability nodes.`;
+    lengthEl.title = `Minimum ${minimum} for topology challenge nodes.`;
   }
 
   function mermaidSafeLabel(value) {

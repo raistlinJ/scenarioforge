@@ -16498,7 +16498,7 @@ def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]]
         # - flag-node-generators require non-vulnerability docker-role nodes (enforced elsewhere)
         is_docker = ('docker' in t) or (str(n.get('type') or '').strip().upper() == 'DOCKER')
         is_vuln = _flow_node_is_vuln(n)
-        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln)):
+        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
 
     # De-dupe eligible ids to avoid accidental repeats.
@@ -16654,7 +16654,7 @@ def _pick_flag_chain_nodes_allow_duplicates(
         t = (str(n.get('type') or '').strip().lower())
         is_docker = ('docker' in t) or (str(n.get('type') or '').strip().upper() == 'DOCKER')
         is_vuln = _flow_node_is_vuln(n)
-        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln)):
+        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
 
     # De-dupe eligible ids to avoid accidental repeats.
@@ -16728,6 +16728,7 @@ def _pick_flow_nonvulnerability_docker_nodes(
         if isinstance(node, dict)
         and _flow_node_is_docker_role(node)
         and not _flow_node_is_vuln(node)
+        and _flow_node_allows_flag_node_generator(node)
     ]
     if not eligible:
         return []
@@ -16827,6 +16828,19 @@ def _pick_flag_chain_nodes_for_preset(
     return [id_to_node[nid] for nid in chosen if nid in id_to_node]
 
 
+def _flow_node_allows_flag_node_generator(node: Any) -> bool:
+    """Compatibility-aware eligibility for non-vulnerability Docker nodes.
+
+    Old persisted previews had no topology generator selection.  Retain their
+    historical generic behavior; previews with the new marker are strict.
+    """
+    if not isinstance(node, dict):
+        return False
+    if not bool(node.get('_topology_flag_node_generators_configured')):
+        return True
+    return bool(str(node.get('flag_node_generator_id') or '').strip())
+
+
 def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     """Return counts for debugging Flow eligibility.
 
@@ -16842,6 +16856,8 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     """
     docker_total = 0
     docker_nonvuln_total = 0
+    topology_node_generator_total = 0
+    topology_generator_mode = any(bool(n.get('_topology_flag_node_generators_configured')) for n in (nodes or []) if isinstance(n, dict))
     vuln_total = 0
     compose_backed_total = 0
     eligible_total = 0
@@ -16862,7 +16878,9 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
             vuln_total += 1
         if is_docker and (not is_vuln):
             docker_nonvuln_total += 1
-        if is_vuln or (is_docker and (not is_vuln)):
+            if str(n.get('flag_node_generator_id') or '').strip():
+                topology_node_generator_total += 1
+        if is_vuln or (is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_total += 1
     return {
         'docker_total': docker_total,
@@ -16871,7 +16889,8 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
         'compose_backed_total': compose_backed_total,
         'eligible_total': eligible_total,
         'flag_generator_eligible_total': vuln_total,
-        'flag_node_generator_eligible_total': docker_nonvuln_total,
+        'flag_node_generator_eligible_total': topology_node_generator_total if topology_generator_mode else docker_nonvuln_total,
+        'topology_flag_node_generator_total': topology_node_generator_total,
     }
 
 
@@ -18857,6 +18876,8 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
         _add_node(sid, str(s.get('name') or f'switch-{sid}'), 'switch')
 
     vuln_ids: set[str] = set()
+    topology_nodegen_mode = isinstance(preview.get('flag_node_generators_by_node'), dict)
+    nodegen_by_preview_id = preview.get('flag_node_generators_by_node') if topology_nodegen_mode else {}
     vuln_names_by_preview_id: dict[str, list[str]] = {}
     try:
         vb = preview.get('vulnerabilities_by_node') if isinstance(preview, dict) else None
@@ -18915,6 +18936,11 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             except Exception:
                 host_ip4 = ''
         extra: dict[str, Any] = {}
+        if topology_nodegen_mode:
+            extra['_topology_flag_node_generators_configured'] = True
+            selected_generator = str((nodegen_by_preview_id or {}).get(hid) or '').strip()
+            if selected_generator:
+                extra['flag_node_generator_id'] = selected_generator
         for key in (
             'PivotProduces',
             'PivotRequires',
@@ -18932,12 +18958,21 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             'segmentation_sources',
             'segmentation_ports',
             'segmentation_protocols',
+            'flag_node_generator_id',
+            'flag_node_generator_name',
         ):
             try:
                 if h.get(key) not in (None, '', []):
                     extra[key] = h.get(key)
             except Exception:
                 continue
+        try:
+            host_metadata = h.get('metadata') if isinstance(h.get('metadata'), dict) else {}
+            for key in ('flag_node_generator_id', 'flag_node_generator_name'):
+                if host_metadata.get(key) not in (None, '', []):
+                    extra[key] = host_metadata.get(key)
+        except Exception:
+            pass
         _add_node(
             hid,
             str(h.get('name') or f'host-{hid}'),
@@ -19650,7 +19685,13 @@ def _flow_compute_flag_assignments(
         def _eligible_for_node(g: dict[str, Any]) -> bool:
             k = str(g.get('_flow_kind') or '').strip() or 'flag-generator'
             if k == 'flag-node-generator':
-                return bool(is_docker_node and (not is_vuln_node))
+                requested_id = str(node.get('flag_node_generator_id') or '').strip()
+                if not bool(node.get('_topology_flag_node_generators_configured')):
+                    return bool(is_docker_node and (not is_vuln_node))
+                return bool(
+                    is_docker_node and (not is_vuln_node) and requested_id
+                    and str(g.get('id') or '').strip() == requested_id
+                )
             return bool(is_vuln_node)
         pool_by_pos.append([g for g in eligible_gens if _eligible_for_node(g)])
 
@@ -21182,18 +21223,21 @@ def _flow_expand_chain_for_topology_requirements(
     so this helper only guarantees that requested topology nodes are present once.
     """
     requested_vulns = bool(include_all_topology_vulns)
+    requested_node_generators = True
     requested_pivots = bool(include_all_topology_pivots)
     info: dict[str, Any] = {
         'requested': {
             'required_vulnerability_nodes': requested_vulns,
+            'required_flag_node_generator_nodes': requested_node_generators,
             'include_all_topology_pivots': requested_pivots,
         },
         'added_node_ids': [],
         'added_vuln_node_ids': [],
+        'added_flag_node_generator_node_ids': [],
         'added_pivot_node_ids': [],
         'effective_length': len(chain_nodes or []),
     }
-    if not requested_vulns and not requested_pivots:
+    if not requested_vulns and not requested_pivots and not requested_node_generators:
         return list(chain_nodes or []), info
 
     all_nodes = [node for node in (nodes or []) if isinstance(node, dict)]
@@ -21239,6 +21283,7 @@ def _flow_expand_chain_for_topology_requirements(
     }
     added_ids: list[str] = []
     added_vuln_ids: list[str] = []
+    added_nodegen_ids: list[str] = []
     added_pivot_ids: list[str] = []
 
     def _resolve_id(raw: Any) -> str:
@@ -21267,6 +21312,12 @@ def _flow_expand_chain_for_topology_requirements(
             node_id = _flow_pivot_node_id(node)
             if node_id and _flow_node_is_vuln(node):
                 _append_node(node_id, added_vuln_ids)
+
+    if requested_node_generators:
+        for node in all_nodes:
+            node_id = _flow_pivot_node_id(node)
+            if node_id and str(node.get('flag_node_generator_id') or '').strip():
+                _append_node(node_id, added_nodegen_ids)
 
     if requested_pivots:
         try:
@@ -21302,6 +21353,7 @@ def _flow_expand_chain_for_topology_requirements(
 
     info['added_node_ids'] = added_ids
     info['added_vuln_node_ids'] = added_vuln_ids
+    info['added_flag_node_generator_node_ids'] = added_nodegen_ids
     info['added_pivot_node_ids'] = added_pivot_ids
     info['effective_length'] = len(expanded)
     return expanded, info
@@ -29500,7 +29552,7 @@ def _default_scenario_payload(name: str) -> Dict[str, Any]:
     # Single default scenario with empty sections mirroring PyQt structure
     sections = [
         "Node Information", "Routing", "Services", "Traffic",
-        "Vulnerabilities", "Segmentation", "HITL"
+        "Vulnerabilities", "Flag Node Generators", "Segmentation", "HITL"
     ]
     display_name = str(name or '').strip() or "Scenario"
     sections_dict: Dict[str, Any] = {}
@@ -29530,6 +29582,7 @@ _RANDOM_OPTIONS_BY_SECTION: Dict[str, List[str]] = {
     'Services': ['SSH', 'HTTP', 'DHCPClient'],
     'Traffic': ['TCP', 'UDP'],
     'Vulnerabilities': ['Specific'],
+    'Flag Node Generators': ['Specific'],
     'Segmentation': ['Firewall', 'NAT'],
 }
 _TRAFFIC_CONTENT_TYPE_OPTIONS: List[str] = ['text', 'photo', 'audio', 'video', 'gibberish']
@@ -30118,7 +30171,12 @@ def _concretize_preview_placeholders(scenario_payload: Any, *, seed: Any = None)
     scenario_name = str(scenario.get('name') or '').strip() or 'Scenario'
 
     vuln_catalog_items = _load_backend_vuln_catalog_items()
-    target_sections = ['Node Information', 'Routing', 'Services', 'Traffic', 'Vulnerabilities', 'Segmentation']
+    try:
+        nodegen_catalog_items, _nodegen_catalog_errors = _flag_node_generators_from_enabled_sources()
+        nodegen_catalog_items = [item for item in (nodegen_catalog_items or []) if isinstance(item, dict) and str(item.get('id') or '').strip()]
+    except Exception:
+        nodegen_catalog_items = []
+    target_sections = ['Node Information', 'Routing', 'Services', 'Traffic', 'Vulnerabilities', 'Flag Node Generators', 'Segmentation']
     for section_name in target_sections:
         sec = sections.get(section_name) if isinstance(sections.get(section_name), dict) else None
         if not isinstance(sec, dict):
@@ -30152,6 +30210,41 @@ def _concretize_preview_placeholders(scenario_payload: Any, *, seed: Any = None)
                             item['v_metric'] = 'Count'
                         if item.get('v_count') in (None, '', 0):
                             item['v_count'] = 1
+                next_items.append(item)
+            sec['items'] = next_items
+            sections[section_name] = sec
+            continue
+
+        if section_name == 'Flag Node Generators':
+            for index, raw_item in enumerate(items):
+                if not isinstance(raw_item, dict):
+                    continue
+                item = copy.deepcopy(raw_item)
+                selected = str(item.get('selected') or '').strip().lower()
+                if (not selected or selected == 'random'):
+                    chosen = _deterministic_pick(
+                        nodegen_catalog_items,
+                        f'{seed_int}|{scenario_name}|{section_name}|{index}|g_id|save-xml',
+                    )
+                    generator_id = str((chosen or {}).get('id') or '').strip()
+                    generator_name = str((chosen or {}).get('name') or '').strip()
+                    if not generator_id:
+                        raise ValueError('Flag Node Generators contains Random, but no enabled flag-node-generators are available.')
+                    item['selected'] = 'Specific'
+                    item['g_id'] = generator_id
+                    item['g_name'] = generator_name or generator_id
+                else:
+                    requested_id = str(item.get('g_id') or '').strip()
+                    match = next((candidate for candidate in nodegen_catalog_items if str(candidate.get('id') or '').strip() == requested_id), None)
+                    if not requested_id or not isinstance(match, dict):
+                        raise ValueError(f"Topology-selected flag-node-generator is not enabled: {requested_id or item.get('g_name') or '(missing id)'}")
+                    item['selected'] = 'Specific'
+                    item['g_id'] = requested_id
+                    item['g_name'] = str(match.get('name') or requested_id).strip() or requested_id
+                if str(item.get('v_metric') or '').strip() in {'', 'Weight'}:
+                    item['v_metric'] = 'Count'
+                if item.get('v_count') in (None, '', 0):
+                    item['v_count'] = 1
                 next_items.append(item)
             sec['items'] = next_items
             sections[section_name] = sec
@@ -30625,6 +30718,7 @@ def _prepare_payload_for_index(payload: Optional[Dict[str, Any]], *, user: Optio
         'Services': {'density': 0.5},
         'Traffic': {'density': 0.5},
         'Vulnerabilities': {'density': 0.5, 'flag_type': 'text'},
+        'Flag Node Generators': {'density': 0.5},
         'Segmentation': {'density': 0.5},
         'HITL': {},
     }
@@ -34995,6 +35089,10 @@ def _parse_scenario_editor(se):
                 vm = item.get("v_metric")
                 if vm:
                     d["v_metric"] = vm
+            if name == "Flag Node Generators":
+                if (d.get('selected') or '').strip() == 'Specific':
+                    d['g_id'] = item.get('g_id', '')
+                    d['g_name'] = item.get('g_name', '')
             # Generic metric/count for all sections (including Vulnerabilities)
             try:
                 vm_generic = item.get("v_metric")
@@ -35361,7 +35459,7 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
 
         order = [
             "Node Information", "Routing", "Services", "Traffic",
-            "Vulnerabilities", "Segmentation", "Notes"
+            "Vulnerabilities", "Flag Node Generators", "Segmentation", "Notes"
         ]
         combined_host_pool: int | None = None
         scenario_host_additive = 0
@@ -35381,8 +35479,8 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
             items_list = sec.get("items", []) or []
             if name == "Vulnerabilities":
                 sec_el.set("flag_type", str(sec.get("flag_type") or "text"))
-            weight_rows = [it for it in items_list if (it.get('v_metric') or (it.get('selected')=='Specific' and name=='Vulnerabilities') or 'Weight') == 'Weight']
-            count_rows = [it for it in items_list if (it.get('v_metric') == 'Count') or (name == 'Vulnerabilities' and it.get('selected') == 'Specific')]
+            weight_rows = [it for it in items_list if (it.get('v_metric') or (it.get('selected')=='Specific' and name in {'Vulnerabilities', 'Flag Node Generators'}) or 'Weight') == 'Weight']
+            count_rows = [it for it in items_list if (it.get('v_metric') == 'Count') or (name in {'Vulnerabilities', 'Flag Node Generators'} and it.get('selected') == 'Specific')]
             weight_sum = sum(float(it.get('factor', 0) or 0) for it in weight_rows) if weight_rows else 0.0
 
             if name == "Node Information":
@@ -35441,7 +35539,7 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                         sec_el.set("density", f"{float(dens):.3f}")
                     except Exception:
                         sec_el.set("density", str(dens))
-                if name in ("Routing", "Vulnerabilities"):
+                if name in ("Routing", "Vulnerabilities", "Flag Node Generators"):
                     base_pool = combined_host_pool if isinstance(combined_host_pool, int) else None
                     explicit = sum(int(it.get('v_count') or 0) for it in count_rows)
                     derived = 0
@@ -35455,7 +35553,7 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                                 derived = int(round(dens_val))
                             elif dens_val > 0:
                                 derived = int(round(base_pool * dens_val))
-                        else:  # Vulnerabilities
+                        else:  # Vulnerabilities / Flag Node Generators
                             if dens_val > 0:
                                 dens_clip = min(1.0, dens_val)
                                 derived = int(round(base_pool * dens_clip))
@@ -35565,6 +35663,13 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                             it.set('v_name', str(vn))
                         if vp:
                             it.set('v_path', str(vp))
+                if name == 'Flag Node Generators' and sel_for_xml == 'Specific':
+                    generator_id = str(item.get('g_id') or '').strip()
+                    generator_name = str(item.get('g_name') or '').strip()
+                    if generator_id:
+                        it.set('g_id', generator_id)
+                    if generator_name:
+                        it.set('g_name', generator_name)
                 if name == 'Segmentation':
                     if _coerce_bool(item.get('pivot_enabled')):
                         it.set('pivot_enabled', 'true')
@@ -35579,7 +35684,7 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
                 vm_any = item.get('v_metric')
                 if vm_any:
                     it.set('v_metric', str(vm_any))
-                if (item.get('v_metric') == 'Count') or (name == 'Vulnerabilities' and str(item.get('selected', '')) == 'Specific'):
+                if (item.get('v_metric') == 'Count') or (name in {'Vulnerabilities', 'Flag Node Generators'} and str(item.get('selected', '')) == 'Specific'):
                     vc_any = item.get('v_count')
                     try:
                         if vc_any is not None:
@@ -37340,15 +37445,17 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
     try:
         role_counts_raw = plan.get('role_counts_raw') if isinstance(plan.get('role_counts_raw'), dict) else None
         if isinstance(role_counts_raw, dict):
-            explicit_docker_hosts = int(role_counts_raw.get('Docker') or 0)
-            if explicit_docker_hosts <= 0 and plan.get('vulnerability_plan'):
-                role_counts = role_counts_raw
+            # ``build_full_preview`` owns additive Docker-slot materialization.
+            # Passing the already-repaired plan count would add vulnerability
+            # and topology node-generator slots a second time.
+            role_counts = role_counts_raw
     except Exception:
         role_counts = plan['role_counts']
     prelim_router_count = plan['routers_planned']
     routing_items = plan.get('routing_items') or []
     service_plan = plan.get('service_plan') or {}
     vplan = plan.get('vulnerability_plan') or {}
+    nodegen_plan = plan.get('flag_node_generator_plan') or {}
     seg_items_serial = plan.get('breakdowns', {}).get('segmentation', {}).get('raw_items_serialized') or []
     seg_density = plan.get('breakdowns', {}).get('segmentation', {}).get('density')
     r2r_policy_plan, r2s_policy_plan = _derive_routing_policies(routing_items)
@@ -37364,6 +37471,7 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
         routers_planned=prelim_router_count,
         services_plan=service_plan,
         vulnerabilities_plan=vplan,
+        flag_node_generators_plan=nodegen_plan,
         r2r_policy=r2r_policy_plan,
         r2s_policy=r2s_policy_plan,
         routing_items=routing_items,

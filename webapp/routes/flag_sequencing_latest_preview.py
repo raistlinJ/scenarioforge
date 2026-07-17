@@ -160,6 +160,8 @@ def register(app, *, backend_module: Any) -> None:
             try:
                 preview = payload.get('full_preview') if isinstance(payload, dict) else None
                 if isinstance(preview, dict):
+                    topology_nodegen_map = preview.get('flag_node_generators_by_node')
+                    topology_nodegen_mode = isinstance(topology_nodegen_map, dict)
                     role_counts = preview.get('role_counts') if isinstance(preview.get('role_counts'), dict) else None
                     if isinstance(role_counts, dict):
                         try:
@@ -175,7 +177,7 @@ def register(app, *, backend_module: Any) -> None:
                             vulns = host.get('vulnerabilities') if isinstance(host.get('vulnerabilities'), list) else []
                             if role == 'docker':
                                 docker_count += 1
-                                if not vulns:
+                                if not vulns and (not topology_nodegen_mode or str((topology_nodegen_map or {}).get(str(host.get('node_id') or '')) or '').strip()):
                                     docker_nonvuln_count += 1
                             if vulns:
                                 vuln_count += 1

@@ -26,6 +26,8 @@ def test_vuln_catalog_returns_pack_backed_items(monkeypatch):
                 'rel_dir': 'items/web/auth',
                 'validated_ok': True,
                 'validated_at': '2026-03-19 10:00:00',
+                'cached': True,
+                'cache_checked_at': '2026-03-19 11:00:00',
             },
             {
                 'id': 12,
@@ -33,6 +35,7 @@ def test_vuln_catalog_returns_pack_backed_items(monkeypatch):
                 'rel_dir': 'items/web/blocked',
                 'validated_ok': False,
                 'validated_at': '2026-03-18 11:00:00',
+                'cached': False,
             },
             {
                 'id': 11,
@@ -70,6 +73,8 @@ def test_vuln_catalog_returns_pack_backed_items(monkeypatch):
             'validated_ok': True,
             'validated_at': '2026-03-19 10:00:00',
             'eligible_for_selection': True,
+            'cached': True,
+            'cache_checked_at': '2026-03-19 11:00:00',
         },
         {
             'Name': 'web/blocked',
@@ -86,6 +91,8 @@ def test_vuln_catalog_returns_pack_backed_items(monkeypatch):
             'validated_ok': False,
             'validated_at': '2026-03-18 11:00:00',
             'eligible_for_selection': False,
+            'cached': False,
+            'cache_checked_at': None,
         },
     ]
 

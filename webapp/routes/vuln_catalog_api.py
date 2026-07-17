@@ -72,6 +72,11 @@ def register(
                             'validated_ok': bool(item.get('validated_ok')) if item.get('validated_ok') is not None else None,
                             'validated_at': str(item.get('validated_at') or '').strip() or None,
                             'eligible_for_selection': bool(item.get('validated_ok') is True and item.get('validated_incomplete') is not True),
+                            # This is the result of the catalog's most recent
+                            # CORE image-cache check.  The Topology picker uses
+                            # it for its cached-images-only filter.
+                            'cached': item.get('cached') is True,
+                            'cache_checked_at': str(item.get('cache_checked_at') or '').strip() or None,
                         }
                     )
             else:
