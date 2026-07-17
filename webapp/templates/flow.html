@@ -128,6 +128,12 @@
                   <div>
                     <button id="flowGenerateBtn" class="btn btn-primary text-nowrap" type="button">Generate</button>
                   </div>
+                  <div>
+                    <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="collapse"
+                      data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions">
+                      Options
+                    </button>
+                  </div>
                   <div class="dropdown">
                     <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button"
                       id="flowDownloadDropdown" data-bs-toggle="dropdown" aria-expanded="false" disabled
@@ -143,12 +149,6 @@
                       <li><a class="dropdown-item" href="#" id="flowDownloadParticipantGuide">Participant Steps Guide (html)</a></li>
                       <li><a class="dropdown-item" href="#" id="flowDownloadFacilitatorGuide">Facilitator Guide (html)</a></li>
                     </ul>
-                  </div>
-                  <div>
-                    <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="collapse"
-                      data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions">
-                      Options
-                    </button>
                   </div>
                 </div>
               </div>
@@ -182,12 +182,6 @@
                 </div>
                 <div class="col-sm-6 col-lg-auto">
                   <div class="form-check form-switch mb-1">
-                    <input class="form-check-input" type="checkbox" id="flowGenerateNoDuplicates">
-                    <label class="form-check-label small text-nowrap" for="flowGenerateNoDuplicates">Allow duplicates</label>
-                  </div>
-                </div>
-                <div class="col-sm-6 col-lg-auto">
-                  <div class="form-check form-switch mb-1">
                     <input class="form-check-input" type="checkbox" id="flowIncludeAllTopologyPivots"
                       title="When enabled, Generate expands the chain beyond Number of Challenges if needed so all topology pivot source and target Docker nodes are included.">
                     <label class="form-check-label small text-nowrap" for="flowIncludeAllTopologyPivots"
@@ -201,9 +195,8 @@
                 </div>
               </div>
             </div>
-            <div class="small text-muted mt-2">Current rule: <span class="font-monospace">flag-generator</span> steps
-              are placed on vulnerability nodes only. Non-vulnerability Docker nodes use <span
-                class="font-monospace">flag-node-generator</span>.</div>
+            <div class="small text-muted mt-2">Note: <span class="font-monospace">flag-generators</span>
+              are placed on vulnerability nodes only.</div>
           </div>
         </div>
 
@@ -465,7 +458,6 @@
     const loadingStepsEl = document.getElementById('flowLoadingSteps');
     const loadingLogLabelEl = document.getElementById('flowLoadingLogLabel');
     const loadingLogEl = document.getElementById('flowLoadingLog');
-    const generateNoDuplicatesEl = document.getElementById('flowGenerateNoDuplicates');
     const includeAllTopologyPivotsEl = document.getElementById('flowIncludeAllTopologyPivots');
     const flowEnabledToggleEl = document.getElementById('flowEnabledToggle');
     const flowEnabledHelpEl = document.getElementById('flowEnabledHelp');
@@ -979,7 +971,7 @@
       dependency_level: normalizeDependencyLevel(state.dependency_level),
       chain_ids,
       flag_assignments: Array.isArray(state.flag_assignments) ? state.flag_assignments : [],
-      allow_node_duplicates: !!state.allow_node_duplicates,
+      allow_node_duplicates: false,
       include_all_topology_pivots: !!state.include_all_topology_pivots,
       initial_facts: normalizeFactsOverride(state.initial_facts),
       goal_facts: normalizeFactsOverride(state.goal_facts),
@@ -1746,10 +1738,9 @@
       }
     } catch (e) { }
     try {
-      allowNodeDuplicates = !!(saved && saved.allow_node_duplicates);
-      if (generateNoDuplicatesEl) {
-        generateNoDuplicatesEl.checked = !!allowNodeDuplicates;
-      }
+      // Node reuse is no longer a Flow option.  Ignore any legacy saved
+      // value so every generated sequence uses distinct topology nodes.
+      allowNodeDuplicates = false;
     } catch (e) { }
     try {
       includeAllTopologyPivots = !!(saved && saved.include_all_topology_pivots);
@@ -10740,15 +10731,9 @@
       }
     }
 
-    let allowDupes = !!options.allow_node_duplicates;
-    const syncAllowDuplicateParams = () => {
-      if (allowDupes) {
-        params.set('allow_node_duplicates', '1');
-        params.delete('retry_index');
-      } else {
-        params.delete('allow_node_duplicates');
-      }
-    };
+    // The UI no longer exposes duplicate-node generation.  Keep the strict
+    // setting explicit for the sequencing and resolve requests below.
+    const allowDupes = false;
     const syncTopologyInclusionParams = () => {
       if (topologyInclusionOptions.include_all_topology_pivots) params.set('include_all_topology_pivots', '1');
       else params.delete('include_all_topology_pivots');
@@ -10759,7 +10744,7 @@
       // capacity.  Strict Flow generation now asks for explicit approval to
       // use existing Docker nodes and, if necessary, explicit approval to add
       // Docker nodes to the topology.  Clamping here would bypass both choices.
-      if (allowDupes || cap === null || cap === undefined || !Number.isFinite(+cap)) return false;
+      if (cap === null || cap === undefined || !Number.isFinite(+cap)) return false;
       const dockerCap = Math.max(0, parseInt(String(cap), 10) || 0);
       if (length > dockerCap) {
         const src = sourceLabel ? ` (${sourceLabel})` : '';
@@ -10777,7 +10762,7 @@
       return;
     }
 
-    syncAllowDuplicateParams();
+    params.delete('allow_node_duplicates');
     syncTopologyInclusionParams();
 
     const buildAttackflowPreviewUrl = (p) => {
@@ -13740,10 +13725,6 @@ ${out.join('\n')}
     }
   } catch (e) { }
 
-  if (generateNoDuplicatesEl) {
-    generateNoDuplicatesEl.addEventListener('change', () => { updateLengthSpinnerMax(); });
-  }
-
   if (includeAllTopologyPivotsEl) {
     includeAllTopologyPivotsEl.addEventListener('change', () => {
       syncTopologyInclusionOptionsFromUi();
@@ -13763,9 +13744,8 @@ ${out.join('\n')}
 
   if (btnEl) btnEl.addEventListener('click', (e) => {
     try { e.preventDefault(); } catch (_) { }
-    const allowDupes = generateNoDuplicatesEl ? !!generateNoDuplicatesEl.checked : false;
-    allowNodeDuplicates = !!allowDupes;
-    generate(true, { savePreviewResolve: true, allow_node_duplicates: !!allowNodeDuplicates, resolveOnGenerate: true });
+    allowNodeDuplicates = false;
+    generate(true, { savePreviewResolve: true, allow_node_duplicates: false, resolveOnGenerate: true });
   });
 
   // Flow Seed Re-roll button handler
@@ -13810,7 +13790,6 @@ ${out.join('\n')}
       // Prepare params for sync (similar to generate).
       const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
       let length = preset ? 3 : (parseInt((lengthEl && lengthEl.value) || '5', 10) || 5);
-      const allowDupes = generateNoDuplicatesEl ? !!generateNoDuplicatesEl.checked : false; // Default from UI switch if present
       const chain_ids = (Array.isArray(currentChain) && currentChain.length)
         ? currentChain.map(n => String(n.id || ''))
         : null;

@@ -51,6 +51,15 @@ def test_flow_challenge_bounds_include_mandatory_and_generic_docker_nodes() -> N
     assert not missing, "Challenge bounds must include generic Docker capacity: " + "; ".join(missing)
 
 
+def test_flow_has_no_allow_duplicates_toggle_and_download_follows_options() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert 'id="flowGenerateNoDuplicates"' not in text
+    assert 'Allow duplicates' not in text
+    assert text.index('data-bs-target="#flowAdvancedOptions"') < text.index('id="flowDownloadDropdown"')
+    assert 'allow_node_duplicates: false,' in text
+
+
 def test_flow_generator_output_shows_phase_timings() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -987,7 +996,7 @@ def test_flow_generate_button_and_options_are_wired() -> None:
         'data-bs-target="#flowAdvancedOptions" aria-expanded="false" aria-controls="flowAdvancedOptions"',
         'id="flowGenerateMaxRetries"',
         "if (btnEl) btnEl.addEventListener('click'",
-        'generate(true, { savePreviewResolve: true, allow_node_duplicates: !!allowNodeDuplicates, resolveOnGenerate: true });',
+        'generate(true, { savePreviewResolve: true, allow_node_duplicates: false, resolveOnGenerate: true });',
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
