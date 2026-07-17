@@ -2016,10 +2016,10 @@ def reuse_saved_flag_assignments(
                     # A topology-selected node generator is an exact binding,
                     # not a hint.  Do not reuse an assignment from an older
                     # FlowState if it names a different generator.
-                    if bool(node.get('_topology_flag_node_generators_configured')):
-                        selected_generator_id = str(node.get('flag_node_generator_id') or '').strip()
+                    selected_generator_id = str(node.get('flag_node_generator_id') or '').strip()
+                    if selected_generator_id:
                         assignment_generator_id = str(assignment.get('id') or '').strip()
-                        if not selected_generator_id or selected_generator_id != assignment_generator_id:
+                        if selected_generator_id != assignment_generator_id:
                             raise ValueError('saved flag-node-generator does not match topology selection')
                 else:
                     # flag-generators require vulnerability nodes only

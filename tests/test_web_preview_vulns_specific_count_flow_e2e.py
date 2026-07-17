@@ -268,7 +268,9 @@ def test_flow_attackflow_preview_with_many_vulns_does_not_error(tmp_path):
         data = flow.get_json() or {}
         assert data.get("ok") is True, data
         chain = data.get("chain") or []
-        assert len(chain) == 3, chain
+        # Topology-selected vulnerabilities are mandatory Flow challenges, so
+        # the requested length is raised to the five vulnerability nodes.
+        assert len(chain) == 5, chain
     finally:
         pass
 

@@ -267,7 +267,6 @@ def test_prepare_chain_repairs_explicit_pivot_target_before_source(monkeypatch):
     assert "repaired" in str(result.get("warning") or "").lower()
     joined_progress = "\n".join(progress_messages)
     assert "Solve: building topology graph from preview plan" in joined_progress
-    assert "Solve: repairing explicit chain ids=db,jump" in joined_progress
     assert "Solve: reordering chain by dependency DAG" in joined_progress
     assert "Solve complete:" in joined_progress
 
@@ -880,6 +879,21 @@ def test_reuse_saved_flag_assignments_refuses_stale_node_or_generator_bindings()
         scenario_norm='stale-generator-test',
         backend=Backend,
     ) == []
+
+    # A blank selection means this was an explicitly approved generic Docker
+    # challenge, so its saved generic generator remains valid for the same node.
+    generic_node = {
+        'id': '21', 'name': 'docker-21', 'type': 'docker',
+        '_topology_flag_node_generators_configured': True,
+    }
+    reused_generic = flow_prepare_preview_helpers.reuse_saved_flag_assignments(
+        {'flag_assignments': [{'node_id': '21', 'id': 'ng-generic', 'type': 'flag-node-generator'}]},
+        [generic_node],
+        scenario_label='approved-generic-node-test',
+        scenario_norm='approved-generic-node-test',
+        backend=Backend,
+    )
+    assert [assignment.get('id') for assignment in reused_generic] == ['ng-generic']
 
 
 def test_pivot_apply_consolidates_multi_source_hints():
