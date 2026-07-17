@@ -912,7 +912,7 @@ def test_flow_visualization_self_heals_placeholder_for_existing_chain() -> None:
         "let flowDiagramRepairQueued = false;",
         "let flowMermaidRetryQueued = false;",
         "function queueMermaidRenderRetry(attempt) {",
-        'script async src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"',
+        'script async src="/static/vendor/mermaid-10.min.js"',
         "window.addEventListener('coretg-mermaid-ready'",
         "Diagram renderer is loading. Chain details are available below.",
         "const retryAttempt = Number.isFinite(+attempt) ? Math.max(1, +attempt) : 1;",
