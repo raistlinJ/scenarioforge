@@ -48,6 +48,8 @@ python -m scenarioforge.cli new \
   --seed-segmentation Firewall=density \
   --seed-vulnerability jboss/CVE-2017-12149=1 \
   --seed-random-vulnerability-count 1 \
+  --seed-flag-node-generator git_deploy_key_repo=1 \
+  --seed-random-flag-node-generator-count 1 \
   --seed 42
 ```
 
@@ -85,6 +87,8 @@ Useful `new` seeding flags:
 - `--seed-segmentation NAME`, `NAME=density`, or `NAME=COUNT`: add one Segmentation row; repeat the flag to add multiple rows.
 - `--seed-vulnerability NAME`, `NAME=density`, or `NAME=COUNT`: add one Specific vulnerability row resolved against the active enabled catalog; repeat the flag to add multiple rows.
 - `--seed-random-vulnerability-count 1`: add one or more random vulnerability targets.
+- `--seed-flag-node-generator ID` or `ID=COUNT`: add one or more topology-selected Docker challenge slots bound to an enabled flag-node-generator.
+- `--seed-random-flag-node-generator-count 1`: add one or more random topology-selected flag-node-generator slots.
 - `--seed`: use a deterministic seed when concretizing random placeholders.
 
 Seed semantics:
@@ -95,6 +99,7 @@ Seed semantics:
 - `NAME=density` is an explicit alias for the same density behavior.
 - If you seed multiple density rows in the same section, their `factor` values are equalized so the rows in that section sum to `1.0`.
 - Count rows (`NAME=COUNT`) remain additive and do not participate in that density-weight split.
+- Specific and random flag-node-generator rows are additive Docker challenge slots, like vulnerability rows: they do not reduce or consume the Docker host count seeded through `--seed-role Docker=COUNT`. The CLI writes them into the XML `Flag Node Generators` section, which remains the execution ground truth for preview, Flow, topology, guides, and Execute.
 
 Useful CORE connection flags for `new`:
 

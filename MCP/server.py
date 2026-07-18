@@ -151,6 +151,7 @@ class ScenarioAuthoringMCPServer:
         self._drafts = DraftStore()
         self._tools = self._build_tools()
         self._vulnerability_catalog: list[dict[str, str]] | None = None
+        self._flag_node_generator_catalog: list[dict[str, str]] | None = None
         self._last_vulnerability_search: dict[str, Any] | None = None
 
     def _build_tools(self) -> dict[str, MCPTool]:
@@ -367,6 +368,23 @@ class ScenarioAuthoringMCPServer:
                     'additionalProperties': False,
                 },
             ),
+            'scenario.add_flag_node_generator_item': MCPTool(
+                name='scenario.add_flag_node_generator_item',
+                description='Append one topology-level Flag Node Generators row. Use selected="Random" for a save-time catalog resolution, or selected="Specific" with an enabled generator g_id or g_name. These rows add Docker challenge nodes and do not consume Node Information Docker counts.',
+                input_schema={
+                    'type': 'object',
+                    'properties': {
+                        'draft_id': {'type': 'string'},
+                        'selected': {'type': 'string'},
+                        'g_id': {'type': 'string'},
+                        'g_name': {'type': 'string'},
+                        'count': {'type': 'integer'},
+                        'v_count': {'type': 'integer'},
+                    },
+                    'required': ['draft_id'],
+                    'additionalProperties': False,
+                },
+            ),
             'scenario.preview_draft': MCPTool(
                 name='scenario.preview_draft',
                 description='Run the existing preview planner against the in-memory draft and return the computed preview.',
@@ -508,6 +526,9 @@ class ScenarioAuthoringMCPServer:
         if tool_name == 'scenario.add_vulnerability_item':
             draft = self._drafts.get(str(arguments.get('draft_id') or ''))
             return self._add_vulnerability_item(draft, arguments)
+        if tool_name == 'scenario.add_flag_node_generator_item':
+            draft = self._drafts.get(str(arguments.get('draft_id') or ''))
+            return self._add_flag_node_generator_item(draft, arguments)
         if tool_name == 'scenario.preview_draft':
             draft = self._drafts.get(str(arguments.get('draft_id') or ''))
             core = arguments.get('core') if isinstance(arguments.get('core'), dict) else draft.core
@@ -545,6 +566,10 @@ class ScenarioAuthoringMCPServer:
             'vulns': 'Vulnerabilities',
             'vuln': 'Vulnerabilities',
             'vulnerabilityinfo': 'Vulnerabilities',
+            'flagnodegenerators': 'Flag Node Generators',
+            'flagnodegenerator': 'Flag Node Generators',
+            'nodegenerators': 'Flag Node Generators',
+            'nodegenerator': 'Flag Node Generators',
             'segmentation': 'Segmentation',
             'segments': 'Segmentation',
             'segmentationinfo': 'Segmentation',
@@ -585,6 +610,7 @@ class ScenarioAuthoringMCPServer:
         segmentation_random = list(random_options.get('Segmentation') or [])
         segmentation_explicit = list(SEGMENTATION_GUI_TYPES or segmentation_random)
         vuln_catalog = self._load_vulnerability_catalog()
+        flag_node_generator_catalog = self._load_flag_node_generator_catalog()
 
         def field_schema(
             *,
@@ -617,11 +643,12 @@ class ScenarioAuthoringMCPServer:
             'top_level': {
                 'section_order': [
                     'Node Information',
-                    'Routing',
                     'Services',
+                    'Routing',
                     'Traffic',
-                    'Vulnerabilities',
                     'Segmentation',
+                    'Flag Node Generators',
+                    'Vulnerabilities',
                     'Notes',
                 ],
                 'scenario_fields': {
@@ -779,6 +806,35 @@ class ScenarioAuthoringMCPServer:
                     'notes': [
                         'Use search_vulnerability_catalog before add_vulnerability_item when selecting a specific vulnerability.',
                         'For multiple different vulnerabilities, add separate rows instead of using factor weighting.',
+                    ],
+                },
+                'Flag Node Generators': {
+                    'parser_backed': True,
+                    'section_aliases': ['flagnodegenerators', 'flagnodegenerator', 'nodegenerators', 'nodegenerator'],
+                    'ui_selected_values': ['Random', 'Specific'],
+                    'selected_values': ['Specific'],
+                    'supports_random_selected': True,
+                    'random_selected_values': ['Specific'],
+                    'catalog_size': len(flag_node_generator_catalog),
+                    'catalog_entries': flag_node_generator_catalog,
+                    'section_fields': {
+                        'density': field_schema(value_type='number', default=0.0, minimum=0),
+                    },
+                    'item_fields': {
+                        'selected': field_schema(value_type='string', required=True, enum=['Random', 'Specific'], default='Random'),
+                        'g_id': field_schema(value_type='string', notes=['Required for Specific rows; must match an enabled flag-node-generator ID.']),
+                        'g_name': field_schema(value_type='string', notes=['Optional display name for Specific rows; normalized from the enabled catalog.']),
+                        'v_metric': field_schema(value_type='string', default='Count', enum=['Count']),
+                        'v_count': field_schema(value_type='integer', default=1, minimum=0),
+                    },
+                    'item_defaults': {'selected': 'Random', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 1},
+                    'selection_modes': {
+                        'Random': {'required_item_fields': ['selected'], 'recommended_item_fields': ['v_metric', 'v_count']},
+                        'Specific': {'required_item_fields': ['selected', 'g_id'], 'recommended_item_fields': ['g_name', 'v_metric', 'v_count']},
+                    },
+                    'notes': [
+                        'Rows are additive Docker challenge nodes, separate from Node Information Docker rows and vulnerability nodes.',
+                        'Specific rows are validated against enabled installed flag-node-generators; Random rows resolve to an enabled generator when the XML is saved.',
                     ],
                 },
                 'Segmentation': {
@@ -989,6 +1045,13 @@ class ScenarioAuthoringMCPServer:
         }
         return aliases.get(normalized, '')
 
+    def _normalize_flag_node_generator_selected(self, value: Any) -> str:
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        normalized = ''.join(ch for ch in text.lower() if ch.isalnum())
+        return {'random': 'Random', 'specific': 'Specific'}.get(normalized, '')
+
     def _normalize_replaced_section_payload(self, section_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = deepcopy(payload)
         if section_name == 'Notes':
@@ -1049,6 +1112,18 @@ class ScenarioAuthoringMCPServer:
                     )
                     item['v_name'] = resolved['name']
                     item['v_path'] = resolved['path']
+            elif section_name == 'Flag Node Generators':
+                selected = self._normalize_flag_node_generator_selected(item.get('selected'))
+                if not selected:
+                    raise ValueError('Flag Node Generators selected must be one of: Random or Specific')
+                item['selected'] = selected
+                if selected == 'Specific':
+                    resolved = self._resolve_flag_node_generator_catalog_entry(
+                        generator_id=item.get('g_id'),
+                        generator_name=item.get('g_name'),
+                    )
+                    item['g_id'] = resolved['id']
+                    item['g_name'] = resolved['name']
             elif section_name == 'Segmentation':
                 selected = self._normalize_segmentation_kind(item.get('selected'))
                 if not selected:
@@ -1111,6 +1186,40 @@ class ScenarioAuthoringMCPServer:
             else:
                 self._vulnerability_catalog = list(load_vuln_catalog(ROOT_DIR) or [])
         return self._vulnerability_catalog
+
+    def _load_flag_node_generator_catalog(self) -> list[dict[str, str]]:
+        if self._flag_node_generator_catalog is not None:
+            return self._flag_node_generator_catalog
+        try:
+            generators, errors = app_backend._flag_node_generators_from_enabled_sources()
+        except Exception as exc:
+            raise ValueError(f'Unable to load enabled flag-node-generator catalog: {exc}') from exc
+        if errors:
+            details = '; '.join(str(item.get('error') or item) if isinstance(item, dict) else str(item) for item in errors)
+            raise ValueError(f'Enabled flag-node-generator catalog has manifest errors: {details}')
+        catalog: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for generator in generators or []:
+            if not isinstance(generator, dict):
+                continue
+            generator_id = str(generator.get('id') or '').strip()
+            if not generator_id or generator_id in seen:
+                continue
+            seen.add(generator_id)
+            catalog.append({'id': generator_id, 'name': str(generator.get('name') or generator_id).strip() or generator_id})
+        self._flag_node_generator_catalog = catalog
+        return catalog
+
+    def _resolve_flag_node_generator_catalog_entry(self, *, generator_id: Any = None, generator_name: Any = None) -> dict[str, str]:
+        requested_id = str(generator_id or '').strip()
+        requested_name = str(generator_name or '').strip()
+        for entry in self._load_flag_node_generator_catalog():
+            if requested_id and entry['id'] == requested_id:
+                return entry
+            if requested_name and entry['name'].casefold() == requested_name.casefold():
+                return entry
+        requested = requested_id or requested_name or '(missing id)'
+        raise ValueError(f'Topology-selected flag-node-generator is not enabled: {requested}')
 
     def _find_vulnerability_catalog_readme(self, entry: dict[str, Any]) -> str:
         raw_path = str(entry.get('Path') or '').strip()
@@ -1715,6 +1824,38 @@ class ScenarioAuthoringMCPServer:
             'draft': self._serialize_draft(draft),
             'added_item': deepcopy(new_item),
         }
+
+    def _add_flag_node_generator_item(self, draft: ScenarioDraft, arguments: dict[str, Any]) -> dict[str, Any]:
+        sections = draft.scenario.get('sections') if isinstance(draft.scenario.get('sections'), dict) else {}
+        section = sections.get('Flag Node Generators') if isinstance(sections.get('Flag Node Generators'), dict) else {}
+        items = section.get('items') if isinstance(section.get('items'), list) else []
+        selected = self._normalize_flag_node_generator_selected(arguments.get('selected') or 'Random')
+        if not selected:
+            raise ValueError('selected must be one of: Random or Specific')
+        try:
+            count = max(1, int(arguments.get('count') or arguments.get('v_count') or 1))
+        except Exception:
+            count = 1
+        new_item: dict[str, Any] = {
+            'selected': selected,
+            'factor': 1.0,
+            'v_metric': 'Count',
+            'v_count': count,
+        }
+        if selected == 'Specific':
+            resolved = self._resolve_flag_node_generator_catalog_entry(
+                generator_id=arguments.get('g_id'),
+                generator_name=arguments.get('g_name'),
+            )
+            new_item['g_id'] = resolved['id']
+            new_item['g_name'] = resolved['name']
+        if 'density' not in section:
+            section['density'] = 0.0
+        section['items'] = list(items) + [new_item]
+        sections['Flag Node Generators'] = section
+        draft.scenario['sections'] = sections
+        self._touch_draft_after_mutation(draft)
+        return {'draft': self._serialize_draft(draft), 'added_item': deepcopy(new_item)}
 
     def _preview_draft(self, draft: ScenarioDraft, *, core: dict[str, Any], seed: Any = None) -> dict[str, Any]:
         draft.scenario = app_backend._concretize_preview_placeholders(draft.scenario, seed=seed)

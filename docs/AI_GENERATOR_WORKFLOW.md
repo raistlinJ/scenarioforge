@@ -32,6 +32,10 @@ This covers explicit requests such as:
 - routing protocol
 - traffic/service/segmentation counts
 - vulnerability target count
+- topology flag-node-generator target count
+
+The generated scaffold uses the same Scenario Editor card order as the UI:
+`Node Information`, `Services`, `Routing`, `Traffic`, `Segmentation`, `Flag Node Generators`, and `Vulnerabilities`. Notes remain available as freeform scenario metadata.
 
 The compiler emits:
 
@@ -49,6 +53,7 @@ That prevents cases where the model says the right thing in prose but returns ro
 - router counts
 - host totals
 - Docker allocation for vulnerabilities
+- additive topology flag-node-generator rows
 - routing protocol selection
 - vulnerability row counts
 
@@ -100,12 +105,14 @@ Coverage checks look for:
 - wrong counts
 - missing requested values
 - incomplete vulnerability coverage
+- missing topology flag-node-generator rows
 
 Examples:
 
 - prompt asked for `RIP` but draft used a different routing protocol
 - prompt asked for `TCP` and `UDP` but only one traffic row was present
 - prompt implied multiple vulnerabilities but only one was authored
+- prompt asked for two flag-node-generators but the draft had none
 
 When coverage is incomplete, the backend can retry generation with stricter repair guidance.
 
@@ -160,6 +167,7 @@ This makes it easier to verify that generation actually produced what the prompt
 - Traffic
 - Vulnerabilities
 - Segmentation
+- Flag Node Generators
 
 ## Current backend workflow
 
@@ -169,7 +177,7 @@ This makes it easier to verify that generation actually produced what the prompt
 2. The compiler derives deterministic intent from the prompt.
 3. The provider generates a draft scenario.
 4. Compiler-managed sections are reapplied.
-5. Vulnerabilities and routing modes are canonicalized.
+5. Vulnerabilities, flag-node-generator rows, and routing modes are canonicalized.
 6. Prompt coverage and preview-count mismatches are checked.
 7. If needed, the route retries once or twice with tighter repair instructions.
 8. Preview is generated from the final scenario.
@@ -181,7 +189,7 @@ This makes it easier to verify that generation actually produced what the prompt
 3. The draft is previewed.
 4. The backend fetches the resulting scenario.
 5. Compiler-managed sections are reapplied.
-6. Vulnerabilities and routing are canonicalized.
+6. Vulnerabilities, flag-node-generator rows, and routing are canonicalized.
 7. Prompt coverage and count mismatches are checked.
 8. If needed, the prompt is retried with repair guidance.
 9. Final preview is recomputed from the final scenario, not an earlier preview snapshot.

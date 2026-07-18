@@ -28,6 +28,7 @@ Current tool surface:
 - `scenario.add_segmentation_item`
 - `scenario.search_vulnerability_catalog`
 - `scenario.add_vulnerability_item`
+- `scenario.add_flag_node_generator_item`
 - `scenario.preview_draft`
 - `scenario.save_xml`
 - `scenario.delete_draft`
@@ -61,6 +62,7 @@ Example draft flow:
 6. `scenario.add_segmentation_item`
 7. `scenario.search_vulnerability_catalog`
 8. `scenario.add_vulnerability_item`
+9. `scenario.add_flag_node_generator_item`
 9. `scenario.replace_section`
 10. `scenario.preview_draft`
 11. `scenario.save_xml`
@@ -73,10 +75,11 @@ Vulnerability authoring flow:
 
 Node and traffic authoring flow:
 
-1. Start with `scenario.get_authoring_schema` to discover current backend values and defaults for Node Information, Traffic, Services, and Segmentation.
+1. Start with `scenario.get_authoring_schema` to discover current backend values and defaults for Node Information, Services, Routing, Traffic, Segmentation, Flag Node Generators, and Vulnerabilities.
 2. Use `scenario.add_node_role_item` for explicit host counts, especially Docker hosts. Example: add three Docker nodes with `role="docker"` and `count=3`.
 3. Use `scenario.add_service_item` for Services rows and `scenario.add_segmentation_item` for Segmentation rows when the prompt asks for those sections directly.
 4. Use `scenario.add_traffic_item` for concrete TCP or UDP traffic. The tool fills in backend-safe defaults such as `pattern="continuous"`, `content_type="text"`, and explicit counts so preview flows materialize.
+5. Use `scenario.add_flag_node_generator_item` for topology challenge nodes. `selected="Random"` resolves through the enabled catalog during XML save; `selected="Specific"` requires an enabled `g_id` or `g_name`. These rows are additive and do not consume Node Information Docker counts.
 5. The schema response distinguishes suggested/random values from explicit runtime values, which is important because not every parser/runtime path is a strict enum.
 
 This is the first slice. It is intentionally draft-centric and in-memory. The next likely step is an orchestration tool that interprets natural-language goals into a sequence of these draft mutations.

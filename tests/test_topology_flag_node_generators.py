@@ -4,6 +4,7 @@ import tempfile
 from scenarioforge.planning.orchestrator import compute_full_plan
 from scenarioforge.planning.ai_topology_intent import compile_ai_topology_intent
 from webapp import app_backend
+from webapp.routes import ai_provider
 
 
 def _xml() -> str:
@@ -84,3 +85,14 @@ def test_ai_topology_scaffold_seeds_requested_flag_node_generators():
         'density': 0.0,
         'items': [{'selected': 'Random', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 2}],
     }
+
+
+def test_ai_prompt_coverage_requires_requested_flag_node_generator_rows():
+    mismatch = ai_provider._get_prompt_coverage_mismatch(
+        'Build a network with two flag-node-generators.',
+        {'sections': {'Flag Node Generators': {'density': 0.0, 'items': []}}},
+    )
+
+    missing = {item['target']: item for item in (mismatch or {}).get('missing') or []}
+    assert missing['Flag Node Generators']['expected_items'] == 2
+    assert missing['Flag Node Generators']['actual_items'] == 0

@@ -52,6 +52,7 @@ def test_mcp_initialize_and_list_tools():
     assert 'scenario.add_segmentation_item' in tool_names
     assert 'scenario.search_vulnerability_catalog' in tool_names
     assert 'scenario.add_vulnerability_item' in tool_names
+    assert 'scenario.add_flag_node_generator_item' in tool_names
     assert 'scenario.preview_draft' in tool_names
     assert 'scenario.save_xml' in tool_names
 
@@ -655,6 +656,12 @@ def test_mcp_get_authoring_schema_exposes_backend_option_sets():
     selection_modes = vulnerabilities.get('selection_modes') or {}
     assert set(selection_modes) == {'Specific'}
 
+    flag_node_generators = sections.get('Flag Node Generators') or {}
+    assert set(flag_node_generators.get('ui_selected_values') or []) >= {'Random', 'Specific'}
+    assert set(flag_node_generators.get('item_fields') or {}) >= {'selected', 'g_id', 'g_name', 'v_metric', 'v_count'}
+    assert set(flag_node_generators.get('selection_modes') or {}) == {'Random', 'Specific'}
+    assert 'Flag Node Generators' in (top_level.get('section_order') or [])
+
     assert 'Events' not in sections
 
     notes = sections.get('Notes') or {}
@@ -709,6 +716,51 @@ def test_mcp_get_authoring_schema_exposes_vulnerability_mode_requirements():
     assert 'factor' not in (section.get('item_fields') or {})
     assert selection_modes.get('Specific', {}).get('required_item_fields') == ['selected', 'v_name']
     assert 'Type/Vector' not in selection_modes
+
+
+def test_mcp_add_flag_node_generator_item_creates_additive_random_row():
+    server = ScenarioAuthoringMCPServer()
+
+    created = _tool_call(server, 'scenario.create_draft', {'name': 'FlagNodeGeneratorScenario'})
+    draft_id = (created.get('draft') or {}).get('draft_id')
+
+    updated = _tool_call(server, 'scenario.add_flag_node_generator_item', {
+        'draft_id': draft_id,
+        'selected': 'Random',
+        'count': 2,
+    })
+
+    items = (((updated.get('draft') or {}).get('scenario') or {}).get('sections') or {}).get('Flag Node Generators', {}).get('items') or []
+    assert items == [{
+        'selected': 'Random',
+        'factor': 1.0,
+        'v_metric': 'Count',
+        'v_count': 2,
+    }]
+
+
+def test_mcp_add_specific_flag_node_generator_requires_enabled_catalog_entry(monkeypatch):
+    from webapp import app_backend
+
+    monkeypatch.setattr(
+        app_backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: ([{'id': 'git_deploy_key_repo', 'name': 'Git Deploy Key'}], []),
+    )
+    server = ScenarioAuthoringMCPServer()
+    created = _tool_call(server, 'scenario.create_draft', {'name': 'SpecificFlagNodeGeneratorScenario'})
+    draft_id = (created.get('draft') or {}).get('draft_id')
+
+    updated = _tool_call(server, 'scenario.add_flag_node_generator_item', {
+        'draft_id': draft_id,
+        'selected': 'Specific',
+        'g_id': 'git_deploy_key_repo',
+        'count': 1,
+    })
+
+    item = (((updated.get('draft') or {}).get('scenario') or {}).get('sections') or {}).get('Flag Node Generators', {}).get('items', [])[0]
+    assert item['g_id'] == 'git_deploy_key_repo'
+    assert item['g_name'] == 'Git Deploy Key'
 
 
 def test_mcp_add_traffic_item_appends_concrete_tcp_flow_row():
