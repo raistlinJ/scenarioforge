@@ -25,6 +25,8 @@ from scenarioforge.planning.ai_topology_intent import apply_compiled_sections_to
 from scenarioforge.planning.ai_topology_intent import build_seeded_traffic_rows as _compiler_build_seeded_traffic_rows
 from scenarioforge.planning.ai_topology_intent import compile_ai_topology_intent
 from scenarioforge.planning.ai_topology_intent import explicit_host_role_count_total as _compiler_explicit_host_role_count_total
+from scenarioforge.planning.ai_topology_intent import extract_ai_topology_intent as _compiler_extract_ai_topology_intent
+from scenarioforge.planning.ai_topology_intent import extract_ai_topology_intent as _compiler_extract_ai_topology_intent
 from scenarioforge.planning.ai_topology_intent import extract_node_role_count_intent as _compiler_extract_node_role_count_intent
 from scenarioforge.planning.ai_topology_intent import extract_r2r_density_intent as _compiler_extract_r2r_density_intent
 from scenarioforge.planning.ai_topology_intent import extract_requested_traffic_patterns as _compiler_extract_requested_traffic_patterns
@@ -53,12 +55,12 @@ except Exception:  # pragma: no cover
 
 _SUPPORTED_SECTION_NAMES = [
     'Node Information',
-    'Routing',
     'Services',
+    'Routing',
     'Traffic',
-    'Vulnerabilities',
-    'Flag Node Generators',
     'Segmentation',
+    'Flag Node Generators',
+    'Vulnerabilities',
     'Notes',
 ]
 
@@ -334,6 +336,10 @@ def _extract_count_intent(user_prompt: str) -> dict[str, int]:
 
 def _extract_vulnerability_target_count(user_prompt: str) -> int:
     return _compiler_extract_vulnerability_target_count(user_prompt)
+
+
+def _extract_flag_node_generator_target_count(user_prompt: str) -> int:
+    return int(_compiler_extract_ai_topology_intent(user_prompt).flag_node_generator_target_count or 0)
 
 
 def _extract_vulnerability_query_hints(user_prompt: str) -> list[str]:
@@ -721,6 +727,13 @@ def _extract_prompt_coverage_intent(user_prompt: str) -> dict[str, dict[str, Any
             'reason': f"user requested at least {vuln_count} vulnerabilit{'y' if vuln_count == 1 else 'ies'}",
         }
 
+    flag_node_generator_count = _extract_flag_node_generator_target_count(user_prompt)
+    if flag_node_generator_count > 0:
+        coverage['Flag Node Generators'] = {
+            'exact_items': flag_node_generator_count,
+            'reason': f"user requested exactly {flag_node_generator_count} topology flag-node-generator node{'s' if flag_node_generator_count != 1 else ''}",
+        }
+
     traffic_count = _match_count(r'\b(\d+)\s+' + qualifier_words + r'(?:traffic\s+flows?|flows?|traffic\s+streams?|streams?)\b')
     if traffic_count is None and _has_any([r'\btraffic\b', r'\btraffic\s+profile', r'\btraffic\s+profiles\b', r'\btcp\b', r'\budp\b', r'\bflows?\b']):
         traffic_count = 1
@@ -1035,6 +1048,7 @@ def _get_prompt_coverage_mismatch(user_prompt: str, scenario_payload: dict[str, 
         'Services': _count_section_coverage_units(scenario_payload, 'Services'),
         'Traffic': _count_section_coverage_units(scenario_payload, 'Traffic'),
         'Vulnerabilities': _count_section_coverage_units(scenario_payload, 'Vulnerabilities'),
+        'Flag Node Generators': _count_section_coverage_units(scenario_payload, 'Flag Node Generators'),
         'Segmentation': _count_section_coverage_units(scenario_payload, 'Segmentation'),
         'Docker': _count_docker_rows(scenario_payload),
     }
@@ -1158,6 +1172,7 @@ def _build_prompt_coverage_retry_prompt(prompt: str, mismatch: dict[str, Any]) -
             for name in ('Services', 'Traffic', 'Vulnerabilities', 'Segmentation', 'Docker')
         )
         + '.',
+        f'Previous draft Flag Node Generators count: {actual.get("Flag Node Generators", 0)}.',
     ]
 
     def _quote_csv(values: list[str]) -> str:
@@ -1177,6 +1192,10 @@ def _build_prompt_coverage_retry_prompt(prompt: str, mismatch: dict[str, Any]) -
         if target == 'Vulnerabilities':
             retry_lines.append(
                 'Add the missing Vulnerabilities rows before finishing. Search the vulnerability catalog using the user\'s wording, then add concrete Specific rows from the chosen matches; for multiple requested vulnerabilities, add separate rows.'
+            )
+        elif target == 'Flag Node Generators':
+            retry_lines.append(
+                'Add the missing Flag Node Generators rows before finishing. Use scenario.add_flag_node_generator_item with selected="Random" unless the user named a specific enabled generator; these are additive Docker challenge nodes, not Node Information Docker rows.'
             )
         elif target.startswith('Node Information:'):
             retry_lines.append(
@@ -1431,6 +1450,8 @@ def _classify_tool_repair(tool_response: str, *, qualified_tool_name: str) -> tu
         return 'traffic-tool-error', f'Auto-healing a traffic tool error for {qualified_tool_name}.'
     if tool_name in {'scenario.add_vulnerability_item', 'scenario.search_vulnerability_catalog'} or (tool_name == 'scenario.replace_section' and section_name == 'vulnerabilities'):
         return 'vulnerability-tool-error', f'Auto-healing a vulnerability tool error for {qualified_tool_name}.'
+    if tool_name == 'scenario.add_flag_node_generator_item' or (tool_name == 'scenario.replace_section' and section_name in {'flagnodegenerators', 'flagnodegenerator'}):
+        return 'flag-node-generator-tool-error', f'Auto-healing a flag-node-generator tool error for {qualified_tool_name}.'
     return category, status_message
 
 
@@ -4403,6 +4424,7 @@ async def _apply_deterministic_mcp_bridge_seed(
     traffic_tool = _find_optional_mcp_bridge_tool(available_tools, 'scenario.add_traffic_item')
     segmentation_tool = _find_optional_mcp_bridge_tool(available_tools, 'scenario.add_segmentation_item')
     vuln_tool = _find_optional_mcp_bridge_tool(available_tools, 'scenario.add_vulnerability_item')
+    flag_node_generator_tool = _find_optional_mcp_bridge_tool(available_tools, 'scenario.add_flag_node_generator_item')
 
     compiled = _compile_ai_intent(user_prompt)
     has_seeded_vulnerability_ops = any(op.get('kind') == 'vulnerability' for op in compiled.tool_seed_ops)
@@ -4441,6 +4463,14 @@ async def _apply_deterministic_mcp_bridge_seed(
                 'draft_id': draft_id,
                 'kind': op.get('selected'),
                 'count': int(op.get('count') or 1),
+            })
+        elif op.get('kind') == 'flag-node-generator' and flag_node_generator_tool:
+            await _mcp_bridge_call_tool(client, flag_node_generator_tool, {
+                'draft_id': draft_id,
+                'selected': op.get('selected') or 'Random',
+                'g_id': op.get('g_id'),
+                'g_name': op.get('g_name'),
+                'v_count': int(op.get('count') or 1),
             })
     applied.extend(compiled.applied_actions)
 
@@ -4493,7 +4523,7 @@ def _build_mcp_bridge_goal_prompt(
         seed_lines.append('Deterministic seed already added: ' + '; '.join(normalized_seeded_actions) + '.')
         seed_lines.append('Do not call scenario.get_authoring_schema merely to reinterpret already-seeded Routing, Services, or Traffic rows. Only call it when you need allowed values for an unseeded section or for a concrete field you still cannot author safely.')
     if compiled.locked_sections:
-        seed_lines.append('Compiler-managed sections for phase 1: ' + ', '.join(compiled.locked_sections) + '. Preserve those seeded Node Information/Routing rows unless preview proves they mismatch the user request.')
+        seed_lines.append('Compiler-managed sections for phase 1: ' + ', '.join(compiled.locked_sections) + '. Preserve those seeded rows unless preview proves they mismatch the user request.')
     return '\n'.join([
         opening_line,
         f'Target draft_id: {draft_id}',
@@ -4517,9 +4547,10 @@ def _build_mcp_bridge_goal_prompt(
         *_build_count_intent_guidance(user_prompt),
         *_build_mcp_bridge_execution_guidance(user_prompt),
         'If the user asks for routers without naming a protocol, use scenario.add_routing_item with protocol="OSPFv2" and the requested count when that tool is enabled; otherwise replace only the Routing section with a Count row selected="OSPFv2".',
-        'When dedicated tools are available, prefer scenario.add_node_role_item for host or Docker counts, scenario.add_routing_item for explicit router/protocol rows and routing edge hints, scenario.add_service_item for Services rows, scenario.add_traffic_item for TCP or UDP traffic, and scenario.add_segmentation_item for Segmentation rows.',
+        'When dedicated tools are available, prefer scenario.add_node_role_item for host or Docker counts, scenario.add_routing_item for explicit router/protocol rows and routing edge hints, scenario.add_service_item for Services rows, scenario.add_traffic_item for TCP or UDP traffic, scenario.add_segmentation_item for Segmentation rows, and scenario.add_flag_node_generator_item for topology flag-node-generator rows.',
         'For vulnerabilities, prefer scenario.search_vulnerability_catalog first, then call scenario.add_vulnerability_item with explicit v_name and v_path from the chosen result. Do not pass factor. If the user asks for multiple different vulnerabilities, make separate add_vulnerability_item calls with v_count=1 for each chosen vulnerability.',
         'For broad vulnerability categories such as web-related, database, auth, or ssh-related vulnerabilities, do not invent a synthetic category row. Search the vulnerability catalog using the user\'s wording and available README-backed context, and do not pass v_type or v_vector filters unless the user explicitly requested those exact filters. Then choose concrete catalog results.',
+        'For topology flag-node-generators, use selected="Random" unless the user names a specific enabled generator. A Specific row requires g_id (and its catalog-backed g_name); these rows are additive Docker challenge nodes and never replace Node Information Docker rows or vulnerability rows.',
         *_build_vulnerability_grounding_guidance(user_prompt),
         'For services and segmentation, prefer schema-discovered values and the dedicated mutation tools; otherwise use replace_section with backend-compatible items.',
         'For traffic requests, ensure each Traffic row uses selected="TCP" or "UDP", a concrete content_type, and one exact pattern from: continuous, periodic, burst, poisson, or ramp. For varied traffic profiles, create multiple Traffic rows rather than vague free-text profile labels. Each Traffic row must also use either v_metric="Count" with v_count or a positive factor so preview flows materialize.',
