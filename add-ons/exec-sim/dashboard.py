@@ -390,9 +390,23 @@ def start_dashboard_server(generate_callback=None):
             else:
                 self.send_error(404, "Not Found")
 
+    class _QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            # A client (browser) disconnecting mid-response — e.g. the
+            # dashboard_state.json poll getting cancelled by a page reload —
+            # is normal and not actionable. Only print genuinely unexpected
+            # errors; this previously dumped a full traceback for every
+            # ordinary disconnect, and with stdout/stderr now mirrored into
+            # the dashboard's own terminal panel, that noise showed up there
+            # too.
+            exc_type = sys.exc_info()[0]
+            if exc_type is not None and issubclass(exc_type, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+                return
+            super().handle_error(request, client_address)
+
     handler = functools.partial(_QuietHandler, directory=config.DASHBOARD_DIR)
     try:
-        httpd = http.server.ThreadingHTTPServer((getattr(config, 'DASHBOARD_HOST', '0.0.0.0'), config.DASHBOARD_PORT), handler)
+        httpd = _QuietThreadingHTTPServer((getattr(config, 'DASHBOARD_HOST', '0.0.0.0'), config.DASHBOARD_PORT), handler)
     except OSError as e:
         print(f"[dashboard] Could not start server on port {config.DASHBOARD_PORT}: {e}")
         return
