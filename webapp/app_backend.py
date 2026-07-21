@@ -37638,19 +37638,31 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
     }
     try:
         if isinstance(flow_meta, dict) and flow_meta:
-            _persist_plan_preview_and_flow_state_in_xml(
+            persisted_ok, persisted_detail = _persist_plan_preview_and_flow_state_in_xml(
                 xml_path,
                 scenario_name or scenario,
                 plan_payload,
                 flow_meta,
             )
         else:
-            _update_plan_preview_in_xml(xml_path, scenario_name or scenario, plan_payload)
+            persisted_ok, persisted_detail = _update_plan_preview_in_xml(
+                xml_path, scenario_name or scenario, plan_payload,
+            )
+        if not persisted_ok:
+            # These helpers report failure via a returned (False, reason)
+            # rather than raising, so the except block below can't catch
+            # this case. Silently continuing here (the plan/preview payload
+            # is still returned either way) previously left phases like
+            # flag-sequencing failing downstream with only "Preview plan not
+            # embedded in XML" and no way to see why.
+            try:
+                app.logger.warning(
+                    '[planner] Failed to persist plan/preview into XML at %s (scenario=%s): %s',
+                    xml_path, scenario_name or scenario, persisted_detail,
+                )
+            except Exception:
+                pass
     except Exception:
-        # Swallowed on purpose (the plan/preview payload above is still
-        # returned even if persisting it into the XML failed), but silently
-        # doing so left phases like flag-sequencing failing downstream with
-        # only "Preview plan not embedded in XML" and no way to see why.
         try:
             app.logger.exception(
                 '[planner] Failed to persist plan/preview into XML at %s (scenario=%s)',
