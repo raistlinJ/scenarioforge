@@ -164,10 +164,11 @@ def _validate_core_connection(grpc_host, grpc_port, ssh_host, ssh_port, username
 def start_dashboard_server(generate_callback=None):
     """Serve DASHBOARD_DIR over HTTP (once per process) so index.html
     can poll dashboard_state.json live, from every CLI mode."""
-    global _dashboard_server_started
+    global _dashboard_server_started, _generate_callback
     if _dashboard_server_started:
         return
     _dashboard_server_started = True
+    _generate_callback = generate_callback
 
     os.makedirs(config.DASHBOARD_DIR, exist_ok=True)
     html_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
@@ -256,14 +257,21 @@ def start_dashboard_server(generate_callback=None):
                     params = json.loads(post_data.decode('utf-8'))
                 except:
                     params = {}
-                    
+
                 if _generate_callback:
                     threading.Thread(target=_generate_callback, args=(params,), daemon=True).start()
-                    
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "started"}).encode('utf-8'))
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "started"}).encode('utf-8'))
+                else:
+                    self.send_response(500)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "status": "error",
+                        "error": "No generate callback is registered on the dashboard server.",
+                    }).encode('utf-8'))
             elif self.path == '/api/fetch_models':
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)

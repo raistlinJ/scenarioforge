@@ -784,6 +784,9 @@
                     const modal = bootstrap.Modal.getInstance(document.getElementById('runModal'));
                     modal.hide();
                     document.getElementById('terminalContent').innerHTML = '<div class="text-secondary mb-2">Run triggered! Waiting for backend to start...</div>';
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    alert("Failed to start run: " + (data.error || `HTTP ${res.status}`));
                 }
             } catch (err) {
                 alert("Failed to start run: " + err);
