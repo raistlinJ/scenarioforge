@@ -340,7 +340,14 @@ def _attack_graph_for_chain(
             if fact_name:
                 last_field_provider[fact_name] = node_index
 
-    edges_out: list[dict[str, Any]] = []
+    # The exported graph is the *ordered attack path*.  The AFB exporter has
+    # always represented that path with an edge between each adjacent action;
+    # doing the same here keeps JSON, DOT, PDF, and AFB exports in agreement.
+    #
+    # Fact dependencies can legitimately skip over an otherwise independent
+    # step.  They are useful provenance, but must not replace path edges (or
+    # make a linear flow appear disconnected), so retain them separately below.
+    fact_dependencies: list[dict[str, Any]] = []
     for (from_index, to_index), facts in edge_facts_by_pair.items():
         if from_index < 0 or to_index < 0 or from_index >= len(nodes_out) or to_index >= len(nodes_out):
             continue
@@ -350,7 +357,7 @@ def _attack_graph_for_chain(
             continue
         assignment = assignment_by_node_id.get(src_id)
         resolved_out = _resolved_map(assignment, 'resolved_outputs')
-        edges_out.append({
+        fact_dependencies.append({
             'sequence_index': int(from_index + 1),
             'source': src_id,
             'target': tgt_id,
@@ -360,17 +367,39 @@ def _attack_graph_for_chain(
             'artifacts_resolved_kv': _resolved_kv_list(resolved_out),
         })
 
-    stage_map: dict[int, list[int]] = {}
-    for node_index, stage in enumerate(stage_by_index):
-        stage_key = int(stage) if isinstance(stage, int) else 0
-        stage_map.setdefault(stage_key, []).append(node_index)
+    fact_dependency_by_pair = {
+        (str(dep.get('source') or '').strip(), str(dep.get('target') or '').strip()): dep
+        for dep in fact_dependencies
+        if isinstance(dep, dict)
+    }
+    edges_out: list[dict[str, Any]] = []
+    for from_index in range(max(0, len(nodes_out) - 1)):
+        source = nodes_out[from_index]
+        target = nodes_out[from_index + 1]
+        src_id = str(source.get('id') or '').strip()
+        tgt_id = str(target.get('id') or '').strip()
+        if not src_id or not tgt_id:
+            continue
+        fact_dependency = fact_dependency_by_pair.get((src_id, tgt_id), {})
+        edges_out.append({
+            'sequence_index': int(from_index + 1),
+            'source': src_id,
+            'target': tgt_id,
+            'relationship': 'sequence',
+            'facts': list(fact_dependency.get('facts') or []),
+            'artifacts': list(fact_dependency.get('artifacts') or []),
+            'artifacts_resolved': dict(fact_dependency.get('artifacts_resolved') or {}),
+            'artifacts_resolved_kv': list(fact_dependency.get('artifacts_resolved_kv') or []),
+        })
+
+    # AFB is an ordered flow, so its visual stages are one ordered step each.
     stages = [
-        {'stage': stage, 'indices': indices}
-        for stage, indices in sorted(stage_map.items(), key=lambda item: item[0])
+        {'stage': int(node_index), 'indices': [node_index]}
+        for node_index in range(len(nodes_out))
     ]
 
     return {
-        'schema_version': 1,
+        'schema_version': 2,
         'scenario': str(scenario_label or ''),
         'chain_order': chain_order,
         'assignment_order': [
@@ -381,6 +410,7 @@ def _attack_graph_for_chain(
         'nodes': nodes_out,
         'edges': edges_out,
         'stages': stages,
+        'fact_dependencies': fact_dependencies,
     }
 
 

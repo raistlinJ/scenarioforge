@@ -1,0 +1,27 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Scenarios>
+  <CoreConnection host="127.0.0.1" port="50051" ssh_enabled="true" ssh_host="12.0.0.100" ssh_port="22" ssh_username="sampleuser" venv_bin="/opt/core/venv/bin" venv_user_override="False"/>
+  <Scenario name="Generated17845936711" density_count="3" scenario_total_nodes="7" base_nodes="0">
+    <ScenarioEditor>
+      <BaseScenario filepath=""/>
+      <section name="Node Information" density_count="3" base_nodes="3" additive_nodes="3" combined_nodes="6" weight_rows="0" count_rows="2" weight_sum="0.000" normalized_weight_sum="0.000">
+        <item selected="Workstation" factor="1.000" v_metric="Count" v_count="1"/>
+        <item selected="Docker" factor="1.000" v_metric="Count" v_count="2"/>
+      </section>
+      <section name="Routing" density="0.500" explicit_count="0" derived_count="0" total_planned="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Services" density="0.500" explicit_count="2" weight_rows="0" count_rows="2" weight_sum="0.000">
+        <item selected="SSH" factor="1.000" v_metric="Count" v_count="1"/>
+        <item selected="HTTP" factor="1.000" v_metric="Count" v_count="1"/>
+      </section>
+      <section name="Traffic" density="0.500" explicit_count="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Vulnerabilities" flag_type="text" density="0.500" explicit_count="0" derived_count="0" total_planned="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Flag Node Generators" density="0.500" explicit_count="1" derived_count="0" total_planned="1" weight_rows="0" count_rows="1" weight_sum="0.000">
+        <item selected="Specific" factor="1.000" g_id="dns_txt_secret_record" g_name="DNS: TXT Secret Record" v_metric="Count" v_count="1"/>
+      </section>
+      <section name="Segmentation" density="0.500" explicit_count="0" weight_rows="0" count_rows="0" weight_sum="0.000"/>
+      <section name="Notes">
+        <notes/>
+      </section>
+    </ScenarioEditor>
+  </Scenario>
+</Scenarios>

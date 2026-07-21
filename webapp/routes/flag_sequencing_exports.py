@@ -77,6 +77,9 @@ def register(app, *, backend_module: Any) -> None:
             chain_nodes.append(chain_node)
         if not chain_nodes:
             return jsonify({'ok': False, 'error': 'Chain contained no valid nodes.'}), 400
+        chain_ids = [str(node.get('id') or '').strip() for node in chain_nodes]
+        if len(chain_ids) != len(set(chain_ids)):
+            return jsonify({'ok': False, 'error': 'Chain contains duplicate node ids.'}), 400
 
         def _assignment_has_generator(assignment: dict[str, Any]) -> bool:
             if not isinstance(assignment, dict):

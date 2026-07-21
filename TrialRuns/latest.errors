@@ -1,0 +1,12 @@
+# ScenarioForge latest warnings/errors
+# Started: 2026-07-21T00:55:38.745161+00:00
+# Includes log records at WARNING and ERROR level.
+
+[2026-07-20 18:55:38,753] INFO in app_backend: Selected default CORE config from secret record: 03-scenario4-4c64cb122d49 (host=localhost)
+[2026-07-20 18:55:41,231] INFO in flag_sequencing_sequence_preview: [flow.progress] elapsed=0.00s Sequence start: scenario=generated_1784595337_1 length=2 dependency=3/5 preset=random duplicates=off expansion=strict include_pivots=0
+[2026-07-20 18:55:41,232] INFO in flag_sequencing_sequence_preview: [flow.progress] elapsed=0.00s Phase: locating preview plan
+[2026-07-20 18:55:41,232] INFO in flag_sequencing_sequence_preview: [flow.progress] elapsed=0.00s Phase: loading preview payload from Generated_1784595337_1.xml
+[2026-07-20 18:55:41,232] INFO in flag_sequencing_sequence_preview: [flow.progress] elapsed=0.00s Validation failed: preview plan not embedded in XML
+[2026-07-20 18:55:41,237] INFO in app_backend: Selected default CORE config from secret record: 03-scenario4-4c64cb122d49 (host=localhost)
+[2026-07-20 18:55:41,238] INFO in flow_prepare_preview_execute: [flow.prepare_preview_for_execute] start scenario=generated_1784595337_1 requested_length=2 preset= best_effort=False timeout_s=none base_plan=Generated_1784595337_1.xml
+[2026-07-20 18:55:41,238] INFO in flow_prepare_preview_execute: [flow.progress] Prepare start: scenario=generated_1784595337_1 length=2

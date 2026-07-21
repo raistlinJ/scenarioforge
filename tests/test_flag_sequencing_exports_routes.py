@@ -67,6 +67,24 @@ def test_afb_from_chain_returns_export_payload():
     assert body['flags_enabled'] is True
 
 
+def test_afb_from_chain_rejects_duplicate_node_ids():
+    client = _make_client()
+
+    resp = client.post(
+        '/api/flag-sequencing/afb_from_chain',
+        json={
+            'scenario': 'Demo Scenario',
+            'chain': [
+                {'id': 'n1', 'name': 'First'},
+                {'id': 'n1', 'name': 'Duplicate'},
+            ],
+        },
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json() == {'ok': False, 'error': 'Chain contains duplicate node ids.'}
+
+
 
 def test_afb_from_chain_builds_exports_from_repaired_visual_order():
     captured = {}
