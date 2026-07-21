@@ -63,21 +63,19 @@ from utils import discover_challenges, short_label, next_run_dir
 
 _iteration_counter = 0
 
-# Holds the active SSH forward, if any, so the background listener thread
-# stays alive for the process lifetime instead of being garbage-collected.
-_active_core_forward = None
-
 
 def ensure_core_daemon_ready():
-    """Check that CORE_HOST:CORE_PORT is reachable and, if not, offer to start
-    core-daemon or open an SSH tunnel over SSH using CORE_SSH_* from the
-    loaded environment file. A tunnel opened here is bound to CORE_HOST:
-    CORE_PORT itself, so the `scenarioforge.cli` subprocess we spawn next
-    connects to that same address and rides it transparently.
+    """Check that CORE_HOST:CORE_PORT is reachable (or reachable via a short-
+    lived SSH tunnel) and, if core-daemon is simply down, offer to start it
+    over SSH using CORE_SSH_* from the loaded environment file.
+
+    This never opens or holds a tunnel itself — that's scoped tightly around
+    the CORE-facing CLI phases in `generator.py` (`core_daemon.core_connection`)
+    so it's never held open while solver LLM calls elsewhere also need the
+    LAN. This function only handles the one thing that *is* safe to settle
+    up front: whether core-daemon needs starting.
 
     Returns True if the run should proceed, False if it should abort."""
-    global _active_core_forward
-
     grpc_host = os.environ.get("CORE_HOST", "").strip()
     grpc_port = os.environ.get("CORE_PORT", "").strip()
     ssh_host = os.environ.get("CORE_SSH_HOST", "").strip()
@@ -96,19 +94,9 @@ def ensure_core_daemon_ready():
     print(f"[core] {status.get('message', 'CORE gRPC endpoint is not reachable.')}")
 
     if status.get("can_tunnel"):
-        try:
-            answer = input(f"Open an SSH tunnel to {ssh_host} now? [y/N]: ").strip().lower()
-        except EOFError:
-            answer = "n"
-        if answer not in ("y", "yes"):
-            return False
-        result = core_daemon.open_local_forward(
-            grpc_host, int(grpc_port), ssh_host, int(ssh_port or 22), ssh_username, ssh_password
-        )
-        print(f"[core] {result.get('message', '')}")
-        if result.get("ok"):
-            _active_core_forward = result["forward"]
-        return bool(result.get("ok"))
+        print("[core] A short-lived SSH tunnel will be opened automatically for each "
+              "generation run's CORE phases, and closed immediately after.")
+        return True
 
     if not status.get("can_start"):
         return False

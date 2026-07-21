@@ -7,6 +7,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import config
+import core_daemon
 from attack_graph import load_attack_graph, extract_attack_graph_from_xml
 from llm import call_model
 
@@ -329,7 +330,7 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
             "--seed-random-flag-node-generator-count", str(params.get("flag_node_generator_count", 1)),
             "--seed-random-vulnerability-count", str(params.get("vuln_count", 1))
         ]
-        
+
         if params.get("server_count", 0) > 0:
             cmd_new.extend(["--seed-role", f"Server={params['server_count']}"])
 
@@ -338,13 +339,9 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
 
         for svc in params.get("services", []):
             cmd_new.extend(["--seed-service", f"{svc}=1"])
-            
+
         for traf in params.get("traffic", []):
             cmd_new.extend(["--seed-traffic", f"{traf}=1"])
-
-            
-        print(f"    [cli] running 'new' phase (seed={seed})...")
-        _run_scenarioforge_phase("new", cmd_new, cwd=cli_cwd, log_path=phase_log("new"))
 
         cmd_preview = [
             "uv", "run", "python", "-m", "scenarioforge.cli", "preview-plan",
@@ -353,8 +350,6 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
             "--seed", str(seed),
             "--plan-output", phase_paths["preview"],
         ]
-        print(f"    [cli] running 'preview-plan' phase...")
-        _run_scenarioforge_phase("preview-plan", cmd_preview, cwd=cli_cwd, log_path=phase_log("preview-plan"))
 
         cmd_seq = [
             "uv", "run", "python", "-m", "scenarioforge.cli", "flag-sequencing",
@@ -366,14 +361,6 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
             "--flow-best-effort",
             "--plan-output", phase_paths["flow"],
         ]
-        print(f"    [cli] running 'flag-sequencing' phase...")
-        _run_scenarioforge_phase("flag-sequencing", cmd_seq, cwd=cli_cwd, log_path=phase_log("flag-sequencing"))
-
-        graph, graph_path = _attack_graph_from_flow_artifacts(xml_path, phase_paths["flow"])
-        solution_path = os.path.join(config.OUTPUT_DIR, f"{challenge_name}_solution.json")
-        with open(solution_path, "w", encoding="utf-8") as handle:
-            json.dump(graph, handle, indent=2)
-        print(f"    ✓ Saved Attack Graph v2 ({len(graph['nodes'])} nodes) to {solution_path}")
 
         cmd_execute = [
             "uv", "run", "python", "-m", "scenarioforge.cli", "execute",
@@ -383,10 +370,35 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
             "--plan-output", phase_paths["execute"],
             "--post-execution-validation",
         ]
-        print("    [cli] running 'execute' phase with post-execution validation...")
-        execute_returncode, execute_output = _run_scenarioforge_phase(
-            "execute", cmd_execute, cwd=cli_cwd, log_path=phase_log("execute"), allow_failure=True,
-        )
+
+        # Scope any SSH tunnel to exactly these four CORE-facing phases —
+        # opened right before 'new', closed right after 'execute' — so it's
+        # never held open while solver LLM calls (before/after this block)
+        # are also using the LAN.
+        with core_daemon.core_connection(
+            os.environ.get("CORE_HOST", ""), os.environ.get("CORE_PORT", ""),
+            os.environ.get("CORE_SSH_HOST", ""), os.environ.get("CORE_SSH_PORT", "22"),
+            os.environ.get("CORE_SSH_USERNAME", ""), os.environ.get("CORE_SSH_PASSWORD", ""),
+        ):
+            print(f"    [cli] running 'new' phase (seed={seed})...")
+            _run_scenarioforge_phase("new", cmd_new, cwd=cli_cwd, log_path=phase_log("new"))
+
+            print(f"    [cli] running 'preview-plan' phase...")
+            _run_scenarioforge_phase("preview-plan", cmd_preview, cwd=cli_cwd, log_path=phase_log("preview-plan"))
+
+            print(f"    [cli] running 'flag-sequencing' phase...")
+            _run_scenarioforge_phase("flag-sequencing", cmd_seq, cwd=cli_cwd, log_path=phase_log("flag-sequencing"))
+
+            graph, graph_path = _attack_graph_from_flow_artifacts(xml_path, phase_paths["flow"])
+            solution_path = os.path.join(config.OUTPUT_DIR, f"{challenge_name}_solution.json")
+            with open(solution_path, "w", encoding="utf-8") as handle:
+                json.dump(graph, handle, indent=2)
+            print(f"    ✓ Saved Attack Graph v2 ({len(graph['nodes'])} nodes) to {solution_path}")
+
+            print("    [cli] running 'execute' phase with post-execution validation...")
+            execute_returncode, execute_output = _run_scenarioforge_phase(
+                "execute", cmd_execute, cwd=cli_cwd, log_path=phase_log("execute"), allow_failure=True,
+            )
         validation_summary = _last_marker_json(execute_output, "VALIDATION_SUMMARY_JSON:")
         session_id = _last_marker_value(execute_output, "CORE_SESSION_ID:")
         if isinstance(validation_summary, dict):

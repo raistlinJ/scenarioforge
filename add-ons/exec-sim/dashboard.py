@@ -16,9 +16,6 @@ from attack_graph import generator_for, validate_attack_graph
 
 _dashboard_server_started = False
 _generate_callback = None
-# Holds the active SSH forward, if any, so the background listener thread
-# stays alive for the process lifetime instead of being garbage-collected.
-_active_core_forward = None
 _LEGACY_SOLVER_ENV_KEYS = (
     "AGENT_LLMS_JSON",
     "AGENT_LLM_PROVIDER",
@@ -153,11 +150,14 @@ def _validate_core_connection(grpc_host, grpc_port, ssh_host, ssh_port, username
     if not 1 <= grpc_port <= 65535 or not 1 <= ssh_port <= 65535:
         raise ValueError("CORE gRPC and SSH ports must be between 1 and 65535")
 
-    # This verifies both transports are reachable. ScenarioForge itself
-    # authenticates to CORE and performs its full preflight during execution.
-    if not core_daemon.tcp_port_reachable(grpc_host, grpc_port, timeout=5.0):
-        details = core_daemon.check_core_daemon(grpc_host, grpc_port, ssh_host, ssh_port, username, password)
-        raise CoreDaemonNotReachable(details)
+    # This verifies both transports are reachable. Actual runs open (and
+    # close) an SSH tunnel scoped tightly around CORE's own CLI phases
+    # (`core_daemon.core_connection`, used from `generator.py`) rather than
+    # holding one open from here, so solver LLM calls elsewhere on the LAN
+    # are never affected by a long-lived tunnel.
+    status = core_daemon.check_core_daemon(grpc_host, grpc_port, ssh_host, ssh_port, username, password)
+    if not status.get("reachable"):
+        raise CoreDaemonNotReachable(status)
     with socket.create_connection((ssh_host, ssh_port), timeout=5.0):
         pass
 
@@ -325,33 +325,6 @@ def start_dashboard_server(generate_callback=None):
                     response = {"status": "ok" if result.get("ok") else "error",
                                 "message": result.get("message", ""),
                                 "daemon_pids": result.get("daemon_pids", [])}
-                    code = 200 if result.get("ok") else 502
-                except Exception as e:
-                    response = {"status": "error", "error": str(e)}
-                    code = 400
-                self.send_response(code)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps(response).encode('utf-8'))
-
-            elif self.path == '/api/core/start_tunnel':
-                global _active_core_forward
-                content_length = int(self.headers['Content-Length'])
-                post_data = self.rfile.read(content_length)
-                try:
-                    params = json.loads(post_data.decode('utf-8'))
-                    if _active_core_forward is not None:
-                        _active_core_forward.close()
-                        _active_core_forward = None
-                    result = core_daemon.open_local_forward(
-                        params.get('grpc_host', ''), int(params.get('grpc_port', 0) or 0),
-                        params.get('ssh_host', ''), int(params.get('ssh_port', 22) or 22),
-                        params.get('username', ''), params.get('password', ''),
-                    )
-                    if result.get("ok"):
-                        _active_core_forward = result["forward"]
-                    response = {"status": "ok" if result.get("ok") else "error",
-                                "message": result.get("message", "")}
                     code = 200 if result.get("ok") else 502
                 except Exception as e:
                     response = {"status": "error", "error": str(e)}
