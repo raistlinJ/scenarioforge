@@ -844,17 +844,31 @@
                     <div class="term-output text-danger">${state.error}</div>`;
                 return;
             }
-            if (!state.iterations || state.iterations.length === 0) return;
+            // Raw server-side output (everything printed on the server terminal
+            // during this run, stdout and stderr both), shown ahead of any
+            // structured per-turn solver detail below it.
+            const termContent = document.getElementById('terminalContent');
+            const termWin = document.getElementById('terminalOutput');
+            const logLines = Array.isArray(state.log) ? state.log : [];
+            const logHtml = logLines.length
+                ? `<div class="term-output mb-3">${logLines.join('\n')}</div>` : '';
+
+            if (!state.iterations || state.iterations.length === 0) {
+                if (logHtml) {
+                    termContent.innerHTML = logHtml;
+                    termWin.scrollTop = termWin.scrollHeight;
+                }
+                return;
+            }
             const currentRun = state.iterations[state.iterations.length - 1];
-            
+
             // If solver data exists, we have live execution
             const solver = state.solver || {};
             const turns = solver.turns || [];
-            
+
             // 1. Terminal Feed
-            const termContent = document.getElementById('terminalContent');
-            if (turns.length > 0) {
-                termContent.innerHTML = turns.map(t => `
+            if (turns.length > 0 || logHtml) {
+                termContent.innerHTML = logHtml + turns.map(t => `
                     <div class="mb-3">
                         ${t.reasoning ? `<div class="term-reasoning">${t.reasoning}</div>` : ''}
                         <div><span class="term-prompt">root@${t.node}:~#</span> <span class="term-cmd">${t.command}</span></div>
@@ -863,7 +877,6 @@
                     </div>
                 `).join('');
                 // Auto scroll to bottom
-                const termWin = document.getElementById('terminalOutput');
                 termWin.scrollTop = termWin.scrollHeight;
             }
 
