@@ -639,10 +639,42 @@
                 });
                 const data = await res.json();
                 settingsValidation.core = res.ok && data.status === 'ok';
-                setValidationMessage('coreValidationStatus', settingsValidation.core ? data.message : (data.error || 'Core VM validation failed.'), settingsValidation.core);
+                if (!settingsValidation.core && res.status === 409 && data.can_start) {
+                    setValidationMessage('coreValidationStatus', data.error || 'core-daemon is not running.', false);
+                    if (confirm(`${data.error}\n\nStart core-daemon on ${payload.ssh_host} now?`)) {
+                        await startCoreDaemon(payload);
+                        return;
+                    }
+                } else {
+                    setValidationMessage('coreValidationStatus', settingsValidation.core ? data.message : (data.error || 'Core VM validation failed.'), settingsValidation.core);
+                }
             } catch (err) {
                 settingsValidation.core = false;
                 setValidationMessage('coreValidationStatus', `Core VM validation failed: ${err}`, false);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Validate Core VM';
+                updateRunAvailability();
+            }
+        }
+
+        async function startCoreDaemon(payload) {
+            const btn = document.getElementById('btnValidateCore');
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Starting core-daemon...';
+            try {
+                const res = await fetch('/api/core/start_daemon', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ssh_host: payload.ssh_host, ssh_port: payload.ssh_port, username: payload.username, password: payload.password })
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    setValidationMessage('coreValidationStatus', data.message, true);
+                    await validateCore();
+                    return;
+                }
+                setValidationMessage('coreValidationStatus', data.error || data.message || 'Failed to start core-daemon.', false);
+            } catch (err) {
+                setValidationMessage('coreValidationStatus', `Failed to start core-daemon: ${err}`, false);
             } finally {
                 btn.disabled = false;
                 btn.textContent = 'Validate Core VM';
