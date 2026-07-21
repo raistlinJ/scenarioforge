@@ -477,8 +477,14 @@
                 solverField(solver.id, 'label').value = solver.label;
                 solverField(solver.id, 'ssl').checked = solver.enforce_ssl;
                 solverField(solver.id, 'max-tokens').value = solver.max_tokens;
-                updateSolverProviderFields(solver.id);
+                // Populate the model <select> (and its value) before
+                // updateSolverProviderFields, which internally calls
+                // readSolverForm() and reads the <select>'s current value
+                // back into solver.model_id — done in the other order, that
+                // read hits the freshly-templated, still-optionless <select>
+                // and clobbers a restored model_id back to ''.
                 populateSolverModels(solver.id);
+                updateSolverProviderFields(solver.id);
             });
         }
 
