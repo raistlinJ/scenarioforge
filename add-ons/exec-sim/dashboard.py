@@ -1,9 +1,11 @@
+import contextlib
 import functools
 import http.server
 import json
 import os
 import shutil
 import socket
+import sys
 import threading
 import tempfile
 from collections import defaultdict
@@ -266,7 +268,11 @@ def start_dashboard_server(generate_callback=None):
                     params = {}
 
                 if _generate_callback:
-                    threading.Thread(target=_generate_callback, args=(params,), daemon=True).start()
+                    threading.Thread(
+                        target=run_generate_callback_with_log,
+                        args=(_generate_callback, params, config.DASHBOARD_DIR),
+                        daemon=True,
+                    ).start()
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
@@ -620,6 +626,91 @@ def write_dashboard_error(message, dashboard_dir, iteration=None):
         print(f"  [dashboard] Wrote error state -> {out_path}")
     except Exception as e:
         print(f"  [dashboard] File write failed: {e}")
+
+
+_MAX_LOG_LINES = 2000
+
+
+def _append_dashboard_log_line(line, dashboard_dir):
+    out_path = os.path.join(dashboard_dir, "dashboard_state.json")
+    try:
+        try:
+            with open(out_path) as f:
+                state = json.load(f)
+        except Exception:
+            state = {"iterations": []}
+        log = state.setdefault("log", [])
+        log.append(line)
+        if len(log) > _MAX_LOG_LINES:
+            del log[: len(log) - _MAX_LOG_LINES]
+        with open(out_path, "w") as f:
+            json.dump(state, f)
+    except Exception:
+        pass  # a logging failure must never break the run it's logging
+
+
+def reset_dashboard_run(dashboard_dir):
+    """Clear the terminal feed and any stale error at the start of a new run."""
+    out_path = os.path.join(dashboard_dir, "dashboard_state.json")
+    try:
+        os.makedirs(dashboard_dir, exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump({"iterations": [], "log": []}, f)
+    except Exception as e:
+        print(f"  [dashboard] File write failed: {e}")
+
+
+class DashboardLogTee:
+    """Duplicates writes to the real stdout (so the server terminal keeps
+    working exactly as before) while also appending each printed line to
+    dashboard_state.json, so the Web UI's terminal panel shows the same
+    output a user watching the server terminal would see."""
+
+    def __init__(self, original_stream, dashboard_dir):
+        self._original = original_stream
+        self._dashboard_dir = dashboard_dir
+        self._buffer = ""
+
+    def write(self, text):
+        self._original.write(text)
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            _append_dashboard_log_line(line, self._dashboard_dir)
+        return len(text)
+
+    def flush(self):
+        self._original.flush()
+
+    def isatty(self):
+        return False
+
+
+@contextlib.contextmanager
+def mirror_stdout_to_dashboard(dashboard_dir):
+    """Mirror everything printed inside this block — stdout *and* stderr, so
+    tracebacks (which `traceback.print_exc()` sends to stderr) show up too —
+    into dashboard_state.json's log, in addition to the real terminal, so the
+    Web UI's terminal panel shows the same output a user watching the server
+    terminal would see. Resets the terminal feed at entry, for a clean view
+    per run."""
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    reset_dashboard_run(dashboard_dir)
+    sys.stdout = DashboardLogTee(original_stdout, dashboard_dir)
+    sys.stderr = DashboardLogTee(original_stderr, dashboard_dir)
+    try:
+        yield
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+
+
+def run_generate_callback_with_log(callback, params, dashboard_dir):
+    """Run `callback(params)` with stdout mirrored into dashboard_state.json's
+    log, restoring the real stdout afterward no matter how it finishes."""
+    with mirror_stdout_to_dashboard(dashboard_dir):
+        callback(params)
 
 
 def write_solver_state(sim, nodes_visited, flags_found, attack_steps,

@@ -59,6 +59,7 @@ def solver_config(provider, model_id, api_key, label, url="", enforce_ssl=True, 
         "enforce_ssl": enforce_ssl,
         "max_tokens": max_tokens,
     }
+import dashboard
 from dashboard import (
     start_dashboard_server, parse_reference_graph, score_challenge_from_graph,
     hypothesize_why_obvious, build_claude_nodes, make_dashboard_data, update_dashboard_js,
@@ -693,11 +694,12 @@ if __name__ == "__main__":
         print(f"Solver    : {solver_models[0]['label']}")
         print(f"Loop      : {args.loop}")
         print(f"Dashboard : http://localhost:{config.DASHBOARD_PORT}/")
-        run_generate_and_solve(
-            difficulty=args.generate,
-            model_cfg=solver_models[0],
-            loop=args.loop,
-        )
+        with dashboard.mirror_stdout_to_dashboard(config.DASHBOARD_DIR):
+            run_generate_and_solve(
+                difficulty=args.generate,
+                model_cfg=solver_models[0],
+                loop=args.loop,
+            )
 
         print(f"\nGeneration + solve complete. Dashboard stays up at "
               f"http://localhost:{config.DASHBOARD_PORT}/")
