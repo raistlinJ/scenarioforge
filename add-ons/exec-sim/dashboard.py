@@ -16,6 +16,9 @@ from attack_graph import generator_for, validate_attack_graph
 
 _dashboard_server_started = False
 _generate_callback = None
+# Holds the active SSH forward, if any, so the background listener thread
+# stays alive for the process lifetime instead of being garbage-collected.
+_active_core_forward = None
 _LEGACY_SOLVER_ENV_KEYS = (
     "AGENT_LLMS_JSON",
     "AGENT_LLM_PROVIDER",
@@ -322,6 +325,33 @@ def start_dashboard_server(generate_callback=None):
                     response = {"status": "ok" if result.get("ok") else "error",
                                 "message": result.get("message", ""),
                                 "daemon_pids": result.get("daemon_pids", [])}
+                    code = 200 if result.get("ok") else 502
+                except Exception as e:
+                    response = {"status": "error", "error": str(e)}
+                    code = 400
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+
+            elif self.path == '/api/core/start_tunnel':
+                global _active_core_forward
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                try:
+                    params = json.loads(post_data.decode('utf-8'))
+                    if _active_core_forward is not None:
+                        _active_core_forward.close()
+                        _active_core_forward = None
+                    result = core_daemon.open_local_forward(
+                        params.get('grpc_host', ''), int(params.get('grpc_port', 0) or 0),
+                        params.get('ssh_host', ''), int(params.get('ssh_port', 22) or 22),
+                        params.get('username', ''), params.get('password', ''),
+                    )
+                    if result.get("ok"):
+                        _active_core_forward = result["forward"]
+                    response = {"status": "ok" if result.get("ok") else "error",
+                                "message": result.get("message", "")}
                     code = 200 if result.get("ok") else 502
                 except Exception as e:
                     response = {"status": "error", "error": str(e)}
