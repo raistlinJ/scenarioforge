@@ -37647,7 +37647,17 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         else:
             _update_plan_preview_in_xml(xml_path, scenario_name or scenario, plan_payload)
     except Exception:
-        pass
+        # Swallowed on purpose (the plan/preview payload above is still
+        # returned even if persisting it into the XML failed), but silently
+        # doing so left phases like flag-sequencing failing downstream with
+        # only "Preview plan not embedded in XML" and no way to see why.
+        try:
+            app.logger.exception(
+                '[planner] Failed to persist plan/preview into XML at %s (scenario=%s)',
+                xml_path, scenario_name or scenario,
+            )
+        except Exception:
+            pass
     if persist_plan_file:
         # JSON plan files are disabled; XML is the universal source.
         pass
