@@ -300,5 +300,81 @@ class AttackGraphFromFlowArtifactsDiagnosticsTests(unittest.TestCase):
             self.assertEqual(graph["scenario"], "contract")
 
 
+class RunScenarioforgePhaseEnvTests(unittest.TestCase):
+    """The scenarioforge.cli subprocess runs in a different project directory
+    (cli_cwd, the scenarioforge repo root) than this process's own
+    (add-ons/exec-sim). An inherited VIRTUAL_ENV pointing at exec-sim's venv
+    doesn't match what uv computes for that other project, so it must not be
+    forwarded — otherwise uv warns "VIRTUAL_ENV=... does not match the
+    project environment path" on every single phase."""
+
+    def test_virtual_env_is_not_forwarded_to_the_subprocess(self):
+        old_virtual_env = os.environ.get("VIRTUAL_ENV")
+        os.environ["VIRTUAL_ENV"] = "/some/exec-sim/.venv"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = os.path.join(temp_dir, "phase.log")
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    generator._run_scenarioforge_phase(
+                        "new",
+                        [sys.executable, "-c",
+                         "import os; print('VIRTUAL_ENV=' + repr(os.environ.get('VIRTUAL_ENV')))"],
+                        cwd=temp_dir, log_path=log_path,
+                    )
+                self.assertIn("VIRTUAL_ENV=None", buffer.getvalue())
+        finally:
+            if old_virtual_env is None:
+                os.environ.pop("VIRTUAL_ENV", None)
+            else:
+                os.environ["VIRTUAL_ENV"] = old_virtual_env
+
+
+class FlagSequencingTimeoutTests(unittest.TestCase):
+    """Without --flow-timeout-s, ScenarioForge falls back to its own internal
+    default (30s) for flag-sequencing's *entire* deadline — too tight once
+    more than one generator needs to run remotely over SSH. This must be
+    passed explicitly and be safely under SCENARIOFORGE_PHASE_TIMEOUT_S (the
+    outer subprocess timeout), so the phase can report its own timeout/best-
+    effort result instead of being killed from outside."""
+
+    def test_flag_sequencing_command_passes_a_generous_timeout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_output_dir = config.OUTPUT_DIR
+            config.OUTPUT_DIR = temp_dir
+            commands = []
+
+            def fake_phase(name, command, *, cwd, log_path, timeout_s=generator.SCENARIOFORGE_PHASE_TIMEOUT_S, allow_failure=False):
+                commands.append(command)
+                Path(log_path).write_text(f"{name}\n", encoding="utf-8")
+                output_path = Path(command[command.index("--plan-output") + 1])
+                if name == "new":
+                    Path(command[command.index("--xml") + 1]).write_text(
+                        "<Scenarios><Scenario name='contract'><ScenarioEditor>"
+                        "<section name='Services'><item selected='SSH'/></section>"
+                        "</ScenarioEditor></Scenario></Scenarios>", encoding="utf-8",
+                    )
+                if name == "flag-sequencing":
+                    output_path.write_text(json.dumps({"attack_graph": _graph()}), encoding="utf-8")
+                else:
+                    output_path.write_text("{}", encoding="utf-8")
+                output = 'CORE_SESSION_ID: 123\nVALIDATION_SUMMARY_JSON: {"ok": true}' if name == "execute" else ""
+                return (0, output) if allow_failure else output
+
+            try:
+                with patch.object(generator, "_run_scenarioforge_phase", side_effect=fake_phase):
+                    generator.generate_one_challenge(
+                        1, "easy", override_name="contract", gen_model_cfg={"provider": "dummy"},
+                    )
+            finally:
+                config.OUTPUT_DIR = old_output_dir
+
+            flag_sequencing_cmd = next(c for c in commands if c[5] == "flag-sequencing")
+            self.assertIn("--flow-timeout-s", flag_sequencing_cmd)
+            passed_timeout = int(flag_sequencing_cmd[flag_sequencing_cmd.index("--flow-timeout-s") + 1])
+            self.assertEqual(passed_timeout, generator.FLOW_SEQUENCING_TIMEOUT_S)
+            self.assertLess(passed_timeout, generator.SCENARIOFORGE_PHASE_TIMEOUT_S)
+
+
 if __name__ == "__main__":
     unittest.main()

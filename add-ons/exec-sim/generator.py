@@ -14,6 +14,12 @@ from llm import call_model
 
 
 SCENARIOFORGE_PHASE_TIMEOUT_S = 20 * 60
+# Budget for flag-sequencing's own internal deadline (ScenarioForge's
+# `--flow-timeout-s`), which covers resolving the chain and running every
+# assigned generator — potentially several, each over SSH. Kept safely under
+# SCENARIOFORGE_PHASE_TIMEOUT_S so the phase reports its own timeout/best-
+# effort result instead of being killed by the outer subprocess timeout.
+FLOW_SEQUENCING_TIMEOUT_S = 10 * 60
 
 
 def _run_scenarioforge_phase(
@@ -21,6 +27,13 @@ def _run_scenarioforge_phase(
 ):
     """Run one ScenarioForge phase and preserve its complete diagnostics."""
     env = os.environ.copy()
+    # This subprocess runs `uv run ...` in cwd (the scenarioforge repo root),
+    # a different project than this process's own (add-ons/exec-sim). An
+    # inherited VIRTUAL_ENV pointing at exec-sim's own venv doesn't match
+    # what uv computes for that other project, so uv warns on every single
+    # phase and ignores it anyway — drop it so uv resolves cwd's own venv
+    # cleanly instead.
+    env.pop("VIRTUAL_ENV", None)
     env.update({"NO_COLOR": "1", "PYTHONUNBUFFERED": "1"})
     try:
         result = subprocess.run(
@@ -385,6 +398,12 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
             "--flow-length", str(params["chain_length"]),
             "--flow-best-effort",
             "--plan-output", phase_paths["flow"],
+            # Without this, ScenarioForge falls back to its own internal
+            # default (30s) for the *entire* phase's deadline — too tight
+            # once more than one generator needs to run remotely over SSH,
+            # each of which first burns several round-trips just probing
+            # interpreter candidates before it can even start real work.
+            "--flow-timeout-s", str(FLOW_SEQUENCING_TIMEOUT_S),
         ]
 
         cmd_execute = [
