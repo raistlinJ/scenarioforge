@@ -9,6 +9,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
     """
     provider = model_cfg["provider"]
     model_id = model_cfg["id"]
+    max_tokens = int(model_cfg.get("max_tokens") or 2048)
 
     if messages is None:
         messages = [{"role": "user", "content": prompt}]
@@ -16,7 +17,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
     if provider == "anthropic":
         import anthropic as _ant
         _client = _ant.Anthropic(api_key=model_cfg.get("api_key") or config.ANTHROPIC_API_KEY)
-        kwargs = dict(model=model_id, max_tokens=2048, messages=messages)
+        kwargs = dict(model=model_id, max_tokens=max_tokens, messages=messages)
         if system_prompt:
             kwargs["system"] = system_prompt
         resp = _client.messages.create(**kwargs)
@@ -38,7 +39,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
         _reasoning_models = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini"}
         token_param = "max_completion_tokens" if model_id in _reasoning_models else "max_tokens"
         resp = _client.chat.completions.create(
-            model=model_id, messages=oai_msgs, **{token_param: 2048})
+            model=model_id, messages=oai_msgs, **{token_param: max_tokens})
         return resp.choices[0].message.content or ""
 
     elif provider == "vllm":
@@ -49,27 +50,27 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
             oai_msgs.append({"role": "system", "content": system_prompt})
         oai_msgs.extend(messages)
         resp = _client.chat.completions.create(
-            model=model_id, messages=oai_msgs, max_tokens=2048)
+            model=model_id, messages=oai_msgs, max_tokens=max_tokens)
         return (resp.choices[0].message.content or "") if resp.choices else ""
-        
+
     elif provider in ("openai-compatible", "ollama"):
         import openai
         import httpx
-        
+
         url = model_cfg.get("url")
         api_key = model_cfg.get("api_key") or "EMPTY"
         enforce_ssl = model_cfg.get("enforce_ssl", True)
-        
+
         http_client = httpx.Client(verify=enforce_ssl)
         _client = openai.OpenAI(api_key=api_key, base_url=url, http_client=http_client)
-        
+
         oai_msgs = []
         if system_prompt:
             oai_msgs.append({"role": "system", "content": system_prompt})
         oai_msgs.extend(messages)
-        
+
         resp = _client.chat.completions.create(
-            model=model_id, messages=oai_msgs, max_tokens=2048)
+            model=model_id, messages=oai_msgs, max_tokens=max_tokens)
         return (resp.choices[0].message.content or "") if resp.choices else ""
 
     elif provider == "huggingface":
@@ -82,7 +83,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
         if system_prompt:
             oai_msgs.append({"role": "system", "content": system_prompt})
         oai_msgs.extend(messages)
-        resp = _client.chat.completions.create(model="tgi", messages=oai_msgs, max_tokens=2048)
+        resp = _client.chat.completions.create(model="tgi", messages=oai_msgs, max_tokens=max_tokens)
         return resp.choices[0].message.content or ""
 
     else:
