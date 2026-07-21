@@ -304,18 +304,24 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
         else:
             params = plan_scenario(difficulty, model_cfg=gen_model_cfg)
 
-        xml_path = os.path.join(config.OUTPUT_DIR, f"{challenge_name}.xml")
+        # Resolved once, up front: the scenarioforge.cli subprocess below runs
+        # with a different cwd (the scenarioforge repo root) than this process,
+        # so a relative OUTPUT_DIR would have each side resolve --xml/--plan-
+        # output paths to two different locations. Absolute paths mean both
+        # sides agree on the same file regardless of either one's cwd.
+        output_dir = os.path.abspath(config.OUTPUT_DIR)
+        xml_path = os.path.join(output_dir, f"{challenge_name}.xml")
         cli_cwd = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         seed = random.SystemRandom().randint(1, 2**31 - 1)
         phase_paths = {
-            "new": os.path.join(config.OUTPUT_DIR, f"{challenge_name}_new.json"),
-            "preview": os.path.join(config.OUTPUT_DIR, f"{challenge_name}_preview-plan.json"),
-            "flow": os.path.join(config.OUTPUT_DIR, f"{challenge_name}_flag-sequencing.json"),
-            "execute": os.path.join(config.OUTPUT_DIR, f"{challenge_name}_execute.json"),
+            "new": os.path.join(output_dir, f"{challenge_name}_new.json"),
+            "preview": os.path.join(output_dir, f"{challenge_name}_preview-plan.json"),
+            "flow": os.path.join(output_dir, f"{challenge_name}_flag-sequencing.json"),
+            "execute": os.path.join(output_dir, f"{challenge_name}_execute.json"),
         }
 
         def phase_log(phase):
-            return os.path.join(config.OUTPUT_DIR, f"{challenge_name}_{phase}.log")
+            return os.path.join(output_dir, f"{challenge_name}_{phase}.log")
         
         # Use the documented, single-XML pipeline. The seed and phase artifacts
         # make the generated scenario reproducible and diagnostically complete.
@@ -391,7 +397,7 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
             _run_scenarioforge_phase("flag-sequencing", cmd_seq, cwd=cli_cwd, log_path=phase_log("flag-sequencing"))
 
             graph, graph_path = _attack_graph_from_flow_artifacts(xml_path, phase_paths["flow"])
-            solution_path = os.path.join(config.OUTPUT_DIR, f"{challenge_name}_solution.json")
+            solution_path = os.path.join(output_dir, f"{challenge_name}_solution.json")
             with open(solution_path, "w", encoding="utf-8") as handle:
                 json.dump(graph, handle, indent=2)
             print(f"    ✓ Saved Attack Graph v2 ({len(graph['nodes'])} nodes) to {solution_path}")
@@ -403,7 +409,7 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
         validation_summary = _last_marker_json(execute_output, "VALIDATION_SUMMARY_JSON:")
         session_id = _last_marker_value(execute_output, "CORE_SESSION_ID:")
         if isinstance(validation_summary, dict):
-            with open(os.path.join(config.OUTPUT_DIR, f"{challenge_name}_execute-validation.json"), "w", encoding="utf-8") as handle:
+            with open(os.path.join(output_dir, f"{challenge_name}_execute-validation.json"), "w", encoding="utf-8") as handle:
                 json.dump(validation_summary, handle, indent=2)
         if (execute_returncode != 0 or not session_id or not isinstance(validation_summary, dict)
                 or validation_summary.get("ok") is not True):
@@ -419,14 +425,14 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
             "validation_file": f"{challenge_name}_execute-validation.json",
             "core_session_id": session_id,
         }
-        meta_path = os.path.join(config.OUTPUT_DIR, f"{challenge_name}_meta.json")
+        meta_path = os.path.join(output_dir, f"{challenge_name}_meta.json")
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
 
         vuln_report = build_vuln_report(
             challenge_name, difficulty, params, solution_path=solution_path, xml_path=xml_path,
         )
-        vuln_path = os.path.join(config.OUTPUT_DIR, f"{challenge_name}_vulns.json")
+        vuln_path = os.path.join(output_dir, f"{challenge_name}_vulns.json")
         with open(vuln_path, "w") as f:
             json.dump(vuln_report, f, indent=2)
         print(f"    ✓ Saved {challenge_name}_vulns.json")
