@@ -34,7 +34,7 @@ SUPPORTED_SOLVER_PROVIDERS = (
 OLLAMA_OPENAI_BASE_URL = "http://localhost:11434/v1"
 
 
-def solver_config(provider, model_id, api_key, label, url="", enforce_ssl=True):
+def solver_config(provider, model_id, api_key, label, url="", enforce_ssl=True, max_tokens=2048):
     """Build the common model configuration used by CLI and dashboard runs."""
     if provider == "ollama":
         # Ollama exposes an OpenAI-compatible API locally and does not use a key.
@@ -43,6 +43,13 @@ def solver_config(provider, model_id, api_key, label, url="", enforce_ssl=True):
     elif provider == "openai-compatible" and not url:
         raise ValueError("--solver-url is required when --solver-provider is openai-compatible")
 
+    try:
+        max_tokens = int(max_tokens)
+    except (TypeError, ValueError):
+        max_tokens = 2048
+    if max_tokens < 1:
+        max_tokens = 2048
+
     return {
         "id": model_id,
         "provider": provider,
@@ -50,6 +57,7 @@ def solver_config(provider, model_id, api_key, label, url="", enforce_ssl=True):
         "label": label,
         "url": url,
         "enforce_ssl": enforce_ssl,
+        "max_tokens": max_tokens,
     }
 from dashboard import (
     start_dashboard_server, parse_reference_graph, score_challenge_from_graph,
@@ -462,6 +470,10 @@ if __name__ == "__main__":
                         help="Disable TLS certificate verification for an OpenAI-compatible or Ollama endpoint")
     parser.add_argument("--solver-label",    default="",
                         help="Human-readable label (auto-derived if omitted)")
+    parser.add_argument("--solver-max-tokens", type=int, default=2048,
+                        help="Max output tokens per completion (raise for reasoning/'thinking' "
+                             "models whose chain-of-thought can exhaust a small budget before "
+                             "producing a final answer)")
 
     parser.add_argument("--solver-provider2", default=None,
                         choices=SUPPORTED_SOLVER_PROVIDERS,
@@ -476,6 +488,8 @@ if __name__ == "__main__":
                         help="Disable TLS certificate verification for the second solver endpoint")
     parser.add_argument("--solver-label2",    default="",
                         help="Label for second solver")
+    parser.add_argument("--solver-max-tokens2", type=int, default=2048,
+                        help="Max output tokens per completion for the second solver")
 
     parser.add_argument("--solver-provider3", default=None,
                         choices=SUPPORTED_SOLVER_PROVIDERS,
@@ -490,6 +504,8 @@ if __name__ == "__main__":
                         help="Disable TLS certificate verification for the third solver endpoint")
     parser.add_argument("--solver-label3",    default="",
                         help="Label for third solver")
+    parser.add_argument("--solver-max-tokens3", type=int, default=2048,
+                        help="Max output tokens per completion for the third solver")
 
     parser.add_argument("--solve-dir", type=str, default=None,
                         help="Directory of pre-generated challenges to replay "
@@ -545,6 +561,7 @@ if __name__ == "__main__":
             args.solver_label or short_label(args.solver_model),
             args.solver_url,
             args.solver_enforce_ssl,
+            args.solver_max_tokens,
         )
         secondary_solvers = []
         for suffix in ("2", "3"):
@@ -558,6 +575,7 @@ if __name__ == "__main__":
                     getattr(args, f"solver_label{suffix}") or short_label(model),
                     getattr(args, f"solver_url{suffix}"),
                     getattr(args, f"solver_enforce_ssl{suffix}"),
+                    getattr(args, f"solver_max_tokens{suffix}"),
                 ))
     except ValueError as exc:
         parser.error(str(exc))
@@ -608,6 +626,7 @@ if __name__ == "__main__":
                     solver.get("label") or f"Solver {index}",
                     solver.get("url", ""),
                     solver.get("enforce_ssl", True),
+                    solver.get("max_tokens", 2048),
                 ))
             if mode == "directory":
                 source_dir = str(params.get("solve_dir", "")).strip()

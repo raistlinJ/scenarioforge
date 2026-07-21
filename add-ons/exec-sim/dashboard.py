@@ -44,6 +44,12 @@ def _normalize_solver_settings(solvers):
     for solver in solvers:
         if not isinstance(solver, dict):
             raise ValueError("Each solver setting must be an object")
+        try:
+            max_tokens = int(solver.get("max_tokens") or 2048)
+        except (TypeError, ValueError):
+            max_tokens = 2048
+        if max_tokens < 1:
+            max_tokens = 2048
         normalized.append({
             "label": str(solver.get("label", "")).strip(),
             "provider": str(solver.get("provider", "")).strip(),
@@ -51,6 +57,7 @@ def _normalize_solver_settings(solvers):
             "url": str(solver.get("url", "")).strip(),
             "api_key": str(solver.get("api_key", "")),
             "enforce_ssl": bool(solver.get("enforce_ssl", True)),
+            "max_tokens": max_tokens,
         })
     return normalized
 
@@ -573,6 +580,10 @@ def update_dashboard_js(data, dashboard_dir):
         except Exception:
             state = {"iterations": []}
 
+        # A prior failure's error shouldn't linger once a later run succeeds.
+        state.pop("error", None)
+        state.pop("error_iteration", None)
+
         existing = next((i for i in state["iterations"]
                          if i["iteration"] == data["iteration"]), None)
         if existing:
@@ -583,6 +594,30 @@ def update_dashboard_js(data, dashboard_dir):
         with open(out_path, "w") as f:
             json.dump(state, f)
         print(f"  [dashboard] Written iteration {data['iteration']} -> {out_path}")
+    except Exception as e:
+        print(f"  [dashboard] File write failed: {e}")
+
+
+def write_dashboard_error(message, dashboard_dir, iteration=None):
+    """Surface a generation/solve failure to the Web UI's terminal feed.
+
+    dashboard_state.json otherwise only gets written after a successful
+    solve (`update_dashboard_js`), so a failed run would leave the browser
+    polling forever with nothing to show — this gives it something to
+    render instead of hanging on stale placeholder text.
+    """
+    out_path = os.path.join(dashboard_dir, "dashboard_state.json")
+    try:
+        try:
+            with open(out_path) as f:
+                state = json.load(f)
+        except Exception:
+            state = {"iterations": []}
+        state["error"] = str(message)
+        state["error_iteration"] = iteration
+        with open(out_path, "w") as f:
+            json.dump(state, f)
+        print(f"  [dashboard] Wrote error state -> {out_path}")
     except Exception as e:
         print(f"  [dashboard] File write failed: {e}")
 

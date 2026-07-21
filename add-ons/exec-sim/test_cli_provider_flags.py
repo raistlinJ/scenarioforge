@@ -29,6 +29,19 @@ class CliProviderConfigTests(unittest.TestCase):
         self.assertEqual(cfg["api_key"], "key")
         self.assertFalse(cfg["enforce_ssl"])
 
+    def test_max_tokens_defaults_to_2048(self):
+        cfg = solver_config("ollama", "llama3", "ignored", "Llama")
+        self.assertEqual(cfg["max_tokens"], 2048)
+
+    def test_max_tokens_can_be_raised_for_reasoning_models(self):
+        cfg = solver_config("ollama", "llama3", "ignored", "Llama", max_tokens=8192)
+        self.assertEqual(cfg["max_tokens"], 8192)
+
+    def test_max_tokens_falls_back_to_default_when_invalid(self):
+        for bad_value in (0, -5, "not-a-number", None):
+            cfg = solver_config("ollama", "llama3", "ignored", "Llama", max_tokens=bad_value)
+            self.assertEqual(cfg["max_tokens"], 2048)
+
 
 if __name__ == "__main__":
     unittest.main()

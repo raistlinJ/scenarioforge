@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 import config
 import core_daemon
+import dashboard
 from attack_graph import load_attack_graph, extract_attack_graph_from_xml
 from llm import call_model
 
@@ -438,4 +439,5 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
     except Exception as e:
         print(f"\n  ✗ {challenge_name} FAILED: {e}")
         import traceback; traceback.print_exc()
+        dashboard.write_dashboard_error(str(e), config.DASHBOARD_DIR, iteration)
         return False

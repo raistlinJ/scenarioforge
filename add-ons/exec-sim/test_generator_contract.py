@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import config
+import dashboard
 import generator
 
 
@@ -127,6 +128,45 @@ class GeneratorContractTests(unittest.TestCase):
                 ("phase", "execute"),
                 ("tunnel", "close"),
             ])
+
+    def test_generation_failure_is_surfaced_to_the_dashboard_state_file(self):
+        """dashboard_state.json only gets written after a successful solve
+        (main.py's run_generate_and_solve), so without this a failed
+        generation would leave the Web UI's terminal panel frozen forever
+        with nothing to show — this writes the failure into the same file
+        the browser already polls."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_output_dir = config.OUTPUT_DIR
+            old_dashboard_dir = config.DASHBOARD_DIR
+            config.OUTPUT_DIR = temp_dir
+            config.DASHBOARD_DIR = temp_dir
+            try:
+                with patch.object(generator, "plan_scenario",
+                                   side_effect=RuntimeError("[planner] Generator model returned empty response")):
+                    ok = generator.generate_one_challenge(
+                        3, "easy", override_name="contract", gen_model_cfg={"provider": "openai-compatible"},
+                    )
+            finally:
+                config.OUTPUT_DIR = old_output_dir
+                config.DASHBOARD_DIR = old_dashboard_dir
+
+            self.assertFalse(ok)
+            state_path = Path(temp_dir) / "dashboard_state.json"
+            self.assertTrue(state_path.is_file())
+            state = json.loads(state_path.read_text())
+            self.assertIn("Generator model returned empty response", state["error"])
+            self.assertEqual(state["error_iteration"], 3)
+
+    def test_successful_run_clears_a_stale_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dashboard.write_dashboard_error("stale failure", temp_dir, iteration=1)
+            self.assertIn("error", json.loads((Path(temp_dir) / "dashboard_state.json").read_text()))
+
+            dashboard.update_dashboard_js({"iteration": 2}, temp_dir)
+
+            state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+            self.assertNotIn("error", state)
+            self.assertNotIn("error_iteration", state)
 
 
 if __name__ == "__main__":

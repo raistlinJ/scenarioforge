@@ -50,6 +50,7 @@ class ScenarioForgeEnvPathTests(unittest.TestCase):
                     "url": "http://localhost:11434/v1",
                     "api_key": "",
                     "enforce_ssl": True,
+                    "max_tokens": 4096,
                 }])
                 self.assertEqual(solver_path, os.path.join(temp_dir, "scenarioforge.solvers.yaml"))
                 self.assertEqual(dashboard._load_solver_settings(), [{
@@ -59,6 +60,7 @@ class ScenarioForgeEnvPathTests(unittest.TestCase):
                     "url": "http://localhost:11434/v1",
                     "api_key": "",
                     "enforce_ssl": True,
+                    "max_tokens": 4096,
                 }])
                 self.assertEqual(os.stat(solver_path).st_mode & 0o777, 0o600)
 

@@ -313,6 +313,7 @@
                 api_key: values.api_key || '',
                 label: values.label || '',
                 enforce_ssl: values.enforce_ssl !== false,
+                max_tokens: Number(values.max_tokens) > 0 ? Number(values.max_tokens) : 2048,
                 model_id: '',
                 models: [],
                 validated: false,
@@ -360,6 +361,8 @@
             solver.api_key = solverField(id, 'api-key').value;
             solver.label = solverField(id, 'label').value.trim();
             solver.enforce_ssl = solverField(id, 'ssl').checked;
+            solver.max_tokens = Number(solverField(id, 'max-tokens').value) > 0
+                ? Number(solverField(id, 'max-tokens').value) : 2048;
             solver.model_id = solverField(id, 'model').value;
             return solver;
         }
@@ -458,6 +461,11 @@
                       </label>
                       <select class="form-select bg-dark text-white border-secondary" id="solver-model-${solver.id}" disabled onchange="solverChanged(${solver.id})"></select>
                     </div>
+                    <div class="mb-3">
+                      <label class="form-label text-uppercase small text-secondary">Context Window <span class="text-lowercase">(max output tokens per completion)</span></label>
+                      <input type="number" class="form-control bg-dark text-white border-secondary" id="solver-max-tokens-${solver.id}" min="1" step="1" placeholder="2048" oninput="solverChanged(${solver.id})">
+                      <div class="form-text text-secondary small">Raise this for reasoning/"thinking" models whose chain-of-thought can exhaust a small budget before producing a final answer.</div>
+                    </div>
                   </div>
                   <button type="button" class="btn btn-outline-primary" id="solver-validate-${solver.id}" onclick="validateSolver(${solver.id})">Validate Solver</button>
                   <div id="solverValidationStatus-${solver.id}" class="small mt-2 text-secondary" role="status"></div>`;
@@ -468,6 +476,7 @@
                 solverField(solver.id, 'api-key').value = solver.api_key;
                 solverField(solver.id, 'label').value = solver.label;
                 solverField(solver.id, 'ssl').checked = solver.enforce_ssl;
+                solverField(solver.id, 'max-tokens').value = solver.max_tokens;
                 updateSolverProviderFields(solver.id);
                 populateSolverModels(solver.id);
             });
@@ -542,8 +551,8 @@
                 alert('Validate the Core VM and at least one complete solver before saving.');
                 return;
             }
-            const serializedSolvers = activeSolvers.map(({ provider, url, api_key, label, enforce_ssl, model_id }) =>
-                ({ provider, url: provider === 'anthropic' ? '' : url, api_key: provider === 'ollama' ? '' : api_key, label, enforce_ssl, model_id }));
+            const serializedSolvers = activeSolvers.map(({ provider, url, api_key, label, enforce_ssl, model_id, max_tokens }) =>
+                ({ provider, url: provider === 'anthropic' ? '' : url, api_key: provider === 'ollama' ? '' : api_key, label, enforce_ssl, model_id, max_tokens }));
             const payload = {
                 CORE_HOST: document.getElementById('coreGrpcHost').value,
                 CORE_PORT: document.getElementById('coreGrpcPort').value,
@@ -761,12 +770,13 @@
                 xml_path: xmlPath,
                 graph_path: graphPath,
                 solve_dir: solveDir,
-                solvers: activeSolvers.map(({ provider, url, api_key, label, enforce_ssl, model_id }, index) => ({
+                solvers: activeSolvers.map(({ provider, url, api_key, label, enforce_ssl, model_id, max_tokens }, index) => ({
                     provider,
                     url: provider === 'anthropic' ? '' : url,
                     api_key: provider === 'ollama' ? '' : api_key,
                     enforce_ssl,
                     model_id,
+                    max_tokens,
                     label: label || `Solver ${index + 1}`,
                 })),
             };
@@ -825,6 +835,15 @@
         }
 
         function renderDashboard(state) {
+            if (state.error) {
+                document.getElementById('terminalContent').innerHTML = `
+                    <div class="mb-2 text-danger">
+                        <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                        Generation failed${state.error_iteration ? ` (iteration ${state.error_iteration})` : ''}:
+                    </div>
+                    <div class="term-output text-danger">${state.error}</div>`;
+                return;
+            }
             if (!state.iterations || state.iterations.length === 0) return;
             const currentRun = state.iterations[state.iterations.length - 1];
             
