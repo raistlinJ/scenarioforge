@@ -314,8 +314,8 @@
                 label: values.label || '',
                 enforce_ssl: values.enforce_ssl !== false,
                 max_tokens: Number(values.max_tokens) > 0 ? Number(values.max_tokens) : 2048,
-                model_id: '',
-                models: [],
+                model_id: values.model_id || '',
+                models: values.model_id ? [values.model_id] : [],
                 validated: false,
             };
         }
@@ -539,7 +539,23 @@
                     const savedSolvers = Array.isArray(data._DASHBOARD_SOLVERS) ? data._DASHBOARD_SOLVERS : [];
                     solvers = savedSolvers.length ? savedSolvers.map(newSolver) : [newSolver()];
                     renderSolverTabs();
-                    setValidationMessage('coreValidationStatus', 'Validate this tab before running an evaluation.', false);
+                    updateRunAvailability();
+
+                    // Everything just loaded came from disk (.scenarioforge.env /
+                    // scenarioforge.solvers.yaml), so re-check it automatically
+                    // instead of making the user re-click Validate/Save on every
+                    // restart or page refresh for config that hasn't changed.
+                    if (coreIsComplete()) {
+                        await validateCore(false);
+                    } else {
+                        setValidationMessage('coreValidationStatus', 'Validate this tab before running an evaluation.', false);
+                    }
+                    await Promise.all(
+                        solvers.filter(solverIsComplete).map(solver => validateSolver(solver.id))
+                    );
+                    if (settingsValidation.core && validatedSolvers().length > 0) {
+                        settingsValidation.saved = true;
+                    }
                     updateRunAvailability();
                 }
             } catch (err) { console.error("Could not load settings:", err); }
@@ -630,7 +646,7 @@
             btn.disabled = false;
         }
         
-        async function validateCore() {
+        async function validateCore(interactive = true) {
             const btn = document.getElementById('btnValidateCore');
             const payload = {
                 grpc_host: document.getElementById('coreGrpcHost').value,
@@ -650,7 +666,9 @@
                 settingsValidation.core = res.ok && data.status === 'ok';
                 if (!settingsValidation.core && res.status === 409 && data.can_start) {
                     setValidationMessage('coreValidationStatus', data.error || 'core-daemon is not running.', false);
-                    if (confirm(`${data.error}\n\nStart core-daemon on ${payload.ssh_host} now?`)) {
+                    // Don't pop a confirm() dialog on a passive auto-check (e.g. page
+                    // load) — only when the user explicitly clicked Validate.
+                    if (interactive && confirm(`${data.error}\n\nStart core-daemon on ${payload.ssh_host} now?`)) {
                         await startCoreDaemon(payload);
                         return;
                     }
@@ -815,17 +833,30 @@
         async function pollState() {
             try {
                 const res = await fetch('dashboard_state.json?t=' + Date.now());
+                if (res.status === 404) {
+                    // No run has ever written a state file yet — the server is
+                    // reachable, it's just idle, not "disconnected".
+                    document.getElementById('navStatus').className = "badge bg-secondary";
+                    document.getElementById('navStatus').textContent = "Stopped";
+                    setTimeout(pollState, 1500);
+                    return;
+                }
                 if (!res.ok) throw new Error('State file not ready');
                 const state = await res.json();
-                
+
                 const currentStateStr = JSON.stringify(state);
                 if (currentStateStr !== lastStateStr) {
                     renderDashboard(state);
                     lastStateStr = currentStateStr;
                 }
-                
-                document.getElementById('navStatus').className = "badge bg-success pulse";
-                document.getElementById('navStatus').textContent = "Live";
+
+                if (state.status === 'running') {
+                    document.getElementById('navStatus').className = "badge bg-success pulse";
+                    document.getElementById('navStatus').textContent = "Live";
+                } else {
+                    document.getElementById('navStatus').className = "badge bg-secondary";
+                    document.getElementById('navStatus').textContent = "Stopped";
+                }
             } catch (err) {
                 document.getElementById('navStatus').className = "badge bg-warning";
                 document.getElementById('navStatus').textContent = "Disconnected";

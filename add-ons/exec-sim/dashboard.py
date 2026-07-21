@@ -655,7 +655,22 @@ def reset_dashboard_run(dashboard_dir):
     try:
         os.makedirs(dashboard_dir, exist_ok=True)
         with open(out_path, "w") as f:
-            json.dump({"iterations": [], "log": []}, f)
+            json.dump({"iterations": [], "log": [], "status": "running"}, f)
+    except Exception as e:
+        print(f"  [dashboard] File write failed: {e}")
+
+
+def set_dashboard_status(status, dashboard_dir):
+    out_path = os.path.join(dashboard_dir, "dashboard_state.json")
+    try:
+        try:
+            with open(out_path) as f:
+                state = json.load(f)
+        except Exception:
+            state = {"iterations": []}
+        state["status"] = status
+        with open(out_path, "w") as f:
+            json.dump(state, f)
     except Exception as e:
         print(f"  [dashboard] File write failed: {e}")
 
@@ -704,6 +719,7 @@ def mirror_stdout_to_dashboard(dashboard_dir):
     finally:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
+        set_dashboard_status("stopped", dashboard_dir)
 
 
 def run_generate_callback_with_log(callback, params, dashboard_dir):

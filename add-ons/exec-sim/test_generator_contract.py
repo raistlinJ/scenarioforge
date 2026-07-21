@@ -1,5 +1,6 @@
 import contextlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -167,6 +168,54 @@ class GeneratorContractTests(unittest.TestCase):
             state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
             self.assertNotIn("error", state)
             self.assertNotIn("error_iteration", state)
+
+    def test_relative_output_dir_resolves_to_the_same_absolute_path_the_cli_subprocess_sees(self):
+        """The scenarioforge.cli subprocess runs with cwd=cli_cwd (the
+        scenarioforge repo root), a different directory than this process's
+        own cwd. A relative OUTPUT_DIR would have each side resolve --xml/
+        --plan-output to two different locations — this pins that every path
+        handed to the subprocess is absolute, so both sides agree."""
+        old_output_dir = config.OUTPUT_DIR
+        old_cwd = os.getcwd()
+        commands = []
+
+        def fake_phase(name, command, *, cwd, log_path, timeout_s=generator.SCENARIOFORGE_PHASE_TIMEOUT_S, allow_failure=False):
+            commands.append(command)
+            self.assertTrue(os.path.isabs(log_path), f"log_path not absolute: {log_path}")
+            output_path = Path(command[command.index("--plan-output") + 1])
+            if name == "new":
+                xml_path = Path(command[command.index("--xml") + 1])
+                self.assertTrue(xml_path.is_absolute(), f"--xml not absolute: {xml_path}")
+                xml_path.write_text(
+                    "<Scenarios><Scenario name='contract'><ScenarioEditor>"
+                    "<section name='Services'><item selected='SSH'/></section>"
+                    "</ScenarioEditor></Scenario></Scenarios>", encoding="utf-8",
+                )
+            if name == "flag-sequencing":
+                output_path.write_text(json.dumps({"attack_graph": _graph()}), encoding="utf-8")
+            else:
+                output_path.write_text("{}", encoding="utf-8")
+            output = 'CORE_SESSION_ID: 123\nVALIDATION_SUMMARY_JSON: {"ok": true}' if name == "execute" else ""
+            return (0, output) if allow_failure else output
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                os.makedirs("relative_output", exist_ok=True)
+                config.OUTPUT_DIR = "./relative_output"
+                with patch.object(generator, "_run_scenarioforge_phase", side_effect=fake_phase):
+                    ok = generator.generate_one_challenge(
+                        1, "easy", override_name="contract", gen_model_cfg={"provider": "dummy"},
+                    )
+            finally:
+                os.chdir(old_cwd)
+                config.OUTPUT_DIR = old_output_dir
+
+        self.assertTrue(ok)
+        for command in commands:
+            for flag in ("--xml", "--plan-output"):
+                if flag in command:
+                    self.assertTrue(os.path.isabs(command[command.index(flag) + 1]))
 
 
 if __name__ == "__main__":

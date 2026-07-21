@@ -52,7 +52,17 @@ class ResetDashboardRunTests(unittest.TestCase):
             dashboard.write_dashboard_error("old failure", temp_dir, iteration=1)
             dashboard.reset_dashboard_run(temp_dir)
             state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
-        self.assertEqual(state, {"iterations": [], "log": []})
+        self.assertEqual(state, {"iterations": [], "log": [], "status": "running"})
+
+
+class SetDashboardStatusTests(unittest.TestCase):
+    def test_sets_status_without_disturbing_other_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dashboard.update_dashboard_js({"iteration": 1}, temp_dir)
+            dashboard.set_dashboard_status("stopped", temp_dir)
+            state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+        self.assertEqual(state["status"], "stopped")
+        self.assertEqual(len(state["iterations"]), 1)
 
 
 class MirrorStdoutToDashboardTests(unittest.TestCase):
@@ -68,15 +78,25 @@ class MirrorStdoutToDashboardTests(unittest.TestCase):
             state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
         self.assertIn("hello from the run", state["log"])
 
-    def test_stdout_and_stderr_are_restored_even_if_the_block_raises(self):
+    def test_status_is_running_during_the_block_and_stopped_after(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with dashboard.mirror_stdout_to_dashboard(temp_dir):
+                mid_run_state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+            after_run_state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+        self.assertEqual(mid_run_state["status"], "running")
+        self.assertEqual(after_run_state["status"], "stopped")
+
+    def test_status_becomes_stopped_even_if_the_block_raises(self):
         original_stdout = sys.stdout
         original_stderr = sys.stderr
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaises(ValueError):
                 with dashboard.mirror_stdout_to_dashboard(temp_dir):
                     raise ValueError("boom")
+            state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
         self.assertIs(sys.stdout, original_stdout)
         self.assertIs(sys.stderr, original_stderr)
+        self.assertEqual(state["status"], "stopped")
 
     def test_run_generate_callback_with_log_captures_callback_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
