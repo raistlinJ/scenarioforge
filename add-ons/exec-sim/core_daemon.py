@@ -8,11 +8,19 @@ actually expects, without depending on the webapp process being up.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import select
 import socket
 import socketserver
 import threading
-from typing import Any
+from typing import Any, Iterator, Optional
+
+# paramiko logs its own transport-level failures (e.g. "Socket exception:
+# Broken pipe" when an SSH connection dies) straight to stderr by default.
+# Our own SSH usage is already short-lived and its failures are caught and
+# reported with clearer messages, so silence the redundant raw internal log.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 
 def scrub_password_echo(text: str, password: str | None) -> str:
@@ -101,8 +109,9 @@ def check_core_daemon(grpc_host: str, grpc_port: int, ssh_host: str, ssh_port: i
 
     Returns a dict always containing "reachable". When not reachable, it also
     distinguishes "daemon is down on the CORE VM" (offer to start it) from
-    "daemon is already up but this host can't reach the gRPC port" (an SSH
-    tunnel or CORE_HOST value problem, not something a restart fixes).
+    "daemon is already up but this host can't reach the gRPC port" (reachable
+    only via a short-lived SSH tunnel, e.g. `core_daemon.core_connection`,
+    rather than something a restart fixes).
     """
     if tcp_port_reachable(grpc_host, grpc_port, timeout=timeout):
         return {"reachable": True}
@@ -147,9 +156,8 @@ def check_core_daemon(grpc_host: str, grpc_port: int, ssh_host: str, ssh_port: i
             "message": (
                 f"core-daemon is already running on {ssh_host} (pid {', '.join(map(str, pids))}), "
                 f"but {grpc_host}:{grpc_port} isn't reachable from here. This usually means "
-                "core-daemon only listens on the VM's loopback interface — open an SSH tunnel "
-                f"(e.g. `ssh -N -L {grpc_port}:127.0.0.1:{grpc_port} {username}@{ssh_host}`) rather "
-                "than restarting the daemon."
+                "core-daemon only listens on the VM's loopback interface — a short-lived SSH "
+                "tunnel is opened automatically around each run's CORE phases to reach it."
             ),
         }
 
@@ -333,3 +341,46 @@ def open_local_forward(grpc_host: str, grpc_port: int, ssh_host: str, ssh_port: 
         "forward": forward,
         "message": f"SSH tunnel open: {grpc_host}:{grpc_port} -> {ssh_host} -> 127.0.0.1:{grpc_port}.",
     }
+
+
+@contextlib.contextmanager
+def core_connection(grpc_host: str, grpc_port: str | int, ssh_host: str, ssh_port: str | int,
+                     username: str, password: str) -> Iterator[Optional["LocalForward"]]:
+    """Ensure CORE_HOST:CORE_PORT is reachable for exactly the duration of the
+    `with` block, opening a short-lived SSH tunnel only if needed and closing
+    it immediately on exit — mirroring how ScenarioForge's own webapp scopes
+    its SSH tunnels per CORE operation (`_core_connection_via_ssh`) rather
+    than holding one open for a whole run.
+
+    Callers with other LAN-dependent work (e.g. solver LLM calls) should keep
+    that work outside this block: nothing here is held open a moment longer
+    than the CORE-facing calls actually need it, so it can't disrupt work
+    that happens before or after.
+    """
+    grpc_host = str(grpc_host or "").strip()
+    grpc_port_str = str(grpc_port or "").strip()
+    if not grpc_host or not grpc_port_str:
+        yield None
+        return
+    grpc_port_int = int(grpc_port_str)
+    if tcp_port_reachable(grpc_host, grpc_port_int):
+        yield None
+        return
+
+    ssh_host = str(ssh_host or "").strip()
+    username = str(username or "").strip()
+    if not ssh_host or not username:
+        # Nothing we can do about it here; let the CORE-facing call the
+        # caller makes next surface the real connection error.
+        yield None
+        return
+
+    ssh_port_int = int(str(ssh_port or 22).strip() or 22)
+    result = open_local_forward(grpc_host, grpc_port_int, ssh_host, ssh_port_int, username, password)
+    if not result.get("ok"):
+        raise RuntimeError(result.get("message", f"Failed to open SSH tunnel to {ssh_host}"))
+    forward = result["forward"]
+    try:
+        yield forward
+    finally:
+        forward.close()

@@ -176,11 +176,59 @@ class LocalForwardProxyTests(unittest.TestCase):
         self.assertIs(result["forward"], fake_forward)
 
 
+class CoreConnectionScopingTests(unittest.TestCase):
+    """core_connection() must only open/hold a tunnel for the duration of its
+    `with` block, and never when CORE is already directly reachable."""
+
+    def test_yields_without_ssh_when_already_reachable(self):
+        with patch.object(core_daemon, "tcp_port_reachable", return_value=True), \
+             patch.object(core_daemon, "open_local_forward") as open_mock:
+            with core_daemon.core_connection("127.0.0.1", 50051, "12.0.0.100", 22, "user", "pass") as forward:
+                self.assertIsNone(forward)
+        open_mock.assert_not_called()
+
+    def test_yields_without_ssh_when_no_ssh_host_configured(self):
+        with patch.object(core_daemon, "tcp_port_reachable", return_value=False), \
+             patch.object(core_daemon, "open_local_forward") as open_mock:
+            with core_daemon.core_connection("127.0.0.1", 50051, "", 22, "", "") as forward:
+                self.assertIsNone(forward)
+        open_mock.assert_not_called()
+
+    def test_opens_and_closes_tunnel_scoped_to_the_with_block(self):
+        fake_forward = MagicMock()
+        with patch.object(core_daemon, "tcp_port_reachable", return_value=False), \
+             patch.object(core_daemon, "open_local_forward",
+                           return_value={"ok": True, "forward": fake_forward}) as open_mock:
+            with core_daemon.core_connection("127.0.0.1", 50051, "12.0.0.100", 22, "user", "pass") as forward:
+                self.assertIs(forward, fake_forward)
+                fake_forward.close.assert_not_called()
+            open_mock.assert_called_once_with("127.0.0.1", 50051, "12.0.0.100", 22, "user", "pass")
+        fake_forward.close.assert_called_once()
+
+    def test_closes_tunnel_even_when_the_block_raises(self):
+        fake_forward = MagicMock()
+        with patch.object(core_daemon, "tcp_port_reachable", return_value=False), \
+             patch.object(core_daemon, "open_local_forward",
+                           return_value={"ok": True, "forward": fake_forward}):
+            with self.assertRaises(ValueError):
+                with core_daemon.core_connection("127.0.0.1", 50051, "12.0.0.100", 22, "user", "pass"):
+                    raise ValueError("CLI phase failed")
+        fake_forward.close.assert_called_once()
+
+    def test_raises_when_tunnel_fails_to_open(self):
+        with patch.object(core_daemon, "tcp_port_reachable", return_value=False), \
+             patch.object(core_daemon, "open_local_forward",
+                           return_value={"ok": False, "message": "auth failed"}):
+            with self.assertRaises(RuntimeError):
+                with core_daemon.core_connection("127.0.0.1", 50051, "12.0.0.100", 22, "user", "pass"):
+                    pass
+
+
 class DashboardValidateCoreTests(unittest.TestCase):
     def test_validate_core_connection_raises_daemon_not_reachable_with_details(self):
-        details = {"reachable": False, "can_start": True, "message": "core-daemon is not running on 12.0.0.100."}
-        with patch.object(dashboard.core_daemon, "tcp_port_reachable", return_value=False), \
-             patch.object(dashboard.core_daemon, "check_core_daemon", return_value=details):
+        details = {"reachable": False, "can_start": True,
+                   "message": "core-daemon is not running on 12.0.0.100."}
+        with patch.object(dashboard.core_daemon, "check_core_daemon", return_value=details):
             with self.assertRaises(dashboard.CoreDaemonNotReachable) as ctx:
                 dashboard._validate_core_connection(
                     "127.0.0.1", 50051, "12.0.0.100", 22, "user", "pass",

@@ -646,11 +646,16 @@
                         return;
                     }
                 } else if (!settingsValidation.core && res.status === 409 && data.can_tunnel) {
-                    setValidationMessage('coreValidationStatus', data.error || 'core-daemon is unreachable.', false);
-                    if (confirm(`${data.error}\n\nOpen an SSH tunnel to ${payload.ssh_host} now?`)) {
-                        await startCoreTunnel(payload);
-                        return;
-                    }
+                    // core-daemon is confirmed running over SSH; a short-lived tunnel is
+                    // opened automatically around each run's CORE phases (and closed
+                    // right after), so this is a pass rather than something to fix here.
+                    settingsValidation.core = true;
+                    setValidationMessage(
+                        'coreValidationStatus',
+                        `core-daemon confirmed running on ${payload.ssh_host} (reachable via a short-lived ` +
+                        'SSH tunnel opened automatically during each run).',
+                        true,
+                    );
                 } else {
                     setValidationMessage('coreValidationStatus', settingsValidation.core ? data.message : (data.error || 'Core VM validation failed.'), settingsValidation.core);
                 }
@@ -681,30 +686,6 @@
                 setValidationMessage('coreValidationStatus', data.error || data.message || 'Failed to start core-daemon.', false);
             } catch (err) {
                 setValidationMessage('coreValidationStatus', `Failed to start core-daemon: ${err}`, false);
-            } finally {
-                btn.disabled = false;
-                btn.textContent = 'Validate Core VM';
-                updateRunAvailability();
-            }
-        }
-
-        async function startCoreTunnel(payload) {
-            const btn = document.getElementById('btnValidateCore');
-            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Opening SSH tunnel...';
-            try {
-                const res = await fetch('/api/core/start_tunnel', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const data = await res.json();
-                if (res.ok && data.status === 'ok') {
-                    setValidationMessage('coreValidationStatus', data.message, true);
-                    await validateCore();
-                    return;
-                }
-                setValidationMessage('coreValidationStatus', data.error || data.message || 'Failed to open SSH tunnel.', false);
-            } catch (err) {
-                setValidationMessage('coreValidationStatus', `Failed to open SSH tunnel: ${err}`, false);
             } finally {
                 btn.disabled = false;
                 btn.textContent = 'Validate Core VM';
