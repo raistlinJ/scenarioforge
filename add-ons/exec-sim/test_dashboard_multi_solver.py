@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import config
+import dashboard
 import main
 
 
@@ -71,6 +72,31 @@ class DashboardMultiSolverTests(unittest.TestCase):
                 main.run_generate_and_solve("easy", [first, second])
 
         self.assertEqual([call.args[2] for call in solve_mock.call_args_list], [first, second])
+
+
+class StartDashboardServerTests(unittest.TestCase):
+    def test_generate_callback_is_wired_to_the_module_global(self):
+        """Regression test: start_dashboard_server previously accepted a
+        generate_callback argument but never assigned it to the module-level
+        _generate_callback the request handler actually reads, so clicking
+        "Start Run" silently did nothing — the thread never started, but the
+        handler still returned 200 "started"."""
+        old_started = dashboard._dashboard_server_started
+        old_callback = dashboard._generate_callback
+        old_dashboard_dir = config.DASHBOARD_DIR
+        dashboard._dashboard_server_started = False
+        dashboard._generate_callback = None
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                config.DASHBOARD_DIR = temp_dir
+                sentinel_callback = lambda params: None
+                with patch("http.server.ThreadingHTTPServer"):
+                    dashboard.start_dashboard_server(sentinel_callback)
+            self.assertIs(dashboard._generate_callback, sentinel_callback)
+        finally:
+            dashboard._dashboard_server_started = old_started
+            dashboard._generate_callback = old_callback
+            config.DASHBOARD_DIR = old_dashboard_dir
 
 
 if __name__ == "__main__":
