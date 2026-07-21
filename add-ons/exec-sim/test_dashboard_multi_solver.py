@@ -99,5 +99,45 @@ class StartDashboardServerTests(unittest.TestCase):
             config.DASHBOARD_DIR = old_dashboard_dir
 
 
+class ChallengeNameSanitizationTests(unittest.TestCase):
+    """ScenarioForge's own XML writer (_sanitize_scenario_name_strict) strips
+    every non-alphanumeric character from a scenario name before storing it,
+    but later phases look it back up using the original, unstripped name —
+    any punctuation here makes that lookup silently fail downstream with
+    "ScenarioEditor not found". Generated challenge/scenario names must stay
+    purely alphanumeric to avoid that write/read mismatch."""
+
+    def test_generated_challenge_name_has_no_punctuation(self):
+        solver = {"id": "m", "provider": "dummy", "label": "Solver"}
+        captured = []
+
+        def fake_generate(_iteration, _difficulty, override_name, gen_model_cfg):
+            captured.append(override_name)
+            return False  # short-circuit; we only care about the name passed in
+
+        with patch.object(main, "generate_one_challenge", side_effect=fake_generate):
+            main.run_generate_and_solve(
+                "easy", [solver], loop=1, challenge_prefix="My_Custom Prefix!",
+            )
+
+        self.assertEqual(len(captured), 1)
+        self.assertRegex(captured[0], r"^[A-Za-z0-9]+$")
+        self.assertTrue(captured[0].startswith("MyCustomPrefix"))
+
+    def test_empty_or_fully_punctuation_prefix_falls_back_to_generated(self):
+        solver = {"id": "m", "provider": "dummy", "label": "Solver"}
+        captured = []
+
+        def fake_generate(_iteration, _difficulty, override_name, gen_model_cfg):
+            captured.append(override_name)
+            return False
+
+        with patch.object(main, "generate_one_challenge", side_effect=fake_generate):
+            main.run_generate_and_solve("easy", [solver], loop=1, challenge_prefix="___---")
+
+        self.assertTrue(captured[0].startswith("Generated"))
+        self.assertRegex(captured[0], r"^[A-Za-z0-9]+$")
+
+
 if __name__ == "__main__":
     unittest.main()

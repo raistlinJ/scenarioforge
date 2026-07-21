@@ -297,7 +297,10 @@ def build_vuln_report(challenge_name, difficulty, params, solution_path=None, xm
 
 def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_cfg=None):
     try:
-        challenge_name = override_name or f"Generated_{int(time.time())}"
+        # Kept purely alphanumeric — see the matching comment in main.py's
+        # run_generate_and_solve for why punctuation here breaks ScenarioForge's
+        # own scenario-name lookup downstream.
+        challenge_name = override_name or f"Generated{int(time.time())}"
         print(f"\n{'='*60}")
         print(f"  [{iteration}] Generating {difficulty.upper()} scenario: {challenge_name}")
         print(f"{'='*60}")
