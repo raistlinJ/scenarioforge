@@ -1,6 +1,8 @@
 import contextlib
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -216,6 +218,42 @@ class GeneratorContractTests(unittest.TestCase):
             for flag in ("--xml", "--plan-output"):
                 if flag in command:
                     self.assertTrue(os.path.isabs(command[command.index(flag) + 1]))
+
+
+class RunScenarioforgePhaseOutputTests(unittest.TestCase):
+    """The scenarioforge.cli subprocess's own stdout/stderr was previously
+    only written to a per-phase .log file and never shown anywhere live —
+    when a phase "succeeds" (exit 0) but didn't actually do what's needed
+    (e.g. an unresolved flow), that captured output is the only diagnostic
+    explaining why. It must be printed so it flows into both the real
+    terminal and the dashboard's mirrored log."""
+
+    def test_captured_subprocess_output_is_printed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "phase.log")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                generator._run_scenarioforge_phase(
+                    "new",
+                    [sys.executable, "-c", "print('hello from the cli subprocess')"],
+                    cwd=temp_dir, log_path=log_path,
+                )
+            self.assertIn("hello from the cli subprocess", buffer.getvalue())
+            self.assertIn("scenarioforge.cli new output", buffer.getvalue())
+
+    def test_captured_output_is_printed_even_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "phase.log")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(RuntimeError):
+                    generator._run_scenarioforge_phase(
+                        "flag-sequencing",
+                        [sys.executable, "-c",
+                         "import sys; print('partial resolution, 1 of 3 steps unresolved'); sys.exit(1)"],
+                        cwd=temp_dir, log_path=log_path,
+                    )
+            self.assertIn("partial resolution, 1 of 3 steps unresolved", buffer.getvalue())
 
 
 if __name__ == "__main__":
