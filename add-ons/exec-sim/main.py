@@ -152,10 +152,17 @@ def run_generate_and_solve(difficulty: str, model_cfgs, loop: int = 1,
         raise ValueError("At least one solver configuration is required")
 
     generator_model_cfg = model_cfgs[0]
-    challenge_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", challenge_prefix).strip("._") or "Generated"
+    # ScenarioForge's own XML writer (_sanitize_scenario_name_strict) strips
+    # every non-alphanumeric character from a scenario name before storing
+    # it, but later phases look the scenario back up using the original,
+    # unstripped name — any punctuation here (including the underscores this
+    # used to join with) makes that lookup silently fail with "ScenarioEditor
+    # not found" / "Preview plan not embedded in XML". Keeping this pure
+    # alphanumeric sidesteps the mismatch entirely.
+    challenge_prefix = re.sub(r"[^A-Za-z0-9]+", "", challenge_prefix) or "Generated"
 
     for i in range(loop):
-        challenge_name = f"{challenge_prefix}_{int(time.time())}_{i+1}"
+        challenge_name = f"{challenge_prefix}{int(time.time())}{i+1}"
 
         gen_ok = generate_one_challenge(
             i + 1, difficulty,
