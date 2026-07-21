@@ -5,6 +5,7 @@
 #     "jsonschema>=4.21.1",
 #     "openai",
 #     "PyYAML>=6.0",
+#     "paramiko>=3.4",
 # ]
 # ///
 
@@ -18,6 +19,7 @@ import time
 
 from attack_graph import load_attack_graph
 import config
+import core_daemon
 
 
 SUPPORTED_SOLVER_PROVIDERS = (
@@ -60,6 +62,42 @@ from simulator import solve_challenge_with_model
 from utils import discover_challenges, short_label, next_run_dir
 
 _iteration_counter = 0
+
+def ensure_core_daemon_ready():
+    """Check that CORE_HOST:CORE_PORT is reachable and, if not, offer to start
+    core-daemon over SSH using CORE_SSH_* from the loaded environment file.
+
+    Returns True if the run should proceed, False if it should abort."""
+    grpc_host = os.environ.get("CORE_HOST", "").strip()
+    grpc_port = os.environ.get("CORE_PORT", "").strip()
+    ssh_host = os.environ.get("CORE_SSH_HOST", "").strip()
+    ssh_port = os.environ.get("CORE_SSH_PORT", "22").strip()
+    ssh_username = os.environ.get("CORE_SSH_USERNAME", "").strip()
+    ssh_password = os.environ.get("CORE_SSH_PASSWORD", "")
+    if not grpc_host or not grpc_port:
+        return True  # nothing configured to check yet; let the CLI pipeline report it
+
+    status = core_daemon.check_core_daemon(
+        grpc_host, int(grpc_port), ssh_host, int(ssh_port or 22), ssh_username, ssh_password
+    )
+    if status.get("reachable"):
+        return True
+
+    print(f"[core] {status.get('message', 'CORE gRPC endpoint is not reachable.')}")
+    if not status.get("can_start"):
+        return False
+
+    try:
+        answer = input(f"Start core-daemon on {ssh_host} now? [y/N]: ").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer not in ("y", "yes"):
+        return False
+
+    result = core_daemon.start_core_daemon(ssh_host, int(ssh_port or 22), ssh_username, ssh_password)
+    print(f"[core] {result.get('message', '')}")
+    return bool(result.get("ok"))
+
 
 def load_scenarioforge_env(env_path=None):
     env_path = os.path.abspath(env_path or config.SCENARIOFORGE_ENV_PATH)
@@ -615,6 +653,8 @@ if __name__ == "__main__":
             print("\nStopped.")
 
     elif args.generate:
+        if not ensure_core_daemon_ready():
+            sys.exit("Error: CORE gRPC endpoint is not reachable; aborting generation.")
         print(f"Mode      : generate + solve")
         print(f"Difficulty: {args.generate}")
         print(f"Solver    : {solver_models[0]['label']}")

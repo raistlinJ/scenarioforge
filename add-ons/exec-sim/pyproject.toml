@@ -9,4 +9,5 @@ dependencies = [
     "openai",
     "httpx",
     "PyYAML>=6.0",
+    "paramiko>=3.4",
 ]

@@ -11,6 +11,7 @@ from collections import defaultdict
 import yaml
 
 import config
+import core_daemon
 from attack_graph import generator_for, validate_attack_graph
 
 _dashboard_server_started = False
@@ -125,6 +126,14 @@ def _fetch_anthropic_models(api_key):
     return [model["id"] for model in models if isinstance(model, dict) and model.get("id")]
 
 
+class CoreDaemonNotReachable(Exception):
+    """grpc_host:grpc_port isn't reachable; `details` carries the SSH diagnosis."""
+
+    def __init__(self, details):
+        super().__init__(details.get("message", "CORE gRPC endpoint is not reachable"))
+        self.details = details
+
+
 def _validate_core_connection(grpc_host, grpc_port, ssh_host, ssh_port, username, password):
     """Validate the CLI-equivalent CORE gRPC and SSH connection inputs."""
     grpc_host = str(grpc_host or "").strip()
@@ -143,8 +152,9 @@ def _validate_core_connection(grpc_host, grpc_port, ssh_host, ssh_port, username
 
     # This verifies both transports are reachable. ScenarioForge itself
     # authenticates to CORE and performs its full preflight during execution.
-    with socket.create_connection((grpc_host, grpc_port), timeout=5.0):
-        pass
+    if not core_daemon.tcp_port_reachable(grpc_host, grpc_port, timeout=5.0):
+        details = core_daemon.check_core_daemon(grpc_host, grpc_port, ssh_host, ssh_port, username, password)
+        raise CoreDaemonNotReachable(details)
     with socket.create_connection((ssh_host, ssh_port), timeout=5.0):
         pass
 
@@ -289,6 +299,30 @@ def start_dashboard_server(generate_callback=None):
 
                     response = {"status": "ok", "message": "CORE gRPC and SSH ports are reachable."}
                     code = 200
+                except CoreDaemonNotReachable as e:
+                    response = {"status": "error", "error": e.details.get("message", str(e)), **e.details}
+                    code = 409
+                except Exception as e:
+                    response = {"status": "error", "error": str(e)}
+                    code = 400
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+
+            elif self.path == '/api/core/start_daemon':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                try:
+                    params = json.loads(post_data.decode('utf-8'))
+                    result = core_daemon.start_core_daemon(
+                        params.get('ssh_host', ''), int(params.get('ssh_port', 22) or 22),
+                        params.get('username', ''), params.get('password', ''),
+                    )
+                    response = {"status": "ok" if result.get("ok") else "error",
+                                "message": result.get("message", ""),
+                                "daemon_pids": result.get("daemon_pids", [])}
+                    code = 200 if result.get("ok") else 502
                 except Exception as e:
                     response = {"status": "error", "error": str(e)}
                     code = 400
