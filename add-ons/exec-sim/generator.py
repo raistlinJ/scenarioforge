@@ -81,7 +81,8 @@ def _attack_graph_from_flow_artifacts(xml_path, flow_plan_path):
     """Load the v2 graph emitted by Flow, accepting either documented location."""
     try:
         payload = _read_json(flow_plan_path)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"    [warn] Could not read flag-sequencing output at {flow_plan_path}: {exc}")
         payload = {}
 
     candidates = []
@@ -96,6 +97,15 @@ def _attack_graph_from_flow_artifacts(xml_path, flow_plan_path):
             with open(graph_path, "w", encoding="utf-8") as handle:
                 json.dump(graph, handle, indent=2)
             return load_attack_graph(graph_path), graph_path
+
+    if isinstance(payload, dict) and payload:
+        # flag-sequencing can exit 0 without an embedded attack_graph — its
+        # own ok/error/phase fields are the actual explanation for why, and
+        # otherwise get lost entirely once we fall back to the generic
+        # "No <FlowState> block found" error below.
+        diagnostic = {k: payload[k] for k in ("ok", "error", "phase", "status", "message") if k in payload}
+        print(f"    [warn] flag-sequencing output at {flow_plan_path} had no attack_graph; "
+              f"falling back to parsing the XML. Payload: {diagnostic or payload}")
 
     graph = extract_attack_graph_from_xml(xml_path)
     graph_path = os.path.splitext(flow_plan_path)[0] + "_attack_graph.json"

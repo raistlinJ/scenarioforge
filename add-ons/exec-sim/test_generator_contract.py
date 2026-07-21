@@ -256,5 +256,49 @@ class RunScenarioforgePhaseOutputTests(unittest.TestCase):
             self.assertIn("partial resolution, 1 of 3 steps unresolved", buffer.getvalue())
 
 
+class AttackGraphFromFlowArtifactsDiagnosticsTests(unittest.TestCase):
+    """When flag-sequencing exits 0 but its output has no attack_graph (e.g.
+    a best-effort resolution that didn't actually resolve anything), the only
+    explanation is inside that JSON's own ok/error fields — this must be
+    printed before silently falling back to XML parsing, or the real cause
+    is lost and only a generic 'No <FlowState> block found' error remains."""
+
+    def test_prints_payload_diagnostics_before_falling_back_to_xml(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            xml_path = os.path.join(temp_dir, "scenario.xml")
+            flow_path = os.path.join(temp_dir, "scenario_flag-sequencing.json")
+            Path(xml_path).write_text(
+                "<Scenarios><Scenario name='contract'><ScenarioEditor>"
+                "<section name='Services'><item selected='SSH'/></section>"
+                "</ScenarioEditor></Scenario></Scenarios>", encoding="utf-8",
+            )
+            Path(flow_path).write_text(json.dumps({
+                "ok": False, "error": "best-effort resolution stalled: 0 of 2 steps resolved",
+                "phase": "flag-sequencing",
+            }), encoding="utf-8")
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(ValueError):
+                    generator._attack_graph_from_flow_artifacts(xml_path, flow_path)
+
+            output = buffer.getvalue()
+            self.assertIn("had no attack_graph", output)
+            self.assertIn("best-effort resolution stalled: 0 of 2 steps resolved", output)
+
+    def test_no_diagnostic_noise_when_attack_graph_is_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            xml_path = os.path.join(temp_dir, "scenario.xml")
+            flow_path = os.path.join(temp_dir, "scenario_flag-sequencing.json")
+            Path(flow_path).write_text(json.dumps({"attack_graph": _graph()}), encoding="utf-8")
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                graph, _graph_path = generator._attack_graph_from_flow_artifacts(xml_path, flow_path)
+
+            self.assertNotIn("had no attack_graph", buffer.getvalue())
+            self.assertEqual(graph["scenario"], "contract")
+
+
 if __name__ == "__main__":
     unittest.main()
