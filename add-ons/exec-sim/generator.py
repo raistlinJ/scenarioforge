@@ -36,6 +36,11 @@ def _run_scenarioforge_phase(
     with open(log_path, "w", encoding="utf-8") as handle:
         handle.write(combined)
 
+    if combined.strip():
+        print(f"    --- scenarioforge.cli {name} output ---")
+        print(combined.rstrip())
+        print(f"    --- end {name} output ---")
+
     if result is None:
         raise RuntimeError(f"ScenarioForge {name} timed out; see {log_path}")
     if allow_failure:
