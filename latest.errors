@@ -1,0 +1,11 @@
+# ScenarioForge latest warnings/errors
+# Started: 2026-07-21T00:54:40.056823+00:00
+# Includes log records at WARNING and ERROR level.
+
+{
+  "error": "Failed to create starter XML: could not convert string to float: 'Random'",
+  "ok": false,
+  "phase": "new",
+  "scenario": "test",
+  "xml_path": "/Users/jcacosta/Documents/GitHub/scenarioforge/test.xml"
+}

@@ -1,0 +1,9 @@
+{
+  "error": "Failed to sync repo to CORE VM: SSH connect failed to 12.0.0.100:22 as corevm: TimeoutError: timed out",
+  "generator_execution_mode": "remote",
+  "generator_execution_requested": true,
+  "ok": false,
+  "phase": "flag-sequencing",
+  "scenario": "test",
+  "xml_path": "/Users/jcacosta/Documents/GitHub/scenarioforge/test_gen.xml"
+}

@@ -4445,7 +4445,7 @@ components:
           additionalProperties: true
         attack_graph:
           type: object
-          description: Simple attack graph JSON derived from the chain.
+          description: Ordered attack-path JSON derived from the same chain as the AFB export. Its edges are consecutive chain steps; fact_dependencies preserves non-adjacent generator data dependencies.
           additionalProperties: true
         attack_graph_dot:
           type: string

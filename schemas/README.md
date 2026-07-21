@@ -4,6 +4,7 @@ This folder contains durable schema and ontology contracts used by the app, test
 
 - `xml/corexml_codebased.xsd` — upstream CORE session XML schema used when validating CORE-native session XML.
 - `xml/scenarios.xsd` — schema for the ScenarioForge "Scenarios" editor XML, the application-level format built/parsed by `webapp/app_backend.py`.
+- `attack_graph/attack_graph_v2.schema.json` — versioned contract for the ordered attack-graph JSON export. DOT, PDF, and Attack Flow Builder exports use the same ordered path; fact provenance is carried separately in `fact_dependencies`.
 - `generators/*.schema.json` — contracts for generator manifests and runtime generator outputs.
 - `sequencer/*.schema.json` — contracts for sequencer plugin and challenge instance documents.
 - `node/*` — node authoring prompt/schema assets served by the Web UI and used by flow validation.

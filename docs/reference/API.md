@@ -265,7 +265,7 @@ Request JSON:
 
 Response JSON includes:
 - `afb` (an OpenChart DiagramViewExport document)
-- `attack_graph` (simple node/edge JSON derived from the chain)
+- `attack_graph` (ordered node/edge JSON derived from the chain; validate with [`schemas/attack_graph/attack_graph_v2.schema.json`](../../schemas/attack_graph/attack_graph_v2.schema.json))
 - `attack_graph_dot` (Graphviz DOT for the attack graph)
 - `attack_graph_pdf_base64` (base64-encoded PDF; requires Graphviz `dot`)
 - `flag_assignments` and validity metadata

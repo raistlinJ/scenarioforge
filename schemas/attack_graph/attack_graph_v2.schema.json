@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/scenarioforge/attack_graph/attack_graph_v2.schema.json",
+  "title": "ScenarioForge Attack Graph v2",
+  "description": "The ordered attack-path JSON exported with Attack Flow Builder, DOT, and PDF representations.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scenario",
+    "chain_order",
+    "assignment_order",
+    "nodes",
+    "edges",
+    "stages",
+    "fact_dependencies"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2,
+      "description": "Attack graph contract version."
+    },
+    "scenario": {
+      "type": "string"
+    },
+    "chain_order": {
+      "type": "array",
+      "description": "Node ids in the ordered attack path.",
+      "items": { "$ref": "#/$defs/nodeId" },
+      "uniqueItems": true
+    },
+    "assignment_order": {
+      "type": "array",
+      "description": "Node ids in the supplied flag-assignment order.",
+      "items": { "$ref": "#/$defs/nodeId" }
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "description": "Consecutive ordered-path edges. DOT and PDF are rendered from these edges.",
+      "items": { "$ref": "#/$defs/sequenceEdge" }
+    },
+    "stages": {
+      "type": "array",
+      "description": "Ordered visual stages. Version 2 emits one node index per stage.",
+      "items": { "$ref": "#/$defs/stage" }
+    },
+    "fact_dependencies": {
+      "type": "array",
+      "description": "Generator fact provenance. A dependency may skip ordered-path steps and is not a rendered path edge.",
+      "items": { "$ref": "#/$defs/factDependency" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "nodeId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "resolvedValues": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "generator": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "source",
+        "catalog",
+        "sequence_index",
+        "resolved_inputs",
+        "resolved_outputs",
+        "flag_value"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "kind": { "type": "string" },
+        "source": { "type": "string" },
+        "catalog": { "type": "string" },
+        "sequence_index": { "type": "integer", "minimum": 1 },
+        "resolved_inputs": { "$ref": "#/$defs/resolvedValues" },
+        "resolved_outputs": { "$ref": "#/$defs/resolvedValues" },
+        "flag_value": {}
+      },
+      "additionalProperties": false
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "id",
+        "sequence_index",
+        "label",
+        "type",
+        "is_vuln",
+        "ipv4",
+        "generator"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nodeId" },
+        "sequence_index": { "type": "integer", "minimum": 1 },
+        "label": { "type": "string" },
+        "type": { "type": "string" },
+        "is_vuln": { "type": "boolean" },
+        "ipv4": {
+          "type": ["string", "null"],
+          "description": "A normalized IPv4 address when one is available."
+        },
+        "generator": {
+          "anyOf": [
+            { "$ref": "#/$defs/generator" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "edgeData": {
+      "type": "object",
+      "required": [
+        "sequence_index",
+        "source",
+        "target",
+        "facts",
+        "artifacts",
+        "artifacts_resolved",
+        "artifacts_resolved_kv"
+      ],
+      "properties": {
+        "sequence_index": { "type": "integer", "minimum": 1 },
+        "source": { "$ref": "#/$defs/nodeId" },
+        "target": { "$ref": "#/$defs/nodeId" },
+        "facts": { "$ref": "#/$defs/stringList" },
+        "artifacts": { "$ref": "#/$defs/stringList" },
+        "artifacts_resolved": { "$ref": "#/$defs/resolvedValues" },
+        "artifacts_resolved_kv": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "factDependency": {
+      "allOf": [
+        { "$ref": "#/$defs/edgeData" }
+      ],
+      "unevaluatedProperties": false
+    },
+    "sequenceEdge": {
+      "allOf": [
+        { "$ref": "#/$defs/edgeData" },
+        {
+          "type": "object",
+          "required": ["relationship"],
+          "properties": {
+            "relationship": { "const": "sequence" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "stage": {
+      "type": "object",
+      "required": ["stage", "indices"],
+      "properties": {
+        "stage": { "type": "integer", "minimum": 0 },
+        "indices": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 0 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

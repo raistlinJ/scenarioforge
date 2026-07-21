@@ -4183,9 +4183,9 @@ def _run_new_phase(args: Any) -> int:
                 'factor': 1.0,
                 'pattern': 'Random',
                 'content_type': 'Random',
-                'rate_kbps': 'Random',
-                'period_s': 'Random',
-                'jitter_pct': 'Random',
+                'rate_kbps': '64.0',
+                'period_s': '1.0',
+                'jitter_pct': '10.0',
             }
             if traffic_seed_count is not None:
                 traffic_item['v_metric'] = 'Count'
