@@ -326,6 +326,9 @@ class SolverSession:
         if any(x in cmdl for x in ["whoami", "id\n", "id "]):
             return "root\nuid=0(root) gid=0(root) groups=0(root)"
 
+        if re.match(r'^\s*echo\b', cmdl):
+            return self._echo(cmd)
+
         if "hostname" in cmdl and "nmap" not in cmdl:
             return ns["label"]
 
@@ -361,6 +364,9 @@ class SolverSession:
             if "SSH"  in ns["services"]: lines.append("tcp    0.0.0.0:22      LISTEN  42/sshd")
             if "HTTP" in ns["services"]: lines.append("tcp    0.0.0.0:80      LISTEN  87/apache2")
             return "\n".join(lines)
+
+        if re.search(r'\bping\b', cmdl):
+            return self._ping(cmd, cmdl, ns)
 
         if "nmap" in cmdl:
             return self._nmap(cmd, cmdl, ns)
@@ -404,7 +410,7 @@ class SolverSession:
 
         prog = cmd.split()[0] if cmd.split() else cmd
         return (f"bash: {prog}: command not found\n"
-                f"  (Available: nmap, find, ls, strings, cat, curl, ssh, grep, ps, netstat, ip)")
+                f"  (Available: nmap, find, ls, strings, cat, curl, ssh, grep, ps, netstat, ip, ping, echo)")
 
     def _nmap(self, cmd: str, cmdl: str, ns: dict) -> str:
         sim = self.sim
@@ -452,6 +458,46 @@ class SolverSession:
             if ts["cve"]:
                 lines.append(f"| CVE: {ts['cve']} — service may be vulnerable")
         return "\n".join(lines)
+
+    def _echo(self, cmd: str) -> str:
+        text = cmd.strip()
+        if text[:4].lower() == "echo":
+            text = text[4:].lstrip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+            text = text[1:-1]
+        return text
+
+    def _ping(self, cmd: str, cmdl: str, ns: dict) -> str:
+        tokens = cmd.split()
+        target = tokens[-1] if len(tokens) > 1 and not tokens[-1].startswith("-") else None
+        if not target:
+            return "ping: usage error: Destination address required"
+
+        tid = self.node_for(target)
+        if not tid:
+            return f"ping: {target}: Name or service not known"
+
+        ts = self.sim["node_state"][tid]
+        reachable = (tid == self.current_id
+                     or ts["label"] in ns["adjacent"]
+                     or ts["ip"] in ns["adjacent_ips"])
+        if reachable:
+            return (
+                f"PING {target} ({ts['ip']}) 56(84) bytes of data.\n"
+                f"64 bytes from {ts['ip']}: icmp_seq=1 ttl=63 time=0.412 ms\n"
+                f"64 bytes from {ts['ip']}: icmp_seq=2 ttl=63 time=0.389 ms\n"
+                f"64 bytes from {ts['ip']}: icmp_seq=3 ttl=63 time=0.401 ms\n\n"
+                f"--- {target} ping statistics ---\n"
+                f"3 packets transmitted, 3 received, 0% packet loss, time 2004ms"
+            )
+        return (
+            f"PING {target} ({ts['ip']}) 56(84) bytes of data.\n"
+            f"From {ns['ip']} icmp_seq=1 Destination Host Unreachable\n"
+            f"From {ns['ip']} icmp_seq=2 Destination Host Unreachable\n"
+            f"From {ns['ip']} icmp_seq=3 Destination Host Unreachable\n\n"
+            f"--- {target} ping statistics ---\n"
+            f"3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2003ms"
+        )
 
     def _find(self, cmd: str, cmdl: str, ns: dict) -> str:
         lines = [f"Searching on {ns['label']}:"]
