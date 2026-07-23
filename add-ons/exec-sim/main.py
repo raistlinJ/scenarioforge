@@ -20,6 +20,7 @@ import time
 from attack_graph import load_attack_graph
 import config
 import core_daemon
+import process_registry
 
 
 SUPPORTED_SOLVER_PROVIDERS = (
@@ -600,6 +601,13 @@ if __name__ == "__main__":
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
 
     config.DASHBOARD_DIR = config.OUTPUT_DIR
+
+    # Clean up anything left running by a previous exec-sim process that
+    # exited without stopping its own subprocesses (e.g. was killed rather
+    # than shut down cleanly), before this process does anything else.
+    _residual = process_registry.stop_all(config.OUTPUT_DIR)
+    if _residual:
+        print(f"[stop] Killed {len(_residual)} residual process(es) from a previous session: {_residual}")
 
     if args.solver_provider == "vllm" or (args.solver_provider2 == "vllm") or (args.solver_provider3 == "vllm"):
         config.VLLM_BASE_URL = args.vllm_host
