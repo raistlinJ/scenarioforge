@@ -182,7 +182,7 @@
                 <button class="btn btn-primary btn-sm border-0 d-flex align-items-center gap-2" id="btnOpenRun" data-bs-toggle="modal" data-bs-target="#runModal" disabled title="Validate the Core VM and at least one solver, then save Environment Settings before running an evaluation.">
                     <i class="bi bi-play-fill"></i> Run Eval
                 </button>
-                <button class="btn btn-outline-danger btn-sm border-0 d-flex align-items-center gap-2" id="btnStop" onclick="stopRun()" title="Kill the running generate/solve process (and any leftover ones from a previous run) right now.">
+                <button class="btn btn-outline-danger btn-sm border-0 d-flex align-items-center gap-2" id="btnStop" onclick="stopRun()" disabled title="Kill the running generate/solve process (and any leftover ones from a previous run) right now.">
                     <i class="bi bi-stop-fill"></i> Stop
                 </button>
                 <button class="btn btn-outline-secondary btn-sm border-0" data-bs-toggle="modal" data-bs-target="#settingsModal">
@@ -275,6 +275,7 @@
         const settingsValidation = { core: false, saved: false };
         let solvers = [];
         let nextSolverId = 1;
+        let isRunActive = false;
 
         function coreIsComplete() {
             return ['coreGrpcHost', 'coreGrpcPort', 'coreSshHost', 'coreSshPort', 'coreSshUser', 'coreSshPass']
@@ -283,15 +284,20 @@
 
         function updateRunAvailability() {
             const ready = settingsValidation.core && settingsValidation.saved
-                && coreIsComplete() && validatedSolvers().length > 0;
+                && coreIsComplete() && validatedSolvers().length > 0 && !isRunActive;
             const runButton = document.getElementById('btnOpenRun');
             const startButton = document.getElementById('btnRun');
-            const reason = ready ? '' : 'Validate the Core VM and at least one solver, then save Environment Settings before running an evaluation.';
+            const reason = isRunActive
+                ? 'A run is already in progress. Stop it before starting another.'
+                : (ready ? '' : 'Validate the Core VM and at least one solver, then save Environment Settings before running an evaluation.');
             if (runButton) {
                 runButton.disabled = !ready;
                 runButton.title = reason;
             }
             if (startButton) startButton.disabled = !ready;
+
+            const stopButton = document.getElementById('btnStop');
+            if (stopButton) stopButton.disabled = !isRunActive;
         }
 
         function setValidationMessage(statusId, message, valid) {
@@ -821,6 +827,7 @@
                     const modal = bootstrap.Modal.getInstance(document.getElementById('runModal'));
                     modal.hide();
                     document.getElementById('terminalContent').innerHTML = '<div class="text-secondary mb-2">Run triggered! Waiting for backend to start...</div>';
+                    isRunActive = true;
                 } else {
                     const data = await res.json().catch(() => ({}));
                     alert("Failed to start run: " + (data.error || `HTTP ${res.status}`));
@@ -845,14 +852,15 @@
                 if (res.ok && data.status === 'ok') {
                     document.getElementById('navStatus').className = "badge bg-secondary";
                     document.getElementById('navStatus').textContent = "Stopped";
+                    isRunActive = false;
                 } else {
                     alert("Failed to stop: " + (data.error || `HTTP ${res.status}`));
                 }
             } catch (err) {
                 alert("Failed to stop: " + err);
             }
-            btn.disabled = false;
             btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
+            updateRunAvailability();
         }
 
         function updateRunModeFields() {
@@ -870,6 +878,8 @@
                     // reachable, it's just idle, not "disconnected".
                     document.getElementById('navStatus').className = "badge bg-secondary";
                     document.getElementById('navStatus').textContent = "Stopped";
+                    isRunActive = false;
+                    updateRunAvailability();
                     setTimeout(pollState, 1500);
                     return;
                 }
@@ -882,17 +892,23 @@
                     lastStateStr = currentStateStr;
                 }
 
-                if (state.status === 'running') {
+                isRunActive = state.status === 'running';
+                if (isRunActive) {
                     document.getElementById('navStatus').className = "badge bg-success pulse";
                     document.getElementById('navStatus').textContent = "Live";
                 } else {
                     document.getElementById('navStatus').className = "badge bg-secondary";
                     document.getElementById('navStatus').textContent = "Stopped";
                 }
+                updateRunAvailability();
             } catch (err) {
                 document.getElementById('navStatus').className = "badge bg-warning";
                 document.getElementById('navStatus').textContent = "Disconnected";
                 console.debug("Polling failed:", err);
+                // Unknown state — don't leave Start/Stop permanently stuck if
+                // the server becomes briefly unreachable mid-poll.
+                isRunActive = false;
+                updateRunAvailability();
             }
             setTimeout(pollState, 1500);
         }
