@@ -959,21 +959,21 @@
 
             document.getElementById('attackChainView').innerHTML = chainHtml || '<div class="text-secondary small">No chain data</div>';
 
-            // Everything below needs a completed iteration (params, final
-            // score) — not available until the whole generate+solve cycle
-            // this run is doing finishes.
-            if (!currentRun) return;
-
-            document.getElementById('statScore').textContent = currentRun.challenge_score || '0.0';
-
-            // 4. Params Table
-            const params = currentRun.params || {};
+            // 4. Params Table — written as soon as generation succeeds
+            // (write_scenario_params), well before any solver has run, so
+            // this doesn't need to wait for a completed iteration either.
+            const params = state.params || (currentRun ? currentRun.params : null) || {};
             document.getElementById('paramsTable').innerHTML = Object.entries(params).map(([k, v]) => `
                 <tr>
                     <td class="text-secondary w-50">${k}</td>
                     <td class="text-white">${Array.isArray(v) ? v.join(', ') : v}</td>
                 </tr>
             `).join('');
+
+            // Final score needs a completed iteration — not available until
+            // the whole generate+solve cycle this run is doing finishes.
+            if (!currentRun) return;
+            document.getElementById('statScore').textContent = currentRun.challenge_score || '0.0';
         }
 
         // Start polling loop

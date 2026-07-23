@@ -608,6 +608,26 @@ def make_dashboard_data(iteration, params, ref_nodes, ref_edges,
     }
 
 
+def write_scenario_params(params, dashboard_dir):
+    """Push the generated scenario's params to the dashboard as soon as
+    they're known — right after generation succeeds, well before any solver
+    has run. Written to a top-level key (not tied to `iterations`, which only
+    gets its first entry once an entire solve finishes) so the Web UI can
+    show them immediately instead of only after the whole run is done."""
+    out_path = os.path.join(dashboard_dir, "dashboard_state.json")
+    try:
+        try:
+            with open(out_path) as f:
+                state = json.load(f)
+        except Exception:
+            state = {"iterations": []}
+        state["params"] = params or {}
+        with open(out_path, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"  [dashboard] File write failed: {e}")
+
+
 def update_dashboard_js(data, dashboard_dir):
     out_path = os.path.join(dashboard_dir, "dashboard_state.json")
     try:
