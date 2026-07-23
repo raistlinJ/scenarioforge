@@ -179,6 +179,7 @@ def run_generate_and_solve(difficulty: str, model_cfgs, loop: int = 1,
             meta_path     = os.path.join(config.OUTPUT_DIR, f"{challenge_name}_meta.json")
             with open(meta_path) as f:
                 params = json.load(f)["params"]
+            dashboard.write_scenario_params(params, config.DASHBOARD_DIR)
 
             raw = load_attack_graph(solution_path)
             ref_nodes, ref_edges, _root = parse_reference_graph(raw)

@@ -73,6 +73,47 @@ class DashboardMultiSolverTests(unittest.TestCase):
 
         self.assertEqual([call.args[2] for call in solve_mock.call_args_list], [first, second])
 
+    def test_params_reach_the_dashboard_before_any_solver_runs(self):
+        """Params are known as soon as generation succeeds — they must be
+        pushed to the dashboard right then, not only after solving (which
+        can take a while, or fail/hang) finishes for the first solver."""
+        solver = {"id": "m", "provider": "ollama", "label": "Solver 1"}
+        result = {
+            "pct": 0, "matched": [], "nodes_visited": [], "attack_steps": [],
+            "chain_labels": [], "error": "", "flags_found": [], "turns": 0,
+            "elapsed_s": 0.0, "missed": [],
+        }
+        call_order = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.object(config, "OUTPUT_DIR", temp_dir), \
+             patch.object(main, "load_attack_graph", return_value={}), \
+             patch.object(main, "parse_reference_graph", return_value=([], [], None)), \
+             patch.object(main, "score_challenge_from_graph", return_value=([], 1.0)), \
+             patch.object(main, "hypothesize_why_obvious", return_value=""), \
+             patch.object(main, "build_claude_nodes", return_value=[]), \
+             patch.object(main, "make_dashboard_data", return_value={}), \
+             patch.object(main, "update_dashboard_js"), \
+             patch.object(dashboard, "write_scenario_params",
+                          side_effect=lambda params, _dir: call_order.append(("params", params))) as write_params_mock, \
+             patch.object(main, "solve_challenge_with_model",
+                          side_effect=lambda *a, **k: call_order.append(("solve",)) or result):
+
+            def generate(_iteration, _difficulty, override_name, gen_model_cfg):
+                with open(os.path.join(temp_dir, f"{override_name}.xml"), "w") as handle:
+                    handle.write("<scenario />")
+                with open(os.path.join(temp_dir, f"{override_name}_meta.json"), "w") as handle:
+                    json.dump({"params": {"chain_length": 3}}, handle)
+                with open(os.path.join(temp_dir, f"{override_name}_solution.json"), "w") as handle:
+                    json.dump({}, handle)
+                return True
+
+            with patch.object(main, "generate_one_challenge", side_effect=generate):
+                main.run_generate_and_solve("easy", [solver])
+
+        write_params_mock.assert_called_once_with({"chain_length": 3}, config.DASHBOARD_DIR)
+        self.assertEqual(call_order, [("params", {"chain_length": 3}), ("solve",)])
+
 
 class StartDashboardServerTests(unittest.TestCase):
     def test_generate_callback_is_wired_to_the_module_global(self):

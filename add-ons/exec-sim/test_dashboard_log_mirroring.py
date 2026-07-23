@@ -121,5 +121,33 @@ class MirrorStdoutToDashboardTests(unittest.TestCase):
             self.assertTrue(any("4321" in line for line in state["log"]))
 
 
+class WriteScenarioParamsTests(unittest.TestCase):
+    """Params are known as soon as generation succeeds, well before any
+    solver has run — they must reach the dashboard immediately rather than
+    waiting for iterations, which only gets its first entry once an entire
+    solve finishes."""
+
+    def test_params_are_written_as_a_top_level_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dashboard.write_scenario_params({"chain_length": 3, "routing_protocol": "RIP"}, temp_dir)
+            state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+        self.assertEqual(state["params"], {"chain_length": 3, "routing_protocol": "RIP"})
+
+    def test_does_not_clobber_other_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dashboard.update_dashboard_js({"iteration": 1}, temp_dir)
+            dashboard.write_scenario_params({"chain_length": 2}, temp_dir)
+            state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+        self.assertEqual(len(state["iterations"]), 1)
+        self.assertEqual(state["params"], {"chain_length": 2})
+
+    def test_later_call_overwrites_earlier_one(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dashboard.write_scenario_params({"chain_length": 2}, temp_dir)
+            dashboard.write_scenario_params({"chain_length": 5}, temp_dir)
+            state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+        self.assertEqual(state["params"], {"chain_length": 5})
+
+
 if __name__ == "__main__":
     unittest.main()
