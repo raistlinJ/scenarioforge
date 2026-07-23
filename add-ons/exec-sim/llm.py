@@ -1,5 +1,16 @@
 import config
 
+# Every provider client below gets this as its request timeout. Without an
+# explicit value, the openai-compatible/ollama path (its own httpx.Client)
+# defaults to httpx's 5s timeout — too short for real generation with a
+# large max_tokens — while every other path inherits the OpenAI/Anthropic
+# SDK's own default (~600s for OpenAI), which lets a stalled/unresponsive
+# endpoint block a solve loop for up to 10 minutes per turn before it's
+# visibly an error. A single bounded value here means a hung endpoint fails
+# fast and loud instead of silently freezing the whole run.
+LLM_REQUEST_TIMEOUT_S = 120.0
+
+
 def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
                messages: list = None) -> str:
     """
@@ -16,7 +27,10 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
 
     if provider == "anthropic":
         import anthropic as _ant
-        _client = _ant.Anthropic(api_key=model_cfg.get("api_key") or config.ANTHROPIC_API_KEY)
+        _client = _ant.Anthropic(
+            api_key=model_cfg.get("api_key") or config.ANTHROPIC_API_KEY,
+            timeout=LLM_REQUEST_TIMEOUT_S,
+        )
         kwargs = dict(model=model_id, max_tokens=max_tokens, messages=messages)
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -28,7 +42,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
         api_key  = model_cfg.get("api_key") or (
             config.OPENROUTER_API_KEY if provider == "openrouter" else config.OPENAI_API_KEY)
         base_url = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
-        kw = {"api_key": api_key}
+        kw = {"api_key": api_key, "timeout": LLM_REQUEST_TIMEOUT_S}
         if base_url:
             kw["base_url"] = base_url
         _client = openai.OpenAI(**kw)
@@ -44,7 +58,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
 
     elif provider == "vllm":
         import openai
-        _client = openai.OpenAI(api_key="EMPTY", base_url=config.VLLM_BASE_URL)
+        _client = openai.OpenAI(api_key="EMPTY", base_url=config.VLLM_BASE_URL, timeout=LLM_REQUEST_TIMEOUT_S)
         oai_msgs = []
         if system_prompt:
             oai_msgs.append({"role": "system", "content": system_prompt})
@@ -61,7 +75,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
         api_key = model_cfg.get("api_key") or "EMPTY"
         enforce_ssl = model_cfg.get("enforce_ssl", True)
 
-        http_client = httpx.Client(verify=enforce_ssl)
+        http_client = httpx.Client(verify=enforce_ssl, timeout=LLM_REQUEST_TIMEOUT_S)
         _client = openai.OpenAI(api_key=api_key, base_url=url, http_client=http_client)
 
         oai_msgs = []
@@ -78,7 +92,7 @@ def call_model(prompt: str, model_cfg: dict, system_prompt: str = "",
         endpoint_url = config.HF_ENDPOINTS.get(model_id)
         if not endpoint_url:
             raise ValueError(f"No HF endpoint URL for {model_id!r}. Add it to HF_ENDPOINTS.")
-        _client = openai.OpenAI(api_key=config.HF_API_KEY, base_url=endpoint_url + "/v1")
+        _client = openai.OpenAI(api_key=config.HF_API_KEY, base_url=endpoint_url + "/v1", timeout=LLM_REQUEST_TIMEOUT_S)
         oai_msgs = []
         if system_prompt:
             oai_msgs.append({"role": "system", "content": system_prompt})

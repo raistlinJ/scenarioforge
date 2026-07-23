@@ -890,16 +890,12 @@
             const logHtml = logLines.length
                 ? `<div class="term-output mb-3">${logLines.join('\n')}</div>` : '';
 
-            if (!state.iterations || state.iterations.length === 0) {
-                if (logHtml) {
-                    termContent.innerHTML = logHtml;
-                    termWin.scrollTop = termWin.scrollHeight;
-                }
-                return;
-            }
-            const currentRun = state.iterations[state.iterations.length - 1];
-
-            // If solver data exists, we have live execution
+            // Solver turn-by-turn progress/metrics (write_solver_state) are
+            // updated after every single turn, independent of `iterations` —
+            // which only gets its first entry once the *entire* generate+
+            // solve cycle finishes. Gating this section on iterations.length
+            // meant live per-turn progress could never reach the dashboard
+            // during a run, only after it was already over.
             const solver = state.solver || {};
             const turns = solver.turns || [];
 
@@ -921,20 +917,28 @@
             document.getElementById('statCoverage').textContent = (solver.coverage || 0) + '%';
             document.getElementById('statFlags').textContent = (solver.flags_found || []).length;
             document.getElementById('statTurns').textContent = turns.length;
-            document.getElementById('statScore').textContent = currentRun.challenge_score || '0.0';
 
             // 3. Attack Path Graph (Linear for now)
+            const currentRun = (state.iterations && state.iterations.length > 0)
+                ? state.iterations[state.iterations.length - 1] : null;
             const visited = solver.nodes_visited || [];
-            const labels = solver.chain_labels || (currentRun.ref_nodes || []).map(n => n.label);
-            
+            const labels = solver.chain_labels || (currentRun ? (currentRun.ref_nodes || []).map(n => n.label) : []);
+
             const chainHtml = labels.map(lbl => {
                 const isVis = visited.includes(lbl);
                 return `<div class="chain-node ${isVis ? 'visited' : ''}">
                     ${isVis ? '<i class="bi bi-check-circle-fill me-1"></i>' : ''} ${lbl}
                 </div>`;
             }).join('');
-            
+
             document.getElementById('attackChainView').innerHTML = chainHtml || '<div class="text-secondary small">No chain data</div>';
+
+            // Everything below needs a completed iteration (params, final
+            // score) — not available until the whole generate+solve cycle
+            // this run is doing finishes.
+            if (!currentRun) return;
+
+            document.getElementById('statScore').textContent = currentRun.challenge_score || '0.0';
 
             // 4. Params Table
             const params = currentRun.params || {};
