@@ -14,6 +14,7 @@ import yaml
 
 import config
 import core_daemon
+import process_registry
 from attack_graph import generator_for, validate_attack_graph
 
 _dashboard_server_started = False
@@ -285,6 +286,22 @@ def start_dashboard_server(generate_callback=None):
                         "status": "error",
                         "error": "No generate callback is registered on the dashboard server.",
                     }).encode('utf-8'))
+
+            elif self.path == '/api/stop':
+                stopped = process_registry.stop_all(config.OUTPUT_DIR)
+                message = (
+                    f"Stopped by user — killed {len(stopped)} process(es): {stopped}"
+                    if stopped else "Stopped by user — no running processes found."
+                )
+                # Written directly (not via print()) so it lands regardless
+                # of whether a background run currently owns sys.stdout.
+                _append_dashboard_log_line(f"[stop] {message}", config.DASHBOARD_DIR)
+                set_dashboard_status("stopped", config.DASHBOARD_DIR)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok", "message": message, "stopped_pids": stopped}).encode('utf-8'))
+
             elif self.path == '/api/fetch_models':
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -723,11 +740,14 @@ def mirror_stdout_to_dashboard(dashboard_dir):
     Web UI's terminal panel shows the same output a user watching the server
     terminal would see. Resets the terminal feed at entry, for a clean view
     per run."""
+    stopped = process_registry.stop_all(dashboard_dir)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     reset_dashboard_run(dashboard_dir)
     sys.stdout = DashboardLogTee(original_stdout, dashboard_dir)
     sys.stderr = DashboardLogTee(original_stderr, dashboard_dir)
+    if stopped:
+        print(f"[stop] Killed {len(stopped)} residual process(es) from a previous run: {stopped}")
     try:
         yield
     finally:

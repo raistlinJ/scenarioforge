@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import dashboard
 
@@ -106,6 +107,18 @@ class MirrorStdoutToDashboardTests(unittest.TestCase):
             dashboard.run_generate_callback_with_log(callback, {"difficulty": "easy"}, temp_dir)
             state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
         self.assertIn("generating with easy", state["log"])
+
+    def test_residual_processes_are_stopped_before_a_new_run_starts(self):
+        """"if running when we start, stop them" — any process left over
+        from a previous, uncleanly-ended run must be killed before this run
+        begins, not left to keep running alongside it."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(dashboard.process_registry, "stop_all", return_value=[4321]) as stop_all_mock:
+                with dashboard.mirror_stdout_to_dashboard(temp_dir):
+                    pass
+            stop_all_mock.assert_called_once_with(temp_dir)
+            state = json.loads((Path(temp_dir) / "dashboard_state.json").read_text())
+            self.assertTrue(any("4321" in line for line in state["log"]))
 
 
 if __name__ == "__main__":

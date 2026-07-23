@@ -376,5 +376,37 @@ class FlagSequencingTimeoutTests(unittest.TestCase):
             self.assertLess(passed_timeout, generator.SCENARIOFORGE_PHASE_TIMEOUT_S)
 
 
+class RunScenarioforgePhaseProcessRegistryTests(unittest.TestCase):
+    """A Stop button (or startup residual-cleanup) can only kill a phase's
+    subprocess if it was actually registered while running — this pins that
+    _run_scenarioforge_phase registers before the process starts and always
+    unregisters afterward, success or failure, so the registry never grows
+    stale entries for processes that have already finished."""
+
+    def test_process_is_registered_while_running_and_unregistered_after(self):
+        seen_during_run = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_output_dir = config.OUTPUT_DIR
+            config.OUTPUT_DIR = temp_dir
+            try:
+                real_register = generator.process_registry.register_process
+
+                def spy_register(output_dir, proc, label=""):
+                    real_register(output_dir, proc, label=label)
+                    seen_during_run.append(generator.process_registry._read_entries(output_dir))
+
+                log_path = os.path.join(temp_dir, "phase.log")
+                with patch.object(generator.process_registry, "register_process", side_effect=spy_register):
+                    generator._run_scenarioforge_phase(
+                        "new", [sys.executable, "-c", "print('hi')"],
+                        cwd=temp_dir, log_path=log_path,
+                    )
+                self.assertEqual(len(seen_during_run), 1)
+                self.assertEqual(len(seen_during_run[0]), 1)
+                self.assertEqual(generator.process_registry._read_entries(temp_dir), [])
+            finally:
+                config.OUTPUT_DIR = old_output_dir
+
+
 if __name__ == "__main__":
     unittest.main()

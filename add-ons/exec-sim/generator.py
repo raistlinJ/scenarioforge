@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 import config
 import core_daemon
 import dashboard
+import process_registry
 from attack_graph import load_attack_graph, extract_attack_graph_from_xml
 from llm import call_model
 
@@ -35,16 +36,30 @@ def _run_scenarioforge_phase(
     # cleanly instead.
     env.pop("VIRTUAL_ENV", None)
     env.update({"NO_COLOR": "1", "PYTHONUNBUFFERED": "1"})
+
+    # start_new_session=True makes this its own process-group leader, so
+    # stopping it (a timeout below, or an external Stop-button request via
+    # process_registry.kill_process_group) can clean up the whole tree —
+    # `uv run`'s own child, the actual scenarioforge.cli process — not just
+    # this one PID.
+    proc = subprocess.Popen(
+        command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=env, start_new_session=True,
+    )
+    process_registry.register_process(config.OUTPUT_DIR, proc, label=name)
     try:
-        result = subprocess.run(
-            command, cwd=cwd, capture_output=True, text=True, env=env,
-            timeout=timeout_s,
-        )
-        combined = (result.stdout or "") + ("\n" if result.stdout and result.stderr else "") + (result.stderr or "")
-    except subprocess.TimeoutExpired as exc:
-        combined = ((exc.stdout or "") + "\n" + (exc.stderr or "")).strip()
-        result = None
-        combined += f"\n[scenarioforge-da] {name} timed out after {timeout_s}s.\n"
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+            combined = (stdout or "") + ("\n" if stdout and stderr else "") + (stderr or "")
+            result = proc
+        except subprocess.TimeoutExpired:
+            process_registry.kill_process_group(proc.pid)
+            stdout, stderr = proc.communicate()
+            combined = ((stdout or "") + "\n" + (stderr or "")).strip()
+            result = None
+            combined += f"\n[scenarioforge-da] {name} timed out after {timeout_s}s.\n"
+    finally:
+        process_registry.unregister_process(config.OUTPUT_DIR, proc)
 
     with open(log_path, "w", encoding="utf-8") as handle:
         handle.write(combined)
