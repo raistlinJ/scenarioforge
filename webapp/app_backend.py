@@ -6592,6 +6592,12 @@ def _prepare_remote_cli_context(
         # Syncing only cli.py leaves imported runtime modules stale on the CORE VM.
         _queue_tree('scenarioforge')
         _queue_file('scripts/run_flag_generator.py')
+        # The default compose template for generic/non-vulnerable docker
+        # nodes (any node beyond the actual attack chain). Without this,
+        # those nodes' docker-compose.yml is "unresolved" on the CORE VM and
+        # their containers never start, which only surfaces much later as
+        # "Docker node(s) not running" once CORE's start validation times out.
+        _queue_tree('scripts/standard-ubuntu-docker-core')
         _queue_tree('outputs/installed_generators/flag_generators')
         _queue_tree('outputs/installed_generators/flag_node_generators')
         _queue_tree('flag_generators')
