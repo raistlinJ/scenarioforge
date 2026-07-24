@@ -30,7 +30,11 @@ def _prefer_explicit_or_ssh_core_host(raw_core: Any, core_cfg: dict[str, Any], *
 _VALIDATION_CHECKS: tuple[tuple[str, str], ...] = (
     ('missing_nodes', 'missing nodes'),
     ('docker_not_running', 'docker not running'),
+    ('port_unreachable', 'port not open/accessible'),
+    ('topology_port_unreachable', 'port not reachable across CORE network'),
     ('injects_missing', 'missing inject files'),
+    ('injects_unreadable', 'inject files empty/unreadable'),
+    ('flag_verification_failed', 'flag verification failed'),
     ('generator_outputs_missing', 'missing generator outputs'),
     ('generator_injects_missing', 'missing generator inject sources'),
 )
@@ -262,6 +266,14 @@ def _ensure_child_validation_summary(backend: Any, child_meta: dict[str, Any]) -
 
     try:
         if post_saved:
+            verify_targets: dict[str, dict[str, str]] = {}
+            verify_path = str(child_meta.get('verify_path') or '').strip()
+            target_node_name = str(child_meta.get('test_docker_node_name') or '').strip()
+            if verify_path and target_node_name:
+                verify_targets[target_node_name] = {
+                    'path': verify_path,
+                    'expect': str(child_meta.get('verify_expect') or '').strip(),
+                }
             validation = backend._validate_session_nodes_and_injects(
                 scenario_xml_path=xml_path,
                 session_xml_path=post_saved,
@@ -269,6 +281,8 @@ def _ensure_child_validation_summary(backend: Any, child_meta: dict[str, Any]) -
                 preview_plan_path=preview_plan_path,
                 scenario_label=scenario_label,
                 flow_enabled=backend._coerce_bool(child_meta.get('flow_enabled')),
+                topology_probe_node_name=str(child_meta.get('test_probe_node_name') or '').strip() or None,
+                verify_targets=verify_targets,
             )
             if isinstance(validation, dict):
                 child_meta['validation_summary'] = validation
@@ -375,7 +389,11 @@ def _categorize_validation_summary(summary: dict[str, Any] | None) -> list[str]:
     for key, category in (
         ('missing_nodes', 'core_runtime'),
         ('docker_not_running', 'docker_runtime'),
+        ('port_unreachable', 'port_unreachable'),
+        ('topology_port_unreachable', 'topology_port_unreachable'),
         ('injects_missing', 'artifact_injection'),
+        ('injects_unreadable', 'artifact_injection_content'),
+        ('flag_verification_failed', 'flag_verification'),
         ('generator_outputs_missing', 'generator_outputs'),
         ('generator_injects_missing', 'generator_injects'),
     ):
@@ -693,6 +711,7 @@ def _start_execute_like_real_vuln_test(backend: Any, *, item: dict[str, Any], ca
         item_id=item_id,
         item_name=item_name,
         compose_path=prepared_compose_path,
+        include_network_probe=True,
     )
     if not isinstance(job_spec, dict):
         return {'ok': False, 'error': str(build_err or 'failed to prepare execute-like-real vulnerability test')}, 500
@@ -744,6 +763,10 @@ def _start_execute_like_real_vuln_test(backend: Any, *, item: dict[str, Any], ca
         'test_docker_node_id': str(job_spec.get('test_docker_node_id') or '').strip(),
         'test_docker_node_name': str(job_spec.get('test_docker_node_name') or '').strip(),
         'test_scenario_tag': str(job_spec.get('test_scenario_tag') or '').strip(),
+        'test_network_probe_enabled': bool(job_spec.get('test_network_probe_enabled')),
+        'test_probe_node_name': str(job_spec.get('test_probe_node_name') or '').strip(),
+        'verify_path': str(item.get('verify_path') or '').strip(),
+        'verify_expect': str(item.get('verify_expect') or '').strip(),
     }
 
     try:

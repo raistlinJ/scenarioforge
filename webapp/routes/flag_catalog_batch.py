@@ -556,7 +556,9 @@ def _classify_validation_summary(summary: dict[str, Any] | None) -> list[str]:
     for key, label in (
         ('missing_nodes', 'missing nodes'),
         ('docker_not_running', 'docker not running'),
+        ('port_unreachable', 'port not open/accessible'),
         ('injects_missing', 'missing inject files'),
+        ('injects_unreadable', 'inject files empty/unreadable'),
         ('generator_outputs_missing', 'missing generator outputs'),
         ('generator_injects_missing', 'missing generator inject sources'),
     ):
@@ -578,7 +580,9 @@ def _validation_categories(summary: dict[str, Any] | None) -> list[str]:
     for key, category in (
         ('missing_nodes', 'core_runtime'),
         ('docker_not_running', 'docker_runtime'),
+        ('port_unreachable', 'port_unreachable'),
         ('injects_missing', 'artifact_injection'),
+        ('injects_unreadable', 'artifact_injection_content'),
         ('generator_outputs_missing', 'generator_outputs'),
         ('generator_injects_missing', 'generator_injects'),
     ):

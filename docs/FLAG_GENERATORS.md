@@ -156,9 +156,9 @@ Destination directory (optional):
 - `injects: ["File(path) -> /opt/bin"]`
 - If unspecified or invalid, files default to `/flow_injects`.
 
-### Non-deterministic injection via `inject_candidate_paths`
+### Suggested injection destinations via `inject_candidate_paths`
 
-To randomize where the injected file lands on each run, add `inject_candidate_paths` alongside `injects`:
+To offer a set of plausible destination directories for the injected file, add `inject_candidate_paths` alongside `injects`:
 
 ```yaml
 injects:
@@ -169,7 +169,7 @@ inject_candidate_paths:
   - /tmp/user_data
 ```
 
-On each execution, one path is chosen at random as the destination directory (only applies when `injects` entries have no explicit `->` destination). Invalid or relative paths are silently ignored. Flow shows these candidates in the Injects override editor; leave the destination blank to keep random selection, or pick/type a destination to make that step explicit.
+These are **suggestions surfaced in the Flow Injects override editor**, not an automatic destination. They are *not* chosen at random per run: unless a candidate is explicitly selected (or a destination is typed), injects with no explicit `->` destination default to `/flow_injects`. Selecting a candidate in the UI records it as an explicit `src -> <candidate>` override, which is what both the copy and the post-run validation then use. Invalid or relative candidate paths are silently ignored.
 
 - `outputs.json.outputs.File(path) = "artifacts/challenge"`
 - Do not emit `outputs.json.outputs.File(path) = "/outputs/artifacts/challenge"`.

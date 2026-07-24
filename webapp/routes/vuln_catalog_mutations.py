@@ -176,6 +176,45 @@ def register(
         write_vuln_catalogs_state(state)
         return jsonify({'ok': True, 'message': 'Saved note/color' if (note or color) else 'Cleared note/color'})
 
+    @app.route('/vuln_catalog_items/set_verify', methods=['POST'])
+    def vuln_catalog_items_set_verify():
+        require_builder_or_admin()
+        payload = request.get_json(silent=True) or {}
+        try:
+            item_id = int(payload.get('item_id'))
+        except Exception:
+            return jsonify({'ok': False, 'error': 'Invalid item_id'}), 400
+        verify_path = str(payload.get('verify_path') or '').strip()
+        if verify_path and not verify_path.startswith('/'):
+            return jsonify({'ok': False, 'error': 'Verify path must start with /'}), 400
+        if len(verify_path) > 500:
+            return jsonify({'ok': False, 'error': 'Verify path must be 500 characters or fewer'}), 400
+        verify_expect = str(payload.get('verify_expect') or '').strip()
+        if len(verify_expect) > 500:
+            return jsonify({'ok': False, 'error': 'Verify expect must be 500 characters or fewer'}), 400
+        state, entry, cid, catalogs, _items = _load_active_catalog_and_items()
+        if not entry:
+            return jsonify({'ok': False, 'error': 'No active catalog pack'}), 404
+        updated = False
+        for catalog in catalogs:
+            if str(catalog.get('id') or '').strip() != cid:
+                continue
+            items = normalize_vuln_catalog_items(catalog)
+            for item in items:
+                if int(item.get('id') or 0) != item_id:
+                    continue
+                item['verify_path'] = verify_path
+                item['verify_expect'] = verify_expect
+                updated = True
+                break
+            catalog['compose_items'] = items
+            break
+        if not updated:
+            return jsonify({'ok': False, 'error': 'Unknown item id'}), 404
+        state['catalogs'] = catalogs
+        write_vuln_catalogs_state(state)
+        return jsonify({'ok': True, 'message': 'Saved verification settings' if (verify_path or verify_expect) else 'Cleared verification settings'})
+
     @app.route('/vuln_catalog_items/delete', methods=['POST'])
     def vuln_catalog_items_delete():
         require_builder_or_admin()

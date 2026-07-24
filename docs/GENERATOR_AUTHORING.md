@@ -228,7 +228,7 @@ If no destination is provided (or it fails validation), files default to `/flow_
 
 ### Candidate injection paths (`inject_candidate_paths`)
 
-If you want the injected artifact to land in a **non-deterministically chosen** directory on each run (making the challenge more realistic — the attacker must discover the file rather than check a known path), add `inject_candidate_paths` to your manifest:
+If you want to offer several plausible destination directories for the injected artifact (so an author can place the file somewhere less obvious than the default), add `inject_candidate_paths` to your manifest:
 
 ```yaml
 inject_candidate_paths:
@@ -239,10 +239,9 @@ inject_candidate_paths:
 
 Rules:
 - Each path must be an absolute path starting with `/`. Relative or `..`-containing entries are ignored.
-- When `inject_candidate_paths` is set and non-empty, one path is chosen at random **per execution** as the inject destination (overrides the `/flow_injects` default).
-- An explicit `->` destination in `injects` still takes priority over candidate paths (candidates only apply when no explicit destination is given).
-- In the Flow Injects override editor, candidate paths appear as destination choices. Leaving the destination blank preserves random selection; choosing a candidate saves that path as an explicit destination for the step.
-- The chosen path is reflected in the `inject_copy` init-container that copies files into the target container's named volume.
+- Candidate paths are **suggestions surfaced in the Flow Injects override editor**, not an automatic destination. They are *not* applied at random per run. Unless a candidate is explicitly selected, injects with no explicit `->` destination default to `/flow_injects`.
+- An explicit `->` destination in `injects` always takes priority.
+- Choosing a candidate in the Injects override editor records it as an explicit `src -> <candidate>` override for that step; both the copy step and the post-run inject validation then use that recorded destination (preserving any subdirectories in the source-relative path).
 
 Example manifest fragment:
 

@@ -740,9 +740,11 @@ def discover_generator_manifests(
                     inject_files.append(s)
             gen['inject_files'] = inject_files
 
-            # Candidate injection paths: if specified, the runtime will pick one
-            # non-deterministically as the destination for inject specs that have no
-            # explicit destination.  Validated as absolute paths; invalid entries dropped.
+            # Candidate injection paths: suggested destination directories surfaced
+            # in the Flow Injects override editor for explicit user selection. They
+            # are NOT applied automatically -- injects with no explicit destination
+            # default to /flow_injects unless a candidate is selected (which records
+            # an explicit src -> dest). Validated as absolute paths; invalid dropped.
             candidate_paths_raw = doc.get('inject_candidate_paths')
             inject_candidate_paths: list[str] = []
             for x in _as_list(candidate_paths_raw):

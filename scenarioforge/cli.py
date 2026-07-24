@@ -2953,6 +2953,9 @@ _POST_EXECUTION_ERROR_FIELDS = (
     ('missing_vuln_nodes', 'Missing expected vulnerability nodes'),
     ('docker_missing', 'Missing Docker containers'),
     ('docker_not_running', 'Docker containers not running'),
+    ('port_unreachable', 'Container ports not open/accessible'),
+    ('topology_port_unreachable', 'Ports unreachable across CORE network (cross-node probe)'),
+    ('flag_verification_failed', 'Flag verification failed (verify_path content mismatch)'),
     ('generator_outputs_missing', 'Missing generator outputs'),
     ('flow_live_paths_missing', 'Missing Flow runtime paths'),
 )
@@ -2963,6 +2966,7 @@ _POST_EXECUTION_WARNING_FIELDS = (
     ('docker_start_pending', 'Docker containers still starting'),
     ('flow_artifact_copy_pending', 'Flow artifact copy pending'),
     ('injects_missing', 'Missing container injects'),
+    ('injects_unreadable', 'Container injects empty or unreadable'),
     ('generator_injects_missing', 'Missing generator inject sources'),
 )
 

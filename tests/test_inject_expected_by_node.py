@@ -1,3 +1,5 @@
+import json
+
 from webapp import app_backend as backend
 
 
@@ -441,6 +443,119 @@ def test_extract_inject_expected_by_node_ignores_resolved_sources_without_inject
     out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'NewScenario1')
 
     assert 'docker-5' not in out
+
+
+def test_extract_inject_expected_by_node_preserves_nested_bare_relative_path(monkeypatch):
+    # A bare relative inject spec with subdirectories and no explicit dest and no
+    # resolved_paths to resolve against: the real copy preserves the full nested
+    # relative path under /flow_injects, so the expected path must too (regression
+    # for a bug that truncated to just the basename).
+    monkeypatch.setattr(
+        backend,
+        '_flow_state_from_xml_path',
+        lambda *a, **k: {
+            'flag_assignments': [
+                {
+                    'node_id': '3',
+                    'type': 'flag-node-generator',
+                    'inject_files': ['site/private/flag.txt'],
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {3: {'name': 'docker-3'}},
+    )
+
+    out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'NewScenario1')
+
+    assert out['docker-3'] == ['/flow_injects/site/private/flag.txt']
+    assert '/flow_injects/flag.txt' not in out['docker-3']
+
+
+def test_extract_inject_expected_by_node_preserves_nested_path_under_selected_candidate(monkeypatch):
+    # When a user selects a non-default candidate destination in the UI, it is
+    # persisted as an explicit 'src -> dest' override. With a nested relative src
+    # and no resolved_paths, the expected path must be dest + full nested rel,
+    # matching where _inject_copy_for_inject_files actually mounts the file.
+    monkeypatch.setattr(
+        backend,
+        '_flow_state_from_xml_path',
+        lambda *a, **k: {
+            'flag_assignments': [
+                {
+                    'node_id': '4',
+                    'type': 'flag-node-generator',
+                    'inject_files': ['site/private/flag.txt'],
+                    'inject_files_override': ['site/private/flag.txt -> /var/www/html'],
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {4: {'name': 'docker-4'}},
+    )
+
+    out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'NewScenario1')
+
+    assert out['docker-4'] == ['/var/www/html/site/private/flag.txt']
+    assert '/var/www/html/flag.txt' not in out['docker-4']
+
+
+def test_copy_destination_matches_validation_expected_for_selected_candidate(tmp_path, monkeypatch):
+    # Parity guard: the container path where _inject_copy_for_inject_files actually
+    # places a file must equal the path _extract_inject_expected_by_node checks, so
+    # a correctly-injected file is never falsely reported missing. Exercises a
+    # selected non-default candidate destination with a nested relative source.
+    from scenarioforge.utils import vuln_process as vp
+
+    run_dir = tmp_path / 'flag_node_generators_runs' / 'run1'
+    (run_dir / 'site' / 'private').mkdir(parents=True)
+    (run_dir / 'site' / 'private' / 'flag.txt').write_text('FLAG{demo}')
+
+    override = 'site/private/flag.txt -> /var/www/html'
+
+    compose = {'services': {'target': {'image': 'nginx', 'container_name': 'docker-3'}}}
+    result = vp._inject_copy_for_inject_files(
+        compose,
+        inject_files=[override],
+        source_dir=str(run_dir),
+        prefer_service='target',
+        inject_candidate_paths=['/var/www/html', '/srv/app/data'],
+    )
+    real_dest = '/var/www/html/site/private/flag.txt'
+    # The real container destination must appear as a mount/copy target in the
+    # generated compose (host source lives under tmp_path, so this string can only
+    # be the container-side path).
+    assert real_dest in json.dumps(result)
+
+    monkeypatch.setattr(
+        backend,
+        '_flow_state_from_xml_path',
+        lambda *a, **k: {
+            'flag_assignments': [
+                {
+                    'node_id': '3',
+                    'type': 'flag-node-generator',
+                    'inject_source_dir': str(run_dir),
+                    'inject_files': ['site/private/flag.txt'],
+                    'inject_files_override': [override],
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        '_expected_from_plan_preview',
+        lambda *a, **k: {3: {'name': 'docker-3'}},
+    )
+    out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'NewScenario1')
+
+    assert out['docker-3'] == [real_dest]
 
 
 def test_extract_inject_expected_by_node_ignores_node_generator_mount_root(monkeypatch):

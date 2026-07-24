@@ -3511,6 +3511,32 @@
         listEl.appendChild(renderExecuteSummaryItem('Docker containers running', count('docker_not_running') === 0,
           count('docker_not_running') ? `${count('docker_not_running')} not running` : 'All containers running',
           count('docker_not_running') ? values('docker_not_running') : values('docker_running')));
+        if (count('ports_checked')) {
+          const describePorts = (entry, onlyUnreachable) => {
+            const ports = Array.isArray(entry?.ports) ? entry.ports : [];
+            const filtered = onlyUnreachable ? ports.filter((p) => p && p.reachable === false) : ports;
+            const portList = filtered.map((p) => `${p.port}/${String(p.container_port || '').split('/').pop() || 'tcp'}${p.reachable === false ? ' (unreachable)' : ''}`).join(', ');
+            return `${entry?.container || 'container'}: ${portList || 'no ports'}`;
+          };
+          listEl.appendChild(renderExecuteSummaryItem('Container ports open and accessible', count('port_unreachable') === 0,
+            count('port_unreachable') ? `${count('port_unreachable')} container(s) with unreachable port(s)` : 'All published ports reachable',
+            count('port_unreachable')
+              ? values('port_unreachable_details').map((entry) => describePorts(entry, true))
+              : values('ports_checked').map((entry) => describePorts(entry, false))));
+        }
+        if (summary.topology_probe_checked) {
+          const describeTopologyIssue = (entry) => {
+            const ports = Array.isArray(entry?.ports) ? entry.ports : [];
+            const portList = ports.map((p) => `${p.port}${p.error ? ` (${p.error})` : ''}`).join(', ');
+            return `${entry?.container || 'container'}: unreachable from ${entry?.probe_container || 'probe node'} at ${entry?.ip || '?'} — ${portList || 'unreachable'}`;
+          };
+          listEl.appendChild(renderExecuteSummaryItem('Reachable across CORE network (cross-node probe)', count('topology_port_unreachable') === 0,
+            count('topology_port_unreachable') ? `${count('topology_port_unreachable')} container(s) unreachable from peer node` : 'Reachable from a peer node across the emulated topology',
+            values('topology_port_unreachable_details').map(describeTopologyIssue)));
+        } else if (summary.topology_probe_error) {
+          listEl.appendChild(renderExecuteSummaryItem('Reachable across CORE network (cross-node probe)', true,
+            `Not checked: ${summary.topology_probe_error}`, []));
+        }
         listEl.appendChild(renderExecuteSummaryItem('Docker startup pending (transient)', true,
           count('docker_start_pending') ? `${count('docker_start_pending')} container(s) still starting` : 'None',
           values('docker_start_pending')));
@@ -3526,6 +3552,24 @@
           : (values('injects_detail').length ? values('injects_detail') : expectedInjectFiles);
         listEl.appendChild(renderExecuteSummaryItem('Injected files present', missingInjects.length === 0,
           missingInjects.length ? `${missingInjects.length} containers missing injects/sources` : 'Injects detected', injectDetails));
+        const unreadableInjects = values('injects_unreadable');
+        if (unreadableInjects.length || values('injects_unreadable_details').length) {
+          const describeContentIssues = (entry) => {
+            const files = Array.isArray(entry?.files) ? entry.files : [];
+            const fileList = files.map((f) => `${f.path} (${(f.issues || []).join('/')})`).join(', ');
+            return `${entry?.container || 'container'}: ${fileList || 'issue detected'}`;
+          };
+          listEl.appendChild(renderExecuteSummaryItem('Injected files readable and non-empty', unreadableInjects.length === 0,
+            unreadableInjects.length ? `${unreadableInjects.length} container(s) with empty/unreadable injects` : 'All injects have content',
+            values('injects_unreadable_details').map(describeContentIssues)));
+        }
+        if (count('flag_verification_checked')) {
+          const failedVerify = values('flag_verification_failed');
+          const describeVerifyFailure = (entry) => `${entry?.container || 'container'}: ${entry?.path || ''} — ${entry?.detail || 'no match'}`;
+          listEl.appendChild(renderExecuteSummaryItem('Flag retrievable via service (verify_path)', failedVerify.length === 0,
+            failedVerify.length ? `${failedVerify.length} container(s) failed flag verification` : 'Flag content verified via configured path',
+            values('flag_verification_details').map(describeVerifyFailure)));
+        }
         const generatorDetail = values('generator_validation_detail');
         const detailFor = (field, fallback) => generatorDetail.length
           ? generatorDetail.map((entry) => {
@@ -3562,7 +3606,11 @@
         `Unexpected nodes: ${count('extra_nodes')}`,
         `Missing Docker containers: ${count('docker_missing')}`,
         `Docker containers not running: ${count('docker_not_running')}`,
+        `Container ports unreachable: ${count('port_unreachable')}`,
+        `Ports unreachable across CORE network: ${summary.topology_probe_checked ? count('topology_port_unreachable') : 'not checked'}`,
         `Missing injects: ${count('injects_missing')}`,
+        `Empty/unreadable injects: ${count('injects_unreadable')}`,
+        `Flag verification failed: ${count('flag_verification_checked') ? count('flag_verification_failed') : 'not checked'}`,
         `Missing generator outputs: ${count('generator_outputs_missing')}`,
         `Missing generator injects: ${count('generator_injects_missing')}`,
         `Missing flow live paths: ${count('flow_live_paths_missing')}`,

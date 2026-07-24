@@ -4,12 +4,13 @@ This document is the current wire-format reference for scenario editor XML
 consumed and emitted by the Web UI and CLI. It covers the planning sections and
 the runtime metadata persisted by the application.
 
-`schemas/xml/scenarios.xsd` is useful for the original planning-only subset,
-but it is **not** the complete schema for a current saved file. In particular,
-it does not model runtime metadata (`CoreConnection`, `HardwareInLoop`,
-`AIGenerator`, `PlanPreview`, or `FlagSequencing`) or the current `Flag Node
-Generators` section. The application parser and its preview/Flow/execute
-preflight checks are authoritative for the complete format.
+`schemas/xml/scenarios.xsd` models the full current format, including the
+runtime metadata blocks (`CoreConnection`, `HardwareInLoop`, `AIGenerator`,
+`PlanPreview`, `FlagSequencing`) and the `Flag Node Generators` section. The
+JSON payloads inside `AIGenerator`, `FlowState`, `FlowExpansion`, and
+`PlanPreview` are opaque strings at the XSD level, and cross-attribute
+semantics are not enforceable in XSD 1.0, so the application parser and its
+preview/Flow/execute preflight checks remain authoritative for semantics.
 
 ### Root Elements
 

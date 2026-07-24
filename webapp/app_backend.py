@@ -4996,9 +4996,9 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
         if not p:
             return ''
         if not p.startswith('/'):
-            base_rel = _basename(_strip_relative_path_prefix(p))
-            if base_rel:
-                return f"{flow_default_dest.rstrip('/')}/{base_rel}"
+            rel = _normalize_inject_rel_for_expected(p)
+            if rel:
+                return f"{flow_default_dest.rstrip('/')}/{rel}"
             return flow_default_dest
         p_norm = p.replace('\\', '/')
         source_norm = str(source_dir or '').strip().replace('\\', '/')
@@ -5265,9 +5265,9 @@ def _extract_inject_expected_by_node(scenario_xml_path: str, scenario_label: str
                     src = str(src or '').strip()
                     dest = str(dest or '').strip()
                     dest_dir = dest if dest.startswith('/') else '/tmp'
-                    base = _basename(src)
-                    if base:
-                        per_node.append(f"{dest_dir.rstrip('/')}/{base}")
+                    rel = _basename(src) if src.startswith('/') else _normalize_inject_rel_for_expected(src)
+                    if rel:
+                        per_node.append(f"{dest_dir.rstrip('/')}/{rel}")
                     else:
                         per_node.append(dest_dir)
                     continue
@@ -38529,6 +38529,7 @@ def _remote_docker_injects_status_script(
     sudo_password: str | None = None,
     inject_dirs: List[str] | None = None,
     expected_by_node: Dict[str, List[str]] | None = None,
+    verify_targets: Dict[str, Dict[str, str]] | None = None,
     max_find: int = 200,
 ) -> str:
     containers_literal = json.dumps([str(x) for x in (containers or [])])
@@ -38536,9 +38537,10 @@ def _remote_docker_injects_status_script(
     max_find_literal = json.dumps(int(max_find))
     inject_dirs_literal = json.dumps([str(d) for d in (inject_dirs or [])])
     expected_by_node_literal = json.dumps(expected_by_node or {})
+    verify_targets_literal = json.dumps(verify_targets or {})
     return (
         r"""
-import json, shlex, subprocess, time
+import json, shlex, socket, subprocess, time
 
 null = None
 true = True
@@ -38549,6 +38551,7 @@ SUDO_PASSWORD = __SUDO_PASSWORD_LITERAL__
 MAX_FIND = __MAX_FIND_LITERAL__
 INJECT_DIRS = __INJECT_DIRS_LITERAL__
 EXPECTED_BY_NODE = __EXPECTED_BY_NODE_LITERAL__
+VERIFY_TARGETS = __VERIFY_TARGETS_LITERAL__
 
 
 def _run(cmd, timeout=30):
@@ -38621,6 +38624,167 @@ def _inspect_state(container_name, attempts=4, delay_s=1.0):
     }
 
 
+_LIKELY_HTTP_PORTS = {80, 443, 8000, 8008, 8080, 8081, 8443, 8888, 3000, 5000, 8090, 9000, 9090, 7001, 4443}
+
+
+def _http_probe(host, port, timeout=3.0):
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except Exception as e:
+        return b'', str(e)
+    try:
+        sock.settimeout(timeout)
+        try:
+            host_header = host.encode('ascii', 'ignore')
+        except Exception:
+            host_header = b''
+        try:
+            sock.sendall(b'HEAD / HTTP/1.0\r\nHost: ' + host_header + b'\r\nConnection: close\r\n\r\n')
+        except Exception:
+            pass
+        try:
+            data = sock.recv(256)
+        except Exception:
+            data = b''
+        return data, ''
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _check_published_ports(container_name, attempts=3, delay_s=1.0):
+    p = _run(['docker', 'inspect', '--format', '{{json .NetworkSettings.Ports}}', container_name], timeout=20)
+    out = str(p.stdout or '').strip()
+    try:
+        raw_ports = json.loads(out) if out else {}
+    except Exception:
+        raw_ports = {}
+    published = []
+    if isinstance(raw_ports, dict):
+        for container_port, bindings in raw_ports.items():
+            if not isinstance(bindings, list):
+                continue
+            for binding in bindings:
+                if not isinstance(binding, dict):
+                    continue
+                host_port_raw = str(binding.get('HostPort') or '').strip()
+                if not host_port_raw:
+                    continue
+                try:
+                    host_port = int(host_port_raw)
+                except Exception:
+                    continue
+                host_ip = str(binding.get('HostIp') or '').strip()
+                if not host_ip or host_ip in ('0.0.0.0', '::'):
+                    host_ip = '127.0.0.1'
+                published.append({'container_port': str(container_port), 'host': host_ip, 'port': host_port})
+    checks = []
+    for entry in published:
+        reachable = False
+        last_err = ''
+        for attempt in range(max(1, int(attempts or 1))):
+            try:
+                sock = socket.create_connection((entry['host'], entry['port']), timeout=3.0)
+                sock.close()
+                reachable = True
+                break
+            except Exception as e:
+                last_err = str(e)
+                if attempt < max(1, int(attempts or 1)) - 1:
+                    time.sleep(float(delay_s or 1.0))
+        protocol_checked = ''
+        protocol_ok = None
+        protocol_detail = ''
+        if reachable:
+            container_port_num = 0
+            try:
+                container_port_num = int(str(entry['container_port']).split('/')[0])
+            except Exception:
+                container_port_num = 0
+            if container_port_num in _LIKELY_HTTP_PORTS or entry['port'] in _LIKELY_HTTP_PORTS:
+                protocol_checked = 'http'
+                data, err = _http_probe(entry['host'], entry['port'])
+                if data:
+                    protocol_ok = data[:5] == b'HTTP/'
+                    if not protocol_ok:
+                        protocol_detail = 'unexpected response (not HTTP)'
+                else:
+                    protocol_ok = False
+                    protocol_detail = err or 'no response to HTTP probe'
+        checks.append({
+            'container_port': entry['container_port'],
+            'host': entry['host'],
+            'port': entry['port'],
+            'reachable': reachable,
+            'error': '' if reachable else last_err,
+            'protocol_checked': protocol_checked,
+            'protocol_ok': protocol_ok,
+            'protocol_detail': protocol_detail,
+        })
+    return checks
+
+
+def _http_get(host, port, path, timeout=4.0):
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except Exception as e:
+        return b'', str(e)
+    try:
+        sock.settimeout(timeout)
+        req_path = path if path.startswith('/') else '/' + path
+        try:
+            host_header = host.encode('ascii', 'ignore')
+        except Exception:
+            host_header = b''
+        try:
+            sock.sendall(b'GET ' + req_path.encode('utf-8', 'ignore') + b' HTTP/1.0\r\nHost: ' + host_header + b'\r\nConnection: close\r\n\r\n')
+        except Exception:
+            pass
+        chunks = []
+        total = 0
+        try:
+            while total < 8192:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+        except Exception:
+            pass
+        return b''.join(chunks), ''
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _check_verify_target(checks, verify_spec):
+    if not isinstance(verify_spec, dict):
+        return None
+    path = str(verify_spec.get('path') or '').strip()
+    if not path:
+        return None
+    expect = str(verify_spec.get('expect') or '')
+    reachable_ports = [pc for pc in (checks or []) if isinstance(pc, dict) and pc.get('reachable')]
+    if not reachable_ports:
+        return {'path': path, 'checked': False, 'matched': False, 'detail': 'no reachable port to verify against'}
+    entry = reachable_ports[0]
+    body, err = _http_get(entry['host'], entry['port'], path)
+    if err and not body:
+        return {'path': path, 'checked': True, 'matched': False, 'detail': err}
+    text = body.decode('utf-8', 'ignore')
+    if expect:
+        matched = expect in text
+        detail = '' if matched else 'expected content not found in response'
+    else:
+        matched = bool(text)
+        detail = '' if matched else 'empty response'
+    return {'path': path, 'checked': True, 'matched': matched, 'detail': detail}
+
+
 def _expected_paths_for(container_name):
     if not isinstance(EXPECTED_BY_NODE, dict):
         return []
@@ -38642,6 +38806,7 @@ def _check_expected_paths(container_name, paths):
     present = []
     missing = []
     debug = []
+    content_issues = []
     for path in paths or []:
         qpath = shlex.quote(str(path or '').strip())
         if not qpath:
@@ -38649,12 +38814,21 @@ def _check_expected_paths(container_name, paths):
         p = _run(['docker', 'exec', container_name, 'sh', '-c', f'test -e {qpath}'], timeout=15)
         if p.returncode == 0:
             present.append(str(path))
+            issues = []
+            p_size = _run(['docker', 'exec', container_name, 'sh', '-c', f'test -s {qpath}'], timeout=15)
+            if p_size.returncode != 0:
+                issues.append('empty')
+            p_read = _run(['docker', 'exec', container_name, 'sh', '-c', f'test -r {qpath}'], timeout=15)
+            if p_read.returncode != 0:
+                issues.append('unreadable')
+            if issues:
+                content_issues.append({'path': str(path), 'issues': issues})
         else:
             out = str(p.stdout or '').strip()
             if out:
                 debug.append(out)
             missing.append(str(path))
-    return present, missing, debug
+    return present, missing, debug, content_issues
 
 
 def _debug_mentions_restarting(values):
@@ -38693,8 +38867,21 @@ def main():
         inject_dirs_found = []
         expected_present = []
         expected_missing = []
+        expected_content_issues = []
         debug_logs = []
+        port_checks = []
+        verify_result = None
         if exists and running:
+            try:
+                port_checks = _check_published_ports(c)
+            except Exception:
+                port_checks = []
+            verify_spec = VERIFY_TARGETS.get(c) if isinstance(VERIFY_TARGETS, dict) else None
+            if verify_spec:
+                try:
+                    verify_result = _check_verify_target(port_checks, verify_spec)
+                except Exception:
+                    verify_result = None
             for d in INJECT_DIRS:
                 if not d:
                     continue
@@ -38730,7 +38917,7 @@ def main():
                             debug_logs.append(dbg)
             expected_paths = _expected_paths_for(c)
             if expected_paths:
-                expected_present, expected_missing, expected_debug = _check_expected_paths(c, expected_paths)
+                expected_present, expected_missing, expected_debug, expected_content_issues = _check_expected_paths(c, expected_paths)
                 debug_logs.extend(expected_debug)
             if _debug_mentions_restarting(debug_logs):
                 retry_state = _inspect_state(c, attempts=8, delay_s=1.0)
@@ -38740,6 +38927,9 @@ def main():
                 state_exit_code = retry_state.get('exit_code')
                 state_error = str(retry_state.get('error') or '').strip()
                 inspect_error = str(retry_state.get('inspect_error') or inspect_error).strip()
+                port_checks = []
+                expected_content_issues = []
+                verify_result = None
         items.append({
             'container': c,
             'exists': exists,
@@ -38753,7 +38943,10 @@ def main():
             'inject_dirs_found': inject_dirs_found,
             'expected_present': expected_present,
             'expected_missing': expected_missing,
+            'expected_content_issues': expected_content_issues,
             'debug_logs': debug_logs,
+            'port_checks': port_checks,
+            'verify_result': verify_result,
         })
     print(json.dumps({'ok': True, 'items': items}))
 
@@ -38765,7 +38958,85 @@ if __name__ == '__main__':
      .replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal) \
      .replace('__MAX_FIND_LITERAL__', max_find_literal) \
     .replace('__INJECT_DIRS_LITERAL__', inject_dirs_literal) \
-    .replace('__EXPECTED_BY_NODE_LITERAL__', expected_by_node_literal)
+    .replace('__EXPECTED_BY_NODE_LITERAL__', expected_by_node_literal) \
+    .replace('__VERIFY_TARGETS_LITERAL__', verify_targets_literal)
+
+
+def _remote_topology_probe_script(
+    *,
+    probe_container: str,
+    target_host: str,
+    target_ports: List[int],
+    sudo_password: str | None = None,
+) -> str:
+    """Build a CORE-VM-side script that shells into a probe container and checks
+    whether the target node's ports are reachable over the CORE-emulated network
+    (as opposed to via Docker's host-published ports), by connecting from inside
+    the probe container to the target's CORE-assigned IP.
+    """
+    probe_container_literal = json.dumps(str(probe_container or ''))
+    target_host_literal = json.dumps(str(target_host or ''))
+    target_ports_literal = json.dumps([int(p) for p in (target_ports or [])])
+    sudo_password_literal = json.dumps(str(sudo_password) if sudo_password else '')
+    return (
+        r"""
+import json, subprocess
+
+PROBE_CONTAINER = __PROBE_CONTAINER_LITERAL__
+TARGET_HOST = __TARGET_HOST_LITERAL__
+TARGET_PORTS = __TARGET_PORTS_LITERAL__
+SUDO_PASSWORD = __SUDO_PASSWORD_LITERAL__
+
+
+def _run(cmd, timeout=30):
+    try:
+        p = subprocess.run(['sudo', '-n'] + list(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        if p.returncode == 0:
+            return p
+        if SUDO_PASSWORD:
+            return subprocess.run(
+                ['sudo', '-S', '-k', '-p', ''] + list(cmd),
+                input=str(SUDO_PASSWORD) + "\n",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+            )
+        return p
+    except Exception as e:
+        return subprocess.CompletedProcess(cmd, 127, stdout=str(e))
+
+
+def main():
+    inner_script = (
+        "import json, socket\n"
+        "results = []\n"
+        "for port in " + json.dumps(TARGET_PORTS) + ":\n"
+        "    try:\n"
+        "        s = socket.create_connection((" + json.dumps(TARGET_HOST) + ", port), timeout=3.0)\n"
+        "        s.close()\n"
+        "        results.append({'port': port, 'reachable': True})\n"
+        "    except Exception as e:\n"
+        "        results.append({'port': port, 'reachable': False, 'error': str(e)})\n"
+        "print(json.dumps(results))\n"
+    )
+    p = _run(['docker', 'exec', PROBE_CONTAINER, 'python3', '-c', inner_script], timeout=45)
+    out = str(p.stdout or '').strip()
+    parsed = None
+    try:
+        parsed = json.loads(out)
+    except Exception:
+        parsed = None
+    print(json.dumps({'ok': p.returncode == 0 and parsed is not None, 'results': parsed, 'raw': out[-500:]}))
+
+
+if __name__ == '__main__':
+    main()
+"""
+    ).replace('__PROBE_CONTAINER_LITERAL__', probe_container_literal) \
+     .replace('__TARGET_HOST_LITERAL__', target_host_literal) \
+     .replace('__TARGET_PORTS_LITERAL__', target_ports_literal) \
+     .replace('__SUDO_PASSWORD_LITERAL__', sudo_password_literal)
 
 
 def _remote_flow_artifacts_validation_script(
@@ -39402,8 +39673,12 @@ def _validate_session_nodes_and_injects(
     preview_plan_path: str | None = None,
     scenario_label: str | None = None,
     flow_enabled: bool = True,
+    topology_probe_node_name: str | None = None,
+    verify_targets: Dict[str, Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
     flow_enabled = bool(flow_enabled)
+    topology_probe_node_name = str(topology_probe_node_name or '').strip() or None
+    verify_targets = verify_targets if isinstance(verify_targets, dict) else {}
     summary: Dict[str, Any] = {
         'ok': True,
         'missing_nodes': [],
@@ -39425,7 +39700,19 @@ def _validate_session_nodes_and_injects(
         'docker_not_running_details': [],
         'docker_start_pending': [],
         'docker_running': [],
+        'port_unreachable': [],
+        'port_unreachable_details': [],
+        'ports_checked': [],
+        'topology_probe_checked': False,
+        'topology_port_unreachable': [],
+        'topology_port_unreachable_details': [],
+        'topology_probe_error': None,
+        'flag_verification_checked': [],
+        'flag_verification_failed': [],
+        'flag_verification_details': [],
         'injects_missing': [],
+        'injects_unreadable': [],
+        'injects_unreadable_details': [],
         'injects_detail': [],
         'inject_dirs_expected': [],
         'inject_nodes_expected': [],
@@ -39944,6 +40231,40 @@ def _validate_session_nodes_and_injects(
                 return None
             return None
 
+        def _record_port_checks(name: str, it: Dict[str, Any]) -> None:
+            port_checks = it.get('port_checks') if isinstance(it.get('port_checks'), list) else []
+            if not port_checks:
+                return
+            summary['ports_checked'].append({'container': name, 'ports': port_checks})
+            failing = [
+                pc for pc in port_checks
+                if isinstance(pc, dict) and (not pc.get('reachable') or pc.get('protocol_ok') is False)
+            ]
+            if failing:
+                summary['port_unreachable'].append(name)
+                summary['port_unreachable_details'].append({'container': name, 'ports': failing})
+
+                def _describe(pc: Dict[str, Any]) -> str:
+                    label = f"{pc.get('port')}/{str(pc.get('container_port') or '').split('/')[-1] or 'tcp'}"
+                    if not pc.get('reachable'):
+                        return f"{label} unreachable"
+                    return f"{label} no {pc.get('protocol_checked') or 'protocol'} response ({pc.get('protocol_detail') or 'unexpected'})"
+
+                failing_desc = ', '.join(_describe(pc) for pc in failing)
+                summary['injects_detail'].append(f"{name}: published port(s) not reachable ({failing_desc})")
+
+            verify_result = it.get('verify_result')
+            if isinstance(verify_result, dict) and verify_result.get('checked'):
+                summary['flag_verification_checked'].append(name)
+                if not verify_result.get('matched'):
+                    summary['flag_verification_failed'].append(name)
+                    summary['flag_verification_details'].append(
+                        {'container': name, 'path': verify_result.get('path'), 'detail': verify_result.get('detail')}
+                    )
+                    summary['injects_detail'].append(
+                        f"{name}: flag verification failed at {verify_result.get('path')} ({verify_result.get('detail') or 'no match'})"
+                    )
+
         if inject_expected_by_node:
             inject_dirs = sorted({d for paths in inject_expected_by_node.values() for p in paths if p.startswith('/') for d in (_safe_inject_dir(p),) if d})
         else:
@@ -39956,6 +40277,7 @@ def _validate_session_nodes_and_injects(
                     sudo_password=core_cfg.get('ssh_password'),
                     inject_dirs=inject_dirs,
                     expected_by_node=inject_expected_by_node if isinstance(inject_expected_by_node, dict) else {},
+                    verify_targets=verify_targets,
                 ),
                 logger=app.logger,
                 label='docker.exec.injects_status',
@@ -40005,6 +40327,7 @@ def _validate_session_nodes_and_injects(
                                 if bool(it2.get('running')):
                                     summary['docker_running'].append(name)
                                     summary['injects_detail'].append(f"{name}: startup recovered after recheck")
+                                    _record_port_checks(name, it2)
                                     continue
                                 status2 = str(it2.get('state_status') or '').strip().lower()
                                 exit2 = it2.get('state_exit_code')
@@ -40041,6 +40364,7 @@ def _validate_session_nodes_and_injects(
                             summary['injects_detail'].append(f"{name}: not running{reason}")
                     else:
                         summary['docker_running'].append(name)
+                        _record_port_checks(name, it)
                     try:
                         is_running = bool(it.get('running'))
                         samples = it.get('inject_samples') if isinstance(it.get('inject_samples'), list) else []
@@ -40085,9 +40409,97 @@ def _validate_session_nodes_and_injects(
                     if should_require_injects and bool(it.get('running')) and (int(it.get('inject_count') or 0) <= 0 or bool(exact_expected_missing)):
                         if name not in summary['injects_missing']:
                             summary['injects_missing'].append(name)
+                    content_issues = it.get('expected_content_issues') if isinstance(it.get('expected_content_issues'), list) else []
+                    if content_issues and bool(it.get('running')):
+                        summary['injects_unreadable'].append(name)
+                        summary['injects_unreadable_details'].append({'container': name, 'files': content_issues})
+                        issues_desc = ', '.join(
+                            f"{entry.get('path')} ({'/'.join(entry.get('issues') or [])})"
+                            for entry in content_issues if isinstance(entry, dict)
+                        )
+                        summary['injects_detail'].append(f"{name}: inject file content issue(s): {issues_desc}")
         except Exception as exc:
             summary['ok'] = False
             summary['error'] = f'failed docker injects validation: {exc}'
+
+    # Cross-node reachability: probe the target's CORE-assigned IP from a second
+    # node's container (rather than from the CORE VM host), to check whether the
+    # service is actually reachable across the CORE-emulated network path a real
+    # scenario would use, not just via Docker's own host-published ports.
+    if (
+        topology_probe_node_name
+        and isinstance(core_cfg, dict)
+        and topology_probe_node_name in summary['docker_running']
+    ):
+        try:
+            target_name = next(
+                (n for n in summary['docker_running'] if n != topology_probe_node_name),
+                None,
+            )
+            target_ports_entry = next(
+                (e for e in summary['ports_checked'] if isinstance(e, dict) and e.get('container') == target_name),
+                None,
+            )
+            target_container_ports: List[int] = []
+            if isinstance(target_ports_entry, dict):
+                for pc in target_ports_entry.get('ports') or []:
+                    if not isinstance(pc, dict):
+                        continue
+                    try:
+                        target_container_ports.append(int(str(pc.get('container_port') or '').split('/')[0]))
+                    except Exception:
+                        continue
+            target_container_ports = sorted(set(p for p in target_container_ports if p > 0))
+            target_ip = None
+            if target_name and session_xml_path:
+                try:
+                    topo = _analyze_core_xml(session_xml_path)
+                    for node in (topo.get('nodes') or []) if isinstance(topo, dict) else []:
+                        if str(node.get('name') or '').strip() != target_name:
+                            continue
+                        for iface in node.get('interfaces') or []:
+                            raw_ip = str(iface.get('ipv4') or '').strip()
+                            if raw_ip:
+                                target_ip = raw_ip.split('/', 1)[0]
+                                break
+                        if target_ip:
+                            break
+                except Exception:
+                    target_ip = None
+            if not target_name or not target_ip or not target_container_ports:
+                summary['topology_probe_error'] = (
+                    'unable to resolve target node/IP/ports for cross-node reachability probe'
+                )
+            else:
+                payload = _run_remote_python_json(
+                    core_cfg,
+                    _remote_topology_probe_script(
+                        probe_container=topology_probe_node_name,
+                        target_host=target_ip,
+                        target_ports=target_container_ports,
+                        sudo_password=core_cfg.get('ssh_password'),
+                    ),
+                    logger=app.logger,
+                    label='docker.exec.topology_probe',
+                    timeout=60.0,
+                )
+                summary['topology_probe_checked'] = True
+                results = payload.get('results') if isinstance(payload, dict) else None
+                if isinstance(results, list):
+                    unreachable = [r for r in results if isinstance(r, dict) and not r.get('reachable')]
+                    if unreachable:
+                        summary['topology_port_unreachable'].append(target_name)
+                        summary['topology_port_unreachable_details'].append(
+                            {'container': target_name, 'probe_container': topology_probe_node_name, 'ip': target_ip, 'ports': unreachable}
+                        )
+                        unreachable_desc = ', '.join(f"{r.get('port')} ({r.get('error') or 'unreachable'})" for r in unreachable)
+                        summary['injects_detail'].append(
+                            f"{target_name}: unreachable from {topology_probe_node_name} across CORE network at {target_ip} ({unreachable_desc})"
+                        )
+                elif not (isinstance(payload, dict) and payload.get('ok')):
+                    summary['topology_probe_error'] = str((payload or {}).get('raw') or 'topology probe returned no results')
+        except Exception as exc:
+            summary['topology_probe_error'] = str(exc)
 
     # Validate Flow generator outputs/inject sources on the CORE VM (remote).
     gen_validation_error: str | None = None
@@ -45762,6 +46174,8 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['requires_build_network'] = bool(it.get('requires_build_network', False))
         bn = it.get('build_network_notes')
         it['build_network_notes'] = [str(v) for v in bn] if isinstance(bn, list) else []
+        it['verify_path'] = str(it.get('verify_path') or '').strip()
+        it['verify_expect'] = str(it.get('verify_expect') or '').strip()
         out.append(it)
     out.sort(key=lambda d: int(d.get('id') or 0))
     return out
@@ -49222,6 +49636,9 @@ def _flagnodegen_run_ephemeral_execute(run_id_local: str) -> None:
     _run_cli_background_task(run_id_local, job_spec)
 
 
+_NETWORK_PROBE_VULN_MARKER = '__coretg_network_probe__'
+
+
 def _vuln_test_build_ephemeral_execute_job(
     *,
     run_dir: str,
@@ -49230,6 +49647,7 @@ def _vuln_test_build_ephemeral_execute_job(
     item_id: int,
     item_name: str,
     compose_path: str,
+    include_network_probe: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     run_dir_abs = os.path.abspath(str(run_dir or '').strip()) if str(run_dir or '').strip() else ''
     if not run_dir_abs:
@@ -49263,14 +49681,41 @@ def _vuln_test_build_ephemeral_execute_job(
     compose_xml = _xml_attr(compose_abs)
     scenario_xml = _xml_attr(scenario_name)
 
+    # Optionally add a second, plain Docker node ("network probe") wired into the
+    # same topology via the planner's normal router/switch auto-attachment, so a
+    # reachability check can run from inside a peer node's container across the
+    # CORE-emulated network instead of from the CORE VM host. Best-effort: any
+    # failure here just disables the probe rather than failing the whole test.
+    probe_compose_abs = ''
+    if include_network_probe:
+        try:
+            probe_compose_abs = os.path.abspath(os.path.join(run_dir_abs, 'docker-compose-network-probe.yml'))
+            Path(probe_compose_abs).write_text(
+                "services:\n"
+                "  probe:\n"
+                "    image: python:3-alpine\n"
+                "    command: [\"sleep\", \"infinity\"]\n",
+                encoding='utf-8',
+            )
+        except Exception:
+            probe_compose_abs = ''
+    docker_count = 2 if probe_compose_abs else 1
+    probe_vuln_item_xml = ''
+    if probe_compose_abs:
+        probe_compose_xml = _xml_attr(probe_compose_abs)
+        probe_vuln_item_xml = (
+            f"\n        <item selected='Specific' v_metric='Count' v_count='1' "
+            f"v_name='{_NETWORK_PROBE_VULN_MARKER}' v_path='{probe_compose_xml}'/>"
+        )
+
     xml_text = f"""<Scenarios>
   <Scenario name='{scenario_xml}'>
     <ScenarioEditor>
       <section name='Node Information'>
-        <item selected='Docker' v_metric='Count' v_count='1'/>
+        <item selected='Docker' v_metric='Count' v_count='{docker_count}'/>
       </section>
       <section name='Vulnerabilities' density='0.0'>
-        <item selected='Specific' v_metric='Count' v_count='1' v_name='{item_name_xml}' v_path='{compose_xml}'/>
+        <item selected='Specific' v_metric='Count' v_count='1' v_name='{item_name_xml}' v_path='{compose_xml}'/>{probe_vuln_item_xml}
       </section>
     </ScenarioEditor>
   </Scenario>
@@ -49288,24 +49733,50 @@ def _vuln_test_build_ephemeral_execute_job(
 
     docker_node_id = ''
     docker_node_name = ''
+    probe_node_id = ''
+    probe_node_name = ''
     try:
         payload = _load_preview_payload_from_path(xml_path, scenario_name)
         full_preview = payload.get('full_preview') if isinstance(payload, dict) else None
         hosts = full_preview.get('hosts') if isinstance(full_preview, dict) and isinstance(full_preview.get('hosts'), list) else []
-        for host in hosts:
-            if not isinstance(host, dict):
-                continue
-            role = str(host.get('role') or '').strip().lower()
+        docker_hosts = [
+            h for h in hosts
+            if isinstance(h, dict) and str(h.get('role') or '').strip().lower() == 'docker' and str(h.get('node_id') or '').strip()
+        ]
+        if probe_compose_abs:
+            for host in docker_hosts:
+                vulns = host.get('vulnerabilities')
+                vuln_names = [str(v).strip() for v in vulns] if isinstance(vulns, list) else []
+                if any(_NETWORK_PROBE_VULN_MARKER in v for v in vuln_names):
+                    probe_node_id = str(host.get('node_id') or '').strip()
+                    probe_node_name = str(host.get('name') or '').strip()
+                    break
+        for host in docker_hosts:
             node_id = str(host.get('node_id') or '').strip()
-            if role == 'docker' and node_id:
-                docker_node_id = node_id
-                docker_node_name = str(host.get('name') or '').strip()
-                break
+            if probe_node_id and node_id == probe_node_id:
+                continue
+            docker_node_id = node_id
+            docker_node_name = str(host.get('name') or '').strip()
+            break
+        if probe_compose_abs and not probe_node_id and len(docker_hosts) >= 2:
+            # Fallback: couldn't identify the probe by its vulnerability marker
+            # (list contents may not include our marker name verbatim) -- assume
+            # whichever docker host isn't the resolved target is the probe.
+            fallback = next(
+                (h for h in docker_hosts if str(h.get('node_id') or '').strip() != docker_node_id),
+                None,
+            )
+            if fallback:
+                probe_node_id = str(fallback.get('node_id') or '').strip()
+                probe_node_name = str(fallback.get('name') or '').strip()
     except Exception:
         docker_node_id = ''
         docker_node_name = ''
+        probe_node_id = ''
+        probe_node_name = ''
     if not docker_node_name and docker_node_id.isdigit():
         docker_node_name = f"docker-{docker_node_id}"
+    network_probe_enabled = bool(probe_compose_abs and probe_node_name)
 
     if not isinstance(core_cfg, dict):
         return None, 'missing core config for vuln test execute'
@@ -49338,6 +49809,9 @@ def _vuln_test_build_ephemeral_execute_job(
         'test_docker_node_name': docker_node_name,
         'test_scenario_tag': scenario_name,
         'skip_flow_artifact_container_copy': True,
+        'test_network_probe_enabled': network_probe_enabled,
+        'test_probe_node_id': probe_node_id,
+        'test_probe_node_name': probe_node_name,
     }
     return job_spec, None
 

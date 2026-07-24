@@ -18,11 +18,13 @@ You can validate a generated `scenarios.xml` with `xmllint`:
 xmllint --noout --schema schemas/xml/scenarios.xsd outputs/scenarios-YYYYMMDD-HHMMSS/scenarios.xml
 ```
 
-The root element of the editor XML is `<Scenarios>` containing one or more `<Scenario>` elements. The editor also supports a single `<ScenarioEditor>` as the root for some tools; the XSD includes a global `ScenarioEditor` element to allow validating such documents as well.
+The root element of the editor XML is `<Scenarios>` containing an optional `<CoreConnection>` plus zero or more `<Scenario>` elements. The editor also supports a single `<ScenarioEditor>` as the root for some tools; the XSD includes a global `ScenarioEditor` element to allow validating such documents as well.
+
+The XSD also models the runtime/UI round-trip blocks inside `<ScenarioEditor>` — `<HardwareInLoop>` (with nested `CoreConnection`/`ProxmoxConnection`/`Interface`), `<AIGenerator>`, `<FlagSequencing>` (`FlowState`/`FlowExpansion`), and `<PlanPreview>` — and the `Flag Node Generators` section. The JSON-bearing blocks are opaque strings at the XSD level.
 
 Notes:
 - Some constraints are semantic (e.g., certain attributes only used for specific sections). In XSD 1.0 these are modeled as optional attributes and are documented in the schema comments.
-- Density is constrained to 0..1, item `factor` is constrained to 0..1, and typical numeric attributes are non-negative.
+- Item `factor` is constrained to 0..1 and typical numeric attributes are non-negative. Section `density` is usually 0..1, but for the Routing section a value >= 1 means an absolute router count, so the XSD only enforces non-negativity.
 
 ### Enumerated Helper Attributes (Added)
 
