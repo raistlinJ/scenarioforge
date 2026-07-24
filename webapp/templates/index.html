@@ -20431,6 +20431,42 @@
                 dockerStartPending ? `${dockerStartPending} container(s) still starting` : 'None',
                 dockerStartPending ? (Array.isArray(summary.docker_start_pending) ? summary.docker_start_pending : []) : []
             ));
+            const portsChecked = Array.isArray(summary.ports_checked) ? summary.ports_checked : [];
+            if (portsChecked.length) {
+                const portUnreachable = Array.isArray(summary.port_unreachable) ? summary.port_unreachable.length : 0;
+                const describePorts = (entry, onlyUnreachable) => {
+                    const ports = Array.isArray(entry?.ports) ? entry.ports : [];
+                    const filtered = onlyUnreachable ? ports.filter((p) => p && p.reachable === false) : ports;
+                    const portList = filtered.map((p) => `${p.port}/${String(p.container_port || '').split('/').pop() || 'tcp'}${p.reachable === false ? ' (unreachable)' : ''}`).join(', ');
+                    return `${entry?.container || 'container'}: ${portList || 'no ports'}`;
+                };
+                executeSummaryListEl.appendChild(renderExecuteSummaryItem(
+                    'Container ports open and accessible',
+                    portUnreachable === 0,
+                    portUnreachable ? `${portUnreachable} container(s) with unreachable port(s)` : 'All published ports reachable',
+                    portUnreachable
+                        ? (Array.isArray(summary.port_unreachable_details) ? summary.port_unreachable_details : []).map((entry) => describePorts(entry, true))
+                        : portsChecked.map((entry) => describePorts(entry, false))
+                ));
+            }
+            if (summary.topology_probe_checked || summary.topology_probe_error) {
+                const topologyUnreachable = Array.isArray(summary.topology_port_unreachable) ? summary.topology_port_unreachable.length : 0;
+                const describeTopologyIssue = (entry) => {
+                    const ports = Array.isArray(entry?.ports) ? entry.ports : [];
+                    const portList = ports.map((p) => `${p.port}${p.error ? ` (${p.error})` : ''}`).join(', ');
+                    return `${entry?.container || 'container'}: unreachable from ${entry?.probe_container || 'probe node'} at ${entry?.ip || '?'} — ${portList || 'unreachable'}`;
+                };
+                executeSummaryListEl.appendChild(renderExecuteSummaryItem(
+                    'Reachable across CORE network (cross-node probe)',
+                    summary.topology_probe_checked ? topologyUnreachable === 0 : true,
+                    summary.topology_probe_checked
+                        ? (topologyUnreachable ? `${topologyUnreachable} container(s) unreachable from peer node` : 'Reachable from a peer node across the emulated topology')
+                        : `Not checked: ${summary.topology_probe_error || 'probe unavailable'}`,
+                    summary.topology_probe_checked
+                        ? (Array.isArray(summary.topology_port_unreachable_details) ? summary.topology_port_unreachable_details : []).map(describeTopologyIssue)
+                        : []
+                ));
+            }
             const expectedFilesText = expectedInjectFiles.length ? expectedInjectFiles.join(', ') : '';
             const injectsMissingList = Array.isArray(summary.injects_missing) ? summary.injects_missing : [];
             const injectsDetailItems = injectsMissing
@@ -20456,6 +20492,32 @@
                         : 'Injects detected',
                 injectsDetailItems
             ));
+            const injectsUnreadable = Array.isArray(summary.injects_unreadable) ? summary.injects_unreadable.length : 0;
+            const injectsUnreadableDetails = Array.isArray(summary.injects_unreadable_details) ? summary.injects_unreadable_details : [];
+            if (injectsUnreadable || injectsUnreadableDetails.length) {
+                const describeContentIssues = (entry) => {
+                    const files = Array.isArray(entry?.files) ? entry.files : [];
+                    const fileList = files.map((f) => `${f.path} (${(f.issues || []).join('/')})`).join(', ');
+                    return `${entry?.container || 'container'}: ${fileList || 'issue detected'}`;
+                };
+                executeSummaryListEl.appendChild(renderExecuteSummaryItem(
+                    'Injected files readable and non-empty',
+                    injectsUnreadable === 0,
+                    injectsUnreadable ? `${injectsUnreadable} container(s) with empty/unreadable injects` : 'All injects have content',
+                    injectsUnreadableDetails.map(describeContentIssues)
+                ));
+            }
+            const flagVerificationChecked = Array.isArray(summary.flag_verification_checked) ? summary.flag_verification_checked.length : 0;
+            if (flagVerificationChecked) {
+                const failedVerify = Array.isArray(summary.flag_verification_failed) ? summary.flag_verification_failed.length : 0;
+                const describeVerifyFailure = (entry) => `${entry?.container || 'container'}: ${entry?.path || ''} — ${entry?.detail || 'no match'}`;
+                executeSummaryListEl.appendChild(renderExecuteSummaryItem(
+                    'Flag retrievable via service (verify_path)',
+                    failedVerify === 0,
+                    failedVerify ? `${failedVerify} container(s) failed flag verification` : 'Flag content verified via configured path',
+                    (Array.isArray(summary.flag_verification_details) ? summary.flag_verification_details : []).map(describeVerifyFailure)
+                ));
+            }
             executeSummaryListEl.appendChild(renderExecuteSummaryItem(
                 'Generator outputs present on CORE VM',
                 generatorOutputsMissing === 0,
@@ -20562,8 +20624,23 @@
         if (dockerNodes > 0) {
             lines.push(`Docker containers present: ${dockerMissing === 0 ? 'OK' : `Missing ${dockerMissing}`}`);
             lines.push(`Docker containers running: ${dockerNotRunning === 0 ? 'OK' : `Not running ${dockerNotRunning}`}`);
+            if (Array.isArray(summary.ports_checked) && summary.ports_checked.length) {
+                const portUnreachable = Array.isArray(summary.port_unreachable) ? summary.port_unreachable.length : 0;
+                lines.push(`Container ports open and accessible: ${portUnreachable === 0 ? 'OK' : `Unreachable ${portUnreachable}`}`);
+            }
+            if (summary.topology_probe_checked) {
+                const topologyUnreachable = Array.isArray(summary.topology_port_unreachable) ? summary.topology_port_unreachable.length : 0;
+                lines.push(`Reachable across CORE network: ${topologyUnreachable === 0 ? 'OK' : `Unreachable ${topologyUnreachable}`}`);
+            }
             lines.push(`Docker startup pending (transient): ${dockerStartPending === 0 ? 'None' : dockerStartPending}`);
             lines.push(`Injected files present: ${injectsMissing === 0 ? 'OK' : `Missing injects/sources on ${injectsMissing}`}`);
+            if (Array.isArray(summary.injects_unreadable) && summary.injects_unreadable.length) {
+                lines.push(`Injected files readable and non-empty: Unreadable/empty on ${summary.injects_unreadable.length}`);
+            }
+            if (Array.isArray(summary.flag_verification_checked) && summary.flag_verification_checked.length) {
+                const failedVerify = Array.isArray(summary.flag_verification_failed) ? summary.flag_verification_failed.length : 0;
+                lines.push(`Flag retrievable via service (verify_path): ${failedVerify === 0 ? 'OK' : `Failed on ${failedVerify}`}`);
+            }
         } else {
             lines.push('Docker containers detected: None');
         }
@@ -20968,6 +21045,40 @@
         }
     }
 
+    function isScenarioExecutionInProgress() {
+        try {
+            return !!(executeProgressState && executeProgressState.active && !executeProgressState.done);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Keep every execute entry point in sync with the global run state so a second
+    // scenario can't be launched while one is already executing.
+    function syncExecuteButtonsForRunState() {
+        const running = isScenarioExecutionInProgress();
+        const fpBtn = document.getElementById('fpExecuteBtn');
+        if (fpBtn) {
+            if (running) {
+                if (!fpBtn.dataset.runLocked) {
+                    fpBtn.dataset.runLockPrevTitle = fpBtn.getAttribute('title') || '';
+                    fpBtn.dataset.runLocked = '1';
+                }
+                fpBtn.disabled = true;
+                fpBtn.classList.add('disabled');
+                fpBtn.setAttribute('title', 'A scenario is currently executing. Wait for it to finish.');
+            } else if (fpBtn.dataset.runLocked === '1') {
+                fpBtn.disabled = false;
+                fpBtn.classList.remove('disabled');
+                const prev = fpBtn.dataset.runLockPrevTitle || '';
+                if (prev) fpBtn.setAttribute('title', prev); else fpBtn.removeAttribute('title');
+                delete fpBtn.dataset.runLockPrevTitle;
+                delete fpBtn.dataset.runLocked;
+            }
+        }
+        try { refreshScenariosExecuteButtonState(); } catch (e) { }
+    }
+
     function refreshScenariosExecuteButtonState() {
         const btn = document.getElementById('scenariosExecuteBtn');
         if (!btn) return;
@@ -20985,6 +21096,12 @@
         if (!isExecute) {
             btn.disabled = false;
             btn.removeAttribute('title');
+            return;
+        }
+
+        if (isScenarioExecutionInProgress()) {
+            btn.disabled = true;
+            btn.setAttribute('title', 'A scenario is currently executing. Wait for it to finish.');
             return;
         }
 
@@ -21372,6 +21489,7 @@
         executeProgressState.runStatus = null;
         executeProgressState.validationLogSig = '';
         executeProgressState.summaryShown = false;
+        syncExecuteButtonsForRunState();
         if (executeSummarySpinnerEl) executeSummarySpinnerEl.classList.remove('d-none');
         executeSummaryRedirect = { url: null, delay: 600 };
         executeProgressState.runId = null;
@@ -21457,6 +21575,7 @@
         setExecuteProgressPercent(0, '0%');
         startExecuteProgressHeartbeat();
         updateExecuteBeforeUnloadGuard(true);
+        syncExecuteButtonsForRunState();
     }
 
     function setExecuteProgressStatus(main, meta) {
@@ -21516,6 +21635,7 @@
             if (executeProgressBarEl && executeProgressBarEl.classList.contains('bg-success')) return;
         }
         executeProgressState.done = true;
+        syncExecuteButtonsForRunState();
         stopExecuteProgressHeartbeat();
         if (executeProgressSpinnerEl) executeProgressSpinnerEl.classList.add('d-none');
         if (executeProgressBarEl) {

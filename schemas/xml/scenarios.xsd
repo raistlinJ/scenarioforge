@@ -11,6 +11,12 @@
   - Semantic constraints (e.g., only section name="Notes" contains <notes>, density in [0,1])
     are captured where feasible via simple restrictions; deeper cross-attribute conditions are
     documented but not enforced here.
+  - Root <Scenarios> may carry an optional <CoreConnection> element (CORE gRPC/SSH endpoint
+    metadata). Extra deployment-specific attributes (e.g., venv_bin) are permitted via
+    xs:anyAttribute.
+  - <ScenarioEditor> may carry optional runtime/UI round-trip blocks: <HardwareInLoop>,
+    <AIGenerator>, <FlagSequencing>, and <PlanPreview>. The JSON-bearing blocks
+    (AIGenerator, FlowState, FlowExpansion, PlanPreview) are opaque strings at the XSD level.
 -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            elementFormDefault="unqualified"
@@ -18,9 +24,14 @@
 
   <!-- Common simple types -->
   <xs:simpleType name="DensityType">
+    <xs:annotation>
+      <xs:documentation>
+        Section density. Usually in [0,1]; for the Routing section a value >= 1 is
+        interpreted by the app as an absolute router count, so no upper bound is enforced.
+      </xs:documentation>
+    </xs:annotation>
     <xs:restriction base="xs:decimal">
       <xs:minInclusive value="0"/>
-      <xs:maxInclusive value="1"/>
     </xs:restriction>
   </xs:simpleType>
 
@@ -44,6 +55,21 @@
     </xs:restriction>
   </xs:simpleType>
 
+  <!-- Boolean-ish attribute token. The writer emits "true"/"false"; the parser also
+       accepts 1/0/yes/no/on/off. -->
+  <xs:simpleType name="BoolTokenType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="true"/>
+      <xs:enumeration value="false"/>
+      <xs:enumeration value="1"/>
+      <xs:enumeration value="0"/>
+      <xs:enumeration value="yes"/>
+      <xs:enumeration value="no"/>
+      <xs:enumeration value="on"/>
+      <xs:enumeration value="off"/>
+    </xs:restriction>
+  </xs:simpleType>
+
   <xs:simpleType name="SectionName">
     <xs:restriction base="xs:string">
       <xs:enumeration value="Node Information"/>
@@ -52,6 +78,7 @@
       <xs:enumeration value="Traffic"/>
       <xs:enumeration value="Events"/>
       <xs:enumeration value="Vulnerabilities"/>
+      <xs:enumeration value="Flag Node Generators"/>
       <xs:enumeration value="Segmentation"/>
       <xs:enumeration value="Notes"/>
     </xs:restriction>
@@ -66,6 +93,8 @@
 
   <xs:simpleType name="TrafficPattern">
     <xs:restriction base="xs:string">
+      <!-- "Random" is UI-selectable and resolved at save time, but may persist in autosaves. -->
+      <xs:enumeration value="Random"/>
       <xs:enumeration value="continuous"/>
       <xs:enumeration value="periodic"/>
       <xs:enumeration value="burst"/>
@@ -113,34 +142,146 @@
     </xs:restriction>
   </xs:simpleType>
 
-  <!-- Item element used within sections. Optional attributes are used so one type
-       can serve all sections in XSD 1.0. -->
+  <!-- Vulnerabilities section flag artifact type. Only "text" is currently enabled in the UI;
+       the others are reserved. -->
+  <xs:simpleType name="FlagTypeType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="text"/>
+      <xs:enumeration value="image"/>
+      <xs:enumeration value="file"/>
+      <xs:enumeration value="custom"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Routing edge policy modes (shared option set of the R-to-R and R-to-S dropdowns). -->
   <xs:simpleType name="R2RModeType">
     <xs:restriction base="xs:string">
+      <xs:enumeration value="Random"/>
+      <xs:enumeration value="Min"/>
       <xs:enumeration value="Uniform"/>
       <xs:enumeration value="NonUniform"/>
       <xs:enumeration value="Exact"/>
-      <xs:enumeration value="Min"/>
     </xs:restriction>
   </xs:simpleType>
 
   <xs:simpleType name="R2SModeType">
     <xs:restriction base="xs:string">
-      <xs:enumeration value="Exact"/>
+      <xs:enumeration value="Random"/>
+      <xs:enumeration value="Min"/>
+      <xs:enumeration value="Uniform"/>
       <xs:enumeration value="NonUniform"/>
+      <xs:enumeration value="Exact"/>
+      <!-- Legacy values retained for older saved XML. -->
       <xs:enumeration value="aggregate"/>
       <xs:enumeration value="ratio"/>
     </xs:restriction>
   </xs:simpleType>
 
+  <!-- Hardware-in-the-loop interface attachment strategy. -->
+  <xs:simpleType name="HitlAttachmentType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="existing_router"/>
+      <xs:enumeration value="existing_switch"/>
+      <xs:enumeration value="new_router"/>
+      <xs:enumeration value="proxmox_vm"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- CORE connection endpoint metadata. Appears at the <Scenarios> root and optionally
+       inside <HardwareInLoop>. port/ssh_port may be written as empty strings, so they are
+       plain strings here. Extra deployment attributes (e.g., venv_bin) are allowed. -->
+  <xs:complexType name="CoreConnectionType">
+    <xs:attribute name="host" type="xs:string" use="optional"/>
+    <xs:attribute name="port" type="xs:string" use="optional"/>
+    <xs:attribute name="ssh_enabled" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="ssh_host" type="xs:string" use="optional"/>
+    <xs:attribute name="ssh_port" type="xs:string" use="optional"/>
+    <xs:attribute name="ssh_username" type="xs:string" use="optional"/>
+    <xs:attribute name="ssh_password" type="xs:string" use="optional"/>
+    <xs:anyAttribute processContents="skip"/>
+  </xs:complexType>
+
+  <!-- Proxmox API connection metadata used by hardware-in-the-loop. -->
+  <xs:complexType name="ProxmoxConnectionType">
+    <xs:attribute name="url" type="xs:string" use="optional"/>
+    <xs:attribute name="port" type="xs:string" use="optional"/>
+    <xs:attribute name="verify_ssl" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="secret_id" type="xs:string" use="optional"/>
+    <xs:attribute name="validated" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="last_validated_at" type="xs:string" use="optional"/>
+    <xs:attribute name="stored_at" type="xs:string" use="optional"/>
+    <xs:attribute name="username" type="xs:string" use="optional"/>
+    <xs:attribute name="remember_credentials" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="last_message" type="xs:string" use="optional"/>
+  </xs:complexType>
+
+  <!-- Physical/virtual interface mapped into the emulated topology.
+       pve_* attributes describe a Proxmox NIC target; ext_* attributes describe an
+       external VM binding. ipv4/ipv6 are comma-separated address lists. -->
+  <xs:complexType name="HitlInterfaceType">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="alias" type="xs:string" use="optional"/>
+    <xs:attribute name="mac" type="xs:string" use="optional"/>
+    <xs:attribute name="core_bridge" type="xs:string" use="optional"/>
+    <xs:attribute name="attachment" type="HitlAttachmentType" use="optional"/>
+    <xs:attribute name="ipv4" type="xs:string" use="optional"/>
+    <xs:attribute name="ipv6" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_node" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_vmid" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_interface_id" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_macaddr" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_bridge" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_model" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_vm_name" type="xs:string" use="optional"/>
+    <xs:attribute name="pve_label" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_vm_key" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_vm_node" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_vm_name" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_vmid" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_status" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_interface_id" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_interface_bridge" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_interface_mac" type="xs:string" use="optional"/>
+    <xs:attribute name="ext_interface_model" type="xs:string" use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="HardwareInLoopType">
+    <xs:sequence>
+      <xs:element name="CoreConnection" type="CoreConnectionType" minOccurs="0" maxOccurs="1"/>
+      <xs:element name="ProxmoxConnection" type="ProxmoxConnectionType" minOccurs="0" maxOccurs="1"/>
+      <xs:element name="Interface" type="HitlInterfaceType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="enabled" type="BoolTokenType" use="required"/>
+    <xs:attribute name="bridge_validated" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="bridge_validated_at" type="xs:string" use="optional"/>
+    <xs:attribute name="participant_proxmox_url" type="xs:string" use="optional"/>
+  </xs:complexType>
+
+  <!-- Flag Sequencing round-trip state. FlowState/FlowExpansion bodies are JSON strings.
+       Mixed content is allowed because legacy writers stored the flow-state JSON directly
+       as FlagSequencing text. -->
+  <xs:complexType name="FlagSequencingType" mixed="true">
+    <xs:sequence>
+      <xs:element name="FlowState" type="xs:string" minOccurs="0" maxOccurs="1"/>
+      <xs:element name="FlowExpansion" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Item element used within sections. Optional attributes are used so one type
+       can serve all sections in XSD 1.0. -->
   <xs:complexType name="ItemType">
     <xs:annotation>
       <xs:documentation>
         Generic item row. Attribute applicability:
         - All sections: selected, factor, v_metric, v_count
         - Events: script_path
-        - Traffic: pattern, rate_kbps, period_s, jitter_pct
+        - Traffic: pattern, rate_kbps, period_s, jitter_pct, content_type
+        - Routing: r2r_mode, r2r_edges, r2s_mode, r2s_edges, r2s_hosts_min, r2s_hosts_max
         - Vulnerabilities (selected == "Specific"): v_name, v_path, v_count
+        - Flag Node Generators (selected == "Specific"): g_id, g_name
+        - Segmentation: pivot_enabled, pivot_provider, requires, produces (+ parser-accepted
+          pivot_node, pivot_role, target_node, target_role, target_ports, target_protocols,
+          target_exposure, source_scope)
       </xs:documentation>
     </xs:annotation>
     <xs:attribute name="selected" type="xs:string" use="optional"/>
@@ -156,17 +297,35 @@
     <xs:attribute name="jitter_pct" type="PercentageDecimal" use="optional"/>
     <!-- Traffic payload attribute -->
     <xs:attribute name="content_type" type="TrafficPayloadType" use="optional"/>
-  <!-- Section-specific enumerated helper attributes (optional). When present they SHOULD mirror or override 'selected'. -->
-  <xs:attribute name="traffic_kind" type="TrafficKind" use="optional"/>
+    <!-- Section-specific enumerated helper attributes (optional). When present they SHOULD mirror or override 'selected'. -->
+    <xs:attribute name="traffic_kind" type="TrafficKind" use="optional"/>
     <!-- Vulnerabilities -->
     <xs:attribute name="v_name" type="xs:string" use="optional"/>
     <xs:attribute name="v_path" type="xs:string" use="optional"/>
-  <xs:attribute name="vuln_kind" type="VulnerabilityKind" use="optional"/>
-  <!-- Segmentation enumeration (Random / Firewall / NAT / CUSTOM) -->
-  <xs:attribute name="segmentation_kind" type="SegmentationKind" use="optional"/>
-    <!-- Routing connectivity / aggregation (new) -->
+    <xs:attribute name="vuln_kind" type="VulnerabilityKind" use="optional"/>
+    <!-- Flag Node Generators (selected == "Specific") -->
+    <xs:attribute name="g_id" type="xs:string" use="optional"/>
+    <xs:attribute name="g_name" type="xs:string" use="optional"/>
+    <!-- Segmentation enumeration (Random / Firewall / NAT / CUSTOM) -->
+    <xs:attribute name="segmentation_kind" type="SegmentationKind" use="optional"/>
+    <!-- Segmentation pivot metadata -->
+    <xs:attribute name="pivot_enabled" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="pivot_provider" type="xs:string" use="optional"/>
+    <xs:attribute name="requires" type="xs:string" use="optional"/>
+    <xs:attribute name="produces" type="xs:string" use="optional"/>
+    <xs:attribute name="pivot_node" type="xs:string" use="optional"/>
+    <xs:attribute name="pivot_role" type="xs:string" use="optional"/>
+    <xs:attribute name="target_node" type="xs:string" use="optional"/>
+    <xs:attribute name="target_role" type="xs:string" use="optional"/>
+    <xs:attribute name="target_ports" type="xs:string" use="optional"/>
+    <xs:attribute name="target_protocols" type="xs:string" use="optional"/>
+    <xs:attribute name="target_exposure" type="xs:string" use="optional"/>
+    <xs:attribute name="source_scope" type="xs:string" use="optional"/>
+    <!-- Routing connectivity / aggregation -->
     <xs:attribute name="r2r_mode" type="R2RModeType" use="optional"/>
     <xs:attribute name="r2r_edges" type="xs:nonNegativeInteger" use="optional"/>
+    <!-- Legacy alias of r2r_edges accepted by the parser. -->
+    <xs:attribute name="edges" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="r2s_mode" type="R2SModeType" use="optional"/>
     <xs:attribute name="r2s_edges" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="r2s_hosts_min" type="xs:nonNegativeInteger" use="optional"/>
@@ -184,6 +343,10 @@
     <!-- Only one of the following typically applies depending on section name; left optional for XSD 1.0. -->
     <xs:attribute name="total_nodes" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="density" type="DensityType" use="optional"/>
+    <!-- Node Information base host pool (mirrors scenario-level density_count) -->
+    <xs:attribute name="density_count" type="xs:nonNegativeInteger" use="optional"/>
+    <!-- Vulnerabilities: flag artifact type -->
+    <xs:attribute name="flag_type" type="FlagTypeType" use="optional"/>
     <!-- Planning metadata (additive round-trip; optional) -->
     <xs:attribute name="base_nodes" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="additive_nodes" type="xs:nonNegativeInteger" use="optional"/>
@@ -191,15 +354,38 @@
     <xs:attribute name="weight_rows" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="count_rows" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="weight_sum" type="xs:decimal" use="optional"/>
+    <xs:attribute name="normalized_weight_sum" type="xs:decimal" use="optional"/>
     <xs:attribute name="explicit_count" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="derived_count" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="total_planned" type="xs:nonNegativeInteger" use="optional"/>
+    <!-- Per-section node count clamp bounds -->
+    <xs:attribute name="node_count_min_enabled" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="node_count_min" type="xs:nonNegativeInteger" use="optional"/>
+    <xs:attribute name="node_count_max_enabled" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="node_count_max" type="xs:nonNegativeInteger" use="optional"/>
   </xs:complexType>
 
   <xs:complexType name="ScenarioEditorType">
+    <xs:annotation>
+      <xs:documentation>
+        BaseScenario first, then any interleaving of the optional round-trip blocks and
+        sections. The parser locates blocks with find(), so ordering is not significant;
+        older writers emitted PlanPreview after the sections, the current writer before.
+        HardwareInLoop, AIGenerator, FlagSequencing, and PlanPreview SHOULD each appear
+        at most once (not enforceable alongside unbounded sections in XSD 1.0).
+      </xs:documentation>
+    </xs:annotation>
     <xs:sequence>
       <xs:element name="BaseScenario" type="BaseScenarioType"/>
-      <xs:element name="section" type="SectionType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:choice minOccurs="0" maxOccurs="unbounded">
+        <xs:element name="HardwareInLoop" type="HardwareInLoopType"/>
+        <!-- JSON payload: AI generator provider config + draft prompt/generation metadata. -->
+        <xs:element name="AIGenerator" type="xs:string"/>
+        <xs:element name="FlagSequencing" type="FlagSequencingType"/>
+        <!-- JSON payload: full preview + plan/breakdowns metadata for UI round-trip. -->
+        <xs:element name="PlanPreview" type="xs:string"/>
+        <xs:element name="section" type="SectionType"/>
+      </xs:choice>
     </xs:sequence>
   </xs:complexType>
 
@@ -212,17 +398,24 @@
       <xs:element name="ScenarioEditor" type="ScenarioEditorType"/>
     </xs:sequence>
     <xs:attribute name="name" type="xs:string" use="required"/>
-    <!-- Scenario-level aggregate planning attribute (optional) -->
+    <!-- Scenario-level aggregate planning attributes (optional) -->
     <xs:attribute name="scenario_total_nodes" type="xs:nonNegativeInteger" use="optional"/>
+    <xs:attribute name="base_nodes" type="xs:nonNegativeInteger" use="optional"/>
     <!-- Scenario-level density_count for the base host pool. -->
     <xs:attribute name="density_count" type="xs:nonNegativeInteger" use="optional"/>
+    <!-- Optional clamp bounds on the resolved density count. -->
+    <xs:attribute name="density_count_min_enabled" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="density_count_min" type="xs:nonNegativeInteger" use="optional"/>
+    <xs:attribute name="density_count_max_enabled" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="density_count_max" type="xs:nonNegativeInteger" use="optional"/>
   </xs:complexType>
 
   <!-- Root -->
   <xs:element name="Scenarios">
     <xs:complexType>
       <xs:sequence>
-        <xs:element name="Scenario" type="ScenarioType" minOccurs="1" maxOccurs="unbounded"/>
+        <xs:element name="CoreConnection" type="CoreConnectionType" minOccurs="0" maxOccurs="1"/>
+        <xs:element name="Scenario" type="ScenarioType" minOccurs="0" maxOccurs="unbounded"/>
       </xs:sequence>
     </xs:complexType>
   </xs:element>

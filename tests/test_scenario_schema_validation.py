@@ -30,10 +30,6 @@ def test_sample_xml_validates():
             txt_head = open(path, 'r', errors='ignore').read(1000)
             if '<scenario' in txt_head and '<Scenarios' not in txt_head:
                 continue
-            # Runtime metadata blocks (PlanPreview/FlowState) are intentionally
-            # outside the static authoring XSD contract.
-            if '<PlanPreview' in txt_head or '<FlowState' in txt_head:
-                continue
             _validate_file(schema, path)
             found_any = True
     if not found_any:
