@@ -37,18 +37,25 @@ class TrafficService(CoreService):
         :param name: name of file to get template for
         :return: string template
         """
+        # Only the node constants below are templated by Mako; the script body
+        # lives in a <%text> block so it is plain shell. Without that, ordinary
+        # syntax breaks: `${VAR:-default}` raises, a line starting with `%` is a
+        # Mako control line, and a line starting with `##` is silently dropped.
         return """
         #!/bin/bash
+        NODE_ID='${node.id}'
+        NODE_NAME='${node.name}'
+        <%text>
         # Traffic starter
-        # node id(${node.id}) name(${node.name})
-          set -e
-          runtime_dir=/tmp/coretg_traffic
-          mkdir -p "$runtime_dir"
-          cp /tmp/traffic/traffic_${node.id}_*.py "$runtime_dir"/ 2>/dev/null || true
-          for file in "$runtime_dir"/traffic_${node.id}_*.py; do
-              [ -f "$file" ] || continue
-              echo "running: python3 $file" >> "$runtime_dir/output.txt"
-              python3 "$file" >> "$runtime_dir/output.txt" 2>&1 &
+        set -e
+        runtime_dir=/tmp/coretg_traffic
+        mkdir -p "$runtime_dir"
+        cp /tmp/traffic/traffic_"$NODE_ID"_*.py "$runtime_dir"/ 2>/dev/null || true
+        for file in "$runtime_dir"/traffic_"$NODE_ID"_*.py; do
+            [ -f "$file" ] || continue
+            echo "running: python3 $file" >> "$runtime_dir/output.txt"
+            python3 "$file" >> "$runtime_dir/output.txt" 2>&1 &
         done
+        </%text>
         """
 
