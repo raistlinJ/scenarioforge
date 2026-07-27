@@ -3547,6 +3547,63 @@ def _wrapper_image_tag(scenario_tag_safe: str, node_name: str, identity: object)
 	return f"coretg/{_wrapper_image_slug(scenario_tag_safe, node_name, identity)}:iproute2"
 
 
+CORETG_APP_USER_SHIM_PATH = '/usr/local/coretg/bin/coretg-app-user-exec'
+
+
+def _wrapper_user_probe_stage_lines(base_image: str) -> List[str]:
+	"""Dockerfile stage that records the base image's default user.
+
+	The wrapper forces USER 0 so CORE docker-exec service scripts can chmod/run,
+	but apps like kibana/elasticsearch refuse to start as root. The recorded
+	name/uid/gid lets the runtime shim drop back to the original user for the
+	app process only.
+	"""
+	return [
+		f"FROM {base_image} AS coretg_userprobe",
+		"RUN u=$(id -un 2>/dev/null); i=$(id -u 2>/dev/null); g=$(id -g 2>/dev/null); "
+		"printf '%s\\n%s\\n%s\\n' \"${u:-root}\" \"${i:-0}\" \"${g:-0}\" > /tmp/coretg_base_user || true",
+		"",
+	]
+
+
+def _wrapper_app_user_shim_lines() -> List[str]:
+	"""Dockerfile lines installing the privilege-drop shim for wrapped apps.
+
+	Preflight rewrites the compose entrypoint to run the app through this shim
+	when the base image declares a non-root USER; the container config user
+	stays root so CORE docker-exec service files keep working.
+	"""
+	return [
+		"COPY --from=coretg_userprobe /tmp/coretg_base_user /usr/local/coretg/base_user",
+		"",
+		"RUN set -eu; \\",
+		"\tmkdir -p /usr/local/coretg/bin; \\",
+		"\t{ \\",
+		"\t\techo '#!/bin/sh'; \\",
+		"\t\techo 'BB=/usr/local/coretg/bin/busybox'; \\",
+		"\t\techo 'META=/usr/local/coretg/base_user'; \\",
+		"\t\techo '[ \"$#\" -gt 0 ] || exit 0'; \\",
+		"\t\techo 'cur=$(\"$BB\" id -u 2>/dev/null || echo 0)'; \\",
+		"\t\techo 'name='; \\",
+		"\t\techo 'uid='; \\",
+		"\t\techo 'if [ -r \"$META\" ]; then'; \\",
+		"\t\techo '  name=$(\"$BB\" sed -n 1p \"$META\" 2>/dev/null)'; \\",
+		"\t\techo '  uid=$(\"$BB\" sed -n 2p \"$META\" 2>/dev/null)'; \\",
+		"\t\techo 'fi'; \\",
+		"\t\techo 'case \"$uid\" in *[!0-9]*) uid= ;; esac'; \\",
+		"\t\techo 'if [ \"$cur\" = \"0\" ] && [ -n \"$uid\" ] && [ \"$uid\" != \"0\" ]; then'; \\",
+		"\t\techo '  tgt=\"$uid\"'; \\",
+		"\t\techo '  if [ -n \"$name\" ] && [ \"$name\" != \"root\" ] && \"$BB\" id -u \"$name\" >/dev/null 2>&1; then'; \\",
+		"\t\techo '    tgt=\"$name\"'; \\",
+		"\t\techo '  fi'; \\",
+		"\t\techo '  exec \"$BB\" setuidgid \"$tgt\" \"$@\"'; \\",
+		"\t\techo 'fi'; \\",
+		"\t\techo 'exec \"$@\"'; \\",
+		f"\t}} > {CORETG_APP_USER_SHIM_PATH}; \\",
+		f"\tchmod 0755 {CORETG_APP_USER_SHIM_PATH}",
+	]
+
+
 def _docker_php_entrypoint_fallback_lines() -> List[str]:
 	return [
 		"# Some catalog images inherit ENTRYPOINT [\"docker-php-entrypoint\"] but lack the script.",
@@ -3686,6 +3743,9 @@ def _write_iproute2_wrapper(
 			"# Strategy: busybox injection (no package manager, offline-safe)",
 			"FROM busybox:1.36.1-musl AS coretg_iptools",
 			"",
+		]
+		lines += _wrapper_user_probe_stage_lines(base_image)
+		lines += [
 			f"FROM {base_image}",
 			"",
 		]
@@ -3730,6 +3790,7 @@ def _write_iproute2_wrapper(
 			"\tln -sf /usr/local/coretg/bin/busybox /sbin/ip; \\",
 			"\t/usr/sbin/ip -V >/dev/null 2>&1 || true",
 		]
+		lines += [""] + _wrapper_app_user_shim_lines()
 		lines += [""] + _docker_php_entrypoint_fallback_lines()
 		if extra_pip:
 			pkgs = ' '.join(extra_pip)
@@ -3787,9 +3848,18 @@ def _write_iproute2_wrapper(
 	# Many vuln images set a non-root USER by default (e.g., airflow). The wrapper
 	# needs root privileges to install iproute2 tooling.
 	lines = [
+		"FROM busybox:1.36.1-musl AS coretg_iptools",
+		"",
+	]
+	lines += _wrapper_user_probe_stage_lines(base_image)
+	lines += [
 		f"FROM {base_image}",
 		"",
 		"USER 0",
+		"",
+		"COPY --from=coretg_iptools /bin/busybox /usr/local/coretg/bin/busybox",
+		"",
+		"RUN chmod 0755 /usr/local/coretg/bin/busybox",
 		"",
 		"# Preserve the base image WORKDIR; some upstream services rely on it.",
 		"",
@@ -3850,6 +3920,7 @@ def _write_iproute2_wrapper(
 			"ENV PYTHONUSERBASE=/home/airflow/.local",
 			"ENV PATH=/home/airflow/.local/bin:$PATH",
 		]
+	lines += [""] + _wrapper_app_user_shim_lines()
 	lines += [""] + _docker_php_entrypoint_fallback_lines()
 	if extra_pip:
 		pkgs = ' '.join(extra_pip)
@@ -5167,9 +5238,14 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 								logger.debug("[vuln] compose service has no image (build-only); iproute2 injection failed node=%s service=%s", node_name, svc_key)
 						else:
 							logger.warning("[vuln] compose service has no image; cannot inject iproute2 wrapper for node=%s service=%s", node_name, svc_key)
-			except Exception:
-				# Best-effort: wrapper injection is optional.
-				pass
+			except Exception as wrap_exc:
+				# Wrapper injection failing silently leaves a raw image in the node
+				# service (no `ip` tooling -> DefaultRoute cannot set a default
+				# gateway). Keep going, but loudly.
+				if str(wrap_exc) == 'skip_iproute2_wrapper':
+					logger.info('[vuln] iproute2 wrapper skipped by record flag node=%s', node_name)
+				else:
+					logger.exception('[vuln] iproute2 wrapper injection failed node=%s: %s', node_name, wrap_exc)
 				# Even if wrapper injection is skipped, force root workdir when enabled.
 				try:
 					if _compose_force_root_workdir_enabled():
@@ -5248,6 +5324,28 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 							node_svc['restart'] = 'unless-stopped'
 					except Exception:
 						pass
+				except Exception:
+					pass
+				# Loud guard: a node service still pointing at a raw upstream image has
+				# no `ip` tooling baked in, so DefaultRoute inside the container will
+				# silently skip and the docker node never gets a default gateway.
+				try:
+					services_chk = obj.get('services') if isinstance(obj, dict) else None
+					node_svc_chk = services_chk.get(node_name) if isinstance(services_chk, dict) else None
+					if isinstance(node_svc_chk, dict):
+						img_chk = str(node_svc_chk.get('image') or '').strip()
+						labs_chk = node_svc_chk.get('labels') if isinstance(node_svc_chk.get('labels'), dict) else {}
+						wrapped_chk = img_chk.startswith('coretg/') and img_chk.endswith(':iproute2')
+						bypassed_chk = bool(labs_chk.get('coretg.wrapper_bypassed_reason'))
+						skip_chk = _is_truthy(rec.get('SkipIproute2Wrapper'))
+						build_only_chk = bool(node_svc_chk.get('build')) and not img_chk
+						if img_chk and not (wrapped_chk or bypassed_chk or skip_chk or build_only_chk):
+							logger.error(
+								'[vuln] node service is NOT wrapped with iproute2 tooling node=%s image=%s; '
+								'the container will lack `ip` and cannot set a default gateway',
+								node_name,
+								img_chk,
+							)
 				except Exception:
 					pass
 				# Keep base OS images alive (avoid immediate exit -> pid=0 -> core-daemon errors).

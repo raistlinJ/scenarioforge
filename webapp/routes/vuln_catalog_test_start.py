@@ -26,6 +26,42 @@ def _prefer_explicit_or_ssh_core_host(raw_core: Any, core_cfg: dict[str, Any], *
     return adjusted
 
 
+def _prepare_test_compose(*, compose_path: str, item_id: int, item_name: str, run_dir: str, node_name: str, logger: Any) -> tuple[str, str | None]:
+    """Prepare a CORE-safe compose for a catalog test run.
+
+    Returns (prepared_path, error). Never falls back to the raw catalog compose:
+    that file has no `ip` tooling baked in and keeps its published ports, so a
+    container started from it cannot set a default gateway inside CORE. A
+    silent fallback here is indistinguishable from success until the node is
+    already running with no route.
+    """
+    try:
+        from scenarioforge.utils.vuln_process import prepare_compose_for_assignments
+
+        rec = {
+            'Name': item_name,
+            'Path': compose_path,
+            'Type': 'docker-compose',
+            'ScenarioTag': f'vuln-test-{item_id}',
+        }
+        created = prepare_compose_for_assignments({node_name: rec}, out_base=run_dir)
+    except Exception as exc:
+        try:
+            logger.exception('[vuln-test] compose preparation raised item_id=%s path=%s: %s', item_id, compose_path, exc)
+        except Exception:
+            pass
+        return compose_path, f'compose preparation failed for {item_name}: {exc}'
+
+    if not created:
+        try:
+            logger.error('[vuln-test] compose preparation produced no file item_id=%s path=%s', item_id, compose_path)
+        except Exception:
+            pass
+        return compose_path, f'compose preparation produced no file for {item_name}'
+
+    return created[0], None
+
+
 def register(app, *, backend_module: Any) -> None:
     if not begin_route_registration(app, 'vuln_catalog_test_start_routes'):
         return
@@ -116,22 +152,16 @@ def register(app, *, backend_module: Any) -> None:
 
         if execute_like_real:
             item_name = str(target.get('name') or target.get('Name') or target.get('Title') or f'vuln-{item_id}')
-            prepared_compose_path = compose_path
-            try:
-                from scenarioforge.utils.vuln_process import prepare_compose_for_assignments
-
-                node_name = f'vuln-test-{item_id}'
-                rec = {
-                    'Name': item_name,
-                    'Path': compose_path,
-                    'Type': 'docker-compose',
-                    'ScenarioTag': f'vuln-test-{item_id}',
-                }
-                created = prepare_compose_for_assignments({node_name: rec}, out_base=run_dir)
-                if created:
-                    prepared_compose_path = created[0]
-            except Exception:
-                prepared_compose_path = compose_path
+            prepared_compose_path, prep_err = _prepare_test_compose(
+                compose_path=compose_path,
+                item_id=item_id,
+                item_name=item_name,
+                run_dir=run_dir,
+                node_name=f'vuln-test-{item_id}',
+                logger=app.logger,
+            )
+            if prep_err:
+                return jsonify({'ok': False, 'error': prep_err}), 500
 
             job_spec, build_err = backend._vuln_test_build_ephemeral_execute_job(
                 run_dir=run_dir,
@@ -203,22 +233,16 @@ def register(app, *, backend_module: Any) -> None:
             )
 
         remote_run_dir = f'/tmp/tests/test-{run_id}'
-        prepared_compose_path = compose_path
-        try:
-            from scenarioforge.utils.vuln_process import prepare_compose_for_assignments
-
-            node_name = f'vuln-test-{item_id}'
-            rec = {
-                'Name': str(target.get('name') or target.get('Name') or target.get('Title') or f'vuln-{item_id}'),
-                'Path': compose_path,
-                'Type': 'docker-compose',
-                'ScenarioTag': f'vuln-test-{item_id}',
-            }
-            created = prepare_compose_for_assignments({node_name: rec}, out_base=run_dir)
-            if created:
-                prepared_compose_path = created[0]
-        except Exception:
-            prepared_compose_path = compose_path
+        prepared_compose_path, prep_err = _prepare_test_compose(
+            compose_path=compose_path,
+            item_id=item_id,
+            item_name=str(target.get('name') or target.get('Name') or target.get('Title') or f'vuln-{item_id}'),
+            run_dir=run_dir,
+            node_name=f'vuln-test-{item_id}',
+            logger=app.logger,
+        )
+        if prep_err:
+            return jsonify({'ok': False, 'error': prep_err}), 500
 
         def _rewrite_compose_paths_for_remote(compose_path: str, local_base: str, remote_base: str) -> None:
             try:
