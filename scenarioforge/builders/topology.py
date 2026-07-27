@@ -582,6 +582,276 @@ def _sanitize_compose_incompatible_workdirs(compose_path: str) -> bool:
     return True
 
 
+# Privilege-drop shim installed by the iproute2 wrapper image (see
+# scenarioforge.utils.vuln_process._wrapper_app_user_shim_lines).
+_CORETG_APP_USER_SHIM = '/usr/local/coretg/bin/coretg-app-user-exec'
+
+# Config.User values that already run the app as root; anything else means the
+# base image expects a non-root app user.
+_ROOTLIKE_IMAGE_USERS = {'', '0', 'root', '0:0', 'root:root', '0:root', 'root:0'}
+
+
+def _apply_wrapper_app_user_entrypoints(
+    compose_path: str,
+    *,
+    docker_cmd: List[str],
+    run,
+    node_name: str,
+) -> None:
+    """Make wrapped apps start as their base image's original user.
+
+    The compose prep forces `user: 0:0` on wrapper services because CORE's
+    docker-exec service files need root, but stacks like kibana/elasticsearch
+    refuse to start as root and exit immediately — leaving the docker node with
+    PID 0, no interface address and no default route. For wrapper services
+    whose base image declares a non-root USER, prepend the wrapper's
+    privilege-drop shim to the effective entrypoint so only the app process
+    drops privileges while docker-exec stays root.
+    """
+    import shlex
+
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+    try:
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            obj = yaml.safe_load(fh) or {}
+    except Exception:
+        return
+    services = obj.get('services') if isinstance(obj, dict) else None
+    if not isinstance(services, dict):
+        return
+
+    changed = False
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        image = str(svc.get('image') or '').strip()
+        if not (image.startswith('coretg/') and image.endswith(':iproute2')):
+            continue
+        labels = svc.get('labels') if isinstance(svc.get('labels'), dict) else {}
+        base_image = str(
+            labels.get('coretg.wrapper_effective_base_image')
+            or labels.get('coretg.wrapper_base_image')
+            or ''
+        ).strip()
+        if not base_image:
+            continue
+
+        rc, tail = run(
+            docker_cmd + ['image', 'inspect', '--format', '{{json .Config}}', base_image],
+            timeout=60,
+        )
+        cfg = None
+        if rc == 0 and tail:
+            for line in reversed([ln.strip() for ln in str(tail).splitlines() if ln.strip()]):
+                try:
+                    cand = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(cand, dict):
+                    cfg = cand
+                    break
+        if not isinstance(cfg, dict):
+            try:
+                logger.warning(
+                    '[docker-node] app-user shim: base image inspect failed node=%s service=%s image=%s rc=%s',
+                    node_name, svc_name, base_image, rc,
+                )
+            except Exception:
+                pass
+            continue
+
+        user = str(cfg.get('User') or '').strip()
+        if user.lower() in _ROOTLIKE_IMAGE_USERS:
+            continue
+
+        existing_ep = svc.get('entrypoint')
+        if existing_ep is not None:
+            if isinstance(existing_ep, str):
+                ep_list = shlex.split(existing_ep)
+            elif isinstance(existing_ep, list):
+                ep_list = [str(x) for x in existing_ep]
+            else:
+                ep_list = [str(existing_ep)]
+            if ep_list and ep_list[0] == _CORETG_APP_USER_SHIM:
+                continue
+            svc['entrypoint'] = [_CORETG_APP_USER_SHIM] + ep_list
+        else:
+            base_ep = cfg.get('Entrypoint') or []
+            if not isinstance(base_ep, list):
+                base_ep = [str(base_ep)]
+            svc['entrypoint'] = [_CORETG_APP_USER_SHIM] + [str(x) for x in base_ep]
+            if svc.get('command') is None:
+                base_cmd = cfg.get('Cmd') or []
+                if isinstance(base_cmd, list) and base_cmd:
+                    svc['command'] = [str(x) for x in base_cmd]
+        changed = True
+        try:
+            logger.info(
+                '[docker-node] app-user shim applied node=%s service=%s base=%s user=%s',
+                node_name, svc_name, base_image, user,
+            )
+        except Exception:
+            pass
+
+    if changed:
+        with open(compose_path, 'w', encoding='utf-8') as fh:
+            yaml.safe_dump(obj, fh, sort_keys=False)
+
+
+_BUSYBOX_REPAIR_IMAGE = 'busybox:1.36.1-musl'
+
+# Where the repair drops busybox inside a container. `/` is the only directory
+# guaranteed to exist, and `docker cp` will not create missing parents. The
+# basename must stay `busybox`: BusyBox dispatches on argv[0], and under any
+# other name it rejects every invocation with "applet not found".
+_BUSYBOX_REPAIR_PATH = '/busybox'
+
+
+def _container_image_platform(container: str, *, docker_cmd: List[str], run) -> str:
+    """Return `linux/<arch>[/<variant>]` for a container's image, or ''.
+
+    A BusyBox of the wrong architecture cannot be exec'd inside the target, so
+    the repair has to fetch one matching the image rather than the host.
+    """
+    rc, tail = run(docker_cmd + ['inspect', '--format', '{{.Image}}', container], timeout=30)
+    image_id = ''
+    if rc == 0:
+        image_id = next((ln.strip() for ln in str(tail or '').splitlines() if ln.strip().startswith('sha256:')), '')
+    if not image_id:
+        return ''
+    rc, tail = run(
+        docker_cmd + ['image', 'inspect', '--format', '{{.Os}}|{{.Architecture}}|{{.Variant}}', image_id],
+        timeout=30,
+    )
+    if rc != 0:
+        return ''
+    line = next((ln.strip() for ln in str(tail or '').splitlines() if '|' in ln), '')
+    parts = line.split('|')
+    if len(parts) < 2:
+        return ''
+    os_name = parts[0].strip() or 'linux'
+    arch = parts[1].strip()
+    variant = parts[2].strip() if len(parts) > 2 else ''
+    if not arch or arch == '<no value>':
+        return ''
+    platform = f'{os_name}/{arch}'
+    if variant and variant != '<no value>':
+        platform = f'{platform}/{variant}'
+    return platform
+
+
+def _ensure_container_ip_tooling(
+    container: str,
+    *,
+    docker_cmd: List[str],
+    run,
+    node_name: str,
+) -> bool:
+    """Guarantee the running container has a usable `ip` command.
+
+    The compose prep normally bakes iproute2 (or a BusyBox `ip`) into a wrapper
+    image, but a node can still end up running an unwrapped upstream image —
+    e.g. when CORE starts a raw catalog compose file. Images like
+    `vulhub/kibana` (CentOS 7) ship no iproute2 and cannot install it: their
+    package mirrors are long dead, and inside a CORE topology there is no route
+    out yet anyway. Without `ip`, DockerDefaultRoute finds no global IPv4,
+    silently skips, and the node never gets a default gateway.
+
+    Repair from the host: copy a static BusyBox into the container and link it
+    as `ip`. Returns True when the container ends up with a working `ip`.
+    """
+    if not container:
+        return False
+
+    # `ip link show` is the probe both iproute2 and BusyBox `ip` accept;
+    # BusyBox has no `-V` flag and would look like a missing binary.
+    rc, _tail = run(docker_cmd + ['exec', container, 'ip', 'link', 'show'], timeout=30)
+    if rc == 0:
+        return True
+    rc, _tail = run(docker_cmd + ['exec', container, '/sbin/ip', 'link', 'show'], timeout=30)
+    if rc == 0:
+        return True
+
+    try:
+        logger.warning(
+            '[docker-node] container has no `ip`; injecting busybox node=%s container=%s',
+            node_name, container,
+        )
+    except Exception:
+        pass
+
+    platform = ''
+    try:
+        platform = _container_image_platform(container, docker_cmd=docker_cmd, run=run)
+    except Exception:
+        platform = ''
+
+    arch_tag = (platform or 'native').replace('/', '-')
+    host_busybox = os.path.join('/tmp', f'coretg-busybox-static-{arch_tag}')
+    if not os.path.isfile(host_busybox):
+        tmp_name = f'coretg-busybox-src-{os.getpid()}'
+        run(docker_cmd + ['rm', '-f', tmp_name], timeout=60)
+        create_args = docker_cmd + ['create']
+        if platform:
+            create_args += ['--platform', platform]
+        create_args += ['--name', tmp_name, _BUSYBOX_REPAIR_IMAGE]
+        rc, tail = run(create_args, timeout=300)
+        if rc != 0:
+            try:
+                logger.warning(
+                    '[docker-node] busybox source container create failed node=%s rc=%s tail=%s',
+                    node_name, rc, tail,
+                )
+            except Exception:
+                pass
+            return False
+        try:
+            rc, tail = run(docker_cmd + ['cp', f'{tmp_name}:/bin/busybox', host_busybox], timeout=120)
+        finally:
+            run(docker_cmd + ['rm', '-f', tmp_name], timeout=60)
+        if rc != 0 or not os.path.isfile(host_busybox):
+            return False
+        try:
+            os.chmod(host_busybox, 0o755)
+        except Exception:
+            pass
+
+    rc, tail = run(docker_cmd + ['cp', host_busybox, f'{container}:{_BUSYBOX_REPAIR_PATH}'], timeout=120)
+    if rc != 0:
+        try:
+            logger.warning(
+                '[docker-node] busybox copy into container failed node=%s container=%s rc=%s tail=%s',
+                node_name, container, rc, tail,
+            )
+        except Exception:
+            pass
+        return False
+
+    # Use busybox itself for the linking so we never depend on a shell,
+    # coreutils, or PATH inside the target image.
+    run(docker_cmd + ['exec', container, _BUSYBOX_REPAIR_PATH, 'mkdir', '-p', '/usr/local/coretg/bin'], timeout=30)
+    run(
+        docker_cmd + ['exec', container, _BUSYBOX_REPAIR_PATH, 'ln', '-sf', _BUSYBOX_REPAIR_PATH, '/usr/local/coretg/bin/busybox'],
+        timeout=30,
+    )
+    for link in ('/sbin/ip', '/usr/sbin/ip', '/bin/ip'):
+        run(docker_cmd + ['exec', container, _BUSYBOX_REPAIR_PATH, 'ln', '-sf', _BUSYBOX_REPAIR_PATH, link], timeout=30)
+
+    rc, _tail = run(docker_cmd + ['exec', container, '/sbin/ip', 'link', 'show'], timeout=30)
+    ok = rc == 0
+    try:
+        if ok:
+            logger.info('[docker-node] injected busybox `ip` into container node=%s container=%s', node_name, container)
+        else:
+            logger.warning('[docker-node] busybox `ip` injection did not take node=%s container=%s', node_name, container)
+    except Exception:
+        pass
+    return ok
+
+
 def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     """Best-effort prepare docker-compose assets before CORE starts docker nodes.
 
@@ -778,6 +1048,28 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             )
     except Exception:
         raise
+
+    # Wrapper services run with a root config user for CORE docker-exec needs;
+    # rewrite their entrypoints so the app itself starts as the base image's
+    # original user (kibana/elasticsearch and similar refuse to run as root,
+    # which otherwise kills the container before CORE can install the node IP
+    # and default route).
+    try:
+        if wrapper_builds:
+            _apply_wrapper_app_user_entrypoints(
+                compose_path,
+                docker_cmd=docker_cmd,
+                run=_run,
+                node_name=node_name,
+            )
+    except Exception as exc:
+        try:
+            logger.warning(
+                '[docker-node] app-user shim rewrite failed node=%s compose=%s err=%s',
+                node_name, compose_path, exc,
+            )
+        except Exception:
+            pass
 
     # Build any services that declare a `build:` stanza using host networking.
     # This avoids reliance on Docker's default bridge network (which may be disabled
@@ -1084,6 +1376,25 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                         f"compose_logs_rc={logs_rc} compose_logs_tail={logs_tail}"
                     ).strip()
                 )
+
+            # Last line of defense before CORE configures networking: the running
+            # container must have `ip`, or DockerDefaultRoute cannot install a
+            # default gateway no matter which compose file produced it.
+            try:
+                _ensure_container_ip_tooling(
+                    inspect_name,
+                    docker_cmd=docker_cmd,
+                    run=_run,
+                    node_name=node_name,
+                )
+            except Exception as ip_exc:
+                try:
+                    logger.warning(
+                        '[docker-node] ip tooling check failed node=%s container=%s err=%s',
+                        node_name, inspect_name, ip_exc,
+                    )
+                except Exception:
+                    pass
     except Exception as exc:
         # PID instability is a hard failure regardless of strict pull settings.
         # Continuing would let core-daemon hit `/proc/0/environ` and fail later.

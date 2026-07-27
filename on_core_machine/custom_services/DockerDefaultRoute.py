@@ -34,13 +34,22 @@ log() {
 iface=""
 cidr=""
 
+# Resolve an `ip` implementation. Wrapper images ship a BusyBox at a fixed
+# path even when the base image has no iproute2 and no package manager.
+IPCMD=""
 if command -v ip >/dev/null 2>&1; then
-  candidates="$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($2,a,"@"); print a[1]}' || true)"
+  IPCMD="ip"
+elif [ -x /usr/local/coretg/bin/busybox ] && /usr/local/coretg/bin/busybox ip link show >/dev/null 2>&1; then
+  IPCMD="/usr/local/coretg/bin/busybox ip"
+fi
+
+if [ -n "$IPCMD" ]; then
+  candidates="$($IPCMD -4 -o addr show scope global 2>/dev/null | awk '{split($2,a,"@"); print a[1]}' || true)"
   for dev in $candidates; do
     if [ "$dev" = "eth0" ]; then
       continue
     fi
-    cidr="$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | head -n1 || true)"
+    cidr="$($IPCMD -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | head -n1 || true)"
     if [ -n "$cidr" ]; then
       iface="$dev"
       break
@@ -48,7 +57,7 @@ if command -v ip >/dev/null 2>&1; then
   done
   if [ -z "$iface" ]; then
     for dev in $candidates; do
-      cidr="$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | head -n1 || true)"
+      cidr="$($IPCMD -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | head -n1 || true)"
       if [ -n "$cidr" ]; then
         iface="$dev"
         break
@@ -79,8 +88,8 @@ if [ "$gw" = "$ipaddr" ]; then
   gw="$a.$b.$c.2"
 fi
 
-if command -v ip >/dev/null 2>&1; then
-  if ip route replace default via "$gw" dev "$iface" >/dev/null 2>&1; then
+if [ -n "$IPCMD" ]; then
+  if $IPCMD route replace default via "$gw" dev "$iface" >/dev/null 2>&1; then
     log "set default route via $gw dev $iface (addr=$ipaddr/$prefix)"
     exit 0
   fi

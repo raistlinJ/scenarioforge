@@ -673,24 +673,20 @@ def _start_execute_like_real_vuln_test(backend: Any, *, item: dict[str, Any], ca
     log_path = backend.os.path.join(run_dir, 'run.log')
 
     item_name = str(item.get('name') or item.get('Name') or item.get('Title') or f'vuln-{item_id}')
-    prepared_compose_path = compose_path
     preflight_meta: dict[str, Any] | None = None
 
-    try:
-        from scenarioforge.utils.vuln_process import prepare_compose_for_assignments
+    from webapp.routes.vuln_catalog_test_start import _prepare_test_compose
 
-        node_name = f'vuln-test-{item_id}'
-        rec = {
-            'Name': item_name,
-            'Path': compose_path,
-            'Type': 'docker-compose',
-            'ScenarioTag': f'vuln-test-{item_id}',
-        }
-        created = prepare_compose_for_assignments({node_name: rec}, out_base=run_dir)
-        if created:
-            prepared_compose_path = created[0]
-    except Exception:
-        prepared_compose_path = compose_path
+    prepared_compose_path, prep_err = _prepare_test_compose(
+        compose_path=compose_path,
+        item_id=item_id,
+        item_name=item_name,
+        run_dir=run_dir,
+        node_name=f'vuln-test-{item_id}',
+        logger=backend.app.logger,
+    )
+    if prep_err:
+        return {'ok': False, 'error': prep_err, 'compose_path': compose_path}, 500
 
     try:
         preflight_ok, preflight_error, preflight_meta = backend._core_like_compose_template_preflight(prepared_compose_path)
