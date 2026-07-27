@@ -61,7 +61,14 @@ class CoreTGPrereqsService(CoreService):
     shadow_directories: list[ShadowDir] = []
 
     def get_text_template(self, name: str) -> str:  # type: ignore[override]
+        # Only the node constants below are templated by Mako; the script body
+        # lives in a <%text> block so it is plain shell. Without that, ordinary
+        # syntax breaks: `${VAR:-default}` raises, a line starting with `%` is a
+        # Mako control line, and a line starting with `##` is silently dropped.
         return r"""#!/bin/sh
+NODE_ID='${node.id}'
+NODE_NAME='${node.name}'
+<%text>
 set -eu
 
 LOG="/tmp/coretg_prereqs_output.txt"
@@ -127,7 +134,7 @@ maybe_install() {
   return 0
 }
 
-log "node id(${node.id}) name(${node.name}) starting prereq check"
+log "node id($NODE_ID) name($NODE_NAME) starting prereq check"
 
 # Ensure /bin/bash exists because other ScenarioForge CORE services use it.
 if [ ! -x /bin/bash ]; then
@@ -159,4 +166,5 @@ if have nft; then
 fi
 
 log "done"
+</%text>
 """

@@ -36,10 +36,13 @@ class DockerComposeService(CoreService):
         """
         return """
         #!/bin/bash
+        NODE_ID='${node.id}'
+        NODE_NAME='${node.name}'
+        <%text>
         set -euo pipefail
         LOG="compose_output.txt"
-        YML="/tmp/vulns/docker-compose-${node.name}.yml"
-        echo "[DockerCompose] node id(${node.id}) name(${node.name}) using $YML" >> "$LOG"
+        YML="/tmp/vulns/docker-compose-$NODE_NAME.yml"
+        echo "[DockerCompose] node id($NODE_ID) name($NODE_NAME) using $YML" >> "$LOG"
         if [ ! -f "$YML" ]; then
           echo "[DockerCompose] compose file not found: $YML" >> "$LOG"
           exit 0
@@ -56,7 +59,7 @@ class DockerComposeService(CoreService):
         # vulnerability container filesystem. Container name is enforced by our
         # compose generator (container_name: <node.name>).
         FLAG_TYPE="text"
-        FLAG_HOST_PATH="/tmp/vulns/flag-${node.name}.txt"
+        FLAG_HOST_PATH="/tmp/vulns/flag-$NODE_NAME.txt"
         FLAG_IN_CONTAINER_PRIMARY="/flag.txt"
         FLAG_IN_CONTAINER_FALLBACK="/tmp/flag.txt"
 
@@ -69,22 +72,23 @@ class DockerComposeService(CoreService):
 
         # Wait briefly for container to appear
         for i in {1..20}; do
-          if docker ps -a --format '{{.Names}}' | grep -qx "${node.name}"; then
+          if docker ps -a --format '{{.Names}}' | grep -qx "$NODE_NAME"; then
             break
           fi
           sleep 0.5
         done
 
-        if docker ps -a --format '{{.Names}}' | grep -qx "${node.name}"; then
-          if docker cp "$FLAG_HOST_PATH" "${node.name}:${FLAG_IN_CONTAINER_PRIMARY}" >> "$LOG" 2>&1; then
-            echo "[DockerCompose] flag copied to ${node.name}:${FLAG_IN_CONTAINER_PRIMARY}" >> "$LOG"
+        if docker ps -a --format '{{.Names}}' | grep -qx "$NODE_NAME"; then
+          if docker cp "$FLAG_HOST_PATH" "$NODE_NAME:$FLAG_IN_CONTAINER_PRIMARY" >> "$LOG" 2>&1; then
+            echo "[DockerCompose] flag copied to $NODE_NAME:$FLAG_IN_CONTAINER_PRIMARY" >> "$LOG"
           else
-            docker cp "$FLAG_HOST_PATH" "${node.name}:${FLAG_IN_CONTAINER_FALLBACK}" >> "$LOG" 2>&1 || true
-            echo "[DockerCompose] flag copied to ${node.name}:${FLAG_IN_CONTAINER_FALLBACK}" >> "$LOG"
+            docker cp "$FLAG_HOST_PATH" "$NODE_NAME:$FLAG_IN_CONTAINER_FALLBACK" >> "$LOG" 2>&1 || true
+            echo "[DockerCompose] flag copied to $NODE_NAME:$FLAG_IN_CONTAINER_FALLBACK" >> "$LOG"
           fi
         else
-          echo "[DockerCompose] container ${node.name} not found; flag not copied" >> "$LOG"
+          echo "[DockerCompose] container $NODE_NAME not found; flag not copied" >> "$LOG"
         fi
 
         exit 0
+        </%text>
         """

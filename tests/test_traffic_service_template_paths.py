@@ -8,5 +8,8 @@ def test_traffic_service_uses_absolute_paths_and_runtime_dir():
     assert 'files: list[str] = ["/runtraffic.sh"]' in txt
     assert 'startup: list[str] = ["/bin/bash /runtraffic.sh &"]' in txt
     assert 'runtime_dir=/tmp/coretg_traffic' in txt
-    assert 'cp /tmp/traffic/traffic_${node.id}_*.py "$runtime_dir"/ 2>/dev/null || true' in txt
-    assert 'for file in "$runtime_dir"/traffic_${node.id}_*.py; do' in txt
+    # The node id is interpolated into a constant above the <%text> body,
+    # so the script itself is plain shell.
+    assert "NODE_ID='${node.id}'" in txt
+    assert 'cp /tmp/traffic/traffic_"$NODE_ID"_*.py "$runtime_dir"/ 2>/dev/null || true' in txt
+    assert 'for file in "$runtime_dir"/traffic_"$NODE_ID"_*.py; do' in txt

@@ -37,14 +37,21 @@ class SegmentationService(CoreService):
         :param name: name of file to get template for
         :return: string template
         """
+        # Only the node constants below are templated by Mako; the script body
+        # lives in a <%text> block so it is plain shell. Without that, ordinary
+        # syntax breaks: `${VAR:-default}` raises, a line starting with `%` is a
+        # Mako control line, and a line starting with `##` is silently dropped.
         return """
         #!/bin/bash
+        NODE_ID='${node.id}'
+        NODE_NAME='${node.name}'
+        <%text>
         # NAT starter
-        # node id(${node.id}) name(${node.name})
-        cp /tmp/segmentation/seg_*_*${node.id}_*.py .
-        for file in seg_*_*${node.id}_*.py; do
+        cp /tmp/segmentation/seg_*_*"$NODE_ID"_*.py .
+        for file in seg_*_*"$NODE_ID"_*.py; do
            echo "running: python3 $file" >> output.txt
-           python3 $file &
+           python3 "$file" &
         done
+        </%text>
         """
 
