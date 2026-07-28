@@ -56,6 +56,7 @@ from .utils.segmentation import apply_preview_segmentation_rules
 from .utils.allocation import compute_role_counts
 from .builders.topology import (
     _docker_node_compose_path,
+    _ensure_docker_node_default_routes,
     build_star_from_roles,
     build_segmented_topology,
     build_multi_switch_topology,
@@ -7336,6 +7337,18 @@ def main():
                     start_ok = False
                     configuration_state_pending_docker_validation = False
                     start_error = f"Docker node(s) not running: {', '.join(docker_runtime.get('not_running') or [])}"
+
+            # Install default routes from the host once interfaces exist. The
+            # in-node DockerDefaultRoute service needs `ip`, NET_ADMIN, a shell
+            # and the service to be assigned; the host needs none of that, so
+            # this is the reliable path (and a no-op when the route is set).
+            if (start_ok or configuration_state_pending_docker_validation) and docker_names2:
+                try:
+                    route_results = _ensure_docker_node_default_routes(list(docker_names2))
+                    for _rn, _outcome in (route_results or {}).items():
+                        logging.info('docker node %s default route: %s', _rn, _outcome)
+                except Exception as exc:
+                    logging.warning('host-side default route pass failed: %s', exc)
 
             # Strict: ensure docker-compose nodes are running the intended compose service/image.
             # This prevents intermittent outcomes where CORE starts the default "sleep" container before we swap
