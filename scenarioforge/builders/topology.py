@@ -521,6 +521,156 @@ def _docker_cmd() -> List[str]:
         return ['docker']
 
 
+def _host_root_cmd() -> List[str]:
+    """Return a prefix for running privileged host commands (nsenter/ip)."""
+    try:
+        val = os.getenv('CORETG_DOCKER_USE_SUDO')
+        if val is None or str(val).strip().lower() in ('0', 'false', 'no', 'off', ''):
+            return []
+        pw = _docker_sudo_password()
+        if pw:
+            return ['sudo', '-S', '-p', '']
+        return ['sudo', '-n']
+    except Exception:
+        return []
+
+
+def _derive_gateway(cidr: str) -> Optional[str]:
+    """Return the conventional gateway for an interface address.
+
+    ScenarioForge topologies put the router at the first host address of the
+    LAN; when the node itself holds that address, the peer is the second.
+    """
+    try:
+        iface = ipaddress.ip_interface(str(cidr).strip())
+    except Exception:
+        return None
+    if iface.version != 4:
+        return None
+    net = iface.network
+    if net.prefixlen > 30:
+        return None
+    hosts = net.network_address
+    gw = hosts + 1
+    if gw == iface.ip:
+        gw = hosts + 2
+    if gw not in net or gw == net.broadcast_address:
+        return None
+    return str(gw)
+
+
+def _ensure_docker_node_default_routes(node_names: List[str]) -> dict[str, str]:
+    """Install default routes into docker node namespaces from the host.
+
+    The in-node DockerDefaultRoute service is best-effort and depends on the
+    container having `ip`, NET_ADMIN, a shell, and the service actually being
+    assigned. None of that is guaranteed — images like vulhub/kibana ship no
+    iproute2 and cannot install it, and a container started from an unprepared
+    compose file has neither NET_ADMIN nor a root user.
+
+    The host has all of it, so configure the route the same way CORE configures
+    node interfaces: enter the container's network namespace with nsenter. This
+    runs after CORE reaches runtime, when interfaces and addresses exist.
+
+    Returns a mapping of node name -> outcome, for logging.
+    """
+    results: dict[str, str] = {}
+    if not node_names:
+        return results
+
+    docker_cmd = _docker_cmd()
+    root_prefix = _host_root_cmd()
+
+    def _run(args: List[str], timeout: int = 30) -> tuple[int, str]:
+        try:
+            sudo_pw = _docker_sudo_password()
+            use_stdin = bool(sudo_pw) and args and args[0] == 'sudo' and '-S' in args
+            proc = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                input=(sudo_pw + '\n') if use_stdin else None,
+            )
+            return int(proc.returncode or 0), (proc.stdout or '').strip()
+        except Exception as exc:
+            return 1, str(exc)
+
+    for name in node_names:
+        node = str(name or '').strip()
+        if not node:
+            continue
+
+        rc, out = _run(docker_cmd + ['inspect', '-f', '{{.State.Pid}}', node])
+        pid = ''
+        if rc == 0:
+            pid = next((ln.strip() for ln in out.splitlines() if ln.strip().isdigit()), '')
+        if not pid or pid == '0':
+            results[node] = 'skipped: no container pid'
+            continue
+
+        ns = root_prefix + ['nsenter', '-t', pid, '-n', '--']
+
+        rc, out = _run(ns + ['ip', 'route', 'show', 'default'])
+        if rc == 0 and out.strip().startswith('default'):
+            results[node] = 'already set'
+            continue
+
+        rc, out = _run(ns + ['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'])
+        if rc != 0:
+            results[node] = f'failed reading addresses: {out[:120]}'
+            continue
+
+        iface = ''
+        cidr = ''
+        fallback: tuple[str, str] = ('', '')
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4 or parts[2] != 'inet':
+                continue
+            dev = parts[1].split('@', 1)[0]
+            addr = parts[3]
+            if dev == 'lo':
+                continue
+            if dev == 'eth0':
+                # eth0 can be a leftover docker bridge; prefer another device.
+                if not fallback[0]:
+                    fallback = (dev, addr)
+                continue
+            iface, cidr = dev, addr
+            break
+        if not iface and fallback[0]:
+            iface, cidr = fallback
+
+        if not iface or not cidr:
+            results[node] = 'skipped: no global IPv4 address'
+            continue
+
+        gw = str(os.getenv('CORETG_DEFAULT_GW') or '').strip() or _derive_gateway(cidr)
+        if not gw:
+            results[node] = f'skipped: cannot derive gateway from {cidr}'
+            continue
+
+        rc, out = _run(ns + ['ip', 'route', 'replace', 'default', 'via', gw, 'dev', iface])
+        if rc != 0:
+            rc, out = _run(ns + ['ip', 'route', 'add', 'default', 'via', gw, 'dev', iface])
+        if rc == 0:
+            results[node] = f'set default via {gw} dev {iface} (addr={cidr})'
+        else:
+            results[node] = f'failed via {gw} dev {iface}: {out[:160]}'
+
+    for node, outcome in results.items():
+        try:
+            if outcome.startswith('failed') or outcome.startswith('skipped'):
+                logger.warning('[docker-node] host-side default route node=%s %s', node, outcome)
+            else:
+                logger.info('[docker-node] host-side default route node=%s %s', node, outcome)
+        except Exception:
+            pass
+    return results
+
+
 def _sanitize_compose_incompatible_workdirs(compose_path: str) -> bool:
     """Best-effort sanitize known incompatible `working_dir` overrides.
 
