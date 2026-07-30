@@ -18765,6 +18765,37 @@ def _flow_state_from_current_xml_for_preview(
         return None
 
 
+def _flow_runtime_input_names(*sources: dict[str, Any] | None) -> set[str]:
+    """Names a generator reads out of its run config.
+
+    Only these need a concrete value at run time. A fact a generator merely
+    declares under ``artifacts.requires`` without consuming it as an input is
+    an ordering constraint, not something that must carry a value.
+    """
+    names: set[str] = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        raw = source.get('inputs')
+        if not isinstance(raw, list):
+            raw = source.get('input_defs')
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    name = str(item.get('name') or '').strip()
+                elif isinstance(item, str):
+                    name = item.strip()
+                else:
+                    continue
+                if name:
+                    names.add(name)
+        for key in ('input_fields', 'input_fields_required'):
+            value = source.get(key)
+            if isinstance(value, list):
+                names |= {str(x).strip() for x in value if str(x).strip()}
+    return names
+
+
 def _flow_node_challenge_slot_kind(node: dict[str, Any] | None) -> str:
     """Return the challenge kind a declared slot host is reserved for.
 
@@ -23765,6 +23796,10 @@ def _flow_validate_chain_order_by_requires_produces(
     gen_defs_by_id: dict[str, dict[str, Any]] = _flow_enabled_generator_defs_by_id()
 
     available: set[str] = set(_flow_synthesized_inputs())
+    # Facts an actual generator produced, and facts only a vulnerability granted.
+    # A vuln grant satisfies the solver but carries no value into the run config.
+    available_from_generators: set[str] = set(_flow_synthesized_inputs())
+    vuln_only_facts: set[str] = set()
     try:
         ordered_assignments = [assign_by_node.get(cid) or {} for cid in chain_ids]
         start_positions = _flow_parallel_start_assignment_indexes(ordered_assignments, gen_defs_by_id=gen_defs_by_id)
@@ -23871,7 +23906,9 @@ def _flow_validate_chain_order_by_requires_produces(
                     f"{cid}: vulnerability requires {unmet} before it can be exploited"
                 )
 
-        available |= set(vuln_entry.get('provides') or set())
+        vuln_provided_facts = set(vuln_entry.get('provides') or set())
+        available |= vuln_provided_facts
+        vuln_only_facts |= {fact for fact in vuln_provided_facts if fact not in available_from_generators}
 
         inferred_requires = {str(x).strip() for x in (a.get('inputs') or []) if str(x).strip()}
         inferred_produces = {str(x).strip() for x in (a.get('outputs') or []) if str(x).strip()}
@@ -23928,7 +23965,27 @@ def _flow_validate_chain_order_by_requires_produces(
         if missing:
             errors.append(f"{cid}: requires {missing} before they are produced")
 
+        # A vulnerability grants a capability, not an artifact: nothing writes a
+        # value into flow_context for it. If a generator reads the fact out of
+        # its run config and only a vuln "produced" it, the generator receives a
+        # fabricated stand-in unrelated to the vulnerability the participant
+        # actually exploited. The chain looks solved; the value is fiction.
+        satisfied_by_vuln_only = sorted(
+            fact for fact in requires
+            if fact in vuln_only_facts
+            and fact not in available_from_generators
+            and fact in _flow_runtime_input_names(gen_defs_by_id.get(plugin_id), a)
+        )
+        if satisfied_by_vuln_only:
+            errors.append(
+                f"{cid}: {satisfied_by_vuln_only} is only granted by a vulnerability, "
+                f"but this generator reads it as a runtime input and a vulnerability "
+                f"supplies no value; it would receive a fabricated one. Place a "
+                f"generator that produces it earlier in the chain."
+            )
+
         available |= produces
+        available_from_generators |= produces
 
     if errors:
         # Include minimal context; callers may surface this in API error details.
