@@ -31,7 +31,16 @@ def _write_xml(tmpdir: str, *, scenario: str) -> str:
     return path
 
 
-def test_vulns_show_in_preview_when_no_docker_hosts_and_flow_allows_vuln_nodes(tmp_path):
+def test_vulns_get_docker_hosts_even_when_none_declared_and_flow_uses_them(tmp_path):
+    """Declaring vulnerabilities creates Docker hosts for them, then Flow uses those.
+
+    This test was built on the opposite premise -- that vulnerabilities could sit
+    on non-Docker hosts and Flow would sequence over them anyway. Docker capacity
+    for vulnerabilities is additive now: the scenario below declares three Servers
+    and no Docker, and the planner still adds one dedicated Docker challenge host
+    per vulnerability. A vulnerability without a Docker host is no longer a state
+    the planner can produce, so the guarantee worth pinning is the reverse.
+    """
     app.config["TESTING"] = True
     client = app.test_client()
 
@@ -52,15 +61,16 @@ def test_vulns_show_in_preview_when_no_docker_hosts_and_flow_allows_vuln_nodes(t
         full_preview = payload.get("full_preview") or {}
         hosts = full_preview.get("hosts") or []
 
-        # Confirm scenario truly has no Docker-role hosts.
-        assert not [h for h in hosts if (h.get("role") or "").strip().lower() == "docker"]
+        # The scenario declares no Docker hosts; capacity repair adds one per
+        # vulnerability, so the preview must contain exactly the two it needs.
+        docker_hosts = [h for h in hosts if (h.get("role") or "").strip().lower() == "docker"]
+        assert len(docker_hosts) == 2, [h.get("name") for h in hosts]
 
         vuln_by_node = full_preview.get("vulnerabilities_by_node") or {}
         assert vuln_by_node, "expected vulnerabilities_by_node to be non-empty even without docker hosts"
 
         # Persist a connected preview plan artifact.
-        # Docker slot semantics: vulnerabilities should not make a host "docker-like".
-        # Flow flag sequencing should still work by using vulnerability nodes for flag-generators.
+        # Flow flag sequencing then places flag-generators on those vulnerability nodes.
         host_ids = [str(h.get("node_id")) for h in hosts if str(h.get("node_id") or "")]
         assert len(host_ids) >= 2
 
@@ -88,7 +98,10 @@ def test_vulns_show_in_preview_when_no_docker_hosts_and_flow_allows_vuln_nodes(t
             data = flow.get_json() or {}
             assert data.get("ok") is True, data
             stats = data.get("stats") or {}
-            assert int(stats.get("docker_total") or 0) == 0
+            # The two docker hosts here exist solely as vulnerability challenge
+            # targets, so none of them is a plain non-vulnerability docker node.
+            assert int(stats.get("docker_total") or 0) == 2
+            assert int(stats.get("docker_nonvuln_total") or 0) == 0
             assert int(stats.get("vuln_total") or 0) >= 1
             assert int(stats.get("eligible_total") or 0) >= 2
 
