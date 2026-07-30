@@ -69,7 +69,10 @@ def test_prepare_preview_duplicate_flag_error_propagates(monkeypatch):
     monkeypatch.setattr(app_backend, "_flow_compute_flag_assignments", fake_flow_assignments)
     monkeypatch.setattr(app_backend, "_flow_validate_chain_order_by_requires_produces", lambda *args, **kwargs: (False, ["forced invalid"]))
 
-    def fake_subprocess_run(cmd, cwd=None, check=False, capture_output=False, text=False, timeout=None):
+    # The generator runner invokes subprocess.run with env=..., so a stub that
+    # omits the parameter raises TypeError, the generator is recorded as failed,
+    # and no resolved outputs reach the duplicate-flag check.
+    def fake_subprocess_run(cmd, cwd=None, check=False, capture_output=False, text=False, timeout=None, env=None):
         out_dir = None
         if isinstance(cmd, list) and "--out-dir" in cmd:
             i = cmd.index("--out-dir")
