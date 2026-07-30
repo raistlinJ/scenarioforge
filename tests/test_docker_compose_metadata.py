@@ -5,7 +5,13 @@ import sys
 import types
 from types import SimpleNamespace
 
-from scenarioforge.builders.topology import _apply_docker_compose_meta, _docker_ifid_start, _docker_node_add_node_kwargs, NodeType
+from scenarioforge.builders.topology import (
+    _apply_docker_compose_meta,
+    _docker_ifid_start,
+    _docker_node_add_node_kwargs,
+    _docker_node_compose_path,
+    NodeType,
+)
 from scenarioforge.utils.vuln_process import prepare_compose_for_assignments
 
 
@@ -908,7 +914,10 @@ def test_docker_node_add_node_kwargs_falls_back_to_node_name_when_compose_unread
         },
     )
 
-    assert kwargs.get("compose") == "/tmp/vulns/docker-compose-host-9.yml"
+    # Derived from the node name, not the unreadable record path. Compare via the
+    # helper: compose files moved from a flat /tmp/vulns/docker-compose-<node>.yml
+    # to per-node project dirs, and the layout is not what this test is about.
+    assert kwargs.get("compose") == _docker_node_compose_path("host-9")
     assert kwargs.get("compose_name") == "host-9"
     options = kwargs.get("options")
     assert getattr(options, "compose_name", None) == "host-9"
@@ -939,7 +948,7 @@ def test_docker_node_add_node_kwargs_prefers_real_core_options_object_when_avail
 
     options = kwargs.get("options")
     assert isinstance(options, FakeDockerOptions)
-    assert getattr(options, "compose", None) == "/tmp/vulns/docker-compose-host-10.yml"
+    assert getattr(options, "compose", None) == _docker_node_compose_path("host-10")
     assert getattr(options, "compose_name", None) == "host-10"
     assert getattr(options, "image", None) == ""
     assert getattr(options, "type", None) == ""
@@ -978,7 +987,7 @@ def test_apply_docker_compose_meta_prefers_real_core_options_object_when_availab
     assert session.calls, "session.edit_node should be called"
     _node_id, options, _ = session.calls[0]
     assert isinstance(options, FakeDockerOptions)
-    assert getattr(options, "compose", None) == "/tmp/vulns/docker-compose-host-11.yml"
+    assert getattr(options, "compose", None) == _docker_node_compose_path("host-11")
     assert getattr(options, "compose_name", None) == "host-11"
 
 
@@ -1729,13 +1738,24 @@ def test_prepare_compose_inject_copy_dependency_nonblocking_by_default(tmp_path,
     target = services.get("docker-1") or services.get("app")
     assert isinstance(target, dict)
 
+    # The hazard this guards against is `service_completed_successfully`: if the
+    # helper image lacks the shell/coreutils the generated copy command needs,
+    # the target never starts and the CORE Docker node sits at PID=0. A weak
+    # dependency is fine -- list form and `service_started` both only wait for
+    # the container to come up. So assert the condition, not the absence of the
+    # dependency, which is what this test used to do.
     depends_on = target.get("depends_on")
     if isinstance(depends_on, dict):
-        inject_keys = [k for k in depends_on.keys() if str(k).startswith("inject_copy")]
-        assert not inject_keys
+        for key, spec in depends_on.items():
+            if not str(key).startswith("inject_copy"):
+                continue
+            condition = (spec or {}).get("condition") if isinstance(spec, dict) else None
+            assert condition != "service_completed_successfully", (
+                f"inject_copy must not block target startup by default: {key} -> {spec}"
+            )
     elif isinstance(depends_on, list):
-        inject_keys = [k for k in depends_on if str(k).startswith("inject_copy")]
-        assert not inject_keys
+        # List form carries no condition, so it cannot be the blocking variant.
+        pass
 
 
 def test_prepare_compose_root_workdir_auto_mode_skips_app_images(tmp_path, monkeypatch):
