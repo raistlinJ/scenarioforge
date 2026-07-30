@@ -235,6 +235,14 @@ services:
 
 
 def test_generator_pack_uninstall_removes_generators(tmp_path, monkeypatch):
+    # Uninstall removes the CORE runtime copy over SSH before touching local
+    # files, and aborts if that fails. There is no CORE VM in a test run, so
+    # without this the delete is refused and nothing is removed. These tests
+    # are about local pack removal, so the remote step is stubbed as done.
+    monkeypatch.setattr(
+        app_backend, "_cleanup_remote_generator_pack",
+        lambda pack: (True, "remote cleanup stubbed in tests"),
+    )
     install_root = tmp_path / "installed_generators"
     monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))
 
@@ -690,6 +698,14 @@ injects: []
 
 
 def test_generator_pack_can_roundtrip_export_all_zip(tmp_path, monkeypatch):
+    # Uninstall removes the CORE runtime copy over SSH before touching local
+    # files, and aborts if that fails. There is no CORE VM in a test run, so
+    # without this the delete is refused and nothing is removed. These tests
+    # are about local pack removal, so the remote step is stubbed as done.
+    monkeypatch.setattr(
+        app_backend, "_cleanup_remote_generator_pack",
+        lambda pack: (True, "remote cleanup stubbed in tests"),
+    )
     install_root = tmp_path / "installed_generators"
     monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))
 
