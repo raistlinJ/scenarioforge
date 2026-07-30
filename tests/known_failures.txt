@@ -3,9 +3,8 @@
 # CI fails only when a failure appears that is NOT listed here, so this file
 # is a ratchet: it may shrink freely, and should only grow with a deliberate
 # decision. Prune an entry as soon as its test passes again.
-# Recorded count: 5
+# Recorded count: 4
 
-tests/test_ai_generator_accuracy_eval.py::test_ai_generator_accuracy_eval_corpus_passes
 tests/test_cli_connectivity_policies.py::test_cli_persists_connectivity_policies
 tests/test_cli_report_switches_init.py::test_cli_report_handles_segmented_build_without_router_nodes
 tests/test_flow_duplicate_flag_error_propagates.py::test_prepare_preview_duplicate_flag_error_propagates
