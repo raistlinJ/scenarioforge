@@ -57,7 +57,13 @@ def test_preview_vulnerabilities_only_assigned_to_docker_hosts():
             for h in hosts
             if (h.get("role") or "").strip().lower() == "docker" and h.get("node_id") is not None
         }
-        assert len(docker_ids) == 3
+        # Docker capacity for vulnerabilities is additive, not a raise-to-max: the
+        # scenario declares 2 Docker hosts and 3 specific vulnerabilities, and the
+        # planner adds one dedicated challenge host per vulnerability on top of the
+        # user's base count (2 + 3 = 5). Base Docker hosts are deliberately never
+        # reused as vulnerability targets, which keeps the user's declared topology
+        # distinct from topology-required challenge nodes.
+        assert len(docker_ids) == 5
 
         vuln_by_node = full_preview.get("vulnerabilities_by_node") or {}
         assert vuln_by_node, "expected at least one vulnerability assignment"
