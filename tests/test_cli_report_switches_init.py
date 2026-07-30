@@ -48,6 +48,13 @@ def test_cli_report_handles_segmented_build_without_router_nodes(tmp_path, monke
         monkeypatch.setattr(cli, 'load_vuln_catalog', lambda *a, **k: [])
         monkeypatch.setattr(cli, 'assign_compose_to_nodes', lambda *a, **k: {})
         monkeypatch.setattr(cli, 'attach_hitl_rj45_nodes', lambda *a, **k: {'enabled': False, 'interfaces': []})
+        # Execute now refuses when the saved PlanPreview disagrees with the plan
+        # derived from the XML. The fakes here are deliberately inconsistent --
+        # a preview with no routers alongside a plan reporting routers_planned=1 --
+        # because this test is about how write_report handles a build with no
+        # router nodes, not about preview/plan agreement. Neutralise just that
+        # comparison rather than hand-tuning every summary field to match.
+        monkeypatch.setattr(cli, '_diff_plan_summaries', lambda *a, **k: [])
         monkeypatch.setattr(cli, 'write_report', fake_write_report)
         monkeypatch.setattr(cli, 'CORE_GRPC_AVAILABLE', True)
         monkeypatch.setattr(cli, 'client', SimpleNamespace(CoreGrpcClient=lambda address: _FakeCoreClient()))
