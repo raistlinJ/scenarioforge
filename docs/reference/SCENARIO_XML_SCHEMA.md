@@ -151,7 +151,7 @@ current writer emits:
 
 | Section name | Purpose |
 |--------------|---------|
-| `Node Information` | Host role/count planning. |
+| `Node Information` | Host role/count planning. Row `selected` is one of `Server`, `Workstation`, `PC`, `Docker`, `VulnerabilitySlot`, `FlagGenSlot`, or `Random`; unrecognized roles normalize to `PC`. See [Challenge slot roles](#challenge-slot-roles). |
 | `Routing` | Router protocol/count and aggregation policy. |
 | `Services` | Service selection/count planning. |
 | `Traffic` | Traffic generator selection and parameters. |
@@ -162,6 +162,33 @@ current writer emits:
 
 `Events` is accepted by legacy planning-only XSD files but is not emitted by the
 current Web UI writer.
+
+### Challenge slot roles
+
+`Docker` is the catch-all challenge host: flag-sequencing may place either a
+vulnerability or a flag-node-generator on it. The two slot roles reserve
+Docker-backed capacity for exactly one challenge kind:
+
+| Role | Accepts |
+|------|---------|
+| `Docker` | a vulnerability **or** a flag-node-generator |
+| `VulnerabilitySlot` | vulnerabilities only |
+| `FlagGenSlot` | flag-node-generators only |
+
+```xml
+<section name="Node Information">
+  <item selected="Docker" v_metric="Count" v_count="1"/>
+  <item selected="VulnerabilitySlot" v_metric="Count" v_count="3"/>
+  <item selected="FlagGenSlot" v_metric="Count" v_count="2"/>
+</section>
+```
+
+Slot rows are independent of the counts declared in the `Vulnerabilities` and
+`Flag Node Generators` sections — declaring slots does not reduce those. When
+the planner places challenges it fills matching slots first and only then adds
+Docker hosts for the remainder, so slots replace additive Docker hosts rather
+than stacking on top of them. Slots left unused when there are fewer challenges
+than slots stay in the topology as empty Docker-backed hosts.
 
 Common attributes:
 | Attribute | Applies | Meaning |

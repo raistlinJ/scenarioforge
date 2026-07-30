@@ -73,6 +73,12 @@ def _apply_docker_bridge_core_defaults() -> None:
 _apply_docker_bridge_core_defaults()
 
 from scenarioforge.utils.flow_seed import flow_generator_seed as _flow_generator_seed_impl
+from scenarioforge.planning.node_plan import (
+    FLAG_GEN_SLOT_ROLE as _PLANNING_FLAG_GEN_SLOT_ROLE,
+    VULNERABILITY_SLOT_ROLE as _PLANNING_VULNERABILITY_SLOT_ROLE,
+    challenge_slot_kind as _planning_challenge_slot_kind,
+    is_docker_backed_role as _planning_is_docker_backed_role,
+)
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - psutil is optional for tests
@@ -18759,6 +18765,28 @@ def _flow_state_from_current_xml_for_preview(
         return None
 
 
+def _flow_node_challenge_slot_kind(node: dict[str, Any] | None) -> str:
+    """Return the challenge kind a declared slot host is reserved for.
+
+    Empty string for plain Docker hosts (which accept either kind) and for
+    everything that is not a challenge slot.
+    """
+    try:
+        if not isinstance(node, dict):
+            return ''
+        metadata = node.get('metadata') if isinstance(node.get('metadata'), dict) else {}
+        explicit = str(metadata.get('challenge_slot_kind') or node.get('challenge_slot_kind') or '').strip()
+        if explicit:
+            return explicit
+        for key in ('role', 'type'):
+            kind = _planning_challenge_slot_kind(str(node.get(key) or ''))
+            if kind:
+                return kind
+        return ''
+    except Exception:
+        return ''
+
+
 def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
     try:
         if not isinstance(node, dict):
@@ -18767,12 +18795,32 @@ def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
         t = t_raw.strip().lower()
         if ('docker' in t) or (t_raw.strip().upper() == 'DOCKER'):
             return True
+        # Challenge slots are Docker-backed hosts under a dedicated role name,
+        # so they carry no "docker" substring to match on.
+        if _flow_node_challenge_slot_kind(node):
+            return True
+        if _planning_is_docker_backed_role(str(node.get('role') or '')):
+            return True
         # Preview graph nodes also carry compose metadata for docker-role hosts.
         comp = str(node.get('compose') or '').strip()
         comp_name = str(node.get('compose_name') or '').strip()
         return bool(comp or comp_name)
     except Exception:
         return False
+
+
+def _flow_node_accepts_challenge_kind(node: dict[str, Any] | None, kind: str) -> bool:
+    """True when `node` may host a challenge of `kind`.
+
+    Plain Docker hosts accept either kind; a declared slot accepts only its own.
+    `kind` is 'vulnerability' or 'flag-node-generator'.
+    """
+    if not _flow_node_is_docker_role(node):
+        return False
+    slot_kind = _flow_node_challenge_slot_kind(node)
+    if not slot_kind:
+        return True
+    return slot_kind == str(kind or '').strip()
 
 
 def _flow_node_is_vuln(node: dict[str, Any] | None) -> bool:
@@ -30522,6 +30570,13 @@ def _normalize_node_information_role(value: Any) -> str:
         'client': 'PC',
         'clients': 'PC',
         'random': 'Random',
+        # Challenge slots. Without these the role would normalize to '' and any
+        # per-role counting silently reports zero slots.
+        'vulnerabilityslot': _PLANNING_VULNERABILITY_SLOT_ROLE,
+        'vulnslot': _PLANNING_VULNERABILITY_SLOT_ROLE,
+        'flaggenslot': _PLANNING_FLAG_GEN_SLOT_ROLE,
+        'flaggeneratorslot': _PLANNING_FLAG_GEN_SLOT_ROLE,
+        'flagnodegeneratorslot': _PLANNING_FLAG_GEN_SLOT_ROLE,
     }
     return aliases.get(normalized, '')
 

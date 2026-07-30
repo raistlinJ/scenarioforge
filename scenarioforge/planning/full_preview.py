@@ -29,7 +29,13 @@ from .layout_positions import compute_clustered_layout
 from ..utils.allocators import UniqueAllocator, make_subnet_allocator  # runtime-like allocators
 from .router_host_plan import plan_router_counts, plan_r2s_grouping  # reuse builder's router count & grouping logic
 from .docker_capacity import ensure_role_counts_docker_capacity
-from .node_plan import _normalize_role_name  # internal normalization helper
+from .node_plan import (  # internal normalization helper
+    FLAG_GEN_SLOT_ROLE,
+    VULNERABILITY_SLOT_ROLE,
+    _normalize_role_name,
+    challenge_slot_kind,
+    is_docker_backed_role,
+)
 from .preview_validation import validate_full_preview
 
 
@@ -51,6 +57,14 @@ def _stable_shuffle(seq: List[Any], seed: int) -> List[Any]:
     out = list(seq)
     rnd.shuffle(out)
     return out
+
+
+# Slot roles get short host names; the raw role lowercased reads poorly
+# ("vulnerabilityslot-3") and host names surface directly in the topology.
+_HOST_NAME_PREFIXES = {
+    VULNERABILITY_SLOT_ROLE: 'vulnslot',
+    FLAG_GEN_SLOT_ROLE: 'flaggenslot',
+}
 
 
 def _expand_roles(role_counts: Dict[str, int]) -> List[str]:
@@ -534,11 +548,15 @@ def build_full_preview(
     for r, c in role_counts.items():
         nr = _normalize_role_name(r)
         normalized_counts[nr] = normalized_counts.get(nr, 0) + int(c)
-    required_docker_hosts = (
-        sum(max(0, int(count or 0)) for count in (vulnerabilities_plan or {}).values())
-        + sum(max(0, int(count or 0)) for count in (flag_node_generators_plan or {}).values())
+    required_vulnerability_hosts = sum(
+        max(0, int(count or 0)) for count in (vulnerabilities_plan or {}).values()
     )
-    role_counts, docker_capacity_repair = ensure_role_counts_docker_capacity(normalized_counts, required_docker_hosts)
+    required_flag_node_generator_hosts = sum(
+        max(0, int(count or 0)) for count in (flag_node_generators_plan or {}).values()
+    )
+    role_counts, docker_capacity_repair = ensure_role_counts_docker_capacity(
+        normalized_counts, required_vulnerability_hosts, required_flag_node_generator_hosts
+    )
     total_hosts = sum(int(c) for c in role_counts.values())
     role_expanded = _expand_roles(role_counts)
     host_nodes: List[PreviewNode] = []
@@ -552,7 +570,14 @@ def build_full_preview(
             else:
                 rid = 0
             host_router_map[host_id] = rid
-            host_nodes.append(PreviewNode(node_id=host_id, name=f"{role.lower()}-{idx+1}", role=role, kind="host"))
+            host_name = f"{_HOST_NAME_PREFIXES.get(role, role.lower())}-{idx+1}"
+            host_node = PreviewNode(node_id=host_id, name=host_name, role=role, kind="host")
+            slot_kind = challenge_slot_kind(role)
+            if slot_kind:
+                # Marks dedicated capacity so Flow placement can tell a slot
+                # apart from a plain Docker host that may take either kind.
+                host_node.metadata['challenge_slot_kind'] = slot_kind
+            host_nodes.append(host_node)
     host_map: Dict[int, PreviewNode] = {h.node_id: h for h in host_nodes}
 
     # ---- Runtime-like IP assignment (using allocators similar to topology.py) ----
@@ -1132,21 +1157,32 @@ def build_full_preview(
         [
             h.node_id
             for h in host_nodes
-            if str(getattr(h, 'role', '') or '').strip().lower() != 'docker'
+            if not is_docker_backed_role(str(getattr(h, 'role', '') or ''))
         ],
         rnd_seed,
     )
     vuln_assignments: Dict[int, List[str]] = {}
     if vulnerabilities_plan:
-        # Vulnerability-bearing slots are realized as Docker-role hosts.
-        # Use deterministic node_id ordering to mirror slot-1..N allocation, then shuffle.
-        target_hosts = sorted(
-            [h for h in host_nodes if str(getattr(h, 'role', '') or '').strip().lower() == 'docker'],
-            key=lambda h: getattr(h, 'node_id', 0),
-        )
-        if not target_hosts:
-            target_hosts = sorted(host_nodes, key=lambda h: getattr(h, 'node_id', 0))
-        ordered = _stable_shuffle([h.node_id for h in target_hosts], rnd_seed + 101)
+        # Vulnerability-bearing slots are realized as Docker-backed hosts.
+        # Declared VulnerabilitySlot rows are dedicated capacity and are filled
+        # before plain Docker hosts; each tier is shuffled independently so the
+        # preference survives randomization.
+        def _hosts_with_role(role_name: str) -> List[int]:
+            return _stable_shuffle(
+                [
+                    h.node_id
+                    for h in sorted(host_nodes, key=lambda h: getattr(h, 'node_id', 0))
+                    if _normalize_role_name(str(getattr(h, 'role', '') or '')) == role_name
+                ],
+                rnd_seed + 101,
+            )
+
+        ordered = _hosts_with_role(VULNERABILITY_SLOT_ROLE) + _hosts_with_role('Docker')
+        if not ordered:
+            ordered = _stable_shuffle(
+                [h.node_id for h in sorted(host_nodes, key=lambda h: getattr(h, 'node_id', 0))],
+                rnd_seed + 101,
+            )
         flat: List[str] = []
         for name, count in vulnerabilities_plan.items():
             for _ in range(int(count)):
@@ -1165,10 +1201,18 @@ def build_full_preview(
     # vulnerability host.  Metadata survives into Flow candidate construction.
     nodegen_assignments: Dict[int, str] = {}
     if flag_node_generators_plan:
-        target_hosts = sorted(
-            [h for h in host_nodes if str(getattr(h, 'role', '') or '').strip().lower() == 'docker' and not h.vulnerabilities],
-            key=lambda h: getattr(h, 'node_id', 0),
-        )
+        # FlagGenSlot rows are dedicated capacity and fill before plain Docker
+        # hosts.  VulnerabilitySlot hosts are never eligible: a slot only ever
+        # takes its own challenge kind.
+        def _nodegen_targets(role_name: str) -> List[PreviewNode]:
+            return [
+                h
+                for h in sorted(host_nodes, key=lambda h: getattr(h, 'node_id', 0))
+                if _normalize_role_name(str(getattr(h, 'role', '') or '')) == role_name
+                and not h.vulnerabilities
+            ]
+
+        target_hosts = _nodegen_targets(FLAG_GEN_SLOT_ROLE) + _nodegen_targets('Docker')
         flat_nodegens: List[str] = []
         for generator_id, count in flag_node_generators_plan.items():
             flat_nodegens.extend([str(generator_id)] * max(0, int(count or 0)))

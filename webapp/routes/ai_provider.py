@@ -41,6 +41,7 @@ from scenarioforge.planning.ai_topology_intent import has_low_r2r_intent as _com
 from scenarioforge.planning.ai_topology_intent import search_vulnerability_catalog_for_prompt as _compiler_search_vulnerability_catalog_for_prompt
 from webapp import app_backend
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
+from scenarioforge.planning.node_plan import HOST_ROLE_DISPLAY_ORDER, is_docker_backed_role
 
 try:
     from mcp.client.session import ClientSession
@@ -881,7 +882,9 @@ def _count_docker_rows(scenario_payload: dict[str, Any] | None) -> int:
     for item in items:
         if not isinstance(item, dict):
             continue
-        if str(item.get('selected') or '').strip().lower() != 'docker':
+        # Challenge slots are Docker-backed hosts, so a scenario that declares
+        # only slots still has container capacity to report.
+        if not is_docker_backed_role(app_backend._normalize_node_information_role(item.get('selected'))):
             continue
         total += _coerce_positive_int(item.get('v_count')) or _coerce_positive_int(item.get('count')) or 1
     return total
@@ -1052,7 +1055,7 @@ def _get_prompt_coverage_mismatch(user_prompt: str, scenario_payload: dict[str, 
         'Segmentation': _count_section_coverage_units(scenario_payload, 'Segmentation'),
         'Docker': _count_docker_rows(scenario_payload),
     }
-    for role in ('Server', 'Workstation', 'PC', 'Docker'):
+    for role in HOST_ROLE_DISPLAY_ORDER:
         actual[f'Node Information:{role}'] = _count_node_role_rows(scenario_payload, role)
     for service in ('SSH', 'HTTP', 'DHCPClient'):
         actual[f'Services:{service}'] = _count_section_selected_rows(

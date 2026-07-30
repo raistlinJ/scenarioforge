@@ -1,7 +1,62 @@
 from __future__ import annotations
 from typing import List, Tuple, Dict
 
-ALLOWED_HOST_ROLES = {"Server", "Workstation", "PC", "Docker"}
+VULNERABILITY_SLOT_ROLE = "VulnerabilitySlot"
+FLAG_GEN_SLOT_ROLE = "FlagGenSlot"
+
+# Challenge slots are declared in Node Information but reserve capacity for a
+# single kind of flag-sequencing challenge.  A VulnerabilitySlot only ever
+# receives a vulnerability, a FlagGenSlot only ever a flag-node-generator.
+# Plain Docker hosts remain the catch-all that either kind may land on.
+CHALLENGE_SLOT_ROLES = {VULNERABILITY_SLOT_ROLE, FLAG_GEN_SLOT_ROLE}
+
+# Stable order for UI enumerations, CLI help, and error messages.  Sets are
+# unordered, so anything user-visible reads from this instead.
+HOST_ROLE_DISPLAY_ORDER = (
+    "Server",
+    "Workstation",
+    "PC",
+    "Docker",
+    VULNERABILITY_SLOT_ROLE,
+    FLAG_GEN_SLOT_ROLE,
+)
+
+ALLOWED_HOST_ROLES = set(HOST_ROLE_DISPLAY_ORDER)
+
+# Slots are materialized as Docker-backed hosts: they run the same container
+# runtime, so anything asking "can this host a container?" must accept them.
+DOCKER_BACKED_ROLES = {"Docker"} | CHALLENGE_SLOT_ROLES
+
+# Accepts the canonical spelling plus hyphen/space/underscore variants, so
+# `vulnerability-slot`, `Vulnerability Slot` and `VulnerabilitySlot` all land on
+# the same role instead of silently falling back to PC.
+_ROLE_ALIASES = {
+    'vulnerabilityslot': VULNERABILITY_SLOT_ROLE,
+    'vulnslot': VULNERABILITY_SLOT_ROLE,
+    'flaggenslot': FLAG_GEN_SLOT_ROLE,
+    'flagnodegeneratorslot': FLAG_GEN_SLOT_ROLE,
+    'flaggeneratorslot': FLAG_GEN_SLOT_ROLE,
+}
+
+
+def _role_alias_key(role: str) -> str:
+    return ''.join(ch for ch in (role or '').lower() if ch.isalnum())
+
+
+def is_docker_backed_role(role: str) -> bool:
+    """True when a role runs containers (plain Docker or a challenge slot)."""
+    return _normalize_role_name(role) in DOCKER_BACKED_ROLES
+
+
+def challenge_slot_kind(role: str) -> str:
+    """Return 'vulnerability', 'flag-node-generator', or '' for non-slot roles."""
+    normalized = _normalize_role_name(role)
+    if normalized == VULNERABILITY_SLOT_ROLE:
+        return 'vulnerability'
+    if normalized == FLAG_GEN_SLOT_ROLE:
+        return 'flag-node-generator'
+    return ''
+
 
 def _normalize_role_name(role: str) -> str:
     rl = (role or '').strip()
@@ -13,6 +68,9 @@ def _normalize_role_name(role: str) -> str:
     for ar in ALLOWED_HOST_ROLES:
         if rl.lower() == ar.lower():
             return ar
+    aliased = _ROLE_ALIASES.get(_role_alias_key(rl))
+    if aliased:
+        return aliased
     # Fallback to PC for any unknown label
     return 'PC'
 

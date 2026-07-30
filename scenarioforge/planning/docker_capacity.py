@@ -3,7 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 
-from .node_plan import compute_node_plan, _normalize_role_name
+from .node_plan import (
+    FLAG_GEN_SLOT_ROLE,
+    VULNERABILITY_SLOT_ROLE,
+    compute_node_plan,
+    _normalize_role_name,
+)
 from .vulnerability_plan import VulnerabilityItem, compute_vulnerability_plan
 
 
@@ -116,24 +121,53 @@ def flag_node_generator_plan_from_section(section_value: Any, base_host_pool: in
     return compute_vulnerability_plan(max(0, int(base_host_pool or 0)), density, items)
 
 
-def ensure_role_counts_docker_capacity(role_counts: Dict[str, int], required_docker_hosts: int) -> tuple[Dict[str, int], dict]:
+def ensure_role_counts_docker_capacity(
+    role_counts: Dict[str, int],
+    required_vulnerability_hosts: int,
+    required_flag_node_generator_hosts: int = 0,
+) -> tuple[Dict[str, int], dict]:
+    """Add Docker hosts for challenge demand that declared slots cannot absorb.
+
+    Declared VulnerabilitySlot/FlagGenSlot rows are dedicated capacity: they are
+    consumed first by their own challenge kind.  Only the remainder spills onto
+    additive Docker hosts, which keeps today's behaviour intact for scenarios
+    that declare no slots at all.  Slots that go unused are left in place and
+    materialize as empty Docker-backed hosts.
+    """
     current_counts: Dict[str, int] = {}
     for role, count in (role_counts or {}).items():
         normalized_role = _normalize_role_name(role)
         current_counts[normalized_role] = current_counts.get(normalized_role, 0) + max(0, _coerce_int(count, 0))
 
+    required_vulnerability = max(0, _coerce_int(required_vulnerability_hosts, 0))
+    required_nodegen = max(0, _coerce_int(required_flag_node_generator_hosts, 0))
+
+    vulnerability_slots = current_counts.get(VULNERABILITY_SLOT_ROLE, 0)
+    flag_gen_slots = current_counts.get(FLAG_GEN_SLOT_ROLE, 0)
+
+    used_vulnerability_slots = min(vulnerability_slots, required_vulnerability)
+    used_flag_gen_slots = min(flag_gen_slots, required_nodegen)
+
     current_docker_hosts = current_counts.get('Docker', 0)
     # Vulnerability and topology-selected node-generator hosts are additive.
     # They must never consume a Docker count explicitly requested in Node
     # Information, even when that count already exceeds the number of slots.
-    shortfall = max(0, _coerce_int(required_docker_hosts, 0))
+    shortfall = (required_vulnerability - used_vulnerability_slots) + (required_nodegen - used_flag_gen_slots)
     if shortfall:
         current_counts['Docker'] = current_docker_hosts + shortfall
 
     return current_counts, {
-        'required_docker_hosts': max(0, _coerce_int(required_docker_hosts, 0)),
+        'required_docker_hosts': required_vulnerability + required_nodegen,
+        'required_vulnerability_hosts': required_vulnerability,
+        'required_flag_node_generator_hosts': required_nodegen,
         'current_docker_hosts': current_docker_hosts,
         'added_docker_hosts': shortfall,
+        'vulnerability_slots': vulnerability_slots,
+        'flag_gen_slots': flag_gen_slots,
+        'used_vulnerability_slots': used_vulnerability_slots,
+        'used_flag_gen_slots': used_flag_gen_slots,
+        'unused_vulnerability_slots': vulnerability_slots - used_vulnerability_slots,
+        'unused_flag_gen_slots': flag_gen_slots - used_flag_gen_slots,
     }
 
 
@@ -147,11 +181,15 @@ def ensure_scenario_payload_docker_capacity(scenario_payload: Any) -> tuple[Dict
     role_counts, _node_breakdown = compute_node_plan(density_base, weight_items, count_items)
     vulnerability_plan, _vuln_breakdown = vulnerability_plan_from_section(vuln_section, density_base)
     nodegen_plan, _nodegen_breakdown = flag_node_generator_plan_from_section(nodegen_section, density_base)
-    required_docker_hosts = (
-        sum(max(0, _coerce_int(count, 0)) for count in (vulnerability_plan or {}).values())
-        + sum(max(0, _coerce_int(count, 0)) for count in (nodegen_plan or {}).values())
+    required_vulnerability_hosts = sum(
+        max(0, _coerce_int(count, 0)) for count in (vulnerability_plan or {}).values()
     )
-    _adjusted_counts, repair = ensure_role_counts_docker_capacity(role_counts, required_docker_hosts)
+    required_nodegen_hosts = sum(
+        max(0, _coerce_int(count, 0)) for count in (nodegen_plan or {}).values()
+    )
+    _adjusted_counts, repair = ensure_role_counts_docker_capacity(
+        role_counts, required_vulnerability_hosts, required_nodegen_hosts
+    )
     # Do not rewrite Node Information to materialize additive slots.  That
     # would make normalization non-idempotent and would blur the user's base
     # Docker count with topology-required challenge nodes.  The planner applies
