@@ -9,6 +9,8 @@ import pytest
 
 from webapp import app_backend
 
+from tests.flow_fixtures import write_flow_state_unvalidated
+
 
 def test_flow_vuln_nodes_only_use_flag_generators(monkeypatch: pytest.MonkeyPatch):
     scenario = f"zz-flow-vuln-only-flaggen-{uuid.uuid4().hex[:8]}"
@@ -214,7 +216,19 @@ def test_attackflow_preview_rejects_stale_flow_missing_required_vulnerability(mo
         shutil.rmtree(plan_dir, ignore_errors=True)
 
 
-def _seed_xml_plan_for_vuln_test(scenario: str, full_preview: dict, flow_meta: dict | None = None) -> tuple[str, str]:
+def _seed_xml_plan_for_vuln_test(
+    scenario: str,
+    full_preview: dict,
+    flow_meta: dict | None = None,
+    *,
+    allow_invalid_flow_state: bool = False,
+) -> tuple[str, str]:
+    """Seed a plan, and optionally a FlowState, for these tests.
+
+    Pass ``allow_invalid_flow_state`` when the point of the test is that the
+    app rejects the state being seeded. The validated writer refuses such a
+    payload, so the fixture could not otherwise be built.
+    """
     td = tempfile.mkdtemp(prefix="coretg-vuln-only-")
     xml_path = os.path.join(td, f"{scenario}.xml")
     xml = f"""<Scenarios>
@@ -242,8 +256,11 @@ def _seed_xml_plan_for_vuln_test(scenario: str, full_preview: dict, flow_meta: d
     ok, err = app_backend._update_plan_preview_in_xml(xml_path, scenario, payload)
     assert ok, err
     if isinstance(flow_meta, dict) and flow_meta:
-        ok2, err2 = app_backend._update_flow_state_in_xml(xml_path, scenario, flow_meta)
-        assert ok2, err2
+        if allow_invalid_flow_state:
+            write_flow_state_unvalidated(xml_path, scenario, flow_meta)
+        else:
+            ok2, err2 = app_backend._update_flow_state_in_xml(xml_path, scenario, flow_meta)
+            assert ok2, err2
     return xml_path, td
 
 
@@ -280,7 +297,11 @@ def test_attackflow_preview_rejects_flag_generator_on_non_vuln_node():
         ],
         'modified_at': '2026-01-01T00:00:00Z',
     }
-    plan_path, plan_dir = _seed_xml_plan_for_vuln_test(scenario, full_preview, flow_meta)
+    # The seeded assignment is deliberately incompatible; the validated writer
+    # refuses it, and asserting the 422 requires that state to exist first.
+    plan_path, plan_dir = _seed_xml_plan_for_vuln_test(
+        scenario, full_preview, flow_meta, allow_invalid_flow_state=True
+    )
     try:
         resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
             'scenario': scenario,
@@ -331,7 +352,11 @@ def test_attackflow_preview_rejects_flag_node_generator_on_vuln_node():
         ],
         'modified_at': '2026-01-01T00:00:00Z',
     }
-    plan_path, plan_dir = _seed_xml_plan_for_vuln_test(scenario, full_preview, flow_meta)
+    # The seeded assignment is deliberately incompatible; the validated writer
+    # refuses it, and asserting the 422 requires that state to exist first.
+    plan_path, plan_dir = _seed_xml_plan_for_vuln_test(
+        scenario, full_preview, flow_meta, allow_invalid_flow_state=True
+    )
     try:
         resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
             'scenario': scenario,
@@ -344,16 +369,22 @@ def test_attackflow_preview_rejects_flag_node_generator_on_vuln_node():
             f"Expected 422 for flag-node-generator on vuln node, got {resp.status_code}: {data}"
         )
         assert data.get('ok') is False
-        assert 'must be flag-generator' in (data.get('error') or '')
+        # The message was reworded to name the offending generator kind and the
+        # node kind it needs, rather than the kind that should have been used.
+        assert 'flag-node-generator requires a non-vulnerability Docker node' in (data.get('error') or '')
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
 
 
-def test_attackflow_preview_uses_compatible_saved_chain_when_chain_ids_drift(monkeypatch: pytest.MonkeyPatch):
-    """Saved XML may contain stale chain_ids alongside a still-valid chain.
+def test_attackflow_preview_rejects_saved_chain_when_chain_ids_drift(monkeypatch: pytest.MonkeyPatch):
+    """A saved Flow whose chain_ids drifted from its chain is rejected, not repaired.
 
-    The guide/export preview should keep the assignment order that fits generator
-    placement rules instead of reassigning saved generators by stale chain_ids.
+    This test previously expected the opposite: that the preview would re-pair
+    assignments against live topology and return a corrected chain. That
+    self-healing was deliberately dropped. A facilitator guide exported from the
+    stale state would silently stop matching the corrected chain, so a drifted
+    save now fails loudly and has to be regenerated instead of being quietly
+    reinterpreted.
     """
     app_backend.app.config['TESTING'] = True
     client = app_backend.app.test_client()
@@ -441,7 +472,12 @@ def test_attackflow_preview_uses_compatible_saved_chain_when_chain_ids_drift(mon
         ],
         'modified_at': '2026-01-01T00:00:00Z',
     }
-    plan_path, plan_dir = _seed_xml_plan_for_vuln_test(scenario, full_preview, flow_meta)
+    # chain_ids is deliberately stale and disagrees with chain, which is exactly
+    # what this test asserts the route tolerates by pairing on node_id. The
+    # validated writer rejects the mismatch, so the drift has to be written raw.
+    plan_path, plan_dir = _seed_xml_plan_for_vuln_test(
+        scenario, full_preview, flow_meta, allow_invalid_flow_state=True
+    )
     try:
         resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
             'scenario': scenario,
@@ -450,19 +486,11 @@ def test_attackflow_preview_uses_compatible_saved_chain_when_chain_ids_drift(mon
             'prefer_flow': '1',
         })
         data = resp.get_json() or {}
-        assert resp.status_code == 200, data
-        assert data.get('ok') is True, data
-        assert [node.get('id') for node in (data.get('chain') or [])] == ['16', '17', '18', '19']
-        assignments = data.get('flag_assignments') or []
-        assert [assignment.get('node_id') for assignment in assignments] == ['16', '17', '18', '19']
-        assert [assignment.get('type') for assignment in assignments] == [
-            'flag-node-generator',
-            'flag-generator',
-            'flag-generator',
-            'flag-node-generator',
-        ]
-        assert assignments[1].get('vulnerabilities') == ['saltstack/CVE-2020-16846']
-        assert assignments[2].get('vulnerabilities') == ['git/CVE-2017-8386']
+        assert resp.status_code == 422, data
+        assert data.get('ok') is False, data
+        # The error names the first assignment that stopped lining up, so the
+        # facilitator can see which step drifted rather than just "invalid".
+        assert 'does not match chain node' in (data.get('error') or ''), data
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
 
@@ -513,6 +541,14 @@ def test_prepare_preview_for_execute_preserves_docker_only_chain(monkeypatch: py
     
     monkeypatch.setattr(app_backend, '_flag_generators_from_enabled_sources', lambda: ([], []))
     monkeypatch.setattr(app_backend, '_flag_node_generators_from_enabled_sources', lambda: ([node_gen], []))
+    # Chain-order validation resolves generators through the plugin contracts, not
+    # the generator catalog, so stubbing only the catalog leaves it reporting
+    # "unknown plugin 'nfs_test'" before execution.
+    monkeypatch.setattr(
+        app_backend,
+        '_flow_enabled_plugin_contracts_by_id',
+        lambda: {'nfs_test': {'plugin_id': 'nfs_test', 'requires': [], 'produces': [{'artifact': 'Flag(flag_id)'}]}},
+    )
 
     plan_path, plan_dir = _seed_xml_plan_for_vuln_test(scenario, full_preview)
     try:
