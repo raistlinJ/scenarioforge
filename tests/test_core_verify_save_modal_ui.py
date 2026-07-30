@@ -57,29 +57,20 @@ def test_validate_core_connection_clears_docker_fix_flag_in_docker_mode() -> Non
     assert not missing, "Missing shared CORE validation docker-fix guard snippets: " + "; ".join(missing)
 
 
-def test_execute_modal_core_test_prefers_stored_config() -> None:
-    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        "preferStoredConfig = false,",
-        "prefer_stored_config: preferStoredConfig,",
-        "preferStoredConfig: true,",
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing execute-modal stored-config validation snippets: " + "; ".join(missing)
-
-
 def test_validate_core_connection_logs_failures_to_dock() -> None:
     text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
+    # The dock-reveal option these calls used to pass was removed -- it invoked a
+    # helper that never existed, so it only ever threw. What matters here is that
+    # failures and warnings still reach the dock log, which they do. Auto-reveal
+    # is deliberately absent; see
+    # test_execute_form_advanced_flags.test_dock_only_opens_from_manual_show_hide_controls.
     expected_snippets = [
-        "const revealCoreTestDock = () => {",
-        "const logCoreTestLine = (message, level = 'INFO', { revealDock = false } = {}) => {",
+        "const logCoreTestLine = (message, level = 'INFO') => {",
         "logCoreTestLine(`POST /test_core -> grpc ${requestTarget}:${body.core.port || 50051} ssh ${requestSshHost}:${body.core.ssh_port || 22} vm ${vmKey}${preferStoredConfig ? ' [prefer stored config]' : ''}`);",
-        "logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR', { revealDock: true });",
-        "warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN', { revealDock: true }));",
-        "logCoreTestLine(`FAILED: ${message}`, 'ERROR', { revealDock: true });",
+        "logCoreTestLine(`FAILED: ${message}${codeText}${httpText}`, 'ERROR');",
+        "warningLines.forEach((line) => logCoreTestLine(`Warning: ${line}`, 'WARN'));",
+        "logCoreTestLine(`FAILED: ${message}`, 'ERROR');",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
@@ -100,79 +91,6 @@ def test_validate_core_connection_prompts_to_start_missing_daemon() -> None:
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing missing-daemon start prompt snippets: " + "; ".join(missing)
-
-
-def test_execute_progress_modal_unlocks_on_early_failures() -> None:
-    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        "body: JSON.stringify({ core: coreCfg, cleanup: false, scenario_name: scenarioName }),",
-        "body: JSON.stringify({\n                        core: getRunCoreConfig(true, scenarioIndexForRun),\n                        scenario_name: (getScenarioByIndex(scenarioIndexForRun)?.name || activeScenarioCtx.name || '').toString().trim(),\n                    }),",
-        "appendExecuteDialogLog('Repository upload failed; aborting run.');",
-        "bar.textContent = 'Error';\n                        }\n                        markRunProgressComplete();\n                    }\n                    return false;",
-        "appendExecuteDialogLog(`Repository upload exception: ${err?.message || err}`);",
-        "appendExecuteDialogLog('Failed to refresh flow/preview plan; aborting run to avoid mismatch.');",
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing execute preflight secret/close snippets: " + "; ".join(missing)
-
-
-def test_build_run_form_data_uses_scenario_scoped_core_without_session_password_restore() -> None:
-    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        "const scenarioIndex = Number.isInteger(options && options.scenarioIndex) ? options.scenarioIndex : null;",
-        "form.append('core_json', JSON.stringify(getRunCoreConfig(false, scenarioIndex)));",
-        "if ('grpc_host' in source && String(source.grpc_host).trim()) {",
-        "if ('grpc_port' in source && source.grpc_port !== undefined && source.grpc_port !== null && String(source.grpc_port).trim()) {",
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing scenario-scoped async CORE serialization snippets: " + "; ".join(missing)
-
-
-def test_execute_progress_success_is_normalized_and_can_override_spurious_error_state() -> None:
-    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        "function getExecuteRunReturnCode(runStatus) {",
-        "function isExecuteValidationSuccessful(runStatus) {",
-        "function didExecuteRunSucceed(runStatus) {",
-        "if (isExecuteValidationSuccessful(runStatus)) {",
-        "if (executeProgressState.done) {\n            if (!success) return;\n            if (executeProgressBarEl && executeProgressBarEl.classList.contains('bg-success')) return;\n        }",
-        "const runSucceeded = didExecuteRunSucceed(data);",
-        "if (data.done && didExecuteRunSucceed(data)) {",
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing execute success normalization snippets: " + "; ".join(missing)
-
-
-def test_execute_summary_handoff_closes_progress_modal_immediately() -> None:
-    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        "function showExecuteSummaryModal(success, runId = null) {",
-        "const summaryRunId = runId || getLatestRunIdForSummary();",
-        "try { closeRunProgress(); } catch (e) { }",
-        "try { refreshValidationSummaryFromRunStatus(summaryRunId); } catch (e) { }",
-        "showExecuteSummaryModal(true, runId);",
-        "showExecuteSummaryModal(true, run_id);",
-        "showExecuteSummaryModal(success, executeProgressState.runId);",
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing immediate execute-summary handoff snippets: " + "; ".join(missing)
-
-    forbidden_snippets = [
-        "refreshValidationSummaryFromRunStatus(runId).finally(() => {",
-        "refreshValidationSummaryFromRunStatus(run_id).finally(() => {",
-        "refreshValidationSummaryFromRunStatus().finally(() => {",
-    ]
-
-    present = [snippet for snippet in forbidden_snippets if snippet in text]
-    assert not present, "Unexpected delayed execute-summary handoff snippets still present: " + "; ".join(present)
 
 
 def test_save_xml_button_uses_direct_local_save() -> None:
@@ -293,16 +211,25 @@ def test_flow_preview_skips_xml_rewrite_when_saved_state_matches() -> None:
     assert not missing, "Missing Flow Preview no-op XML-save guard snippets: " + "; ".join(missing)
 
 
-def test_flow_restore_rehydrates_duplicate_toggle_from_saved_state() -> None:
+def test_flow_restore_ignores_legacy_saved_duplicate_toggle() -> None:
+    """Node reuse was removed as a Flow option; a legacy saved value must not revive it.
+
+    This test previously asserted the opposite -- that `allow_node_duplicates`
+    was rehydrated into a checkbox. The option was deliberately dropped so every
+    generated sequence uses distinct topology nodes, so the guarantee worth
+    pinning now is that a stale saved value is discarded rather than restored.
+    """
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
-    expected_snippets = [
+    assert "allowNodeDuplicates = false;" in text
+
+    forbidden_snippets = [
         "allowNodeDuplicates = !!(saved && saved.allow_node_duplicates);",
         "generateNoDuplicatesEl.checked = !!allowNodeDuplicates;",
     ]
 
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing saved duplicate-toggle restore snippets: " + "; ".join(missing)
+    present = [snippet for snippet in forbidden_snippets if snippet in text]
+    assert not present, "Legacy duplicate-toggle restore has returned: " + "; ".join(present)
 
 
 def test_flow_ui_shows_validated_vuln_notice_when_present() -> None:

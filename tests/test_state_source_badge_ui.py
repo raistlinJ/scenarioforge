@@ -44,12 +44,25 @@ def test_index_wires_unsaved_saved_xml_warning() -> None:
         "window.coretgSyncSavedXmlWarningBadge({",
         "Unsaved edits are present. Preview and Execute use the last saved XML until you save again.",
         "await window.coretgConfirmSavedXmlGroundTruth('Preview', {",
-        "await window.coretgConfirmSavedXmlGroundTruth('Execute', {",
         "try { updateSavedXmlGroundTruthWarning(); } catch (e) { }",
     ]
 
     missing = [s for s in expected if s not in text]
     assert not missing, "Missing unsaved saved-XML warning wiring: " + "; ".join(missing)
+
+    # The 'Execute' variant of the guard moved with execution itself: the
+    # topology page no longer executes, so only its Preview guard lives here.
+    assert "coretgConfirmSavedXmlGroundTruth('Execute'" not in text
+
+
+def test_preview_page_execute_guards_against_unsaved_xml() -> None:
+    """The Execute-time saved-XML guard follows execution to the preview page."""
+    scripts = (
+        Path(__file__).resolve().parent.parent
+        / "webapp" / "templates" / "full_preview_scripts.html"
+    ).read_text(encoding="utf-8", errors="ignore")
+
+    assert "coretgConfirmSavedXmlGroundTruth?.('Execute', {" in scripts
 
 
 def test_layout_exposes_saved_xml_ground_truth_helpers() -> None:
