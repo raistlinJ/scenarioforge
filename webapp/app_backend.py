@@ -20123,6 +20123,15 @@ def _flow_compute_flag_assignments(
 
         next_id = chain_ids[i + 1] if (i + 1) < len(chain_ids) else ''
         hint_level_templates = _flow_hint_level_templates_from_generator(gen)
+        # The opening step has nothing before it to hand over a secret, so any
+        # undiscoverable value its access steps need is promoted into `low`.
+        # Later steps keep theirs gated: there the secret is the reward for the
+        # previous challenge.
+        promoted_first_step_hints: list[str] = []
+        if i == 0:
+            hint_level_templates, promoted_first_step_hints = _flow_promote_first_step_hint_levels(
+                hint_level_templates, gen
+            )
         rendered_hint_levels = _flow_render_hint_level_templates(
             hint_level_templates,
             scenario_label=scenario_label,
@@ -20199,6 +20208,7 @@ def _flow_compute_flag_assignments(
             'vulnerabilities': vuln_names,
             # What the vuln at this position grants the solver, so the chain is
             # inspectable when a step looks unreachable.
+            'promoted_first_step_hints': list(promoted_first_step_hints),
             'vuln_provides': sorted(_vuln_facts_at(i)),
             'vuln_requires': sorted(vuln_requires_by_idx[i]) if i < len(vuln_requires_by_idx) else [],
             'vuln_metadata_missing': (
@@ -20307,6 +20317,193 @@ def _flow_fact_vocabulary(
                 if name and _flow_looks_like_fact_ref(name):
                     vocab.add(name)
     return vocab
+
+
+# Placeholders in access_instructions that stand for a secret the participant has
+# to already hold, mapped to the fact that would carry it.
+_ACCESS_SECRET_PLACEHOLDER_FACTS: dict[str, tuple[str, ...]] = {
+    'USERNAME': ('Credential(user, password)', 'Credential(user)'),
+    'USER': ('Credential(user, password)', 'Credential(user)'),
+    'PASSWORD': ('Credential(user, password)', 'Credential(user, hash)'),
+    'PASS': ('Credential(user, password)', 'Credential(user, hash)'),
+    'HASH': ('Credential(user, hash)',),
+    'TOKEN': ('Token(service)',),
+    'APIKEY': ('APIKey(service)',),
+    'API_KEY': ('APIKey(service)',),
+    'SECRET': ('ExposedSecret(service)',),
+    'PASSPHRASE': ('DecryptionKey(id)', 'Credential(user, password)'),
+    'DECRYPTION_KEY': ('DecryptionKey(id)',),
+    'KEY': ('DecryptionKey(id)', 'APIKey(service)'),
+}
+
+# Facts a participant cannot reasonably discover by looking around: they are
+# handed over or they are not had. Paths, ports and endpoints are deliberately
+# absent -- those are enumerable, so a hint for them is a convenience, not a
+# precondition.
+_UNDISCOVERABLE_FACT_NAMES = ('credential', 'token', 'apikey', 'exposedsecret', 'decryptionkey')
+
+
+def _flow_fact_is_undiscoverable(fact: Any) -> bool:
+    """Whether a fact names a secret that must be disclosed rather than found."""
+    text = str(fact or '').strip().lower()
+    head = text.split('(', 1)[0].strip()
+    return head in _UNDISCOVERABLE_FACT_NAMES
+
+_ACCESS_PLACEHOLDER_RE = re.compile(r'\{\{\s*([A-Za-z0-9_.(), ]+?)\s*\}\}')
+
+
+def _flow_access_instruction_text(generator: dict[str, Any] | None) -> str:
+    """Flatten a generator's access_instructions into one searchable string."""
+    if not isinstance(generator, dict):
+        return ''
+    access = generator.get('access_instructions')
+    if isinstance(access, str):
+        return access
+    if not isinstance(access, dict):
+        return ''
+    parts: list[str] = [str(access.get('title') or '')]
+    for step in (access.get('steps') or []):
+        if isinstance(step, dict):
+            parts.append(str(step.get('title') or ''))
+            parts.append(str(step.get('instructions') or ''))
+        else:
+            parts.append(str(step or ''))
+    return '\n'.join(parts)
+
+
+def _flow_access_required_secret_facts(generator: dict[str, Any] | None) -> list[tuple[str, frozenset[str]]]:
+    """Secrets the participant must hold to follow the access steps.
+
+    Returns ``(placeholder, alternatives)`` pairs. The alternatives are a choice,
+    not a conjunction: ``{{USERNAME}}`` is satisfied by either
+    ``Credential(user)`` or ``Credential(user, password)``, so disclosing one is
+    enough.
+
+    Read from the `{{USERNAME}}`/`{{PASSWORD}}` placeholders rather than the
+    generator contract, because a generator that *produces* a credential still
+    gates its own service behind it and the contract cannot express that.
+    """
+    text = _flow_access_instruction_text(generator)
+    if not text:
+        return []
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return []
+    out: list[tuple[str, frozenset[str]]] = []
+    seen: set[str] = set()
+    for raw in _ACCESS_PLACEHOLDER_RE.findall(text):
+        token = str(raw or '').strip()
+        key = token.upper()
+        if key in seen:
+            continue
+        if key.startswith('OUTPUT.'):
+            fact = token.split('.', 1)[1].strip()
+            if fact:
+                seen.add(key)
+                out.append((token, frozenset({canonical_fact_key(fact)})))
+            continue
+        alternatives = _ACCESS_SECRET_PLACEHOLDER_FACTS.get(key)
+        if alternatives:
+            seen.add(key)
+            out.append((token, frozenset(canonical_fact_key(f) for f in alternatives)))
+    return out
+
+
+def _flow_hint_disclosed_facts(generator: dict[str, Any] | None, *, levels: tuple[str, ...] = ('low',)) -> set[str]:
+    """Canonical facts revealed by a generator's hints at the given levels."""
+    if not isinstance(generator, dict):
+        return set()
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return set()
+    hint_levels = generator.get('hint_levels') if isinstance(generator.get('hint_levels'), dict) else {}
+    out: set[str] = set()
+    for level in levels:
+        for line in (hint_levels.get(level) or []):
+            for raw in _ACCESS_PLACEHOLDER_RE.findall(str(line or '')):
+                token = str(raw or '').strip()
+                if token.upper().startswith('OUTPUT.'):
+                    fact = token.split('.', 1)[1].strip()
+                    if fact:
+                        out.add(canonical_fact_key(fact))
+    return out
+
+
+def _flow_first_step_undisclosed_secrets(generator: dict[str, Any] | None) -> list[str]:
+    """Secrets the first chain step needs but never reveals at the lowest hint level.
+
+    Fact dependencies only answer whether a *generator* can run. A chain can be
+    perfectly solvable that way and still strand the participant: the opening
+    step has no earlier step to leak a credential, so anything its access steps
+    require must be disclosed by its own low hints.
+    """
+    needed = _flow_access_required_secret_facts(generator)
+    if not needed:
+        return []
+    disclosed = _flow_hint_disclosed_facts(generator, levels=('low',))
+    return [placeholder for placeholder, alternatives in needed if not (alternatives & disclosed)]
+
+
+def _flow_promote_first_step_hint_levels(
+    hint_levels: dict[str, list[str]] | None,
+    generator: dict[str, Any] | None,
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Raise disclosures the opening step needs into `low`.
+
+    The first step has nothing before it, so anything its access instructions
+    require that a participant cannot discover -- a credential, token, key --
+    has to be given outright or the challenge is unenterable. Where a deeper
+    hint already discloses it, that line is copied into `low`.
+
+    Only applied at position 0. Everywhere else the same secret is meant to be
+    earned from an earlier step, so promoting it there would give away the chain.
+
+    Returns the adjusted levels and the placeholders that were satisfied by a
+    promotion, so callers can record what was surfaced and why.
+    """
+    levels: dict[str, list[str]] = {
+        key: [str(v) for v in (value or [])]
+        for key, value in (hint_levels or {}).items()
+    }
+    needed = _flow_access_required_secret_facts(generator)
+    if not needed:
+        return levels, []
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return levels, []
+
+    low = list(levels.get('low') or [])
+    disclosed = _flow_hint_disclosed_facts({'hint_levels': levels}, levels=('low',))
+    promoted: list[str] = []
+
+    for placeholder, alternatives in needed:
+        if alternatives & disclosed:
+            continue
+        if not any(_flow_fact_is_undiscoverable(a) for a in alternatives):
+            # Enumerable values (paths, ports) are findable; do not give them away.
+            continue
+        for level in ('medium', 'high'):
+            for line in (levels.get(level) or []):
+                line_facts = {
+                    canonical_fact_key(m.split('.', 1)[1].strip())
+                    for m in _ACCESS_PLACEHOLDER_RE.findall(str(line))
+                    if m.strip().upper().startswith('OUTPUT.')
+                }
+                if line_facts & alternatives and line not in low:
+                    low.append(line)
+                    disclosed |= line_facts
+                    promoted.append(placeholder)
+                    break
+            if placeholder in promoted:
+                break
+
+    if promoted:
+        levels['low'] = low
+    return levels, sorted(set(promoted))
 
 
 def _flow_node_authoring_fact_strings(value: Any) -> list[str]:
@@ -23576,7 +23773,7 @@ def _flow_validate_chain_order_by_requires_produces(
 
     require_metadata = _require_vuln_metadata_enabled()
 
-    for cid in chain_ids:
+    for step_index, cid in enumerate(chain_ids):
         a = assign_by_node.get(cid) or {}
         plugin_id = str(a.get('id') or '').strip()
         if not plugin_id:
@@ -23587,6 +23784,23 @@ def _flow_validate_chain_order_by_requires_produces(
         if not isinstance(plugin, dict):
             errors.append(f"{cid}: unknown plugin '{plugin_id}'")
             continue
+
+        # The opening step has no earlier step to leak a secret, so anything its
+        # access instructions require must be disclosed by its own lowest-level
+        # hint. Fact dependencies cannot catch this: a generator that *produces*
+        # a credential still gates its own service behind it, and
+        # flow_supply_when_first exempts that input from the requirement check at
+        # position 0 even when it is marked required.
+        if step_index == 0:
+            gen_def = gen_defs_by_id.get(plugin_id)
+            undisclosed = _flow_first_step_undisclosed_secrets(gen_def)
+            if undisclosed:
+                errors.append(
+                    f"{cid}: first chain step needs {undisclosed} to follow its access "
+                    f"instructions, but its low hints never reveal them; nothing earlier "
+                    f"in the chain can supply them either. Promote the disclosing hint to "
+                    f"'low' or place this generator later in the chain."
+                )
 
         vuln_entry = vuln_facts_by_id.get(cid) or {}
         unresolved_vulns = list(vuln_entry.get('unresolved') or [])

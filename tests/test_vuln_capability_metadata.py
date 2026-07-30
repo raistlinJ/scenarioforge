@@ -681,3 +681,176 @@ def test_pivot_shell_claim_follows_node_authoring_when_present(monkeypatch):
     assert len(rules) == 1
     assert 'Shell(jump-web)' not in rules[0]['produces']
     assert rules[0]['unbacked_shell'] is True
+
+
+# ---------------------------------------------------------------------------
+# First-step secret disclosure
+# ---------------------------------------------------------------------------
+
+_CRED_ACCESS = {
+    'title': 'Postgres-Style Export',
+    'steps': [
+        {'step': 1, 'instructions': '```bash\nnc {{NODE}} {{PORT}}\n```'},
+        {'step': 2, 'instructions': '```text\nAUTH {{USERNAME}} {{PASSWORD}}\nGET {{FLAG_FILE}}\n```'},
+    ],
+}
+
+
+def _gen_def(*, hint_levels, access=_CRED_ACCESS):
+    return {
+        'id': 'g1',
+        'name': 'Credential Gated Service',
+        'access_instructions': access,
+        'hint_levels': hint_levels,
+        'inputs': [
+            {'name': 'Credential(user, password)', 'required': True, 'flow_supply_when_first': True},
+        ],
+        'outputs': [{'name': 'Flag(flag_id)'}],
+    }
+
+
+def _validate_chain(monkeypatch, gen_defs, chain_len=1):
+    plugins = {f'g{i+1}': {'plugin_id': f'g{i+1}', 'requires': [], 'produces': [{'artifact': 'Flag(flag_id)'}]}
+               for i in range(chain_len)}
+    monkeypatch.setattr(app_backend, '_flow_enabled_generator_defs_by_id', lambda: gen_defs)
+    monkeypatch.setenv('SCENARIOFORGE_REQUIRE_VULN_METADATA', '0')
+    chain_nodes = [{'id': f'h{i+1}', 'name': f'n{i+1}', 'type': 'docker', 'is_vuln': True,
+                    'vulnerabilities': [{'name': 'zz/CVE-0000-0000'}]} for i in range(chain_len)]
+    assignments = [{'node_id': f'h{i+1}', 'id': f'g{i+1}'} for i in range(chain_len)]
+    return app_backend._flow_validate_chain_order_by_requires_produces(
+        chain_nodes, assignments, scenario_label='zz-disclose', plugins_by_id_override=plugins,
+    )
+
+
+def test_access_secrets_are_read_from_placeholders_not_the_contract():
+    """A generator that produces a credential still gates its service behind it."""
+    gen = _gen_def(hint_levels={'low': ['Look around.']})
+    pairs = app_backend._flow_access_required_secret_facts(gen)
+    assert {p for p, _alts in pairs} == {'USERNAME', 'PASSWORD'}
+
+
+def test_placeholder_alternatives_are_a_choice_not_a_conjunction():
+    """USERNAME is satisfied by either Credential(user) or Credential(user, password)."""
+    gen = _gen_def(hint_levels={'low': ['user: {{OUTPUT.Credential(user, password)}}']})
+    assert app_backend._flow_first_step_undisclosed_secrets(gen) == []
+
+
+def test_first_step_without_low_disclosure_is_rejected(monkeypatch):
+    gen = _gen_def(hint_levels={
+        'low': ['Inspect the export before moving on.'],
+        'medium': ['Credential artifact: {{OUTPUT.Credential(user,password)}}'],
+    })
+    ok, errors = _validate_chain(monkeypatch, {'g1': gen})
+    assert not ok
+    assert any('first chain step needs' in e for e in errors), errors
+    assert any('USERNAME' in e for e in errors), errors
+
+
+def test_first_step_with_low_disclosure_is_accepted(monkeypatch):
+    """Promoting the disclosing hint to low is the intended remedy."""
+    gen = _gen_def(hint_levels={
+        'low': ['Credential artifact: {{OUTPUT.Credential(user,password)}}'],
+    })
+    ok, errors = _validate_chain(monkeypatch, {'g1': gen})
+    assert ok, errors
+
+
+def test_later_steps_are_not_checked(monkeypatch):
+    """Only the opening step is unenterable; later steps can be fed by earlier ones."""
+    plain = {'id': 'g1', 'name': 'Plain', 'hint_levels': {'low': ['go']}, 'outputs': [{'name': 'Flag(flag_id)'}]}
+    gated = _gen_def(hint_levels={'low': ['Inspect the export.']})
+    gated['id'] = 'g2'
+    ok, errors = _validate_chain(monkeypatch, {'g1': plain, 'g2': gated}, chain_len=2)
+    assert ok, errors
+
+
+def test_generator_without_access_secrets_is_unaffected(monkeypatch):
+    gen = {
+        'id': 'g1', 'name': 'No Secrets',
+        'access_instructions': {'steps': [{'step': 1, 'instructions': 'nc {{NODE}} {{PORT}}'}]},
+        'hint_levels': {'low': ['go']}, 'outputs': [{'name': 'Flag(flag_id)'}],
+    }
+    ok, errors = _validate_chain(monkeypatch, {'g1': gen})
+    assert ok, errors
+
+
+# ---------------------------------------------------------------------------
+# First-step hint promotion
+# ---------------------------------------------------------------------------
+
+
+def _gated(hint_levels, access=_CRED_ACCESS):
+    return {'id': 'g1', 'name': 'Gated', 'access_instructions': access, 'hint_levels': hint_levels}
+
+
+def test_promotion_copies_the_disclosing_hint_into_low():
+    gen = _gated({
+        'low': ['Inspect the export.'],
+        'medium': ['Credential artifact: {{OUTPUT.Credential(user,password)}}'],
+    })
+    levels, promoted = app_backend._flow_promote_first_step_hint_levels(
+        app_backend._flow_hint_level_templates_from_generator(gen), gen
+    )
+    assert promoted, 'expected a promotion'
+    assert any('OUTPUT.Credential' in line for line in levels['low'])
+    # The original medium hint is left in place; promotion copies, it does not move.
+    assert any('OUTPUT.Credential' in line for line in levels['medium'])
+    assert app_backend._flow_first_step_undisclosed_secrets({**gen, 'hint_levels': levels}) == []
+
+
+def test_one_promoted_line_can_satisfy_several_placeholders():
+    """A Credential(user, password) disclosure covers both USERNAME and PASSWORD."""
+    gen = _gated({
+        'low': ['Inspect the export.'],
+        'medium': ['Credential artifact: {{OUTPUT.Credential(user,password)}}'],
+    })
+    levels, _ = app_backend._flow_promote_first_step_hint_levels(
+        app_backend._flow_hint_level_templates_from_generator(gen), gen
+    )
+    assert len([l for l in levels['low'] if 'OUTPUT.Credential' in l]) == 1
+
+
+def test_enumerable_placeholders_are_not_promoted():
+    """Ports and paths are discoverable; giving them away is not the point."""
+    access = {'steps': [{'step': 1, 'instructions': 'nc {{NODE}} {{PORT}}\nGET {{FLAG_FILE}}'}]}
+    gen = _gated({'low': ['Look around.'], 'medium': ['File: {{OUTPUT.File(path)}}']}, access=access)
+    levels, promoted = app_backend._flow_promote_first_step_hint_levels(
+        app_backend._flow_hint_level_templates_from_generator(gen), gen
+    )
+    assert promoted == []
+    assert levels['low'] == ['Look around.']
+
+
+def test_promotion_is_a_no_op_when_nothing_discloses_the_secret():
+    """A manifest with no disclosing hint cannot be repaired; the validator flags it."""
+    gen = _gated({'low': ['Inspect the debug token.'], 'medium': ['File: {{OUTPUT.File(path)}}']},
+                 access={'steps': [{'step': 1, 'instructions': 'AUTH {{TOKEN}}'}]})
+    levels, promoted = app_backend._flow_promote_first_step_hint_levels(
+        app_backend._flow_hint_level_templates_from_generator(gen), gen
+    )
+    assert promoted == []
+    assert app_backend._flow_first_step_undisclosed_secrets({**gen, 'hint_levels': levels}) == ['TOKEN']
+
+
+def test_only_the_first_assignment_gets_promoted_hints(monkeypatch):
+    """Later steps keep the secret gated -- there it is the previous step's reward."""
+    gen = {
+        'id': 'gated', 'name': 'Gated', '_source_name': 'test',
+        'access_instructions': _CRED_ACCESS,
+        'hint_levels': {'low': ['Inspect the export.'],
+                        'medium': ['Credential artifact: {{OUTPUT.Credential(user,password)}}']},
+        'inputs': [], 'outputs': [{'name': 'Flag(flag_id)'}],
+    }
+    preview = {'seed': 0, 'hosts': [
+        {'node_id': 'h1', 'name': 'v1', 'role': 'Docker', 'vulnerabilities': [{'name': 'zz/CVE-0'}]},
+        {'node_id': 'h2', 'name': 'v2', 'role': 'Docker', 'vulnerabilities': [{'name': 'zz/CVE-0'}]},
+    ]}
+    _install_generators(monkeypatch, [gen], {'gated': {'plugin_id': 'gated', 'requires': [],
+                                                       'produces': [{'artifact': 'Flag(flag_id)'}]}})
+    _install_metadata(monkeypatch, [{'match': 'zz/CVE-0', 'impact': 'remote_code_execution'}])
+    chain = [{'id': 'h1', 'name': 'v1', 'type': 'docker', 'is_vuln': True},
+             {'id': 'h2', 'name': 'v2', 'type': 'docker', 'is_vuln': True}]
+    out = app_backend._flow_compute_flag_assignments(preview, chain, f'zz-promote-{uuid.uuid4().hex[:8]}')
+    assert len(out) == 2
+    assert out[0].get('promoted_first_step_hints'), 'first step should disclose the credential'
+    assert not out[1].get('promoted_first_step_hints'), 'later steps must stay gated'
