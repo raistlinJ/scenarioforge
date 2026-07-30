@@ -64,7 +64,12 @@ def test_save_flow_substitutions_persists_config_overrides(monkeypatch):
         "switches": [],
         "switches_detail": [],
         "hosts": [
-            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6", "vulnerabilities": []},
+            # A flag-generator may only be assigned to a vulnerability node, and that
+            # rule is enforced when the flow state is written to XML -- not just by the
+            # solver. A bare Docker host makes the save fail with "flag-generator
+            # requires vulnerability node", so give h1 a vuln.
+            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6",
+             "vulnerabilities": [{"name": "zz-fixture/CVE-0000-0000"}]},
         ],
         "host_router_map": {},
         "r2r_links_preview": [],
@@ -240,7 +245,12 @@ def test_save_flow_substitutions_persists_hint_overrides_and_can_clear(monkeypat
         "switches": [],
         "switches_detail": [],
         "hosts": [
-            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6", "vulnerabilities": []},
+            # A flag-generator may only be assigned to a vulnerability node, and that
+            # rule is enforced when the flow state is written to XML -- not just by the
+            # solver. A bare Docker host makes the save fail with "flag-generator
+            # requires vulnerability node", so give h1 a vuln.
+            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6",
+             "vulnerabilities": [{"name": "zz-fixture/CVE-0000-0000"}]},
         ],
         "host_router_map": {},
         "r2r_links_preview": [],
@@ -338,7 +348,12 @@ def test_save_flow_substitutions_persists_flag_override_and_can_clear(monkeypatc
         "switches": [],
         "switches_detail": [],
         "hosts": [
-            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6", "vulnerabilities": []},
+            # A flag-generator may only be assigned to a vulnerability node, and that
+            # rule is enforced when the flow state is written to XML -- not just by the
+            # solver. A bare Docker host makes the save fail with "flag-generator
+            # requires vulnerability node", so give h1 a vuln.
+            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6",
+             "vulnerabilities": [{"name": "zz-fixture/CVE-0000-0000"}]},
         ],
         "host_router_map": {},
         "r2r_links_preview": [],
@@ -430,7 +445,12 @@ def test_save_flow_substitutions_persists_output_overrides_and_inject_override_a
         "switches": [],
         "switches_detail": [],
         "hosts": [
-            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6", "vulnerabilities": []},
+            # A flag-generator may only be assigned to a vulnerability node, and that
+            # rule is enforced when the flow state is written to XML -- not just by the
+            # solver. A bare Docker host makes the save fail with "flag-generator
+            # requires vulnerability node", so give h1 a vuln.
+            {"node_id": "h1", "name": "h1", "role": "Docker", "ip4": "172.27.83.6",
+             "vulnerabilities": [{"name": "zz-fixture/CVE-0000-0000"}]},
         ],
         "host_router_map": {},
         "r2r_links_preview": [],

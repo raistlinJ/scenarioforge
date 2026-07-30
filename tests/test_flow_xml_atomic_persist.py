@@ -13,16 +13,37 @@ def test_flow_xml_updates_replace_read_only_target(tmp_path) -> None:
     )
     xml_path.chmod(0o444)
 
+    # FlowState validation cross-checks the chain against PlanPreview topology, so
+    # an empty preview fails with "PlanPreview has no topology nodes". The host
+    # below is the one the flow_state chain references.
     plan_payload = {
-        'full_preview': {'hosts': [], 'routers': [], 'switches': []},
+        'full_preview': {
+            'hosts': [
+                {
+                    'node_id': 'docker-1',
+                    'name': 'docker-1',
+                    'role': 'Docker',
+                    'ip4': '172.27.83.6',
+                    'vulnerabilities': [{'name': 'zz-fixture/CVE-0000-0000'}],
+                }
+            ],
+            'routers': [],
+            'switches': [],
+        },
         'metadata': {'scenario': scenario_name, 'seed': 101},
     }
     ok, err = backend._update_plan_preview_in_xml(str(xml_path), scenario_name, plan_payload)
     assert ok, err
 
+    # This test is about atomically replacing a read-only target, so the flow
+    # content is only scaffolding -- but it still has to be a valid FlowState.
+    # A payload without 'chain' is rejected with "Flow chain is empty", so the
+    # chain has to accompany the assignments.
     flow_state = {
         'scenario': scenario_name,
         'flow_valid': True,
+        'length': 1,
+        'chain': [{'id': 'docker-1', 'name': 'docker-1', 'type': 'docker'}],
         'flag_assignments': [
             {
                 'node_id': 'docker-1',

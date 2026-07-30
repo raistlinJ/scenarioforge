@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.invalid/scenarioforge/vulns/vuln_metadata_v1.schema.json",
+  "title": "ScenarioForge Vulnerability Capability Metadata",
+  "description": "Declares what exploiting a catalog vulnerability requires and what it yields, in the fact vocabulary used by flag generators. Consumed by flag sequencing so chains are only built when every step is reachable.",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "catalog": {
+      "type": "string",
+      "description": "Optional label of the catalog these entries describe."
+    },
+    "vulns": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/vulnEntry" }
+    }
+  },
+  "additionalProperties": true,
+  "definitions": {
+    "factRef": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\s*\\([^\\n]*\\)$",
+      "description": "A fact signature such as CodeExecution(host). Must exist in schemas/facts/fact_ontology_reference.yaml."
+    },
+    "vulnEntry": {
+      "type": "object",
+      "properties": {
+        "match": {
+          "type": "string",
+          "description": "Catalog entry name or rel_dir. Glob patterns (* ? [..]) are allowed. Matching is case-insensitive and also tries path suffixes."
+        },
+        "cve": {
+          "type": "string",
+          "description": "CVE id. Used as a fallback match when 'match' does not resolve."
+        },
+        "impact": {
+          "type": "string",
+          "description": "Shorthand that expands to a default set of provided facts.",
+          "enum": [
+            "remote_code_execution",
+            "command_injection",
+            "deserialization",
+            "web_rce",
+            "privilege_escalation",
+            "auth_bypass",
+            "arbitrary_file_read",
+            "path_traversal",
+            "arbitrary_file_write",
+            "arbitrary_file_upload",
+            "sql_injection",
+            "credential_disclosure",
+            "secret_disclosure",
+            "information_disclosure",
+            "ssrf",
+            "xxe",
+            "misconfiguration",
+            "denial_of_service",
+            "unknown"
+          ]
+        },
+        "requires": {
+          "type": "array",
+          "description": "Facts that must already hold before this vulnerability is exploitable. Unioned with the impact default.",
+          "items": { "$ref": "#/definitions/factRef" }
+        },
+        "provides": {
+          "type": "array",
+          "description": "Facts a solver gains by exploiting this vulnerability. Unioned with the impact default.",
+          "items": { "$ref": "#/definitions/factRef" }
+        },
+        "notes": { "type": "string" }
+      },
+      "anyOf": [
+        { "required": ["match"] },
+        { "required": ["cve"] }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

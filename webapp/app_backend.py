@@ -1921,6 +1921,14 @@ def _open_ssh_client(core_cfg: Dict[str, Any]) -> Any:
     except Exception:
         max_attempts = 2
     max_attempts = max(1, max_attempts)
+    # A host that drops packets rather than refusing blocks for the full timeout
+    # on every attempt, so an unreachable CORE VM costs timeout x retries with no
+    # output. Overridable so a run off the lab network can fail fast.
+    try:
+        connect_timeout = float(os.getenv('CORETG_SSH_CONNECT_TIMEOUT', '30') or 30)
+    except Exception:
+        connect_timeout = 30.0
+    connect_timeout = max(0.1, connect_timeout)
     for attempt in range(1, max_attempts + 1):
         client = paramiko.SSHClient()  # type: ignore[assignment]
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # type: ignore[attr-defined]
@@ -1932,9 +1940,9 @@ def _open_ssh_client(core_cfg: Dict[str, Any]) -> Any:
                 password=password,
                 look_for_keys=False,
                 allow_agent=False,
-                timeout=30.0,
-                banner_timeout=30.0,
-                auth_timeout=30.0,
+                timeout=connect_timeout,
+                banner_timeout=connect_timeout,
+                auth_timeout=connect_timeout,
             )
             return client
         except Exception as exc:
@@ -19840,6 +19848,41 @@ def _flow_compute_flag_assignments(
             return bool(is_vuln_node)
         pool_by_pos.append([g for g in eligible_gens if _eligible_for_node(g)])
 
+    # Facts granted by the vulnerability sitting at each chain position.  A
+    # generator is only placed where the underlying vuln actually yields what it
+    # needs, and its grants carry forward to later positions.
+    vuln_facts_by_idx: list[set[str]] = [set() for _ in range(len(chain_ids))]
+    vuln_requires_by_idx: list[set[str]] = [set() for _ in range(len(chain_ids))]
+    vuln_unresolved_by_idx: list[list[str]] = [[] for _ in range(len(chain_ids))]
+    try:
+        vocabulary = _flow_fact_vocabulary(eligible_gens, plugins_by_id)
+        resolved_vuln_facts = _flow_vuln_facts_by_node_id(
+            vuln_names_by_id,
+            vocabulary=vocabulary,
+            nodes_by_id=id_to_node,
+        )
+        for idx, cid in enumerate(chain_ids):
+            entry = resolved_vuln_facts.get(str(cid))
+            if not isinstance(entry, dict):
+                continue
+            vuln_facts_by_idx[idx] = set(entry.get('provides') or set())
+            vuln_requires_by_idx[idx] = set(entry.get('requires') or set())
+            vuln_unresolved_by_idx[idx] = list(entry.get('unresolved') or [])
+    except Exception:
+        vuln_facts_by_idx = [set() for _ in range(len(chain_ids))]
+        vuln_requires_by_idx = [set() for _ in range(len(chain_ids))]
+        vuln_unresolved_by_idx = [[] for _ in range(len(chain_ids))]
+
+    def _vuln_facts_at(idx: int) -> set[str]:
+        try:
+            return vuln_facts_by_idx[idx]
+        except Exception:
+            return set()
+
+    def _state_at(idx: int, state: set[str]) -> set[str]:
+        extra = _vuln_facts_at(idx)
+        return (set(state) | extra) if extra else state
+
     remaining_union_by_idx: list[set[str]] = []
     try:
         running: set[str] = set()
@@ -19847,6 +19890,7 @@ def _flow_compute_flag_assignments(
             pool = pool_by_pos[i] if i < len(pool_by_pos) else []
             for g in pool:
                 running |= _provides_cached(g)
+            running |= _vuln_facts_at(i)
             remaining_union_by_idx.append(set(running))
         remaining_union_by_idx = list(reversed(remaining_union_by_idx))
     except Exception:
@@ -19977,15 +20021,16 @@ def _flow_compute_flag_assignments(
                 if not remaining_goal.issubset(possible):
                     memo.add(key)
                     return None
-            candidates = _candidate_list(idx, state, deployed_ids)
+            state_here = _state_at(idx, state)
+            candidates = _candidate_list(idx, state_here, deployed_ids)
             if not candidates:
                 memo.add(key)
                 return None
-            ordered = _score_order(candidates, state)
+            ordered = _score_order(candidates, state_here)
             for g in ordered:
                 provides = _provides_cached(g)
                 gid = str(g.get('id') or '').strip()
-                next_state = set(state) | set(provides)
+                next_state = set(state_here) | set(provides)
                 next_deployed = set(deployed_ids)
                 if gid:
                     next_deployed.add(gid)
@@ -20012,6 +20057,10 @@ def _flow_compute_flag_assignments(
         if not pool:
             return []
 
+        # The vulnerability at this position is exploited before its generator's
+        # flag is reachable, so its grants are in scope for this step onward.
+        state_known |= _vuln_facts_at(i)
+
         if chosen_gens is not None:
             gen = chosen_gens[i]
         else:
@@ -20037,6 +20086,7 @@ def _flow_compute_flag_assignments(
                         for j in range(i + 1, len(chain_ids)):
                             for g in (pool_by_pos[j] if j < len(pool_by_pos) else []):
                                 remaining_union |= _provides_cached(g)
+                            remaining_union |= _vuln_facts_at(j)
                         filtered: list[dict[str, Any]] = []
                         for g in candidates:
                             future_possible = set(state_known) | _provides_cached(g) | remaining_union
@@ -20147,6 +20197,13 @@ def _flow_compute_flag_assignments(
             'generator_catalog': str(gen.get('_flow_catalog') or 'flag_generators'),
             'language': str(gen.get('language') or ''),
             'vulnerabilities': vuln_names,
+            # What the vuln at this position grants the solver, so the chain is
+            # inspectable when a step looks unreachable.
+            'vuln_provides': sorted(_vuln_facts_at(i)),
+            'vuln_requires': sorted(vuln_requires_by_idx[i]) if i < len(vuln_requires_by_idx) else [],
+            'vuln_metadata_missing': (
+                list(vuln_unresolved_by_idx[i]) if i < len(vuln_unresolved_by_idx) else []
+            ),
             'description_hints': list(gen.get('description_hints') or []) if isinstance(gen.get('description_hints'), list) else [],
             'inject_files': inject_files,
             'inject_candidate_paths': inject_candidate_paths,
@@ -20212,6 +20269,182 @@ def _flow_synthesized_inputs() -> set[str]:
         'ip4',
         'ipv4',
     }
+
+
+def _flow_fact_vocabulary(
+    generators: list[dict[str, Any]] | None,
+    plugins_by_id: dict[str, dict[str, Any]] | None,
+) -> set[str]:
+    """Every fact spelling the enabled generators actually use.
+
+    Vuln facts are matched canonically but must enter solver state using the
+    consuming generator's own spelling, because the solver compares literally.
+    """
+    vocab: set[str] = set()
+    for plugin in (plugins_by_id or {}).values():
+        if not isinstance(plugin, dict):
+            continue
+        for item in (plugin.get('requires') or []):
+            text = str(item or '').strip()
+            if text:
+                vocab.add(text)
+        for item in (plugin.get('produces') or []):
+            artifact = item.get('artifact') if isinstance(item, dict) else item
+            text = str(artifact or '').strip()
+            if text:
+                vocab.add(text)
+    for gen in (generators or []):
+        if not isinstance(gen, dict):
+            continue
+        for bucket in ('inputs', 'outputs'):
+            entries = gen.get(bucket)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name') or '').strip()
+                if name and _flow_looks_like_fact_ref(name):
+                    vocab.add(name)
+    return vocab
+
+
+def _flow_node_authoring_fact_strings(value: Any) -> list[str]:
+    """Convert node-authoring facts into ontology signature strings.
+
+    The node authoring schema spells facts as ``{'name': 'Shell',
+    'args': ['host']}``; the rest of Flow uses ``Shell(host)``.
+    """
+    out: list[str] = []
+    if not isinstance(value, list):
+        return out
+    for item in value:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                out.append(text)
+            continue
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name') or '').strip()
+        if not name:
+            continue
+        raw_args = item.get('args')
+        args = [str(a).strip() for a in raw_args if str(a).strip()] if isinstance(raw_args, list) else []
+        out.append(f'{name}({", ".join(args)})' if args else f'{name}()')
+    return out
+
+
+def _flow_node_authoring_facts(node: dict[str, Any] | None) -> dict[str, set[str]]:
+    """Return the requires/provides a node declares via its authoring doc.
+
+    Chain nodes rarely carry one, so an absent doc yields empty sets rather than
+    an error.  When present it is treated exactly like vulnerability metadata:
+    a declared capability of that position.
+    """
+    empty: dict[str, set[str]] = {'requires': set(), 'provides': set()}
+    if not isinstance(node, dict):
+        return empty
+    try:
+        doc = _flow_extract_node_authoring_doc(node)
+    except Exception:
+        return empty
+    if not isinstance(doc, dict):
+        return empty
+    logic = doc.get('logic')
+    if not isinstance(logic, dict):
+        return empty
+    return {
+        'requires': set(_flow_node_authoring_fact_strings(logic.get('requires'))),
+        'provides': set(_flow_node_authoring_fact_strings(logic.get('provides'))),
+    }
+
+
+def _flow_vuln_facts_by_node_id(
+    vuln_names_by_id: dict[str, list[str]] | None,
+    *,
+    vocabulary: set[str] | None = None,
+    index: Any | None = None,
+    nodes_by_id: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve each node's vulnerabilities into the facts they grant.
+
+    Returns ``{node_id: {'provides': set[str], 'requires': set[str],
+    'unresolved': list[str], 'impacts': list[str]}}``.  ``provides`` holds
+    literal fact strings ready to union into solver state; ``requires`` holds
+    canonical keys, because they are only ever compared canonically.
+
+    A node whose vulnerabilities have no metadata yields an empty ``provides``
+    and is listed in ``unresolved`` so callers can report or reject it.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    names_by_id = vuln_names_by_id if isinstance(vuln_names_by_id, dict) else {}
+    authoring_nodes = nodes_by_id if isinstance(nodes_by_id, dict) else {}
+    if not names_by_id and not authoring_nodes:
+        return out
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key, expand_provided_facts
+    except Exception:
+        return out
+
+    if index is None:
+        index = _load_vuln_metadata_index()
+
+    vocab = set(vocabulary or set())
+
+    # A node can declare capability two ways: the vulnerability it hosts, and an
+    # explicit node-authoring doc.  Both describe what this position grants.
+    node_ids = list(dict.fromkeys(list(names_by_id.keys()) + list(authoring_nodes.keys())))
+
+    for node_id in node_ids:
+        key = str(node_id or '').strip()
+        if not key:
+            continue
+        names = names_by_id.get(node_id) or []
+        canonical_provides: set[str] = set()
+        canonical_requires: set[str] = set()
+        unresolved: list[str] = []
+        impacts: list[str] = []
+        for raw_name in names:
+            name = str(raw_name or '').strip()
+            if not name:
+                continue
+            facts = index.lookup(name) if index is not None else None
+            if facts is None:
+                unresolved.append(name)
+                continue
+            impacts.append(facts.impact)
+            try:
+                canonical_provides |= facts.canonical_provides
+                canonical_requires |= facts.canonical_requires
+            except Exception:
+                continue
+
+        authored = _flow_node_authoring_facts(authoring_nodes.get(node_id))
+        authored_provides = authored.get('provides') or set()
+        authored_requires = authored.get('requires') or set()
+        if authored_provides:
+            canonical_provides |= {canonical_fact_key(f) for f in authored_provides if f}
+        if authored_requires:
+            canonical_requires |= {canonical_fact_key(f) for f in authored_requires if f}
+
+        if not canonical_provides and not canonical_requires and not unresolved:
+            continue
+
+        provides_literal = (
+            expand_provided_facts(canonical_provides, vocab | authored_provides)
+            if canonical_provides
+            else set()
+        )
+        out[key] = {
+            'provides': provides_literal,
+            'requires': {canonical_fact_key(r) for r in canonical_requires if r},
+            'unresolved': unresolved,
+            'impacts': impacts,
+            'authored_provides': sorted(authored_provides),
+        }
+    return out
 
 
 def _flow_looks_like_fact_ref(raw: Any) -> bool:
@@ -21067,6 +21300,61 @@ def _flow_pivot_provider_for_node(node: dict[str, Any]) -> str:
     return 'manual'
 
 
+# Facts that amount to "you can run code on this host", and therefore to a
+# usable pivot foothold.
+_SHELL_CLASS_FACTS = ('Shell(host)', 'RootShell(host)', 'CodeExecution(host)', 'WebRCE(app)')
+
+
+def _flow_node_grants_shell_access(node: dict[str, Any] | None) -> bool | None:
+    """Whether a node's declared capability includes a shell-class foothold.
+
+    Returns ``True``/``False`` when the node's capability is known (via
+    vulnerability metadata or a node-authoring doc), and ``None`` when it is
+    not declared at all.  Callers keep their previous default on ``None`` --
+    an undeclared node is not evidence of absence.
+    """
+    if not isinstance(node, dict):
+        return None
+
+    names: list[str] = []
+    raw = node.get('vulnerabilities')
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                names.append(item.strip())
+            elif isinstance(item, dict):
+                for key in ('name', 'title', 'id', 'vuln', 'cve', 'cve_id', 'slug'):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        names.append(value.strip())
+                        break
+
+    node_id = str(node.get('id') or node.get('node_id') or '').strip() or '_pivot_source'
+    try:
+        resolved = _flow_vuln_facts_by_node_id(
+            {node_id: names} if names else {},
+            nodes_by_id={node_id: node},
+        )
+    except Exception:
+        return None
+
+    entry = resolved.get(node_id)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get('unresolved') and not entry.get('provides'):
+        # The vulnerability is present but undeclared; do not claim knowledge.
+        return None
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return None
+
+    provided = {canonical_fact_key(f) for f in (entry.get('provides') or set())}
+    shell_class = {canonical_fact_key(f) for f in _SHELL_CLASS_FACTS}
+    return bool(provided & shell_class)
+
+
 def _flow_pivot_requested_provider(value: Any) -> str:
     provider = str(value or 'random').strip().lower().replace('_', '-') or 'random'
     aliases = {
@@ -21150,10 +21438,21 @@ def _flow_pivot_rules_for_chain(
         target_id = _flow_pivot_node_id(target_node)
         if not source_name or not target_name or not source_id or not target_id or source_id == target_id:
             return
-        prod = _flow_split_top_level_list(produces) or [f'Shell({source_name})', f'Pivot({source_name})']
+        prod = _flow_split_top_level_list(produces)
+        unbacked_shell = False
+        if not prod:
+            # Only claim a shell on the source when its declared capability
+            # actually yields one.  An undeclared node keeps the old default.
+            grants_shell = _flow_node_grants_shell_access(source_node)
+            if grants_shell is False:
+                prod = [f'Pivot({source_name})']
+                unbacked_shell = True
+            else:
+                prod = [f'Shell({source_name})', f'Pivot({source_name})']
         req = _flow_split_top_level_list(target_requires) or [f'Pivot({source_name})']
         rule = {
             'name': str(name or 'Pivot').strip() or 'Pivot',
+            'unbacked_shell': unbacked_shell,
             'source_id': source_id,
             'source_name': source_name,
             'target_id': target_id,
@@ -23237,6 +23536,46 @@ def _flow_validate_chain_order_by_requires_produces(
     except Exception:
         pass
 
+    # Facts the vulnerability on each node grants once exploited.  Without this
+    # the chain is only checked generator-to-generator, so a generator needing
+    # CodeExecution(host) could sit behind a read-only file-disclosure CVE.
+    vuln_names_by_id: dict[str, list[str]] = {}
+    for cid in chain_ids:
+        node = node_by_id.get(cid)
+        if not isinstance(node, dict) or not _flow_node_is_vuln(node):
+            continue
+        names: list[str] = []
+        raw = node.get('vulnerabilities')
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    names.append(item.strip())
+                elif isinstance(item, dict):
+                    for key in ('name', 'title', 'id', 'vuln', 'cve', 'cve_id', 'slug'):
+                        value = item.get(key)
+                        if isinstance(value, str) and value.strip():
+                            names.append(value.strip())
+                            break
+        if names:
+            vuln_names_by_id[cid] = list(dict.fromkeys(names))
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key as _canonical_fact_key
+    except Exception:
+        _canonical_fact_key = None  # type: ignore[assignment]
+
+    vuln_facts_by_id: dict[str, dict[str, Any]] = {}
+    try:
+        vuln_facts_by_id = _flow_vuln_facts_by_node_id(
+            vuln_names_by_id,
+            vocabulary=_flow_fact_vocabulary(list(gen_defs_by_id.values()), plugins_by_id),
+            nodes_by_id=node_by_id,
+        )
+    except Exception:
+        vuln_facts_by_id = {}
+
+    require_metadata = _require_vuln_metadata_enabled()
+
     for cid in chain_ids:
         a = assign_by_node.get(cid) or {}
         plugin_id = str(a.get('id') or '').strip()
@@ -23248,6 +23587,29 @@ def _flow_validate_chain_order_by_requires_produces(
         if not isinstance(plugin, dict):
             errors.append(f"{cid}: unknown plugin '{plugin_id}'")
             continue
+
+        vuln_entry = vuln_facts_by_id.get(cid) or {}
+        unresolved_vulns = list(vuln_entry.get('unresolved') or [])
+        if cid in vuln_names_by_id and not vuln_entry:
+            unresolved_vulns = list(vuln_names_by_id.get(cid) or [])
+        if unresolved_vulns and require_metadata:
+            errors.append(
+                f"{cid}: no capability metadata for vulnerability "
+                f"{sorted(unresolved_vulns)}; add an entry to vuln_metadata.yaml "
+                f"declaring its impact/provides"
+            )
+
+        # A vuln may itself need a foothold (privilege escalation needs a shell).
+        vuln_requires = set(vuln_entry.get('requires') or set())
+        if vuln_requires and _canonical_fact_key is not None:
+            available_canonical = {_canonical_fact_key(x) for x in available}
+            unmet = sorted(vuln_requires - available_canonical)
+            if unmet:
+                errors.append(
+                    f"{cid}: vulnerability requires {unmet} before it can be exploited"
+                )
+
+        available |= set(vuln_entry.get('provides') or set())
 
         inferred_requires = {str(x).strip() for x in (a.get('inputs') or []) if str(x).strip()}
         inferred_produces = {str(x).strip() for x in (a.get('outputs') or []) if str(x).strip()}
@@ -45729,6 +46091,130 @@ def _active_vuln_catalog_label() -> str:
     except Exception:
         return ''
     return ''
+
+
+_VULN_METADATA_CACHE: dict[str, Any] = {'key': None, 'index': None}
+_VULN_METADATA_CACHE_LOCK = threading.Lock()
+
+
+def _vuln_metadata_entry_dirs() -> list[str]:
+    """Vuln directories that may carry a per-entry metadata file."""
+    dirs: list[str] = []
+    try:
+        state = _load_vuln_catalogs_state()
+        catalogs = state.get('catalogs') if isinstance(state, dict) else None
+        for catalog in (catalogs or []):
+            if not isinstance(catalog, dict):
+                continue
+            catalog_id = str(catalog.get('id') or '').strip()
+            if not catalog_id:
+                continue
+            content_dir = _vuln_catalog_pack_content_dir(catalog_id)
+            for item in (catalog.get('compose_items') or []):
+                if not isinstance(item, dict):
+                    continue
+                rel = str(item.get('rel_dir') or item.get('dir_rel') or '').strip()
+                if not rel:
+                    continue
+                try:
+                    dirs.append(_safe_path_under(content_dir, rel))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return dirs
+
+
+def _vuln_metadata_catalog_dirs() -> list[str]:
+    dirs: list[str] = []
+    try:
+        state = _load_vuln_catalogs_state()
+        catalogs = state.get('catalogs') if isinstance(state, dict) else None
+        for catalog in (catalogs or []):
+            if not isinstance(catalog, dict):
+                continue
+            catalog_id = str(catalog.get('id') or '').strip()
+            if catalog_id:
+                dirs.append(_vuln_catalog_pack_dir(catalog_id))
+    except Exception:
+        return []
+    return dirs
+
+
+def _vuln_metadata_cache_key() -> tuple[Any, ...]:
+    """Cache key covering every file the merged index is built from.
+
+    The key is derived from the *output* of the path helpers rather than their
+    identity, so monkeypatching `_vuln_catalog_pack_dir`, `_safe_path_under`, or
+    friends changes the key and misses the cache on its own.  Do not add those
+    helpers to `_XML_CACHE_DEP_NAMES` to cover this: doing so disables every XML
+    cache for the duration of any test that patches them, which cascades into
+    unrelated failures elsewhere in the suite.
+    """
+    parts: list[Any] = [_vuln_catalog_state_cache_key()]
+    try:
+        from scenarioforge.vulns import metadata_filenames
+
+        names = metadata_filenames()
+        for directory in _vuln_metadata_catalog_dirs():
+            for filename in names['index']:
+                parts.append(_file_stat_cache_key(os.path.join(directory, filename)))
+        for filename in names['index']:
+            parts.append(_file_stat_cache_key(os.path.join(_get_repo_root(), filename)))
+        # Per-entry files are numerous; key on the directory mtimes instead so a
+        # newly added scenarioforge.vuln.yaml still invalidates the cache.
+        for directory in _vuln_metadata_entry_dirs():
+            parts.append(_file_stat_cache_key(directory))
+    except Exception:
+        return ('vuln-metadata', None)
+    return tuple(parts)
+
+
+def _load_vuln_metadata_index(*, force: bool = False) -> Any:
+    """Return the merged vulnerability capability index (cached by file stats)."""
+    try:
+        from scenarioforge.vulns import load_vuln_metadata_index
+    except Exception:
+        return None
+
+    try:
+        key = _vuln_metadata_cache_key()
+    except Exception:
+        key = None
+
+    use_cache = (not force) and _xml_caches_enabled()
+    if use_cache and key is not None:
+        with _VULN_METADATA_CACHE_LOCK:
+            if _VULN_METADATA_CACHE.get('key') == key:
+                return _VULN_METADATA_CACHE.get('index')
+
+    try:
+        index = load_vuln_metadata_index(
+            entry_dirs=_vuln_metadata_entry_dirs(),
+            catalog_dirs=_vuln_metadata_catalog_dirs(),
+            repo_root=_get_repo_root(),
+        )
+    except Exception:
+        return None
+
+    if use_cache and key is not None:
+        with _VULN_METADATA_CACHE_LOCK:
+            _VULN_METADATA_CACHE['key'] = key
+            _VULN_METADATA_CACHE['index'] = index
+    return index
+
+
+def _require_vuln_metadata_enabled() -> bool:
+    """Whether a vuln without metadata is a hard chain-validation error.
+
+    Off by default so an existing catalog keeps working; turn it on once the
+    metadata file covers the entries you sequence over.
+    """
+    try:
+        raw = os.environ.get('SCENARIOFORGE_REQUIRE_VULN_METADATA', '')
+    except Exception:
+        return False
+    return str(raw or '').strip().lower() in {'1', 'true', 't', 'yes', 'y', 'on'}
 
 
 def _safe_path_under(base_dir: str, subpath: str) -> str:
