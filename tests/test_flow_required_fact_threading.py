@@ -128,3 +128,39 @@ def test_unrelated_context_facts_are_not_threaded() -> None:
     )
     assert cfg.get('SSHPrivateKey(path)') == UPSTREAM_KEY_PATH
     assert 'Token(service)' not in cfg
+
+
+class _ContractBackendStub(_BackendStub):
+    """Backend whose plugin contracts are the only place `requires` appears."""
+
+    @staticmethod
+    def _flow_enabled_plugin_contracts_by_id() -> dict[str, Any]:
+        return {'dep_ssh_key_bastion': {
+            'plugin_id': 'dep_ssh_key_bastion',
+            'requires': ['Knowledge(ip)', 'SSHPrivateKey(path)'],
+        }}
+
+
+def test_requirement_is_found_via_the_plugin_contract(monkeypatch) -> None:
+    """A manifest-built gen_def has no `requires` key; a saved assignment may not either.
+
+    `artifacts.requires` lives on the plugin contract, so without consulting it
+    the fact is invisible to threading and the generator starts with nothing.
+    """
+    manifest = {'id': 'dep_ssh_key_bastion', 'inputs': [{'name': 'seed', 'required': False}]}
+    assert 'requires' not in manifest, 'fixture must mirror a real manifest-built def'
+
+    _cfg_full, cfg, _mismatch, _gen = build_generator_run_config(
+        {'id': 'dep_ssh_key_bastion'},          # saved FlowState style: no 'requires'
+        {'name': 'docker-4'},
+        preview={},
+        preview_ip4='10.0.0.4',
+        flow_context={'SSHPrivateKey(path)': UPSTREAM_KEY_PATH},
+        gen_by_id={'dep_ssh_key_bastion': manifest},
+        flow_default_generator_config=lambda _a: {
+            'seed': 'seed-value', 'secret': 'secret-value', 'flag_prefix': 'FLAG',
+        },
+        backend=_ContractBackendStub(),
+        time_module=_TimeStub(),
+    )
+    assert cfg.get('SSHPrivateKey(path)') == UPSTREAM_KEY_PATH

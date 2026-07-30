@@ -2272,6 +2272,19 @@ def build_generator_run_config(
                     required_context_refs |= {str(x).strip() for x in (gen_def.get('requires') or []) if str(x).strip()}
             except Exception:
                 pass
+            # A generator definition built from a manifest carries no `requires`
+            # key at all -- artifacts.requires lives on the plugin contract. A
+            # saved FlowState assignment may not carry it either, so without
+            # this lookup a required fact is invisible here and never threaded.
+            try:
+                contracts = backend._flow_enabled_plugin_contracts_by_id() or {}
+                contract = contracts.get(str(assignment.get('id') or '').strip())
+                if isinstance(contract, dict) and isinstance(contract.get('requires'), list):
+                    required_context_refs |= {
+                        str(x).strip() for x in (contract.get('requires') or []) if str(x).strip()
+                    }
+            except Exception:
+                pass
 
             try:
                 if flow_context:
