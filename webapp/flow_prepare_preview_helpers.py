@@ -1649,8 +1649,14 @@ def repair_explicit_chain_nodes(
                     is_docker = backend._flow_node_is_docker_role(candidate)
                     is_vuln = bool(candidate.get('is_vuln')) or bool(candidate.get('vulnerabilities'))
                     if _needs_nonvuln_docker(pos):
-                        return bool(is_docker) and (not is_vuln)
-                    return bool(is_vuln)
+                        # A declared VulnerabilitySlot is Docker-backed and may sit
+                        # empty, but it must never absorb a flag-node-generator.
+                        return (
+                            bool(is_docker)
+                            and (not is_vuln)
+                            and backend._flow_node_accepts_challenge_kind(candidate, 'flag-node-generator')
+                        )
+                    return bool(is_vuln) and backend._flow_node_accepts_challenge_kind(candidate, 'vulnerability')
                 except Exception:
                     return False
 
@@ -1748,9 +1754,7 @@ def repair_explicit_chain_nodes(
             for index, node in enumerate(chain_nodes):
                 if not isinstance(node, dict):
                     continue
-                type_raw = str(node.get('type') or '')
-                type_name = type_raw.strip().lower()
-                is_docker = ('docker' in type_name) or (type_raw.strip().upper() == 'DOCKER')
+                is_docker = backend._flow_node_is_docker_role(node)
                 is_vuln = backend._flow_node_is_vuln(node)
 
                 need_nonvuln_docker = False
@@ -1761,10 +1765,10 @@ def repair_explicit_chain_nodes(
                     need_nonvuln_docker = True
 
                 if need_nonvuln_docker:
-                    if is_docker and (not is_vuln):
+                    if is_docker and (not is_vuln) and backend._flow_node_accepts_challenge_kind(node, 'flag-node-generator'):
                         continue
                 else:
-                    if is_vuln:
+                    if is_vuln and backend._flow_node_accepts_challenge_kind(node, 'vulnerability'):
                         continue
 
                 replacement = None
@@ -1776,17 +1780,19 @@ def repair_explicit_chain_nodes(
                         continue
                     if (not allow_node_duplicates) and candidate_id in used:
                         continue
-                    candidate_type_raw = str(candidate.get('type') or '')
-                    candidate_type_name = candidate_type_raw.strip().lower()
-                    candidate_is_docker = ('docker' in candidate_type_name) or (candidate_type_raw.strip().upper() == 'DOCKER')
+                    candidate_is_docker = backend._flow_node_is_docker_role(candidate)
                     candidate_is_vuln = backend._flow_node_is_vuln(candidate)
                     if need_nonvuln_docker:
                         if not candidate_is_docker:
                             continue
                         if candidate_is_vuln:
                             continue
+                        if not backend._flow_node_accepts_challenge_kind(candidate, 'flag-node-generator'):
+                            continue
                     else:
                         if not candidate_is_vuln:
+                            continue
+                        if not backend._flow_node_accepts_challenge_kind(candidate, 'vulnerability'):
                             continue
                     replacement = candidate
                     break

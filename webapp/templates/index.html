@@ -9253,7 +9253,7 @@
     } catch (e) { }
 
     const dropdownsBySection = {
-        'Node Information': ['Server', 'Workstation', 'PC', 'Docker', 'Random'],
+        'Node Information': ['Server', 'Workstation', 'PC', 'Docker', 'VulnerabilitySlot', 'FlagGenSlot', 'Random'],
         // Added 'Random' entry so user can explicitly request a random routing protocol.
         'Routing': ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3', 'Random'],
         'Services': ['SSH', 'HTTP', 'DHCPClient', 'Random'],
@@ -17112,7 +17112,7 @@
             let options = ['Random'];
             switch (secName) {
                 case 'Node Information':
-                    options = ['Server', 'Workstation', 'PC', 'Docker', 'Random'];
+                    options = ['Server', 'Workstation', 'PC', 'Docker', 'VulnerabilitySlot', 'FlagGenSlot', 'Random'];
                     break;
                 case 'Routing':
                     options = ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3', 'Random'];
