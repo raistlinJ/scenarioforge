@@ -3,8 +3,7 @@
 # CI fails only when a failure appears that is NOT listed here, so this file
 # is a ratchet: it may shrink freely, and should only grow with a deliberate
 # decision. Prune an entry as soon as its test passes again.
-# Recorded count: 3
+# Recorded count: 2
 
-tests/test_cli_report_switches_init.py::test_cli_report_handles_segmented_build_without_router_nodes
 tests/test_flow_duplicate_flag_error_propagates.py::test_prepare_preview_duplicate_flag_error_propagates
 tests/test_flow_generate_validate_execute_copy.py::test_remote_service_node_generator_prepare_persists_execute_ready_flow
