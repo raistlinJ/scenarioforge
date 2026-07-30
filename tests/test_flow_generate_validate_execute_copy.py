@@ -130,6 +130,10 @@ parser.add_argument('--generator-id')
 parser.add_argument('--out-dir', required=True)
 parser.add_argument('--config')
 parser.add_argument('--repo-root')
+# The runner invocation gained --source-dir. argparse exits 2 on an unrecognized
+# argument, which surfaced only as "generator failed (rc=2)" from the remote
+# wrapper, so accept it here rather than let the fake runner reject the call.
+parser.add_argument('--source-dir')
 args = parser.parse_args()
 
 os.makedirs(args.out_dir, exist_ok=True)

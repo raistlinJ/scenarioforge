@@ -83,6 +83,28 @@ def test_missing_baseline_is_an_error(tmp_path, monkeypatch) -> None:
     assert main([]) == 1
 
 
+def test_empty_baseline_means_green_not_missing(tmp_path, monkeypatch) -> None:
+    """A fully green suite records an empty baseline; that must still pass.
+
+    The first version treated an empty set as "no baseline recorded" and exited 1,
+    so clearing the last known failure would have failed CI on a green suite.
+    """
+    import check_test_ratchet as mod
+
+    target = tmp_path / 'known_failures.txt'
+    monkeypatch.setattr(mod, 'BASELINE', target)
+    mod.write_baseline(set(), total=0)
+    assert target.is_file()
+    assert mod.read_baseline() == set()
+
+    monkeypatch.setattr(mod, 'run_pytest', lambda extra: (set(), 0))
+    assert main([]) == 0
+
+    # A failure against an empty baseline is still a regression.
+    monkeypatch.setattr(mod, 'run_pytest', lambda extra: ({'tests/test_x.py::test_y'}, 1))
+    assert main([]) == 1
+
+
 def test_new_failure_fails_and_fixed_failure_passes(tmp_path, monkeypatch) -> None:
     import check_test_ratchet as mod
 

@@ -99,13 +99,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f'\nBaseline updated: {len(failures)} known failure(s) -> {_display(BASELINE)}')
         return 0
 
-    baseline = read_baseline()
-    if not baseline:
+    # An empty baseline is a fully green suite, not a missing one. Only the file
+    # being absent means "no baseline recorded yet".
+    if not BASELINE.is_file():
         print(
             f'\nNo baseline at {_display(BASELINE)}.\n'
             'Record one with: python scripts/check_test_ratchet.py --update'
         )
         return 1
+    baseline = read_baseline()
 
     new = sorted(failures - baseline)
     fixed = sorted(baseline - failures)

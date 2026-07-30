@@ -3,6 +3,5 @@
 # CI fails only when a failure appears that is NOT listed here, so this file
 # is a ratchet: it may shrink freely, and should only grow with a deliberate
 # decision. Prune an entry as soon as its test passes again.
-# Recorded count: 1
+# Recorded count: 0
 
-tests/test_flow_generate_validate_execute_copy.py::test_remote_service_node_generator_prepare_persists_execute_ready_flow
