@@ -3,16 +3,12 @@
 # CI fails only when a failure appears that is NOT listed here, so this file
 # is a ratchet: it may shrink freely, and should only grow with a deliberate
 # decision. Prune an entry as soon as its test passes again.
-# Recorded count: 20
+# Recorded count: 16
 
 tests/test_ai_generator_accuracy_eval.py::test_ai_generator_accuracy_eval_corpus_passes
 tests/test_ai_topology_intent.py::test_compile_ai_topology_intent_compiles_vulnerabilities_from_catalog_and_allocates_docker_slots
 tests/test_cli_connectivity_policies.py::test_cli_persists_connectivity_policies
 tests/test_cli_report_switches_init.py::test_cli_report_handles_segmented_build_without_router_nodes
-tests/test_docker_compose_metadata.py::test_apply_docker_compose_meta_prefers_real_core_options_object_when_available
-tests/test_docker_compose_metadata.py::test_docker_node_add_node_kwargs_falls_back_to_node_name_when_compose_unreadable
-tests/test_docker_compose_metadata.py::test_docker_node_add_node_kwargs_prefers_real_core_options_object_when_available
-tests/test_docker_compose_metadata.py::test_prepare_compose_inject_copy_dependency_nonblocking_by_default
 tests/test_execute_advanced_flags.py::test_run_cli_async_prefers_latest_xml_for_scenario
 tests/test_flow_duplicate_flag_error_propagates.py::test_prepare_preview_duplicate_flag_error_propagates
 tests/test_flow_generate_validate_execute_copy.py::test_generate_validate_execute_flow_copy_for_both_generator_kinds
