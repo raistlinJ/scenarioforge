@@ -500,7 +500,24 @@ def test_save_xml_api_adds_docker_capacity_for_vuln_targets(tmp_path, monkeypatc
         for item in node_items
         if isinstance(item, dict) and str(item.get('selected') or '').strip() == 'Docker' and str(item.get('v_metric') or '').strip() == 'Count'
     )
-    assert docker_total == 3
+    # Node Information deliberately keeps the user's base Docker count. Saving
+    # used to materialize the extra vulnerability slots here, which made
+    # normalization non-idempotent and blurred the base count with
+    # topology-required challenge nodes. The planner now applies the repair when
+    # it builds the preview/runtime topology instead
+    # (ensure_role_counts_docker_capacity takes Docker 1 -> 4 for this payload).
+    assert docker_total == 1
+
+    # The shortfall is not recorded in the XML -- docker_capacity_repair is
+    # attached to the in-memory scenario during save and never serialized. What
+    # matters is that the capacity is still honoured downstream, so assert the
+    # planner step directly rather than leaving that side of the contract
+    # untested.
+    from scenarioforge.planning.docker_capacity import ensure_role_counts_docker_capacity
+
+    adjusted, repair = ensure_role_counts_docker_capacity({'Docker': 1, 'Server': 2}, 3)
+    assert adjusted['Docker'] == 4, adjusted
+    assert repair['added_docker_hosts'] == 3, repair
 
 
 def test_save_xml_api_canonicalizes_specific_vulnerability_name_in_sections_and_planpreview(tmp_path, monkeypatch):

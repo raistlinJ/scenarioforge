@@ -3,7 +3,7 @@
 # CI fails only when a failure appears that is NOT listed here, so this file
 # is a ratchet: it may shrink freely, and should only grow with a deliberate
 # decision. Prune an entry as soon as its test passes again.
-# Recorded count: 12
+# Recorded count: 10
 
 tests/test_ai_generator_accuracy_eval.py::test_ai_generator_accuracy_eval_corpus_passes
 tests/test_ai_topology_intent.py::test_compile_ai_topology_intent_compiles_vulnerabilities_from_catalog_and_allocates_docker_slots
@@ -14,6 +14,4 @@ tests/test_flow_duplicate_flag_error_propagates.py::test_prepare_preview_duplica
 tests/test_flow_generate_validate_execute_copy.py::test_generate_validate_execute_flow_copy_for_both_generator_kinds
 tests/test_flow_generate_validate_execute_copy.py::test_remote_service_node_generator_prepare_persists_execute_ready_flow
 tests/test_index_single_xml_force_guard.py::test_index_prefers_explicit_xml_path_query
-tests/test_save_xml_api.py::test_save_xml_api_adds_docker_capacity_for_vuln_targets
-tests/test_web_preview_vulns_docker_only.py::test_preview_vulnerabilities_only_assigned_to_docker_hosts
 tests/test_web_preview_vulns_no_docker_fallback_flow_e2e.py::test_vulns_show_in_preview_when_no_docker_hosts_and_flow_allows_vuln_nodes
