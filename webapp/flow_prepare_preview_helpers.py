@@ -2274,9 +2274,26 @@ def build_generator_run_config(
                 pass
 
             try:
-                if allowed and flow_context:
-                    for key in allowed:
-                        if key in cfg_full:
+                if flow_context:
+                    # Placeholders Flow fabricated for a branch start.  A real
+                    # upstream value must supersede these: the placeholder only
+                    # stands in for a fact nothing earlier in the chain produced,
+                    # and letting it win would hand the consumer a made-up path
+                    # that does not match what the producer actually created.
+                    synthesized_keys: set[str] = set()
+                    try:
+                        raw_supplied = assignment.get('chain_supplied_input_values')
+                        if isinstance(raw_supplied, dict):
+                            synthesized_keys = {str(k).strip() for k in raw_supplied if str(k).strip()}
+                    except Exception:
+                        synthesized_keys = set()
+                    # A required fact does not have to be declared under `inputs`
+                    # to be threaded.  Generators read it out of the config by
+                    # fact name, so requiring a declaration silently starved any
+                    # manifest that listed the fact only under artifacts.requires.
+                    threadable = set(allowed) | set(required_context_refs)
+                    for key in threadable:
+                        if key in cfg_full and key not in synthesized_keys:
                             continue
                         if flow_is_fact_artifact_ref(key) and key not in required_context_refs:
                             continue
@@ -2290,6 +2307,13 @@ def build_generator_run_config(
                 keep = set(allowed)
                 try:
                     keep |= set(declared_required or set())
+                except Exception:
+                    pass
+                try:
+                    # Required facts survive the input-name filter even when the
+                    # manifest never declared them under `inputs`; otherwise a
+                    # value threaded just above would be dropped before the run.
+                    keep |= set(required_context_refs)
                 except Exception:
                     pass
                 try:
