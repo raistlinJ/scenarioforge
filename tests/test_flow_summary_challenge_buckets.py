@@ -176,3 +176,41 @@ def test_flow_length_minimum_uses_mandatory_total() -> None:
         'the length spinner minimum must come from the mandatory-host count'
     )
     assert 'function vulnerabilityNodeMinimumFromStats(stats)' in text
+
+
+def test_the_preview_route_supplies_buckets_before_a_generate():
+    """The summary must not read zero on arrival.
+
+    Opening Flag Sequencing populates its stats from the latest preview plan,
+    long before any Generate produces a topology graph. That path built stats
+    from legacy keys only, so every bucket came back undefined and the operator
+    saw an all-zero summary for a topology that was fully described.
+    """
+    from pathlib import Path
+
+    route = (
+        Path(__file__).resolve().parents[1]
+        / 'webapp' / 'routes' / 'flag_sequencing_latest_preview.py'
+    ).read_text(encoding='utf-8', errors='ignore')
+    for key in BUCKET_KEYS + ('mandatory_challenge_total',):
+        assert key in route, f'{key} is not reported on page load'
+
+    template = FLOW_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert "bucketFrom('specified_flag_node_generator_total')" in template, (
+        'the page-load stats must carry the buckets the summary reads'
+    )
+
+
+def test_page_load_buckets_use_the_same_origin_rule():
+    """Same classification as the post-generate stats, or the number jumps."""
+    from pathlib import Path
+
+    route = (
+        Path(__file__).resolve().parents[1]
+        / 'webapp' / 'routes' / 'flag_sequencing_latest_preview.py'
+    ).read_text(encoding='utf-8', errors='ignore')
+    marker = "slot_kind = challenge_slot_kind(role)"
+    assert marker in route
+    block = route[route.index(marker):route.index(marker) + 700]
+    # Slot roles are decided before what happens to sit on the host.
+    assert block.index("flag_gen_slot_total") < block.index("specified_flag_node_generator_total")
