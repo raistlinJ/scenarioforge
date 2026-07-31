@@ -19967,16 +19967,37 @@ def _flow_compute_flag_assignments(
         node = id_to_node.get(str(cid)) or {}
         is_vuln_node = _flow_node_is_vuln(node) or (str(cid) in vuln_ids)
         is_docker_node = _flow_node_is_docker_role(node)
+        slot_kind = _flow_node_challenge_slot_kind(node)
+        requested_id = str(node.get('flag_node_generator_id') or '').strip()
+        # A challenge slot is capacity reserved for flag-sequencing, not a
+        # generator the user picked. Topology cannot name what fills it -- the
+        # planner has no view of the installed catalog -- so a slot either
+        # arrives unassigned or carries an id that resolves to nothing. Either
+        # way Flow chooses, rather than leaving the pool empty and failing the
+        # whole sequence.
+        slot_id_resolves = any(
+            str(g.get('id') or '').strip() == requested_id
+            and (str(g.get('_flow_kind') or '').strip() or 'flag-generator') == 'flag-node-generator'
+            for g in eligible_gens
+        ) if requested_id else False
+        slot_picks_own_generator = (
+            slot_kind == 'flag-node-generator' and not slot_id_resolves
+        )
+
         def _eligible_for_node(g: dict[str, Any]) -> bool:
             k = str(g.get('_flow_kind') or '').strip() or 'flag-generator'
             if k == 'flag-node-generator':
-                requested_id = str(node.get('flag_node_generator_id') or '').strip()
+                # A declared slot only ever takes its own challenge kind, so a
+                # VulnerabilitySlot must not draw a generator here.
+                if not _flow_node_accepts_challenge_kind(node, 'flag-node-generator'):
+                    return False
+                if is_vuln_node:
+                    return False
                 if not bool(node.get('_topology_flag_node_generators_configured')):
-                    return bool(is_docker_node and (not is_vuln_node))
-                return bool(
-                    is_docker_node and (not is_vuln_node) and requested_id
-                    and str(g.get('id') or '').strip() == requested_id
-                )
+                    return True
+                if slot_picks_own_generator:
+                    return True
+                return str(g.get('id') or '').strip() == requested_id
             return bool(is_vuln_node)
         pool_by_pos.append([g for g in eligible_gens if _eligible_for_node(g)])
 

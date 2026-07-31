@@ -124,9 +124,14 @@ def compute_full_plan(
             count = 0
         nodegen_items.append(VulnerabilityItem(name=name, density=nodegen_density, abs_count=count, kind=selected,
                                                 factor=float(it.get('factor') or 0.0), metric=metric))
-    # FlagGenSlot rows behave like VulnerabilitySlot rows: each slot draws its
-    # own random generator so it materializes as a real challenge node rather
-    # than empty capacity, and declared card rows keep their additive hosts.
+    # A FlagGenSlot is capacity reserved for flag-sequencing; the planner cannot
+    # name the generator that fills it. It has no access to the installed
+    # catalog, and drawing through compute_vulnerability_plan resolves 'Random'
+    # against DEFAULT_RANDOM_VULNS -- vulnerability names such as "SSHCreds",
+    # which are not generators. A slot assigned one of those matches no
+    # generator at all, which empties the candidate pool for that node and fails
+    # the whole sequence. Flow fills the slot from the real catalog instead, so
+    # leave it unassigned here.
     flag_gen_slot_count = 0
     for role_name, count in (role_counts or {}).items():
         if _normalize_role_name(role_name) == FLAG_GEN_SLOT_ROLE:
@@ -134,11 +139,6 @@ def compute_full_plan(
                 flag_gen_slot_count += max(0, int(count or 0))
             except Exception:
                 continue
-    if flag_gen_slot_count:
-        nodegen_items.append(VulnerabilityItem(
-            name='Random', density=nodegen_density, abs_count=flag_gen_slot_count,
-            kind='Random', factor=0.0, metric='Count',
-        ))
 
     flag_node_generator_plan, nodegen_breakdown = compute_vulnerability_plan(density_base, nodegen_density, nodegen_items)
     vuln_host_demand = sum(max(0, int(count or 0)) for count in (vulnerability_plan or {}).values())
@@ -147,7 +147,10 @@ def compute_full_plan(
     # adds Docker hosts, so that share of the demand already has somewhere to
     # live. Counting it again here would materialize a duplicate host per slot.
     vuln_absorbed_by_slots = min(vulnerability_slot_count, vuln_host_demand)
-    nodegen_absorbed_by_slots = min(flag_gen_slot_count, nodegen_host_demand)
+    # Declared generator rows are never absorbed into FlagGenSlot capacity: the
+    # slot demand is no longer part of nodegen_host_demand (see above), and
+    # slots stay additive -- 5 slots plus 5 declared generators is 10 hosts.
+    nodegen_absorbed_by_slots = 0
     required_docker_hosts = (
         (vuln_host_demand - vuln_absorbed_by_slots)
         + (nodegen_host_demand - nodegen_absorbed_by_slots)
