@@ -26,7 +26,7 @@ artifacts:
     - FlagFile(path)
 hint_levels:
   low:
-    - "Target: {{NEXT_NODE_IP}}"
+    - "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
   medium:
     - "Generated compose: {{OUTPUT.File(path)}}"
   high:

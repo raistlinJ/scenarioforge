@@ -150,12 +150,12 @@ When using Generator Builder intent overrides or natural-language prompt specs, 
 
 ```text
 Hint levels:
-low: Target: {{NEXT_NODE_IP}}
+low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.
 medium: Artifact or service: {{OUTPUT.File(path)}}
 high: Use the access instructions and README.md for the complete workflow.
 ```
 
-The compact one-line form is also accepted: `Hint levels: low: Target: {{NEXT_NODE_IP}}; medium: Artifact: {{OUTPUT.File(path)}}; high: Use README.md.`
+The compact one-line form is also accepted: `Hint levels: low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.; medium: Artifact: {{OUTPUT.File(path)}}; high: Use README.md.`
 
 ---
 

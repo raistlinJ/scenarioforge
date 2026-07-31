@@ -1565,7 +1565,7 @@ def test_generator_builder_ai_messages_add_prompt_derived_ssh_credential_default
     assert 'Suggested artifact requirements: Knowledge(ip), Knowledge(hostname) (optional).' in user_content
     assert 'Suggested artifact outputs: Flag(flag_id), Credential(user), Credential(user,password), File(path).' in user_content
     assert 'Suggested inject_files entries: File(path).' in user_content
-    assert 'Suggested hint levels: low: Target: {{NEXT_NODE_IP}}, medium: Credential: {{OUTPUT.Credential(user,password)}}, high: Use the access instructions and README.md for the complete workflow.' in user_content
+    assert 'Suggested hint levels: low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}., medium: Credential: {{OUTPUT.Credential(user,password)}}, high: Use the access instructions and README.md for the complete workflow.' in user_content
     assert 'README should mention determinism, local runner testing.' in user_content
 
 
@@ -1634,7 +1634,7 @@ def test_normalize_ai_scaffold_payload_uses_prompt_intent_defaults_when_ai_omits
     assert payload['produces'] == ['Flag(flag_id)', 'Credential(user)', 'Credential(user,password)', 'File(path)']
     assert payload['inject_files'] == ['File(path)']
     assert payload['hint_levels'] == {
-        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
         'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
         'high': ['Use the access instructions and README.md for the complete workflow.'],
     }

@@ -364,10 +364,10 @@ Example request:
 ```json
 {
 	"plugin_type": "flag-generator",
-	"prompt": "Build deterministic SSH credentials. Hint levels:\nlow: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use README.md.",
+	"prompt": "Build deterministic SSH credentials. Hint levels:\nlow: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use README.md.",
 	"intent_overrides": {
 		"runtime_inputs": "seed (required)\nsecret (required, sensitive)",
-		"hint_levels": "low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
+		"hint_levels": "low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
 	}
 }
 ```
@@ -387,7 +387,7 @@ Example request:
 	"name_hint": "SSH Credentials Drop",
 	"prompt": "Build a deterministic SSH credential generator with Knowledge(ip) as required input.",
 	"intent_overrides": {
-		"hint_levels": "low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
+		"hint_levels": "low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
 	},
 	"provider": "ollama",
 	"base_url": "http://127.0.0.1:11434",
@@ -506,7 +506,7 @@ Example request:
 		{"name": "Credential(user, password)", "type": "string", "required": false, "sensitive": true}
 	],
 	"hint_levels": {
-		"low": ["Target: {{NEXT_NODE_IP}}"],
+		"low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],
 		"medium": ["Credential: {{OUTPUT.Credential(user,password)}}"],
 		"high": ["Use the access instructions and README.md."]
 	},

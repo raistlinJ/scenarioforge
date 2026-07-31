@@ -111,7 +111,7 @@ artifacts:
 
 hint_levels:
   low:
-    - "Target: {{NEXT_NODE_IP}}"
+    - "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
   medium:
     - "Credential: {{OUTPUT.Credential(user,password)}}"
   high:
@@ -296,12 +296,35 @@ Flow substitutions include:
 - `{{SCENARIO}}`
 - `{{OUTPUT.<key>}}` where `<key>` comes from `outputs.json.outputs`
 
+### Next-node variables resolve to a *dependent* successor
+
+A `{{NEXT_NODE_*}}` variable names the next step that actually consumes one of
+this generator's outputs — not simply the next node in the emitted chain. Flow
+places independent challenges on parallel stages, where no ordering exists
+between them, so naming the positional neighbour would assert a gate the solver
+never imposed.
+
+When a step has no dependent successor, Flow removes the clause containing the
+variable and keeps the rest of the hint:
+
+```
+"Inspect the vendor intake dropbox before moving to {{NEXT_NODE_NAME}}."
+  -> parallel stage:  "Inspect the vendor intake dropbox."
+  -> real dependency: "Inspect the vendor intake dropbox before moving to docker-9 (10.0.98.3)."
+```
+
+Write hints so they still read correctly with the pointer removed. Put the
+instruction first and the pointer last, in its own clause. A hint whose entire
+body is a pointer — such as `"Target: {{NEXT_NODE_IP}}"` — leaves nothing behind
+and falls back to a generic line, so prefer a form that carries its own
+instruction.
+
 Example:
 
 ```yaml
 hint_levels:
   low:
-    - "Target: {{NEXT_NODE_IP}}"
+    - "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
   medium:
     - "Credential: {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"
   high:
@@ -309,7 +332,7 @@ hint_levels:
 ```
 
 Note:
-- Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known, even if `{{NEXT_NODE_IP}}` is not explicitly present.
+- Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known, even if `{{NEXT_NODE_IP}}` is not explicitly present. This applies only when a dependent successor exists.
 
 ---
 

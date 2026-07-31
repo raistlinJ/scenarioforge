@@ -107,7 +107,7 @@ Example:
 ```yaml
 hint_levels:
 	low:
-		- "Target: {{NEXT_NODE_IP}}"
+		- "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
 	medium:
 		- "Credential: {{OUTPUT.Credential(user,password)}}"
 	high:
