@@ -554,16 +554,24 @@ def build_full_preview(
     required_flag_node_generator_hosts = sum(
         max(0, int(count or 0)) for count in (flag_node_generators_plan or {}).values()
     )
-    # Vulnerabilities fill declared VulnerabilitySlot rows before additive
-    # Docker hosts are created, so that share of the demand already has a home.
-    # Counting it again would materialize a duplicate host per slot.
+    # The two challenge kinds reach this point differently, so only one nets out
+    # here. Both end up additive -- 5 slots plus 5 declared rows is 10 challenge
+    # hosts -- but by different routes:
+    #
+    #   Vulnerabilities: nothing downstream can assign a vulnerability, so the
+    #   orchestrator already asked for one *per slot*. That demand is in
+    #   required_vulnerability_hosts, and the slots themselves are the hosts for
+    #   it, so subtract them or every slot materializes a duplicate Docker host.
+    #
+    #   Flag-node-generators: the orchestrator deliberately does not name what
+    #   fills a slot (it cannot see the installed catalog), so slot demand is
+    #   absent here and required_flag_node_generator_hosts counts declared rows
+    #   only. Subtracting slots would make a slot absorb a declared generator,
+    #   leaving the scenario a challenge node short and no free slot for
+    #   flag-sequencing.
     declared_vulnerability_slots = int(normalized_counts.get(VULNERABILITY_SLOT_ROLE, 0) or 0)
     required_vulnerability_hosts = max(
         0, required_vulnerability_hosts - min(declared_vulnerability_slots, required_vulnerability_hosts)
-    )
-    declared_flag_gen_slots = int(normalized_counts.get(FLAG_GEN_SLOT_ROLE, 0) or 0)
-    required_flag_node_generator_hosts = max(
-        0, required_flag_node_generator_hosts - min(declared_flag_gen_slots, required_flag_node_generator_hosts)
     )
     role_counts, docker_capacity_repair = ensure_role_counts_docker_capacity(
         normalized_counts, required_vulnerability_hosts, required_flag_node_generator_hosts
