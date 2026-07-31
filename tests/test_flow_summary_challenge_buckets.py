@@ -135,3 +135,44 @@ def test_flow_summary_ui_reports_all_five_buckets() -> None:
 
     # Max challenges must be the sum of the buckets, not a stale subset.
     assert 'const maxChallenges = specifiedFlagNodeGenerators + specifiedVulnerabilities' in text
+
+
+def test_minimum_counts_filled_slots_not_just_specified_buckets() -> None:
+    """The chain pulls in every filled host, including a filled declared slot.
+
+    The display buckets classify by origin, so a filled VulnerabilitySlot is
+    reported as slot capacity rather than as "specified". Deriving the minimum
+    chain length from the specified buckets alone therefore under-reports it,
+    and the length spinner would offer a value generation cannot honour.
+    """
+    nodes = [
+        _docker_node('vulnslot-1', role='VulnerabilitySlot',
+                     slot_kind='vulnerability', vulns=['cve/one']),
+        _docker_node('vulnslot-2', role='VulnerabilitySlot',
+                     slot_kind='vulnerability', vulns=['cve/two']),
+        _docker_node('docker-1', generator_id='alpha'),
+        _docker_node('docker-2', vulns=['cve/three']),
+        # Free capacity: optional, so it must not raise the minimum.
+        _docker_node('flaggenslot-1', role='FlagGenSlot', slot_kind='flag-node-generator'),
+        _docker_node('docker-3'),
+    ]
+    stats = _stats(nodes)
+
+    specified_only = (
+        stats['specified_flag_node_generator_total']
+        + stats['specified_vulnerability_total']
+    )
+    assert specified_only == 2
+    # Both filled vulnerability slots are mandatory too.
+    assert stats['mandatory_challenge_total'] == 4
+    # Free slots stay optional.
+    assert stats['mandatory_challenge_total'] < sum(stats[key] for key in BUCKET_KEYS)
+
+
+def test_flow_length_minimum_uses_mandatory_total() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    assert 'mandatory_challenge_total' in text, (
+        'the length spinner minimum must come from the mandatory-host count'
+    )
+    assert 'function vulnerabilityNodeMinimumFromStats(stats)' in text

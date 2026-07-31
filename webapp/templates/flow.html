@@ -10291,18 +10291,15 @@
     return Math.max(0, (vuln || 0) + nodeGenerators + genericDocker);
   }
 
-  // Only hosts a card actually placed are mandatory; slots are free capacity the
-  // operator may or may not extend the chain into.
+  // A host is mandatory once something sits on it, because chain expansion pulls
+  // in every vulnerability and card-placed generator regardless of the requested
+  // length. That is not the same as the "specified" display buckets: a declared
+  // slot the planner already filled is reported as slot capacity but is still
+  // mandatory, so the minimum must count it.
   function vulnerabilityNodeMinimumFromStats(stats) {
     if (!stats || typeof stats !== 'object') return 1;
-    const specifiedGenerators = Number.isFinite(+stats.specified_flag_node_generator_total)
-      ? (+stats.specified_flag_node_generator_total)
-      : null;
-    const specifiedVulnerabilities = Number.isFinite(+stats.specified_vulnerability_total)
-      ? (+stats.specified_vulnerability_total)
-      : null;
-    if (specifiedGenerators !== null || specifiedVulnerabilities !== null) {
-      return Math.max(1, (specifiedGenerators || 0) + (specifiedVulnerabilities || 0));
+    if (Number.isFinite(+stats.mandatory_challenge_total)) {
+      return Math.max(1, +stats.mandatory_challenge_total);
     }
     const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : 0;
     const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
