@@ -7408,6 +7408,47 @@ def _stale_core_veth_cleanup_enabled() -> bool:
     return str(raw).strip().lower() not in {'0', 'false', 'no', 'off', ''}
 
 
+def _docker_home_permission_repair_enabled() -> bool:
+    """Whether to repair root-owned files in the SSH user's ~/.docker before execute.
+
+    Default: enabled. Disable with
+    `CORETG_REPAIR_DOCKER_HOME_PERMS=0/false/no/off`.
+    """
+    raw = os.environ.get('CORETG_REPAIR_DOCKER_HOME_PERMS')
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in {'0', 'false', 'no', 'off', ''}
+
+
+def _docker_home_permission_repair_command(ssh_username: str) -> str:
+    """Return a command that gives the SSH user back its own ~/.docker.
+
+    Running any docker command as root seeds root-owned state into the invoking
+    user's config directory -- `buildx/.lock` is the usual casualty. Every later
+    `docker compose up` that has to build then dies on
+
+        open /home/<user>/.docker/buildx/.lock: permission denied
+
+    which Compose reports only as `rc=1`, so the scenario surfaces as nodes that
+    will not start with no stated cause.
+
+    Only files that are *not* already owned by the user are touched, and only
+    below that user's own ~/.docker.
+    """
+    user = shlex.quote(str(ssh_username or '').strip())
+    return (
+        'sh -c '
+        + shlex.quote(
+            f'HOME_DIR=$(getent passwd {user} | cut -d: -f6); '
+            '[ -n "$HOME_DIR" ] && [ -d "$HOME_DIR/.docker" ] || exit 0; '
+            f'BAD=$(find "$HOME_DIR/.docker" ! -user {user} -print 2>/dev/null | wc -l); '
+            '[ "$BAD" -gt 0 ] || exit 0; '
+            f'find "$HOME_DIR/.docker" ! -user {user} -exec chown {user}:{user} {{}} + 2>/dev/null; '
+            'echo "repaired $BAD path(s) under $HOME_DIR/.docker"'
+        )
+    )
+
+
 def _stale_core_veth_cleanup_command() -> str:
     """Return a shell command that best-effort deletes orphaned CORE veth names.
 
@@ -43602,6 +43643,34 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
              pass
          _fail_run(msg, code=1, extra={'error_code': 'active_sessions_blocking'})
          return
+
+    if _docker_home_permission_repair_enabled():
+        try:
+            ssh_user_for_docker = str(core_cfg.get('ssh_username') or '').strip()
+        except Exception:
+            ssh_user_for_docker = ''
+        if ssh_user_for_docker:
+            try:
+                rc, out_text, err_text = _exec_sudo(
+                    _docker_home_permission_repair_command(ssh_user_for_docker),
+                    timeout=25.0,
+                    stage='docker_home_perms',
+                )
+                note = (out_text or '').strip()
+                if rc == 0 and note:
+                    # Only logged when something was actually wrong, so a clean
+                    # VM stays quiet.
+                    log_f.write(f"{log_prefix}Docker config permissions: {note}\n")
+                elif rc != 0:
+                    log_f.write(
+                        f"{log_prefix}WARN: docker config permission repair exited {rc}; continuing. "
+                        f"stderr={_summarize_for_log((err_text or '').strip())}\n"
+                    )
+            except Exception as exc:
+                try:
+                    log_f.write(f"{log_prefix}WARN: docker config permission repair failed: {exc}; continuing.\n")
+                except Exception:
+                    pass
 
     if _stale_core_veth_cleanup_enabled():
         try:
