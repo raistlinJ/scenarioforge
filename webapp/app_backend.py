@@ -29622,6 +29622,18 @@ def _select_core_config_for_page(
                 if not include_password:
                     merged.pop('ssh_password', None)
                 return _ensure_core_vm_metadata(merged)
+        # VM mode targets one CORE VM, declared by the runtime environment
+        # (.scenarioforge.env). The fallbacks below are implicit and
+        # stale-prone: a credential stored during an earlier remote setup, or a
+        # run-history entry from another host, would silently shadow that VM and
+        # send every connection to an address the operator has already moved
+        # away from. An explicit per-scenario config above still wins, because
+        # that is a visible setting; these are not.
+        if _webui_runtime_mode() == 'vm':
+            return _ensure_core_vm_metadata(
+                _core_backend_defaults(include_password=include_password)
+            )
+
         # Fall back to the latest VM/Access secret record for this scenario.
         try:
             secret_record = _select_latest_core_secret_record(scenario_norm or None)
