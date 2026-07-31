@@ -1614,6 +1614,82 @@ def _drop_service_dependencies_for_no_network(service: Dict[str, object]) -> Non
 	service.pop('links', None)
 
 
+# Options Docker refuses on a container that joins another container's network
+# namespace. Each raises "conflicting options: <thing> and the container type
+# network mode" (or "... and the network mode") and aborts container creation.
+CONTAINER_NETWORK_MODE_CONFLICTING_KEYS = (
+	'hostname',
+	'domainname',
+	'ports',
+	'expose',
+	'dns',
+	'dns_search',
+	'dns_opt',
+	'extra_hosts',
+	'mac_address',
+	'networks',
+)
+
+
+def _strip_network_conflicts_from_secondary_services(compose_obj: dict, node_name: str) -> dict:
+	"""Drop per-container network options from services CORE will co-locate.
+
+	CORE runs a Docker node's stack in one network namespace: it rewrites each
+	secondary service to ``network_mode: service:<node>`` and leaves the
+	node-named service on ``none``, whose namespace it manages itself. A
+	container sharing another's namespace cannot own any of the options above,
+	and Docker refuses to create it::
+
+	    service:node:1 Error response from daemon: conflicting options:
+	    hostname and the network mode
+	    service:node:1 Error response from daemon: conflicting options:
+	    port exposing and the container type network mode
+
+	The stack then sits in `created` and every node reports "not running", with
+	the cause recorded only in the core-daemon journal.
+
+	Nothing is lost: the namespace those services join belongs to the node-named
+	service, which keeps its own hostname and exposed ports and is what CORE
+	attaches to the scenario network.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		primary = str(node_name or '').strip()
+		primary_svc = services.get(primary) if primary else None
+
+		def _as_list(value: object) -> list:
+			if isinstance(value, list):
+				return list(value)
+			if value in (None, ''):
+				return []
+			return [value]
+
+		for svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			if primary and str(svc_name) == primary:
+				continue
+			# Port intent is not discarded: every one of these services shares
+			# the node's namespace, so a port they meant to expose is reachable
+			# on the node service and belongs there. Reporting reads it from the
+			# compose file, so moving it keeps that working.
+			if isinstance(primary_svc, dict):
+				moved = [str(p) for p in (_as_list(svc.get('expose')) + _as_list(svc.get('ports')))]
+				if moved:
+					existing = [str(p) for p in _as_list(primary_svc.get('expose'))]
+					merged = list(dict.fromkeys(existing + [p.split(':')[-1] for p in moved]))
+					primary_svc['expose'] = merged
+			for key in CONTAINER_NETWORK_MODE_CONFLICTING_KEYS:
+				svc.pop(key, None)
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
 def _force_compose_no_network(compose_obj: dict) -> dict:
 	"""Best-effort: make all services run with network_mode: none.
 
@@ -5378,6 +5454,15 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					except Exception:
 						alias_src = None
 					obj = _ensure_service_named_as_node(obj, node_name, prefer_service=alias_src or prefer)
+					# Done after the alias exists, so the node-named service is
+					# known and keeps its hostname while the rest -- which CORE
+					# will move into that service's network namespace -- lose
+					# theirs.
+					try:
+						if _compose_force_no_network_enabled():
+							obj = _strip_network_conflicts_from_secondary_services(obj, node_name)
+					except Exception:
+						pass
 					try:
 						replace_original = _is_truthy(rec.get('ReplaceComposeServiceWithNode') or rec.get('replace_compose_service_with_node'))
 						services_obj = obj.get('services') if isinstance(obj, dict) else None
