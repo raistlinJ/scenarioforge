@@ -31,17 +31,62 @@ from ..parsers.pivoting import parse_pivoting_info
 
 logger = logging.getLogger(__name__)
 
+def _installed_vulnerability_names(seed: Optional[int]) -> List[str]:
+    """Names a 'Random' vulnerability row may draw from, in seeded order.
+
+    A vulnerability name only means something if it resolves to an installed
+    catalog entry; an unresolvable name degrades its host to a plain Docker node
+    with no vulnerability on it. The planner therefore draws from the real
+    catalog rather than from placeholder names.
+
+    Best-effort: returns [] when the catalog cannot be read, which leaves
+    compute_vulnerability_plan on its built-in fallback.
+    """
+    try:
+        import os
+        import random as _random
+
+        from ..utils.vuln_process import load_vuln_catalog
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        names: List[str] = []
+        seen: set[str] = set()
+        for entry in (load_vuln_catalog(repo_root) or []):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get('Name') or '').strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        # Stable order first, then a seeded shuffle so "Random" varies with the
+        # scenario seed while staying reproducible for preview/execute parity.
+        names.sort()
+        _random.Random(int(seed) if seed is not None else 0).shuffle(names)
+        return names
+    except Exception:
+        return []
+
+
 def compute_full_plan(
     xml_path: str,
     scenario: Optional[str] = None,
     seed: Optional[int] = None,
     include_breakdowns: bool = True,
+    available_vulnerabilities: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Compute a unified planning object for all scenario sections.
 
     Returns a dict containing role counts, routers planned, and per-section plan + breakdowns.
     This function intentionally mirrors (and supersedes) ad-hoc logic previously in CLI and web preview.
+
+    ``available_vulnerabilities`` overrides the pool a 'Random' vulnerability row
+    draws from; when omitted the installed catalog is consulted.
     """
+    random_vuln_names = (
+        [str(n).strip() for n in available_vulnerabilities if str(n or '').strip()]
+        if available_vulnerabilities is not None
+        else _installed_vulnerability_names(seed)
+    )
     # --- Node Information ---
     density_base, weight_items, count_items, services_list = parse_node_info(xml_path, scenario)
     role_counts, node_breakdown = compute_node_plan(density_base, weight_items, count_items)
@@ -102,7 +147,9 @@ def compute_full_plan(
             kind='Random', factor=0.0, metric='Count',
         ))
 
-    vulnerability_plan, vuln_breakdown = compute_vulnerability_plan(density_base, vuln_density, vuln_items)
+    vulnerability_plan, vuln_breakdown = compute_vulnerability_plan(
+        density_base, vuln_density, vuln_items, random_names=random_vuln_names
+    )
     # Flag-node-generators have exactly the same topology cardinality semantics
     # as vulnerabilities, but their Docker hosts are separate/additive slots.
     nodegen_density, nodegen_items_xml = parse_flag_node_generators_info(xml_path, scenario)
