@@ -35317,7 +35317,24 @@ def _core_config_from_xml_path(
 
     if not scenario_core and not global_core:
         return None
-    return _merge_core_configs(global_core, scenario_core, include_password=include_password)
+    merged_xml_core = _merge_core_configs(global_core, scenario_core, include_password=include_password)
+
+    # A scenario XML records the CORE endpoint it was last saved against.
+    # Callers merge that *over* the resolved config, so in VM mode -- where the
+    # deployment targets one CORE VM declared in the runtime environment -- a
+    # scenario saved against a previous VM drags every connection back to it,
+    # however the environment has since been changed. Keep the metadata, drop
+    # the transport, including the stored credential id that would otherwise
+    # refill the transport from that same old record.
+    if isinstance(merged_xml_core, dict) and _webui_runtime_mode() == 'vm':
+        merged_xml_core = {
+            key: value
+            for key, value in merged_xml_core.items()
+            if key not in _CORE_FIELD_KEYS and key != 'core_secret_id'
+        }
+        if not merged_xml_core:
+            return None
+    return merged_xml_core
 
 
 def _flow_state_from_latest_xml(scenario_norm: str) -> dict[str, Any] | None:

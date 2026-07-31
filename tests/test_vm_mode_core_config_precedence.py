@@ -95,3 +95,47 @@ def test_vm_mode_keeps_an_explicit_per_scenario_config(monkeypatch, stale_secret
 
     cfg = backend._select_core_config_for_page('Scenario1', include_password=False)
     assert cfg.get('ssh_host') == '10.9.9.9', cfg
+
+
+def _scenario_xml_with_core(tmp_path, ssh_host: str, ssh_port: int):
+    xml = tmp_path / 'Scenario1.xml'
+    xml.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<Scenarios>\n'
+        f'  <CoreConnection host="localhost" port="50051" ssh_enabled="true"\n'
+        f'    ssh_host="{ssh_host}" ssh_port="{ssh_port}" ssh_username="corevm"\n'
+        '    core_secret_id="stale-record" vm_key="oldlab::185" />\n'
+        '  <Scenario name="Scenario1" density_count="4" />\n'
+        '</Scenarios>\n',
+        encoding='utf-8',
+    )
+    return str(xml)
+
+
+def test_vm_mode_ignores_the_core_endpoint_recorded_in_a_scenario(monkeypatch, tmp_path):
+    """A scenario records the CORE endpoint it was last saved against.
+
+    Callers merge that over the resolved config, so without this a scenario
+    saved against a previous CORE VM drags every connection back to it -- which
+    surfaces as `CORE connection failed to localhost:50051: timed out`, naming
+    the gRPC target rather than the SSH host actually being dialled.
+    """
+    _use_env_vm(monkeypatch)
+    path = _scenario_xml_with_core(tmp_path, 'old-lab.example.edu', 10006)
+
+    cfg = backend._core_config_from_xml_path(path, 'Scenario1', include_password=True) or {}
+
+    for key in ('host', 'port', 'ssh_host', 'ssh_port', 'ssh_username'):
+        assert not cfg.get(key), f'{key} survived: {cfg.get(key)!r}'
+    # The stored credential id would refill the transport from the same record.
+    assert not cfg.get('core_secret_id')
+
+
+def test_native_mode_still_honors_the_scenario_core_endpoint(monkeypatch, tmp_path):
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'native')
+    path = _scenario_xml_with_core(tmp_path, 'old-lab.example.edu', 10006)
+
+    cfg = backend._core_config_from_xml_path(path, 'Scenario1', include_password=True) or {}
+
+    assert cfg.get('ssh_host') == 'old-lab.example.edu'
+    assert str(cfg.get('ssh_port')) == '10006'
