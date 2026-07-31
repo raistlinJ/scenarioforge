@@ -20679,6 +20679,7 @@ def _flow_promote_first_step_hint_levels(
     low = list(levels.get('low') or [])
     disclosed = _flow_hint_disclosed_facts({'hint_levels': levels}, levels=('low',))
     promoted: list[str] = []
+    promoted_lines: dict[str, list[str]] = {}
 
     for placeholder, alternatives in needed:
         if alternatives & disclosed:
@@ -20697,12 +20698,18 @@ def _flow_promote_first_step_hint_levels(
                     low.append(line)
                     disclosed |= line_facts
                     promoted.append(placeholder)
+                    promoted_lines.setdefault(level, []).append(line)
                     break
             if placeholder in promoted:
                 break
 
     if promoted:
         levels['low'] = low
+        # A promoted line moves rather than copies: leaving it at its original
+        # depth shows the same disclosure twice and makes the deeper hint
+        # pointless, since `low` has already given it away.
+        for level, lines in promoted_lines.items():
+            levels[level] = [line for line in (levels.get(level) or []) if line not in lines]
     return levels, sorted(set(promoted))
 
 

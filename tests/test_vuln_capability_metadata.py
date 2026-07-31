@@ -783,7 +783,7 @@ def _gated(hint_levels, access=_CRED_ACCESS):
     return {'id': 'g1', 'name': 'Gated', 'access_instructions': access, 'hint_levels': hint_levels}
 
 
-def test_promotion_copies_the_disclosing_hint_into_low():
+def test_promotion_moves_the_disclosing_hint_into_low():
     gen = _gated({
         'low': ['Inspect the export.'],
         'medium': ['Credential artifact: {{OUTPUT.Credential(user,password)}}'],
@@ -793,8 +793,9 @@ def test_promotion_copies_the_disclosing_hint_into_low():
     )
     assert promoted, 'expected a promotion'
     assert any('OUTPUT.Credential' in line for line in levels['low'])
-    # The original medium hint is left in place; promotion copies, it does not move.
-    assert any('OUTPUT.Credential' in line for line in levels['medium'])
+    # The line moves rather than copies: showing the same disclosure at two
+    # depths makes the deeper hint pointless once `low` has given it away.
+    assert not any('OUTPUT.Credential' in line for line in levels['medium'])
     assert app_backend._flow_first_step_undisclosed_secrets({**gen, 'hint_levels': levels}) == []
 
 
