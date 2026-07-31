@@ -196,33 +196,32 @@ def _preview_for(node_rows: str, vuln_count: int = 2):
         return payload['full_preview']
 
 
-def test_declared_vulnerabilities_fill_their_slots() -> None:
-    """Only the Vulnerabilities card can supply a vulnerability.
+def test_every_vulnerability_slot_gets_its_own_vulnerability() -> None:
+    """A slot must never materialize empty.
 
-    Flag-sequencing cannot invent one, so an empty VulnerabilitySlot would be a
-    dead node. Vulnerabilities fill their slots and free the additive Docker
-    hosts, which sequencing can use for either challenge kind.
+    Only the Vulnerabilities card can supply a vulnerability -- sequencing
+    cannot invent one -- so an unfilled slot would be a permanently dead node.
+    Slots not covered by declared rows draw a random catalog vulnerability.
     """
     preview = _preview_for(
         "<item selected='VulnerabilitySlot' v_metric='Count' v_count='3'/>", vuln_count=2
     )
     hosts = list(preview['hosts'])
-    bearing = [h for h in hosts if h.get('vulnerabilities')]
-    assert len(bearing) == 2
-    assert all(h['role'] == VULNERABILITY_SLOT_ROLE for h in bearing), bearing
-    # The two Docker hosts added for the card rows are left free.
-    free_docker = [h for h in hosts if h['role'] == 'Docker' and not h.get('vulnerabilities')]
-    assert len(free_docker) == 2
+    slots = [h for h in hosts if h['role'] == VULNERABILITY_SLOT_ROLE]
+    assert len(slots) == 3
+    assert all(h.get('vulnerabilities') for h in slots), slots
+    # The two declared rows keep their own additive Docker hosts.
+    assert preview['role_counts'].get('Docker') == 2
     assert len(hosts) == 5
 
 
 def test_slot_rows_add_capacity_on_top_of_declared_cards() -> None:
+    """Slots are additive: 2 slots plus 2 declared vulnerabilities is 4 hosts."""
     with_slots = _preview_for(
         "<item selected='VulnerabilitySlot' v_metric='Count' v_count='2'/>", vuln_count=2
     )
     without_slots = _preview_for('', vuln_count=2)
     assert len(without_slots['hosts']) == 2
-    # The two slot rows are additional, not a replacement.
     assert len(with_slots['hosts']) == 4
     assert with_slots['role_counts'].get('Docker') == 2
     assert with_slots['role_counts'].get(VULNERABILITY_SLOT_ROLE) == 2
