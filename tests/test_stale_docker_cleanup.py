@@ -1,0 +1,123 @@
+"""Leftover containers are cleared before an execute, and only the right ones.
+
+Every execute leaves its containers behind once the CORE session goes away. The
+next run's conflict check then finds those names taken and resolves it by
+deleting *images*, forcing a rebuild of work already done -- one observed run
+removed six images to reclaim five container names.
+
+Cleanup is deliberately narrow: Compose has to label a container as belonging to
+a CORE or ScenarioForge project, and it has to not be running.
+"""
+
+from __future__ import annotations
+
+import subprocess
+
+import pytest
+
+from scenarioforge.utils import vuln_process
+
+
+class _Recorder:
+    """Stands in for docker, recording what would be removed."""
+
+    def __init__(self, containers):
+        self.containers = containers          # name -> (state, config_files)
+        self.removed = []
+
+    def __call__(self, argv, **kwargs):
+        if argv[:3] == ['docker', 'ps', '-a']:
+            lines = [f'{n}\t{v[0]}' for n, v in self.containers.items()]
+            return subprocess.CompletedProcess(argv, 0, stdout='\n'.join(lines), stderr='')
+        if argv[:2] == ['docker', 'inspect']:
+            name = argv[2]
+            marker = self.containers.get(name, ('', ''))[1]
+            return subprocess.CompletedProcess(argv, 0, stdout=f'{marker}|{marker}', stderr='')
+        if argv[:3] == ['docker', 'rm', '-f']:
+            self.removed.append(argv[3])
+            return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+        raise AssertionError(f'unexpected command: {argv}')
+
+
+@pytest.fixture
+def docker(monkeypatch):
+    def _install(containers):
+        rec = _Recorder(containers)
+        monkeypatch.setattr(vuln_process, '__name__', vuln_process.__name__)
+        monkeypatch.setattr(subprocess, 'run', rec)
+        import shutil
+        monkeypatch.setattr(shutil, 'which', lambda _n: '/usr/bin/docker')
+        return rec
+    return _install
+
+
+def test_removes_leftover_core_and_scenarioforge_containers(docker):
+    rec = docker({
+        'core-1-20-docker-15-inject_copy-1': ('created', '/tmp/pycore.1/docker-15.conf/docker-compose.yml'),
+        'docker-11': ('created', '/tmp/vulns/.compose-projects/docker-11/docker-compose.yml'),
+        'docker-12conf-node-1': ('exited', '/tmp/pycore.1/docker-12.conf/docker-compose.yml'),
+    })
+    result = vuln_process.remove_stale_scenarioforge_containers()
+
+    assert sorted(rec.removed) == [
+        'core-1-20-docker-15-inject_copy-1', 'docker-11', 'docker-12conf-node-1',
+    ]
+    assert sorted(result['removed']) == sorted(rec.removed)
+
+
+def test_never_touches_a_running_container(docker):
+    """A live scenario's containers are running; a concurrent run must survive."""
+    rec = docker({
+        'docker-11': ('running', '/tmp/vulns/.compose-projects/docker-11/docker-compose.yml'),
+        'docker-12': ('created', '/tmp/vulns/.compose-projects/docker-12/docker-compose.yml'),
+    })
+    result = vuln_process.remove_stale_scenarioforge_containers()
+
+    assert rec.removed == ['docker-12']
+    assert 'docker-11' in result['skipped_running']
+
+
+def test_never_touches_an_unrelated_container(docker):
+    """Someone else's stopped container carries no ScenarioForge project label."""
+    rec = docker({
+        'my-postgres': ('exited', '/home/me/projects/db/docker-compose.yml'),
+        'jenkins': ('created', ''),
+        'docker-11': ('created', '/tmp/vulns/.compose-projects/docker-11/docker-compose.yml'),
+    })
+    vuln_process.remove_stale_scenarioforge_containers()
+
+    assert rec.removed == ['docker-11']
+
+
+def test_a_removal_failure_is_reported_not_raised(docker):
+    rec = docker({'docker-11': ('created', '/tmp/vulns/x/docker-compose.yml')})
+
+    def _failing(argv, **kwargs):
+        if argv[:3] == ['docker', 'rm', '-f']:
+            return subprocess.CompletedProcess(argv, 1, stdout='device or resource busy', stderr='')
+        return _Recorder.__call__(rec, argv, **kwargs)
+
+    subprocess.run = _failing
+    result = vuln_process.remove_stale_scenarioforge_containers()
+
+    assert result['removed'] == []
+    assert 'docker-11' in result['errors']
+
+
+def test_compose_failure_reason_is_extracted_for_the_operator():
+    """`rc=1` alone is unactionable; the cause is in the captured output."""
+    from scenarioforge import cli
+
+    meta = {'docker_nodes_start_recovery_attempts': [
+        {'ok': False, 'error': 'docker compose up rc=1',
+         'output': 'Image docker-11-node Building \nopen /home/corevm/.docker/buildx/.lock: permission denied'},
+    ]}
+    reason = cli._first_docker_restart_failure_reason(meta)
+    assert 'permission denied' in reason
+
+
+def test_no_reason_when_every_restart_succeeded():
+    from scenarioforge import cli
+
+    meta = {'docker_nodes_start_recovery_attempts': [{'ok': True, 'output': 'Started'}]}
+    assert cli._first_docker_restart_failure_reason(meta) == ''

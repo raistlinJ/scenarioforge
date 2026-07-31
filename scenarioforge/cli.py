@@ -80,6 +80,7 @@ from .utils.vuln_process import (
     resolve_vulnerability_catalog_entry,
     detect_docker_conflicts_for_compose_files,
     remove_docker_conflicts,
+    remove_stale_scenarioforge_containers,
 )
 
 
@@ -1077,6 +1078,22 @@ def _restart_not_running_docker_nodes(
                     compose_path,
                     result.get('error'),
                 )
+                # The return code alone says nothing about why. Compose already
+                # captured its output; without printing it a build failure --
+                # a missing image, a permission problem on the buildx lock --
+                # reaches the operator as a bare "rc=1".
+                try:
+                    output_tail = str(result.get('output') or '').strip()
+                    if output_tail:
+                        kept = [ln for ln in output_tail.splitlines() if ln.strip()][-12:]
+                        if kept:
+                            logging.warning(
+                                "docker compose output (node=%s):\n%s",
+                                name,
+                                '\n'.join(kept),
+                            )
+                except Exception:
+                    pass
         except Exception:
             pass
     return attempts
@@ -1127,6 +1144,37 @@ def _ensure_docker_nodes_running(
     if any(bool(item.get('ok')) for item in restart_attempts):
         docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
     return docker_runtime
+
+
+def _first_docker_restart_failure_reason(generation_meta: Any) -> str:
+    """Pull the most actionable line out of a failed compose restart.
+
+    `docker compose up` reports its cause on the last non-empty output lines;
+    the return code carries none of it.
+    """
+    try:
+        if not isinstance(generation_meta, dict):
+            return ''
+        attempts = generation_meta.get('docker_nodes_start_recovery_attempts')
+        if not isinstance(attempts, list):
+            return ''
+        for item in attempts:
+            if not isinstance(item, dict) or item.get('ok'):
+                continue
+            output = str(item.get('output') or '').strip()
+            lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+            for line in reversed(lines):
+                lowered = line.lower()
+                if 'permission denied' in lowered or 'error' in lowered or 'failed' in lowered:
+                    return line[:300]
+            if lines:
+                return lines[-1][:300]
+            error_text = str(item.get('error') or '').strip()
+            if error_text:
+                return error_text[:300]
+        return ''
+    except Exception:
+        return ''
 
 
 def _wait_for_docker_running(
@@ -7200,6 +7248,28 @@ def main():
                     docker_names = []
                 docker_names = sorted(set([n for n in docker_names if n]))
                 if docker_names:
+                    # Clear leftovers from earlier runs before looking for
+                    # conflicts. Those containers hold the names this run wants,
+                    # so leaving them turns every execute into a conflict that
+                    # gets resolved by deleting *images* -- forcing a rebuild of
+                    # work already done. Only non-running CORE/ScenarioForge
+                    # containers qualify; see remove_stale_scenarioforge_containers.
+                    if str(os.getenv('CORETG_SKIP_STALE_DOCKER_CLEANUP') or '').strip().lower() not in {'1', 'true', 'yes', 'on'}:
+                        try:
+                            stale = remove_stale_scenarioforge_containers()
+                            removed_stale = stale.get('removed') or []
+                            if removed_stale:
+                                logging.info(
+                                    "Removed %d stale ScenarioForge container(s) from previous runs: %s",
+                                    len(removed_stale),
+                                    ', '.join(sorted(removed_stale)[:12])
+                                    + ('…' if len(removed_stale) > 12 else ''),
+                                )
+                            for nm, err in (stale.get('errors') or {}).items():
+                                logging.warning('Could not remove stale container %s: %s', nm, err)
+                        except Exception as _stale_exc:
+                            logging.debug('Stale container cleanup skipped: %s', _stale_exc)
+
                     compose_paths = [_docker_node_compose_path(nm) for nm in docker_names]
                     compose_paths = [p for p in compose_paths if p and os.path.exists(p)]
                     # Detect conflicts from compose files (if present) AND from existing containers
@@ -7350,6 +7420,12 @@ def main():
                     start_ok = False
                     configuration_state_pending_docker_validation = False
                     start_error = f"Docker node(s) not running: {', '.join(docker_runtime.get('not_running') or [])}"
+                    # Attach why the restart failed. The node list alone says
+                    # which containers are down but nothing about the cause,
+                    # which is what the operator actually has to act on.
+                    reason = _first_docker_restart_failure_reason(generation_meta)
+                    if reason:
+                        start_error = f"{start_error} ({reason})"
 
             # Install default routes from the host once interfaces exist. The
             # in-node DockerDefaultRoute service needs `ip`, NET_ADMIN, a shell
