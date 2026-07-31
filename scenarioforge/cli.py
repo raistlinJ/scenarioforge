@@ -1146,6 +1146,52 @@ def _ensure_docker_nodes_running(
     return docker_runtime
 
 
+def _repair_docker_home_permissions() -> str:
+    """Give the invoking user back its own ~/.docker; return what was fixed.
+
+    Mirrors the Web UI's SSH preflight so a CLI-only run gets the same repair.
+    Only files not already owned by this user are touched, and only below this
+    user's own ~/.docker. Empty string when there was nothing to do, so a clean
+    host stays quiet.
+    """
+    try:
+        import getpass
+        import pwd
+
+        user = getpass.getuser()
+        home = pwd.getpwnam(user).pw_dir
+    except Exception:
+        return ''
+    docker_home = os.path.join(str(home or ''), '.docker')
+    if not docker_home or not os.path.isdir(docker_home):
+        return ''
+    try:
+        uid = os.getuid()
+    except Exception:
+        return ''
+
+    bad: list[str] = []
+    for root, dirnames, filenames in os.walk(docker_home):
+        for name in list(dirnames) + list(filenames):
+            path = os.path.join(root, name)
+            try:
+                if os.lstat(path).st_uid != uid:
+                    bad.append(path)
+            except Exception:
+                continue
+    if not bad:
+        return ''
+    try:
+        _run_local_cmd(
+            ['chown', '-R', f'{user}:{user}', docker_home],
+            timeout_s=30.0,
+            allow_sudo_retry=True,
+        )
+    except Exception:
+        return ''
+    return f'repaired {len(bad)} path(s) under {docker_home}'
+
+
 def _first_docker_restart_failure_reason(generation_meta: Any) -> str:
     """Pull the most actionable line out of a failed compose restart.
 
@@ -6320,6 +6366,18 @@ def main():
         pass
     # If any routing item carries abs_count>0, we should build a segmented topology even if density==0
     has_routing_counts = any(getattr(ri, 'abs_count', 0) and int(getattr(ri, 'abs_count', 0)) > 0 for ri in (routing_items or []))
+    # The Web UI repairs this over SSH during its own preflight, but a CLI-only
+    # run never passes through that path and hits the same wall: a docker
+    # command once run as root leaves root-owned state in the invoking user's
+    # ~/.docker, and every later build fails on it with a bare rc=1.
+    if str(os.getenv('CORETG_REPAIR_DOCKER_HOME_PERMS') or '').strip().lower() not in {'0', 'false', 'no', 'off'}:
+        try:
+            _repaired = _repair_docker_home_permissions()
+            if _repaired:
+                logging.info('Docker config permissions: %s', _repaired)
+        except Exception as _perm_exc:
+            logging.debug('Docker config permission repair skipped: %s', _perm_exc)
+
     # Clear leftovers before anything brings compose up. Building the topology
     # is what first runs `docker compose up`, so a container still holding a
     # node's name aborts the run there -- long before the conflict check that

@@ -99,6 +99,23 @@ management endpoint and should not be inferred from a gRPC address. At execute
 time the Web UI synchronizes its validated target into the saved XML before
 invoking the CLI.
 
+**VM mode ignores the recorded transport.** A deployment running with
+`CORETG_WEBUI_MODE=vm` targets one CORE VM, declared by `CORE_HOST`,
+`CORE_PORT`, and `CORE_SSH_*` in `.scenarioforge.env`. The `host`, `port`,
+`ssh_*`, `venv_bin` and `core_secret_id` attributes recorded in a scenario are
+therefore dropped when that scenario is loaded, and the environment supplies
+them instead. Everything else in the element — `vm_key`, `vm_name`,
+`cached_host_interfaces` and the rest — is kept.
+
+This matters because a scenario records the endpoint it was last *saved*
+against. Without this, a scenario saved against a previous CORE VM keeps
+dragging every connection back to it however the environment has since changed,
+and the resulting failure names the gRPC target (a loopback address reached
+*through* the SSH hop) rather than the host actually being dialled. Editing a
+scenario's CORE connection consequently has no effect while in VM mode; change
+`.scenarioforge.env` instead. Native mode is unaffected and still honours the
+recorded transport.
+
 #### `<HardwareInLoop>`
 
 This optional element is emitted when HITL is enabled or when per-scenario
