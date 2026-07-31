@@ -4983,27 +4983,13 @@
           if (uniq.length) firstIp = uniq.join(', ');
         } catch (e) { }
         if (!firstIp && firstName && _hintNodeIpMap && _hintNodeIpMap.get(firstName)) firstIp = _hintNodeIpMap.get(firstName);
-        const firstHintDetails = [];
-        try {
-          const genId = (faFirst && (faFirst.id || faFirst.generator_id)) ? String(faFirst.id || faFirst.generator_id).trim() : '';
-          const genName = (faFirst && faFirst.name) ? String(faFirst.name).trim() : '';
-          const genDisplay = (genName && genName !== genId) ? (genId ? (genId + ' | ' + genName) : genName) : genId;
-          if (genDisplay) firstHintDetails.push('generator: ' + genDisplay);
-        } catch (e) { }
-        try {
-          const genType = (faFirst && faFirst.type) ? String(faFirst.type).trim() : '';
-          if (genType) firstHintDetails.push('type: ' + genType);
-        } catch (e) { }
-        try {
-          let vulnNames = (faFirst && Array.isArray(faFirst.vulnerabilities)) ? faFirst.vulnerabilities.map(String).map(s => s.trim()).filter(Boolean) : [];
-          if (!vulnNames.length && firstNode && Array.isArray(firstNode.vulnerabilities)) {
-            vulnNames = firstNode.vulnerabilities.map(String).map(s => s.trim()).filter(Boolean);
-          }
-          if (vulnNames.length) firstHintDetails.push('target: ' + Array.from(new Set(vulnNames)).join(', '));
-        } catch (e) { }
+        // A start hint says where to begin, nothing more. The generator id, its
+        // display name, the assignment type and the vulnerability name are all
+        // authoring detail that describes how the challenge is built -- naming
+        // them here hands over the answer before anyone has looked at the box.
         if (firstName) {
           const suffix = firstIp ? (' @ ' + firstIp) : '';
-          initHints = [`Start: ${firstName}${suffix}${firstHintDetails.length ? ('; ' + firstHintDetails.join('; ')) : ''}`];
+          initHints = [`Start: ${firstName}${suffix}`];
         } else {
           initHints = [];
         }
@@ -5034,15 +5020,11 @@
             const nodeName = String((node && node.name) || assignment.node_name || assignment.node_id || '').trim();
             if (!nodeName) return;
             const nodeIp = nodeIpForStart(node) || (_hintNodeIpMap && _hintNodeIpMap.get(nodeName)) || '';
-            const details = [];
-            const genId = String(assignment.id || assignment.generator_id || '').trim();
-            const genName = String(assignment.name || '').trim();
-            const genDisplay = (genName && genName !== genId) ? (genId ? (genId + ' | ' + genName) : genName) : genId;
-            if (genDisplay) details.push('generator: ' + genDisplay);
-            if (assignment.type) details.push('type: ' + String(assignment.type).trim());
+            // Same rule as the primary start hint above: where to begin, not
+            // which generator builds the challenge.
             const prefix = String(assignment.chain_supplied_requirement_label || ('Seq ' + (entry.assignmentIndex + 1) + ' required')).trim();
             const suffix = nodeIp ? (' @ ' + nodeIp) : '';
-            const text = `${prefix} start: ${nodeName}${suffix}${details.length ? ('; ' + details.join('; ')) : ''}`;
+            const text = `${prefix} start: ${nodeName}${suffix}`;
             if (text && !initHints.includes(text)) initHints.push(text);
           });
         } catch (e) { }
