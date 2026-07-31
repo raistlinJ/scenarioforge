@@ -2480,6 +2480,8 @@
           if (status && composeStatusEl && opts.composeLog !== false) composeStatusEl.textContent = status;
           if (status && opts.loadingLog && loadingTextEl) loadingTextEl.textContent = status;
         });
+        // Any new phase line means the request it covers is alive, not stalled.
+        if (newLines.length) touchFlowActivitySignal(opts.activity);
         if (newLines.length && opts.composeLog !== false) appendComposeLines(newLines);
         if (newLines.length && opts.loadingLog) newLines.forEach((line) => appendLoadingLog(line));
         if (newLines.length && typeof opts.onLines === 'function') {
@@ -3222,9 +3224,28 @@
     return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
   }
 
+  // Shared "the server is still working" marker. The long Flow endpoints stream
+  // phase lines to /api/flag-sequencing/flow_progress while they run, so the
+  // browser can tell a slow request from a stalled one. Pass the same object to
+  // startFlowProgressPoll and to the request it covers.
+  // Set for the duration of a sequence-preview request so postSequencePreviewPlan
+  // can attach it without threading the object through every caller.
+  let sequenceActivitySignal = null;
+
+  function createFlowActivitySignal() {
+    return { lastActivityAt: Date.now() };
+  }
+
+  function touchFlowActivitySignal(activity) {
+    try {
+      if (activity && typeof activity === 'object') activity.lastActivityAt = Date.now();
+    } catch (e) { }
+  }
+
   async function fetchWithTransientRetry(url, init, opts) {
     opts = opts || {};
     const timeoutMs = Number.isFinite(+opts.timeoutMs) ? (+opts.timeoutMs) : 0;
+    const activity = (opts.activity && typeof opts.activity === 'object') ? opts.activity : null;
     const maxRetries = Math.max(0, Math.min(5, parseInt(String(opts.networkRetries || 0), 10) || 0));
     const baseDelayMs = Math.max(0, Math.min(5000, parseInt(String(opts.retryDelayMs || 350), 10) || 350));
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -3232,15 +3253,32 @@
       const requestInit = Object.assign({}, init || {});
       if (controller) requestInit.signal = controller.signal;
       let timerId = null;
+      let intervalId = null;
       if (controller && timeoutMs > 0) {
-        timerId = setTimeout(() => { try { controller.abort(); } catch (e) { } }, timeoutMs);
+        if (activity) {
+          // Budget the silence, not the duration. Chain length drives how long
+          // this legitimately takes, so a fixed deadline either cuts off real
+          // work or hides a stall behind a number that is still counting down.
+          touchFlowActivitySignal(activity);
+          intervalId = setInterval(() => {
+            const idleMs = Date.now() - (Number(activity.lastActivityAt) || 0);
+            if (idleMs >= timeoutMs) {
+              try { controller.abort(); } catch (e) { }
+            }
+          }, 1000);
+        } else {
+          timerId = setTimeout(() => { try { controller.abort(); } catch (e) { } }, timeoutMs);
+        }
       }
       try {
         return await fetch(url, requestInit);
       } catch (e) {
         if (controller && e && e.name === 'AbortError') {
-          const err = new Error('Request timed out.');
+          const err = new Error(activity
+            ? `No progress from the server for ${Math.round(timeoutMs / 1000)}s.`
+            : 'Request timed out.');
           err.isTimeout = true;
+          err.isStall = !!activity;
           throw err;
         }
         if (attempt < maxRetries && isTransientFetchError(e)) {
@@ -3253,6 +3291,7 @@
         throw e;
       } finally {
         if (timerId) clearTimeout(timerId);
+        if (intervalId) clearInterval(intervalId);
       }
     }
     throw new Error('Network request failed.');
@@ -3308,6 +3347,12 @@
     const requestedTimeoutMs = Number(requestOpts.timeoutMs);
     if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs < timeoutFloorMs) {
       requestOpts.timeoutMs = timeoutFloorMs;
+    }
+    // With an activity signal the configured budget covers silence rather than
+    // total runtime, so a long-but-progressing sequence is no longer cut off at
+    // the floor, and a genuine stall is reported as one.
+    if (!requestOpts.activity && sequenceActivitySignal) {
+      requestOpts.activity = sequenceActivitySignal;
     }
     if (!Number.isFinite(+requestOpts.networkRetries)) {
       requestOpts.networkRetries = 2;
@@ -11170,8 +11215,9 @@
             appendLoadingLog(`Sequencing attempt ${retryIndex + 1}`);
             const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
             let stopSequenceProgressPoll = null;
+            sequenceActivitySignal = createFlowActivitySignal();
             try {
-              stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
+              stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false, activity: sequenceActivitySignal });
               data = sequenceResponseWithRefreshPayload(await postSequencePreviewPlan({
                 scenario,
                 length,
@@ -11427,6 +11473,7 @@
           let resolveProgressLines = [];
           let resolveStartedAt = Date.now();
           let resolveTimeoutSeconds = 0;
+          let resolveActivitySignal = null;
           try {
             setStatus('Resolving values…', false);
             showLoading('Resolving values…');
@@ -11443,8 +11490,10 @@
             resolveTimeoutSeconds = Math.min(executeTimeoutCapS, Math.max(600, (chain_ids.length * 150) + 180));
             resolveProgressId = `resolve-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
             resolveStartedAt = Date.now();
+            resolveActivitySignal = createFlowActivitySignal();
             stopProgressPoll = startFlowProgressPoll({
               progressId: resolveProgressId,
+              activity: resolveActivitySignal,
               loadingLog: true,
               onLines: (lines) => {
                 try {
@@ -11474,6 +11523,7 @@
               },
               {
                 timeoutMs: (resolveTimeoutSeconds * 1000) + 30000,
+                activity: resolveActivitySignal,
                 networkRetries: 2,
                 retryDelayMs: 350,
                 throwOnHttpError: true,
@@ -11690,8 +11740,9 @@
               const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
               let stopSequenceProgressPoll = null;
               let data2 = null;
+              sequenceActivitySignal = createFlowActivitySignal();
               try {
-                stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });
+                stopSequenceProgressPoll = startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false, activity: sequenceActivitySignal });
                 data2 = sequenceResponseWithRefreshPayload(await postSequencePreviewPlan({
                   scenario,
                   length,
