@@ -43,6 +43,13 @@ else:  # pragma: no cover - fallback path executed in CI without CORE
     client = None  # type: ignore
     CORE_GRPC_AVAILABLE = False
 from .types import NodeInfo
+from .planning.node_plan import (
+    ALLOWED_HOST_ROLES,
+    HOST_ROLE_DISPLAY_ORDER,
+    is_docker_backed_role,
+)
+
+_ALLOWED_ROLES_TEXT = ', '.join(HOST_ROLE_DISPLAY_ORDER)
 from .parsers.node_info import parse_node_info
 from .parsers.routing import parse_routing_info
 from .parsers.traffic import parse_traffic_info
@@ -1555,10 +1562,16 @@ def _inject_source_for_precheck(inject_value: Any) -> str:
 
 
 def _plan_supports_flow(role_counts: Any, vulnerabilities_plan: Any) -> bool:
-    try:
-        docker_hosts = int((role_counts or {}).get('Docker') or 0)
-    except Exception:
-        docker_hosts = 0
+    docker_hosts = 0
+    for role, count in (role_counts or {}).items():
+        # Challenge slots are Docker-backed, so they carry a Flow-capable plan
+        # even when no plain Docker row was declared.
+        if not is_docker_backed_role(role):
+            continue
+        try:
+            docker_hosts += max(0, int(count or 0))
+        except Exception:
+            continue
     vuln_targets = 0
     if isinstance(vulnerabilities_plan, dict):
         for value in vulnerabilities_plan.values():
@@ -4081,14 +4094,14 @@ def _run_new_phase(args: Any) -> int:
                 count_value = int(str(count_raw or '').strip())
             except Exception:
                 count_value = -1
-            if role_name not in {'Server', 'Workstation', 'PC', 'Docker'} or count_value < 0:
+            if role_name not in ALLOWED_HOST_ROLES or count_value < 0:
                 _emit_phase_json(
                     {
                         'ok': False,
                         'phase': 'new',
                         'xml_path': xml_path,
                         'scenario': scenario_name,
-                        'error': f'Invalid --seed-role value: {text!r}. Allowed roles are Server, Workstation, PC, Docker with non-negative counts.',
+                        'error': f'Invalid --seed-role value: {text!r}. Allowed roles are {_ALLOWED_ROLES_TEXT} with non-negative counts.',
                     },
                     output_path=args.plan_output,
                     stream=sys.stderr,
@@ -5077,7 +5090,7 @@ def _add_cli_new_args(container: Any) -> None:
     defaults = _cli_new_argument_defaults()
     container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
     container.add_argument('--density-count', type=int, default=defaults['density_count'], help='Scenario-level Count for Density base host pool for density-based planning in the new phase')
-    container.add_argument('--seed-role', dest='seed_roles', action='append', help='Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable)')
+    container.add_argument('--seed-role', dest='seed_roles', action='append', help=f'Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable). ROLE is one of: {_ALLOWED_ROLES_TEXT}. VulnerabilitySlot/FlagGenSlot reserve Docker-backed capacity for that challenge kind only')
     container.add_argument('--seed-routing', dest='seed_routing_specs', action='append', help='Seed a Routing row for the new phase (repeatable; density rows are equal-weighted, for example OSPFv2, BGP=density, or OSPFv2=3)')
     container.add_argument('--seed-routing-density', type=float, default=defaults['seed_routing_density'], help='Routing density to use with --seed-routing')
     container.add_argument('--seed-service', dest='seed_service_specs', action='append', help='Seed a Services row for the new phase (repeatable; density rows are equal-weighted, for example SSH, HTTP=density, or SSH=4)')

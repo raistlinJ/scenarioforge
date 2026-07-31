@@ -180,6 +180,13 @@ IMPORTANT — how docker nodes work:
 - Difficulty comes from: longer chains, harder routing, more diverse services
 - There are NO decoy nodes — every docker node is part of the chain
 
+Challenge slots (optional, for pinning what a host may run):
+- A plain docker node accepts either a vulnerability or a flag-node-generator
+- vuln_slot_count reserves hosts that accept ONLY vulnerabilities
+- flag_gen_slot_count reserves hosts that accept ONLY flag-node-generators
+- Slots are filled before extra docker hosts are added, so they do not grow the
+  topology; leave both at 0 unless the design calls for pinning placement
+
 Available options:
 - Routing protocols: RIP (easy) < RIPNG < OSPFv2 < OSPFv3 < BGP (hard)
 - Services (ONLY these three): SSH, HTTP, DHCPClient
@@ -195,6 +202,8 @@ Respond ONLY with a JSON object, no markdown:
   "traffic": <list from: TCP, UDP>,
   "vuln_count": <int, 1 to chain_length>,
   "flag_node_generator_count": <int, 1-2>,
+  "vuln_slot_count": <int, 0 to vuln_count>,
+  "flag_gen_slot_count": <int, 0 to flag_node_generator_count>,
   "reasoning": "<one sentence describing what makes this challenge unique>"
 }}"""
 
@@ -251,6 +260,15 @@ Respond ONLY with a JSON object, no markdown:
     params["vuln_count"] = max(1, min(
         params["docker_count"],
         int(params.get("vuln_count", params["docker_count"]))
+    ))
+    # Slots may not exceed the demand they are meant to absorb; an excess slot
+    # would just materialize as an empty host.
+    params["vuln_slot_count"] = max(0, min(
+        params["vuln_count"], int(params.get("vuln_slot_count", 0) or 0)
+    ))
+    params["flag_gen_slot_count"] = max(0, min(
+        int(params.get("flag_node_generator_count", 1) or 0),
+        int(params.get("flag_gen_slot_count", 0) or 0),
     ))
     params["difficulty"] = difficulty
 
@@ -386,6 +404,12 @@ def generate_one_challenge(iteration, difficulty, override_name=None, gen_model_
 
         if params.get("server_count", 0) > 0:
             cmd_new.extend(["--seed-role", f"Server={params['server_count']}"])
+
+        if params.get("vuln_slot_count", 0) > 0:
+            cmd_new.extend(["--seed-role", f"VulnerabilitySlot={params['vuln_slot_count']}"])
+
+        if params.get("flag_gen_slot_count", 0) > 0:
+            cmd_new.extend(["--seed-role", f"FlagGenSlot={params['flag_gen_slot_count']}"])
 
         if params.get("routing_protocol"):
             cmd_new.extend(["--seed-routing", f"{params['routing_protocol']}=1"])

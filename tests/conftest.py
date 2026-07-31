@@ -1,10 +1,33 @@
+import gc
 import sys
 from pathlib import Path
+
+import pytest
 
 # Ensure repository root is on sys.path so imports like 'webapp.app_backend' work
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _collect_abandoned_stream_generators():
+    """Close abandoned streaming responses in the test that created them.
+
+    Routes that stream with `stream_with_context` build a generator holding a
+    request/app context. When a test asserts before draining that stream, the
+    generator is abandoned and only closed at an arbitrary later garbage
+    collection -- pushing its teardown, and the context it leaves behind, into
+    an unrelated test.
+
+    Production code branches on `has_app_context()` (for example
+    `_stop_vuln_test_meta`, which returns a bare dict outside a request context
+    and a `(payload, status)` tuple inside one), so a stray context silently
+    changes what a later test observes. Collecting here pins that cleanup to the
+    test responsible, which makes the suite independent of allocation timing.
+    """
+    yield
+    gc.collect()
 
 # Provide a minimal stub for missing CORE gRPC dependency in testing environments
 try:  # only create if real package absent

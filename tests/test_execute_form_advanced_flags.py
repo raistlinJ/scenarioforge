@@ -3,41 +3,74 @@ from pathlib import Path
 
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "index.html"
 DOCK_PARTIAL_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "partials" / "dock.html"
+FULL_PREVIEW_SCRIPTS_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "full_preview_scripts.html"
 
 
-def test_build_run_form_data_includes_advanced_flags() -> None:
+def test_preview_execute_offers_only_conflict_cleanup() -> None:
+    """Execution moved to the preview page and offers one cleanup option.
+
+    The topology page used to host an execute confirm dialog whose Advanced
+    section carried five cleanup toggles (`executeAdvDeepCleanupAfterRun`,
+    `executeAdvDockerNukeAll`, ...). That dialog was replaced by the preview-page
+    execute flow, which deliberately exposes only `docker_remove_conflicts` --
+    and only as a retry after a container-name collision, not as a default.
+
+    This test previously asserted the retired checkboxes existed and were
+    pre-checked. It now pins the replacement contract, and that the retired
+    destructive toggles do not quietly come back.
+    """
+    scripts_text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    assert "if (o.dockerRemoveConflicts) { form.append('docker_remove_conflicts', '1'); }" in scripts_text
+    # First attempt never force-removes; only the post-collision retry opts in.
+    assert "buildExecuteForm({ dockerRemoveConflicts: false })" in scripts_text
+    assert "buildExecuteForm({ dockerRemoveConflicts: true })" in scripts_text
+
+    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    for retired in (
+        'id="executeAdvDeepCleanupAfterRun"',
+        'id="executeAdvDockerNukeAll"',
+        'id="executeAdvDockerCleanupBeforeRun"',
+    ):
+        assert retired not in text, f"Retired execute-dialog cleanup control reappeared: {retired}"
+
+
+def test_topology_page_carries_no_execute_machinery() -> None:
+    """The topology page does not execute; that lives on the preview page.
+
+    index.html used to host a full execute pipeline -- a confirm dialog, a run
+    poller, progress/summary modals, flow-artifact and custom-service preflights,
+    and a window.confirm() fallback for when the dialog markup was missing. All
+    of it became unreachable once the dialog markup and its triggers were
+    removed, and ~3.6k lines of it were deleted. This pins that it stays gone,
+    so the dead pipeline cannot be resurrected by a partial revert.
+    """
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
-    expected_lines = [
-        "if (adv && adv.fixDockerDaemon) form.append('adv_fix_docker_daemon', '1');",
-        "if (adv && adv.runCoreCleanup) form.append('adv_run_core_cleanup', '1');",
-        "if (adv && adv.deepCleanupAfterRun) form.append('adv_deep_cleanup_after_run', '1');",
-        "if (adv && adv.restartCoreDaemon) form.append('adv_restart_core_daemon', '1');",
-        "if (adv && adv.startCoreDaemon) form.append('adv_start_core_daemon', '1');",
-        "if (adv && adv.autoKillSessions) form.append('adv_auto_kill_sessions', '1');",
-    ]
+    for symbol in (
+        "function runSyncWithModal",
+        "function promptExecuteConfirmation",
+        "function runWithSeedBuild",
+        "function setupPreviewModalExecute",
+        "function ensureExecuteConfirmElements",
+        "function getExecuteConfirmSelections",
+        "function ensureExecuteFlowArtifactsReady",
+        "function ensureExecuteCustomServicesReady",
+        "function submitRunCliRequest",
+        "function runAsync",
+        "function prepareRunCli",
+        "function cancelRun",
+        "function buildRunFormData",
+        "function getRunCoreConfig",
+        "function pushRepoToRemote",
+        "function waitForRepoFinalize",
+        "function registerExecuteCancelHandler",
+    ):
+        assert symbol not in text, f"Retired execute machinery is back in index.html: {symbol}"
 
-    missing = [line for line in expected_lines if line not in text]
-    assert not missing, "Missing execute advanced FormData mapping lines: " + "; ".join(missing)
-
-    forbidden_lines = [
-        "if (adv && adv.checkCoreVersion) form.append('adv_check_core_version', '1');",
-    ]
-
-    present = [line for line in forbidden_lines if line in text]
-    assert not present, "Unexpected CORE version-check FormData mapping lines still present: " + "; ".join(present)
-
-
-def test_execute_dialog_defaults_enable_deep_and_all_container_cleanup() -> None:
-    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        '<input class="form-check-input" type="checkbox" id="executeAdvDeepCleanupAfterRun" checked>',
-        '<input class="form-check-input" type="checkbox" id="executeAdvDockerNukeAll" checked>',
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing enabled execute cleanup defaults: " + "; ".join(missing)
+    # The triggers are gone too, so nothing can re-enter the pipeline.
+    for trigger in ('id="fpExecuteBtn"', 'data-action="preview-plan"', 'id="executeConfirmModal"'):
+        assert trigger not in text, f"Retired execute trigger reappeared: {trigger}"
 
 
 def test_execute_dialog_omits_start_core_daemon_checkbox() -> None:
@@ -52,70 +85,6 @@ def test_execute_dialog_omits_start_core_daemon_checkbox() -> None:
     assert not present, "Execute dialog should prompt for stopped core-daemon instead of showing a start checkbox: " + "; ".join(present)
 
     assert "Would you like ScenarioForge to try to start core-daemon now?" in text
-
-
-def test_execute_preflights_flow_artifacts_and_regenerates_when_safe() -> None:
-    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        "const EXECUTE_FLOW_PREFLIGHT_CACHE_PREFIX = 'coretg_execute_flow_preflight_v1::';",
-        "function buildExecuteFlowPreflightCacheKey({ scenarioName, xmlPath } = {}) {",
-        "const cached = readExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath });",
-        "log('Using recent Flow challenge file check.');",
-        "async function ensureExecuteFlowArtifactsReady",
-        "'/api/flag-sequencing/revalidate_flow'",
-        "'/api/flag-sequencing/regenerate_flow_artifacts'",
-        "regeneration_would_preserve_resolves === false",
-        "Regenerate & Continue",
-        "const flowReady = await ensureExecuteFlowArtifactsReady({",
-        "if (!flowReady) {",
-        "return false;",
-        "writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, check);",
-        "writeExecuteFlowPreflightCache({ scenarioName: scenario, xmlPath: planPath }, verify);",
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing execute Flow artifact preflight wiring: " + "; ".join(missing)
-
-    has_unsaved_block = text.split("function hasUnsavedChanges()", 1)[1].split("function showUnsavedChangesModal", 1)[0]
-    assert "await window.alertWithModal" not in has_unsaved_block
-    assert "Flow preflight exception" not in has_unsaved_block
-
-    preferred_scenario_block = text.split("const resolvePreferredScenarioNameOnLoad = () =>", 1)[1].split("const preferredScenarioName", 1)[0]
-    assert "await window.alertWithModal" not in preferred_scenario_block
-    assert "Flow preflight exception" not in preferred_scenario_block
-
-    execute_preflight_block = text.split("const flowReady = await ensureExecuteFlowArtifactsReady({", 1)[1].split("appendExecuteDialogLog('Requesting remote CLI run…');", 1)[0]
-    assert "Flow preflight exception" in execute_preflight_block
-    assert "await window.alertWithModal('Flow Preflight Failed', detail, 'OK', 'danger');" in execute_preflight_block
-
-
-def test_execute_preflights_custom_services_and_prompts_before_run_request() -> None:
-    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
-
-    expected_snippets = [
-        "const EXECUTE_CUSTOM_SERVICES_CACHE_PREFIX = 'coretg_execute_custom_services_v1::';",
-        "function buildExecuteCustomServicesCacheKey({ scenarioName, coreConfig } = {}) {",
-        "const cached = readExecuteCustomServicesCache({ scenarioName, coreConfig: core });",
-        "log('Using recent custom CORE services check.');",
-        "async function ensureExecuteCustomServicesReady",
-        "'/core/custom_services/check'",
-        "Install Custom Services?",
-        "Install & Continue",
-        "on_core_machine/custom_services",
-        "const servicesReady = await ensureExecuteCustomServicesReady({",
-        "if (!servicesReady) {",
-        "return false;",
-        "writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, check);",
-        "writeExecuteCustomServicesCache({ scenarioName, coreConfig: core }, install);",
-    ]
-
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing execute custom services preflight wiring: " + "; ".join(missing)
-
-    services_preflight_idx = text.index("const servicesReady = await ensureExecuteCustomServicesReady({")
-    run_request_idx = text.index("appendExecuteDialogLog('Requesting remote CLI run…');")
-    assert services_preflight_idx < run_request_idx
 
 
 def test_dock_only_opens_from_manual_show_hide_controls() -> None:

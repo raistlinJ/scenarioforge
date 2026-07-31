@@ -246,7 +246,8 @@ def test_flow_sequence_hints_hide_unresolved_template_variables() -> None:
         "return 'generated credential';",
         "function _applyHintNodeTemplateVars(text, assignment)",
         "const FLOW_TEMPLATE_OPEN = '{' + '{';",
-        ": {};\n\n    const roLower = new Map();",
+        "const ro = hintOutputsForAssignment(assignment);\n",
+        "    const roLower = new Map();",
         "if (text.includes(FLOW_TEMPLATE_OPEN) || text.includes(FLOW_TEMPLATE_CLOSE)) return;",
         "if (Array.isArray(out[level]) && out[level].length) return;",
         ".map(x => _applyHintNodeTemplateVars(String(x || '').trim(), fa))",
@@ -548,14 +549,16 @@ def test_flow_hint_node_ip_rewrites_stale_ip_values() -> None:
     assert not missing, "Missing stale hint IP rewrite wiring in flow template: " + "; ".join(missing)
 
 
-def test_flow_initial_facts_start_hint_includes_first_step_context() -> None:
+def test_flow_initial_facts_start_hint_wiring() -> None:
+    """Initial Facts still surfaces supplied start values and their badges.
+
+    The start hint itself is deliberately bare -- node and address only; the
+    generator, type and vulnerability detail it used to append is pinned out by
+    tests/test_start_hints_omit_generator_details.py.
+    """
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
-        "const firstHintDetails = [];",
-        "firstHintDetails.push('generator: ' + genDisplay);",
-        "firstHintDetails.push('type: ' + genType);",
-        "firstHintDetails.push('target: ' + Array.from(new Set(vulnNames)).join(', '));",
         "startAssignmentEntries.forEach((entry) => {",
         "entry.assignment.chain_supplied_input_hints.map(x => String(x || '').trim()).filter(Boolean)",
         "sequenceRequiredByName.set(text,",
@@ -564,7 +567,7 @@ def test_flow_initial_facts_start_hint_includes_first_step_context() -> None:
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing enriched Initial Facts start hint wiring: " + "; ".join(missing)
+    assert not missing, "Missing Initial Facts start hint wiring: " + "; ".join(missing)
 
 
 def test_flow_visualization_groups_parallel_dependency_layers() -> None:
@@ -684,12 +687,16 @@ def test_flow_summary_card_reports_seed_slots_and_maximum_challenges() -> None:
     expected_snippets = [
         '<strong>Summary</strong>',
         'for="flowSeedInput">Flow seed</label>',
+        # Card-placed hosts and Node Information capacity are reported
+        # separately; see tests/test_flow_summary_challenge_buckets.py.
+        'Specified Flag-node-generators:',
+        'Specified vulnerabilities:',
         'Flag-node-generator slots:',
         'Vulnerability slots:',
         'Docker slots:',
         'Max challenges:',
         'function updateFlowSummary(stats)',
-        'const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;',
+        'const maxChallenges = specifiedFlagNodeGenerators + specifiedVulnerabilities',
         'updateFlowSummary(lastStats);',
     ]
 

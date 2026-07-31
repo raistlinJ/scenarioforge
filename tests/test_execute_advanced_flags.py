@@ -202,7 +202,15 @@ def test_run_cli_async_blocks_when_sessions_present_and_no_adv_kill(tmp_path, mo
     assert isinstance(payload.get('run_id'), str) and payload.get('run_id')
 
 
-def test_run_cli_async_prefers_latest_xml_for_scenario(tmp_path, monkeypatch):
+def test_run_cli_async_honors_supplied_xml_and_falls_back_to_latest(tmp_path, monkeypatch):
+    """A supplied XML wins; the latest is only a fallback when none is given.
+
+    This asserted the reverse -- that the latest XML should override a supplied
+    path. That was deliberately inverted for the execute path: picking a newer
+    same-named file here can pair a preview and facilitator guide from one save
+    with a run from another. Viewing prefers the latest XML (see
+    scenarios_pages), but executing honours what the caller selected.
+    """
     from webapp import app_backend as backend
 
     stale_xml = tmp_path / 'stale.xml'
@@ -248,7 +256,19 @@ def test_run_cli_async_prefers_latest_xml_for_scenario(tmp_path, monkeypatch):
     assert _CaptureThread.calls
     run_id, job_spec = _CaptureThread.calls[-1]['kwargs']['args']
     assert run_id
-    assert job_spec['xml_path'] == str(latest_xml)
+    # The posted path is used as-is, keeping the run paired with the preview and
+    # guide produced from that same save.
+    assert job_spec['xml_path'] == str(stale_xml)
+
+    # With no xml_path supplied, resolution falls back to the latest for the scenario.
+    _CaptureThread.calls.clear()
+    resp2 = client.post(
+        '/run_cli_async',
+        data={'scenario': 'Scenario One', 'flow_enabled': '0'},
+    )
+    assert resp2.status_code == 202
+    _run_id2, job_spec2 = _CaptureThread.calls[-1]['kwargs']['args']
+    assert job_spec2['xml_path'] == str(latest_xml)
 
 
 def test_run_cli_async_blocks_when_flow_artifact_paths_missing(tmp_path, monkeypatch):

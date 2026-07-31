@@ -35,8 +35,19 @@ def test_tabs_flow_state_helpers_use_window_state_not_localstorage() -> None:
     assert "localStorage.setItem(FLOW_STATE_STORAGE_KEY" not in text
 
 
-def test_index_rehydrate_latest_xml_does_not_force_specific_xml_path() -> None:
+def test_index_rehydrate_latest_xml_pins_the_saved_xml_path() -> None:
+    """A scenario carrying a saved XML path rehydrates from that exact source.
+
+    This test previously asserted the opposite -- that rehydration must never
+    pin a specific `xml_path`. Under XML-as-ground-truth that policy was
+    reversed on purpose: re-resolving by scenario name can pick a different
+    project file, so a saved path is now honoured. The template documents the
+    change inline ("rehydrate from that exact project source instead of
+    re-resolving by scenario name").
+    """
     text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
     block = text.split("async function rehydrateScenarioFromLatestXml(idx, scenarioName) {", 1)[1].split("const existing = state?.scenarios?.[idx];", 1)[0]
-    assert "query.set('xml_path', preferredXmlPath);" not in block
-    assert "forceXmlPath: !!preferredXmlPath" not in block
+    assert "query.set('xml_path', preferredXmlPath);" in block
+    assert "forceXmlPath: true" in block
+    # Only pin when the scenario actually has one; otherwise resolve by name.
+    assert "if (preferredXmlPath) {" in block

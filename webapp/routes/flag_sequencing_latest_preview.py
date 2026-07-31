@@ -8,6 +8,7 @@ from typing import Any
 from flask import jsonify, request
 
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
+from scenarioforge.planning.node_plan import challenge_slot_kind, is_docker_backed_role
 
 
 def register(app, *, backend_module: Any) -> None:
@@ -167,7 +168,14 @@ def register(app, *, backend_module: Any) -> None:
                     role_counts = preview.get('role_counts') if isinstance(preview.get('role_counts'), dict) else None
                     if isinstance(role_counts, dict):
                         try:
-                            docker_count = int(role_counts.get('Docker') or 0)
+                            # Challenge slots are Docker-backed hosts under their
+                            # own role name, so counting only 'Docker' reads a
+                            # slot-only topology as having no container capacity.
+                            docker_count = sum(
+                                max(0, int(count or 0))
+                                for role_name, count in role_counts.items()
+                                if is_docker_backed_role(role_name)
+                            )
                         except Exception:
                             docker_count = 0
                     hosts = preview.get('hosts') if isinstance(preview.get('hosts'), list) else []
@@ -179,11 +187,14 @@ def register(app, *, backend_module: Any) -> None:
                         for host in hosts:
                             if not isinstance(host, dict):
                                 continue
-                            role = str(host.get('role') or '').strip().lower()
+                            role = str(host.get('role') or '').strip()
                             vulns = host.get('vulnerabilities') if isinstance(host.get('vulnerabilities'), list) else []
-                            if role == 'docker':
+                            if is_docker_backed_role(role):
                                 docker_count += 1
-                                if not vulns:
+                                # A VulnerabilitySlot is Docker-backed but only
+                                # ever takes a vulnerability, so it is not a
+                                # flag-node-generator target.
+                                if not vulns and challenge_slot_kind(role) != 'vulnerability':
                                     docker_nonvuln_count += 1
                                     selected_node_generator = str((topology_nodegen_map or {}).get(str(host.get('node_id') or '')) or '').strip()
                                     if topology_nodegen_mode and selected_node_generator:

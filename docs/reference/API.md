@@ -364,10 +364,10 @@ Example request:
 ```json
 {
 	"plugin_type": "flag-generator",
-	"prompt": "Build deterministic SSH credentials. Hint levels:\nlow: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use README.md.",
+	"prompt": "Build deterministic SSH credentials. Hint levels:\nlow: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Work through the access instructions for this step in order.",
 	"intent_overrides": {
 		"runtime_inputs": "seed (required)\nsecret (required, sensitive)",
-		"hint_levels": "low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
+		"hint_levels": "low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
 	}
 }
 ```
@@ -387,7 +387,7 @@ Example request:
 	"name_hint": "SSH Credentials Drop",
 	"prompt": "Build a deterministic SSH credential generator with Knowledge(ip) as required input.",
 	"intent_overrides": {
-		"hint_levels": "low: Target: {{NEXT_NODE_IP}}\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
+		"hint_levels": "low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."
 	},
 	"provider": "ollama",
 	"base_url": "http://127.0.0.1:11434",
@@ -506,7 +506,7 @@ Example request:
 		{"name": "Credential(user, password)", "type": "string", "required": false, "sensitive": true}
 	],
 	"hint_levels": {
-		"low": ["Target: {{NEXT_NODE_IP}}"],
+		"low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],
 		"medium": ["Credential: {{OUTPUT.Credential(user,password)}}"],
 		"high": ["Use the access instructions and README.md."]
 	},
@@ -536,7 +536,7 @@ Example request:
 Notes:
 - `requires` accepts either a list of strings or a list of objects `{ artifact, optional }`; items with `optional: true` are written into `artifacts.optional_requires` in the manifest.
 - `runtime_inputs` is the preferred way to define manifest runtime inputs. The older `inputs` boolean flag map still works for standard fields such as `seed`, `secret`, `node_name`, and `flag_prefix`.
-- `runtime_inputs[].flow_supply_when_first` marks solver-facing start-step values that Flow should deterministically supply and include in the sequence 1 or parallel-branch start hint when participants cannot reasonably discover them yet.
+- `runtime_inputs[].flow_supply_when_first` marks solver-facing start-step values that Flow should deterministically supply and include in the sequence 1 or parallel-branch start hint when participants cannot reasonably discover them yet. Apart from these, a start hint carries only the node name and address; the generator id, assignment type, and vulnerability name are never appended.
 - `inject_files` is optional; when present it is written into `manifest.yaml` as `injects`.
 - `inject_candidate_paths` is optional; when present it is written into `manifest.yaml` and must contain absolute destination paths without `..` segments.
 - `access_instructions` is optional but recommended for interactive generators; when present it is written into `manifest.yaml` and rendered in participant/facilitator guides.

@@ -274,6 +274,15 @@
       <xs:documentation>
         Generic item row. Attribute applicability:
         - All sections: selected, factor, v_metric, v_count
+        - Node Information (selected): Server, Workstation, PC, Docker,
+          VulnerabilitySlot, FlagGenSlot, Random. Unrecognized roles normalize
+          to PC. Docker hosts may carry either a vulnerability or a
+          flag-node-generator challenge; VulnerabilitySlot and FlagGenSlot
+          reserve Docker-backed capacity for that one challenge kind and are
+          filled before additive Docker hosts are created. Slot rows are
+          independent of the counts declared in the Vulnerabilities and Flag
+          Node Generators sections. Unused slots materialize as empty
+          Docker-backed hosts.
         - Events: script_path
         - Traffic: pattern, rate_kbps, period_s, jitter_pct, content_type
         - Routing: r2r_mode, r2r_edges, r2s_mode, r2s_edges, r2s_hosts_min, r2s_hosts_max

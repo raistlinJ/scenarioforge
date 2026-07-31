@@ -10,7 +10,7 @@ from webapp.app_backend import app
 from webapp import app_backend
 
 
-def _seed_xml_plan(scenario: str, full_preview: dict) -> tuple[str, str]:
+def _seed_xml_plan(scenario: str, full_preview: dict, flow_meta: dict | None = None) -> tuple[str, str]:
         td = tempfile.mkdtemp(prefix="coretg-flow-nodeip-")
         xml_path = os.path.join(td, f"{scenario}.xml")
         xml = f"""<Scenarios>
@@ -37,8 +37,18 @@ def _seed_xml_plan(scenario: str, full_preview: dict) -> tuple[str, str]:
                         "seed": full_preview.get("seed"),
                 },
         }
+        if isinstance(flow_meta, dict) and flow_meta:
+                payload["metadata"]["flow"] = flow_meta
         ok, err = app_backend._update_plan_preview_in_xml(xml_path, scenario, payload)
         assert ok, err
+        # FlowState is a separate XML element; metadata["flow"] alone is not read
+        # back by the prepare route. Converting an existing non-vulnerable Docker
+        # node into a generic Flow challenge also needs a recorded approval -- a
+        # blank topology generator field is deliberately not permission -- so the
+        # chain, assignments and chain_expansion all have to be persisted here.
+        if isinstance(flow_meta, dict) and flow_meta:
+                ok2, err2 = app_backend._update_flow_state_in_xml(xml_path, scenario, flow_meta)
+                assert ok2, err2
         return xml_path, td
 
 
@@ -80,7 +90,24 @@ def test_prepare_preview_replaces_node_ip_placeholder(monkeypatch):
         'r2r_links_preview': [],
     }
 
-    plan_path, plan_dir = _seed_xml_plan(scenario, full_preview)
+    plan_path, plan_dir = _seed_xml_plan(
+        scenario,
+        full_preview,
+        flow_meta={
+            "scenario": scenario,
+            "length": 2,
+            "chain": [
+                {"id": "h1", "name": "h1", "type": "docker"},
+                {"id": "h2", "name": "h2", "type": "docker"},
+            ],
+            "flag_assignments": [
+                {"node_id": "h1", "id": "zz_node_ip_hint", "type": "flag-node-generator"},
+                {"node_id": "h2", "id": "zz_node_ip_hint", "type": "flag-node-generator"},
+            ],
+            "chain_expansion": {"converted_existing_docker_node_ids": ["h1", "h2"]},
+            "modified_at": "2026-01-01T00:00:00Z",
+        },
+    )
 
     # Only one eligible node generator; its hint includes <node-ip>.
     fake_node_gen = {

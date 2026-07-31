@@ -46,8 +46,14 @@ def _seed_xml_plan(scenario: str, full_preview: dict, flow_meta: dict) -> tuple[
     }
     ok, err = backend._update_plan_preview_in_xml(xml_path, scenario, payload)
     assert ok, err
-    ok2, err2 = backend._update_flow_state_in_xml(xml_path, scenario, flow_meta)
-    assert ok2, err2
+    # These tests seed a marker (a length, or chain_ids with no assignments) and
+    # then build the real sequence through the API. FlowState validation requires
+    # a complete state -- a chain, one assignment per chain node, and topology to
+    # match against -- so writing a partial marker is now rejected outright.
+    # Only persist a FlowState when the caller actually supplied one.
+    if isinstance(flow_meta, dict) and flow_meta.get('chain') and flow_meta.get('flag_assignments'):
+        ok2, err2 = backend._update_flow_state_in_xml(xml_path, scenario, flow_meta)
+        assert ok2, err2
     return xml_path, tmp_dir
 
 
@@ -124,6 +130,10 @@ parser.add_argument('--generator-id')
 parser.add_argument('--out-dir', required=True)
 parser.add_argument('--config')
 parser.add_argument('--repo-root')
+# The runner invocation gained --source-dir. argparse exits 2 on an unrecognized
+# argument, which surfaced only as "generator failed (rc=2)" from the remote
+# wrapper, so accept it here rather than let the fake runner reject the call.
+parser.add_argument('--source-dir')
 args = parser.parse_args()
 
 os.makedirs(args.out_dir, exist_ok=True)

@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Several tests reach the SSH helper. Without a CORE VM in CI the target
+      # host is unreachable, and a host that drops packets blocks for the full
+      # timeout on every attempt. Fail fast instead of burning the job clock.
+      CORETG_SSH_CONNECT_TIMEOUT: '2'
+      CORETG_SSH_CONNECT_RETRIES: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests against the known-failure baseline
+        run: python scripts/check_test_ratchet.py
+
+      - name: Upload pytest output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: |
+            latest.errors
+            examples/latest.errors
+          if-no-files-found: ignore
+          retention-days: 7

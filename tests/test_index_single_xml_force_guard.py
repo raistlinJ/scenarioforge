@@ -52,6 +52,12 @@ def test_index_prefers_explicit_xml_path_query(monkeypatch, tmp_path):
 
     from webapp import app_backend as backend
 
+    # outputs/scenario_catalog.json in a working checkout records deleted
+    # scenarios, and this workspace has 'Scenario A' among them. A deleted name
+    # gets no catalog stub, so the assertion below would depend on whatever the
+    # developer happened to delete. Pin an empty set to keep the test hermetic.
+    monkeypatch.setattr(backend, '_scenario_catalog_deleted_match_keys', lambda: set())
+
     xml_a = tmp_path / 'A.xml'
     xml_b = tmp_path / 'B.xml'
     xml_a.write_text('<Scenarios><Scenario name="Scenario A"><ScenarioEditor/></Scenario></Scenarios>', encoding='utf-8')

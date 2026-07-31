@@ -3458,9 +3458,10 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 	# helper image lacks expected shell/coreutils for the generated copy command.
 	# That ultimately leaves CORE Docker nodes at PID=0 (`/proc/0/environ`).
 	#
-	# Default to no dependency at all so target containers always start even if
-	# inject_copy is incompatible with a specific image. Operators can opt into
-	# strict blocking with CORETG_INJECT_COPY_REQUIRE_SUCCESS=1.
+	# Default to a non-blocking dependency (`service_started`, or bare list form
+	# which means the same) so target containers always start even if inject_copy
+	# is incompatible with a specific image. Operators can opt into strict
+	# blocking with CORETG_INJECT_COPY_REQUIRE_SUCCESS=1.
 	try:
 		svc = services.get(target_service)
 		if isinstance(svc, dict):

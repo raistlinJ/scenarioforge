@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import re
 from typing import Any
+from .node_plan import HOST_ROLE_DISPLAY_ORDER
 
 
 _LOW_R2R_PATTERNS: tuple[str, ...] = (
@@ -664,7 +665,7 @@ def compile_ai_topology_intent(
 
     if node_role_counts:
         node_items: list[dict[str, Any]] = []
-        for role in ('Server', 'Workstation', 'PC', 'Docker'):
+        for role in HOST_ROLE_DISPLAY_ORDER:
             count = int(node_role_counts.get(role) or 0)
             if count <= 0:
                 continue

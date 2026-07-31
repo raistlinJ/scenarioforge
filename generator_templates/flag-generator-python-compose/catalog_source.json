@@ -28,9 +28,9 @@
       "compose": {"file": "docker-compose.yml", "service": "generator"},
       "description_hints": ["TODO"],
       "hint_levels": {
-        "low": ["Target: {{NEXT_NODE_IP}}"],
+        "low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],
         "medium": ["Artifact: {{OUTPUT.example}}"],
-        "high": ["Use the access instructions and README.md for the complete workflow."]
+        "high": ["Work through the access instructions for this step in order."]
       }
     }
   ]

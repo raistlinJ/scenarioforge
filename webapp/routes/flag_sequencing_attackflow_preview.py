@@ -404,9 +404,17 @@ def register(app, *, backend_module: Any) -> None:
             try:
                 meta = payload.get('metadata') if isinstance(payload, dict) else None
                 flow_meta = meta.get('flow') if isinstance(meta, dict) else None
+                # Cap a reused chain at the requested length, not at
+                # `length - required_vulnerability_count`. That subtraction is
+                # right for the generation path below, which picks only
+                # non-vulnerability nodes and needs the vulnerability slots held
+                # back. A persisted chain already contains its vulnerability
+                # nodes, so subtracting again double-counts them and silently
+                # truncates the saved sequence -- a two-node saved chain with one
+                # vulnerability came back as just the vulnerability node.
                 chain_nodes, _saved_chain_source = _saved_chain_nodes_from_flow_state(
                     flow_meta,
-                    max_length=max(0, length - required_vulnerability_count),
+                    max_length=max(0, length),
                 )
                 if chain_nodes:
                     used_saved_chain = True
