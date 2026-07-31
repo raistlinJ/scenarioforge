@@ -16006,22 +16006,24 @@
                 coreAdvAutoKillSessionsInput.checked = !!(coreState.adv_auto_kill_sessions);
                 coreAdvAutoKillSessionsInput.disabled = builderLocked || inputsDisabled;
             }
-            const coreSecretIdForDefaults = (coreState.core_secret_id || '').toString().trim();
-            const useStoredConnectionDefaults = !coreSecretIdForDefaults;
             const modalDefaultGrpcHost = 'localhost';
             const modalDefaultGrpcPort = 50051;
             const modalDefaultSshPort = 22;
-            const grpcHostValue = useStoredConnectionDefaults
-                ? (coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost))
-                : modalDefaultGrpcHost;
-            const grpcPortValue = useStoredConnectionDefaults
-                ? (Number.isFinite(Number(coreState.grpc_port)) && Number(coreState.grpc_port) > 0 ? Number(coreState.grpc_port) : modalDefaultGrpcPort)
+            // Always show the saved connection. These were previously replaced by
+            // hardcoded defaults once core_secret_id existed, so a successful
+            // "Save & Validate" -- which is exactly what sets that id -- wiped the
+            // host/port fields the user had just entered. Only the password is
+            // withheld once stored, and that is handled below via its placeholder.
+            const grpcHostValue = coreState.grpc_host
+                || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost);
+            const grpcPortValue = (Number.isFinite(Number(coreState.grpc_port)) && Number(coreState.grpc_port) > 0)
+                ? Number(coreState.grpc_port)
                 : modalDefaultGrpcPort;
-            const sshHostValue = useStoredConnectionDefaults
-                ? (coreState.ssh_host || coreState.grpc_host || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost))
-                : modalDefaultGrpcHost;
-            const sshPortValue = useStoredConnectionDefaults
-                ? (Number.isFinite(Number(coreState.ssh_port)) && Number(coreState.ssh_port) > 0 ? Number(coreState.ssh_port) : modalDefaultSshPort)
+            const sshHostValue = coreState.ssh_host
+                || coreState.grpc_host
+                || (WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : modalDefaultGrpcHost);
+            const sshPortValue = (Number.isFinite(Number(coreState.ssh_port)) && Number(coreState.ssh_port) > 0)
+                ? Number(coreState.ssh_port)
                 : modalDefaultSshPort;
             if (coreModalInputs.grpc_host) {
                 coreModalInputs.grpc_host.value = grpcHostValue;

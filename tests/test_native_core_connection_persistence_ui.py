@@ -13,10 +13,8 @@ def test_native_core_connection_persistence_prefers_ui_state_over_defaults() -> 
         "state.core = {",
         "...state.core,",
         "...persistedCore,",
-        "const coreSecretIdForDefaults = (coreState.core_secret_id || '').toString().trim();",
-        "const useStoredConnectionDefaults = !coreSecretIdForDefaults;",
-        "const grpcHostValue = useStoredConnectionDefaults",
-        "const sshHostValue = useStoredConnectionDefaults",
+        "const grpcHostValue = coreState.grpc_host",
+        "const sshHostValue = coreState.ssh_host",
         "coreModalInputs.grpc_host.value = grpcHostValue;",
         "coreModalInputs.ssh_host.value = sshHostValue;",
         "coreModalInputs.grpc_host.disabled = inputsDisabled;",
@@ -34,6 +32,12 @@ def test_native_core_connection_persistence_no_longer_forces_local_defaults_into
     text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     forbidden_snippets = [
+        # Gating the modal fields on core_secret_id meant a successful
+        # "Save & Validate" -- the very action that sets that id -- replaced the
+        # host/port the user had just entered with hardcoded defaults.
+        "const useStoredConnectionDefaults = !coreSecretIdForDefaults;",
+        "const grpcHostValue = useStoredConnectionDefaults",
+        "const sshHostValue = useStoredConnectionDefaults",
         "coreModalInputs.grpc_host.value = WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : (coreState.grpc_host || '');",
         "coreModalInputs.grpc_port.disabled = WEBUI_LOCAL_MODE || inputsDisabled;",
         "coreModalInputs.ssh_host.value = WEBUI_LOCAL_MODE ? WEBUI_LOCAL_CORE_HOST : (coreState.ssh_host || '');",

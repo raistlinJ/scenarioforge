@@ -16640,7 +16640,7 @@ def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]]
         # Flow placement eligibility:
         # - flag-generators may be placed on vulnerability nodes only
         # - flag-node-generators require non-vulnerability docker-role nodes (enforced elsewhere)
-        is_docker = ('docker' in t) or (str(n.get('type') or '').strip().upper() == 'DOCKER')
+        is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
         if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
@@ -16796,7 +16796,7 @@ def _pick_flag_chain_nodes_allow_duplicates(
             continue
         id_to_node[nid] = n
         t = (str(n.get('type') or '').strip().lower())
-        is_docker = ('docker' in t) or (str(n.get('type') or '').strip().upper() == 'DOCKER')
+        is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
         if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
@@ -16969,16 +16969,21 @@ def _pick_flag_chain_nodes_for_preset(
 
 
 def _flow_node_allows_flag_node_generator(node: Any) -> bool:
-    """Compatibility-aware eligibility for non-vulnerability Docker nodes.
+    """Whether a non-vulnerability node may carry a flag-node-generator.
 
-    Old persisted previews had no topology generator selection.  Retain their
-    historical generic behavior; previews with the new marker are strict.
+    Nodes the topology already bound to a generator obviously qualify.  Free
+    Docker-backed hosts do too: leftover Docker rows and declared FlagGenSlot
+    rows exist precisely so flag-sequencing has capacity beyond the generators
+    named in the Flag Node Generators card.  Requiring an assigned generator id
+    here made that spare capacity invisible, so a scenario could declare slots
+    and still be told it had nothing to place challenges on.
+
+    A VulnerabilitySlot is Docker-backed but reserved for vulnerabilities, so it
+    is excluded.
     """
     if not isinstance(node, dict):
         return False
-    if not bool(node.get('_topology_flag_node_generators_configured')):
-        return True
-    return bool(str(node.get('flag_node_generator_id') or '').strip())
+    return _flow_node_accepts_challenge_kind(node, 'flag-node-generator')
 
 
 def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
@@ -17005,9 +17010,10 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     for n in nodes or []:
         if not isinstance(n, dict):
             continue
-        t_raw = str(n.get('type') or '')
-        t = t_raw.strip().lower()
-        is_docker = ('docker' in t) or (t_raw.strip().upper() == 'DOCKER')
+        # Challenge slots are Docker-backed under their own role name, so the
+        # old "docker" substring test on `type` counted a slot-only topology as
+        # having no eligible nodes at all.
+        is_docker = _flow_node_is_docker_role(n)
         is_vuln = bool(n.get('is_vuln')) or bool(n.get('vulnerabilities'))
         if is_docker:
             docker_total += 1
@@ -17017,7 +17023,7 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
                 compose_backed_total += 1
         if is_vuln:
             vuln_total += 1
-        if is_docker and (not is_vuln):
+        if is_docker and (not is_vuln) and _flow_node_accepts_challenge_kind(n, 'flag-node-generator'):
             docker_nonvuln_total += 1
             if str(n.get('flag_node_generator_id') or '').strip():
                 topology_node_generator_total += 1
@@ -19091,13 +19097,17 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             continue
         role = str(h.get('role') or 'Host')
         role_norm = role.strip().lower()
-        is_docker_role = role_norm == 'docker'
+        # Challenge slots are Docker-backed hosts under their own role name.
+        # Mapping them to a plain 'host' node made every downstream docker check
+        # fail, so a slot-only topology reported zero eligible nodes.
+        slot_kind = _planning_challenge_slot_kind(role)
+        is_docker_role = _planning_is_docker_backed_role(role)
         vulns = h.get('vulnerabilities') if isinstance(h.get('vulnerabilities'), list) else []
         if not vulns:
             vulns = vuln_names_by_preview_id.get(hid, [])
         is_vuln = bool(vulns) or (hid in vuln_ids)
         # IMPORTANT: vulnerabilities should not "take up" Docker node slots.
-        # Only Docker-role hosts are treated as docker nodes for Flow eligibility.
+        # Only Docker-backed hosts are treated as docker nodes for Flow eligibility.
         node_type = 'docker' if is_docker_role else 'host'
         compose = ''
         compose_name = ''
@@ -19122,6 +19132,11 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             except Exception:
                 host_ip4 = ''
         extra: dict[str, Any] = {}
+        if slot_kind:
+            # Carried so Flow placement can tell a dedicated slot apart from a
+            # plain Docker host, which accepts either challenge kind.
+            extra['challenge_slot_kind'] = slot_kind
+            extra['role'] = role
         if topology_nodegen_mode:
             extra['_topology_flag_node_generators_configured'] = True
             selected_generator = str((nodegen_by_preview_id or {}).get(hid) or '').strip()
@@ -23841,7 +23856,14 @@ def _flow_validate_chain_order_by_requires_produces(
         # position 0 even when it is marked required.
         if step_index == 0:
             gen_def = gen_defs_by_id.get(plugin_id)
-            undisclosed = _flow_first_step_undisclosed_secrets(gen_def)
+            effective_gen = dict(gen_def) if isinstance(gen_def, dict) else {}
+            # Hint promotion rewrites the opening step's levels on the assignment;
+            # the manifest still carries the un-promoted ones. Validating the
+            # manifest would re-report a gap the runtime has already closed.
+            assignment_hint_levels = a.get('hint_levels')
+            if isinstance(assignment_hint_levels, dict) and assignment_hint_levels:
+                effective_gen['hint_levels'] = assignment_hint_levels
+            undisclosed = _flow_first_step_undisclosed_secrets(effective_gen or gen_def)
             if undisclosed:
                 errors.append(
                     f"{cid}: first chain step needs {undisclosed} to follow its access "

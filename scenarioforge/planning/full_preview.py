@@ -1177,6 +1177,11 @@ def build_full_preview(
                 rnd_seed + 101,
             )
 
+        # Vulnerabilities fill their slots first, unlike generators.  Only the
+        # Vulnerabilities card can supply a vulnerability -- flag-sequencing
+        # cannot invent one -- so an empty VulnerabilitySlot would be a dead
+        # node.  Filling slots here instead frees the additive Docker hosts,
+        # which sequencing *can* use for either challenge kind.
         ordered = _hosts_with_role(VULNERABILITY_SLOT_ROLE) + _hosts_with_role('Docker')
         if not ordered:
             ordered = _stable_shuffle(
@@ -1201,9 +1206,10 @@ def build_full_preview(
     # vulnerability host.  Metadata survives into Flow candidate construction.
     nodegen_assignments: Dict[int, str] = {}
     if flag_node_generators_plan:
-        # FlagGenSlot rows are dedicated capacity and fill before plain Docker
-        # hosts.  VulnerabilitySlot hosts are never eligible: a slot only ever
-        # takes its own challenge kind.
+        # Declared generators fill the Docker hosts added for them; FlagGenSlot
+        # rows stay free for flag-sequencing and take overflow only.
+        # VulnerabilitySlot hosts are never eligible: a slot only ever takes its
+        # own challenge kind.
         def _nodegen_targets(role_name: str) -> List[PreviewNode]:
             return [
                 h
@@ -1212,7 +1218,7 @@ def build_full_preview(
                 and not h.vulnerabilities
             ]
 
-        target_hosts = _nodegen_targets(FLAG_GEN_SLOT_ROLE) + _nodegen_targets('Docker')
+        target_hosts = _nodegen_targets('Docker') + _nodegen_targets(FLAG_GEN_SLOT_ROLE)
         flat_nodegens: List[str] = []
         for generator_id, count in flag_node_generators_plan.items():
             flat_nodegens.extend([str(generator_id)] * max(0, int(count or 0)))

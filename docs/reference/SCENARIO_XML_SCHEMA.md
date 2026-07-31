@@ -184,11 +184,11 @@ Docker-backed capacity for exactly one challenge kind:
 ```
 
 Slot rows are independent of the counts declared in the `Vulnerabilities` and
-`Flag Node Generators` sections — declaring slots does not reduce those. When
-the planner places challenges it fills matching slots first and only then adds
-Docker hosts for the remainder, so slots replace additive Docker hosts rather
-than stacking on top of them. Slots left unused when there are fewer challenges
-than slots stay in the topology as empty Docker-backed hosts.
+`Flag Node Generators` sections and add to them. Declaring 5 `FlagGenSlot` rows
+alongside 5 generators yields 10 challenge hosts: the declared generators fill
+the Docker hosts the planner adds for them, and the slots stay free for
+flag-sequencing to place further challenges into. Slots sequencing does not use
+remain in the topology as empty Docker-backed hosts.
 
 Common attributes:
 | Attribute | Applies | Meaning |
