@@ -279,6 +279,17 @@ def register(app, *, backend_module: Any) -> None:
                 pass
             return provides
 
+        # Parallel branch starts are not just position 0.  Defaulting to that
+        # cleared the supplied inputs of every later branch start, starving its
+        # generator of a fact nothing upstream produces.
+        try:
+            supply_start_positions = backend._flow_parallel_start_assignment_indexes(
+                list(fas_in or []),
+                gen_defs_by_id=gen_by_id,
+            )
+        except Exception:
+            supply_start_positions = {0} if fas_in else set()
+
         out_assignments: list[dict[str, Any]] = []
         for index, (chain_id, raw_assignment) in enumerate(zip(chain_ids, (fas_in or []))):
             if not isinstance(raw_assignment, dict):
@@ -443,6 +454,7 @@ def register(app, *, backend_module: Any) -> None:
                     generator,
                     scenario_label=(scenario_label or scenario_norm),
                     position=index,
+                    supply_on_start=(index in supply_start_positions),
                 )
             except Exception:
                 pass

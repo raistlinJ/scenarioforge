@@ -21617,6 +21617,29 @@ def _flow_clear_chain_supplied_inputs(assignment: dict[str, Any]) -> dict[str, A
     return assignment
 
 
+def _flow_supply_definition_for(
+    assignment: dict[str, Any] | Any,
+    gen_defs_by_id: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Return the generator definition backing an assignment, or None.
+
+    Only a generator definition carries `inputs` as descriptor dicts, which is
+    the sole place `flow_supply_when_first` is recorded.  An assignment lists
+    `inputs` as bare fact names, so it can never stand in for its own
+    definition here.
+    """
+    if not isinstance(assignment, dict) or not isinstance(gen_defs_by_id, dict):
+        return None
+    try:
+        gen_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+    except Exception:
+        return None
+    if not gen_id:
+        return None
+    found = gen_defs_by_id.get(gen_id)
+    return found if isinstance(found, dict) else None
+
+
 def _flow_apply_first_step_chain_supplied_inputs(
     assignment: dict[str, Any],
     gen_def: dict[str, Any] | None = None,
@@ -21640,6 +21663,13 @@ def _flow_apply_first_step_chain_supplied_inputs(
     if not names and source is not assignment:
         names = _flow_first_step_chain_supplied_input_names(assignment)
     if not names:
+        # Without a generator definition the supply flags are simply invisible
+        # here -- that is not evidence the step needs no supply.  Keep whatever
+        # an earlier pass supplied rather than clearing a value this call was
+        # never able to see, which would starve the generator at run time.
+        existing_supplied = assignment.get('chain_supplied_input_values')
+        if isinstance(existing_supplied, dict) and existing_supplied:
+            return assignment
         return _flow_clear_chain_supplied_inputs(assignment)
 
     node_id = str(assignment.get('node_id') or '').strip()
@@ -24810,9 +24840,13 @@ def _flow_reorder_chain_by_generator_dag(
                         levels['low'] = low_values
                         assignment['hint_levels'] = levels
                     try:
+                        # An assignment lists `inputs` as bare fact names, so it
+                        # can never reveal `flow_supply_when_first`. Passing it as
+                        # its own definition made this pass clear a value the
+                        # assignment step had correctly supplied.
                         _flow_apply_first_step_chain_supplied_inputs(
                             assignment,
-                            assignment,
+                            _flow_supply_definition_for(assignment, gen_defs_by_id_for_reorder),
                             scenario_label=scenario_label,
                             position=idx,
                             supply_on_start=(idx in start_positions),
@@ -25178,7 +25212,7 @@ def _flow_reorder_chain_by_generator_dag(
                 a['hints'] = rendered
                 _flow_apply_first_step_chain_supplied_inputs(
                     a,
-                    a,
+                    _flow_supply_definition_for(a, gen_defs_by_id_for_reorder),
                     scenario_label=scenario_label,
                     position=i,
                     supply_on_start=(i in dag_start_positions),
