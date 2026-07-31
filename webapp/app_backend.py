@@ -17995,7 +17995,10 @@ def _flow_render_hint_template(
             next_ip_val = ''
             this_ip_val = ''
         if (not next_id_val) and ('{{NEXT_NODE_' in raw_tpl):
-            return "You've completed this sequence of challenges!"
+            # The final step has nothing after it. Keep its own instruction and
+            # drop the pointer clause rather than replacing the whole hint with
+            # a congratulation, which tells the participant nothing.
+            return _flow_strip_ids_from_hint(_flow_strip_next_node_references(raw_tpl))
         if not next_name_val:
             next_name_val = next_id_val
 
