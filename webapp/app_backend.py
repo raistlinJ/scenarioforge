@@ -17906,6 +17906,71 @@ def _flow_text_contains_ipv4(text: str, ip_value: str) -> bool:
         return False
 
 
+def _flow_strip_next_node_references(tpl: str) -> str:
+    """Drop the part of a hint that only exists to name the next chain node.
+
+    Most manifests phrase their low hint as "<do the thing> before moving to
+    {{NEXT_NODE_NAME}}." That clause asserts an ordering the dependency graph
+    may not have: on a parallel stage the positional next step is an unrelated
+    sibling, so naming it tells participants a gate exists where none does.
+    When a step has no dependent successor the clause is removed and the
+    instruction itself is kept.
+    """
+    text = str(tpl or '').strip()
+    if not text or '{{NEXT_NODE_' not in text:
+        return text
+    placeholder = r'\{\{NEXT_NODE_[A-Z_]+\}\}'
+    # "... before moving to X", "... then proceed to X @ Y"
+    text = re.sub(
+        r'[\s,;]*\b(?:before|then|and then|next)\s+'
+        r'(?:moving|move|proceeding|proceed|continuing|continue|going|go)\s+(?:on\s+)?to\s+'
+        + placeholder + r'(?:\s*@\s*' + placeholder + r')?',
+        '', text, flags=re.IGNORECASE,
+    )
+    # Bare label forms the scaffolding teaches: "Target: {{NEXT_NODE_IP}}".
+    text = re.sub(
+        r'(?:^|(?<=[.;]))\s*(?:target|next|then)\s*:\s*' + placeholder
+        + r'(?:\s*@\s*' + placeholder + r')?\s*\.?',
+        '', text, flags=re.IGNORECASE,
+    )
+    # Anything still referencing a next node has no safe partial rendering.
+    if '{{NEXT_NODE_' in text:
+        text = re.sub(r'[\s,;]*' + placeholder + r'(?:\s*@\s*' + placeholder + r')?', '', text)
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    text = re.sub(r'^[\s,;.]+', '', text).strip()
+    if text and not text.endswith(('.', '!', '?', ':')):
+        text += '.'
+    return text
+
+
+def _flow_dependent_successor_id(
+    assignments: list[dict[str, Any]] | None,
+    index: int,
+) -> str:
+    """Node id of the first later step that consumes this step's output.
+
+    Returns '' when nothing downstream depends on this step, which means the
+    step sits on a parallel stage and must not claim to gate anything.
+    """
+    try:
+        items = assignments if isinstance(assignments, list) else []
+        current = items[index] if 0 <= index < len(items) else None
+        if not isinstance(current, dict):
+            return ''
+        produced = _flow_assignment_fact_names(current, ('produces', 'output_fields', 'outputs'))
+        if not produced:
+            return ''
+        for later in items[index + 1:]:
+            if not isinstance(later, dict):
+                continue
+            needs = _flow_assignment_fact_names(later, ('requires', 'input_fields_required', 'inputs'))
+            if needs & produced:
+                return str(later.get('node_id') or '').strip()
+        return ''
+    except Exception:
+        return ''
+
+
 def _flow_render_hint_template(
     tpl: str,
     *,
@@ -20308,6 +20373,69 @@ def _flow_compute_flag_assignments(
             supply_on_start=supply_on_start,
         )
         out.append(assignment_out)
+
+    # A step only gates another when something downstream actually consumes its
+    # output. Manifest hints assume a linear chain ("... before moving to
+    # {{NEXT_NODE_NAME}}"), so on a parallel stage they name an unrelated
+    # sibling and invent a dependency the solver never imposed. Where no
+    # dependent successor exists, drop that clause and re-render. Templates are
+    # stored unrendered, so doing it here fixes every downstream view at once.
+    for idx, assignment_out in enumerate(out):
+        dependent_id = _flow_dependent_successor_id(out, idx)
+        assignment_out['hint_next_node_id'] = dependent_id
+        if dependent_id:
+            continue
+        if not str(assignment_out.get('next_node_id') or '').strip():
+            # Terminal step: it already renders the completion message.
+            continue
+        this_node_id = str(assignment_out.get('node_id') or '')
+
+        def _rerender(template: str) -> str:
+            try:
+                return _flow_render_hint_template(
+                    template,
+                    scenario_label=scenario_label,
+                    id_to_name=id_to_name,
+                    id_to_ip=id_to_ip,
+                    this_id=this_node_id,
+                    next_id='',
+                )
+            except Exception:
+                return str(template or '')
+
+        levels = assignment_out.get('hint_level_templates')
+        if isinstance(levels, dict):
+            stripped_levels: dict[str, list[str]] = {}
+            for level_name, lines in levels.items():
+                kept = [
+                    text for text in
+                    (_flow_strip_next_node_references(line) for line in (lines or []))
+                    if text
+                ]
+                stripped_levels[str(level_name)] = kept
+            assignment_out['hint_level_templates'] = stripped_levels
+            assignment_out['hint_levels'] = {
+                level_name: [_rerender(line) for line in lines]
+                for level_name, lines in stripped_levels.items()
+            }
+        templates = assignment_out.get('hint_templates')
+        if isinstance(templates, list):
+            stripped = [
+                text for text in
+                (_flow_strip_next_node_references(line) for line in templates)
+                if text
+            ]
+            # A hint whose entire body was the pointer (the scaffolding's
+            # "Target: {{NEXT_NODE_IP}}") leaves nothing behind, so fall back to
+            # a neutral instruction rather than an empty hint.
+            if not stripped:
+                stripped = ['Solve the challenge on this node.']
+            assignment_out['hint_templates'] = stripped
+            rendered = [_rerender(line) for line in stripped]
+            if rendered:
+                assignment_out['hints'] = rendered
+                assignment_out['hint'] = rendered[0]
+
     return _flow_apply_pivot_context_to_assignments(
         out,
         chain_nodes,
