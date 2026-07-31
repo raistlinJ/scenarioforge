@@ -65,16 +65,42 @@ def test_removes_leftover_core_and_scenarioforge_containers(docker):
     assert sorted(result['removed']) == sorted(rec.removed)
 
 
-def test_never_touches_a_running_container(docker):
-    """A live scenario's containers are running; a concurrent run must survive."""
+def test_a_running_leftover_is_removed_by_default(docker):
+    """The case that blocks a new run hardest.
+
+    Execute refuses to start while another CORE session is active, so a
+    container still running here belongs to a run that is already over -- and it
+    is holding a node name the new run needs.
+    """
     rec = docker({
         'docker-11': ('running', '/tmp/vulns/.compose-projects/docker-11/docker-compose.yml'),
         'docker-12': ('created', '/tmp/vulns/.compose-projects/docker-12/docker-compose.yml'),
     })
-    result = vuln_process.remove_stale_scenarioforge_containers()
+    vuln_process.remove_stale_scenarioforge_containers()
+
+    assert sorted(rec.removed) == ['docker-11', 'docker-12']
+
+
+def test_running_containers_can_still_be_spared(docker):
+    rec = docker({
+        'docker-11': ('running', '/tmp/vulns/.compose-projects/docker-11/docker-compose.yml'),
+        'docker-12': ('created', '/tmp/vulns/.compose-projects/docker-12/docker-compose.yml'),
+    })
+    result = vuln_process.remove_stale_scenarioforge_containers(include_running=False)
 
     assert rec.removed == ['docker-12']
     assert 'docker-11' in result['skipped_running']
+
+
+def test_an_operator_container_survives_even_when_running(docker):
+    """The project-label rule holds regardless of state."""
+    rec = docker({
+        'my-postgres': ('running', '/home/me/db/docker-compose.yml'),
+        'docker-11': ('running', '/tmp/vulns/.compose-projects/docker-11/docker-compose.yml'),
+    })
+    vuln_process.remove_stale_scenarioforge_containers()
+
+    assert rec.removed == ['docker-11']
 
 
 def test_never_touches_an_unrelated_container(docker):
@@ -162,3 +188,27 @@ def test_docker_home_permission_repair_can_be_disabled(monkeypatch):
     assert backend._docker_home_permission_repair_enabled() is True
     monkeypatch.setenv('CORETG_REPAIR_DOCKER_HOME_PERMS', '0')
     assert backend._docker_home_permission_repair_enabled() is False
+
+
+def test_cleanup_runs_before_the_topology_build():
+    """Placement is the whole fix.
+
+    Building the topology is the first thing to run `docker compose up`, so a
+    leftover container aborts the run there. Cleaning up afterwards -- next to
+    the conflict check, where this started -- never gets the chance.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / 'scenarioforge' / 'cli.py').read_text(
+        encoding='utf-8', errors='ignore'
+    ).splitlines()
+    cleanup = [i for i, line in enumerate(source) if 'remove_stale_scenarioforge_containers()' in line]
+    build = [
+        i for i, line in enumerate(source)
+        if 'build_segmented_topology(' in line and not line.strip().startswith('def ')
+    ]
+    assert cleanup, 'execute no longer clears leftover containers'
+    assert build, 'could not locate the topology build'
+    assert max(cleanup) < min(build), (
+        f'cleanup at {cleanup} must precede the topology build at {min(build)}'
+    )

@@ -942,21 +942,28 @@ def detect_docker_conflicts_for_compose_files(paths: list[str]) -> dict:
 SCENARIOFORGE_COMPOSE_PATH_PREFIXES = ('/tmp/pycore.', '/tmp/vulns/')
 
 
-def remove_stale_scenarioforge_containers() -> dict:
+def remove_stale_scenarioforge_containers(*, include_running: bool = True) -> dict:
 	"""Remove containers left behind by earlier ScenarioForge runs.
 
 	Every execute leaves its containers behind once the CORE session goes away,
-	and they accumulate: the next run's conflict check then finds name
-	collisions and deletes *images* to resolve them, which forces a rebuild of
-	work that was already done.
+	and they hold the names the next run needs. Compose then fails with
 
-	Two rules keep this from touching anything it should not:
+	    Conflict. The container name "/docker-11" is already in use
 
-	- Only containers Compose labels as belonging to a CORE or ScenarioForge
-	  project (``/tmp/pycore.*`` or ``/tmp/vulns/``). An operator's own
-	  containers carry neither and are never considered.
-	- Only containers that are not running. A live scenario's containers are
-	  running by definition, so a concurrent run cannot be disturbed.
+	which aborts the topology build outright; the conflict check that used to
+	handle this ran later and resolved collisions by deleting *images*, forcing
+	a rebuild of work already done.
+
+	Running containers are included by default. Execute refuses to start while
+	another CORE session is active (``active_sessions_blocking``), so anything
+	still running here belongs to a run that is already over -- and a leftover
+	that is *running* is exactly the case that blocks the new one hardest. Pass
+	``include_running=False`` to restrict this to stopped containers.
+
+	The one rule that always holds: Compose must label the container as
+	belonging to a CORE or ScenarioForge project (``/tmp/pycore.*`` or
+	``/tmp/vulns/``). An operator's own containers carry neither and are never
+	considered, running or not.
 	"""
 	result: dict = {'removed': [], 'skipped_running': [], 'errors': {}}
 	try:
@@ -982,7 +989,7 @@ def remove_stale_scenarioforge_containers() -> dict:
 			state = parts[1].strip().lower()
 			if not name:
 				continue
-			if state == 'running':
+			if state == 'running' and not include_running:
 				result['skipped_running'].append(name)
 				continue
 			try:
