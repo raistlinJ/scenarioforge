@@ -3906,12 +3906,30 @@
     }
   }
 
+  // On a flag-node-generator, File(path) is reserved plumbing: Flow requires it
+  // to name the docker-compose file it deploys, which participants never see.
+  // Hints that talk about "the file" mean the challenge artifact, so point them
+  // at FlagFile(path). Mirrors the server-side remap in
+  // flow_prepare_preview_helpers.process_generator_outputs.
+  function hintOutputsForAssignment(assignment) {
+    const source = (assignment && typeof assignment === 'object') ? assignment : {};
+    const ro = (typeof source.resolved_outputs === 'object' && source.resolved_outputs && !Array.isArray(source.resolved_outputs))
+      ? source.resolved_outputs
+      : {};
+    try {
+      if (String(source.type || '').trim() !== 'flag-node-generator') return ro;
+      const flagFile = String(ro['FlagFile(path)'] || '').trim();
+      if (!flagFile || !String(ro['File(path)'] || '').trim()) return ro;
+      return Object.assign({}, ro, { 'File(path)': flagFile });
+    } catch (e) {
+      return ro;
+    }
+  }
+
   function _applyHintOutputTemplates(text, assignment) {
     const t = String(text || '');
     if (!t || !t.includes(_OUTPUT_TEMPLATE_PREFIX)) return t;
-    const ro = (assignment && typeof assignment.resolved_outputs === 'object' && assignment.resolved_outputs && !Array.isArray(assignment.resolved_outputs))
-      ? assignment.resolved_outputs
-      : {};
+    const ro = hintOutputsForAssignment(assignment);
 
     const roLower = new Map();
     const roCanonical = new Map();
@@ -4067,15 +4085,54 @@
       source.hints.forEach((value) => add('low', value));
     }
     if (!Object.keys(out).length && source.hint) add('low', source.hint);
-    const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
-    const hasReadmeHint = Array.isArray(out.high) && out.high.some((item) => String(item || '').trim().toLowerCase().startsWith('readme:'));
-    if (opts.includeReadme !== false && readmeRef && !hasReadmeHint) add('high', `README: ${readmeRef}`);
+    // No README hint: a participant has no access to the generator manifest or
+    // its README, so pointing at one is a dead end. Manifests carry a real
+    // `high` hint instead.
     return out;
   }
 
   function hintLevelTitle(level) {
     const key = String(level || '').trim().toLowerCase();
     return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : 'Hint';
+  }
+
+  const FLOW_PROMOTED_HINT_TITLE = 'Helpful Fact';
+
+  // Lines the opening step had to disclose outright (a credential or key nobody
+  // could have earned yet). They sit in `low` so they are always visible, but
+  // they are a given, not a hint, and are labelled as such.
+  function promotedHintLineSet(assignment) {
+    const source = (assignment && typeof assignment === 'object') ? assignment : {};
+    const raw = Array.isArray(source.promoted_first_step_hint_lines) ? source.promoted_first_step_hint_lines : [];
+    const out = new Set();
+    raw.forEach((value) => {
+      let text = _applyHintOutputTemplates(String(value || '').trim(), source);
+      text = _applyHintNodeTemplateVars(text, source).trim();
+      if (text) out.add(text);
+    });
+    return out;
+  }
+
+  // Flatten the level map into labelled display groups, splitting promoted
+  // disclosures out of `low` so both node cards and guides agree on wording.
+  function flowHintDisplayGroups(levels, assignment) {
+    const promoted = promotedHintLineSet(assignment);
+    const groups = [];
+    FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+      const values = Array.isArray(levels && levels[level])
+        ? levels[level].map((v) => String(v || '').trim()).filter(Boolean)
+        : [];
+      if (!values.length) return;
+      if (level === 'low' && promoted.size) {
+        const facts = values.filter((v) => promoted.has(v));
+        const rest = values.filter((v) => !promoted.has(v));
+        if (facts.length) groups.push({ title: FLOW_PROMOTED_HINT_TITLE, values: facts });
+        if (rest.length) groups.push({ title: `Hint ${hintLevelTitle(level)}`, values: rest });
+        return;
+      }
+      groups.push({ title: `Hint ${hintLevelTitle(level)}`, values });
+    });
+    return groups;
   }
 
   function resolveFlowGuideTemplateText(text, assignment, context) {
@@ -4132,7 +4189,7 @@
     add('NODE_ID', nodeId);
     add('THIS_NODE_ID', nodeId);
     addObject(source.resolved_inputs);
-    addObject(source.resolved_outputs);
+    addObject(hintOutputsForAssignment(source));
     addObject(source.config_overrides);
     addObject(source.output_overrides);
     return out.replace(/\{\{\s*([A-Za-z0-9_.:(),\-\s]+?)\s*\}\}/g, (full, rawKey) => {
@@ -4154,6 +4211,11 @@
     if (!value) return false;
     if (value.includes(FLOW_TEMPLATE_OPEN) || value.includes(FLOW_TEMPLATE_CLOSE)) return false;
     if (/^[A-Za-z][A-Za-z0-9_ ()/.,-]{0,96}:\s*$/.test(value)) return false;
+    // Participants get the deployed scenario, not the authoring tree, so a hint
+    // pointing at a README, the generator manifest, or the compose file names
+    // something they cannot open.
+    if (/^README:/i.test(value)) return false;
+    if (/generator manifest|docker-compose\.ya?ml/i.test(value)) return false;
     return true;
   }
 
@@ -4181,8 +4243,7 @@
     const outputs = (source.resolved_outputs && typeof source.resolved_outputs === 'object' && !Array.isArray(source.resolved_outputs)) ? source.resolved_outputs : {};
     const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
     addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the access instructions and resolved facts for this step.');
-    const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
-    addDefault('high', readmeRef ? `README: ${readmeRef}` : 'Use the access instructions for the complete workflow.');
+    addDefault('high', 'Work through the access instructions for this step in order.');
     return out;
   }
 
@@ -5573,10 +5634,11 @@
 
       const hintLevels = normalizeFlowHintLevels(fa);
       let renderedAnyHintLevel = false;
-      FLOW_HINT_LEVEL_ORDER.forEach((level) => {
-        const values = Array.isArray(hintLevels[level])
-          ? hintLevels[level].map(h => _applyHintNodeIps(h, _hintNodeIpMap)).map(h => String(h || '').trim()).filter(Boolean)
-          : [];
+      flowHintDisplayGroups(hintLevels, fa).forEach((group) => {
+        const values = group.values
+          .map(h => _applyHintNodeIps(h, _hintNodeIpMap))
+          .map(h => String(h || '').trim())
+          .filter(Boolean);
         if (!values.length) return;
         renderedAnyHintLevel = true;
         if (values.length > 1) {
@@ -5600,9 +5662,9 @@
           });
           details.appendChild(ul);
           wrap.appendChild(details);
-          addRow(`Hint ${hintLevelTitle(level)}`, wrap);
+          addRow(group.title, wrap);
         } else {
-          addRow(`Hint ${hintLevelTitle(level)}`, values[0]);
+          addRow(group.title, values[0]);
         }
       });
       if (!renderedAnyHintLevel) addRow('Hint Low', '-');
@@ -12521,16 +12583,7 @@ ${out.join('\n')}
 
     const formatGuideHintLine = (text) => {
       const value = String(text || '').trim();
-      if (!isGuideHintLineInformative(value)) return '';
-      const readmeMatch = value.match(/^README:\s*(.+)$/i);
-      if (readmeMatch) {
-        const rawPath = String(readmeMatch[1] || '').trim();
-        if (rawPath) {
-          const target = rawPath.replace(/\s/g, '%20').replace(/\)/g, '%29');
-          return `README: [${rawPath}](${target})`;
-        }
-      }
-      return value;
+      return isGuideHintLineInformative(value) ? value : '';
     };
 
     const renderGuideHintLine = (text, assignment, context) => formatGuideHintLine(resolveFlowGuideTemplateText(text, assignment, context));
@@ -13226,14 +13279,12 @@ ${out.join('\n')}
       if (hasStructuredHintLevels) {
         lines.push('### Hints');
         lines.push('');
-        FLOW_HINT_LEVEL_ORDER.forEach((level) => {
-          const values = Array.isArray(structuredHintLevels[level])
-            ? structuredHintLevels[level].map((value) => formatGuideHintLine(value)).filter(Boolean)
-            : [];
+        flowHintDisplayGroups(structuredHintLevels, assignment).forEach((group) => {
+          const values = group.values.map((value) => formatGuideHintLine(value)).filter(Boolean);
           if (!values.length) return;
           const firstValue = values[0];
           lines.push('<details>');
-          lines.push(`<summary>Hint ${hintLevelTitle(level)}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
+          lines.push(`<summary>${group.title}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
           lines.push('');
           if (values.length === 1) {
             lines.push(firstValue);

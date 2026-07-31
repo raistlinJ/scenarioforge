@@ -20269,10 +20269,19 @@ def _flow_compute_flag_assignments(
         # Later steps keep theirs gated: there the secret is the reward for the
         # previous challenge.
         promoted_first_step_hints: list[str] = []
+        promoted_first_step_hint_templates: list[str] = []
         if i == 0:
+            _low_before_promotion = list(hint_level_templates.get('low') or [])
             hint_level_templates, promoted_first_step_hints = _flow_promote_first_step_hint_levels(
                 hint_level_templates, gen
             )
+            # Promotion only ever appends to `low`, so the difference is exactly
+            # the set of lines that moved up. Views label these differently from
+            # an authored low hint: they are a given fact, not a nudge.
+            promoted_first_step_hint_templates = [
+                line for line in (hint_level_templates.get('low') or [])
+                if line not in _low_before_promotion
+            ]
         rendered_hint_levels = _flow_render_hint_level_templates(
             hint_level_templates,
             scenario_label=scenario_label,
@@ -20350,6 +20359,11 @@ def _flow_compute_flag_assignments(
             # What the vuln at this position grants the solver, so the chain is
             # inspectable when a step looks unreachable.
             'promoted_first_step_hints': list(promoted_first_step_hints),
+            'promoted_first_step_hint_templates': list(promoted_first_step_hint_templates),
+            'promoted_first_step_hint_lines': [
+                _render_hint(line, this_id=str(cid), next_id=str(next_id))
+                for line in promoted_first_step_hint_templates
+            ],
             'vuln_provides': sorted(_vuln_facts_at(i)),
             'vuln_requires': sorted(vuln_requires_by_idx[i]) if i < len(vuln_requires_by_idx) else [],
             'vuln_metadata_missing': (
@@ -20431,6 +20445,15 @@ def _flow_compute_flag_assignments(
                 level_name: [_rerender(line) for line in lines]
                 for level_name, lines in stripped_levels.items()
             }
+            # Promoted lines are matched against `hint_levels` by text, so they
+            # have to go through the same strip-and-re-render.
+            promoted_templates = assignment_out.get('promoted_first_step_hint_templates')
+            if isinstance(promoted_templates, list):
+                assignment_out['promoted_first_step_hint_lines'] = [
+                    _rerender(text) for text in
+                    (_flow_strip_next_node_references(line) for line in promoted_templates)
+                    if text
+                ]
         templates = assignment_out.get('hint_templates')
         if isinstance(templates, list):
             stripped = [
@@ -45066,7 +45089,7 @@ def _default_scaffold_hint_levels(produces: list[str]) -> dict[str, list[str]]:
     return {
         'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
         'medium': [medium],
-        'high': ['Use the access instructions and README.md for the complete workflow.'],
+        'high': ['Work through the access instructions for this step in order.'],
     }
 
 

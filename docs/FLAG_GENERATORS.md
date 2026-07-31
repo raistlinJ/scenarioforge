@@ -111,12 +111,14 @@ hint_levels:
 	medium:
 		- "Credential: {{OUTPUT.Credential(user,password)}}"
 	high:
-		- "Use the access instructions and README.md for the complete workflow."
+		- "Log in over SSH with the credential above, then read {{OUTPUT.FlagFile(path)}}."
 ```
 
 Notes:
 - Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known (e.g., `web01 (10.0.0.5)`), even if `{{NEXT_NODE_IP}}` is not explicitly present.
 - For payload-specific files, you may still emit a `hint.txt` as challenge content, but Flow generator manifests should declare participant guidance with `hint_levels`.
+- **Do not point a hint at a README, the generator manifest, or `docker-compose.yml`.** Participants only have the deployed scenario, so Flow filters those lines out of node cards and both guides. Write the actual step instead. See [Generator Authoring §5](GENERATOR_AUTHORING.md#5-hint-levels-and-substitution).
+- On a **flag-node-generator**, `File(path)` is reserved for the compose file Flow deploys, so `{{OUTPUT.File(path)}}` resolves to `FlagFile(path)` — the participant-facing artifact. Prefer writing `{{OUTPUT.FlagFile(path)}}` explicitly.
 
 ## Schemas (Generator Authors)
 

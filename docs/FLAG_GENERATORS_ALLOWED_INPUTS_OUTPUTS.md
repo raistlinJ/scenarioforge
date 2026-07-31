@@ -176,7 +176,7 @@ hint_levels:
   medium:
     - "Credential: {{OUTPUT.Credential(user,password)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Work through the access instructions for this step in order."
 injects:
   - File(path)
 ```
@@ -221,7 +221,7 @@ hint_levels:
   medium:
     - "Service: {{NEXT_NODE_NAME}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Work through the access instructions for this step in order."
 injects:
   - File(path) -> /flow_injects
 ```
