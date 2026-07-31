@@ -20604,7 +20604,20 @@ def _flow_compute_flag_assignments(
             # produced; it is updated for this step just below.
             available_now = set(initial_facts) | set(state_known)
             unresolved_supplied = supplied_names_for_start - available_now
-            required_for_start = set(_required_inputs_of(gen)) - available_now - supplied_names_for_start
+            # Synthesized inputs -- Knowledge(ip), node_name, seed and the rest
+            # -- are written into every generator config, but no step ever
+            # "produces" them, so they never appear in state. Counting them as
+            # unmet requirements suppressed the supply for any generator that
+            # declares one: a manifest requiring Knowledge(ip) alongside a
+            # flow_supply_when_first input got placed (eligibility knows the
+            # value is always there) and then ran without the supplied value,
+            # failing with "required and not supplied".
+            required_for_start = (
+                set(_required_inputs_of(gen))
+                - available_now
+                - supplied_names_for_start
+                - _flow_synthesized_inputs()
+            )
             # Only fabricate (and disclose) a value at a genuine branch start.
             # When an earlier step already produced the fact, the consumer gets
             # that real value through flow_context, and hinting a fabricated one
