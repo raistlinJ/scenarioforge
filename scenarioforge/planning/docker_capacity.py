@@ -126,13 +126,14 @@ def ensure_role_counts_docker_capacity(
     required_vulnerability_hosts: int,
     required_flag_node_generator_hosts: int = 0,
 ) -> tuple[Dict[str, int], dict]:
-    """Add Docker hosts for challenge demand that declared slots cannot absorb.
+    """Add Docker hosts for the challenge demand declared in the section cards.
 
-    Declared VulnerabilitySlot/FlagGenSlot rows are dedicated capacity: they are
-    consumed first by their own challenge kind.  Only the remainder spills onto
-    additive Docker hosts, which keeps today's behaviour intact for scenarios
-    that declare no slots at all.  Slots that go unused are left in place and
-    materialize as empty Docker-backed hosts.
+    Vulnerability and Flag Node Generator rows are additive, exactly as before:
+    each one gets its own Docker host.  Declared VulnerabilitySlot/FlagGenSlot
+    rows are *separate, additional* capacity for flag-sequencing and never
+    reduce that count -- 5 slots plus 5 declared generators is 10 challenge
+    hosts, not 5.  Slots stay in the topology whether or not sequencing fills
+    them.
     """
     current_counts: Dict[str, int] = {}
     for role, count in (role_counts or {}).items():
@@ -145,29 +146,26 @@ def ensure_role_counts_docker_capacity(
     vulnerability_slots = current_counts.get(VULNERABILITY_SLOT_ROLE, 0)
     flag_gen_slots = current_counts.get(FLAG_GEN_SLOT_ROLE, 0)
 
-    used_vulnerability_slots = min(vulnerability_slots, required_vulnerability)
-    used_flag_gen_slots = min(flag_gen_slots, required_nodegen)
-
     current_docker_hosts = current_counts.get('Docker', 0)
     # Vulnerability and topology-selected node-generator hosts are additive.
     # They must never consume a Docker count explicitly requested in Node
-    # Information, even when that count already exceeds the number of slots.
-    shortfall = (required_vulnerability - used_vulnerability_slots) + (required_nodegen - used_flag_gen_slots)
+    # Information, nor a declared challenge slot: slots exist to add capacity
+    # for flag-sequencing, so absorbing card demand into them would silently
+    # cancel out the rows the user declared.
+    shortfall = required_vulnerability + required_nodegen
     if shortfall:
         current_counts['Docker'] = current_docker_hosts + shortfall
 
     return current_counts, {
-        'required_docker_hosts': required_vulnerability + required_nodegen,
+        'required_docker_hosts': shortfall,
         'required_vulnerability_hosts': required_vulnerability,
         'required_flag_node_generator_hosts': required_nodegen,
         'current_docker_hosts': current_docker_hosts,
         'added_docker_hosts': shortfall,
         'vulnerability_slots': vulnerability_slots,
         'flag_gen_slots': flag_gen_slots,
-        'used_vulnerability_slots': used_vulnerability_slots,
-        'used_flag_gen_slots': used_flag_gen_slots,
-        'unused_vulnerability_slots': vulnerability_slots - used_vulnerability_slots,
-        'unused_flag_gen_slots': flag_gen_slots - used_flag_gen_slots,
+        # Slots are extra sequencing capacity on top of the declared cards.
+        'challenge_capacity': current_counts.get('Docker', 0) + vulnerability_slots + flag_gen_slots,
     }
 
 

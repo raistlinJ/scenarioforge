@@ -76,18 +76,23 @@ def test_display_order_matches_allowed_roles() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_declared_slots_absorb_demand_instead_of_adding_docker() -> None:
-    counts, repair = ensure_role_counts_docker_capacity({'Docker': 1, VULNERABILITY_SLOT_ROLE: 3}, 3, 0)
-    assert repair['added_docker_hosts'] == 0
-    # The user's explicit Docker row is never consumed by challenge demand.
-    assert counts['Docker'] == 1
-    assert counts[VULNERABILITY_SLOT_ROLE] == 3
+def test_declared_cards_still_add_their_own_docker_hosts() -> None:
+    """Slots are extra capacity; they must not cancel out declared card rows.
+
+    5 FlagGenSlot rows plus 5 declared generators is 10 challenge hosts, not 5.
+    """
+    counts, repair = ensure_role_counts_docker_capacity({FLAG_GEN_SLOT_ROLE: 5}, 0, 5)
+    assert repair['added_docker_hosts'] == 5
+    assert counts['Docker'] == 5
+    assert counts[FLAG_GEN_SLOT_ROLE] == 5
+    assert repair['challenge_capacity'] == 10
 
 
-def test_demand_beyond_slots_spills_onto_docker() -> None:
-    counts, repair = ensure_role_counts_docker_capacity({'Docker': 1, VULNERABILITY_SLOT_ROLE: 2}, 3, 0)
-    assert repair['added_docker_hosts'] == 1
-    assert counts['Docker'] == 2
+def test_vulnerability_slots_do_not_absorb_declared_vulnerabilities() -> None:
+    counts, repair = ensure_role_counts_docker_capacity({VULNERABILITY_SLOT_ROLE: 5}, 3, 0)
+    assert counts['Docker'] == 3
+    assert counts[VULNERABILITY_SLOT_ROLE] == 5
+    assert repair['challenge_capacity'] == 8
 
 
 def test_no_slots_declared_keeps_legacy_additive_behaviour() -> None:
@@ -96,30 +101,20 @@ def test_no_slots_declared_keeps_legacy_additive_behaviour() -> None:
     assert counts['Docker'] == 6
 
 
-def test_unused_slots_are_kept_as_empty_hosts() -> None:
-    counts, repair = ensure_role_counts_docker_capacity({VULNERABILITY_SLOT_ROLE: 4}, 1, 0)
-    assert counts[VULNERABILITY_SLOT_ROLE] == 4
-    assert repair['unused_vulnerability_slots'] == 3
+def test_slots_alone_are_capacity_with_no_declared_cards() -> None:
+    counts, repair = ensure_role_counts_docker_capacity({FLAG_GEN_SLOT_ROLE: 4}, 0, 0)
+    assert counts[FLAG_GEN_SLOT_ROLE] == 4
     assert repair['added_docker_hosts'] == 0
+    assert repair['challenge_capacity'] == 4
 
 
-def test_a_slot_never_absorbs_the_other_challenge_kind() -> None:
-    """FlagGenSlot capacity must not soak up vulnerability demand."""
-    counts, repair = ensure_role_counts_docker_capacity({FLAG_GEN_SLOT_ROLE: 3}, 2, 0)
-    assert repair['added_docker_hosts'] == 2
-    assert counts['Docker'] == 2
-    assert counts[FLAG_GEN_SLOT_ROLE] == 3
-
-
-def test_each_kind_draws_from_its_own_slot_pool() -> None:
-    counts, repair = ensure_role_counts_docker_capacity(
-        {VULNERABILITY_SLOT_ROLE: 2, FLAG_GEN_SLOT_ROLE: 2}, 3, 1
+def test_explicit_docker_rows_are_never_consumed_either() -> None:
+    counts, _ = ensure_role_counts_docker_capacity(
+        {'Docker': 1, VULNERABILITY_SLOT_ROLE: 2, FLAG_GEN_SLOT_ROLE: 2}, 1, 1
     )
-    assert repair['used_vulnerability_slots'] == 2
-    assert repair['used_flag_gen_slots'] == 1
-    # Only the one unabsorbed vulnerability becomes an additive Docker host.
-    assert repair['added_docker_hosts'] == 1
-    assert counts['Docker'] == 1
+    assert counts['Docker'] == 3
+    assert counts[VULNERABILITY_SLOT_ROLE] == 2
+    assert counts[FLAG_GEN_SLOT_ROLE] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -201,36 +196,35 @@ def _preview_for(node_rows: str, vuln_count: int = 2):
         return payload['full_preview']
 
 
-def test_vulnerabilities_prefer_declared_slots_over_docker_hosts() -> None:
-    preview = _preview_for(
-        "<item selected='Docker' v_metric='Count' v_count='1'/>"
-        "<item selected='VulnerabilitySlot' v_metric='Count' v_count='3'/>",
-        vuln_count=2,
-    )
-    hosts = {int(h['node_id']): h for h in preview['hosts']}
-    bearing = [h for h in hosts.values() if h.get('vulnerabilities')]
-    assert len(bearing) == 2
-    # Every vulnerability landed on a slot; the declared Docker host stays free.
-    assert all(h['role'] == VULNERABILITY_SLOT_ROLE for h in bearing)
-    assert preview['role_counts'].get('Docker') == 1
-    # The leftover slot is still materialized, just empty.
-    assert sum(1 for h in hosts.values() if h['role'] == VULNERABILITY_SLOT_ROLE) == 3
+def test_declared_vulnerabilities_fill_their_slots() -> None:
+    """Only the Vulnerabilities card can supply a vulnerability.
 
-
-def test_slots_are_not_double_counted_against_additive_hosts() -> None:
-    """Declaring exactly enough slots yields the same host count as declaring none.
-
-    The slots replace the additive Docker hosts rather than stacking on top of
-    them, which is what keeps a slot from silently growing the topology.
+    Flag-sequencing cannot invent one, so an empty VulnerabilitySlot would be a
+    dead node. Vulnerabilities fill their slots and free the additive Docker
+    hosts, which sequencing can use for either challenge kind.
     """
+    preview = _preview_for(
+        "<item selected='VulnerabilitySlot' v_metric='Count' v_count='3'/>", vuln_count=2
+    )
+    hosts = list(preview['hosts'])
+    bearing = [h for h in hosts if h.get('vulnerabilities')]
+    assert len(bearing) == 2
+    assert all(h['role'] == VULNERABILITY_SLOT_ROLE for h in bearing), bearing
+    # The two Docker hosts added for the card rows are left free.
+    free_docker = [h for h in hosts if h['role'] == 'Docker' and not h.get('vulnerabilities')]
+    assert len(free_docker) == 2
+    assert len(hosts) == 5
+
+
+def test_slot_rows_add_capacity_on_top_of_declared_cards() -> None:
     with_slots = _preview_for(
         "<item selected='VulnerabilitySlot' v_metric='Count' v_count='2'/>", vuln_count=2
     )
     without_slots = _preview_for('', vuln_count=2)
-    assert len(with_slots['hosts']) == len(without_slots['hosts']) == 2
-    # Without slots the demand materializes as additive Docker hosts instead.
-    assert without_slots['role_counts'].get('Docker') == 2
-    assert with_slots['role_counts'].get('Docker') is None
+    assert len(without_slots['hosts']) == 2
+    # The two slot rows are additional, not a replacement.
+    assert len(with_slots['hosts']) == 4
+    assert with_slots['role_counts'].get('Docker') == 2
     assert with_slots['role_counts'].get(VULNERABILITY_SLOT_ROLE) == 2
 
 
