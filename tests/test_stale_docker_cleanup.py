@@ -121,3 +121,44 @@ def test_no_reason_when_every_restart_succeeded():
 
     meta = {'docker_nodes_start_recovery_attempts': [{'ok': True, 'output': 'Started'}]}
     assert cli._first_docker_restart_failure_reason(meta) == ''
+
+
+def test_docker_home_permission_repair_is_scoped_and_idempotent():
+    """Running docker as root seeds root-owned state into the invoking user's
+    ~/.docker; buildx/.lock is the usual casualty, and every later build that
+    needs it dies with a bare `rc=1`."""
+    from webapp import app_backend as backend
+
+    cmd = backend._docker_home_permission_repair_command('corevm')
+
+    # Scoped to that user's own ~/.docker, resolved from passwd rather than
+    # assuming /home/<user>.
+    assert 'getent passwd corevm' in cmd
+    assert '"$HOME_DIR/.docker"' in cmd
+    # Only files not already owned by the user are touched.
+    assert '! -user corevm' in cmd
+    assert 'chown corevm:corevm' in cmd
+    # Nothing to do -> exits without output, so a clean VM stays quiet.
+    assert 'exit 0' in cmd
+
+    import subprocess
+    assert subprocess.run(['sh', '-n', '-c', cmd], capture_output=True).returncode == 0
+
+
+def test_docker_home_permission_repair_quotes_the_username():
+    """The username reaches a root shell, so it must not be interpolated raw."""
+    from webapp import app_backend as backend
+
+    cmd = backend._docker_home_permission_repair_command('bad; rm -rf /')
+    assert '; rm -rf /' not in cmd.replace("'bad; rm -rf /'", '')
+    import subprocess
+    assert subprocess.run(['sh', '-n', '-c', cmd], capture_output=True).returncode == 0
+
+
+def test_docker_home_permission_repair_can_be_disabled(monkeypatch):
+    from webapp import app_backend as backend
+
+    monkeypatch.delenv('CORETG_REPAIR_DOCKER_HOME_PERMS', raising=False)
+    assert backend._docker_home_permission_repair_enabled() is True
+    monkeypatch.setenv('CORETG_REPAIR_DOCKER_HOME_PERMS', '0')
+    assert backend._docker_home_permission_repair_enabled() is False
