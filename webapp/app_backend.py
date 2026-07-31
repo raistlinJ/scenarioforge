@@ -73,6 +73,12 @@ def _apply_docker_bridge_core_defaults() -> None:
 _apply_docker_bridge_core_defaults()
 
 from scenarioforge.utils.flow_seed import flow_generator_seed as _flow_generator_seed_impl
+from scenarioforge.planning.node_plan import (
+    FLAG_GEN_SLOT_ROLE as _PLANNING_FLAG_GEN_SLOT_ROLE,
+    VULNERABILITY_SLOT_ROLE as _PLANNING_VULNERABILITY_SLOT_ROLE,
+    challenge_slot_kind as _planning_challenge_slot_kind,
+    is_docker_backed_role as _planning_is_docker_backed_role,
+)
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - psutil is optional for tests
@@ -1921,6 +1927,14 @@ def _open_ssh_client(core_cfg: Dict[str, Any]) -> Any:
     except Exception:
         max_attempts = 2
     max_attempts = max(1, max_attempts)
+    # A host that drops packets rather than refusing blocks for the full timeout
+    # on every attempt, so an unreachable CORE VM costs timeout x retries with no
+    # output. Overridable so a run off the lab network can fail fast.
+    try:
+        connect_timeout = float(os.getenv('CORETG_SSH_CONNECT_TIMEOUT', '30') or 30)
+    except Exception:
+        connect_timeout = 30.0
+    connect_timeout = max(0.1, connect_timeout)
     for attempt in range(1, max_attempts + 1):
         client = paramiko.SSHClient()  # type: ignore[assignment]
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # type: ignore[attr-defined]
@@ -1932,9 +1946,9 @@ def _open_ssh_client(core_cfg: Dict[str, Any]) -> Any:
                 password=password,
                 look_for_keys=False,
                 allow_agent=False,
-                timeout=30.0,
-                banner_timeout=30.0,
-                auth_timeout=30.0,
+                timeout=connect_timeout,
+                banner_timeout=connect_timeout,
+                auth_timeout=connect_timeout,
             )
             return client
         except Exception as exc:
@@ -16626,7 +16640,7 @@ def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]]
         # Flow placement eligibility:
         # - flag-generators may be placed on vulnerability nodes only
         # - flag-node-generators require non-vulnerability docker-role nodes (enforced elsewhere)
-        is_docker = ('docker' in t) or (str(n.get('type') or '').strip().upper() == 'DOCKER')
+        is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
         if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
@@ -16782,7 +16796,7 @@ def _pick_flag_chain_nodes_allow_duplicates(
             continue
         id_to_node[nid] = n
         t = (str(n.get('type') or '').strip().lower())
-        is_docker = ('docker' in t) or (str(n.get('type') or '').strip().upper() == 'DOCKER')
+        is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
         if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
@@ -16955,16 +16969,21 @@ def _pick_flag_chain_nodes_for_preset(
 
 
 def _flow_node_allows_flag_node_generator(node: Any) -> bool:
-    """Compatibility-aware eligibility for non-vulnerability Docker nodes.
+    """Whether a non-vulnerability node may carry a flag-node-generator.
 
-    Old persisted previews had no topology generator selection.  Retain their
-    historical generic behavior; previews with the new marker are strict.
+    Nodes the topology already bound to a generator obviously qualify.  Free
+    Docker-backed hosts do too: leftover Docker rows and declared FlagGenSlot
+    rows exist precisely so flag-sequencing has capacity beyond the generators
+    named in the Flag Node Generators card.  Requiring an assigned generator id
+    here made that spare capacity invisible, so a scenario could declare slots
+    and still be told it had nothing to place challenges on.
+
+    A VulnerabilitySlot is Docker-backed but reserved for vulnerabilities, so it
+    is excluded.
     """
     if not isinstance(node, dict):
         return False
-    if not bool(node.get('_topology_flag_node_generators_configured')):
-        return True
-    return bool(str(node.get('flag_node_generator_id') or '').strip())
+    return _flow_node_accepts_challenge_kind(node, 'flag-node-generator')
 
 
 def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
@@ -16988,12 +17007,28 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     vuln_total = 0
     compose_backed_total = 0
     eligible_total = 0
+    # Challenge-capacity breakdown for the Flow summary. Every Docker-backed
+    # host falls in exactly one bucket, so the five sum to "Max challenges".
+    # The first two are what the Vulnerabilities and Flag Node Generators cards
+    # asked for; the last three are unfilled capacity declared in Node
+    # Information, which is what "slot" means here.
+    specified_flag_node_generator_total = 0
+    specified_vulnerability_total = 0
+    flag_gen_slot_total = 0
+    vulnerability_slot_total = 0
+    docker_slot_total = 0
+    # Hosts the chain must include however short it is: anything already
+    # carrying a vulnerability or a card-placed generator. Counted separately
+    # from the display buckets because a *filled* slot is mandatory even though
+    # it is reported as slot capacity.
+    mandatory_challenge_total = 0
     for n in nodes or []:
         if not isinstance(n, dict):
             continue
-        t_raw = str(n.get('type') or '')
-        t = t_raw.strip().lower()
-        is_docker = ('docker' in t) or (t_raw.strip().upper() == 'DOCKER')
+        # Challenge slots are Docker-backed under their own role name, so the
+        # old "docker" substring test on `type` counted a slot-only topology as
+        # having no eligible nodes at all.
+        is_docker = _flow_node_is_docker_role(n)
         is_vuln = bool(n.get('is_vuln')) or bool(n.get('vulnerabilities'))
         if is_docker:
             docker_total += 1
@@ -17003,7 +17038,7 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
                 compose_backed_total += 1
         if is_vuln:
             vuln_total += 1
-        if is_docker and (not is_vuln):
+        if is_docker and (not is_vuln) and _flow_node_accepts_challenge_kind(n, 'flag-node-generator'):
             docker_nonvuln_total += 1
             if str(n.get('flag_node_generator_id') or '').strip():
                 topology_node_generator_total += 1
@@ -17011,6 +17046,27 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
                 generic_docker_total += 1
         if is_vuln or (is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_total += 1
+        if is_docker:
+            if is_vuln or str(n.get('flag_node_generator_id') or '').strip():
+                mandatory_challenge_total += 1
+            # Classify by where the host came from, not by what currently sits
+            # on it. A declared slot is Node Information capacity whether or not
+            # something has filled it yet; counting a filled slot as "specified"
+            # would move it between buckets as the plan resolves.
+            slot_kind = _flow_node_challenge_slot_kind(n)
+            if slot_kind == 'flag-node-generator':
+                flag_gen_slot_total += 1
+            elif slot_kind == 'vulnerability':
+                vulnerability_slot_total += 1
+            elif str(n.get('flag_node_generator_id') or '').strip():
+                # A Docker host the Flag Node Generators card added. It counts
+                # here even when it also carries a vulnerability, so the buckets
+                # stay disjoint.
+                specified_flag_node_generator_total += 1
+            elif is_vuln:
+                specified_vulnerability_total += 1
+            else:
+                docker_slot_total += 1
     return {
         'docker_total': docker_total,
         'docker_nonvuln_total': docker_nonvuln_total,
@@ -17021,6 +17077,12 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
         'flag_generator_eligible_total': vuln_total,
         'flag_node_generator_eligible_total': topology_node_generator_total if topology_generator_mode else docker_nonvuln_total,
         'topology_flag_node_generator_total': topology_node_generator_total,
+        'specified_flag_node_generator_total': specified_flag_node_generator_total,
+        'specified_vulnerability_total': specified_vulnerability_total,
+        'flag_gen_slot_total': flag_gen_slot_total,
+        'vulnerability_slot_total': vulnerability_slot_total,
+        'docker_slot_total': docker_slot_total,
+        'mandatory_challenge_total': mandatory_challenge_total,
     }
 
 
@@ -17886,6 +17948,71 @@ def _flow_text_contains_ipv4(text: str, ip_value: str) -> bool:
         return False
 
 
+def _flow_strip_next_node_references(tpl: str) -> str:
+    """Drop the part of a hint that only exists to name the next chain node.
+
+    Most manifests phrase their low hint as "<do the thing> before moving to
+    {{NEXT_NODE_NAME}}." That clause asserts an ordering the dependency graph
+    may not have: on a parallel stage the positional next step is an unrelated
+    sibling, so naming it tells participants a gate exists where none does.
+    When a step has no dependent successor the clause is removed and the
+    instruction itself is kept.
+    """
+    text = str(tpl or '').strip()
+    if not text or '{{NEXT_NODE_' not in text:
+        return text
+    placeholder = r'\{\{NEXT_NODE_[A-Z_]+\}\}'
+    # "... before moving to X", "... then proceed to X @ Y"
+    text = re.sub(
+        r'[\s,;]*\b(?:before|then|and then|next)\s+'
+        r'(?:moving|move|proceeding|proceed|continuing|continue|going|go)\s+(?:on\s+)?to\s+'
+        + placeholder + r'(?:\s*@\s*' + placeholder + r')?',
+        '', text, flags=re.IGNORECASE,
+    )
+    # Bare label forms the scaffolding teaches: "Target: {{NEXT_NODE_IP}}".
+    text = re.sub(
+        r'(?:^|(?<=[.;]))\s*(?:target|next|then)\s*:\s*' + placeholder
+        + r'(?:\s*@\s*' + placeholder + r')?\s*\.?',
+        '', text, flags=re.IGNORECASE,
+    )
+    # Anything still referencing a next node has no safe partial rendering.
+    if '{{NEXT_NODE_' in text:
+        text = re.sub(r'[\s,;]*' + placeholder + r'(?:\s*@\s*' + placeholder + r')?', '', text)
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    text = re.sub(r'^[\s,;.]+', '', text).strip()
+    if text and not text.endswith(('.', '!', '?', ':')):
+        text += '.'
+    return text
+
+
+def _flow_dependent_successor_id(
+    assignments: list[dict[str, Any]] | None,
+    index: int,
+) -> str:
+    """Node id of the first later step that consumes this step's output.
+
+    Returns '' when nothing downstream depends on this step, which means the
+    step sits on a parallel stage and must not claim to gate anything.
+    """
+    try:
+        items = assignments if isinstance(assignments, list) else []
+        current = items[index] if 0 <= index < len(items) else None
+        if not isinstance(current, dict):
+            return ''
+        produced = _flow_assignment_fact_names(current, ('produces', 'output_fields', 'outputs'))
+        if not produced:
+            return ''
+        for later in items[index + 1:]:
+            if not isinstance(later, dict):
+                continue
+            needs = _flow_assignment_fact_names(later, ('requires', 'input_fields_required', 'inputs'))
+            if needs & produced:
+                return str(later.get('node_id') or '').strip()
+        return ''
+    except Exception:
+        return ''
+
+
 def _flow_render_hint_template(
     tpl: str,
     *,
@@ -17910,7 +18037,10 @@ def _flow_render_hint_template(
             next_ip_val = ''
             this_ip_val = ''
         if (not next_id_val) and ('{{NEXT_NODE_' in raw_tpl):
-            return "You've completed this sequence of challenges!"
+            # The final step has nothing after it. Keep its own instruction and
+            # drop the pointer clause rather than replacing the whole hint with
+            # a congratulation, which tells the participant nothing.
+            return _flow_strip_ids_from_hint(_flow_strip_next_node_references(raw_tpl))
         if not next_name_val:
             next_name_val = next_id_val
 
@@ -18751,6 +18881,28 @@ def _flow_state_from_current_xml_for_preview(
         return None
 
 
+def _flow_node_challenge_slot_kind(node: dict[str, Any] | None) -> str:
+    """Return the challenge kind a declared slot host is reserved for.
+
+    Empty string for plain Docker hosts (which accept either kind) and for
+    everything that is not a challenge slot.
+    """
+    try:
+        if not isinstance(node, dict):
+            return ''
+        metadata = node.get('metadata') if isinstance(node.get('metadata'), dict) else {}
+        explicit = str(metadata.get('challenge_slot_kind') or node.get('challenge_slot_kind') or '').strip()
+        if explicit:
+            return explicit
+        for key in ('role', 'type'):
+            kind = _planning_challenge_slot_kind(str(node.get(key) or ''))
+            if kind:
+                return kind
+        return ''
+    except Exception:
+        return ''
+
+
 def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
     try:
         if not isinstance(node, dict):
@@ -18758,6 +18910,12 @@ def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
         t_raw = str(node.get('type') or '')
         t = t_raw.strip().lower()
         if ('docker' in t) or (t_raw.strip().upper() == 'DOCKER'):
+            return True
+        # Challenge slots are Docker-backed hosts under a dedicated role name,
+        # so they carry no "docker" substring to match on.
+        if _flow_node_challenge_slot_kind(node):
+            return True
+        if _planning_is_docker_backed_role(str(node.get('role') or '')):
             return True
         # Preview graph nodes also carry compose metadata for docker-role hosts.
         comp = str(node.get('compose') or '').strip()
@@ -18767,6 +18925,20 @@ def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
         return False
 
 
+def _flow_node_accepts_challenge_kind(node: dict[str, Any] | None, kind: str) -> bool:
+    """True when `node` may host a challenge of `kind`.
+
+    Plain Docker hosts accept either kind; a declared slot accepts only its own.
+    `kind` is 'vulnerability' or 'flag-node-generator'.
+    """
+    if not _flow_node_is_docker_role(node):
+        return False
+    slot_kind = _flow_node_challenge_slot_kind(node)
+    if not slot_kind:
+        return True
+    return slot_kind == str(kind or '').strip()
+
+
 def _flow_node_is_vuln(node: dict[str, Any] | None) -> bool:
     try:
         if not isinstance(node, dict):
@@ -18774,6 +18946,100 @@ def _flow_node_is_vuln(node: dict[str, Any] | None) -> bool:
         return bool(node.get('is_vuln')) or bool(node.get('is_vulnerability')) or bool(node.get('is_vulnerable')) or bool(node.get('vulnerabilities'))
     except Exception:
         return False
+
+
+def _flow_installed_vulnerability_names() -> list[str]:
+    """Vulnerability names available to draw, sorted for stable ordering."""
+    try:
+        from scenarioforge.utils.vuln_process import load_vuln_catalog
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for entry in (load_vuln_catalog(_get_repo_root()) or []):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get('Name') or '').strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        names.sort()
+        return names
+    except Exception:
+        return []
+
+
+def _flow_fill_empty_vulnerability_slots(
+    preview: dict[str, Any] | None,
+    chain_nodes: list[dict[str, Any]] | None,
+    *,
+    seed: int | None = None,
+) -> list[str]:
+    """Draw a vulnerability for every empty VulnerabilitySlot in the chain.
+
+    A declared slot is capacity, not a placement: the planner leaves it empty so
+    it does not become a mandatory challenge, and flag-sequencing fills it only
+    if the chain actually reaches it. A slot the chain never reaches stays a
+    plain Docker node.
+
+    Without this an empty slot in the chain has no candidate pool at all -- it
+    is not a vulnerability host yet, and its slot kind refuses flag-node
+    generators -- so the whole sequence fails.
+
+    Mutates the chain nodes and the preview's ``vulnerabilities_by_node`` so
+    both the solver and deployment see the choice. Returns the names drawn.
+    """
+    nodes = [n for n in (chain_nodes or []) if isinstance(n, dict)]
+    empty_slots = [
+        n for n in nodes
+        if _flow_node_challenge_slot_kind(n) == 'vulnerability'
+        and not _flow_node_is_vuln(n)
+    ]
+    if not empty_slots:
+        return []
+
+    catalog = _flow_installed_vulnerability_names()
+    if not catalog:
+        return []
+
+    view = preview if isinstance(preview, dict) else {}
+    by_node = view.get('vulnerabilities_by_node')
+    if not isinstance(by_node, dict):
+        by_node = {}
+
+    # Prefer a vulnerability the scenario is not already using, so a drawn slot
+    # adds a distinct challenge rather than repeating a placed one.
+    in_use: set[str] = set()
+    for value in by_node.values():
+        if isinstance(value, list):
+            in_use.update(str(v).strip() for v in value if str(v or '').strip())
+        elif str(value or '').strip():
+            in_use.add(str(value).strip())
+    for n in nodes:
+        for v in (n.get('vulnerabilities') or []):
+            if str(v or '').strip():
+                in_use.add(str(v).strip())
+
+    import random as _random
+
+    rnd = _random.Random(int(seed) if seed is not None else 0)
+    pool = [name for name in catalog if name not in in_use] or list(catalog)
+    rnd.shuffle(pool)
+
+    drawn: list[str] = []
+    for index, node in enumerate(empty_slots):
+        if not pool:
+            break
+        name = pool.pop()
+        node['vulnerabilities'] = [name]
+        node['is_vuln'] = True
+        node_id = str(node.get('id') or node.get('node_id') or '').strip()
+        if node_id:
+            by_node[node_id] = [name]
+        drawn.append(name)
+
+    if drawn and isinstance(preview, dict):
+        preview['vulnerabilities_by_node'] = by_node
+    return drawn
 
 
 def _get_flow_seed(preview: dict[str, Any] | None, flow_seed_override: int | None = None) -> int:
@@ -19035,13 +19301,17 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             continue
         role = str(h.get('role') or 'Host')
         role_norm = role.strip().lower()
-        is_docker_role = role_norm == 'docker'
+        # Challenge slots are Docker-backed hosts under their own role name.
+        # Mapping them to a plain 'host' node made every downstream docker check
+        # fail, so a slot-only topology reported zero eligible nodes.
+        slot_kind = _planning_challenge_slot_kind(role)
+        is_docker_role = _planning_is_docker_backed_role(role)
         vulns = h.get('vulnerabilities') if isinstance(h.get('vulnerabilities'), list) else []
         if not vulns:
             vulns = vuln_names_by_preview_id.get(hid, [])
         is_vuln = bool(vulns) or (hid in vuln_ids)
         # IMPORTANT: vulnerabilities should not "take up" Docker node slots.
-        # Only Docker-role hosts are treated as docker nodes for Flow eligibility.
+        # Only Docker-backed hosts are treated as docker nodes for Flow eligibility.
         node_type = 'docker' if is_docker_role else 'host'
         compose = ''
         compose_name = ''
@@ -19066,6 +19336,11 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
             except Exception:
                 host_ip4 = ''
         extra: dict[str, Any] = {}
+        if slot_kind:
+            # Carried so Flow placement can tell a dedicated slot apart from a
+            # plain Docker host, which accepts either challenge kind.
+            extra['challenge_slot_kind'] = slot_kind
+            extra['role'] = role
         if topology_nodegen_mode:
             extra['_topology_flag_node_generators_configured'] = True
             selected_generator = str((nodegen_by_preview_id or {}).get(hid) or '').strip()
@@ -19581,7 +19856,8 @@ def _flow_compute_flag_assignments(
             next_name_val = (id_to_name.get(next_id_val) or '').strip() if next_id_val else ''
             next_ip_val = str(id_to_ip.get(next_id_val) or '').strip() if next_id_val else ''
             if not next_id_val:
-                return "You've completed this sequence of challenges!"
+                # Final step: keep its own instruction, drop the pointer.
+                return _flow_strip_ids_from_hint(_flow_strip_next_node_references(text))
             if not next_name_val:
                 next_name_val = next_id_val
             if ('{{NEXT_NODE_NAME}}' in raw_tpl) and ('{{NEXT_NODE_IP}}' not in raw_tpl) and next_ip_val:
@@ -19827,18 +20103,74 @@ def _flow_compute_flag_assignments(
         node = id_to_node.get(str(cid)) or {}
         is_vuln_node = _flow_node_is_vuln(node) or (str(cid) in vuln_ids)
         is_docker_node = _flow_node_is_docker_role(node)
+        slot_kind = _flow_node_challenge_slot_kind(node)
+        requested_id = str(node.get('flag_node_generator_id') or '').strip()
+        # A challenge slot is capacity reserved for flag-sequencing, not a
+        # generator the user picked. Topology cannot name what fills it -- the
+        # planner has no view of the installed catalog -- so a slot either
+        # arrives unassigned or carries an id that resolves to nothing. Either
+        # way Flow chooses, rather than leaving the pool empty and failing the
+        # whole sequence.
+        slot_id_resolves = any(
+            str(g.get('id') or '').strip() == requested_id
+            and (str(g.get('_flow_kind') or '').strip() or 'flag-generator') == 'flag-node-generator'
+            for g in eligible_gens
+        ) if requested_id else False
+        slot_picks_own_generator = (
+            slot_kind == 'flag-node-generator' and not slot_id_resolves
+        )
+
         def _eligible_for_node(g: dict[str, Any]) -> bool:
             k = str(g.get('_flow_kind') or '').strip() or 'flag-generator'
             if k == 'flag-node-generator':
-                requested_id = str(node.get('flag_node_generator_id') or '').strip()
+                # A declared slot only ever takes its own challenge kind, so a
+                # VulnerabilitySlot must not draw a generator here.
+                if not _flow_node_accepts_challenge_kind(node, 'flag-node-generator'):
+                    return False
+                if is_vuln_node:
+                    return False
                 if not bool(node.get('_topology_flag_node_generators_configured')):
-                    return bool(is_docker_node and (not is_vuln_node))
-                return bool(
-                    is_docker_node and (not is_vuln_node) and requested_id
-                    and str(g.get('id') or '').strip() == requested_id
-                )
+                    return True
+                if slot_picks_own_generator:
+                    return True
+                return str(g.get('id') or '').strip() == requested_id
             return bool(is_vuln_node)
         pool_by_pos.append([g for g in eligible_gens if _eligible_for_node(g)])
+
+    # Facts granted by the vulnerability sitting at each chain position.  A
+    # generator is only placed where the underlying vuln actually yields what it
+    # needs, and its grants carry forward to later positions.
+    vuln_facts_by_idx: list[set[str]] = [set() for _ in range(len(chain_ids))]
+    vuln_requires_by_idx: list[set[str]] = [set() for _ in range(len(chain_ids))]
+    vuln_unresolved_by_idx: list[list[str]] = [[] for _ in range(len(chain_ids))]
+    try:
+        vocabulary = _flow_fact_vocabulary(eligible_gens, plugins_by_id)
+        resolved_vuln_facts = _flow_vuln_facts_by_node_id(
+            vuln_names_by_id,
+            vocabulary=vocabulary,
+            nodes_by_id=id_to_node,
+        )
+        for idx, cid in enumerate(chain_ids):
+            entry = resolved_vuln_facts.get(str(cid))
+            if not isinstance(entry, dict):
+                continue
+            vuln_facts_by_idx[idx] = set(entry.get('provides') or set())
+            vuln_requires_by_idx[idx] = set(entry.get('requires') or set())
+            vuln_unresolved_by_idx[idx] = list(entry.get('unresolved') or [])
+    except Exception:
+        vuln_facts_by_idx = [set() for _ in range(len(chain_ids))]
+        vuln_requires_by_idx = [set() for _ in range(len(chain_ids))]
+        vuln_unresolved_by_idx = [[] for _ in range(len(chain_ids))]
+
+    def _vuln_facts_at(idx: int) -> set[str]:
+        try:
+            return vuln_facts_by_idx[idx]
+        except Exception:
+            return set()
+
+    def _state_at(idx: int, state: set[str]) -> set[str]:
+        extra = _vuln_facts_at(idx)
+        return (set(state) | extra) if extra else state
 
     remaining_union_by_idx: list[set[str]] = []
     try:
@@ -19847,6 +20179,7 @@ def _flow_compute_flag_assignments(
             pool = pool_by_pos[i] if i < len(pool_by_pos) else []
             for g in pool:
                 running |= _provides_cached(g)
+            running |= _vuln_facts_at(i)
             remaining_union_by_idx.append(set(running))
         remaining_union_by_idx = list(reversed(remaining_union_by_idx))
     except Exception:
@@ -19977,15 +20310,16 @@ def _flow_compute_flag_assignments(
                 if not remaining_goal.issubset(possible):
                     memo.add(key)
                     return None
-            candidates = _candidate_list(idx, state, deployed_ids)
+            state_here = _state_at(idx, state)
+            candidates = _candidate_list(idx, state_here, deployed_ids)
             if not candidates:
                 memo.add(key)
                 return None
-            ordered = _score_order(candidates, state)
+            ordered = _score_order(candidates, state_here)
             for g in ordered:
                 provides = _provides_cached(g)
                 gid = str(g.get('id') or '').strip()
-                next_state = set(state) | set(provides)
+                next_state = set(state_here) | set(provides)
                 next_deployed = set(deployed_ids)
                 if gid:
                     next_deployed.add(gid)
@@ -20012,6 +20346,10 @@ def _flow_compute_flag_assignments(
         if not pool:
             return []
 
+        # The vulnerability at this position is exploited before its generator's
+        # flag is reachable, so its grants are in scope for this step onward.
+        state_known |= _vuln_facts_at(i)
+
         if chosen_gens is not None:
             gen = chosen_gens[i]
         else:
@@ -20037,6 +20375,7 @@ def _flow_compute_flag_assignments(
                         for j in range(i + 1, len(chain_ids)):
                             for g in (pool_by_pos[j] if j < len(pool_by_pos) else []):
                                 remaining_union |= _provides_cached(g)
+                            remaining_union |= _vuln_facts_at(j)
                         filtered: list[dict[str, Any]] = []
                         for g in candidates:
                             future_possible = set(state_known) | _provides_cached(g) | remaining_union
@@ -20051,8 +20390,17 @@ def _flow_compute_flag_assignments(
 
         try:
             supplied_names_for_start = set(_flow_first_step_chain_supplied_input_names(gen))
-            required_for_start = set(_required_inputs_of(gen)) - set(initial_facts) - supplied_names_for_start
-            supply_on_start = bool(not required_for_start)
+            # `state_known` holds initial facts plus everything steps 0..i-1
+            # produced; it is updated for this step just below.
+            available_now = set(initial_facts) | set(state_known)
+            unresolved_supplied = supplied_names_for_start - available_now
+            required_for_start = set(_required_inputs_of(gen)) - available_now - supplied_names_for_start
+            # Only fabricate (and disclose) a value at a genuine branch start.
+            # When an earlier step already produced the fact, the consumer gets
+            # that real value through flow_context, and hinting a fabricated one
+            # would hand participants a credential the chain never uses -- and
+            # give away a secret the previous challenge was meant to earn.
+            supply_on_start = bool(not required_for_start) and bool(unresolved_supplied)
         except Exception:
             supply_on_start = bool(i == 0)
 
@@ -20073,6 +20421,24 @@ def _flow_compute_flag_assignments(
 
         next_id = chain_ids[i + 1] if (i + 1) < len(chain_ids) else ''
         hint_level_templates = _flow_hint_level_templates_from_generator(gen)
+        # The opening step has nothing before it to hand over a secret, so any
+        # undiscoverable value its access steps need is promoted into `low`.
+        # Later steps keep theirs gated: there the secret is the reward for the
+        # previous challenge.
+        promoted_first_step_hints: list[str] = []
+        promoted_first_step_hint_templates: list[str] = []
+        if i == 0:
+            _low_before_promotion = list(hint_level_templates.get('low') or [])
+            hint_level_templates, promoted_first_step_hints = _flow_promote_first_step_hint_levels(
+                hint_level_templates, gen
+            )
+            # Promotion only ever appends to `low`, so the difference is exactly
+            # the set of lines that moved up. Views label these differently from
+            # an authored low hint: they are a given fact, not a nudge.
+            promoted_first_step_hint_templates = [
+                line for line in (hint_level_templates.get('low') or [])
+                if line not in _low_before_promotion
+            ]
         rendered_hint_levels = _flow_render_hint_level_templates(
             hint_level_templates,
             scenario_label=scenario_label,
@@ -20147,6 +20513,19 @@ def _flow_compute_flag_assignments(
             'generator_catalog': str(gen.get('_flow_catalog') or 'flag_generators'),
             'language': str(gen.get('language') or ''),
             'vulnerabilities': vuln_names,
+            # What the vuln at this position grants the solver, so the chain is
+            # inspectable when a step looks unreachable.
+            'promoted_first_step_hints': list(promoted_first_step_hints),
+            'promoted_first_step_hint_templates': list(promoted_first_step_hint_templates),
+            'promoted_first_step_hint_lines': [
+                _render_hint(line, this_id=str(cid), next_id=str(next_id))
+                for line in promoted_first_step_hint_templates
+            ],
+            'vuln_provides': sorted(_vuln_facts_at(i)),
+            'vuln_requires': sorted(vuln_requires_by_idx[i]) if i < len(vuln_requires_by_idx) else [],
+            'vuln_metadata_missing': (
+                list(vuln_unresolved_by_idx[i]) if i < len(vuln_unresolved_by_idx) else []
+            ),
             'description_hints': list(gen.get('description_hints') or []) if isinstance(gen.get('description_hints'), list) else [],
             'inject_files': inject_files,
             'inject_candidate_paths': inject_candidate_paths,
@@ -20178,6 +20557,78 @@ def _flow_compute_flag_assignments(
             supply_on_start=supply_on_start,
         )
         out.append(assignment_out)
+
+    # A step only gates another when something downstream actually consumes its
+    # output. Manifest hints assume a linear chain ("... before moving to
+    # {{NEXT_NODE_NAME}}"), so on a parallel stage they name an unrelated
+    # sibling and invent a dependency the solver never imposed. Where no
+    # dependent successor exists, drop that clause and re-render. Templates are
+    # stored unrendered, so doing it here fixes every downstream view at once.
+    for idx, assignment_out in enumerate(out):
+        dependent_id = _flow_dependent_successor_id(out, idx)
+        assignment_out['hint_next_node_id'] = dependent_id
+        if dependent_id:
+            continue
+        if not str(assignment_out.get('next_node_id') or '').strip():
+            # Terminal step: it already renders the completion message.
+            continue
+        this_node_id = str(assignment_out.get('node_id') or '')
+
+        def _rerender(template: str) -> str:
+            try:
+                return _flow_render_hint_template(
+                    template,
+                    scenario_label=scenario_label,
+                    id_to_name=id_to_name,
+                    id_to_ip=id_to_ip,
+                    this_id=this_node_id,
+                    next_id='',
+                )
+            except Exception:
+                return str(template or '')
+
+        levels = assignment_out.get('hint_level_templates')
+        if isinstance(levels, dict):
+            stripped_levels: dict[str, list[str]] = {}
+            for level_name, lines in levels.items():
+                kept = [
+                    text for text in
+                    (_flow_strip_next_node_references(line) for line in (lines or []))
+                    if text
+                ]
+                stripped_levels[str(level_name)] = kept
+            assignment_out['hint_level_templates'] = stripped_levels
+            assignment_out['hint_levels'] = {
+                level_name: [_rerender(line) for line in lines]
+                for level_name, lines in stripped_levels.items()
+            }
+            # Promoted lines are matched against `hint_levels` by text, so they
+            # have to go through the same strip-and-re-render.
+            promoted_templates = assignment_out.get('promoted_first_step_hint_templates')
+            if isinstance(promoted_templates, list):
+                assignment_out['promoted_first_step_hint_lines'] = [
+                    _rerender(text) for text in
+                    (_flow_strip_next_node_references(line) for line in promoted_templates)
+                    if text
+                ]
+        templates = assignment_out.get('hint_templates')
+        if isinstance(templates, list):
+            stripped = [
+                text for text in
+                (_flow_strip_next_node_references(line) for line in templates)
+                if text
+            ]
+            # A hint whose entire body was the pointer (the scaffolding's
+            # "Target: {{NEXT_NODE_IP}}") leaves nothing behind, so fall back to
+            # a neutral instruction rather than an empty hint.
+            if not stripped:
+                stripped = ['Solve the challenge on this node.']
+            assignment_out['hint_templates'] = stripped
+            rendered = [_rerender(line) for line in stripped]
+            if rendered:
+                assignment_out['hints'] = rendered
+                assignment_out['hint'] = rendered[0]
+
     return _flow_apply_pivot_context_to_assignments(
         out,
         chain_nodes,
@@ -20212,6 +20663,376 @@ def _flow_synthesized_inputs() -> set[str]:
         'ip4',
         'ipv4',
     }
+
+
+def _flow_fact_vocabulary(
+    generators: list[dict[str, Any]] | None,
+    plugins_by_id: dict[str, dict[str, Any]] | None,
+) -> set[str]:
+    """Every fact spelling the enabled generators actually use.
+
+    Vuln facts are matched canonically but must enter solver state using the
+    consuming generator's own spelling, because the solver compares literally.
+    """
+    vocab: set[str] = set()
+    for plugin in (plugins_by_id or {}).values():
+        if not isinstance(plugin, dict):
+            continue
+        for item in (plugin.get('requires') or []):
+            text = str(item or '').strip()
+            if text:
+                vocab.add(text)
+        for item in (plugin.get('produces') or []):
+            artifact = item.get('artifact') if isinstance(item, dict) else item
+            text = str(artifact or '').strip()
+            if text:
+                vocab.add(text)
+    for gen in (generators or []):
+        if not isinstance(gen, dict):
+            continue
+        for bucket in ('inputs', 'outputs'):
+            entries = gen.get(bucket)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name') or '').strip()
+                if name and _flow_looks_like_fact_ref(name):
+                    vocab.add(name)
+    return vocab
+
+
+# Placeholders in access_instructions that stand for a secret the participant has
+# to already hold, mapped to the fact that would carry it.
+_ACCESS_SECRET_PLACEHOLDER_FACTS: dict[str, tuple[str, ...]] = {
+    'USERNAME': ('Credential(user, password)', 'Credential(user)'),
+    'USER': ('Credential(user, password)', 'Credential(user)'),
+    'PASSWORD': ('Credential(user, password)', 'Credential(user, hash)'),
+    'PASS': ('Credential(user, password)', 'Credential(user, hash)'),
+    'HASH': ('Credential(user, hash)',),
+    'TOKEN': ('Token(service)',),
+    'APIKEY': ('APIKey(service)',),
+    'API_KEY': ('APIKey(service)',),
+    'SECRET': ('ExposedSecret(service)',),
+    'PASSPHRASE': ('DecryptionKey(id)', 'Credential(user, password)'),
+    'DECRYPTION_KEY': ('DecryptionKey(id)',),
+    'KEY': ('DecryptionKey(id)', 'APIKey(service)'),
+}
+
+# Facts a participant cannot reasonably discover by looking around: they are
+# handed over or they are not had. Paths, ports and endpoints are deliberately
+# absent -- those are enumerable, so a hint for them is a convenience, not a
+# precondition.
+_UNDISCOVERABLE_FACT_NAMES = ('credential', 'token', 'apikey', 'exposedsecret', 'decryptionkey')
+
+
+def _flow_fact_is_undiscoverable(fact: Any) -> bool:
+    """Whether a fact names a secret that must be disclosed rather than found."""
+    text = str(fact or '').strip().lower()
+    head = text.split('(', 1)[0].strip()
+    return head in _UNDISCOVERABLE_FACT_NAMES
+
+_ACCESS_PLACEHOLDER_RE = re.compile(r'\{\{\s*([A-Za-z0-9_.(), ]+?)\s*\}\}')
+
+
+def _flow_access_instruction_text(generator: dict[str, Any] | None) -> str:
+    """Flatten a generator's access_instructions into one searchable string."""
+    if not isinstance(generator, dict):
+        return ''
+    access = generator.get('access_instructions')
+    if isinstance(access, str):
+        return access
+    if not isinstance(access, dict):
+        return ''
+    parts: list[str] = [str(access.get('title') or '')]
+    for step in (access.get('steps') or []):
+        if isinstance(step, dict):
+            parts.append(str(step.get('title') or ''))
+            parts.append(str(step.get('instructions') or ''))
+        else:
+            parts.append(str(step or ''))
+    return '\n'.join(parts)
+
+
+def _flow_access_required_secret_facts(generator: dict[str, Any] | None) -> list[tuple[str, frozenset[str]]]:
+    """Secrets the participant must hold to follow the access steps.
+
+    Returns ``(placeholder, alternatives)`` pairs. The alternatives are a choice,
+    not a conjunction: ``{{USERNAME}}`` is satisfied by either
+    ``Credential(user)`` or ``Credential(user, password)``, so disclosing one is
+    enough.
+
+    Read from the `{{USERNAME}}`/`{{PASSWORD}}` placeholders rather than the
+    generator contract, because a generator that *produces* a credential still
+    gates its own service behind it and the contract cannot express that.
+    """
+    text = _flow_access_instruction_text(generator)
+    if not text:
+        return []
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return []
+    out: list[tuple[str, frozenset[str]]] = []
+    seen: set[str] = set()
+    for raw in _ACCESS_PLACEHOLDER_RE.findall(text):
+        token = str(raw or '').strip()
+        key = token.upper()
+        if key in seen:
+            continue
+        if key.startswith('OUTPUT.'):
+            fact = token.split('.', 1)[1].strip()
+            if fact:
+                seen.add(key)
+                out.append((token, frozenset({canonical_fact_key(fact)})))
+            continue
+        alternatives = _ACCESS_SECRET_PLACEHOLDER_FACTS.get(key)
+        if alternatives:
+            seen.add(key)
+            out.append((token, frozenset(canonical_fact_key(f) for f in alternatives)))
+    return out
+
+
+def _flow_hint_disclosed_facts(generator: dict[str, Any] | None, *, levels: tuple[str, ...] = ('low',)) -> set[str]:
+    """Canonical facts revealed by a generator's hints at the given levels."""
+    if not isinstance(generator, dict):
+        return set()
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return set()
+    hint_levels = generator.get('hint_levels') if isinstance(generator.get('hint_levels'), dict) else {}
+    out: set[str] = set()
+    for level in levels:
+        for line in (hint_levels.get(level) or []):
+            for raw in _ACCESS_PLACEHOLDER_RE.findall(str(line or '')):
+                token = str(raw or '').strip()
+                if token.upper().startswith('OUTPUT.'):
+                    fact = token.split('.', 1)[1].strip()
+                    if fact:
+                        out.add(canonical_fact_key(fact))
+    return out
+
+
+def _flow_first_step_undisclosed_secrets(generator: dict[str, Any] | None) -> list[str]:
+    """Secrets the first chain step needs but never reveals at the lowest hint level.
+
+    Fact dependencies only answer whether a *generator* can run. A chain can be
+    perfectly solvable that way and still strand the participant: the opening
+    step has no earlier step to leak a credential, so anything its access steps
+    require must be disclosed by its own low hints.
+    """
+    needed = _flow_access_required_secret_facts(generator)
+    if not needed:
+        return []
+    disclosed = _flow_hint_disclosed_facts(generator, levels=('low',))
+    return [placeholder for placeholder, alternatives in needed if not (alternatives & disclosed)]
+
+
+def _flow_promote_first_step_hint_levels(
+    hint_levels: dict[str, list[str]] | None,
+    generator: dict[str, Any] | None,
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Raise disclosures the opening step needs into `low`.
+
+    The first step has nothing before it, so anything its access instructions
+    require that a participant cannot discover -- a credential, token, key --
+    has to be given outright or the challenge is unenterable. Where a deeper
+    hint already discloses it, that line is copied into `low`.
+
+    Only applied at position 0. Everywhere else the same secret is meant to be
+    earned from an earlier step, so promoting it there would give away the chain.
+
+    Returns the adjusted levels and the placeholders that were satisfied by a
+    promotion, so callers can record what was surfaced and why.
+    """
+    levels: dict[str, list[str]] = {
+        key: [str(v) for v in (value or [])]
+        for key, value in (hint_levels or {}).items()
+    }
+    needed = _flow_access_required_secret_facts(generator)
+    if not needed:
+        return levels, []
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return levels, []
+
+    low = list(levels.get('low') or [])
+    disclosed = _flow_hint_disclosed_facts({'hint_levels': levels}, levels=('low',))
+    promoted: list[str] = []
+    promoted_lines: dict[str, list[str]] = {}
+
+    for placeholder, alternatives in needed:
+        if alternatives & disclosed:
+            continue
+        if not any(_flow_fact_is_undiscoverable(a) for a in alternatives):
+            # Enumerable values (paths, ports) are findable; do not give them away.
+            continue
+        for level in ('medium', 'high'):
+            for line in (levels.get(level) or []):
+                line_facts = {
+                    canonical_fact_key(m.split('.', 1)[1].strip())
+                    for m in _ACCESS_PLACEHOLDER_RE.findall(str(line))
+                    if m.strip().upper().startswith('OUTPUT.')
+                }
+                if line_facts & alternatives and line not in low:
+                    low.append(line)
+                    disclosed |= line_facts
+                    promoted.append(placeholder)
+                    promoted_lines.setdefault(level, []).append(line)
+                    break
+            if placeholder in promoted:
+                break
+
+    if promoted:
+        levels['low'] = low
+        # A promoted line moves rather than copies: leaving it at its original
+        # depth shows the same disclosure twice and makes the deeper hint
+        # pointless, since `low` has already given it away.
+        for level, lines in promoted_lines.items():
+            levels[level] = [line for line in (levels.get(level) or []) if line not in lines]
+    return levels, sorted(set(promoted))
+
+
+def _flow_node_authoring_fact_strings(value: Any) -> list[str]:
+    """Convert node-authoring facts into ontology signature strings.
+
+    The node authoring schema spells facts as ``{'name': 'Shell',
+    'args': ['host']}``; the rest of Flow uses ``Shell(host)``.
+    """
+    out: list[str] = []
+    if not isinstance(value, list):
+        return out
+    for item in value:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                out.append(text)
+            continue
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name') or '').strip()
+        if not name:
+            continue
+        raw_args = item.get('args')
+        args = [str(a).strip() for a in raw_args if str(a).strip()] if isinstance(raw_args, list) else []
+        out.append(f'{name}({", ".join(args)})' if args else f'{name}()')
+    return out
+
+
+def _flow_node_authoring_facts(node: dict[str, Any] | None) -> dict[str, set[str]]:
+    """Return the requires/provides a node declares via its authoring doc.
+
+    Chain nodes rarely carry one, so an absent doc yields empty sets rather than
+    an error.  When present it is treated exactly like vulnerability metadata:
+    a declared capability of that position.
+    """
+    empty: dict[str, set[str]] = {'requires': set(), 'provides': set()}
+    if not isinstance(node, dict):
+        return empty
+    try:
+        doc = _flow_extract_node_authoring_doc(node)
+    except Exception:
+        return empty
+    if not isinstance(doc, dict):
+        return empty
+    logic = doc.get('logic')
+    if not isinstance(logic, dict):
+        return empty
+    return {
+        'requires': set(_flow_node_authoring_fact_strings(logic.get('requires'))),
+        'provides': set(_flow_node_authoring_fact_strings(logic.get('provides'))),
+    }
+
+
+def _flow_vuln_facts_by_node_id(
+    vuln_names_by_id: dict[str, list[str]] | None,
+    *,
+    vocabulary: set[str] | None = None,
+    index: Any | None = None,
+    nodes_by_id: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve each node's vulnerabilities into the facts they grant.
+
+    Returns ``{node_id: {'provides': set[str], 'requires': set[str],
+    'unresolved': list[str], 'impacts': list[str]}}``.  ``provides`` holds
+    literal fact strings ready to union into solver state; ``requires`` holds
+    canonical keys, because they are only ever compared canonically.
+
+    A node whose vulnerabilities have no metadata yields an empty ``provides``
+    and is listed in ``unresolved`` so callers can report or reject it.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    names_by_id = vuln_names_by_id if isinstance(vuln_names_by_id, dict) else {}
+    authoring_nodes = nodes_by_id if isinstance(nodes_by_id, dict) else {}
+    if not names_by_id and not authoring_nodes:
+        return out
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key, expand_provided_facts
+    except Exception:
+        return out
+
+    if index is None:
+        index = _load_vuln_metadata_index()
+
+    vocab = set(vocabulary or set())
+
+    # A node can declare capability two ways: the vulnerability it hosts, and an
+    # explicit node-authoring doc.  Both describe what this position grants.
+    node_ids = list(dict.fromkeys(list(names_by_id.keys()) + list(authoring_nodes.keys())))
+
+    for node_id in node_ids:
+        key = str(node_id or '').strip()
+        if not key:
+            continue
+        names = names_by_id.get(node_id) or []
+        canonical_provides: set[str] = set()
+        canonical_requires: set[str] = set()
+        unresolved: list[str] = []
+        impacts: list[str] = []
+        for raw_name in names:
+            name = str(raw_name or '').strip()
+            if not name:
+                continue
+            facts = index.lookup(name) if index is not None else None
+            if facts is None:
+                unresolved.append(name)
+                continue
+            impacts.append(facts.impact)
+            try:
+                canonical_provides |= facts.canonical_provides
+                canonical_requires |= facts.canonical_requires
+            except Exception:
+                continue
+
+        authored = _flow_node_authoring_facts(authoring_nodes.get(node_id))
+        authored_provides = authored.get('provides') or set()
+        authored_requires = authored.get('requires') or set()
+        if authored_provides:
+            canonical_provides |= {canonical_fact_key(f) for f in authored_provides if f}
+        if authored_requires:
+            canonical_requires |= {canonical_fact_key(f) for f in authored_requires if f}
+
+        if not canonical_provides and not canonical_requires and not unresolved:
+            continue
+
+        provides_literal = (
+            expand_provided_facts(canonical_provides, vocab | authored_provides)
+            if canonical_provides
+            else set()
+        )
+        out[key] = {
+            'provides': provides_literal,
+            'requires': {canonical_fact_key(r) for r in canonical_requires if r},
+            'unresolved': unresolved,
+            'impacts': impacts,
+            'authored_provides': sorted(authored_provides),
+        }
+    return out
 
 
 def _flow_looks_like_fact_ref(raw: Any) -> bool:
@@ -21067,6 +21888,61 @@ def _flow_pivot_provider_for_node(node: dict[str, Any]) -> str:
     return 'manual'
 
 
+# Facts that amount to "you can run code on this host", and therefore to a
+# usable pivot foothold.
+_SHELL_CLASS_FACTS = ('Shell(host)', 'RootShell(host)', 'CodeExecution(host)', 'WebRCE(app)')
+
+
+def _flow_node_grants_shell_access(node: dict[str, Any] | None) -> bool | None:
+    """Whether a node's declared capability includes a shell-class foothold.
+
+    Returns ``True``/``False`` when the node's capability is known (via
+    vulnerability metadata or a node-authoring doc), and ``None`` when it is
+    not declared at all.  Callers keep their previous default on ``None`` --
+    an undeclared node is not evidence of absence.
+    """
+    if not isinstance(node, dict):
+        return None
+
+    names: list[str] = []
+    raw = node.get('vulnerabilities')
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                names.append(item.strip())
+            elif isinstance(item, dict):
+                for key in ('name', 'title', 'id', 'vuln', 'cve', 'cve_id', 'slug'):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        names.append(value.strip())
+                        break
+
+    node_id = str(node.get('id') or node.get('node_id') or '').strip() or '_pivot_source'
+    try:
+        resolved = _flow_vuln_facts_by_node_id(
+            {node_id: names} if names else {},
+            nodes_by_id={node_id: node},
+        )
+    except Exception:
+        return None
+
+    entry = resolved.get(node_id)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get('unresolved') and not entry.get('provides'):
+        # The vulnerability is present but undeclared; do not claim knowledge.
+        return None
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key
+    except Exception:
+        return None
+
+    provided = {canonical_fact_key(f) for f in (entry.get('provides') or set())}
+    shell_class = {canonical_fact_key(f) for f in _SHELL_CLASS_FACTS}
+    return bool(provided & shell_class)
+
+
 def _flow_pivot_requested_provider(value: Any) -> str:
     provider = str(value or 'random').strip().lower().replace('_', '-') or 'random'
     aliases = {
@@ -21150,10 +22026,21 @@ def _flow_pivot_rules_for_chain(
         target_id = _flow_pivot_node_id(target_node)
         if not source_name or not target_name or not source_id or not target_id or source_id == target_id:
             return
-        prod = _flow_split_top_level_list(produces) or [f'Shell({source_name})', f'Pivot({source_name})']
+        prod = _flow_split_top_level_list(produces)
+        unbacked_shell = False
+        if not prod:
+            # Only claim a shell on the source when its declared capability
+            # actually yields one.  An undeclared node keeps the old default.
+            grants_shell = _flow_node_grants_shell_access(source_node)
+            if grants_shell is False:
+                prod = [f'Pivot({source_name})']
+                unbacked_shell = True
+            else:
+                prod = [f'Shell({source_name})', f'Pivot({source_name})']
         req = _flow_split_top_level_list(target_requires) or [f'Pivot({source_name})']
         rule = {
             'name': str(name or 'Pivot').strip() or 'Pivot',
+            'unbacked_shell': unbacked_shell,
             'source_id': source_id,
             'source_name': source_name,
             'target_id': target_id,
@@ -23237,7 +24124,47 @@ def _flow_validate_chain_order_by_requires_produces(
     except Exception:
         pass
 
+    # Facts the vulnerability on each node grants once exploited.  Without this
+    # the chain is only checked generator-to-generator, so a generator needing
+    # CodeExecution(host) could sit behind a read-only file-disclosure CVE.
+    vuln_names_by_id: dict[str, list[str]] = {}
     for cid in chain_ids:
+        node = node_by_id.get(cid)
+        if not isinstance(node, dict) or not _flow_node_is_vuln(node):
+            continue
+        names: list[str] = []
+        raw = node.get('vulnerabilities')
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    names.append(item.strip())
+                elif isinstance(item, dict):
+                    for key in ('name', 'title', 'id', 'vuln', 'cve', 'cve_id', 'slug'):
+                        value = item.get(key)
+                        if isinstance(value, str) and value.strip():
+                            names.append(value.strip())
+                            break
+        if names:
+            vuln_names_by_id[cid] = list(dict.fromkeys(names))
+
+    try:
+        from scenarioforge.vulns import canonical_fact_key as _canonical_fact_key
+    except Exception:
+        _canonical_fact_key = None  # type: ignore[assignment]
+
+    vuln_facts_by_id: dict[str, dict[str, Any]] = {}
+    try:
+        vuln_facts_by_id = _flow_vuln_facts_by_node_id(
+            vuln_names_by_id,
+            vocabulary=_flow_fact_vocabulary(list(gen_defs_by_id.values()), plugins_by_id),
+            nodes_by_id=node_by_id,
+        )
+    except Exception:
+        vuln_facts_by_id = {}
+
+    require_metadata = _require_vuln_metadata_enabled()
+
+    for step_index, cid in enumerate(chain_ids):
         a = assign_by_node.get(cid) or {}
         plugin_id = str(a.get('id') or '').strip()
         if not plugin_id:
@@ -23248,6 +24175,53 @@ def _flow_validate_chain_order_by_requires_produces(
         if not isinstance(plugin, dict):
             errors.append(f"{cid}: unknown plugin '{plugin_id}'")
             continue
+
+        # The opening step has no earlier step to leak a secret, so anything its
+        # access instructions require must be disclosed by its own lowest-level
+        # hint. Fact dependencies cannot catch this: a generator that *produces*
+        # a credential still gates its own service behind it, and
+        # flow_supply_when_first exempts that input from the requirement check at
+        # position 0 even when it is marked required.
+        if step_index == 0:
+            gen_def = gen_defs_by_id.get(plugin_id)
+            effective_gen = dict(gen_def) if isinstance(gen_def, dict) else {}
+            # Hint promotion rewrites the opening step's levels on the assignment;
+            # the manifest still carries the un-promoted ones. Validating the
+            # manifest would re-report a gap the runtime has already closed.
+            assignment_hint_levels = a.get('hint_levels')
+            if isinstance(assignment_hint_levels, dict) and assignment_hint_levels:
+                effective_gen['hint_levels'] = assignment_hint_levels
+            undisclosed = _flow_first_step_undisclosed_secrets(effective_gen or gen_def)
+            if undisclosed:
+                errors.append(
+                    f"{cid}: first chain step needs {undisclosed} to follow its access "
+                    f"instructions, but its low hints never reveal them; nothing earlier "
+                    f"in the chain can supply them either. Promote the disclosing hint to "
+                    f"'low' or place this generator later in the chain."
+                )
+
+        vuln_entry = vuln_facts_by_id.get(cid) or {}
+        unresolved_vulns = list(vuln_entry.get('unresolved') or [])
+        if cid in vuln_names_by_id and not vuln_entry:
+            unresolved_vulns = list(vuln_names_by_id.get(cid) or [])
+        if unresolved_vulns and require_metadata:
+            errors.append(
+                f"{cid}: no capability metadata for vulnerability "
+                f"{sorted(unresolved_vulns)}; add an entry to vuln_metadata.yaml "
+                f"declaring its impact/provides"
+            )
+
+        # A vuln may itself need a foothold (privilege escalation needs a shell).
+        vuln_requires = set(vuln_entry.get('requires') or set())
+        if vuln_requires and _canonical_fact_key is not None:
+            available_canonical = {_canonical_fact_key(x) for x in available}
+            unmet = sorted(vuln_requires - available_canonical)
+            if unmet:
+                errors.append(
+                    f"{cid}: vulnerability requires {unmet} before it can be exploited"
+                )
+
+        available |= set(vuln_entry.get('provides') or set())
 
         inferred_requires = {str(x).strip() for x in (a.get('inputs') or []) if str(x).strip()}
         inferred_produces = {str(x).strip() for x in (a.get('outputs') or []) if str(x).strip()}
@@ -23550,7 +24524,8 @@ def _flow_reorder_chain_by_generator_dag(
                     next_id_val = str(next_id or '').strip()
                     next_name_val = (id_to_name.get(next_id_val) or '').strip() if next_id_val else ''
                     if not next_id_val:
-                        return "You've completed this sequence of challenges!"
+                        # Final step: keep its own instruction, drop the pointer.
+                        return _flow_strip_ids_from_hint(_flow_strip_next_node_references(text))
                     if not next_name_val:
                         next_name_val = next_id_val
                     repl = {
@@ -23935,7 +24910,8 @@ def _flow_reorder_chain_by_generator_dag(
                 next_id_val = str(next_id or '').strip()
                 next_name_val = (id_to_name.get(next_id_val) or '').strip() if next_id_val else ''
                 if not next_id_val:
-                    return "You've completed this sequence of challenges!"
+                    # Final step: keep its own instruction, drop the pointer.
+                    return _flow_strip_ids_from_hint(_flow_strip_next_node_references(text))
                 if not next_name_val:
                     next_name_val = next_id_val
                 repl = {
@@ -29946,6 +30922,13 @@ def _normalize_node_information_role(value: Any) -> str:
         'client': 'PC',
         'clients': 'PC',
         'random': 'Random',
+        # Challenge slots. Without these the role would normalize to '' and any
+        # per-role counting silently reports zero slots.
+        'vulnerabilityslot': _PLANNING_VULNERABILITY_SLOT_ROLE,
+        'vulnslot': _PLANNING_VULNERABILITY_SLOT_ROLE,
+        'flaggenslot': _PLANNING_FLAG_GEN_SLOT_ROLE,
+        'flaggeneratorslot': _PLANNING_FLAG_GEN_SLOT_ROLE,
+        'flagnodegeneratorslot': _PLANNING_FLAG_GEN_SLOT_ROLE,
     }
     return aliases.get(normalized, '')
 
@@ -44261,9 +45244,9 @@ def _default_scaffold_hint_levels(produces: list[str]) -> dict[str, list[str]]:
         medium = 'Inspect the target service or generated artifact for the next clue.'
 
     return {
-        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
         'medium': [medium],
-        'high': ['Use the access instructions and README.md for the complete workflow.'],
+        'high': ['Work through the access instructions for this step in order.'],
     }
 
 
@@ -45729,6 +46712,130 @@ def _active_vuln_catalog_label() -> str:
     except Exception:
         return ''
     return ''
+
+
+_VULN_METADATA_CACHE: dict[str, Any] = {'key': None, 'index': None}
+_VULN_METADATA_CACHE_LOCK = threading.Lock()
+
+
+def _vuln_metadata_entry_dirs() -> list[str]:
+    """Vuln directories that may carry a per-entry metadata file."""
+    dirs: list[str] = []
+    try:
+        state = _load_vuln_catalogs_state()
+        catalogs = state.get('catalogs') if isinstance(state, dict) else None
+        for catalog in (catalogs or []):
+            if not isinstance(catalog, dict):
+                continue
+            catalog_id = str(catalog.get('id') or '').strip()
+            if not catalog_id:
+                continue
+            content_dir = _vuln_catalog_pack_content_dir(catalog_id)
+            for item in (catalog.get('compose_items') or []):
+                if not isinstance(item, dict):
+                    continue
+                rel = str(item.get('rel_dir') or item.get('dir_rel') or '').strip()
+                if not rel:
+                    continue
+                try:
+                    dirs.append(_safe_path_under(content_dir, rel))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return dirs
+
+
+def _vuln_metadata_catalog_dirs() -> list[str]:
+    dirs: list[str] = []
+    try:
+        state = _load_vuln_catalogs_state()
+        catalogs = state.get('catalogs') if isinstance(state, dict) else None
+        for catalog in (catalogs or []):
+            if not isinstance(catalog, dict):
+                continue
+            catalog_id = str(catalog.get('id') or '').strip()
+            if catalog_id:
+                dirs.append(_vuln_catalog_pack_dir(catalog_id))
+    except Exception:
+        return []
+    return dirs
+
+
+def _vuln_metadata_cache_key() -> tuple[Any, ...]:
+    """Cache key covering every file the merged index is built from.
+
+    The key is derived from the *output* of the path helpers rather than their
+    identity, so monkeypatching `_vuln_catalog_pack_dir`, `_safe_path_under`, or
+    friends changes the key and misses the cache on its own.  Do not add those
+    helpers to `_XML_CACHE_DEP_NAMES` to cover this: doing so disables every XML
+    cache for the duration of any test that patches them, which cascades into
+    unrelated failures elsewhere in the suite.
+    """
+    parts: list[Any] = [_vuln_catalog_state_cache_key()]
+    try:
+        from scenarioforge.vulns import metadata_filenames
+
+        names = metadata_filenames()
+        for directory in _vuln_metadata_catalog_dirs():
+            for filename in names['index']:
+                parts.append(_file_stat_cache_key(os.path.join(directory, filename)))
+        for filename in names['index']:
+            parts.append(_file_stat_cache_key(os.path.join(_get_repo_root(), filename)))
+        # Per-entry files are numerous; key on the directory mtimes instead so a
+        # newly added scenarioforge.vuln.yaml still invalidates the cache.
+        for directory in _vuln_metadata_entry_dirs():
+            parts.append(_file_stat_cache_key(directory))
+    except Exception:
+        return ('vuln-metadata', None)
+    return tuple(parts)
+
+
+def _load_vuln_metadata_index(*, force: bool = False) -> Any:
+    """Return the merged vulnerability capability index (cached by file stats)."""
+    try:
+        from scenarioforge.vulns import load_vuln_metadata_index
+    except Exception:
+        return None
+
+    try:
+        key = _vuln_metadata_cache_key()
+    except Exception:
+        key = None
+
+    use_cache = (not force) and _xml_caches_enabled()
+    if use_cache and key is not None:
+        with _VULN_METADATA_CACHE_LOCK:
+            if _VULN_METADATA_CACHE.get('key') == key:
+                return _VULN_METADATA_CACHE.get('index')
+
+    try:
+        index = load_vuln_metadata_index(
+            entry_dirs=_vuln_metadata_entry_dirs(),
+            catalog_dirs=_vuln_metadata_catalog_dirs(),
+            repo_root=_get_repo_root(),
+        )
+    except Exception:
+        return None
+
+    if use_cache and key is not None:
+        with _VULN_METADATA_CACHE_LOCK:
+            _VULN_METADATA_CACHE['key'] = key
+            _VULN_METADATA_CACHE['index'] = index
+    return index
+
+
+def _require_vuln_metadata_enabled() -> bool:
+    """Whether a vuln without metadata is a hard chain-validation error.
+
+    Off by default so an existing catalog keeps working; turn it on once the
+    metadata file covers the entries you sequence over.
+    """
+    try:
+        raw = os.environ.get('SCENARIOFORGE_REQUIRE_VULN_METADATA', '')
+    except Exception:
+        return False
+    return str(raw or '').strip().lower() in {'1', 'true', 't', 'yes', 'y', 'on'}
 
 
 def _safe_path_under(base_dir: str, subpath: str) -> str:

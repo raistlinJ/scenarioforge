@@ -1649,8 +1649,14 @@ def repair_explicit_chain_nodes(
                     is_docker = backend._flow_node_is_docker_role(candidate)
                     is_vuln = bool(candidate.get('is_vuln')) or bool(candidate.get('vulnerabilities'))
                     if _needs_nonvuln_docker(pos):
-                        return bool(is_docker) and (not is_vuln)
-                    return bool(is_vuln)
+                        # A declared VulnerabilitySlot is Docker-backed and may sit
+                        # empty, but it must never absorb a flag-node-generator.
+                        return (
+                            bool(is_docker)
+                            and (not is_vuln)
+                            and backend._flow_node_accepts_challenge_kind(candidate, 'flag-node-generator')
+                        )
+                    return bool(is_vuln) and backend._flow_node_accepts_challenge_kind(candidate, 'vulnerability')
                 except Exception:
                     return False
 
@@ -1748,9 +1754,7 @@ def repair_explicit_chain_nodes(
             for index, node in enumerate(chain_nodes):
                 if not isinstance(node, dict):
                     continue
-                type_raw = str(node.get('type') or '')
-                type_name = type_raw.strip().lower()
-                is_docker = ('docker' in type_name) or (type_raw.strip().upper() == 'DOCKER')
+                is_docker = backend._flow_node_is_docker_role(node)
                 is_vuln = backend._flow_node_is_vuln(node)
 
                 need_nonvuln_docker = False
@@ -1761,10 +1765,10 @@ def repair_explicit_chain_nodes(
                     need_nonvuln_docker = True
 
                 if need_nonvuln_docker:
-                    if is_docker and (not is_vuln):
+                    if is_docker and (not is_vuln) and backend._flow_node_accepts_challenge_kind(node, 'flag-node-generator'):
                         continue
                 else:
-                    if is_vuln:
+                    if is_vuln and backend._flow_node_accepts_challenge_kind(node, 'vulnerability'):
                         continue
 
                 replacement = None
@@ -1776,17 +1780,19 @@ def repair_explicit_chain_nodes(
                         continue
                     if (not allow_node_duplicates) and candidate_id in used:
                         continue
-                    candidate_type_raw = str(candidate.get('type') or '')
-                    candidate_type_name = candidate_type_raw.strip().lower()
-                    candidate_is_docker = ('docker' in candidate_type_name) or (candidate_type_raw.strip().upper() == 'DOCKER')
+                    candidate_is_docker = backend._flow_node_is_docker_role(candidate)
                     candidate_is_vuln = backend._flow_node_is_vuln(candidate)
                     if need_nonvuln_docker:
                         if not candidate_is_docker:
                             continue
                         if candidate_is_vuln:
                             continue
+                        if not backend._flow_node_accepts_challenge_kind(candidate, 'flag-node-generator'):
+                            continue
                     else:
                         if not candidate_is_vuln:
+                            continue
+                        if not backend._flow_node_accepts_challenge_kind(candidate, 'vulnerability'):
                             continue
                     replacement = candidate
                     break
@@ -2266,11 +2272,41 @@ def build_generator_run_config(
                     required_context_refs |= {str(x).strip() for x in (gen_def.get('requires') or []) if str(x).strip()}
             except Exception:
                 pass
+            # A generator definition built from a manifest carries no `requires`
+            # key at all -- artifacts.requires lives on the plugin contract. A
+            # saved FlowState assignment may not carry it either, so without
+            # this lookup a required fact is invisible here and never threaded.
+            try:
+                contracts = backend._flow_enabled_plugin_contracts_by_id() or {}
+                contract = contracts.get(str(assignment.get('id') or '').strip())
+                if isinstance(contract, dict) and isinstance(contract.get('requires'), list):
+                    required_context_refs |= {
+                        str(x).strip() for x in (contract.get('requires') or []) if str(x).strip()
+                    }
+            except Exception:
+                pass
 
             try:
-                if allowed and flow_context:
-                    for key in allowed:
-                        if key in cfg_full:
+                if flow_context:
+                    # Placeholders Flow fabricated for a branch start.  A real
+                    # upstream value must supersede these: the placeholder only
+                    # stands in for a fact nothing earlier in the chain produced,
+                    # and letting it win would hand the consumer a made-up path
+                    # that does not match what the producer actually created.
+                    synthesized_keys: set[str] = set()
+                    try:
+                        raw_supplied = assignment.get('chain_supplied_input_values')
+                        if isinstance(raw_supplied, dict):
+                            synthesized_keys = {str(k).strip() for k in raw_supplied if str(k).strip()}
+                    except Exception:
+                        synthesized_keys = set()
+                    # A required fact does not have to be declared under `inputs`
+                    # to be threaded.  Generators read it out of the config by
+                    # fact name, so requiring a declaration silently starved any
+                    # manifest that listed the fact only under artifacts.requires.
+                    threadable = set(allowed) | set(required_context_refs)
+                    for key in threadable:
+                        if key in cfg_full and key not in synthesized_keys:
                             continue
                         if flow_is_fact_artifact_ref(key) and key not in required_context_refs:
                             continue
@@ -2284,6 +2320,13 @@ def build_generator_run_config(
                 keep = set(allowed)
                 try:
                     keep |= set(declared_required or set())
+                except Exception:
+                    pass
+                try:
+                    # Required facts survive the input-name filter even when the
+                    # manifest never declared them under `inputs`; otherwise a
+                    # value threaded just above would be dropped before the run.
+                    keep |= set(required_context_refs)
                 except Exception:
                     pass
                 try:
@@ -2782,14 +2825,28 @@ def process_generator_outputs(
     except Exception:
         pass
 
+    # On a flag-node-generator, File(path) is reserved plumbing: Flow requires it
+    # to name the docker-compose file it deploys, so a hint resolving it renders
+    # "docker-compose.yml" -- build detail, never a participant artifact. Point
+    # those hints at FlagFile(path), which is the artifact the challenge is about.
+    hint_outputs = outputs
+    try:
+        if str(assignment_type or '').strip() == 'flag-node-generator' and isinstance(outputs, dict):
+            flag_file = str(outputs.get('FlagFile(path)') or '').strip()
+            if flag_file and str(outputs.get('File(path)') or '').strip():
+                hint_outputs = dict(outputs)
+                hint_outputs['File(path)'] = flag_file
+    except Exception:
+        hint_outputs = outputs
+
     try:
         if isinstance(assignment.get('hints'), list) and assignment.get('hints'):
-            new_hints = [apply_outputs_to_hint_text(str(text), outputs) for text in (assignment.get('hints') or [])]
+            new_hints = [apply_outputs_to_hint_text(str(text), hint_outputs) for text in (assignment.get('hints') or [])]
             new_hints = [apply_node_placeholders(str(text), node_ip4=preview_ip4) for text in new_hints]
             assignment['hints'] = new_hints
             assignment['hint'] = str(new_hints[0] or '') if new_hints else str(assignment.get('hint') or '')
         else:
-            hint_final = apply_outputs_to_hint_text(str(assignment.get('hint') or ''), outputs)
+            hint_final = apply_outputs_to_hint_text(str(assignment.get('hint') or ''), hint_outputs)
             hint_final = apply_node_placeholders(str(hint_final), node_ip4=preview_ip4)
             if hint_final and hint_final != str(assignment.get('hint') or ''):
                 assignment['hint'] = hint_final
@@ -2808,7 +2865,7 @@ def process_generator_outputs(
                     continue
                 values = []
                 for text in raw_items:
-                    rendered = apply_outputs_to_hint_text(str(text or ''), outputs)
+                    rendered = apply_outputs_to_hint_text(str(text or ''), hint_outputs)
                     rendered = apply_node_placeholders(str(rendered), node_ip4=preview_ip4)
                     if str(rendered or '').strip():
                         values.append(str(rendered))

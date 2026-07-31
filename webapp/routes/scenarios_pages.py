@@ -137,21 +137,26 @@ def register(app, *, backend_module: Any) -> None:
 
         active_scenario_xml_path = ''
         xml_path = (request.args.get('xml_path') or '').strip()
+        # Resolution order is latest-first on purpose. A bookmarked or shared
+        # link carries whichever xml_path was current when it was created, and
+        # honouring that first would serve a stale project file after the
+        # scenario has been saved elsewhere. The query value is still used as a
+        # fallback so a deep link keeps working when no latest path resolves.
         try:
-            if xml_path:
-                xml_path_abs = os.path.abspath(xml_path)
-                if os.path.exists(xml_path_abs):
-                    active_scenario_xml_path = xml_path_abs
+            if scenario_norm:
+                latest_xml = backend._latest_xml_path_for_scenario(scenario_norm) or ''
+                if latest_xml:
+                    latest_abs = os.path.abspath(latest_xml)
+                    if os.path.exists(latest_abs):
+                        active_scenario_xml_path = latest_abs
         except Exception:
             active_scenario_xml_path = ''
         if not active_scenario_xml_path:
             try:
-                if scenario_norm:
-                    latest_xml = backend._latest_xml_path_for_scenario(scenario_norm) or ''
-                    if latest_xml:
-                        latest_abs = os.path.abspath(latest_xml)
-                        if os.path.exists(latest_abs):
-                            active_scenario_xml_path = latest_abs
+                if xml_path:
+                    xml_path_abs = os.path.abspath(xml_path)
+                    if os.path.exists(xml_path_abs):
+                        active_scenario_xml_path = xml_path_abs
             except Exception:
                 active_scenario_xml_path = ''
         if not active_scenario_xml_path:
@@ -274,21 +279,24 @@ def register(app, *, backend_module: Any) -> None:
 
         xml_path = (request.args.get('xml_path') or '').strip()
         xml_path_abs = ''
+        # Latest-first, matching the flow page: a bookmarked xml_path must not
+        # win over the newest saved XML for this scenario. The query value stays
+        # as the fallback for links that point at a still-valid one-off file.
         try:
-            if xml_path:
-                candidate = os.path.abspath(xml_path)
-                if os.path.exists(candidate):
-                    xml_path_abs = candidate
+            if scenario_norm:
+                latest_xml = backend._latest_xml_path_for_scenario(scenario_norm) or ''
+                if latest_xml:
+                    latest_abs = os.path.abspath(latest_xml)
+                    if os.path.exists(latest_abs):
+                        xml_path_abs = latest_abs
         except Exception:
             xml_path_abs = ''
         if not xml_path_abs:
             try:
-                if scenario_norm:
-                    latest_xml = backend._latest_xml_path_for_scenario(scenario_norm) or ''
-                    if latest_xml:
-                        latest_abs = os.path.abspath(latest_xml)
-                        if os.path.exists(latest_abs):
-                            xml_path_abs = latest_abs
+                if xml_path:
+                    candidate = os.path.abspath(xml_path)
+                    if os.path.exists(candidate):
+                        xml_path_abs = candidate
             except Exception:
                 xml_path_abs = ''
         if not xml_path_abs:

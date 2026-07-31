@@ -19,6 +19,7 @@ from flask import url_for
 from werkzeug.utils import secure_filename
 
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
+from scenarioforge.planning.node_plan import is_docker_backed_role
 
 
 def register(app, *, backend_module: Any) -> None:
@@ -649,7 +650,10 @@ def register(app, *, backend_module: Any) -> None:
                             role_counts = full_preview.get('role_counts') if isinstance(full_preview.get('role_counts'), dict) else None
                             if isinstance(role_counts, dict):
                                 try:
-                                    docker_expected = int(role_counts.get('Docker') or 0) > 0
+                                    docker_expected = any(
+                                        is_docker_backed_role(role_name) and int(count or 0) > 0
+                                        for role_name, count in role_counts.items()
+                                    )
                                 except Exception:
                                     docker_expected = False
                             if not docker_expected:
@@ -657,8 +661,8 @@ def register(app, *, backend_module: Any) -> None:
                                 for host in hosts or []:
                                     if not isinstance(host, dict):
                                         continue
-                                    role = str(host.get('role') or '').strip().lower()
-                                    if role == 'docker':
+                                    role = str(host.get('role') or '').strip()
+                                    if is_docker_backed_role(role):
                                         docker_expected = True
                                         break
                 if docker_expected:
@@ -1344,7 +1348,11 @@ def register(app, *, backend_module: Any) -> None:
                     role_counts = preview.get('role_counts') if isinstance(preview.get('role_counts'), dict) else None
                     if isinstance(role_counts, dict):
                         try:
-                            docker_count = int(role_counts.get('Docker') or 0)
+                            docker_count = sum(
+                                max(0, int(count or 0))
+                                for role_name, count in role_counts.items()
+                                if is_docker_backed_role(role_name)
+                            )
                         except Exception:
                             docker_count = 0
                     hosts = preview.get('hosts') if isinstance(preview.get('hosts'), list) else []
@@ -1352,8 +1360,8 @@ def register(app, *, backend_module: Any) -> None:
                         for host in hosts:
                             if not isinstance(host, dict):
                                 continue
-                            role = str(host.get('role') or '').strip().lower()
-                            if role == 'docker':
+                            role = str(host.get('role') or '').strip()
+                            if is_docker_backed_role(role):
                                 docker_count += 1
                             vulns = host.get('vulnerabilities') if isinstance(host.get('vulnerabilities'), list) else []
                             if vulns:

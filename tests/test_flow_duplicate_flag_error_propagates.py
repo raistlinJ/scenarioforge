@@ -67,9 +67,15 @@ def test_prepare_preview_duplicate_flag_error_propagates(monkeypatch):
         ]
 
     monkeypatch.setattr(app_backend, "_flow_compute_flag_assignments", fake_flow_assignments)
-    monkeypatch.setattr(app_backend, "_flow_validate_chain_order_by_requires_produces", lambda *args, **kwargs: (False, ["forced invalid"]))
+    # Chain-order validation runs *before* generators, and a failure short-circuits
+    # the request. Forcing it invalid meant the generators never ran, no flags were
+    # ever realized, and the duplicate check this test exists for was unreachable.
+    monkeypatch.setattr(app_backend, "_flow_validate_chain_order_by_requires_produces", lambda *args, **kwargs: (True, []))
 
-    def fake_subprocess_run(cmd, cwd=None, check=False, capture_output=False, text=False, timeout=None):
+    # The generator runner invokes subprocess.run with env=..., so a stub that
+    # omits the parameter raises TypeError, the generator is recorded as failed,
+    # and no resolved outputs reach the duplicate-flag check.
+    def fake_subprocess_run(cmd, cwd=None, check=False, capture_output=False, text=False, timeout=None, env=None):
         out_dir = None
         if isinstance(cmd, list) and "--out-dir" in cmd:
             i = cmd.index("--out-dir")
@@ -112,7 +118,10 @@ def test_prepare_preview_duplicate_flag_error_propagates(monkeypatch):
                 "timeout_s": 5,
             },
         )
-        assert resp.status_code == 422
+        # best_effort streams the response, so the status line is committed long
+        # before the duplicate is discovered; it is always 200 and cannot carry the
+        # failure. The error is reported in the body, which is what callers read.
+        assert resp.status_code == 200
         data = resp.get_json()
         assert data and data.get("ok") is False
         assert "duplicate flag" in str(data.get("error") or "").lower()

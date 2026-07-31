@@ -172,11 +172,11 @@ artifacts:
 
 hint_levels:
   low:
-    - "Target: {{NEXT_NODE_IP}}"
+    - "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
   medium:
     - "Credential: {{OUTPUT.Credential(user,password)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Work through the access instructions for this step in order."
 injects:
   - File(path)
 ```
@@ -217,11 +217,11 @@ artifacts:
 
 hint_levels:
   low:
-    - "Target: {{NEXT_NODE_IP}}"
+    - "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
   medium:
     - "Service: {{NEXT_NODE_NAME}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Work through the access instructions for this step in order."
 injects:
   - File(path) -> /flow_injects
 ```

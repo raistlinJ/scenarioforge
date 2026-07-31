@@ -151,7 +151,7 @@ current writer emits:
 
 | Section name | Purpose |
 |--------------|---------|
-| `Node Information` | Host role/count planning. |
+| `Node Information` | Host role/count planning. Row `selected` is one of `Server`, `Workstation`, `PC`, `Docker`, `VulnerabilitySlot`, `FlagGenSlot`, or `Random`; unrecognized roles normalize to `PC`. See [Challenge slot roles](#challenge-slot-roles). |
 | `Routing` | Router protocol/count and aggregation policy. |
 | `Services` | Service selection/count planning. |
 | `Traffic` | Traffic generator selection and parameters. |
@@ -162,6 +162,46 @@ current writer emits:
 
 `Events` is accepted by legacy planning-only XSD files but is not emitted by the
 current Web UI writer.
+
+### Challenge slot roles
+
+`Docker` is the catch-all challenge host: flag-sequencing may place either a
+vulnerability or a flag-node-generator on it. The two slot roles reserve
+Docker-backed capacity for exactly one challenge kind:
+
+| Role | Accepts |
+|------|---------|
+| `Docker` | a vulnerability **or** a flag-node-generator |
+| `VulnerabilitySlot` | vulnerabilities only |
+| `FlagGenSlot` | flag-node-generators only |
+
+```xml
+<section name="Node Information">
+  <item selected="Docker" v_metric="Count" v_count="1"/>
+  <item selected="VulnerabilitySlot" v_metric="Count" v_count="3"/>
+  <item selected="FlagGenSlot" v_metric="Count" v_count="2"/>
+</section>
+```
+
+Slot rows are independent of the counts declared in the `Vulnerabilities` and
+`Flag Node Generators` sections and add to them. Declaring 5 `FlagGenSlot` rows
+alongside 5 generators yields 10 challenge hosts: the declared generators fill
+the Docker hosts the planner adds for them, and the slots stay free for
+flag-sequencing to place further challenges into. The same holds for
+`VulnerabilitySlot` rows against the `Vulnerabilities` section.
+
+**A slot is capacity, not a placement.** Both kinds materialize *empty*, and
+flag-sequencing fills a slot only if the requested chain length reaches it —
+drawing a generator or a vulnerability from the installed catalog at that point.
+Consequences worth knowing:
+
+- Declaring a slot does not raise the minimum chain length. Only what the
+  section cards placed is mandatory; slots are optional headroom.
+- A slot the chain does not reach stays in the topology as a plain
+  Docker-backed host with no challenge on it.
+- Because the planner cannot see the installed catalog, it never names what
+  fills a slot. That choice is made during flag-sequencing, where the catalog
+  is available, so a slot can never be assigned something that is not installed.
 
 Common attributes:
 | Attribute | Applies | Meaning |

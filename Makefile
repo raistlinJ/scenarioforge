@@ -1,6 +1,11 @@
 # Simple developer conveniences
 
-.PHONY: dev-certs up clean force-certs host-web host-web-nginx stop stop-host kill-backend ensure-webui-deps clear-runtime-data run-web run-web-local run-web-remote run-web-local-bg run-web-remote-bg
+.PHONY: dev-certs up clean force-certs host-web host-web-nginx stop stop-host kill-backend ensure-webui-deps clear-runtime-data run-web run-web-local run-web-remote run-web-local-bg run-web-remote-bg test test-update-baseline
+
+# Interpreter used for the test targets. Override when the default `python3` is
+# not the environment that has pytest installed, e.g.
+#   make test PYTHON=/path/to/python
+PYTHON?=python3
 
 CERT_SANS?=DNS:localhost,IP:127.0.0.1
 CERT_SUBJECT?=/CN=localhost
@@ -194,3 +199,15 @@ run-web-remote:
 run-web-remote-bg:
 	@$(MAKE) ensure-webui-deps
 	@bash scripts/run_webui_remote.sh --web-host "$(WEB_HOST)" --web-port "$(WEB_PORT)" --core-host "$(CORE_REMOTE_HOST)" --core-port "$(CORE_REMOTE_PORT)" --kill-existing --detach
+
+# Tests: gate on the known-failure baseline rather than a fully green run.
+# See scripts/check_test_ratchet.py and tests/known_failures.txt.
+# SSH timeouts are shortened because several tests reach the SSH helper and an
+# unreachable CORE VM otherwise blocks for the full timeout on every attempt.
+test:
+	@CORETG_SSH_CONNECT_TIMEOUT=2 CORETG_SSH_CONNECT_RETRIES=1 \
+		$(PYTHON) scripts/check_test_ratchet.py
+
+test-update-baseline:
+	@CORETG_SSH_CONNECT_TIMEOUT=2 CORETG_SSH_CONNECT_RETRIES=1 \
+		$(PYTHON) scripts/check_test_ratchet.py --update

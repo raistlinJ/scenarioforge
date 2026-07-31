@@ -1283,6 +1283,39 @@ def _execute_or_prepare_assignments(
                         )
                         ok_run = bool(run_result.get('ok_run'))
                         note = str(run_result.get('note') or '')
+                        # A generator that dies on its own input validation gives a
+                        # bare "<fact> is required" with no hint as to why nothing
+                        # supplied it. Say which required facts never reached the
+                        # config and what earlier steps had actually produced, so
+                        # the cause is visible without re-deriving the chain.
+                        if not ok_run:
+                            try:
+                                required_facts = {
+                                    str(x).strip()
+                                    for x in (
+                                        (inputs_mismatch or {}).get('declared_required') or []
+                                    )
+                                    if str(x).strip()
+                                }
+                                if isinstance(fa.get('requires'), list):
+                                    required_facts |= {
+                                        str(x).strip() for x in fa.get('requires') if str(x).strip()
+                                    }
+                                absent = sorted(
+                                    fact for fact in required_facts
+                                    if fact not in (cfg or {}) or str((cfg or {}).get(fact) or '').strip() == ''
+                                )
+                                if absent:
+                                    upstream = sorted(
+                                        key for key in (flow_context or {})
+                                        if str(key).strip()
+                                    )
+                                    note = (
+                                        f"{note} [inputs] required and not supplied: {absent}; "
+                                        f"produced by earlier steps in this run: {upstream or 'nothing'}"
+                                    ).strip()
+                            except Exception:
+                                pass
                         manifest_path = str(run_result.get('manifest_path') or '') or None
                         manifest_outputs = run_result.get('manifest_outputs') if isinstance(run_result.get('manifest_outputs'), dict) else None
                         run_stdout = run_result.get('run_stdout') if isinstance(run_result.get('run_stdout'), str) else None

@@ -150,12 +150,12 @@ When using Generator Builder intent overrides or natural-language prompt specs, 
 
 ```text
 Hint levels:
-low: Target: {{NEXT_NODE_IP}}
+low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.
 medium: Artifact or service: {{OUTPUT.File(path)}}
-high: Use the access instructions and README.md for the complete workflow.
+high: Work through the access instructions for this step in order.
 ```
 
-The compact one-line form is also accepted: `Hint levels: low: Target: {{NEXT_NODE_IP}}; medium: Artifact: {{OUTPUT.File(path)}}; high: Use README.md.`
+The compact one-line form is also accepted: `Hint levels: low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.; medium: Artifact: {{OUTPUT.File(path)}}; high: Work through the access instructions for this step in order.`
 
 ---
 
@@ -181,9 +181,10 @@ Tell the AI these are strict requirements:
 - Outputs should be **deterministic** for the same inputs.
 - `outputs.json.outputs` must always include `Flag(flag_id)` (required by schema).
 - `hint.txt` is optional. Prefer `hint_levels` in the catalog; only write `/outputs/hint.txt` if you explicitly need a standalone hint file.
-- Include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`, with at least one non-empty hint in each level: low can reveal an IP/node, medium can reveal a port/service/file/artifact, and high can point to access instructions or README guidance.
+- Include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`, with at least one non-empty hint in each level: low can reveal an IP/node, medium can reveal a port/service/file/artifact, and high should state the solving workflow outright.
+- Never point a hint at a README, the generator manifest, or `docker-compose.yml`. Participants only have the deployed scenario, so Flow filters those lines out of node cards and both guides. On a flag-node-generator, write `{{OUTPUT.FlagFile(path)}}` rather than `{{OUTPUT.File(path)}}` — the latter is the compose file and is remapped for you.
 - Mark runtime inputs with `flow_supply_when_first: true` only when participants must use that value on sequence 1 or the first step of a parallel branch and cannot reasonably infer or find it before solving.
-- Flow labels `flow_supply_when_first` values as `Seq N required` Initial Facts, marks them in Participant/Facilitator guide fact tables, and includes them in the matching start participant hints.
+- Flow labels `flow_supply_when_first` values as `Seq N required` Initial Facts, marks them in Participant/Facilitator guide fact tables, and includes them in the matching start participant hints. Start hints otherwise name only the node and its address, so do not rely on a participant being told which generator produced a step.
 - Treat Flow-synthesized values as **inputs**, not artifacts:
   - Never put `seed`, `secret`, `node_name`, `flag_prefix` into artifact inputs (aka `requires`).
 - Input descriptors default to `required: true` when omitted. Set `required: false` for optional runtime inputs.
@@ -322,7 +323,8 @@ Hard requirements (do not violate):
 - generator_id requirements:
   - Do not assume the installed numeric ID is stable; using SOURCE_ID is acceptable.
 - Do NOT write /outputs/hint.txt unless I explicitly ask; prefer hint_levels in the catalog.
-- Include low/medium/high hint_levels in manifest.yaml, with at least one non-empty hint in each level: IP or node, service/port/file/artifact, then access instructions or README guidance.
+- Include low/medium/high hint_levels in manifest.yaml, with at least one non-empty hint in each level: IP or node, service/port/file/artifact, then the solving workflow stated outright.
+- Do NOT reference a README, the generator manifest, or docker-compose.yml in a hint; participants cannot open those and Flow filters such lines out. On a flag-node-generator use {{OUTPUT.FlagFile(path)}}, not {{OUTPUT.File(path)}}.
 - Deterministic outputs: same (seed, secret, flag_prefix) => same outputs.
 - Inputs (NOT artifacts): seed (required), secret (required), flag_prefix (optional).
 - Mark any solver-facing runtime input the participant must use but cannot reasonably discover before the first solve with flow_supply_when_first.

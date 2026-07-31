@@ -284,13 +284,7 @@
               "selected": "PC",
               "factor": 1.0,
               "v_metric": "Count",
-              "v_count": 7
-            },
-            {
-              "selected": "Docker",
-              "factor": 1.0,
-              "v_metric": "Count",
-              "v_count": 2
+              "v_count": 9
             }
           ]
         },
@@ -323,13 +317,7 @@
               "selected": "PC",
               "factor": 1.0,
               "v_metric": "Count",
-              "v_count": 7
-            },
-            {
-              "selected": "Docker",
-              "factor": 1.0,
-              "v_metric": "Count",
-              "v_count": 2
+              "v_count": 9
             }
           ]
         },
@@ -353,7 +341,7 @@
         }
       },
       "preview_counts": {
-        "hosts_count": 9,
+        "hosts_count": 11,
         "routers_count": 3
       }
     }

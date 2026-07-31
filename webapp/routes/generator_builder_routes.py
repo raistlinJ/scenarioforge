@@ -142,9 +142,9 @@ def _default_hint_levels_for_outputs(produces: Any) -> dict[str, list[str]]:
         chosen = next((item for item in artifacts if _compact(item) != _compact('Flag(flag_id)')), '')
     medium = f"Artifact or service: {{{{OUTPUT.{chosen}}}}}" if chosen else 'Inspect the target service or generated artifact for the next clue.'
     return {
-        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
         'medium': [medium],
-        'high': ['Use the access instructions and README.md for the complete workflow.'],
+        'high': ['Work through the access instructions for this step in order.'],
     }
 
 
@@ -984,6 +984,7 @@ def _build_generator_grounding_lines(plugin_type: str, *, compact: bool = False,
         '- Preserve test-vs-execute parity; do not rely on incidental environment state.',
         '- Keep docker-compose startup commands simple and non-fragile across local test and remote execute paths.',
         '- Keep the implementation deterministic for the same inputs.',
+        "- Write the low hint so it still reads correctly if the next-node pointer is removed: put the instruction first and any {{NEXT_NODE_*}} reference last, in its own clause. Flow drops that clause when nothing downstream consumes the generator output, so a hint whose entire body is a pointer degrades to a generic line.",
         '- Mark runtime inputs with `flow_supply_when_first` when participants must use the value on sequence 1 or a parallel branch starter and cannot reasonably discover it yet.',
         '- Do not use `flow_supply_when_first` for purely internal entropy/config fields that participants never need, such as ordinary seeds.',
         '- Optionally include `access_instructions` in manifest to guide participants on artifact usage/exploitation.',
@@ -1474,9 +1475,9 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         inferred['produces'] = ['Flag(flag_id)', 'Credential(user)', 'Credential(user,password)', 'File(path)']
         inferred['inject_files'] = ['File(path)']
         inferred['hint_levels'] = {
-            'low': ['Target: {{NEXT_NODE_IP}}'],
+            'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
             'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
-            'high': ['Use the access instructions and README.md for the complete workflow.'],
+            'high': ['Work through the access instructions for this step in order.'],
         }
         notes['write_file_under_outputs_artifacts'] = True
         notes['readme_mentions'] = list(dict.fromkeys(notes['readme_mentions'] + ['determinism', 'local runner testing']))
@@ -1489,9 +1490,9 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         ])
         inferred.setdefault('produces', ['Flag(flag_id)', 'Credential(user)', 'Credential(user,password)', 'File(path)'])
         inferred.setdefault('hint_levels', {
-            'low': ['Target: {{NEXT_NODE_IP}}'],
+            'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
             'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
-            'high': ['Use the access instructions and README.md for the complete workflow.'],
+            'high': ['Work through the access instructions for this step in order.'],
         })
         notes['write_file_under_outputs_artifacts'] = True
 
@@ -2009,7 +2010,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
             '- outputs.json must include generator_id and Flag(flag_id).',
             '- Keep outputs deterministic and ensure all declared outputs exist.',
             '- Include access_instructions for interactive service/file/credential artifacts.',
-            '- Include hint_levels with low, medium, and high arrays: low should reveal a target IP/name, medium should reveal a port/service/file/artifact, and high should point to access instructions or README guidance.',
+            '- Include hint_levels with low, medium, and high arrays: low should reveal a target IP/name, medium should reveal a port/service/file/artifact, and high should state the solving workflow outright. Never reference a README, the generator manifest, or docker-compose.yml in a hint: participants cannot open those and Flow filters such lines out.',
         ]
         if plugin_type == 'flag-node-generator':
             kind_requirements.extend([
@@ -2033,7 +2034,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '  "optional_requires": ["Knowledge(hostname)"],',
         '  "produces": ["Flag(flag_id)", "Credential(user,password)"],',
         '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true}, {"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true}],',
-        '  "hint_levels": {"low": ["Target: {{NEXT_NODE_IP}}"], "medium": ["Service/artifact: {{OUTPUT.File(path):basename}}"], "high": ["Use the access instructions and README.md for the complete workflow."]},',
+        '  "hint_levels": {"low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."], "medium": ["Service/artifact: {{OUTPUT.File(path):basename}}"], "high": ["Work through the access instructions for this step in order."]},',
         '  "inject_files": ["File(path)"],',
         '  "inject_candidate_paths": ["/opt/uploads", "/var/www/html"],',
         '  "access_instructions": {"title": "How to Access", "steps": [{"step": 1, "title": "Connect", "instructions": "Use {{NODE}} and {{PORT}}.", "vars": {"NODE": "node_name", "PORT": "PortForward(host, port)"}}]},',
@@ -2045,11 +2046,11 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
     ]
     if ultra_compact_prompt:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_levels":{"low":["Target: {{NEXT_NODE_IP}}"],"medium":["Artifact or service: {{OUTPUT.File(path)}}"],"high":["Use the access instructions and README.md for the complete workflow."]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_levels":{"low":["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],"medium":["Artifact or service: {{OUTPUT.File(path)}}"],"high":["Work through the access instructions for this step in order."]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
         ]
     elif compact_grounding:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true}],"hint_levels":{"low":["Target: {{NEXT_NODE_IP}}"],"medium":["Artifact: {{OUTPUT.Flag(flag_id)}}"],"high":["Use the access instructions and README.md."]},"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true}],"hint_levels":{"low":["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],"medium":["Artifact: {{OUTPUT.Flag(flag_id)}}"],"high":["Use the access instructions and README.md."]},"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
         ]
 
     current_scaffold = payload.get('current_scaffold_request') if isinstance(payload.get('current_scaffold_request'), dict) else None

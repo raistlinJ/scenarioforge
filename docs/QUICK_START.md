@@ -82,6 +82,8 @@ python -m scenarioforge.cli new \
 	--density-count 10 \
 	--seed-role Workstation=2 \
 	--seed-role Docker=3 \
+	--seed-role VulnerabilitySlot=2 \
+	--seed-role FlagGenSlot=1 \
 	--seed-routing OSPFv2=2 \
 	--seed-service SSH=2 \
 	--seed-traffic TCP \

@@ -111,11 +111,11 @@ artifacts:
 
 hint_levels:
   low:
-    - "Target: {{NEXT_NODE_IP}}"
+    - "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
   medium:
     - "Credential: {{OUTPUT.Credential(user,password)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Work through the access instructions for this step in order."
 
 # If you produce files/binaries that should be safe to mount into other containers.
 injects:
@@ -129,7 +129,7 @@ env:
 Notes:
 - `kind` must be `flag-generator` or `flag-node-generator`.
 - `inputs` is a list of input descriptors (used by UI forms and Flow). If `required` is omitted, it defaults to `true`.
-- For any solver-facing runtime input a participant must use on sequence 1 or on the first step of a parallel branch but cannot reasonably discover yet, set `flow_supply_when_first: true`; Flow supplies a deterministic value and writes it into the matching start hint.
+- For any solver-facing runtime input a participant must use on sequence 1 or on the first step of a parallel branch but cannot reasonably discover yet, set `flow_supply_when_first: true`; Flow supplies a deterministic value and writes it into the matching start hint. Aside from those supplied values, a start hint names only the node and its address — see [What a participant is told](#what-a-participant-is-told-and-what-is-held-back).
 - `artifacts.requires` / `artifacts.optional_requires` / `artifacts.produces` drive Flow dependency chaining.
 
 ### Input types (mandatory convention)
@@ -284,9 +284,27 @@ Author generators assuming transforms can happen, and make startup robust to the
 
 Manifests declare structured hints via:
 
-- `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` (lists of strings shown as collapsible guide sections labeled `Hint Low`, `Hint Medium`, and `Hint High`)
+- `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` (lists of strings shown as collapsible guide sections labeled `Hint Low`, `Hint Medium`, and `Hint High` — except for promoted first-step lines, which are labeled `Helpful Fact`; see below)
 
-Use levels consistently and keep at least one non-empty entry in each level: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should point to access instructions or a README link.
+Use levels consistently and keep at least one non-empty entry in each level: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should state the workflow outright — the step that solves the challenge.
+
+**Write hints for someone who only has the deployed scenario.** Participants run
+against the built environment; they cannot open your `manifest.yaml`, your
+`README.md`, or the `docker-compose.yml` Flow deploys. A hint such as
+`"Use the access instructions in this generator manifest."` or
+`"README: generators/foo/README.md"` names something they have no way to reach,
+so Flow filters those lines out of node cards and both guides. Spell out the
+step instead:
+
+```yaml
+# Filtered out -- names files the participant cannot open.
+high:
+  - "See README.md for the complete workflow."
+
+# Kept -- states what to actually do.
+high:
+  - "Mount the NFS export at /exports, then read flag.txt from the mount."
+```
 
 Flow substitutions include:
 
@@ -296,20 +314,99 @@ Flow substitutions include:
 - `{{SCENARIO}}`
 - `{{OUTPUT.<key>}}` where `<key>` comes from `outputs.json.outputs`
 
+### Next-node variables resolve to a *dependent* successor
+
+A `{{NEXT_NODE_*}}` variable names the next step that actually consumes one of
+this generator's outputs — not simply the next node in the emitted chain. Flow
+places independent challenges on parallel stages, where no ordering exists
+between them, so naming the positional neighbour would assert a gate the solver
+never imposed.
+
+When a step has no dependent successor, Flow removes the clause containing the
+variable and keeps the rest of the hint:
+
+```
+"Inspect the vendor intake dropbox before moving to {{NEXT_NODE_NAME}}."
+  -> parallel stage:  "Inspect the vendor intake dropbox."
+  -> real dependency: "Inspect the vendor intake dropbox before moving to docker-9 (10.0.98.3)."
+```
+
+Write hints so they still read correctly with the pointer removed. Put the
+instruction first and the pointer last, in its own clause. A hint whose entire
+body is a pointer — such as `"Target: {{NEXT_NODE_IP}}"` — leaves nothing behind
+and falls back to a generic line, so prefer a form that carries its own
+instruction.
+
 Example:
 
 ```yaml
 hint_levels:
   low:
-    - "Target: {{NEXT_NODE_IP}}"
+    - "Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."
   medium:
     - "Credential: {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Log in over SSH with the credential above, then read {{OUTPUT.FlagFile(path)}}."
 ```
 
 Note:
-- Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known, even if `{{NEXT_NODE_IP}}` is not explicitly present.
+- Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known, even if `{{NEXT_NODE_IP}}` is not explicitly present. This applies only when a dependent successor exists.
+
+### `File(path)` is reserved on flag-node-generators
+
+A flag-node-generator must publish `File(path)` as the compose file it deploys —
+Flow validates that it is `docker-compose.yml` or `docker-compose.yaml` and
+rejects anything else. That file is infrastructure: it never reaches the
+participant.
+
+So on a flag-node-generator, `{{OUTPUT.File(path)}}` in a hint would render as
+`docker-compose.yml`, which is useless to whoever is solving the challenge. Flow
+resolves it to `FlagFile(path)` instead — the artifact the challenge is actually
+about. Node cards, the participant guide, and the facilitator guide all apply
+the same substitution.
+
+Write hints against `{{OUTPUT.FlagFile(path)}}` directly; it is explicit and
+behaves identically. This remap does not apply to flag-generators, where
+`File(path)` means what it says.
+
+### Promoted disclosures appear as **Helpful Fact**
+
+The opening step has nothing before it. If its access instructions need a value
+a participant could not yet have earned — a credential, a token, a private key —
+Flow promotes the deeper hint that discloses it into `low`, because otherwise
+the chain has no entry point.
+
+Two consequences for authors:
+
+- A promoted line **moves**; it no longer appears at its original depth. Do not
+  write a `medium` hint that only makes sense alongside the `high` one.
+- Promoted lines are labelled **Helpful Fact** rather than `Hint Low`, since they
+  are given rather than earned. Write them as statements of fact.
+
+Only undiscoverable values are promoted. Enumerable ones — ports, paths — stay
+gated, and nothing is promoted at any position other than the first.
+
+### What a participant is told, and what is held back
+
+Flow draws a line between *where to go* and *how the challenge was built*. The
+second is authoring detail: it names the mechanism, which is usually the answer.
+
+| Surface | Participant sees | Facilitator sees |
+|---------|------------------|------------------|
+| Start hint (Initial Facts) | node name and address, plus any `flow_supply_when_first` values | same |
+| `Technique Source` (guide, Critical Access) | — | generator id and kind |
+| Hint levels | as authored, minus filtered lines | same |
+| Access instructions | yes | yes |
+
+Concretely, a start hint reads `Start: docker-2 @ 10.103.160.3` and never
+appends the generator id, its catalog display name, the assignment type, or the
+vulnerability name. Hints naming a README, the generator manifest, or
+`docker-compose.yml` are filtered from both guides, since a participant has only
+the deployed scenario.
+
+The practical consequence for authors: **your hint levels are the participant's
+only guided path.** Do not rely on them being able to see which generator
+produced a step, or to look anything up outside the environment.
 
 ---
 

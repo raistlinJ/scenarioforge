@@ -77,7 +77,15 @@ def test_compile_ai_topology_intent_also_compiles_services_and_traffic_rows():
     ]
 
 
-def test_compile_ai_topology_intent_compiles_vulnerabilities_from_catalog_and_allocates_docker_slots():
+def test_compile_ai_topology_intent_compiles_vulnerabilities_without_reserving_docker_slots():
+    """Vulnerability rows are compiled; Docker capacity for them is not.
+
+    The compiler used to reserve Docker slots inside the host budget for each
+    vulnerability target. That was removed (commit "add flag-nodes as a card")
+    so the host budget reflects what the user asked for, and the planner adds
+    the dedicated challenge hosts when it builds the topology -- the same split
+    that keeps a declared Docker count distinct from vulnerability targets.
+    """
     compiled = compile_ai_topology_intent(
         'Create a network with 12 nodes, 3 routers, and 2 web vulnerabilities.',
         vuln_catalog=[
@@ -90,9 +98,10 @@ def test_compile_ai_topology_intent_compiles_vulnerabilities_from_catalog_and_al
     vuln_items = compiled.section_payloads['Vulnerabilities']['items']
 
     assert compiled.locked_sections == ('Routing', 'Node Information', 'Vulnerabilities')
+    # 12 nodes - 3 routers = 9 hosts, all left as PC. No Docker row is reserved
+    # here for the 2 vulnerabilities; the planner allocates those hosts instead.
     assert node_items == [
-        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 7},
-        {'selected': 'Docker', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 2},
+        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 9},
     ]
     assert vuln_items == [
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'appweb/CVE-2018-8715', 'v_path': '/catalog/appweb/CVE-2018-8715/docker-compose.yml'},

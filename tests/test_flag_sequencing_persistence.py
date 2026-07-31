@@ -6,6 +6,8 @@ import uuid
 
 from webapp import app_backend
 
+from tests.flow_fixtures import write_flow_state_unvalidated
+
 
 IMPORTED_FLAG_GENERATOR_ID = 'imported_saved_flag_generator'
 IMPORTED_NODE_GENERATOR_ID = 'imported_saved_node_generator'
@@ -561,8 +563,20 @@ def test_save_flow_state_disabled_clears_flow_state_and_planpreview_metadata_flo
         lambda norm: str(xml_path) if norm == scenario_norm else None,
     )
 
+    # FlowState validation cross-checks the chain against PlanPreview topology, so
+    # an empty preview is rejected with "PlanPreview has no topology nodes". This
+    # test is about clearing FlowState, so the hosts are only scaffolding -- they
+    # just have to be the ones the chain references.
     payload = {
-        'full_preview': {'seed': 7, 'hosts': []},
+        'full_preview': {
+            'seed': 7,
+            'hosts': [
+                {'node_id': 'h1', 'name': 'h1', 'role': 'Docker',
+                 'vulnerabilities': [{'name': 'zz-fixture/CVE-0000-0001'}]},
+                {'node_id': 'h2', 'name': 'h2', 'role': 'Docker',
+                 'vulnerabilities': [{'name': 'zz-fixture/CVE-0000-0002'}]},
+            ],
+        },
         'metadata': {
             'xml_path': str(xml_path),
             'scenario': scenario_name,
@@ -983,7 +997,12 @@ def test_attackflow_preview_ignores_saved_duplicate_xml_flow_when_duplicates_dis
     plan_path, plan_dir = _seed_xml_plan(scenario, full_preview)
 
     try:
-        ok, err = app_backend._update_flow_state_in_xml(
+        # This chain is deliberately invalid: it repeats h1 and omits h2, which
+        # carries a vulnerability. The validated writer refuses exactly that
+        # ("Flow chain is missing required vulnerability node(s): h2"), so the
+        # premise has to be written directly -- the whole point of the test is
+        # that the route ignores such a state when duplicates are disabled.
+        write_flow_state_unvalidated(
             str(plan_path),
             scenario,
             {
@@ -998,7 +1017,6 @@ def test_attackflow_preview_ignores_saved_duplicate_xml_flow_when_duplicates_dis
                 ],
             },
         )
-        assert ok, err
 
         monkeypatch.setattr(
             app_backend,

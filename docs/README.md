@@ -29,6 +29,7 @@ Use this page to navigate the main project documentation.
 - [Generator Authoring](GENERATOR_AUTHORING.md)
 - [Flag Generator Notes](FLAG_GENERATORS.md)
 - [Flag Generator Inputs & Outputs](FLAG_GENERATORS_ALLOWED_INPUTS_OUTPUTS.md)
+- [Vulnerability Capability Metadata](VULN_CAPABILITY_METADATA.md) – Declare what a vuln requires and yields so generated chains are solvable.
 - [AI Prompt Templates](AI_PROMPT_TEMPLATES.md)
 - [Generator Prompt Context](prompts/prompt_sample_context_generator.txt)
 - [REST API Reference](reference/API.md)

@@ -105,9 +105,11 @@
               </div>
               <div class="col-sm-6 col-lg-9">
                 <div class="d-flex flex-wrap gap-3 small">
-                  <span>Flag-node-generator slots: <strong id="flowSummaryFlagNodeGeneratorSlots">0</strong></span>
-                  <span>Vulnerability slots: <strong id="flowSummaryVulnerabilitySlots">0</strong></span>
-                  <span>Docker slots: <strong id="flowSummaryDockerSlots">0</strong></span>
+                  <span title="Placed by the Flag Node Generators card. Some may also carry a vulnerability.">Specified Flag-node-generators: <strong id="flowSummarySpecifiedFlagNodeGenerators">0</strong></span>
+                  <span title="Placed by the Vulnerabilities card.">Specified vulnerabilities: <strong id="flowSummarySpecifiedVulnerabilities">0</strong></span>
+                  <span title="Free FlagGenSlot capacity declared in Node Information. Only a flag-node-generator can fill these.">Flag-node-generator slots: <strong id="flowSummaryFlagNodeGeneratorSlots">0</strong></span>
+                  <span title="Free VulnerabilitySlot capacity declared in Node Information. Only a vulnerability can fill these.">Vulnerability slots: <strong id="flowSummaryVulnerabilitySlots">0</strong></span>
+                  <span title="Free plain Docker nodes from Node Information. Either kind can fill these.">Docker slots: <strong id="flowSummaryDockerSlots">0</strong></span>
                   <span class="fw-semibold">Max challenges: <strong id="flowSummaryMaxChallenges">0</strong></span>
                 </div>
               </div>
@@ -414,6 +416,8 @@
     const generateMaxRetriesEl = document.getElementById('flowGenerateMaxRetries');
     const flowSeedInputEl = document.getElementById('flowSeedInput');
     const flowSeedRerollBtnEl = document.getElementById('flowSeedRerollBtn');
+    const flowSummarySpecifiedFlagNodeGeneratorsEl = document.getElementById('flowSummarySpecifiedFlagNodeGenerators');
+    const flowSummarySpecifiedVulnerabilitiesEl = document.getElementById('flowSummarySpecifiedVulnerabilities');
     const flowSummaryFlagNodeGeneratorSlotsEl = document.getElementById('flowSummaryFlagNodeGeneratorSlots');
     const flowSummaryVulnerabilitySlotsEl = document.getElementById('flowSummaryVulnerabilitySlots');
     const flowSummaryDockerSlotsEl = document.getElementById('flowSummaryDockerSlots');
@@ -3906,12 +3910,30 @@
     }
   }
 
+  // On a flag-node-generator, File(path) is reserved plumbing: Flow requires it
+  // to name the docker-compose file it deploys, which participants never see.
+  // Hints that talk about "the file" mean the challenge artifact, so point them
+  // at FlagFile(path). Mirrors the server-side remap in
+  // flow_prepare_preview_helpers.process_generator_outputs.
+  function hintOutputsForAssignment(assignment) {
+    const source = (assignment && typeof assignment === 'object') ? assignment : {};
+    const ro = (typeof source.resolved_outputs === 'object' && source.resolved_outputs && !Array.isArray(source.resolved_outputs))
+      ? source.resolved_outputs
+      : {};
+    try {
+      if (String(source.type || '').trim() !== 'flag-node-generator') return ro;
+      const flagFile = String(ro['FlagFile(path)'] || '').trim();
+      if (!flagFile || !String(ro['File(path)'] || '').trim()) return ro;
+      return Object.assign({}, ro, { 'File(path)': flagFile });
+    } catch (e) {
+      return ro;
+    }
+  }
+
   function _applyHintOutputTemplates(text, assignment) {
     const t = String(text || '');
     if (!t || !t.includes(_OUTPUT_TEMPLATE_PREFIX)) return t;
-    const ro = (assignment && typeof assignment.resolved_outputs === 'object' && assignment.resolved_outputs && !Array.isArray(assignment.resolved_outputs))
-      ? assignment.resolved_outputs
-      : {};
+    const ro = hintOutputsForAssignment(assignment);
 
     const roLower = new Map();
     const roCanonical = new Map();
@@ -4067,15 +4089,54 @@
       source.hints.forEach((value) => add('low', value));
     }
     if (!Object.keys(out).length && source.hint) add('low', source.hint);
-    const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
-    const hasReadmeHint = Array.isArray(out.high) && out.high.some((item) => String(item || '').trim().toLowerCase().startsWith('readme:'));
-    if (opts.includeReadme !== false && readmeRef && !hasReadmeHint) add('high', `README: ${readmeRef}`);
+    // No README hint: a participant has no access to the generator manifest or
+    // its README, so pointing at one is a dead end. Manifests carry a real
+    // `high` hint instead.
     return out;
   }
 
   function hintLevelTitle(level) {
     const key = String(level || '').trim().toLowerCase();
     return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : 'Hint';
+  }
+
+  const FLOW_PROMOTED_HINT_TITLE = 'Helpful Fact';
+
+  // Lines the opening step had to disclose outright (a credential or key nobody
+  // could have earned yet). They sit in `low` so they are always visible, but
+  // they are a given, not a hint, and are labelled as such.
+  function promotedHintLineSet(assignment) {
+    const source = (assignment && typeof assignment === 'object') ? assignment : {};
+    const raw = Array.isArray(source.promoted_first_step_hint_lines) ? source.promoted_first_step_hint_lines : [];
+    const out = new Set();
+    raw.forEach((value) => {
+      let text = _applyHintOutputTemplates(String(value || '').trim(), source);
+      text = _applyHintNodeTemplateVars(text, source).trim();
+      if (text) out.add(text);
+    });
+    return out;
+  }
+
+  // Flatten the level map into labelled display groups, splitting promoted
+  // disclosures out of `low` so both node cards and guides agree on wording.
+  function flowHintDisplayGroups(levels, assignment) {
+    const promoted = promotedHintLineSet(assignment);
+    const groups = [];
+    FLOW_HINT_LEVEL_ORDER.forEach((level) => {
+      const values = Array.isArray(levels && levels[level])
+        ? levels[level].map((v) => String(v || '').trim()).filter(Boolean)
+        : [];
+      if (!values.length) return;
+      if (level === 'low' && promoted.size) {
+        const facts = values.filter((v) => promoted.has(v));
+        const rest = values.filter((v) => !promoted.has(v));
+        if (facts.length) groups.push({ title: FLOW_PROMOTED_HINT_TITLE, values: facts });
+        if (rest.length) groups.push({ title: `Hint ${hintLevelTitle(level)}`, values: rest });
+        return;
+      }
+      groups.push({ title: `Hint ${hintLevelTitle(level)}`, values });
+    });
+    return groups;
   }
 
   function resolveFlowGuideTemplateText(text, assignment, context) {
@@ -4132,7 +4193,7 @@
     add('NODE_ID', nodeId);
     add('THIS_NODE_ID', nodeId);
     addObject(source.resolved_inputs);
-    addObject(source.resolved_outputs);
+    addObject(hintOutputsForAssignment(source));
     addObject(source.config_overrides);
     addObject(source.output_overrides);
     return out.replace(/\{\{\s*([A-Za-z0-9_.:(),\-\s]+?)\s*\}\}/g, (full, rawKey) => {
@@ -4154,6 +4215,11 @@
     if (!value) return false;
     if (value.includes(FLOW_TEMPLATE_OPEN) || value.includes(FLOW_TEMPLATE_CLOSE)) return false;
     if (/^[A-Za-z][A-Za-z0-9_ ()/.,-]{0,96}:\s*$/.test(value)) return false;
+    // Participants get the deployed scenario, not the authoring tree, so a hint
+    // pointing at a README, the generator manifest, or the compose file names
+    // something they cannot open.
+    if (/^README:/i.test(value)) return false;
+    if (/generator manifest|docker-compose\.ya?ml/i.test(value)) return false;
     return true;
   }
 
@@ -4181,8 +4247,7 @@
     const outputs = (source.resolved_outputs && typeof source.resolved_outputs === 'object' && !Array.isArray(source.resolved_outputs)) ? source.resolved_outputs : {};
     const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
     addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the access instructions and resolved facts for this step.');
-    const readmeRef = String(source.readme_rel_path || source.readme_path || '').trim();
-    addDefault('high', readmeRef ? `README: ${readmeRef}` : 'Use the access instructions for the complete workflow.');
+    addDefault('high', 'Work through the access instructions for this step in order.');
     return out;
   }
 
@@ -4918,27 +4983,13 @@
           if (uniq.length) firstIp = uniq.join(', ');
         } catch (e) { }
         if (!firstIp && firstName && _hintNodeIpMap && _hintNodeIpMap.get(firstName)) firstIp = _hintNodeIpMap.get(firstName);
-        const firstHintDetails = [];
-        try {
-          const genId = (faFirst && (faFirst.id || faFirst.generator_id)) ? String(faFirst.id || faFirst.generator_id).trim() : '';
-          const genName = (faFirst && faFirst.name) ? String(faFirst.name).trim() : '';
-          const genDisplay = (genName && genName !== genId) ? (genId ? (genId + ' | ' + genName) : genName) : genId;
-          if (genDisplay) firstHintDetails.push('generator: ' + genDisplay);
-        } catch (e) { }
-        try {
-          const genType = (faFirst && faFirst.type) ? String(faFirst.type).trim() : '';
-          if (genType) firstHintDetails.push('type: ' + genType);
-        } catch (e) { }
-        try {
-          let vulnNames = (faFirst && Array.isArray(faFirst.vulnerabilities)) ? faFirst.vulnerabilities.map(String).map(s => s.trim()).filter(Boolean) : [];
-          if (!vulnNames.length && firstNode && Array.isArray(firstNode.vulnerabilities)) {
-            vulnNames = firstNode.vulnerabilities.map(String).map(s => s.trim()).filter(Boolean);
-          }
-          if (vulnNames.length) firstHintDetails.push('target: ' + Array.from(new Set(vulnNames)).join(', '));
-        } catch (e) { }
+        // A start hint says where to begin, nothing more. The generator id, its
+        // display name, the assignment type and the vulnerability name are all
+        // authoring detail that describes how the challenge is built -- naming
+        // them here hands over the answer before anyone has looked at the box.
         if (firstName) {
           const suffix = firstIp ? (' @ ' + firstIp) : '';
-          initHints = [`Start: ${firstName}${suffix}${firstHintDetails.length ? ('; ' + firstHintDetails.join('; ')) : ''}`];
+          initHints = [`Start: ${firstName}${suffix}`];
         } else {
           initHints = [];
         }
@@ -4969,15 +5020,11 @@
             const nodeName = String((node && node.name) || assignment.node_name || assignment.node_id || '').trim();
             if (!nodeName) return;
             const nodeIp = nodeIpForStart(node) || (_hintNodeIpMap && _hintNodeIpMap.get(nodeName)) || '';
-            const details = [];
-            const genId = String(assignment.id || assignment.generator_id || '').trim();
-            const genName = String(assignment.name || '').trim();
-            const genDisplay = (genName && genName !== genId) ? (genId ? (genId + ' | ' + genName) : genName) : genId;
-            if (genDisplay) details.push('generator: ' + genDisplay);
-            if (assignment.type) details.push('type: ' + String(assignment.type).trim());
+            // Same rule as the primary start hint above: where to begin, not
+            // which generator builds the challenge.
             const prefix = String(assignment.chain_supplied_requirement_label || ('Seq ' + (entry.assignmentIndex + 1) + ' required')).trim();
             const suffix = nodeIp ? (' @ ' + nodeIp) : '';
-            const text = `${prefix} start: ${nodeName}${suffix}${details.length ? ('; ' + details.join('; ')) : ''}`;
+            const text = `${prefix} start: ${nodeName}${suffix}`;
             if (text && !initHints.includes(text)) initHints.push(text);
           });
         } catch (e) { }
@@ -5573,10 +5620,11 @@
 
       const hintLevels = normalizeFlowHintLevels(fa);
       let renderedAnyHintLevel = false;
-      FLOW_HINT_LEVEL_ORDER.forEach((level) => {
-        const values = Array.isArray(hintLevels[level])
-          ? hintLevels[level].map(h => _applyHintNodeIps(h, _hintNodeIpMap)).map(h => String(h || '').trim()).filter(Boolean)
-          : [];
+      flowHintDisplayGroups(hintLevels, fa).forEach((group) => {
+        const values = group.values
+          .map(h => _applyHintNodeIps(h, _hintNodeIpMap))
+          .map(h => String(h || '').trim())
+          .filter(Boolean);
         if (!values.length) return;
         renderedAnyHintLevel = true;
         if (values.length > 1) {
@@ -5600,9 +5648,9 @@
           });
           details.appendChild(ul);
           wrap.appendChild(details);
-          addRow(`Hint ${hintLevelTitle(level)}`, wrap);
+          addRow(group.title, wrap);
         } else {
-          addRow(`Hint ${hintLevelTitle(level)}`, values[0]);
+          addRow(group.title, values[0]);
         }
       });
       if (!renderedAnyHintLevel) addRow('Hint Low', '-');
@@ -10200,12 +10248,24 @@
     return parts.join(' · ');
   }
 
+  // The chain can reach every Docker-backed host, so the cap is the same total
+  // the summary reports as "Max challenges".
   function dockerNodeCapFromStats(stats) {
     if (!stats || typeof stats !== 'object') return null;
-    const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : null;
-    const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
-      ? (+stats.topology_flag_node_generator_total)
-      : 0;
+    const num = (value) => (Number.isFinite(+value) ? (+value) : null);
+    const buckets = [
+      num(stats.specified_flag_node_generator_total),
+      num(stats.specified_vulnerability_total),
+      num(stats.flag_gen_slot_total),
+      num(stats.vulnerability_slot_total),
+      num(stats.docker_slot_total),
+    ];
+    if (buckets.some((value) => value !== null)) {
+      return Math.max(0, buckets.reduce((total, value) => total + (value || 0), 0));
+    }
+    // Older payloads predate the five-bucket breakdown.
+    const vuln = num(stats.vuln_total);
+    const nodeGenerators = num(stats.topology_flag_node_generator_total) || 0;
     const genericDocker = Number.isFinite(+stats.generic_docker_total)
       ? (+stats.generic_docker_total)
       : Math.max(0, (Number.isFinite(+stats.docker_nonvuln_total) ? (+stats.docker_nonvuln_total) : 0) - nodeGenerators);
@@ -10213,8 +10273,16 @@
     return Math.max(0, (vuln || 0) + nodeGenerators + genericDocker);
   }
 
+  // A host is mandatory once something sits on it, because chain expansion pulls
+  // in every vulnerability and card-placed generator regardless of the requested
+  // length. That is not the same as the "specified" display buckets: a declared
+  // slot the planner already filled is reported as slot capacity but is still
+  // mandatory, so the minimum must count it.
   function vulnerabilityNodeMinimumFromStats(stats) {
     if (!stats || typeof stats !== 'object') return 1;
+    if (Number.isFinite(+stats.mandatory_challenge_total)) {
+      return Math.max(1, +stats.mandatory_challenge_total);
+    }
     const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : 0;
     const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
       ? (+stats.topology_flag_node_generator_total)
@@ -10223,17 +10291,22 @@
   }
 
   function updateFlowSummary(stats) {
-    const flagNodeGeneratorSlots = Number.isFinite(+stats?.topology_flag_node_generator_total)
-      ? Math.max(0, +stats.topology_flag_node_generator_total)
-      : 0;
-    const vulnerabilitySlots = Number.isFinite(+stats?.vuln_total)
-      ? Math.max(0, +stats.vuln_total)
-      : 0;
-    const dockerSlots = Number.isFinite(+stats?.generic_docker_total)
-      ? Math.max(0, +stats.generic_docker_total)
-      : Math.max(0, (Number.isFinite(+stats?.docker_nonvuln_total) ? +stats.docker_nonvuln_total : 0) - flagNodeGeneratorSlots);
-    const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;
+    // Five disjoint buckets over the Docker-backed hosts, so they sum to
+    // "Max challenges". The first two are what the Vulnerabilities and Flag
+    // Node Generators cards placed; the last three are free capacity declared
+    // in Node Information, which is what "slot" means here. A slot only accepts
+    // its own challenge kind; a plain Docker node accepts either.
+    const count = (value) => (Number.isFinite(+value) ? Math.max(0, +value) : 0);
+    const specifiedFlagNodeGenerators = count(stats?.specified_flag_node_generator_total);
+    const specifiedVulnerabilities = count(stats?.specified_vulnerability_total);
+    const flagNodeGeneratorSlots = count(stats?.flag_gen_slot_total);
+    const vulnerabilitySlots = count(stats?.vulnerability_slot_total);
+    const dockerSlots = count(stats?.docker_slot_total);
+    const maxChallenges = specifiedFlagNodeGenerators + specifiedVulnerabilities
+      + flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;
 
+    if (flowSummarySpecifiedFlagNodeGeneratorsEl) flowSummarySpecifiedFlagNodeGeneratorsEl.textContent = String(specifiedFlagNodeGenerators);
+    if (flowSummarySpecifiedVulnerabilitiesEl) flowSummarySpecifiedVulnerabilitiesEl.textContent = String(specifiedVulnerabilities);
     if (flowSummaryFlagNodeGeneratorSlotsEl) flowSummaryFlagNodeGeneratorSlotsEl.textContent = String(flagNodeGeneratorSlots);
     if (flowSummaryVulnerabilitySlotsEl) flowSummaryVulnerabilitySlotsEl.textContent = String(vulnerabilitySlots);
     if (flowSummaryDockerSlotsEl) flowSummaryDockerSlotsEl.textContent = String(dockerSlots);
@@ -12521,16 +12594,7 @@ ${out.join('\n')}
 
     const formatGuideHintLine = (text) => {
       const value = String(text || '').trim();
-      if (!isGuideHintLineInformative(value)) return '';
-      const readmeMatch = value.match(/^README:\s*(.+)$/i);
-      if (readmeMatch) {
-        const rawPath = String(readmeMatch[1] || '').trim();
-        if (rawPath) {
-          const target = rawPath.replace(/\s/g, '%20').replace(/\)/g, '%29');
-          return `README: [${rawPath}](${target})`;
-        }
-      }
-      return value;
+      return isGuideHintLineInformative(value) ? value : '';
     };
 
     const renderGuideHintLine = (text, assignment, context) => formatGuideHintLine(resolveFlowGuideTemplateText(text, assignment, context));
@@ -12981,7 +13045,10 @@ ${out.join('\n')}
       lines.push(`| Node | ${_cell(nodeName)} |`);
       lines.push(`| IP Address | ${_cell(nodeIp)} |`);
       if (nodeId) lines.push(`| Node ID | ${_cell(nodeId)} |`);
-      if (generatorLabel || generatorId) lines.push(`| Technique Source | ${_cell([generatorLabel, generatorId].filter(Boolean).join(' / '))} |`);
+      // Facilitators only. Naming the generator that built a challenge tells a
+      // participant how it was constructed, which is the same disclosure that
+      // start hints deliberately omit.
+      if (facilitatorMode && (generatorLabel || generatorId)) lines.push(`| Technique Source | ${_cell([generatorLabel, generatorId].filter(Boolean).join(' / '))} |`);
       lines.push('');
 
       const requiredInputsRaw = Array.isArray(assignment.input_fields_required)
@@ -13226,14 +13293,12 @@ ${out.join('\n')}
       if (hasStructuredHintLevels) {
         lines.push('### Hints');
         lines.push('');
-        FLOW_HINT_LEVEL_ORDER.forEach((level) => {
-          const values = Array.isArray(structuredHintLevels[level])
-            ? structuredHintLevels[level].map((value) => formatGuideHintLine(value)).filter(Boolean)
-            : [];
+        flowHintDisplayGroups(structuredHintLevels, assignment).forEach((group) => {
+          const values = group.values.map((value) => formatGuideHintLine(value)).filter(Boolean);
           if (!values.length) return;
           const firstValue = values[0];
           lines.push('<details>');
-          lines.push(`<summary>Hint ${hintLevelTitle(level)}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
+          lines.push(`<summary>${group.title}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
           lines.push('');
           if (values.length === 1) {
             lines.push(firstValue);

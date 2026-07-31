@@ -40,6 +40,7 @@ python -m scenarioforge.cli new \
   --scenario "myscen" \
   --density-count 10 \
   --seed-role Workstation=2 \
+  --seed-role VulnerabilitySlot=2 \
   --seed-role Docker=3 \
   --seed-routing OSPFv2=2 \
   --seed-service SSH=2 \
@@ -80,7 +81,11 @@ Behavior:
 Useful `new` seeding flags:
 
 - `--density-count N`: set the scenario-level Count for Density base host pool used by density-based planning. If omitted, the CLI uses the same starter default as the Web UI (`10`).
-- `--seed-role ROLE=COUNT`: add Node Information count rows, for example `Workstation=2` or `Docker=3`.
+- `--seed-role ROLE=COUNT`: add Node Information count rows, for example `Workstation=2` or `Docker=3`. `ROLE` is one of `Server`, `Workstation`, `PC`, `Docker`, `VulnerabilitySlot`, `FlagGenSlot`.
+
+  `Docker` hosts are the catch-all challenge target: flag-sequencing may place either a vulnerability or a flag-node-generator on them. `VulnerabilitySlot` and `FlagGenSlot` reserve Docker-backed capacity for one challenge kind only — a vulnerability never lands on a `FlagGenSlot`, and a flag-node-generator never lands on a `VulnerabilitySlot`.
+
+  Slot counts are independent of the counts declared in the Vulnerabilities and Flag Node Generators sections and are **additional** capacity: 5 `FlagGenSlot` rows plus 5 declared generators yields 10 challenge hosts, not 5. Declared card rows fill the Docker hosts added for them; slots stay free for flag-sequencing to place further challenges into, and remain in the topology as empty Docker-backed hosts if sequencing does not use them.
 - `--seed-routing NAME`, `NAME=density`, or `NAME=COUNT`: add one Routing row; repeat the flag to add multiple rows.
 - `--seed-service NAME`, `NAME=density`, or `NAME=COUNT`: add one Services row; repeat the flag to add multiple rows.
 - `--seed-traffic NAME`, `NAME=density`, or `NAME=COUNT`: add one Traffic row; repeat the flag to add multiple rows.
@@ -100,6 +105,7 @@ Seed semantics:
 - If you seed multiple density rows in the same section, their `factor` values are equalized so the rows in that section sum to `1.0`.
 - Count rows (`NAME=COUNT`) remain additive and do not participate in that density-weight split.
 - Specific and random flag-node-generator rows are additive Docker challenge slots, like vulnerability rows: they do not reduce or consume the Docker host count seeded through `--seed-role Docker=COUNT`. The CLI writes them into the XML `Flag Node Generators` section, which remains the execution ground truth for preview, Flow, topology, guides, and Execute.
+- `--seed-role VulnerabilitySlot=COUNT` and `--seed-role FlagGenSlot=COUNT` declare dedicated challenge capacity in Node Information. Like the additive rows above they raise the host count, and they never reduce the counts declared in the Vulnerabilities or Flag Node Generators sections. Their purpose is headroom for flag-sequencing: a `FlagGenSlot` accepts only flag-node-generators and a `VulnerabilitySlot` only vulnerabilities, so sequencing can add challenges of a chosen kind without opening the topology to the other. Both kinds materialize empty and are filled from the installed catalog only when the requested chain length reaches them, so declaring a slot does not raise the minimum chain length; an unused slot stays a plain Docker-backed host. See [Challenge slot roles](reference/SCENARIO_XML_SCHEMA.md#challenge-slot-roles).
 
 Useful CORE connection flags for `new`:
 

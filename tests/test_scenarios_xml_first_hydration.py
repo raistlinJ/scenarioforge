@@ -80,7 +80,9 @@ def test_scenarios_tabs_refreshes_latest_state_from_xml_on_load():
         "async function refreshScenarioStateFromXml(scenarioName, opts)",
         "latestStateUrl += '&xml_path=' + encodeURIComponent(explicitXmlPath);",
         "typeof window.CORETG_FETCH_LATEST_STATE === 'function'",
-        "await window.CORETG_FETCH_LATEST_STATE(scenario, { xmlPath: explicitXmlPath, forceXmlPath: options.forceXmlPath === true })",
+        # The inline `options.forceXmlPath === true` test was hoisted into a
+        # `useExplicitXmlPath` local, which also covers the page-source path.
+        "await window.CORETG_FETCH_LATEST_STATE(scenario, { xmlPath: explicitXmlPath, forceXmlPath: useExplicitXmlPath })",
         "setLatestXmlPathForScenario(scenario, xmlPath);",
         "window.coretgRefreshScenarioStateFromXml = refreshScenarioStateFromXml;",
         "await refreshScenarioStateFromXml(scen, { updateHidden: true });",
@@ -172,9 +174,12 @@ def test_index_template_uses_page_details_navigation_helper() -> None:
     text = INDEX_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
 
     expected_snippets = [
-        'window.CORETG_NAVIGATE_PAGE_DETAILS(targetUrl);',
+        # The (targetUrl) variant lived in scheduleScenarioRedirect(), which had
+        # no callers and was removed. Navigation still routes through the shared
+        # helper from every live call site.
         'window.CORETG_NAVIGATE_PAGE_DETAILS(href);',
         'window.CORETG_NAVIGATE_PAGE_DETAILS(url);',
+        'window.CORETG_NAVIGATE_PAGE_DETAILS(target);',
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
@@ -186,7 +191,9 @@ def test_full_preview_scripts_uses_page_details_navigation_helper() -> None:
     text = FULL_PREVIEW_SCRIPTS_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
 
     expected_snippets = [
-        '(window.top || window).CORETG_NAVIGATE_PAGE_DETAILS(url);',
+        # Navigation now happens in the current frame rather than reaching for
+        # `window.top`; the shared helper is still what performs it.
+        'window.CORETG_NAVIGATE_PAGE_DETAILS(reportsHref);',
         'window.CORETG_NAVIGATE_PAGE_DETAILS(reportsHref);',
     ]
 
@@ -270,11 +277,20 @@ def test_scenarios_tabs_xml_refresh_prefers_latest_scenario_xml_path() -> None:
     text = TABS_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
 
     latest_snippet = "explicitXmlPath = (getLatestXmlPathForScenario(scenario) || '').toString().trim();"
-    hidden_snippet = "explicitXmlPath = (document.getElementById('scenariosPreviewXmlPath')?.value || '').toString().trim();"
+    # The hidden-input read was extracted into getCurrentStateSourceXmlPath(),
+    # which still resolves `#scenariosPreviewXmlPath`.
+    hidden_snippet = "explicitXmlPath = getCurrentStateSourceXmlPath();"
 
     latest_idx = text.find(latest_snippet)
     hidden_idx = text.find(hidden_snippet)
 
     assert latest_idx != -1, "Missing latest per-scenario XML path lookup snippet"
     assert hidden_idx != -1, "Missing hidden XML path lookup snippet"
-    assert latest_idx < hidden_idx, "Latest per-scenario XML path must be preferred over hidden XML path"
+    assert "document.getElementById('scenariosPreviewXmlPath')?.value" in text, \
+        "getCurrentStateSourceXmlPath no longer reads the hidden XML path input"
+    # Precedence was deliberately inverted: the XML source the page is already
+    # displaying wins over "latest for this scenario name", so a refresh cannot
+    # silently switch to a different project file. Only when no page source is
+    # set does resolution fall back to the latest per-scenario path.
+    assert hidden_idx < latest_idx, "Page-source XML path must be preferred over latest per-scenario path"
+    assert "explicitXmlPathIsPageSource = !!explicitXmlPath;" in text
