@@ -18948,6 +18948,100 @@ def _flow_node_is_vuln(node: dict[str, Any] | None) -> bool:
         return False
 
 
+def _flow_installed_vulnerability_names() -> list[str]:
+    """Vulnerability names available to draw, sorted for stable ordering."""
+    try:
+        from scenarioforge.utils.vuln_process import load_vuln_catalog
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for entry in (load_vuln_catalog(_get_repo_root()) or []):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get('Name') or '').strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        names.sort()
+        return names
+    except Exception:
+        return []
+
+
+def _flow_fill_empty_vulnerability_slots(
+    preview: dict[str, Any] | None,
+    chain_nodes: list[dict[str, Any]] | None,
+    *,
+    seed: int | None = None,
+) -> list[str]:
+    """Draw a vulnerability for every empty VulnerabilitySlot in the chain.
+
+    A declared slot is capacity, not a placement: the planner leaves it empty so
+    it does not become a mandatory challenge, and flag-sequencing fills it only
+    if the chain actually reaches it. A slot the chain never reaches stays a
+    plain Docker node.
+
+    Without this an empty slot in the chain has no candidate pool at all -- it
+    is not a vulnerability host yet, and its slot kind refuses flag-node
+    generators -- so the whole sequence fails.
+
+    Mutates the chain nodes and the preview's ``vulnerabilities_by_node`` so
+    both the solver and deployment see the choice. Returns the names drawn.
+    """
+    nodes = [n for n in (chain_nodes or []) if isinstance(n, dict)]
+    empty_slots = [
+        n for n in nodes
+        if _flow_node_challenge_slot_kind(n) == 'vulnerability'
+        and not _flow_node_is_vuln(n)
+    ]
+    if not empty_slots:
+        return []
+
+    catalog = _flow_installed_vulnerability_names()
+    if not catalog:
+        return []
+
+    view = preview if isinstance(preview, dict) else {}
+    by_node = view.get('vulnerabilities_by_node')
+    if not isinstance(by_node, dict):
+        by_node = {}
+
+    # Prefer a vulnerability the scenario is not already using, so a drawn slot
+    # adds a distinct challenge rather than repeating a placed one.
+    in_use: set[str] = set()
+    for value in by_node.values():
+        if isinstance(value, list):
+            in_use.update(str(v).strip() for v in value if str(v or '').strip())
+        elif str(value or '').strip():
+            in_use.add(str(value).strip())
+    for n in nodes:
+        for v in (n.get('vulnerabilities') or []):
+            if str(v or '').strip():
+                in_use.add(str(v).strip())
+
+    import random as _random
+
+    rnd = _random.Random(int(seed) if seed is not None else 0)
+    pool = [name for name in catalog if name not in in_use] or list(catalog)
+    rnd.shuffle(pool)
+
+    drawn: list[str] = []
+    for index, node in enumerate(empty_slots):
+        if not pool:
+            break
+        name = pool.pop()
+        node['vulnerabilities'] = [name]
+        node['is_vuln'] = True
+        node_id = str(node.get('id') or node.get('node_id') or '').strip()
+        if node_id:
+            by_node[node_id] = [name]
+        drawn.append(name)
+
+    if drawn and isinstance(preview, dict):
+        preview['vulnerabilities_by_node'] = by_node
+    return drawn
+
+
 def _get_flow_seed(preview: dict[str, Any] | None, flow_seed_override: int | None = None) -> int:
     """Return the flow seed for chain/generator selection.
 

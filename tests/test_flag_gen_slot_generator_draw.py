@@ -152,11 +152,11 @@ def test_declared_generators_are_not_absorbed_into_flag_gen_slots(tmp_path) -> N
     assert len(declared) == 5
 
 
-def test_vulnerability_slots_do_not_materialize_duplicate_hosts(tmp_path) -> None:
-    """Vuln slots net out, because the planner already asked for one vuln each.
+def test_vulnerability_slots_add_capacity_without_duplicating_hosts(tmp_path) -> None:
+    """3 declared vulnerabilities + 2 slots is 5 hosts, and the slots stay free.
 
-    Nothing downstream can assign a vulnerability, so unlike a generator slot
-    the demand is counted up front and the slot *is* the host for it.
+    The declared rows take the Docker hosts added for them; the slots are extra
+    capacity flag-sequencing fills only if the chain reaches them.
     """
     _plan, hosts = _preview_hosts(
         _scenario_xml(
@@ -169,10 +169,11 @@ def test_vulnerability_slots_do_not_materialize_duplicate_hosts(tmp_path) -> Non
     )
 
     assert len(hosts) == 5, [h.get('name') for h in hosts]
-    # No dead nodes: every host carries a vulnerability.
-    assert all(h.get('vulnerabilities') for h in hosts), [
-        (h.get('name'), h.get('vulnerabilities')) for h in hosts
-    ]
+    placed = [h for h in hosts if h.get('vulnerabilities')]
+    slots = [h for h in hosts if str(h.get('role') or '') == 'VulnerabilitySlot']
+    assert len(placed) == 3, [(h.get('name'), h.get('vulnerabilities')) for h in hosts]
+    assert len(slots) == 2
+    assert not any(h.get('vulnerabilities') for h in slots)
 
 
 def test_random_vulnerabilities_come_from_the_installed_catalog(tmp_path) -> None:

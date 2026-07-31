@@ -187,8 +187,21 @@ Slot rows are independent of the counts declared in the `Vulnerabilities` and
 `Flag Node Generators` sections and add to them. Declaring 5 `FlagGenSlot` rows
 alongside 5 generators yields 10 challenge hosts: the declared generators fill
 the Docker hosts the planner adds for them, and the slots stay free for
-flag-sequencing to place further challenges into. Slots sequencing does not use
-remain in the topology as empty Docker-backed hosts.
+flag-sequencing to place further challenges into. The same holds for
+`VulnerabilitySlot` rows against the `Vulnerabilities` section.
+
+**A slot is capacity, not a placement.** Both kinds materialize *empty*, and
+flag-sequencing fills a slot only if the requested chain length reaches it —
+drawing a generator or a vulnerability from the installed catalog at that point.
+Consequences worth knowing:
+
+- Declaring a slot does not raise the minimum chain length. Only what the
+  section cards placed is mandatory; slots are optional headroom.
+- A slot the chain does not reach stays in the topology as a plain
+  Docker-backed host with no challenge on it.
+- Because the planner cannot see the installed catalog, it never names what
+  fills a slot. That choice is made during flag-sequencing, where the catalog
+  is available, so a slot can never be assigned something that is not installed.
 
 Common attributes:
 | Attribute | Applies | Meaning |
