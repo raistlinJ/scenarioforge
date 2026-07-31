@@ -18964,6 +18964,7 @@
         runStatus: null,
         summaryShown: false,
         validationLogSig: '',
+        runStatusPollActive: false,
     };
 
     let executeBeforeUnloadGuardInstalled = false;
@@ -22282,6 +22283,8 @@
         if (evtSrc) { try { evtSrc.close(); } catch (e) { } }
         evtSrc = new EventSource('/stream/' + runId);
         try { localStorage.setItem('coretg_active_run_id', String(runId || '')); } catch (e) { }
+        // Independent of the stream, so a dropped connection still resolves.
+        try { ensureRunStatusPoll(runId); } catch (e) { }
         // keep existing logs; do not auto-clear
         // Toggle buttons
         try { document.getElementById('runAsyncBtn')?.classList.add('d-none'); } catch (e) { }
@@ -22309,14 +22312,32 @@
             try { document.getElementById('runSyncBtn')?.classList.remove('disabled'); } catch (e) { }
             try { document.getElementById('cancelRunBtn')?.classList.add('d-none'); } catch (e) { }
             logInfo('Async run ended');
+            // The stream says "ended", not whether it worked. Nudge the status
+            // poll so the return code is read promptly rather than on its next tick.
+            try { ensureRunStatusPoll(runId); } catch (e) { }
         });
+    }
+
+    // The log stream reports that a run ended, but not how it ended. Run status
+    // carries the return code, so it is what decides success from failure; this
+    // keeps a single poll chain alive alongside the stream so the outcome is
+    // still detected if the stream drops before its `end` event.
+    function ensureRunStatusPoll(runId) {
+        const id = String(runId || '').trim();
+        if (!id) return;
+        if (executeProgressState.runStatusPollActive) return;
+        executeProgressState.runStatusPollActive = true;
+        pollRunStatus(id);
     }
 
     async function pollRunStatus(runId) {
         const xmlPre = document.getElementById('xmlPre');
         try {
             const res = await fetch('/run_status/' + runId);
-            if (!res.ok) return;
+            if (!res.ok) {
+                executeProgressState.runStatusPollActive = false;
+                return;
+            }
             const data = await res.json();
             try {
                 if (data?.validation_summary && shouldUpdateValidationSummary(executeProgressState.validationSummary, data.validation_summary)) {
@@ -22338,6 +22359,7 @@
             if (!data.done) {
                 setTimeout(() => pollRunStatus(runId), 1000);
             } else {
+                executeProgressState.runStatusPollActive = false;
                 if (!executeProgressState.summaryShown) {
                     executeProgressState.summaryShown = true;
                     if (data.returncode === 0) {
