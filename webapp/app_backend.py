@@ -5868,6 +5868,84 @@ def _flow_assignment_missing_remote_paths(sftp: Any, assignment: dict[str, Any])
     return missing
 
 
+def _installed_generator_repo_relpath(generator_id: str) -> str:
+    """Repo-relative directory of an installed generator, or ''.
+
+    Resolved from the local tree, which is the same content just synced to the
+    CORE VM, so the relative path is valid on both sides.
+    """
+    gid = str(generator_id or '').strip()
+    if not gid:
+        return ''
+    try:
+        root = os.path.join(_get_repo_root(), 'outputs', 'installed_generators')
+        for kind in ('flag_node_generators', 'flag_generators'):
+            base = os.path.join(root, kind)
+            if not os.path.isdir(base):
+                continue
+            for name in os.listdir(base):
+                marker = os.path.join(base, name, '.coretg_pack.json')
+                if not os.path.isfile(marker):
+                    continue
+                try:
+                    with open(marker, 'r', encoding='utf-8') as handle:
+                        meta = json.load(handle)
+                except Exception:
+                    continue
+                if str(meta.get('generator_id') or '').strip() == gid:
+                    return f'outputs/installed_generators/{kind}/{name}'
+    except Exception:
+        return ''
+    return ''
+
+
+def _flow_assignment_artifacts_are_stale(
+    sftp: Any,
+    assignment: dict[str, Any],
+    *,
+    remote_repo: str,
+) -> str:
+    """Return why an assignment's artifacts are outdated, or ''.
+
+    Regeneration used to trigger only on *missing* artifacts. A generator whose
+    code changed therefore kept producing nothing: the previous run's output was
+    still present, so it was reused, and the fix silently never took effect --
+    a broken generated app survived repeated executes until someone deleted the
+    output directory by hand.
+
+    Compares the generator's own source against what it produced. Unknown on
+    error: a comparison we cannot make must not force needless regeneration.
+    """
+    try:
+        generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+        rel = _installed_generator_repo_relpath(generator_id)
+        if not rel:
+            return ''
+        source_path = f"{str(remote_repo).rstrip('/')}/{rel}/generator.py"
+        try:
+            source_mtime = float(sftp.stat(source_path).st_mtime or 0)
+        except Exception:
+            return ''
+        if source_mtime <= 0:
+            return ''
+        newest_artifact = 0.0
+        for path in _remote_flow_assignment_expected_paths(assignment):
+            try:
+                newest_artifact = max(newest_artifact, float(sftp.stat(path).st_mtime or 0))
+            except Exception:
+                continue
+        if newest_artifact <= 0:
+            return ''
+        if source_mtime > newest_artifact:
+            return (
+                f'generator.py is newer than its output '
+                f'({int(source_mtime - newest_artifact)}s)'
+            )
+        return ''
+    except Exception:
+        return ''
+
+
 def _flow_regeneration_plan_context(preview_plan_path: str) -> tuple[Any, str]:
     seed_val: Any = None
     scenario_norm = ''
@@ -6107,8 +6185,20 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
         if not out_dir:
             continue
         missing_before = _flow_assignment_missing_remote_paths(sftp, assignment)
+        stale_reason = ''
         if not missing_before:
-            continue
+            stale_reason = _flow_assignment_artifacts_are_stale(
+                sftp, assignment, remote_repo=remote_repo
+            )
+            if not stale_reason:
+                continue
+            try:
+                log_handle.write(
+                    f"[remote] flow.artifacts.regenerate stale index={index} "
+                    f"out_dir={out_dir} reason={stale_reason}\n"
+                )
+            except Exception:
+                pass
         generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
         if not generator_id:
             failures.append(f"assignment {index} missing generator id")

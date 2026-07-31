@@ -262,6 +262,93 @@ def _stage_injected_dir(out_dir: Path, inject_files: list[str]) -> Path | None:
     return injected_dir
 
 
+def _validate_generated_python_compiles(out_dir: Path) -> None:
+    """Reject a generator that emitted Python which cannot be imported.
+
+    Generators build their challenge app by templating values into a `.py`
+    file, and a mistake there is invisible until the container runs. One
+    generator pasted `json.dumps()` output into Python source, so any config
+    holding a boolean produced::
+
+        "directory_traversal": true,
+        NameError: name 'true' is not defined
+
+    The container then crash-looped, CORE could not read its PID or attach an
+    interface, the session never left `configuration`, and the run reported
+    success. Four layers, none of which named the syntax error.
+
+    Parsing is cheap and the failure is exact, so do it while we still know
+    which generator produced the file.
+    """
+    import ast
+
+    # JSON's literals are ordinary names in Python, so `{"x": true}` parses
+    # cleanly and only fails when the line executes. Syntax checking alone
+    # therefore misses the exact bug this exists to catch, and the names have to
+    # be looked for directly.
+    json_literals = {'true': 'True', 'false': 'False', 'null': 'None'}
+
+    broken: list[str] = []
+    try:
+        candidates = sorted(out_dir.rglob('*.py'))
+    except Exception:
+        return
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            source = path.read_text(encoding='utf-8', errors='ignore')
+        except Exception:
+            continue
+        try:
+            rel = path.relative_to(out_dir)
+        except Exception:
+            rel = path
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError as exc:
+            detail = f"{rel} line {exc.lineno}: {exc.msg}"
+            text = (exc.text or '').strip()
+            if text:
+                detail += f" -> {text[:120]}"
+            broken.append(detail)
+            continue
+        # A name the module actually binds is a real variable, however oddly
+        # spelled, not a JSON literal that leaked into source.
+        bound: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, ast.arg):
+                bound.add(node.arg)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    bound.add((alias.asname or alias.name).split('.')[0])
+
+        seen: set[tuple[int, str]] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+                continue
+            replacement = json_literals.get(node.id)
+            if not replacement or node.id in bound:
+                continue
+            key = (node.lineno, node.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            broken.append(
+                f"{rel} line {node.lineno}: JSON literal '{node.id}' used as Python "
+                f"(did you mean {replacement}?)"
+            )
+    if broken:
+        raise SystemExit(
+            '[validation error] generator emitted Python that will not import: '
+            + '; '.join(broken[:5])
+        )
+
+
 def _validate_injected_sources_exist(out_dir: Path, inject_files: list[str]) -> None:
     """Validate that inject source files produced by a generator exist.
 
@@ -1298,6 +1385,7 @@ def main() -> int:
         # rewrite compose during Generate/Resolve.
         expanded_inject = expand_inject_files([str(x) for x in inject_files if x is not None], env)
         expanded_inject = expand_inject_files_from_outputs(out_dir, expanded_inject)
+        _validate_generated_python_compiles(out_dir)
         _validate_injected_sources_exist(out_dir, expanded_inject)
 
         manifest = out_dir / "outputs.json"
@@ -1323,6 +1411,7 @@ def main() -> int:
 
     expanded_inject = expand_inject_files([str(x) for x in inject_files if x is not None], env)
     expanded_inject = expand_inject_files_from_outputs(out_dir, expanded_inject)
+    _validate_generated_python_compiles(out_dir)
     _validate_injected_sources_exist(out_dir, expanded_inject)
 
     # Print manifest if present
