@@ -45042,7 +45042,7 @@ def _default_scaffold_hint_levels(produces: list[str]) -> dict[str, list[str]]:
         medium = 'Inspect the target service or generated artifact for the next clue.'
 
     return {
-        'low': ['Target: {{NEXT_NODE_IP}}'],
+        'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
         'medium': [medium],
         'high': ['Use the access instructions and README.md for the complete workflow.'],
     }
