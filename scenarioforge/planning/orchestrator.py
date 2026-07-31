@@ -7,7 +7,12 @@ are centralized here so both CLI and Web preview can share identical logic.
 from typing import Optional, Dict, Any, List, Tuple
 import logging
 
-from .node_plan import compute_node_plan
+from .node_plan import (
+    FLAG_GEN_SLOT_ROLE,
+    VULNERABILITY_SLOT_ROLE,
+    _normalize_role_name,
+    compute_node_plan,
+)
 from .docker_capacity import ensure_role_counts_docker_capacity
 from .router_plan import compute_router_plan
 from .service_plan import compute_service_plan, ServiceSpec
@@ -75,6 +80,28 @@ def compute_full_plan(
             factor_val = 0.0
         kind = selected
         vuln_items.append(VulnerabilityItem(name=name, density=vuln_density, abs_count=abs_c, kind=kind, factor=factor_val, metric=vm))
+
+    # Declared VulnerabilitySlot rows are challenge capacity, and only the
+    # Vulnerabilities section can supply a vulnerability -- flag-sequencing
+    # cannot invent one. Any slot the declared rows do not cover therefore asks
+    # for a random vulnerability, so the slot materializes as a real challenge
+    # node instead of an unusable empty host.
+    vulnerability_slot_count = 0
+    for role_name, count in (role_counts or {}).items():
+        if _normalize_role_name(role_name) == VULNERABILITY_SLOT_ROLE:
+            try:
+                vulnerability_slot_count += max(0, int(count or 0))
+            except Exception:
+                continue
+    # Each slot gets its *own* vulnerability rather than absorbing a declared
+    # one: slot rows are additive, so 5 slots plus 5 declared vulnerabilities is
+    # 10 challenge hosts. The declared rows keep their additive Docker hosts.
+    if vulnerability_slot_count:
+        vuln_items.append(VulnerabilityItem(
+            name='Random', density=vuln_density, abs_count=vulnerability_slot_count,
+            kind='Random', factor=0.0, metric='Count',
+        ))
+
     vulnerability_plan, vuln_breakdown = compute_vulnerability_plan(density_base, vuln_density, vuln_items)
     # Flag-node-generators have exactly the same topology cardinality semantics
     # as vulnerabilities, but their Docker hosts are separate/additive slots.
@@ -97,10 +124,33 @@ def compute_full_plan(
             count = 0
         nodegen_items.append(VulnerabilityItem(name=name, density=nodegen_density, abs_count=count, kind=selected,
                                                 factor=float(it.get('factor') or 0.0), metric=metric))
+    # FlagGenSlot rows behave like VulnerabilitySlot rows: each slot draws its
+    # own random generator so it materializes as a real challenge node rather
+    # than empty capacity, and declared card rows keep their additive hosts.
+    flag_gen_slot_count = 0
+    for role_name, count in (role_counts or {}).items():
+        if _normalize_role_name(role_name) == FLAG_GEN_SLOT_ROLE:
+            try:
+                flag_gen_slot_count += max(0, int(count or 0))
+            except Exception:
+                continue
+    if flag_gen_slot_count:
+        nodegen_items.append(VulnerabilityItem(
+            name='Random', density=nodegen_density, abs_count=flag_gen_slot_count,
+            kind='Random', factor=0.0, metric='Count',
+        ))
+
     flag_node_generator_plan, nodegen_breakdown = compute_vulnerability_plan(density_base, nodegen_density, nodegen_items)
+    vuln_host_demand = sum(max(0, int(count or 0)) for count in (vulnerability_plan or {}).values())
+    nodegen_host_demand = sum(max(0, int(count or 0)) for count in (flag_node_generator_plan or {}).values())
+    # Vulnerabilities fill declared VulnerabilitySlot rows before the planner
+    # adds Docker hosts, so that share of the demand already has somewhere to
+    # live. Counting it again here would materialize a duplicate host per slot.
+    vuln_absorbed_by_slots = min(vulnerability_slot_count, vuln_host_demand)
+    nodegen_absorbed_by_slots = min(flag_gen_slot_count, nodegen_host_demand)
     required_docker_hosts = (
-        sum(max(0, int(count or 0)) for count in (vulnerability_plan or {}).values())
-        + sum(max(0, int(count or 0)) for count in (flag_node_generator_plan or {}).values())
+        (vuln_host_demand - vuln_absorbed_by_slots)
+        + (nodegen_host_demand - nodegen_absorbed_by_slots)
     )
     role_counts, docker_capacity_repair = ensure_role_counts_docker_capacity(role_counts, required_docker_hosts)
     if docker_capacity_repair.get('added_docker_hosts'):
