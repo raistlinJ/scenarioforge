@@ -10467,6 +10467,77 @@ def _exec_ssh_python_probe(client: Any, command: str, *, timeout: float) -> Tupl
     return exit_code, stdout_text, stderr_text
 
 
+def _core_ssh_endpoint_reachable(ssh_host: str, ssh_port: int, *, timeout: float = 3.0) -> str:
+    """Return '' when a TCP connection to the SSH endpoint succeeds, else why not.
+
+    Paramiko spends its full connect, banner and auth budget before reporting an
+    unreachable host, and callers phrase the result in terms of the gRPC target
+    they were ultimately after -- which is a loopback address reached *through*
+    this SSH hop, so the message names a host that was never the problem. A
+    short TCP probe first fails in seconds and can name the real endpoint.
+    """
+    import socket as _socket
+
+    host = str(ssh_host or '').strip()
+    if not host:
+        return 'no SSH host configured'
+    try:
+        port = int(ssh_port or 22)
+    except Exception:
+        port = 22
+    sock = None
+    try:
+        sock = _socket.create_connection((host, port), timeout=max(1.0, float(timeout)))
+        return ''
+    except _socket.gaierror as exc:
+        return f'{host} does not resolve ({exc})'
+    except _socket.timeout:
+        return (
+            f'no response from {host}:{port} within {max(1.0, float(timeout)):.0f}s. '
+            'The CORE VM may be powered off, or it may be on a network this machine cannot currently reach.'
+        )
+    except ConnectionRefusedError:
+        return f'{host}:{port} refused the connection (nothing is listening on that port)'
+    except OSError as exc:
+        return f'cannot reach {host}:{port} ({exc})'
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def _core_daemon_journal_tail(client: Any, *, lines: int = 40, timeout: float = 15.0) -> str:
+    """Best-effort `journalctl -u core-daemon` tail over an open SSH client.
+
+    Only useful once SSH works: when the daemon is the thing that is down, its
+    own log says why, and otherwise the operator is left with a bare timeout.
+    """
+    try:
+        command = f'sh -c "timeout {int(timeout)}s journalctl -u core-daemon -n {int(lines)} --no-pager 2>&1 || true"'
+        _stdin, stdout, _stderr = client.exec_command(command, timeout=timeout + 2.0)
+        data = stdout.read()
+        text = data.decode('utf-8', 'ignore') if isinstance(data, bytes) else str(data)
+        return text.strip()
+    except Exception:
+        return ''
+
+
+def _core_daemon_journal_suffix(client: Any, *, lines: int = 20) -> str:
+    """Render the daemon's own log as a suffix for a failure message.
+
+    Empty when nothing could be read, so callers can append unconditionally.
+    """
+    tail = _core_daemon_journal_tail(client, lines=lines)
+    if not tail:
+        return ''
+    kept = [ln for ln in tail.splitlines() if ln.strip()][-lines:]
+    if not kept:
+        return ''
+    return '\n\nRecent core-daemon log:\n' + '\n'.join(kept)
+
+
 def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 5.0) -> None:
     cfg = _require_core_ssh_credentials(core_cfg)
     _ensure_paramiko_available()
@@ -10479,6 +10550,10 @@ def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 
     username = str(cfg.get('ssh_username') or '').strip()
     password = cfg.get('ssh_password') or ''
     logger = getattr(app, 'logger', logging.getLogger(__name__))
+    # Fail on an unreachable VM in seconds, naming the endpoint actually dialled.
+    unreachable = _core_ssh_endpoint_reachable(ssh_host, ssh_port, timeout=3.0)
+    if unreachable:
+        raise RuntimeError(f'Cannot reach the CORE VM over SSH at {ssh_host}:{ssh_port}: {unreachable}')
     client = paramiko.SSHClient()  # type: ignore[assignment]
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # type: ignore[attr-defined]
     try:
@@ -10517,11 +10592,15 @@ def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 
                     'Test Venv only verifies that the CORE Python modules import; Save & Validate also requires '
                     'a running core-daemon listening on the configured gRPC host/port. '
                     'Check the configured gRPC port and run `systemctl status core-daemon` on the CORE host.'
+                    + _core_daemon_journal_suffix(client)
                 )
             if 'not found' in lower or 'command not found' in lower:
                 continue
         error_detail = _summarize_core_daemon_probe_errors(probe_errors)
-        raise RuntimeError(f'core-daemon did not respond on {daemon_host}:{daemon_port} ({error_detail})')
+        raise RuntimeError(
+            f'core-daemon did not respond on {daemon_host}:{daemon_port} ({error_detail})'
+            + _core_daemon_journal_suffix(client)
+        )
     finally:
         try:
             client.close()
