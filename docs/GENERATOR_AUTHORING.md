@@ -129,7 +129,7 @@ env:
 Notes:
 - `kind` must be `flag-generator` or `flag-node-generator`.
 - `inputs` is a list of input descriptors (used by UI forms and Flow). If `required` is omitted, it defaults to `true`.
-- For any solver-facing runtime input a participant must use on sequence 1 or on the first step of a parallel branch but cannot reasonably discover yet, set `flow_supply_when_first: true`; Flow supplies a deterministic value and writes it into the matching start hint.
+- For any solver-facing runtime input a participant must use on sequence 1 or on the first step of a parallel branch but cannot reasonably discover yet, set `flow_supply_when_first: true`; Flow supplies a deterministic value and writes it into the matching start hint. Aside from those supplied values, a start hint names only the node and its address — see [What a participant is told](#what-a-participant-is-told-and-what-is-held-back).
 - `artifacts.requires` / `artifacts.optional_requires` / `artifacts.produces` drive Flow dependency chaining.
 
 ### Input types (mandatory convention)
@@ -385,6 +385,28 @@ Two consequences for authors:
 
 Only undiscoverable values are promoted. Enumerable ones — ports, paths — stay
 gated, and nothing is promoted at any position other than the first.
+
+### What a participant is told, and what is held back
+
+Flow draws a line between *where to go* and *how the challenge was built*. The
+second is authoring detail: it names the mechanism, which is usually the answer.
+
+| Surface | Participant sees | Facilitator sees |
+|---------|------------------|------------------|
+| Start hint (Initial Facts) | node name and address, plus any `flow_supply_when_first` values | same |
+| `Technique Source` (guide, Critical Access) | — | generator id and kind |
+| Hint levels | as authored, minus filtered lines | same |
+| Access instructions | yes | yes |
+
+Concretely, a start hint reads `Start: docker-2 @ 10.103.160.3` and never
+appends the generator id, its catalog display name, the assignment type, or the
+vulnerability name. Hints naming a README, the generator manifest, or
+`docker-compose.yml` are filtered from both guides, since a participant has only
+the deployed scenario.
+
+The practical consequence for authors: **your hint levels are the participant's
+only guided path.** Do not rely on them being able to see which generator
+produced a step, or to look anything up outside the environment.
 
 ---
 
