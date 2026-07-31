@@ -17017,6 +17017,11 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     flag_gen_slot_total = 0
     vulnerability_slot_total = 0
     docker_slot_total = 0
+    # Hosts the chain must include however short it is: anything already
+    # carrying a vulnerability or a card-placed generator. Counted separately
+    # from the display buckets because a *filled* slot is mandatory even though
+    # it is reported as slot capacity.
+    mandatory_challenge_total = 0
     for n in nodes or []:
         if not isinstance(n, dict):
             continue
@@ -17042,6 +17047,8 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
         if is_vuln or (is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_total += 1
         if is_docker:
+            if is_vuln or str(n.get('flag_node_generator_id') or '').strip():
+                mandatory_challenge_total += 1
             # Classify by where the host came from, not by what currently sits
             # on it. A declared slot is Node Information capacity whether or not
             # something has filled it yet; counting a filled slot as "specified"
@@ -17075,6 +17082,7 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
         'flag_gen_slot_total': flag_gen_slot_total,
         'vulnerability_slot_total': vulnerability_slot_total,
         'docker_slot_total': docker_slot_total,
+        'mandatory_challenge_total': mandatory_challenge_total,
     }
 
 
