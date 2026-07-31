@@ -196,12 +196,13 @@ def _preview_for(node_rows: str, vuln_count: int = 2):
         return payload['full_preview']
 
 
-def test_every_vulnerability_slot_gets_its_own_vulnerability() -> None:
-    """A slot must never materialize empty.
+def test_vulnerability_slots_materialize_empty_for_sequencing() -> None:
+    """A slot is capacity, not a placement.
 
-    Only the Vulnerabilities card can supply a vulnerability -- sequencing
-    cannot invent one -- so an unfilled slot would be a permanently dead node.
-    Slots not covered by declared rows draw a random catalog vulnerability.
+    It stays empty at plan time so it does not become a mandatory challenge --
+    chain expansion pulls in every vulnerability-carrying host. Flag-sequencing
+    draws a vulnerability only for the slots the chain actually reaches; see
+    tests/test_vulnerability_slot_lazy_fill.py.
     """
     preview = _preview_for(
         "<item selected='VulnerabilitySlot' v_metric='Count' v_count='3'/>", vuln_count=2
@@ -209,7 +210,7 @@ def test_every_vulnerability_slot_gets_its_own_vulnerability() -> None:
     hosts = list(preview['hosts'])
     slots = [h for h in hosts if h['role'] == VULNERABILITY_SLOT_ROLE]
     assert len(slots) == 3
-    assert all(h.get('vulnerabilities') for h in slots), slots
+    assert not any(h.get('vulnerabilities') for h in slots), slots
     # The two declared rows keep their own additive Docker hosts.
     assert preview['role_counts'].get('Docker') == 2
     assert len(hosts) == 5

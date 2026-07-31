@@ -551,6 +551,25 @@ def register(app, *, backend_module: Any) -> None:
                 stats=stats,
             )
 
+        # A declared VulnerabilitySlot arrives empty so it does not count as a
+        # mandatory challenge. Now that the chain is known, draw a vulnerability
+        # for each slot the chain actually reached; the rest stay plain Docker
+        # nodes. This must happen before assignment, because an empty slot has
+        # no candidate pool of either kind.
+        try:
+            drawn_slot_vulns = backend._flow_fill_empty_vulnerability_slots(
+                preview,
+                chain_nodes,
+                seed=backend._get_flow_seed(preview, flow_seed_param),
+            )
+            if drawn_slot_vulns:
+                _flow_progress(
+                    f'Filled {len(drawn_slot_vulns)} vulnerability slot(s): '
+                    + ', '.join(drawn_slot_vulns)
+                )
+        except Exception as exc:
+            _flow_progress(f'Vulnerability slot fill skipped: {exc}')
+
         host_by_id: dict[str, dict[str, Any]] = {}
         try:
             hosts = preview.get('hosts') if isinstance(preview, dict) else None

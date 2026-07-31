@@ -554,25 +554,11 @@ def build_full_preview(
     required_flag_node_generator_hosts = sum(
         max(0, int(count or 0)) for count in (flag_node_generators_plan or {}).values()
     )
-    # The two challenge kinds reach this point differently, so only one nets out
-    # here. Both end up additive -- 5 slots plus 5 declared rows is 10 challenge
-    # hosts -- but by different routes:
-    #
-    #   Vulnerabilities: nothing downstream can assign a vulnerability, so the
-    #   orchestrator already asked for one *per slot*. That demand is in
-    #   required_vulnerability_hosts, and the slots themselves are the hosts for
-    #   it, so subtract them or every slot materializes a duplicate Docker host.
-    #
-    #   Flag-node-generators: the orchestrator deliberately does not name what
-    #   fills a slot (it cannot see the installed catalog), so slot demand is
-    #   absent here and required_flag_node_generator_hosts counts declared rows
-    #   only. Subtracting slots would make a slot absorb a declared generator,
-    #   leaving the scenario a challenge node short and no free slot for
-    #   flag-sequencing.
-    declared_vulnerability_slots = int(normalized_counts.get(VULNERABILITY_SLOT_ROLE, 0) or 0)
-    required_vulnerability_hosts = max(
-        0, required_vulnerability_hosts - min(declared_vulnerability_slots, required_vulnerability_hosts)
-    )
+    # Neither total includes slot demand: a declared slot of either kind stays
+    # empty until flag-sequencing needs it, so the orchestrator asks only for
+    # what the section cards declared. Netting slots out here would make a slot
+    # absorb a declared row, leaving the scenario a challenge node short with no
+    # free slot left to extend the chain into.
     role_counts, docker_capacity_repair = ensure_role_counts_docker_capacity(
         normalized_counts, required_vulnerability_hosts, required_flag_node_generator_hosts
     )
@@ -1182,10 +1168,9 @@ def build_full_preview(
     )
     vuln_assignments: Dict[int, List[str]] = {}
     if vulnerabilities_plan:
-        # Vulnerability-bearing slots are realized as Docker-backed hosts.
-        # Declared VulnerabilitySlot rows are dedicated capacity and are filled
-        # before plain Docker hosts; each tier is shuffled independently so the
-        # preference survives randomization.
+        # Vulnerability-bearing hosts are realized as Docker-backed hosts. Each
+        # tier is shuffled independently so the placement preference survives
+        # randomization.
         def _hosts_with_role(role_name: str) -> List[int]:
             return _stable_shuffle(
                 [
@@ -1196,12 +1181,12 @@ def build_full_preview(
                 rnd_seed + 101,
             )
 
-        # Vulnerabilities fill their slots first, unlike generators.  Only the
-        # Vulnerabilities card can supply a vulnerability -- flag-sequencing
-        # cannot invent one -- so an empty VulnerabilitySlot would be a dead
-        # node.  Filling slots here instead frees the additive Docker hosts,
-        # which sequencing *can* use for either challenge kind.
-        ordered = _hosts_with_role(VULNERABILITY_SLOT_ROLE) + _hosts_with_role('Docker')
+        # Declared vulnerabilities take the Docker hosts added for them, and a
+        # VulnerabilitySlot takes overflow only -- the same order generators
+        # use. A slot left empty here is not a dead node: flag-sequencing draws
+        # a vulnerability for it if the chain reaches it, and otherwise it stays
+        # a plain Docker node.
+        ordered = _hosts_with_role('Docker') + _hosts_with_role(VULNERABILITY_SLOT_ROLE)
         if not ordered:
             ordered = _stable_shuffle(
                 [h.node_id for h in sorted(host_nodes, key=lambda h: getattr(h, 'node_id', 0))],
