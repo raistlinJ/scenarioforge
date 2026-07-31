@@ -19720,7 +19720,8 @@ def _flow_compute_flag_assignments(
             next_name_val = (id_to_name.get(next_id_val) or '').strip() if next_id_val else ''
             next_ip_val = str(id_to_ip.get(next_id_val) or '').strip() if next_id_val else ''
             if not next_id_val:
-                return "You've completed this sequence of challenges!"
+                # Final step: keep its own instruction, drop the pointer.
+                return _flow_strip_ids_from_hint(_flow_strip_next_node_references(text))
             if not next_name_val:
                 next_name_val = next_id_val
             if ('{{NEXT_NODE_NAME}}' in raw_tpl) and ('{{NEXT_NODE_IP}}' not in raw_tpl) and next_ip_val:
@@ -24343,7 +24344,8 @@ def _flow_reorder_chain_by_generator_dag(
                     next_id_val = str(next_id or '').strip()
                     next_name_val = (id_to_name.get(next_id_val) or '').strip() if next_id_val else ''
                     if not next_id_val:
-                        return "You've completed this sequence of challenges!"
+                        # Final step: keep its own instruction, drop the pointer.
+                        return _flow_strip_ids_from_hint(_flow_strip_next_node_references(text))
                     if not next_name_val:
                         next_name_val = next_id_val
                     repl = {
@@ -24728,7 +24730,8 @@ def _flow_reorder_chain_by_generator_dag(
                 next_id_val = str(next_id or '').strip()
                 next_name_val = (id_to_name.get(next_id_val) or '').strip() if next_id_val else ''
                 if not next_id_val:
-                    return "You've completed this sequence of challenges!"
+                    # Final step: keep its own instruction, drop the pointer.
+                    return _flow_strip_ids_from_hint(_flow_strip_next_node_references(text))
                 if not next_name_val:
                     next_name_val = next_id_val
                 repl = {

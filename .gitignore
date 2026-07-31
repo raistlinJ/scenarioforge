@@ -193,3 +193,4 @@ data_sources/
 
 # Local model/cache directories.
 /llamaboard_cache/
+examples/latest.errors
