@@ -154,12 +154,27 @@ def register(app, *, backend_module: Any) -> None:
         except Exception:
             core_validated = False
 
-        def _flow_eligibility_from_payload(payload: dict) -> tuple[int, int, int, int, int, bool]:
+        def _flow_eligibility_from_payload(payload: dict) -> tuple[int, int, int, int, int, bool, dict[str, int]]:
             docker_count = 0
             vuln_count = 0
             docker_nonvuln_count = 0
             topology_flag_node_generator_count = 0
             generic_docker_count = 0
+            # The Flag Sequencing summary reports challenge capacity as five
+            # disjoint buckets. They are computed after a Generate from the
+            # topology graph, but the page opens before that has run, so they
+            # are computed here too -- otherwise the summary reads all zeroes
+            # until the operator generates. Classification matches
+            # backend._flow_compose_docker_stats: by where a host came from,
+            # not by what currently sits on it.
+            buckets = {
+                'specified_flag_node_generator_total': 0,
+                'specified_vulnerability_total': 0,
+                'flag_gen_slot_total': 0,
+                'vulnerability_slot_total': 0,
+                'docker_slot_total': 0,
+                'mandatory_challenge_total': 0,
+            }
             try:
                 preview = payload.get('full_preview') if isinstance(payload, dict) else None
                 if isinstance(preview, dict):
@@ -203,6 +218,23 @@ def register(app, *, backend_module: Any) -> None:
                                         generic_docker_count += 1
                             if vulns:
                                 vuln_count += 1
+                            if is_docker_backed_role(role):
+                                node_generator = str(
+                                    (topology_nodegen_map or {}).get(str(host.get('node_id') or '')) or ''
+                                ).strip()
+                                if node_generator or vulns:
+                                    buckets['mandatory_challenge_total'] += 1
+                                slot_kind = challenge_slot_kind(role)
+                                if slot_kind == 'flag-node-generator':
+                                    buckets['flag_gen_slot_total'] += 1
+                                elif slot_kind == 'vulnerability':
+                                    buckets['vulnerability_slot_total'] += 1
+                                elif node_generator:
+                                    buckets['specified_flag_node_generator_total'] += 1
+                                elif vulns:
+                                    buckets['specified_vulnerability_total'] += 1
+                                else:
+                                    buckets['docker_slot_total'] += 1
                     vuln_by_node = preview.get('vulnerabilities_by_node') if isinstance(preview.get('vulnerabilities_by_node'), dict) else None
                     if isinstance(vuln_by_node, dict):
                         vuln_count = max(vuln_count, len([key for key, value in vuln_by_node.items() if value]))
@@ -213,7 +245,7 @@ def register(app, *, backend_module: Any) -> None:
                 topology_flag_node_generator_count = topology_flag_node_generator_count
                 generic_docker_count = generic_docker_count
             flow_eligible = bool((docker_count or 0) > 0 or (vuln_count or 0) > 0)
-            return docker_count, vuln_count, docker_nonvuln_count, topology_flag_node_generator_count, generic_docker_count, flow_eligible
+            return docker_count, vuln_count, docker_nonvuln_count, topology_flag_node_generator_count, generic_docker_count, flow_eligible, buckets
 
         def _flow_eligibility_details(payload: dict | None) -> dict[str, Any]:
             (
@@ -223,6 +255,7 @@ def register(app, *, backend_module: Any) -> None:
                 topology_flag_node_generator_count,
                 generic_docker_count,
                 topology_eligible,
+                challenge_buckets,
             ) = _flow_eligibility_from_payload(payload or {})
             try:
                 flag_generators, _ = backend._flag_generators_from_enabled_sources()
@@ -268,6 +301,7 @@ def register(app, *, backend_module: Any) -> None:
                 'vuln_count': vuln_count,
                 'docker_nonvuln_count': docker_nonvuln_count,
                 'topology_flag_node_generator_count': topology_flag_node_generator_count,
+                **challenge_buckets,
                 'generic_docker_count': generic_docker_count,
                 'flow_topology_eligible': topology_eligible,
                 'flag_generator_count': flag_generator_count,

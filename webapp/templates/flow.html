@@ -3008,6 +3008,7 @@
           setFlowEnabled(false, { skipPersist: true, clearStateOnDisable: false });
         }
         if (dockerCount > 0 || vulnCount > 0) {
+          const bucketFrom = (key) => (Number.isFinite(+data[key]) ? Math.max(0, +data[key]) : 0);
           lastStats = {
             vuln_total: vulnCount,
             docker_nonvuln_total: dockerNonvulnCount,
@@ -3015,6 +3016,15 @@
             topology_flag_node_generator_total: topologyFlagNodeGeneratorCount,
             generic_docker_total: genericDockerCount,
             flag_node_generator_eligible_total: topologyFlagNodeGeneratorCount || dockerNonvulnCount,
+            // The summary reads these five. Without them it renders zeroes until
+            // the operator runs a Generate, even though the topology already
+            // says exactly what the capacity is.
+            specified_flag_node_generator_total: bucketFrom('specified_flag_node_generator_total'),
+            specified_vulnerability_total: bucketFrom('specified_vulnerability_total'),
+            flag_gen_slot_total: bucketFrom('flag_gen_slot_total'),
+            vulnerability_slot_total: bucketFrom('vulnerability_slot_total'),
+            docker_slot_total: bucketFrom('docker_slot_total'),
+            mandatory_challenge_total: bucketFrom('mandatory_challenge_total'),
           };
           updateLengthSpinnerMax();
         }
