@@ -1512,12 +1512,51 @@ def _docker_compose_node_names(docker_by_name: Any) -> list[str]:
     return sorted(set([n for n in names if n]))
 
 
+def _docker_nodes_without_core_interfaces(names: list[str]) -> list[str]:
+    """Return the node containers CORE has not attached an interface to.
+
+    A container started by compose has only loopback: `network_mode: none` is
+    deliberate, and CORE is what later moves a veth into the namespace and
+    assigns the scenario address. So a node holding nothing but `lo` is a node
+    CORE never wired, however healthy the container looks.
+
+    Unknown on error -- a node we cannot inspect is not reported as missing,
+    since this decides whether to fail a run.
+    """
+    missing: list[str] = []
+    try:
+        import subprocess
+        import shutil as _sh
+        if not _sh.which('docker'):
+            return []
+        for name in (names or []):
+            node = str(name or '').strip()
+            if not node:
+                continue
+            try:
+                probe = subprocess.run(
+                    ['docker', 'exec', node, 'sh', '-c',
+                     "ip -o -4 addr show 2>/dev/null | awk '$2 != \"lo\" {print $2}'"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=20,
+                )
+            except Exception:
+                continue
+            if probe.returncode != 0:
+                continue
+            if not (probe.stdout or '').strip():
+                missing.append(node)
+    except Exception:
+        return missing
+    return missing
+
+
 def _should_tolerate_configuration_state_for_docker(
     session_state: str,
     docker_names: list[str],
     docker_runtime: dict[str, Any] | None,
     *,
     mismatches: list[dict[str, Any]] | None = None,
+    unwired_nodes: list[str] | None = None,
 ) -> bool:
     if not _is_configuration_state(session_state):
         return False
@@ -1528,6 +1567,12 @@ def _should_tolerate_configuration_state_for_docker(
     if list(docker_runtime.get('not_running') or []):
         return False
     if list(mismatches or []):
+        return False
+    # Running containers are not a deployed scenario. Staying in
+    # `configuration` means CORE never instantiated the topology, so a node can
+    # be up and still have no interface, no address and no reachable service --
+    # which reported as a successful run.
+    if list(unwired_nodes or []):
         return False
     return True
 
@@ -7597,7 +7642,15 @@ def main():
                     pass
 
             if configuration_state_pending_docker_validation and start_ok:
-                if _should_tolerate_configuration_state_for_docker(session_state, docker_names2, docker_runtime):
+                unwired_nodes = _docker_nodes_without_core_interfaces(docker_names2)
+                if unwired_nodes:
+                    try:
+                        generation_meta['docker_nodes_without_core_interfaces'] = list(unwired_nodes)
+                    except Exception:
+                        pass
+                if _should_tolerate_configuration_state_for_docker(
+                    session_state, docker_names2, docker_runtime, unwired_nodes=unwired_nodes
+                ):
                     configuration_state_pending_docker_validation = False
                     start_error = None
                     try:
@@ -7615,7 +7668,15 @@ def main():
                 else:
                     start_ok = False
                     configuration_state_pending_docker_validation = False
-                    start_error = 'CORE session stayed in "configuration"'
+                    if unwired_nodes:
+                        start_error = (
+                            'CORE session stayed in "configuration": it never instantiated the '
+                            'topology, so no interface or address was attached to '
+                            + ', '.join(sorted(unwired_nodes))
+                            + '. The containers are running but the scenario is not deployed.'
+                        )
+                    else:
+                        start_error = 'CORE session stayed in "configuration"'
 
         # CORE can swallow per-node boot exceptions from its thread pool while the
         # session or Docker containers still appear to be running. Inspect only the
