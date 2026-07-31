@@ -6275,6 +6275,26 @@ def main():
         pass
     # If any routing item carries abs_count>0, we should build a segmented topology even if density==0
     has_routing_counts = any(getattr(ri, 'abs_count', 0) and int(getattr(ri, 'abs_count', 0)) > 0 for ri in (routing_items or []))
+    # Clear leftovers before anything brings compose up. Building the topology
+    # is what first runs `docker compose up`, so a container still holding a
+    # node's name aborts the run there -- long before the conflict check that
+    # used to handle this, which is why that check never got the chance.
+    if str(os.getenv('CORETG_SKIP_STALE_DOCKER_CLEANUP') or '').strip().lower() not in {'1', 'true', 'yes', 'on'}:
+        try:
+            _stale = remove_stale_scenarioforge_containers()
+            _stale_removed = _stale.get('removed') or []
+            if _stale_removed:
+                logging.info(
+                    "Removed %d container(s) left by previous runs: %s",
+                    len(_stale_removed),
+                    ', '.join(sorted(_stale_removed)[:12])
+                    + ('…' if len(_stale_removed) > 12 else ''),
+                )
+            for _nm, _err in (_stale.get('errors') or {}).items():
+                logging.warning('Could not remove leftover container %s: %s', _nm, _err)
+        except Exception as _stale_exc:
+            logging.debug('Leftover container cleanup skipped: %s', _stale_exc)
+
     # Always build directly from current scenario plan (phased path removed)
     logging.info("PHASE: Building topology")
     routers = []
@@ -7248,28 +7268,8 @@ def main():
                     docker_names = []
                 docker_names = sorted(set([n for n in docker_names if n]))
                 if docker_names:
-                    # Clear leftovers from earlier runs before looking for
-                    # conflicts. Those containers hold the names this run wants,
-                    # so leaving them turns every execute into a conflict that
-                    # gets resolved by deleting *images* -- forcing a rebuild of
-                    # work already done. Only non-running CORE/ScenarioForge
-                    # containers qualify; see remove_stale_scenarioforge_containers.
-                    if str(os.getenv('CORETG_SKIP_STALE_DOCKER_CLEANUP') or '').strip().lower() not in {'1', 'true', 'yes', 'on'}:
-                        try:
-                            stale = remove_stale_scenarioforge_containers()
-                            removed_stale = stale.get('removed') or []
-                            if removed_stale:
-                                logging.info(
-                                    "Removed %d stale ScenarioForge container(s) from previous runs: %s",
-                                    len(removed_stale),
-                                    ', '.join(sorted(removed_stale)[:12])
-                                    + ('…' if len(removed_stale) > 12 else ''),
-                                )
-                            for nm, err in (stale.get('errors') or {}).items():
-                                logging.warning('Could not remove stale container %s: %s', nm, err)
-                        except Exception as _stale_exc:
-                            logging.debug('Stale container cleanup skipped: %s', _stale_exc)
-
+                    # Leftovers were already cleared before the topology build,
+                    # which is the first thing to run `docker compose up`.
                     compose_paths = [_docker_node_compose_path(nm) for nm in docker_names]
                     compose_paths = [p for p in compose_paths if p and os.path.exists(p)]
                     # Detect conflicts from compose files (if present) AND from existing containers
