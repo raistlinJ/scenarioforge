@@ -939,6 +939,82 @@ def detect_docker_conflicts_for_compose_files(paths: list[str]) -> dict:
 		return {'containers': [], 'images': []}
 
 
+SCENARIOFORGE_COMPOSE_PATH_PREFIXES = ('/tmp/pycore.', '/tmp/vulns/')
+
+
+def remove_stale_scenarioforge_containers() -> dict:
+	"""Remove containers left behind by earlier ScenarioForge runs.
+
+	Every execute leaves its containers behind once the CORE session goes away,
+	and they accumulate: the next run's conflict check then finds name
+	collisions and deletes *images* to resolve them, which forces a rebuild of
+	work that was already done.
+
+	Two rules keep this from touching anything it should not:
+
+	- Only containers Compose labels as belonging to a CORE or ScenarioForge
+	  project (``/tmp/pycore.*`` or ``/tmp/vulns/``). An operator's own
+	  containers carry neither and are never considered.
+	- Only containers that are not running. A live scenario's containers are
+	  running by definition, so a concurrent run cannot be disturbed.
+	"""
+	result: dict = {'removed': [], 'skipped_running': [], 'errors': {}}
+	try:
+		import subprocess
+		import shutil as _sh
+		if not _sh.which('docker'):
+			return result
+		try:
+			listing = subprocess.run(
+				['docker', 'ps', '-a', '--format', '{{.Names}}\t{{.State}}'],
+				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
+			)
+		except Exception:
+			return result
+		if listing.returncode != 0:
+			return result
+
+		for raw in (listing.stdout or '').splitlines():
+			parts = raw.split('\t')
+			if len(parts) < 2:
+				continue
+			name = parts[0].strip()
+			state = parts[1].strip().lower()
+			if not name:
+				continue
+			if state == 'running':
+				result['skipped_running'].append(name)
+				continue
+			try:
+				probe = subprocess.run(
+					['docker', 'inspect', name, '--format',
+					 '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+					 '|{{index .Config.Labels "com.docker.compose.project.working_dir"}}'],
+					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30,
+				)
+			except Exception:
+				continue
+			if probe.returncode != 0:
+				continue
+			marker = (probe.stdout or '').strip()
+			if not any(prefix in marker for prefix in SCENARIOFORGE_COMPOSE_PATH_PREFIXES):
+				continue
+			try:
+				removed = subprocess.run(
+					['docker', 'rm', '-f', name],
+					stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+				)
+				if removed.returncode == 0:
+					result['removed'].append(name)
+				else:
+					result['errors'][name] = (removed.stdout or '').strip()[:300]
+			except Exception as exc:
+				result['errors'][name] = str(exc)[:300]
+		return result
+	except Exception:
+		return result
+
+
 def remove_docker_conflicts(conflicts: dict) -> dict:
 	"""Best-effort removal of conflicting Docker containers/images.
 
