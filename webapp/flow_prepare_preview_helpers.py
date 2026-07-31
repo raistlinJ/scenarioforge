@@ -2825,14 +2825,28 @@ def process_generator_outputs(
     except Exception:
         pass
 
+    # On a flag-node-generator, File(path) is reserved plumbing: Flow requires it
+    # to name the docker-compose file it deploys, so a hint resolving it renders
+    # "docker-compose.yml" -- build detail, never a participant artifact. Point
+    # those hints at FlagFile(path), which is the artifact the challenge is about.
+    hint_outputs = outputs
+    try:
+        if str(assignment_type or '').strip() == 'flag-node-generator' and isinstance(outputs, dict):
+            flag_file = str(outputs.get('FlagFile(path)') or '').strip()
+            if flag_file and str(outputs.get('File(path)') or '').strip():
+                hint_outputs = dict(outputs)
+                hint_outputs['File(path)'] = flag_file
+    except Exception:
+        hint_outputs = outputs
+
     try:
         if isinstance(assignment.get('hints'), list) and assignment.get('hints'):
-            new_hints = [apply_outputs_to_hint_text(str(text), outputs) for text in (assignment.get('hints') or [])]
+            new_hints = [apply_outputs_to_hint_text(str(text), hint_outputs) for text in (assignment.get('hints') or [])]
             new_hints = [apply_node_placeholders(str(text), node_ip4=preview_ip4) for text in new_hints]
             assignment['hints'] = new_hints
             assignment['hint'] = str(new_hints[0] or '') if new_hints else str(assignment.get('hint') or '')
         else:
-            hint_final = apply_outputs_to_hint_text(str(assignment.get('hint') or ''), outputs)
+            hint_final = apply_outputs_to_hint_text(str(assignment.get('hint') or ''), hint_outputs)
             hint_final = apply_node_placeholders(str(hint_final), node_ip4=preview_ip4)
             if hint_final and hint_final != str(assignment.get('hint') or ''):
                 assignment['hint'] = hint_final
@@ -2851,7 +2865,7 @@ def process_generator_outputs(
                     continue
                 values = []
                 for text in raw_items:
-                    rendered = apply_outputs_to_hint_text(str(text or ''), outputs)
+                    rendered = apply_outputs_to_hint_text(str(text or ''), hint_outputs)
                     rendered = apply_node_placeholders(str(rendered), node_ip4=preview_ip4)
                     if str(rendered or '').strip():
                         values.append(str(rendered))
