@@ -105,9 +105,11 @@
               </div>
               <div class="col-sm-6 col-lg-9">
                 <div class="d-flex flex-wrap gap-3 small">
-                  <span>Flag-node-generator slots: <strong id="flowSummaryFlagNodeGeneratorSlots">0</strong></span>
-                  <span>Vulnerability slots: <strong id="flowSummaryVulnerabilitySlots">0</strong></span>
-                  <span>Docker slots: <strong id="flowSummaryDockerSlots">0</strong></span>
+                  <span title="Placed by the Flag Node Generators card. Some may also carry a vulnerability.">Specified Flag-node-generators: <strong id="flowSummarySpecifiedFlagNodeGenerators">0</strong></span>
+                  <span title="Placed by the Vulnerabilities card.">Specified vulnerabilities: <strong id="flowSummarySpecifiedVulnerabilities">0</strong></span>
+                  <span title="Free FlagGenSlot capacity declared in Node Information. Only a flag-node-generator can fill these.">Flag-node-generator slots: <strong id="flowSummaryFlagNodeGeneratorSlots">0</strong></span>
+                  <span title="Free VulnerabilitySlot capacity declared in Node Information. Only a vulnerability can fill these.">Vulnerability slots: <strong id="flowSummaryVulnerabilitySlots">0</strong></span>
+                  <span title="Free plain Docker nodes from Node Information. Either kind can fill these.">Docker slots: <strong id="flowSummaryDockerSlots">0</strong></span>
                   <span class="fw-semibold">Max challenges: <strong id="flowSummaryMaxChallenges">0</strong></span>
                 </div>
               </div>
@@ -414,6 +416,8 @@
     const generateMaxRetriesEl = document.getElementById('flowGenerateMaxRetries');
     const flowSeedInputEl = document.getElementById('flowSeedInput');
     const flowSeedRerollBtnEl = document.getElementById('flowSeedRerollBtn');
+    const flowSummarySpecifiedFlagNodeGeneratorsEl = document.getElementById('flowSummarySpecifiedFlagNodeGenerators');
+    const flowSummarySpecifiedVulnerabilitiesEl = document.getElementById('flowSummarySpecifiedVulnerabilities');
     const flowSummaryFlagNodeGeneratorSlotsEl = document.getElementById('flowSummaryFlagNodeGeneratorSlots');
     const flowSummaryVulnerabilitySlotsEl = document.getElementById('flowSummaryVulnerabilitySlots');
     const flowSummaryDockerSlotsEl = document.getElementById('flowSummaryDockerSlots');
@@ -10262,12 +10266,24 @@
     return parts.join(' · ');
   }
 
+  // The chain can reach every Docker-backed host, so the cap is the same total
+  // the summary reports as "Max challenges".
   function dockerNodeCapFromStats(stats) {
     if (!stats || typeof stats !== 'object') return null;
-    const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : null;
-    const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
-      ? (+stats.topology_flag_node_generator_total)
-      : 0;
+    const num = (value) => (Number.isFinite(+value) ? (+value) : null);
+    const buckets = [
+      num(stats.specified_flag_node_generator_total),
+      num(stats.specified_vulnerability_total),
+      num(stats.flag_gen_slot_total),
+      num(stats.vulnerability_slot_total),
+      num(stats.docker_slot_total),
+    ];
+    if (buckets.some((value) => value !== null)) {
+      return Math.max(0, buckets.reduce((total, value) => total + (value || 0), 0));
+    }
+    // Older payloads predate the five-bucket breakdown.
+    const vuln = num(stats.vuln_total);
+    const nodeGenerators = num(stats.topology_flag_node_generator_total) || 0;
     const genericDocker = Number.isFinite(+stats.generic_docker_total)
       ? (+stats.generic_docker_total)
       : Math.max(0, (Number.isFinite(+stats.docker_nonvuln_total) ? (+stats.docker_nonvuln_total) : 0) - nodeGenerators);
@@ -10275,8 +10291,19 @@
     return Math.max(0, (vuln || 0) + nodeGenerators + genericDocker);
   }
 
+  // Only hosts a card actually placed are mandatory; slots are free capacity the
+  // operator may or may not extend the chain into.
   function vulnerabilityNodeMinimumFromStats(stats) {
     if (!stats || typeof stats !== 'object') return 1;
+    const specifiedGenerators = Number.isFinite(+stats.specified_flag_node_generator_total)
+      ? (+stats.specified_flag_node_generator_total)
+      : null;
+    const specifiedVulnerabilities = Number.isFinite(+stats.specified_vulnerability_total)
+      ? (+stats.specified_vulnerability_total)
+      : null;
+    if (specifiedGenerators !== null || specifiedVulnerabilities !== null) {
+      return Math.max(1, (specifiedGenerators || 0) + (specifiedVulnerabilities || 0));
+    }
     const vuln = Number.isFinite(+stats.vuln_total) ? (+stats.vuln_total) : 0;
     const nodeGenerators = Number.isFinite(+stats.topology_flag_node_generator_total)
       ? (+stats.topology_flag_node_generator_total)
@@ -10285,17 +10312,22 @@
   }
 
   function updateFlowSummary(stats) {
-    const flagNodeGeneratorSlots = Number.isFinite(+stats?.topology_flag_node_generator_total)
-      ? Math.max(0, +stats.topology_flag_node_generator_total)
-      : 0;
-    const vulnerabilitySlots = Number.isFinite(+stats?.vuln_total)
-      ? Math.max(0, +stats.vuln_total)
-      : 0;
-    const dockerSlots = Number.isFinite(+stats?.generic_docker_total)
-      ? Math.max(0, +stats.generic_docker_total)
-      : Math.max(0, (Number.isFinite(+stats?.docker_nonvuln_total) ? +stats.docker_nonvuln_total : 0) - flagNodeGeneratorSlots);
-    const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;
+    // Five disjoint buckets over the Docker-backed hosts, so they sum to
+    // "Max challenges". The first two are what the Vulnerabilities and Flag
+    // Node Generators cards placed; the last three are free capacity declared
+    // in Node Information, which is what "slot" means here. A slot only accepts
+    // its own challenge kind; a plain Docker node accepts either.
+    const count = (value) => (Number.isFinite(+value) ? Math.max(0, +value) : 0);
+    const specifiedFlagNodeGenerators = count(stats?.specified_flag_node_generator_total);
+    const specifiedVulnerabilities = count(stats?.specified_vulnerability_total);
+    const flagNodeGeneratorSlots = count(stats?.flag_gen_slot_total);
+    const vulnerabilitySlots = count(stats?.vulnerability_slot_total);
+    const dockerSlots = count(stats?.docker_slot_total);
+    const maxChallenges = specifiedFlagNodeGenerators + specifiedVulnerabilities
+      + flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;
 
+    if (flowSummarySpecifiedFlagNodeGeneratorsEl) flowSummarySpecifiedFlagNodeGeneratorsEl.textContent = String(specifiedFlagNodeGenerators);
+    if (flowSummarySpecifiedVulnerabilitiesEl) flowSummarySpecifiedVulnerabilitiesEl.textContent = String(specifiedVulnerabilities);
     if (flowSummaryFlagNodeGeneratorSlotsEl) flowSummaryFlagNodeGeneratorSlotsEl.textContent = String(flagNodeGeneratorSlots);
     if (flowSummaryVulnerabilitySlotsEl) flowSummaryVulnerabilitySlotsEl.textContent = String(vulnerabilitySlots);
     if (flowSummaryDockerSlotsEl) flowSummaryDockerSlotsEl.textContent = String(dockerSlots);

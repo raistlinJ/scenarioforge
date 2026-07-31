@@ -17007,6 +17007,16 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
     vuln_total = 0
     compose_backed_total = 0
     eligible_total = 0
+    # Challenge-capacity breakdown for the Flow summary. Every Docker-backed
+    # host falls in exactly one bucket, so the five sum to "Max challenges".
+    # The first two are what the Vulnerabilities and Flag Node Generators cards
+    # asked for; the last three are unfilled capacity declared in Node
+    # Information, which is what "slot" means here.
+    specified_flag_node_generator_total = 0
+    specified_vulnerability_total = 0
+    flag_gen_slot_total = 0
+    vulnerability_slot_total = 0
+    docker_slot_total = 0
     for n in nodes or []:
         if not isinstance(n, dict):
             continue
@@ -17031,6 +17041,25 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
                 generic_docker_total += 1
         if is_vuln or (is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_total += 1
+        if is_docker:
+            # Classify by where the host came from, not by what currently sits
+            # on it. A declared slot is Node Information capacity whether or not
+            # something has filled it yet; counting a filled slot as "specified"
+            # would move it between buckets as the plan resolves.
+            slot_kind = _flow_node_challenge_slot_kind(n)
+            if slot_kind == 'flag-node-generator':
+                flag_gen_slot_total += 1
+            elif slot_kind == 'vulnerability':
+                vulnerability_slot_total += 1
+            elif str(n.get('flag_node_generator_id') or '').strip():
+                # A Docker host the Flag Node Generators card added. It counts
+                # here even when it also carries a vulnerability, so the buckets
+                # stay disjoint.
+                specified_flag_node_generator_total += 1
+            elif is_vuln:
+                specified_vulnerability_total += 1
+            else:
+                docker_slot_total += 1
     return {
         'docker_total': docker_total,
         'docker_nonvuln_total': docker_nonvuln_total,
@@ -17041,6 +17070,11 @@ def _flow_compose_docker_stats(nodes: list[dict[str, Any]]) -> dict[str, int]:
         'flag_generator_eligible_total': vuln_total,
         'flag_node_generator_eligible_total': topology_node_generator_total if topology_generator_mode else docker_nonvuln_total,
         'topology_flag_node_generator_total': topology_node_generator_total,
+        'specified_flag_node_generator_total': specified_flag_node_generator_total,
+        'specified_vulnerability_total': specified_vulnerability_total,
+        'flag_gen_slot_total': flag_gen_slot_total,
+        'vulnerability_slot_total': vulnerability_slot_total,
+        'docker_slot_total': docker_slot_total,
     }
 
 

@@ -685,12 +685,16 @@ def test_flow_summary_card_reports_seed_slots_and_maximum_challenges() -> None:
     expected_snippets = [
         '<strong>Summary</strong>',
         'for="flowSeedInput">Flow seed</label>',
+        # Card-placed hosts and Node Information capacity are reported
+        # separately; see tests/test_flow_summary_challenge_buckets.py.
+        'Specified Flag-node-generators:',
+        'Specified vulnerabilities:',
         'Flag-node-generator slots:',
         'Vulnerability slots:',
         'Docker slots:',
         'Max challenges:',
         'function updateFlowSummary(stats)',
-        'const maxChallenges = flagNodeGeneratorSlots + vulnerabilitySlots + dockerSlots;',
+        'const maxChallenges = specifiedFlagNodeGenerators + specifiedVulnerabilities',
         'updateFlowSummary(lastStats);',
     ]
 
