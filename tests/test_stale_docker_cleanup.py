@@ -212,3 +212,50 @@ def test_cleanup_runs_before_the_topology_build():
     assert max(cleanup) < min(build), (
         f'cleanup at {cleanup} must precede the topology build at {min(build)}'
     )
+
+
+def test_conflict_resolution_keeps_images_by_default():
+    """Most conflicts here are the run's own work.
+
+    Building the topology brings each Docker node's compose up, so by the time
+    conflicts are checked the containers exist and their images were just built.
+    Freeing the names is required; deleting the images with them discards the
+    build and makes CORE rebuild identical layers.
+    """
+    from scenarioforge import cli
+
+    conflicts = {
+        'containers': ['docker-11', 'docker-12'],
+        'images': ['alpine:3.19', 'docker-11-node'],
+    }
+    trimmed = cli._conflicts_without_images(conflicts)
+
+    assert trimmed['containers'] == ['docker-11', 'docker-12']
+    assert trimmed['images'] == []
+    # The caller's dict must not be mutated.
+    assert conflicts['images'] == ['alpine:3.19', 'docker-11-node']
+
+
+def test_conflict_image_removal_can_be_restored(monkeypatch):
+    from scenarioforge import cli
+
+    monkeypatch.setenv('CORETG_REMOVE_CONFLICTING_IMAGES', '1')
+    conflicts = {'containers': ['docker-11'], 'images': ['alpine:3.19']}
+    assert cli._conflicts_without_images(conflicts)['images'] == ['alpine:3.19']
+
+
+def test_conflict_trimming_tolerates_junk():
+    from scenarioforge import cli
+
+    assert cli._conflicts_without_images(None) == {'containers': [], 'images': []}
+    assert cli._conflicts_without_images({'containers': 'nope'}) == {'containers': [], 'images': []}
+
+
+def test_conflict_removal_call_site_trims_images():
+    """The auto-remove branch is what runs unattended; it must use the trim."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / 'scenarioforge' / 'cli.py').read_text(
+        encoding='utf-8', errors='ignore'
+    )
+    assert 'remove_docker_conflicts(_conflicts_without_images(conflicts))' in source

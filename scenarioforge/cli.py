@@ -1146,6 +1146,39 @@ def _ensure_docker_nodes_running(
     return docker_runtime
 
 
+def _conflicts_without_images(conflicts: Any) -> dict:
+    """Drop images from a conflict set, keeping only the container names.
+
+    Most "conflicts" at this point are *this run's own* work: building the
+    topology brings each Docker node's compose up, so by the time conflicts are
+    checked the containers exist and their images have just been built. Freeing
+    the names is necessary -- CORE recreates each node under its own
+    ``core-<session>-<node>`` project -- but deleting the images with them
+    throws away the build and makes CORE rebuild identical layers, which is a
+    large part of the time a session spends in `configuration`. Pulled base
+    images such as ``alpine:3.19`` have to be fetched again for the same reason.
+
+    Compose rebuilds whenever the build context changes, so a retained image is
+    never stale. Set ``CORETG_REMOVE_CONFLICTING_IMAGES=1`` for the old
+    behaviour.
+    """
+    source = conflicts if isinstance(conflicts, dict) else {}
+    containers = source.get('containers')
+    if not isinstance(containers, list):
+        containers = []
+    raw = str(os.getenv('CORETG_REMOVE_CONFLICTING_IMAGES') or '').strip().lower()
+    if raw in {'1', 'true', 'yes', 'on'}:
+        return dict(source)
+    images = source.get('images')
+    if isinstance(images, list) and images:
+        logging.info(
+            'Keeping %d built/pulled image(s) that CORE is about to reuse: %s',
+            len(images),
+            ', '.join(sorted(str(i) for i in images)[:8]),
+        )
+    return {'containers': list(containers), 'images': []}
+
+
 def _first_docker_restart_failure_reason(generation_meta: Any) -> str:
     """Pull the most actionable line out of a failed compose restart.
 
@@ -7334,7 +7367,7 @@ def main():
                             len(c_imgs),
                         )
                         if getattr(args, 'docker_remove_conflicts', False):
-                            rr = remove_docker_conflicts(conflicts)
+                            rr = remove_docker_conflicts(_conflicts_without_images(conflicts))
                             logging.info(
                                 "Removed Docker conflicts (best-effort): containers=%d images=%d",
                                 len(rr.get('removed_containers') or []),
