@@ -184,7 +184,7 @@ Tell the AI these are strict requirements:
 - Include `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high`, with at least one non-empty hint in each level: low can reveal an IP/node, medium can reveal a port/service/file/artifact, and high should state the solving workflow outright.
 - Never point a hint at a README, the generator manifest, or `docker-compose.yml`. Participants only have the deployed scenario, so Flow filters those lines out of node cards and both guides. On a flag-node-generator, write `{{OUTPUT.FlagFile(path)}}` rather than `{{OUTPUT.File(path)}}` — the latter is the compose file and is remapped for you.
 - Mark runtime inputs with `flow_supply_when_first: true` only when participants must use that value on sequence 1 or the first step of a parallel branch and cannot reasonably infer or find it before solving.
-- Flow labels `flow_supply_when_first` values as `Seq N required` Initial Facts, marks them in Participant/Facilitator guide fact tables, and includes them in the matching start participant hints.
+- Flow labels `flow_supply_when_first` values as `Seq N required` Initial Facts, marks them in Participant/Facilitator guide fact tables, and includes them in the matching start participant hints. Start hints otherwise name only the node and its address, so do not rely on a participant being told which generator produced a step.
 - Treat Flow-synthesized values as **inputs**, not artifacts:
   - Never put `seed`, `secret`, `node_name`, `flag_prefix` into artifact inputs (aka `requires`).
 - Input descriptors default to `required: true` when omitted. Set `required: false` for optional runtime inputs.

@@ -58,3 +58,20 @@ def test_start_hint_templates_carry_no_detail_suffix() -> None:
         if 'start: ' in line and re.search(r"details\.length|firstHintDetails", line)
     ]
     assert not offenders, offenders
+
+
+def test_technique_source_is_facilitator_only() -> None:
+    """The guides' Critical Access table names the generator that built a step.
+
+    That is the same disclosure start hints omit, so it belongs to facilitators.
+    Both guide builders carry their own copy of the row.
+    """
+    reports_path = REPO_ROOT / 'webapp' / 'templates' / 'reports.html'
+    for path in (FLOW_TEMPLATE_PATH, reports_path):
+        text = path.read_text(encoding='utf-8', errors='ignore')
+        rows = [line for line in text.splitlines() if 'Technique Source' in line]
+        assert rows, f'{path.name} no longer renders a Technique Source row'
+        for row in rows:
+            assert 'facilitatorMode' in row, (
+                f'{path.name} shows Technique Source to participants: {row.strip()}'
+            )

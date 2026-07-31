@@ -13045,7 +13045,10 @@ ${out.join('\n')}
       lines.push(`| Node | ${_cell(nodeName)} |`);
       lines.push(`| IP Address | ${_cell(nodeIp)} |`);
       if (nodeId) lines.push(`| Node ID | ${_cell(nodeId)} |`);
-      if (generatorLabel || generatorId) lines.push(`| Technique Source | ${_cell([generatorLabel, generatorId].filter(Boolean).join(' / '))} |`);
+      // Facilitators only. Naming the generator that built a challenge tells a
+      // participant how it was constructed, which is the same disclosure that
+      // start hints deliberately omit.
+      if (facilitatorMode && (generatorLabel || generatorId)) lines.push(`| Technique Source | ${_cell([generatorLabel, generatorId].filter(Boolean).join(' / '))} |`);
       lines.push('');
 
       const requiredInputsRaw = Array.isArray(assignment.input_fields_required)
