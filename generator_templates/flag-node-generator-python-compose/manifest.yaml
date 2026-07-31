@@ -30,4 +30,4 @@ hint_levels:
   medium:
     - "Generated compose: {{OUTPUT.File(path)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Work through the access instructions for this step in order."

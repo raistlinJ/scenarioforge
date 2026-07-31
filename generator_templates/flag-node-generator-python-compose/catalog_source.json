@@ -30,7 +30,7 @@
       "hint_levels": {
         "low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],
         "medium": ["Generated compose: {{OUTPUT.File(path)}}"],
-        "high": ["Use the access instructions and README.md for the complete workflow."]
+        "high": ["Work through the access instructions for this step in order."]
       }
     }
   ]

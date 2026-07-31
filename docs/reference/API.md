@@ -364,7 +364,7 @@ Example request:
 ```json
 {
 	"plugin_type": "flag-generator",
-	"prompt": "Build deterministic SSH credentials. Hint levels:\nlow: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use README.md.",
+	"prompt": "Build deterministic SSH credentials. Hint levels:\nlow: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Work through the access instructions for this step in order.",
 	"intent_overrides": {
 		"runtime_inputs": "seed (required)\nsecret (required, sensitive)",
 		"hint_levels": "low: Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.\nmedium: Credential: {{OUTPUT.Credential(user,password)}}\nhigh: Use the README access steps."

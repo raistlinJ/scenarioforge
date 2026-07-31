@@ -115,7 +115,7 @@ hint_levels:
   medium:
     - "Credential: {{OUTPUT.Credential(user,password)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Work through the access instructions for this step in order."
 
 # If you produce files/binaries that should be safe to mount into other containers.
 injects:
@@ -284,9 +284,27 @@ Author generators assuming transforms can happen, and make startup robust to the
 
 Manifests declare structured hints via:
 
-- `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` (lists of strings shown as collapsible guide sections labeled `Hint Low`, `Hint Medium`, and `Hint High`)
+- `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` (lists of strings shown as collapsible guide sections labeled `Hint Low`, `Hint Medium`, and `Hint High` — except for promoted first-step lines, which are labeled `Helpful Fact`; see below)
 
-Use levels consistently and keep at least one non-empty entry in each level: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should point to access instructions or a README link.
+Use levels consistently and keep at least one non-empty entry in each level: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should state the workflow outright — the step that solves the challenge.
+
+**Write hints for someone who only has the deployed scenario.** Participants run
+against the built environment; they cannot open your `manifest.yaml`, your
+`README.md`, or the `docker-compose.yml` Flow deploys. A hint such as
+`"Use the access instructions in this generator manifest."` or
+`"README: generators/foo/README.md"` names something they have no way to reach,
+so Flow filters those lines out of node cards and both guides. Spell out the
+step instead:
+
+```yaml
+# Filtered out -- names files the participant cannot open.
+high:
+  - "See README.md for the complete workflow."
+
+# Kept -- states what to actually do.
+high:
+  - "Mount the NFS export at /exports, then read flag.txt from the mount."
+```
 
 Flow substitutions include:
 
@@ -328,11 +346,45 @@ hint_levels:
   medium:
     - "Credential: {{OUTPUT.Credential(user)}} / {{OUTPUT.Credential(user,password)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Log in over SSH with the credential above, then read {{OUTPUT.FlagFile(path)}}."
 ```
 
 Note:
 - Flow will automatically append an IP to `{{NEXT_NODE_NAME}}` when a next-node IP is known, even if `{{NEXT_NODE_IP}}` is not explicitly present. This applies only when a dependent successor exists.
+
+### `File(path)` is reserved on flag-node-generators
+
+A flag-node-generator must publish `File(path)` as the compose file it deploys —
+Flow validates that it is `docker-compose.yml` or `docker-compose.yaml` and
+rejects anything else. That file is infrastructure: it never reaches the
+participant.
+
+So on a flag-node-generator, `{{OUTPUT.File(path)}}` in a hint would render as
+`docker-compose.yml`, which is useless to whoever is solving the challenge. Flow
+resolves it to `FlagFile(path)` instead — the artifact the challenge is actually
+about. Node cards, the participant guide, and the facilitator guide all apply
+the same substitution.
+
+Write hints against `{{OUTPUT.FlagFile(path)}}` directly; it is explicit and
+behaves identically. This remap does not apply to flag-generators, where
+`File(path)` means what it says.
+
+### Promoted disclosures appear as **Helpful Fact**
+
+The opening step has nothing before it. If its access instructions need a value
+a participant could not yet have earned — a credential, a token, a private key —
+Flow promotes the deeper hint that discloses it into `low`, because otherwise
+the chain has no entry point.
+
+Two consequences for authors:
+
+- A promoted line **moves**; it no longer appears at its original depth. Do not
+  write a `medium` hint that only makes sense alongside the `high` one.
+- Promoted lines are labelled **Helpful Fact** rather than `Hint Low`, since they
+  are given rather than earned. Write them as statements of fact.
+
+Only undiscoverable values are promoted. Enumerable ones — ports, paths — stay
+gated, and nothing is promoted at any position other than the first.
 
 ---
 
