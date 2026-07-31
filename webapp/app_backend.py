@@ -20229,8 +20229,17 @@ def _flow_compute_flag_assignments(
 
         try:
             supplied_names_for_start = set(_flow_first_step_chain_supplied_input_names(gen))
-            required_for_start = set(_required_inputs_of(gen)) - set(initial_facts) - supplied_names_for_start
-            supply_on_start = bool(not required_for_start)
+            # `state_known` holds initial facts plus everything steps 0..i-1
+            # produced; it is updated for this step just below.
+            available_now = set(initial_facts) | set(state_known)
+            unresolved_supplied = supplied_names_for_start - available_now
+            required_for_start = set(_required_inputs_of(gen)) - available_now - supplied_names_for_start
+            # Only fabricate (and disclose) a value at a genuine branch start.
+            # When an earlier step already produced the fact, the consumer gets
+            # that real value through flow_context, and hinting a fabricated one
+            # would hand participants a credential the chain never uses -- and
+            # give away a secret the previous challenge was meant to earn.
+            supply_on_start = bool(not required_for_start) and bool(unresolved_supplied)
         except Exception:
             supply_on_start = bool(i == 0)
 
