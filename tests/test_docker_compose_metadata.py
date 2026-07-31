@@ -77,8 +77,14 @@ services:
         assert str(node_svc.get("user") or "") == "0:0"
         # With network_mode none we should not be publishing ports at all.
         assert "ports" not in svc
-        # Preserve container-side port intent for reporting/metadata.
-        assert "expose" in svc and "80" in [str(x) for x in (svc.get("expose") or [])]
+        # Container-side port intent is preserved, but on the node-named
+        # service. CORE moves every other service into that one's network
+        # namespace, and Docker refuses a container that both joins another's
+        # namespace and exposes ports ("conflicting options: port exposing and
+        # the container type network mode"). The port is reachable on the node
+        # service, which is where it now lives.
+        assert "expose" not in svc
+        assert "80" in [str(x) for x in (node_svc.get("expose") or [])]
         # Wrapped services now include an explicit working directory.
         assert isinstance(svc.get("working_dir"), str) and str(svc.get("working_dir") or "").strip()
         # Compose handed to CORE should NOT include `build:`; core-daemon would
