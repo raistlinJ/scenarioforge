@@ -489,6 +489,7 @@ def _docker_compose_cmd() -> List[str]:
             return []
 
     prefix = _sudo_prefix()
+    probe_failure = 'unknown'
     try:
         sudo_pw = _docker_sudo_password()
         use_sudo_stdin = bool(sudo_pw) and ('-S' in prefix)
@@ -502,6 +503,25 @@ def _docker_compose_cmd() -> List[str]:
         )
         if p.returncode == 0:
             return prefix + ['docker', 'compose']
+        probe_failure = f'rc={p.returncode}'
+    except Exception as exc:
+        probe_failure = f'{type(exc).__name__}: {exc}'
+
+    # The probe is not proof that the v2 plugin is absent -- it also fails on a
+    # sudo hiccup or a timeout under load. Falling back unconditionally selected
+    # `docker-compose` on hosts that never had v1 installed, so every later
+    # command died as "command not found" with no output to explain it.
+    if not shutil.which('docker-compose'):
+        try:
+            logger.warning(
+                '[docker-node] `docker compose` probe failed (%s) but docker-compose (v1) '
+                'is not installed; using the v2 plugin anyway', probe_failure,
+            )
+        except Exception:
+            pass
+        return prefix + ['docker', 'compose']
+    try:
+        logger.info('[docker-node] `docker compose` probe failed (%s); falling back to docker-compose', probe_failure)
     except Exception:
         pass
     return prefix + ['docker-compose']
@@ -1003,10 +1023,15 @@ def _ensure_container_ip_tooling(
 
 
 def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
-    """Return the images that are not already present in the local daemon.
+    """Return the images confirmed absent from the local daemon.
 
     A failed pull only blocks the run for images the host does not already
     have; anything cached from an earlier run starts perfectly well offline.
+
+    Only positive evidence of absence counts. `docker image inspect` also fails
+    when it could not talk to the daemon at all -- a sudo prompt, a bad socket
+    permission -- and reporting those as "image not available locally" blamed a
+    perfectly present image for someone else's failure.
     """
     missing: list[str] = []
     for image in images:
@@ -1014,11 +1039,22 @@ def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
         if not name or name in missing:
             continue
         try:
-            rc, _tail = run(docker_cmd + ['image', 'inspect', name], timeout=60)
+            rc, tail = run(docker_cmd + ['image', 'inspect', name], timeout=60)
         except Exception:
-            rc = 1
-        if rc != 0:
+            continue
+        if rc == 0:
+            continue
+        text = str(tail or '').lower()
+        if 'no such image' in text or 'error: no such object' in text:
             missing.append(name)
+        else:
+            try:
+                logger.warning(
+                    '[docker-node] could not verify image %s locally (rc=%s); '
+                    'not treating it as missing: %s', name, rc, str(tail or '').strip()[:200],
+                )
+            except Exception:
+                pass
     return missing
 
 
