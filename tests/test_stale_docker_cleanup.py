@@ -238,8 +238,12 @@ def test_conflict_resolution_passes_the_keep_set():
         assert 'keep_images=' in line, f'unprotected cleanup call: {line.strip()}'
 
 
-def _removal_calls(monkeypatch):
-    """Capture `docker image rm` targets from remove_docker_conflicts."""
+def _removal_calls(monkeypatch, *, registry_images=()):
+    """Capture `docker image rm` targets from remove_docker_conflicts.
+
+    `registry_images` are treated as pulled (they report a repo digest); every
+    other image looks locally built.
+    """
     removed = []
 
     class _Proc:
@@ -251,6 +255,9 @@ def _removal_calls(monkeypatch):
         argv = list(args)
         if argv[:3] == ['docker', 'image', 'rm']:
             removed.append(argv[-1])
+            return _Proc(0)
+        if argv[:3] == ['docker', 'image', 'inspect'] and '{{len .RepoDigests}}' in argv:
+            return _Proc(0, '1' if argv[-1] in registry_images else '0')
         return _Proc(0)
 
     monkeypatch.setattr('shutil.which', lambda _n: '/usr/bin/docker')
@@ -264,16 +271,63 @@ CONFLICTS = {
 }
 
 
-def test_unpinned_cached_images_are_still_deleted(monkeypatch):
-    """Caching must not become a licence to hoard."""
+def test_unpinned_locally_built_images_are_still_deleted(monkeypatch):
+    """Caching must not become a licence to hoard what we can rebuild."""
     from scenarioforge.builders import topology as topo
     monkeypatch.setattr(topo, 'IMAGES_BUILT_THIS_RUN', set())
-    removed = _removal_calls(monkeypatch)
+    removed = _removal_calls(monkeypatch)  # nothing looks registry-sourced
 
     result = vuln_process.remove_docker_conflicts(CONFLICTS)
 
     assert set(removed) == set(CONFLICTS['images'])
     assert result['kept_images'] == []
+
+
+def test_registry_images_survive_so_a_cached_run_needs_no_network(monkeypatch):
+    """Deleting a pulled image can only be undone over the network.
+
+    alpine:3.19 was deleted every run and re-pulled by CORE, which failed
+    outright the moment the VM could not resolve auth.docker.io.
+    """
+    from scenarioforge.builders import topology as topo
+    monkeypatch.setattr(topo, 'IMAGES_BUILT_THIS_RUN', set())
+    pulled = ('alpine:3.19', 'vulhub/solr:8.11.0')
+    removed = _removal_calls(monkeypatch, registry_images=pulled)
+
+    result = vuln_process.remove_docker_conflicts(CONFLICTS)
+
+    for ref in pulled:
+        assert ref not in removed, f'{ref} must survive for an offline run'
+        assert ref in result['kept_images']
+    assert 'coretg/scenarios-x-vulnslot-6-abc:iproute2' in removed, 'local builds still go'
+
+
+def test_an_unverifiable_image_is_kept(monkeypatch):
+    """Uncertainty must not cost the offline cache."""
+    from scenarioforge.builders import topology as topo
+    monkeypatch.setattr(topo, 'IMAGES_BUILT_THIS_RUN', set())
+
+    class _Proc:
+        def __init__(self, rc=0, stdout=''):
+            self.returncode = rc
+            self.stdout = stdout
+
+    removed = []
+
+    def fake_run(args, **kwargs):
+        argv = list(args)
+        if argv[:3] == ['docker', 'image', 'rm']:
+            removed.append(argv[-1])
+            return _Proc(0)
+        if argv[:3] == ['docker', 'image', 'inspect']:
+            return _Proc(1, '')  # cannot tell
+        return _Proc(0)
+
+    monkeypatch.setattr('shutil.which', lambda _n: '/usr/bin/docker')
+    monkeypatch.setattr('subprocess.run', fake_run)
+
+    vuln_process.remove_docker_conflicts(CONFLICTS)
+    assert removed == []
 
 
 def test_persistent_images_are_never_deleted(monkeypatch):

@@ -1136,11 +1136,39 @@ def remove_docker_conflicts(conflicts: dict, *, keep_images: Optional[Iterable[s
 		except Exception:
 			pass
 
+		def _came_from_a_registry(ref: str) -> bool:
+			"""True when this image was pulled rather than built here.
+
+			Deleting it can only be undone over the network, so it is exactly
+			what must survive for a cached run to work offline. A locally built
+			image has no repo digest and can be rebuilt from cached layers.
+			"""
+			try:
+				probe = subprocess.run(
+					['docker', 'image', 'inspect', '--format', '{{len .RepoDigests}}', ref],
+					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
+				)
+			except Exception:
+				return True  # unknown: err towards keeping it
+			if probe.returncode != 0:
+				return True
+			try:
+				return int((probe.stdout or '0').strip() or 0) > 0
+			except Exception:
+				return True
+
 		for img in images:
 			name = str(img or '').strip()
 			if not name:
 				continue
 			if name in keep:
+				result['kept_images'].append(name)
+				continue
+			if _came_from_a_registry(name):
+				# Re-fetching it needs a registry, and a run whose images are all
+				# cached must not need one. alpine:3.19 was deleted here every
+				# run and re-pulled by CORE, which failed outright the moment
+				# DNS was unavailable.
 				result['kept_images'].append(name)
 				continue
 			try:
