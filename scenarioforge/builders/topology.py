@@ -94,6 +94,15 @@ IMAGES_BUILT_THIS_RUN: Set[str] = set()
 # Printed for the execute UI, which otherwise gives no sign of why one run takes
 # minutes and the next seconds.
 _IMAGE_USE_COUNTS: Dict[str, int] = {'pulling': 0, 'cached': 0}
+_EXPECTED_IMAGE_NODES: Dict[str, int] = {'total': 0}
+
+
+def _set_expected_image_nodes(total: int) -> None:
+    """Record how many Docker nodes this run will preflight."""
+    try:
+        _EXPECTED_IMAGE_NODES['total'] = max(0, int(total or 0))
+    except Exception:
+        _EXPECTED_IMAGE_NODES['total'] = 0
 
 
 def _report_image_use(bucket: str) -> None:
@@ -101,8 +110,11 @@ def _report_image_use(bucket: str) -> None:
         if bucket not in _IMAGE_USE_COUNTS:
             return
         _IMAGE_USE_COUNTS[bucket] += 1
+        done = _IMAGE_USE_COUNTS['pulling'] + _IMAGE_USE_COUNTS['cached']
+        pending = max(0, int(_EXPECTED_IMAGE_NODES.get('total') or 0) - done)
         print(
-            f"[images] pulling={_IMAGE_USE_COUNTS['pulling']} cached={_IMAGE_USE_COUNTS['cached']}",
+            f"[images] pulling={_IMAGE_USE_COUNTS['pulling']} "
+            f"cached={_IMAGE_USE_COUNTS['cached']} pending={pending}",
             flush=True,
         )
     except Exception:
@@ -4867,6 +4879,14 @@ def _try_build_segmented_topology_from_preview(
     docker_ifid_start = _docker_ifid_start()
 
     sorted_hosts = sorted(hosts_data, key=lambda h: h.get('node_id', 0))
+    # Each Docker host gets one preflight pass, so this is what the image
+    # counter counts down from.
+    try:
+        _set_expected_image_nodes(
+            sum(1 for h in sorted_hosts if _is_docker_node_type(str(h.get('type') or '')))
+        )
+    except Exception:
+        pass
     for idx, hdata in enumerate(sorted_hosts):
         try:
             hid = int(hdata.get('node_id', idx + len(router_objs) + 1))

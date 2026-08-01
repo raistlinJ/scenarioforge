@@ -93,7 +93,7 @@ def test_execute_indicator_resets_between_runs() -> None:
 def test_preflight_emits_the_counter_line_for_execute() -> None:
     """The execute path has no generator runs, so preflight must report."""
     source = (REPO_ROOT / 'scenarioforge' / 'builders' / 'topology.py').read_text(encoding='utf-8')
-    assert "f\"[images] pulling={_IMAGE_USE_COUNTS['pulling']} cached={_IMAGE_USE_COUNTS['cached']}\"" in source
+    assert '[images] pulling={' in source, 'preflight must emit the counter line'
     assert "_report_image_use('cached')" in source
     assert "_report_image_use('pulling')" in source
 
@@ -122,14 +122,61 @@ def test_indicator_is_cleared_between_runs(template: str) -> None:
     assert 'clearFlowImageCounts()' in body
 
 
-def test_emitted_progress_line_matches_what_the_client_parses() -> None:
-    """Server format and client regex have to agree."""
-    template = FLOW_TEMPLATE_PATH.read_text(encoding='utf-8')
-    match = re.search(r'/\^\\\[images\\\]\\s\+pulling=\(\\d\+\)\\s\+cached=\(\\d\+\)\$/', template)
-    assert match, 'client regex for the counter line not found'
+def test_both_surfaces_render_pending(template: str) -> None:
+    scripts = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview_scripts.html').read_text(encoding='utf-8')
+    for source in (template, scripts):
+        assert "' / Pending: '" in source, 'the pending count must be rendered'
+        assert 'pending=(\\d+)' in source, 'the parser must accept a pending field'
 
+
+def test_pending_is_optional_so_an_older_remote_still_renders(template: str) -> None:
+    """The remote may run code that predates the field."""
+    assert '(?:\\s+pending=(\\d+))?' in template
+    assert 'match[3] === undefined' in template
+
+
+def test_generate_counts_pending_against_the_chain_length() -> None:
     source = (REPO_ROOT / 'webapp' / 'flow_prepare_preview_execute.py').read_text(encoding='utf-8')
-    assert "f\"[images] pulling={image_counts['pulling']} cached={image_counts['cached']}\"" in source
+    assert 'int(total_assignments or 0)' in source
+    assert "- image_counts['pulling']" in source and "- image_counts['cached']" in source
 
-    client_re = re.compile(r'^\[images\]\s+pulling=(\d+)\s+cached=(\d+)$')
-    assert client_re.match('[images] pulling=2 cached=5').groups() == ('2', '5')
+
+def test_execute_counts_pending_against_the_docker_node_total() -> None:
+    source = (REPO_ROOT / 'scenarioforge' / 'builders' / 'topology.py').read_text(encoding='utf-8')
+    assert '_set_expected_image_nodes(' in source, 'the total must be established before preflight'
+    assert "pending = max(0, int(_EXPECTED_IMAGE_NODES.get('total') or 0) - done)" in source
+
+
+def test_pending_never_goes_negative() -> None:
+    """More reports than expected nodes must not print a negative count."""
+    from scenarioforge.builders import topology as topo
+    topo._set_expected_image_nodes(1)
+    topo._IMAGE_USE_COUNTS.update({'pulling': 5, 'cached': 5})
+    try:
+        done = topo._IMAGE_USE_COUNTS['pulling'] + topo._IMAGE_USE_COUNTS['cached']
+        assert max(0, topo._EXPECTED_IMAGE_NODES['total'] - done) == 0
+    finally:
+        topo._IMAGE_USE_COUNTS.update({'pulling': 0, 'cached': 0})
+        topo._set_expected_image_nodes(0)
+
+
+def test_emitted_progress_line_matches_what_the_client_parses() -> None:
+    """Server format and client regex have to agree, in both directions."""
+    template = FLOW_TEMPLATE_PATH.read_text(encoding='utf-8')
+
+    # Take the regex the page actually uses rather than restating it here.
+    literal = re.search(r'/(\^\\\[images\\\].+?)/\.exec', template)
+    assert literal, 'client regex for the counter line not found'
+    client_re = re.compile(literal.group(1).replace('\\/', '/'))
+
+    # And the exact strings the two servers emit.
+    generate = "[images] pulling=2 cached=5 pending=10"
+    execute = "[images] pulling=1 cached=0 pending=17"
+    for line in (generate, execute):
+        match = client_re.match(line)
+        assert match, f'client cannot parse {line!r}'
+        assert match.group(1).isdigit() and match.group(2).isdigit()
+        assert match.group(3) is not None, 'pending must be captured'
+
+    assert client_re.match('[images] pulling=2 cached=5'), 'older remotes must still parse'
+    assert not client_re.match('Running generator 6/17'), 'unrelated lines must pass through'

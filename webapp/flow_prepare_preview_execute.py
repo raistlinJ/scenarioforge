@@ -1416,8 +1416,18 @@ def _execute_or_prepare_assignments(
                             bucket = _classify_generator_image_use(run_stdout)
                             if bucket:
                                 image_counts[bucket] += 1
+                                # Counted against the chain length, so the reader
+                                # can tell a run that is nearly done from one that
+                                # has barely started.
+                                pending = max(
+                                    0,
+                                    int(total_assignments or 0)
+                                    - image_counts['pulling']
+                                    - image_counts['cached'],
+                                )
                                 flow_progress(
-                                    f"[images] pulling={image_counts['pulling']} cached={image_counts['cached']}"
+                                    f"[images] pulling={image_counts['pulling']} "
+                                    f"cached={image_counts['cached']} pending={pending}"
                                 )
                         except Exception:
                             pass
