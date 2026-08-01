@@ -53,9 +53,11 @@ def _assignments(count, filler=0):
 
 def _export(monkeypatch, assigns, tmp_path):
     monkeypatch.setattr(cli, '_flow_state_from_xml', lambda *a, **k: {'flag_assignments': assigns})
+    # The export routes through scenarioforge.utils.env_payload; keep its
+    # sidecar inside the test's directory rather than the real /tmp/vulns.
     monkeypatch.setattr(
-        cli, '_write_flow_assignments_sidecar',
-        lambda blob: _write(tmp_path / 'flow_assignments.json', blob),
+        'scenarioforge.utils.env_payload._write_sidecar',
+        lambda blob, **kwargs: _write(tmp_path / 'flow_assignments.json', blob),
     )
     cli._export_flow_assignments_to_env('ignored.xml', None)
 

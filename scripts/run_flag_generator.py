@@ -1247,7 +1247,17 @@ def main() -> int:
         inject_files = []
     # Optional override from environment (e.g., Flow inject overrides).
     try:
+        # A large list travels as a file so it cannot push the environment past
+        # the kernel's per-string argv/envp limit; accept either form.
         raw_override = os.environ.get('CORETG_INJECT_FILES_JSON')
+        if not raw_override:
+            override_path = str(os.environ.get('CORETG_INJECT_FILES_PATH') or '').strip()
+            if override_path:
+                try:
+                    with open(override_path, 'r', encoding='utf-8') as handle:
+                        raw_override = handle.read()
+                except Exception:
+                    raw_override = None
         if raw_override:
             parsed = json.loads(raw_override)
             if isinstance(parsed, list):

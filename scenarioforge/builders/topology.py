@@ -3723,18 +3723,14 @@ def _flow_assignments_from_env() -> list[dict[str, Any]]:
     global _FLOW_ASSIGNMENTS_CACHE
     if _FLOW_ASSIGNMENTS_CACHE is not None:
         return _FLOW_ASSIGNMENTS_CACHE
-    raw = os.environ.get('CORETG_FLOW_ASSIGNMENTS_JSON') or ''
-    if not raw:
-        # Large assignment sets travel as a file: putting them in the
-        # environment pushes past MAX_ARG_STRLEN and makes every later execve
-        # fail with E2BIG.
-        path = str(os.environ.get('CORETG_FLOW_ASSIGNMENTS_PATH') or '').strip()
-        if path:
-            try:
-                with open(path, 'r', encoding='utf-8') as fh:
-                    raw = fh.read()
-            except Exception:
-                raw = ''
+    # Large assignment sets travel as a file: putting them in the environment
+    # pushes past MAX_ARG_STRLEN and makes every later execve fail with E2BIG.
+    try:
+        from scenarioforge.utils.env_payload import read_env_payload
+
+        raw = read_env_payload('CORETG_FLOW_ASSIGNMENTS_JSON')
+    except Exception:
+        raw = os.environ.get('CORETG_FLOW_ASSIGNMENTS_JSON') or ''
     if not raw:
         _FLOW_ASSIGNMENTS_CACHE = []
         return _FLOW_ASSIGNMENTS_CACHE

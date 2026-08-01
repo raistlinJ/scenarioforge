@@ -6089,7 +6089,11 @@ try:
     if sudo_password:
         env['CORETG_DOCKER_SUDO_PASSWORD'] = sudo_password
     if inject_files:
-        env['CORETG_INJECT_FILES_JSON'] = json.dumps(inject_files)
+        # Same class as the flow assignments: a long enough list would push past
+        # the kernel's per-string argv/envp limit and break every execve here.
+        from scenarioforge.utils.env_payload import set_env_payload
+
+        set_env_payload(env, 'CORETG_INJECT_FILES_JSON', json.dumps(inject_files))
     preflight = ''
     deps_dir = '/tmp/coretg_pydeps'
     try:
