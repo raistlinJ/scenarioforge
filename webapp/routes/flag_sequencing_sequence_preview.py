@@ -508,6 +508,30 @@ def register(app, *, backend_module: Any) -> None:
                     allow_node_duplicates=allow_node_duplicates,
                     seed=seed_val,
                 )
+                # Declared VulnerabilitySlots refuse flag-node-generators, so the
+                # picker above skips them even though they are counted as
+                # capacity and raise the challenge ceiling. Top up from them so
+                # the chain can actually reach the requested length; the fill
+                # step below draws a vulnerability for each one reached.
+                if len(selected_generic) < generic_target:
+                    already = {
+                        str(node.get('id') or '').strip()
+                        for node in selected_generic
+                        if isinstance(node, dict)
+                    }
+                    selected_generic = list(selected_generic) + list(
+                        backend._pick_flow_empty_vulnerability_slot_nodes(
+                            [
+                                node for node in generic_candidates
+                                if isinstance(node, dict)
+                                and str(node.get('id') or '').strip() not in already
+                            ],
+                            adj,
+                            length=(generic_target - len(selected_generic)),
+                            allow_node_duplicates=allow_node_duplicates,
+                            seed=seed_val,
+                        )
+                    )
             if len(selected_generic) < generic_target:
                 # This protects against graph/selection edge cases without
                 # silently falling back to a shorter chain.
