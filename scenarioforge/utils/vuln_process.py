@@ -924,13 +924,14 @@ def detect_docker_conflicts_for_compose_files(paths: list[str]) -> dict:
 			except Exception:
 				continue
 
-		for img in all_images:
-			try:
-				p3 = subprocess.run(['docker', 'image', 'inspect', img], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-				if p3.returncode == 0:
-					conflicting_images.append(img)
-			except Exception:
-				continue
+		# An image that exists locally is the cache, not a conflict. Docker has no
+		# image-name conflict to resolve: a tag is simply reused or overwritten.
+		# Reporting every present image here made the caller delete them, which
+		# destroyed the wrapper image preflight had just built for this very run
+		# (CORE then failed with "No such image") and re-pulled alpine:3.19 on
+		# every start. Staleness is handled elsewhere: wrapper tags carry a
+		# sha256 of their identity, and preflight rebuilds them unconditionally.
+		conflicting_images = []
 		return {
 			'containers': list(dict.fromkeys(conflicting_containers)),
 			'images': list(dict.fromkeys(conflicting_images)),
@@ -1045,57 +1046,6 @@ def remove_docker_conflicts(conflicts: dict) -> dict:
 		if not isinstance(images, list):
 			images = []
 
-		def _container_image_ids(name: str) -> list[str]:
-			ids: list[str] = []
-			try:
-				p0 = subprocess.run(
-					['docker', 'container', 'inspect', '-f', '{{.Image}}', str(name)],
-					stdout=subprocess.PIPE,
-					stderr=subprocess.DEVNULL,
-					text=True,
-				)
-				if p0.returncode == 0:
-					val = (p0.stdout or '').strip()
-					if val:
-						ids.append(val)
-			except Exception:
-				pass
-			return list(dict.fromkeys([x for x in ids if x]))
-
-		def _image_unused(img: str) -> bool:
-			try:
-				p1 = subprocess.run(
-					['docker', 'ps', '-a', '-q', '--filter', f'ancestor={img}'],
-					stdout=subprocess.PIPE,
-					stderr=subprocess.DEVNULL,
-					text=True,
-				)
-				if p1.returncode != 0:
-					return False
-				return not bool((p1.stdout or '').strip())
-			except Exception:
-				return False
-
-		def _try_remove_image(img: str) -> None:
-			try:
-				p = subprocess.run(['docker', 'image', 'rm', '-f', str(img)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-				if p.returncode == 0:
-					result['removed_images'].append(str(img))
-				else:
-					out = (p.stdout or '').strip()[-500:]
-					result['image_errors'][str(img)] = out or f'rc={p.returncode}'
-			except Exception as exc:
-				result['image_errors'][str(img)] = str(exc)
-
-		# Collect image IDs for containers we intend to remove.
-		container_image_ids: list[str] = []
-		for cn in containers:
-			try:
-				container_image_ids.extend(_container_image_ids(str(cn)))
-			except Exception:
-				pass
-		container_image_ids = list(dict.fromkeys([x for x in container_image_ids if x]))
-
 		for cn in containers:
 			try:
 				p = subprocess.run(['docker', 'rm', '-f', str(cn)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -1107,21 +1057,14 @@ def remove_docker_conflicts(conflicts: dict) -> dict:
 			except Exception as exc:
 				result['container_errors'][str(cn)] = str(exc)
 
-		# Remove explicit conflicting images.
-		for img in images:
-			if not img:
-				continue
-			_try_remove_image(str(img))
-
-		# Remove images associated with removed containers (only if unused now).
-		for img_id in container_image_ids:
-			try:
-				if img_id in (result.get('removed_images') or []):
-					continue
-				if _image_unused(img_id):
-					_try_remove_image(img_id)
-			except Exception:
-				pass
+		# Images are deliberately kept. Freeing a container name never requires
+		# deleting the image behind it, and doing so deleted the wrapper image
+		# that preflight had already built for this run -- CORE then failed with
+		# "No such image" on a node whose image had existed moments earlier.
+		#
+		# Retention cannot pin stale content: a wrapper tag embeds a sha256 of
+		# its identity, so changed content produces a different tag, and
+		# preflight rebuilds wrappers unconditionally before CORE starts.
 		return result
 	except Exception:
 		return result
