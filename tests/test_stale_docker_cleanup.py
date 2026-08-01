@@ -214,21 +214,60 @@ def test_cleanup_runs_before_the_topology_build():
     )
 
 
-def test_conflict_resolution_removes_backing_images():
-    """Images must go with the containers they back.
+def test_conflict_resolution_keeps_images():
+    """Freeing a container name must not delete the image behind it.
 
-    CORE starts a node with `docker compose up -d`, which builds only when the
-    image tag is absent. A retained per-session image is therefore reused
-    forever: a run rebuilt its context, CORE skipped the build, and the node ran
-    two-hour-old code. Keeping images to save rebuild time silently pinned
-    whatever was baked in -- and with layer caching the rebuild is nearly free.
+    Deleting images was meant to stop CORE reusing a stale per-session build,
+    but conflict resolution runs *after* preflight has already built the
+    wrapper image for this run, so it deleted work moments old and CORE failed
+    with `No such image` on a node whose image had just existed:
+
+        09:03:47  preflight wrapper build service=vulnslot-6 image=coretg/...
+        09:04:59  Removed Docker conflicts: containers=18 images=20
+        09:12:33  No such image: coretg/...-vulnslot-6-...:iproute2
+
+    Staleness is already handled twice over: a wrapper tag embeds a sha256 of
+    its identity, so changed content yields a different tag, and preflight
+    rebuilds wrappers unconditionally before CORE starts.
     """
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / 'scenarioforge' / 'cli.py').read_text(
         encoding='utf-8', errors='ignore'
     )
-    assert 'remove_docker_conflicts(conflicts)' in source
-    assert '_conflicts_without_images' not in source, (
-        'retaining conflict images lets CORE reuse a stale per-session build'
+    assert 'remove_docker_conflicts(conflicts)' in source, 'containers must still be freed'
+
+    vuln = (Path(__file__).resolve().parents[1] / 'scenarioforge' / 'utils' / 'vuln_process.py').read_text(
+        encoding='utf-8', errors='ignore'
     )
+    body = vuln[vuln.index('def remove_docker_conflicts'):]
+    body = body[:body.index('\ndef ', 1)]
+    assert "'image', 'rm'" not in body, 'conflict resolution must not delete images'
+
+
+def test_an_existing_image_is_not_reported_as_a_conflict(monkeypatch, tmp_path):
+    """An image present locally is the cache, not a conflict."""
+    compose = tmp_path / 'docker-compose.yml'
+    compose.write_text(
+        'services:\n'
+        '  vulnslot-6:\n'
+        '    image: coretg/scenarios-x-vulnslot-6-bc7c2020c62e:iproute2\n'
+        '    container_name: vulnslot-6\n'
+        '  inject_copy:\n'
+        '    image: alpine:3.19\n',
+        encoding='utf-8',
+    )
+
+    class _Proc:
+        def __init__(self, rc):
+            self.returncode = rc
+
+    # Everything exists locally, which used to mean "all of it is a conflict".
+    # The helper imports these inside the function, so patch the real modules.
+    monkeypatch.setattr('shutil.which', lambda _n: '/usr/bin/docker')
+    monkeypatch.setattr('subprocess.run', lambda *a, **k: _Proc(0))
+
+    conflicts = vuln_process.detect_docker_conflicts_for_compose_files([str(compose)])
+
+    assert conflicts['images'] == [], 'a cached image must never be a conflict'
+    assert 'vulnslot-6' in conflicts['containers'], 'container names still conflict'
