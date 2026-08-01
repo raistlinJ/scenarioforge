@@ -1594,13 +1594,10 @@ def pick_chain_nodes(
     adj: Any,
     *,
     preview: Any,
-    preset_steps: list[Any],
     allow_node_duplicates: bool,
     length: int,
     backend: Any,
 ) -> list[Any]:
-    if preset_steps:
-        return backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
     try:
         seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
     except Exception:
@@ -1620,7 +1617,6 @@ def repair_explicit_chain_nodes(
     adj: Any,
     *,
     preview: Any,
-    preset_steps: list[Any],
     allow_node_duplicates: bool,
     length: int,
     requested_length: int,
@@ -1650,11 +1646,7 @@ def repair_explicit_chain_nodes(
             }
 
             def _needs_nonvuln_docker(pos: int) -> bool:
-                if not preset_steps:
-                    return False
-                if pos < 0 or pos >= len(preset_steps):
-                    return False
-                return str((preset_steps[pos] or {}).get('kind') or '').strip() == 'flag-node-generator'
+                return False
 
             def _eligible(candidate: dict[str, Any], pos: int) -> bool:
                 try:
@@ -1724,40 +1716,6 @@ def repair_explicit_chain_nodes(
                 },
             }
 
-    if preset_steps and chain_nodes:
-        try:
-            used = {str(node.get('id') or '').strip() for node in chain_nodes if isinstance(node, dict)}
-            for index, step in enumerate(preset_steps[:len(chain_nodes)]):
-                if str((step or {}).get('kind') or '').strip() != 'flag-node-generator':
-                    continue
-                node = chain_nodes[index] if index < len(chain_nodes) else None
-                if not isinstance(node, dict):
-                    continue
-                if not bool(node.get('is_vuln')):
-                    continue
-                replacement = None
-                for candidate in (nodes or []):
-                    if not isinstance(candidate, dict):
-                        continue
-                    candidate_id = str(candidate.get('id') or '').strip()
-                    if not candidate_id:
-                        continue
-                    if (not allow_node_duplicates) and candidate_id in used:
-                        continue
-                    type_raw = str(candidate.get('type') or '')
-                    type_name = type_raw.strip().lower()
-                    is_docker = ('docker' in type_name) or (type_raw.strip().upper() == 'DOCKER')
-                    if is_docker and not bool(candidate.get('is_vuln')):
-                        replacement = candidate
-                        break
-                if replacement is not None:
-                    replacement_id = str(replacement.get('id') or '').strip()
-                    if replacement_id:
-                        chain_nodes[index] = replacement
-                        chain_ids[index] = replacement_id
-                        used.add(replacement_id)
-        except Exception:
-            pass
 
     if chain_nodes:
         try:
@@ -1774,12 +1732,9 @@ def repair_explicit_chain_nodes(
                 is_docker = backend._flow_node_is_docker_role(node)
                 is_vuln = backend._flow_node_is_vuln(node)
 
-                need_nonvuln_docker = False
-                if preset_steps and index < len(preset_steps):
-                    need_nonvuln_docker = str((preset_steps[index] or {}).get('kind') or '').strip() == 'flag-node-generator'
-                elif is_docker and (not is_vuln):
-                    # When no preset: non-vuln docker nodes can ONLY be used with flag-node-generators
-                    need_nonvuln_docker = True
+                # A non-vulnerability docker node can only host a
+                # flag-node-generator.
+                need_nonvuln_docker = bool(is_docker and (not is_vuln))
 
                 if need_nonvuln_docker:
                     if is_docker and (not is_vuln) and backend._flow_node_accepts_challenge_kind(node, 'flag-node-generator'):
@@ -1841,7 +1796,6 @@ def repair_explicit_chain_nodes(
                     nodes,
                     adj,
                     preview=preview,
-                    preset_steps=preset_steps,
                     allow_node_duplicates=allow_node_duplicates,
                     length=length,
                     backend=backend,
@@ -1899,7 +1853,6 @@ def repair_explicit_chain_nodes(
             nodes,
             adj,
             preview=preview,
-            preset_steps=preset_steps,
             allow_node_duplicates=allow_node_duplicates,
             length=length,
             backend=backend,

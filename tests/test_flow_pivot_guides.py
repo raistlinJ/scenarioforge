@@ -244,8 +244,6 @@ def test_prepare_chain_repairs_explicit_pivot_target_before_source(monkeypatch):
         flow_state_for_prepare={},
         scenario_label="pivot-demo",
         scenario_norm="pivot-demo",
-        preset="",
-        preset_steps=[],
         mode="preview",
         best_effort=True,
         allow_node_duplicates=False,

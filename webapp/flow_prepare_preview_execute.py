@@ -32,7 +32,6 @@ def _backend_dependencies(backend: Any) -> Any:
     bound_names = [
         '_coerce_bool',
         '_normalize_scenario_label',
-        '_flow_preset_steps',
         '_existing_xml_path_or_none',
         '_latest_xml_path_for_scenario',
         '_planner_get_plan',
@@ -49,7 +48,6 @@ def _backend_dependencies(backend: Any) -> Any:
         '_canonicalize_payload_flow_from_xml',
         '_build_topology_graph_from_preview_plan',
         '_flow_compose_docker_stats',
-        '_flow_compute_flag_assignments_for_preset',
         '_flow_compute_flag_assignments',
         '_pick_flow_nonvulnerability_docker_nodes',
         '_flow_apply_pivot_context_to_assignments',
@@ -249,7 +247,6 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
     j = payload if isinstance(payload, dict) else (request.get_json(silent=True) or {})
     scenario_label = str(j.get('scenario') or '').strip()
     scenario_norm = deps._normalize_scenario_label(scenario_label)
-    preset = str(j.get('preset') or '').strip()
     mode = str(j.get('mode') or '').strip().lower()
     best_effort = bool(j.get('best_effort')) or (mode in {'hint', 'hint_only', 'resolve_hints', 'preview'})
     run_generators_request = bool(mode in {'resolve', 'resolve_hints', 'hint', 'hint_only'})
@@ -268,9 +265,6 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
         length = int(j.get('length') or 5)
     except Exception:
         length = 5
-    preset_steps = deps._flow_preset_steps(preset)
-    if preset_steps:
-        length = len(preset_steps)
     length = max(1, min(length, 50))
     requested_length = length
     dependency_level_normalizer = getattr(deps, '_flow_normalize_dependency_level', None)
@@ -431,10 +425,9 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
     except Exception:
         plan_basename = str(base_plan_path or '')
     current_app.logger.info(
-        '[flow.prepare_preview_for_execute] start scenario=%s requested_length=%s preset=%s best_effort=%s timeout_s=%s base_plan=%s',
+        '[flow.prepare_preview_for_execute] start scenario=%s requested_length=%s best_effort=%s timeout_s=%s base_plan=%s',
         scenario_norm,
         requested_length,
-        (preset or ''),
         bool(best_effort),
         (total_timeout_s if total_timeout_s is not None else 'none'),
         plan_basename,
@@ -470,7 +463,6 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
         'j': j,
         'scenario_label': scenario_label,
         'scenario_norm': scenario_norm,
-        'preset': preset,
         'mode': mode,
         'best_effort': best_effort,
         'run_generators_request': run_generators_request,
@@ -480,7 +472,6 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
         'length': length,
         'requested_length': requested_length,
         'dependency_level': dependency_level,
-        'preset_steps': preset_steps,
         'flow_run_remote': flow_run_remote,
         'flow_remote_forced': flow_remote_forced,
         'flow_core_cfg': flow_core_cfg,
@@ -505,8 +496,6 @@ def _prepare_chain_and_assignments(
     flow_state_for_prepare: Any,
     scenario_label: str,
     scenario_norm: str,
-    preset: str,
-    preset_steps: list[Any],
     mode: str,
     best_effort: bool,
     allow_node_duplicates: bool,
@@ -532,12 +521,11 @@ def _prepare_chain_and_assignments(
         nodes, _links, adj = deps._build_topology_graph_from_preview_plan(preview)
         stats = deps._flow_compose_docker_stats(nodes)
         required_vulnerability_count = 0
-        if not preset_steps:
-            required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
-            if length < required_vulnerability_count:
-                length = required_vulnerability_count
-                requested_length = length
-                _progress(f'Solve: adjusted requested length to required vulnerability count={required_vulnerability_count}')
+        required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
+        if length < required_vulnerability_count:
+            length = required_vulnerability_count
+            requested_length = length
+            _progress(f'Solve: adjusted requested length to required vulnerability count={required_vulnerability_count}')
         nonvulnerability_target = max(0, length - required_vulnerability_count)
         eligible_debug = helpers.eligible_debug_summary(nodes, backend=backend)
         try:
@@ -547,7 +535,7 @@ def _prepare_chain_and_assignments(
 
         _progress('Solve: resolving requested chain ids')
         chain_ids_in = j.get('chain_ids')
-        if (not chain_ids_in) and (not preset_steps):
+        if not chain_ids_in:
             try:
                 saved_ids = helpers.saved_chain_ids_from_flow_state(flow_state_for_prepare)
                 if saved_ids:
@@ -562,7 +550,7 @@ def _prepare_chain_and_assignments(
                     chain_ids.append(value)
             chain_ids = chain_ids[:length]
 
-        if (not preset_steps) and chain_ids:
+        if chain_ids:
             nodes_by_id = {
                 str(node.get('id') or '').strip(): node
                 for node in (nodes or [])
@@ -587,7 +575,6 @@ def _prepare_chain_and_assignments(
                 nodes,
                 adj,
                 preview=preview,
-                preset_steps=preset_steps,
                 allow_node_duplicates=allow_node_duplicates,
                 length=nonvulnerability_target,
                 requested_length=requested_length,
@@ -616,7 +603,6 @@ def _prepare_chain_and_assignments(
                 nodes,
                 adj,
                 preview=preview,
-                preset_steps=preset_steps,
                 allow_node_duplicates=allow_node_duplicates,
                 length=nonvulnerability_target,
                 backend=backend,
@@ -650,57 +636,49 @@ def _prepare_chain_and_assignments(
             chain_ids = [str(node.get('id') or '').strip() for node in chain_nodes if str(node.get('id') or '').strip()]
             _progress(f'Solve: picked chain count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
 
-        if not preset_steps:
-            chain_nodes, _required_vuln_info = deps._flow_expand_chain_for_topology_requirements(
-                nodes,
-                chain_nodes,
-                preview,
-                include_all_topology_vulns=True,
-                pivot_context=pivot_context,
+        chain_nodes, _required_vuln_info = deps._flow_expand_chain_for_topology_requirements(
+            nodes,
+            chain_nodes,
+            preview,
+            include_all_topology_vulns=True,
+            pivot_context=pivot_context,
+        )
+        chain_ids = [
+            str(node.get('id') or '').strip()
+            for node in (chain_nodes or [])
+            if isinstance(node, dict) and str(node.get('id') or '').strip()
+        ]
+        _progress(f'Solve: required vulnerability nodes included count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
+        approved_generic_node_ids: set[str] = set()
+        try:
+            saved_expansion = flow_state_for_prepare.get('chain_expansion') if isinstance(flow_state_for_prepare, dict) else None
+            if isinstance(saved_expansion, dict):
+                for raw_id in (saved_expansion.get('converted_existing_docker_node_ids') or []):
+                    value = str(raw_id or '').strip()
+                    if value:
+                        approved_generic_node_ids.add(value)
+        except Exception:
+            approved_generic_node_ids = set()
+        if approved_generic_node_ids:
+            normalized_chain: list[dict[str, Any]] = []
+            for node in (chain_nodes or []):
+                if not isinstance(node, dict):
+                    continue
+                node_copy = dict(node)
+                node_id = str(node_copy.get('id') or '').strip()
+                if (
+                    node_id in approved_generic_node_ids
+                    and deps._flow_node_is_docker_role(node_copy)
+                    and not deps._flow_node_is_vuln(node_copy)
+                    and not str(node_copy.get('flag_node_generator_id') or '').strip()
+                ):
+                    node_copy['_topology_flag_node_generators_configured'] = False
+                normalized_chain.append(node_copy)
+            chain_nodes = normalized_chain
+            _progress(
+                'Solve: restored explicitly approved Docker challenge nodes='
+                + ','.join(sorted(approved_generic_node_ids))
             )
-            chain_ids = [
-                str(node.get('id') or '').strip()
-                for node in (chain_nodes or [])
-                if isinstance(node, dict) and str(node.get('id') or '').strip()
-            ]
-            _progress(f'Solve: required vulnerability nodes included count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
-
-            # An existing Docker node becomes a generic Flow challenge only
-            # after the user explicitly approved that conversion during
-            # sequencing.  Preserve that recorded decision from XML rather
-            # than treating a blank topology generator field as permission.
-            # This is not a fallback: every accepted node id is audited in
-            # FlowState.chain_expansion and must be non-vulnerable Docker.
-            approved_generic_node_ids: set[str] = set()
-            try:
-                saved_expansion = flow_state_for_prepare.get('chain_expansion') if isinstance(flow_state_for_prepare, dict) else None
-                if isinstance(saved_expansion, dict):
-                    for raw_id in (saved_expansion.get('converted_existing_docker_node_ids') or []):
-                        value = str(raw_id or '').strip()
-                        if value:
-                            approved_generic_node_ids.add(value)
-            except Exception:
-                approved_generic_node_ids = set()
-            if approved_generic_node_ids:
-                normalized_chain: list[dict[str, Any]] = []
-                for node in (chain_nodes or []):
-                    if not isinstance(node, dict):
-                        continue
-                    node_copy = dict(node)
-                    node_id = str(node_copy.get('id') or '').strip()
-                    if (
-                        node_id in approved_generic_node_ids
-                        and deps._flow_node_is_docker_role(node_copy)
-                        and not deps._flow_node_is_vuln(node_copy)
-                        and not str(node_copy.get('flag_node_generator_id') or '').strip()
-                    ):
-                        node_copy['_topology_flag_node_generators_configured'] = False
-                    normalized_chain.append(node_copy)
-                chain_nodes = normalized_chain
-                _progress(
-                    'Solve: restored explicitly approved Docker challenge nodes='
-                    + ','.join(sorted(approved_generic_node_ids))
-                )
     except Exception as exc:
         current_app.logger.exception('[flow.prepare_preview_for_execute] internal error: %s', exc)
         return {
@@ -731,33 +709,18 @@ def _prepare_chain_and_assignments(
         _progress(f'Solve: reused saved assignments count={len(flag_assignments or [])}')
 
     if not flag_assignments:
-        if preset_steps:
-            _progress('Solve: computing preset flag assignments')
-            preset_assignments, preset_err = deps._flow_compute_flag_assignments_for_preset(
-                preview,
-                chain_nodes,
-                scenario_label or scenario_norm,
-                preset,
-                pivot_context=pivot_context,
-            )
-            if preset_err:
-                return {
-                    'response': (jsonify({'ok': False, 'error': f'Error: {preset_err}', 'stats': stats}), 422),
-                }
-            flag_assignments = preset_assignments
-        else:
-            _progress('Solve: computing flag assignments')
-            flag_assignments = deps._flow_compute_flag_assignments(
-                preview,
-                chain_nodes,
-                scenario_label or scenario_norm,
-                initial_facts_override=initial_facts_override,
-                goal_facts_override=goal_facts_override,
-                disallow_generator_reuse=(not allow_node_duplicates),
-                dependency_level=dependency_level,
-                pivot_context=pivot_context,
-            )
-            _progress(f'Solve: assignments ready count={len(flag_assignments or [])}')
+        _progress('Solve: computing flag assignments')
+        flag_assignments = deps._flow_compute_flag_assignments(
+            preview,
+            chain_nodes,
+            scenario_label or scenario_norm,
+            initial_facts_override=initial_facts_override,
+            goal_facts_override=goal_facts_override,
+            disallow_generator_reuse=(not allow_node_duplicates),
+            dependency_level=dependency_level,
+            pivot_context=pivot_context,
+        )
+        _progress(f'Solve: assignments ready count={len(flag_assignments or [])}')
 
     try:
         _progress('Solve: applying pivot context to assignments')
@@ -800,8 +763,8 @@ def _prepare_chain_and_assignments(
         has_dupes = False
 
     debug_dag = bool(j.get('debug_dag'))
-    should_reorder_chain = bool((not explicit_chain) and (not preset_steps) and (not has_dupes))
-    if explicit_chain and (not preset_steps) and (not has_dupes) and flag_assignments:
+    should_reorder_chain = bool((not explicit_chain) and (not has_dupes))
+    if explicit_chain and (not has_dupes) and flag_assignments:
         try:
             _progress('Solve: validating explicit chain order before repair')
             explicit_valid, explicit_errors = deps._flow_validate_chain_order_by_requires_produces(
@@ -1983,7 +1946,6 @@ def execute_impl(*, backend: Any, payload: dict[str, Any] | None = None):
     j = request_context['j']
     scenario_label = str(request_context['scenario_label'])
     scenario_norm = str(request_context['scenario_norm'])
-    preset = str(request_context['preset'])
     mode = str(request_context['mode'])
     best_effort = bool(request_context['best_effort'])
     run_generators_request = bool(request_context['run_generators_request'])
@@ -1993,7 +1955,6 @@ def execute_impl(*, backend: Any, payload: dict[str, Any] | None = None):
     length = int(request_context['length'])
     requested_length = int(request_context['requested_length'])
     dependency_level = int(request_context['dependency_level'])
-    preset_steps = request_context['preset_steps'] or []
     flow_run_remote = bool(request_context['flow_run_remote'])
     flow_remote_forced = bool(request_context['flow_remote_forced'])
     flow_core_cfg = request_context['flow_core_cfg'] if isinstance(request_context['flow_core_cfg'], dict) else None
@@ -2017,8 +1978,6 @@ def execute_impl(*, backend: Any, payload: dict[str, Any] | None = None):
         flow_state_for_prepare=flow_state_for_prepare,
         scenario_label=scenario_label,
         scenario_norm=scenario_norm,
-        preset=preset,
-        preset_steps=preset_steps,
         mode=mode,
         best_effort=best_effort,
         allow_node_duplicates=allow_node_duplicates,

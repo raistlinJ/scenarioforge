@@ -4830,9 +4830,6 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     chain_ids = _cli_phase_chain_ids(args)
     if chain_ids:
         payload['chain_ids'] = chain_ids
-    preset = str(args.flow_preset or '').strip()
-    if preset:
-        payload['preset'] = preset
     if args.flow_timeout_s is not None:
         payload['timeout_s'] = int(args.flow_timeout_s)
     if args.flow_run_remote:
@@ -4895,8 +4892,6 @@ def _run_flag_sequencing_phase(args: Any) -> int:
         'allow_node_duplicates': bool(args.flow_allow_node_duplicates),
         'dependency_level': int(args.flow_dependency_level),
     }
-    if preset:
-        sequence_payload['preset'] = preset
     if chain_ids:
         sequence_payload['chain_ids'] = chain_ids
 
@@ -5294,7 +5289,6 @@ def _add_cli_flag_sequencing_args(container: Any) -> None:
         help='Flag-sequencing mode for the flag-sequencing phase (default: resolve)',
     )
     container.add_argument('--flow-length', type=int, default=5, help='Requested chain length for the flag-sequencing phase')
-    container.add_argument('--flow-preset', default='', help='Optional flow preset name for the flag-sequencing phase')
     container.add_argument('--flow-chain-id', dest='flow_chain_ids', action='append', help='Explicit flow chain node id (repeatable)')
     container.add_argument('--flow-chain-ids', dest='flow_chain_ids_csv', default='', help='Comma-separated explicit flow chain node ids')
     container.add_argument('--flow-best-effort', action='store_true', help='Allow the flag-sequencing phase to clamp to available eligible nodes')
