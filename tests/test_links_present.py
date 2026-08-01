@@ -1,44 +1,73 @@
+"""The CLI fails cleanly when no CORE daemon is reachable.
+
+This used to assert that a scenario report existed after running the CLI
+against a closed port, on the stated premise that "a report should exist even
+if session start failed". That premise is false: without a CORE session the
+execute phase stops before any report is written.
+
+It passed anyway, because it globbed `reports/` for *any* report and a
+developer checkout accumulates them -- 131 in one working tree -- so it matched
+a file from an unrelated earlier run and never inspected the run it had just
+made. In CI, where `reports/` is empty and gitignored, it failed.
+
+What is worth guarding is that the failure is orderly: a non-zero exit and no
+traceback, rather than an exception escaping the topology builder.
+"""
+
 import os
-import json
-import tempfile
 import subprocess
 from pathlib import Path
 
+import pytest
 
-def _find_latest_report(repo_root: Path) -> Path | None:
-    reports = sorted((repo_root / "reports").glob("scenario_report_*.md"), key=lambda p: p.stat().st_mtime)
-    return reports[-1] if reports else None
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SAMPLE_XML = REPO_ROOT / "examples" / "sample.xml"
 
 
-def test_cli_generates_session_with_links(monkeypatch):
-    """Smoke test: run CLI on examples/sample.xml with no routing to exercise multi-switch builder and ensure links exist in session.
-
-    We don't require core-daemon; this is a structural test that at least ensures the run completes and report is written.
-    """
-    repo_root = Path(__file__).resolve().parent.parent
-    xml_path = repo_root / "examples" / "sample.xml"
-    if not xml_path.exists():
-        # Skip if the example XML is not present in this checkout
-        import pytest
+@pytest.fixture(scope="module")
+def cli_run():
+    if not SAMPLE_XML.exists():
         pytest.skip("examples/sample.xml missing")
 
-    # Try invoking the CLI module in a way that does not require core-daemon: we expect it to fail to connect in CI
     env = os.environ.copy()
-    env.setdefault("PYTHONPATH", str(repo_root))
-    # Use localhost and a likely closed port to exercise code path without starting a real session
-    cmd = ["python", "-m", "scenarioforge.cli", "--xml", str(xml_path), "--host", "127.0.0.1", "--port", "50051"]
+    env.setdefault("PYTHONPATH", str(REPO_ROOT))
+    # A closed port: the run must reach the CORE connection attempt and stop
+    # there, without a live daemon.
+    cmd = [
+        "python", "-m", "scenarioforge.cli",
+        "--xml", str(SAMPLE_XML),
+        "--host", "127.0.0.1",
+        "--port", "50051",
+    ]
     try:
-        subprocess.run(cmd, cwd=str(repo_root), env=env, check=False, capture_output=True, text=True, timeout=30)
-    except Exception:
-        # If execution environment cannot run subprocesses, skip gracefully
-        import pytest
-        pytest.skip("subprocess execution not supported in this environment")
+        return subprocess.run(
+            cmd, cwd=str(REPO_ROOT), env=env, check=False,
+            capture_output=True, text=True, timeout=120,
+        )
+    except FileNotFoundError:
+        pytest.skip("python executable not available for subprocess execution")
+    except subprocess.TimeoutExpired:
+        pytest.fail("CLI did not return within 120s against an unreachable CORE host")
 
-    # A report should exist even if session start failed
-    report = _find_latest_report(repo_root)
-    assert report is not None, "Expected a scenario report to be written"
-    content = report.read_text(encoding="utf-8")
-    # At minimum, we should see a 'Switches' or 'Routers' section and non-zero node count lines
-    assert "Total nodes:" in content
-    # Links aren't directly listed in report; success indicates builders ran through link add paths.
-    # This test primarily guards against regressions causing exceptions during link creation.
+
+def test_cli_exits_non_zero_without_a_core_daemon(cli_run):
+    assert cli_run.returncode != 0, (
+        "the CLI reported success despite having no CORE session:\n"
+        f"{(cli_run.stdout or '')[-2000:]}"
+    )
+
+
+def test_cli_does_not_crash_while_building_the_topology(cli_run):
+    """An orderly refusal, not an exception escaping the builder."""
+    combined = (cli_run.stdout or "") + (cli_run.stderr or "")
+    assert "Traceback (most recent call last)" not in combined, (
+        f"CLI raised instead of reporting a connection failure:\n{combined[-2000:]}"
+    )
+
+
+def test_no_report_is_claimed_when_no_session_ran(cli_run):
+    """The inverse of the original assertion, and the true one."""
+    combined = (cli_run.stdout or "") + (cli_run.stderr or "")
+    assert "Scenario report written to" not in combined, (
+        "a report was announced even though no CORE session was started"
+    )
