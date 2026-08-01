@@ -214,38 +214,108 @@ def test_cleanup_runs_before_the_topology_build():
     )
 
 
-def test_conflict_resolution_keeps_images():
-    """Freeing a container name must not delete the image behind it.
+def test_conflict_resolution_passes_the_keep_set():
+    """Image cleanup must be told what not to touch.
 
-    Deleting images was meant to stop CORE reusing a stale per-session build,
-    but conflict resolution runs *after* preflight has already built the
-    wrapper image for this run, so it deleted work moments old and CORE failed
-    with `No such image` on a node whose image had just existed:
+    Deleting images stops a stale build outliving its run, but conflict
+    resolution runs *after* preflight has already built this run's wrapper
+    image, and it has no view of which images the operator pinned. Without a
+    keep set it deleted both, and CORE failed with `No such image` on a node
+    whose image had existed seconds earlier:
 
         09:03:47  preflight wrapper build service=vulnslot-6 image=coretg/...
         09:04:59  Removed Docker conflicts: containers=18 images=20
         09:12:33  No such image: coretg/...-vulnslot-6-...:iproute2
-
-    Staleness is already handled twice over: a wrapper tag embeds a sha256 of
-    its identity, so changed content yields a different tag, and preflight
-    rebuilds wrappers unconditionally before CORE starts.
     """
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / 'scenarioforge' / 'cli.py').read_text(
         encoding='utf-8', errors='ignore'
     )
-    assert 'remove_docker_conflicts(conflicts)' in source, 'containers must still be freed'
+    calls = [ln for ln in source.splitlines() if 'remove_docker_conflicts(conflicts' in ln]
+    assert calls, 'conflict resolution must still run'
+    for line in calls:
+        assert 'keep_images=' in line, f'unprotected cleanup call: {line.strip()}'
 
-    vuln = (Path(__file__).resolve().parents[1] / 'scenarioforge' / 'utils' / 'vuln_process.py').read_text(
-        encoding='utf-8', errors='ignore'
+
+def _removal_calls(monkeypatch):
+    """Capture `docker image rm` targets from remove_docker_conflicts."""
+    removed = []
+
+    class _Proc:
+        def __init__(self, rc=0, stdout=''):
+            self.returncode = rc
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        argv = list(args)
+        if argv[:3] == ['docker', 'image', 'rm']:
+            removed.append(argv[-1])
+        return _Proc(0)
+
+    monkeypatch.setattr('shutil.which', lambda _n: '/usr/bin/docker')
+    monkeypatch.setattr('subprocess.run', fake_run)
+    return removed
+
+
+CONFLICTS = {
+    'containers': ['vulnslot-6'],
+    'images': ['alpine:3.19', 'vulhub/solr:8.11.0', 'coretg/scenarios-x-vulnslot-6-abc:iproute2'],
+}
+
+
+def test_unpinned_cached_images_are_still_deleted(monkeypatch):
+    """Caching must not become a licence to hoard."""
+    from scenarioforge.builders import topology as topo
+    monkeypatch.setattr(topo, 'IMAGES_BUILT_THIS_RUN', set())
+    removed = _removal_calls(monkeypatch)
+
+    result = vuln_process.remove_docker_conflicts(CONFLICTS)
+
+    assert set(removed) == set(CONFLICTS['images'])
+    assert result['kept_images'] == []
+
+
+def test_persistent_images_are_never_deleted(monkeypatch):
+    from scenarioforge.builders import topology as topo
+    monkeypatch.setattr(topo, 'IMAGES_BUILT_THIS_RUN', set())
+    removed = _removal_calls(monkeypatch)
+
+    result = vuln_process.remove_docker_conflicts(
+        CONFLICTS, keep_images=['vulhub/solr:8.11.0'],
     )
-    body = vuln[vuln.index('def remove_docker_conflicts'):]
-    body = body[:body.index('\ndef ', 1)]
-    assert "'image', 'rm'" not in body, 'conflict resolution must not delete images'
+
+    assert 'vulhub/solr:8.11.0' not in removed, 'a pinned image must survive'
+    assert 'vulhub/solr:8.11.0' in result['kept_images']
+    assert 'alpine:3.19' in removed, 'unpinned images are still cleared'
 
 
-def test_an_existing_image_is_not_reported_as_a_conflict(monkeypatch, tmp_path):
+def test_images_built_by_this_run_are_never_deleted(monkeypatch):
+    """The failure that stranded CORE with "No such image"."""
+    from scenarioforge.builders import topology as topo
+    monkeypatch.setattr(
+        topo, 'IMAGES_BUILT_THIS_RUN', {'coretg/scenarios-x-vulnslot-6-abc:iproute2'},
+    )
+    removed = _removal_calls(monkeypatch)
+
+    result = vuln_process.remove_docker_conflicts(CONFLICTS)
+
+    assert 'coretg/scenarios-x-vulnslot-6-abc:iproute2' not in removed
+    assert 'coretg/scenarios-x-vulnslot-6-abc:iproute2' in result['kept_images']
+    assert 'alpine:3.19' in removed
+
+
+def test_containers_are_freed_regardless_of_image_pins(monkeypatch):
+    from scenarioforge.builders import topology as topo
+    monkeypatch.setattr(topo, 'IMAGES_BUILT_THIS_RUN', set())
+    _removal_calls(monkeypatch)
+
+    result = vuln_process.remove_docker_conflicts(CONFLICTS, keep_images=CONFLICTS['images'])
+
+    assert result['removed_containers'] == ['vulnslot-6']
+
+
+def test_an_existing_image_is_reported_as_a_conflict(monkeypatch, tmp_path):
     """An image present locally is the cache, not a conflict."""
     compose = tmp_path / 'docker-compose.yml'
     compose.write_text(
@@ -269,5 +339,5 @@ def test_an_existing_image_is_not_reported_as_a_conflict(monkeypatch, tmp_path):
 
     conflicts = vuln_process.detect_docker_conflicts_for_compose_files([str(compose)])
 
-    assert conflicts['images'] == [], 'a cached image must never be a conflict'
+    assert 'alpine:3.19' in conflicts['images'], 'cached images are candidates for cleanup'
     assert 'vulnslot-6' in conflicts['containers'], 'container names still conflict'
