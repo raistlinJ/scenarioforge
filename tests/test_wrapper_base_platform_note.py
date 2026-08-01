@@ -16,14 +16,19 @@ import pytest
 
 from scenarioforge.builders import topology as topo
 
+# The real wrapper opens with multi-arch helper stages; the application image
+# that actually fails comes later.
 DOCKERFILE = (
     '# generated wrapper\n'
+    'FROM busybox:1.36.1-musl AS coretg_iptools\n'
     'FROM vulhub/grafana:8.5.4 AS coretg_userprobe\n'
     'RUN u=$(id -un) && echo "$u" > /tmp/coretg_base_user\n'
     '\n'
     'FROM vulhub/grafana:8.5.4\n'
     'RUN true\n'
 )
+
+ARCH_BY_IMAGE = {'busybox:1.36.1-musl': 'arm64', 'vulhub/grafana:8.5.4': 'amd64'}
 
 
 @pytest.fixture
@@ -33,10 +38,15 @@ def dockerfile(tmp_path):
     return str(path)
 
 
-def _runner(*, image_arch, host_arch, image_rc=0, host_rc=0):
+def _runner(*, image_arch, host_arch, image_rc=0, host_rc=0, manifest=None):
+    """image_arch may be a str (all images) or a dict keyed by image name."""
     def run(args, timeout=None):
         if args[:3] == ['docker', 'image', 'inspect']:
-            return image_rc, image_arch
+            name = args[-1]
+            value = image_arch.get(name, '') if isinstance(image_arch, dict) else image_arch
+            return (image_rc if value or not isinstance(image_arch, dict) else 1), value
+        if args[:3] == ['docker', 'manifest', 'inspect']:
+            return (0, manifest) if manifest is not None else (1, '')
         if args[:2] == ['docker', 'version']:
             return host_rc, host_arch
         return 1, ''
@@ -50,13 +60,13 @@ def _note(dockerfile, **kwargs):
 
 
 def test_mismatch_names_both_architectures_and_the_image(dockerfile):
-    note = _note(dockerfile, image_arch='amd64', host_arch='arm64')
+    note = _note(dockerfile, image_arch=ARCH_BY_IMAGE, host_arch='arm64')
     assert 'vulhub/grafana:8.5.4' in note
     assert 'amd64' in note and 'arm64' in note
 
 
 def test_mismatch_suggests_installing_emulation_for_the_right_arch(dockerfile):
-    note = _note(dockerfile, image_arch='amd64', host_arch='arm64')
+    note = _note(dockerfile, image_arch=ARCH_BY_IMAGE, host_arch='arm64')
     assert 'binfmt --install amd64' in note
 
 
@@ -79,14 +89,48 @@ def test_unknown_architecture_is_not_guessed_at(dockerfile, kwargs):
     assert _note(dockerfile, **kwargs) == ''
 
 
-def test_first_from_line_is_used(tmp_path):
+def test_a_later_stage_is_checked_not_just_the_first(dockerfile):
+    """The regression: the first FROM is a multi-arch helper that matches."""
+    note = _note(dockerfile, image_arch=ARCH_BY_IMAGE, host_arch='arm64')
+    assert 'vulhub/grafana:8.5.4' in note
+    assert 'busybox' not in note, 'the matching helper stage is not the problem'
+
+
+def test_stage_alias_is_stripped_from_the_image_name(tmp_path):
     path = tmp_path / 'Dockerfile'
-    path.write_text('FROM base/one:1 AS probe\nRUN true\nFROM base/two:2\n', encoding='utf-8')
+    path.write_text('FROM base/one:1 AS probe\nRUN true\n', encoding='utf-8')
     note = topo._wrapper_base_platform_note(
         str(path), docker_cmd=['docker'], run=_runner(image_arch='amd64', host_arch='arm64'),
     )
     assert 'base/one:1' in note
-    assert 'AS probe' not in note, 'the stage alias is not part of the image name'
+    assert 'AS probe' not in note
+
+
+def test_registry_manifest_answers_when_nothing_is_pulled(dockerfile):
+    """A failed build can leave no image on disk to inspect."""
+    note = _note(
+        dockerfile,
+        image_arch={},  # nothing cached locally
+        host_arch='arm64',
+        manifest='{"manifests": [{"platform": {"architecture": "amd64"}}]}',
+    )
+    assert 'publishes no arm64 build' in note
+    assert 'binfmt --install amd64' in note
+
+
+def test_multi_arch_manifest_containing_the_host_is_not_flagged(dockerfile):
+    note = _note(
+        dockerfile,
+        image_arch={},
+        host_arch='arm64',
+        manifest='{"manifests": [{"platform": {"architecture": "amd64"}}, '
+                 '{"platform": {"architecture": "arm64"}}]}',
+    )
+    assert note == ''
+
+
+def test_unavailable_manifest_is_not_guessed_at(dockerfile):
+    assert _note(dockerfile, image_arch={}, host_arch='arm64', manifest=None) == ''
 
 
 def test_missing_dockerfile_is_not_fatal(tmp_path):

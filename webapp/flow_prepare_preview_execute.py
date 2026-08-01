@@ -11,6 +11,23 @@ from flask import current_app, jsonify, request
 from typing import Any, Dict
 
 
+def _classify_generator_image_use(run_stdout: Any) -> str:
+    """Return 'cached', 'pulling', or '' for a generator run's output.
+
+    The runner prints exactly one of these per run. A cached hit is reported
+    last-wins because the "not cached" line is also emitted when a build is
+    about to start, and a later run of the same image reports the hit.
+    """
+    text = run_stdout if isinstance(run_stdout, str) else ''
+    if not text:
+        return ''
+    if 'using cached generator image' in text:
+        return 'cached'
+    if 'not cached; will build now' in text:
+        return 'pulling'
+    return ''
+
+
 def _backend_dependencies(backend: Any) -> Any:
     bound_names = [
         '_coerce_bool',
@@ -1142,6 +1159,10 @@ def _execute_or_prepare_assignments(
             occurrence_ctr: dict[tuple[str, str], int] = {}
             total_assignments = len([item for item in (flag_assignments or []) if isinstance(item, dict)])
             run_index = 0
+            # Generator images are tagged with a digest of their source, so a run
+            # either reuses a cached image or has to build/pull one. Surfacing the
+            # split explains why one Generate takes minutes and the next seconds.
+            image_counts = {'pulling': 0, 'cached': 0}
             cleaned_scenario_roots: set[str] = set()
             for fa in (flag_assignments or []):
                 if not isinstance(fa, dict):
@@ -1388,6 +1409,16 @@ def _execute_or_prepare_assignments(
                             flow_progress(
                                 f"Completed generator {run_index}/{total_assignments}: {generator_id} -> {'ok' if ok_run else 'failed'}"
                             )
+                        except Exception:
+                            pass
+
+                        try:
+                            bucket = _classify_generator_image_use(run_stdout)
+                            if bucket:
+                                image_counts[bucket] += 1
+                                flow_progress(
+                                    f"[images] pulling={image_counts['pulling']} cached={image_counts['cached']}"
+                                )
                         except Exception:
                             pass
 

@@ -1034,13 +1034,20 @@ def _wrapper_base_platform_note(dockerfile_path: str, *, docker_cmd, run) -> str
             lines = handle.read().splitlines()
     except Exception:
         return ''
-    base = ''
+    # Every stage matters, not just the first: the wrapper opens with helper
+    # stages (busybox and friends) that are multi-arch, and the image that
+    # actually fails is the application one further down.
+    bases: list[str] = []
     for line in lines:
         text = line.strip()
-        if text.upper().startswith('FROM '):
-            base = text.split(None, 1)[1].split(' AS ')[0].split(' as ')[0].strip()
-            break
-    if not base:
+        if not text.upper().startswith('FROM '):
+            continue
+        name = text.split(None, 1)[1].split(' AS ')[0].split(' as ')[0].strip()
+        # A later stage may build FROM an earlier stage's alias, which is not an
+        # image and cannot be inspected.
+        if name and name not in bases:
+            bases.append(name)
+    if not bases:
         return ''
 
     def _inspect(args):
@@ -1050,17 +1057,36 @@ def _wrapper_base_platform_note(dockerfile_path: str, *, docker_cmd, run) -> str
             return ''
         return str(tail or '').strip() if rc == 0 else ''
 
-    image_arch = _inspect(['image', 'inspect', '--format', '{{.Architecture}}', base])
     host_arch = _inspect(['version', '--format', '{{.Server.Arch}}'])
-    if not image_arch or not host_arch or image_arch == host_arch:
+    if not host_arch:
         return ''
-    return (
-        f"base image {base} is built for {image_arch} but this host runs {host_arch}, "
-        f"so every RUN in the wrapper fails with an exec format error. "
-        f"Install emulation on the CORE VM "
-        f"(docker run --privileged --rm tonistiigi/binfmt --install {image_arch}) "
-        f"or choose a vulnerability whose image publishes a {host_arch} build."
-    )
+    for base in bases:
+        image_arch = _inspect(['image', 'inspect', '--format', '{{.Architecture}}', base])
+        if not image_arch:
+            # A failed build may leave nothing pulled, so ask the registry what
+            # platforms the tag publishes. Absence of the host's architecture is
+            # the same answer, without needing the image on disk.
+            manifest = _inspect(['manifest', 'inspect', base])
+            if not manifest:
+                continue
+            if f'"architecture": "{host_arch}"' in manifest:
+                continue
+            return (
+                f"{base} publishes no {host_arch} build, so nothing from it can run on this host. "
+                f"Install emulation on the CORE VM "
+                f"(docker run --privileged --rm tonistiigi/binfmt --install amd64) "
+                f"or choose a vulnerability whose image publishes a {host_arch} build."
+            )
+        if image_arch == host_arch:
+            continue
+        return (
+            f"base image {base} is built for {image_arch} but this host runs {host_arch}, "
+            f"so every RUN against it fails with an exec format error. "
+            f"Install emulation on the CORE VM "
+            f"(docker run --privileged --rm tonistiigi/binfmt --install {image_arch}) "
+            f"or choose a vulnerability whose image publishes a {host_arch} build."
+        )
+    return ''
 
 
 def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
