@@ -345,6 +345,30 @@ def _read_installed_pack_marker_ids(generator_path: Path) -> list[str]:
     return ids
 
 
+def _reroot_installed_item_path(item_path: Path, installed_root: Path) -> Path:
+    """Re-root an installed item recorded on another host.
+
+    Item paths are stored absolute, so a state file synced to the CORE VM points
+    at directories that only exist on the authoring machine. The layout under
+    `installed_root` is the same on both, so match on the trailing
+    `<kind>/<pack_dir>` and keep the original path when nothing matches.
+    """
+    try:
+        parts = item_path.parts
+    except Exception:
+        return item_path
+    for depth in (2, 1):
+        if len(parts) < depth:
+            continue
+        candidate = installed_root.joinpath(*parts[-depth:])
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            continue
+    return item_path
+
+
 def _load_installed_generator_state(installed_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
     state_path = installed_root / '_packs_state.json'
     try:
@@ -401,6 +425,13 @@ def _load_installed_generator_state(installed_root: Path) -> dict[tuple[str, str
                 item_path = Path(str(item.get('path') or '')).expanduser()
                 if not item_path.is_absolute():
                     item_path = (installed_root / item_path).resolve()
+                elif not item_path.exists():
+                    # `path` is recorded as an absolute path on the authoring
+                    # host, so it never resolves on the CORE VM. Losing it loses
+                    # the marker's alias ids, and the state then keys only by the
+                    # numeric item id -- which let one generator's disabled flag
+                    # suppress a different generator that shares that number.
+                    item_path = _reroot_installed_item_path(item_path, installed_root)
                 for marker_id in _read_installed_pack_marker_ids(item_path):
                     if marker_id not in ids:
                         ids.append(marker_id)
