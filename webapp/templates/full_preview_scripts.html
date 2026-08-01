@@ -3330,12 +3330,13 @@
     // cached. Surface the tally in the header instead of leaving it to scroll
     // past in the log, since it explains the run's duration.
     function applyExecuteImageCounts(line) {
-      const match = /^\[images\]\s+pulling=(\d+)\s+cached=(\d+)$/.exec(String(line || '').trim());
+      const match = /^\[images\]\s+pulling=(\d+)\s+cached=(\d+)(?:\s+pending=(\d+))?$/.exec(String(line || '').trim());
       if (!match) return false;
       try {
         const el = document.getElementById('executeProgressImages');
         if (el) {
-          el.textContent = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached';
+          el.textContent = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached'
+        + (match[3] === undefined ? '' : ' / Pending: ' + match[3]);
           el.classList.remove('d-none');
         }
       } catch (e) { }
