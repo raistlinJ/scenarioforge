@@ -80,6 +80,7 @@ from .utils.vuln_process import (
     resolve_vulnerability_catalog_entry,
     detect_docker_conflicts_for_compose_files,
     remove_docker_conflicts,
+    remove_stale_core_session_images,
     remove_stale_scenarioforge_containers,
 )
 
@@ -6428,6 +6429,18 @@ def main():
                     len(_stale_removed),
                     ', '.join(sorted(_stale_removed)[:12])
                     + ('…' if len(_stale_removed) > 12 else ''),
+                )
+            # CORE reuses a project-scoped image tag whenever it exists, so a
+            # node whose generator changed would otherwise run the previous
+            # session's code. These are build outputs, not a cache.
+            _stale_imgs = remove_stale_core_session_images()
+            _stale_imgs_removed = _stale_imgs.get('removed') or []
+            if _stale_imgs_removed:
+                logging.info(
+                    "Removed %d CORE session image(s) so nodes rebuild from current context: %s",
+                    len(_stale_imgs_removed),
+                    ', '.join(sorted(_stale_imgs_removed)[:12])
+                    + ('…' if len(_stale_imgs_removed) > 12 else ''),
                 )
             for _nm, _err in (_stale.get('errors') or {}).items():
                 logging.warning('Could not remove leftover container %s: %s', _nm, _err)

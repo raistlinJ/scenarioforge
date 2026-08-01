@@ -941,6 +941,66 @@ def detect_docker_conflicts_for_compose_files(paths: list[str]) -> dict:
 
 SCENARIOFORGE_COMPOSE_PATH_PREFIXES = ('/tmp/pycore.', '/tmp/vulns/')
 
+# CORE starts a node with `docker compose --project-name core-<session>-<node>-<name>`,
+# which tags any image it builds `core-<session>-<node>-<name>-<service>`. Session
+# and node ids repeat between runs, so that tag says nothing about content -- and
+# `up -d` builds only when the tag is absent.
+CORE_SESSION_IMAGE_RE = re.compile(r'^core-\d+-\d+-\S+$')
+
+
+def remove_stale_core_session_images() -> dict:
+	"""Remove images CORE built for a previous session's nodes.
+
+	These are not a cache. The tag is project-scoped rather than
+	content-addressed, so a node whose generator changed still matches the old
+	tag and CORE skips the build, silently running the previous run's code:
+
+	    flaggenslot-5 was rebuilt from a Python ticket-portal context, but CORE
+	    reused a 12-hour-old WebDAV image and the container crash-looped on
+	    "DAV_USER: parameter not set"
+
+	Rebuilding costs little -- the layers are cached and no network is needed --
+	whereas keeping them serves a different generator's code. Images that *are*
+	a cache (coretg-gen-* by source digest, coretg/scenarios-*:iproute2 by
+	identity hash, and upstream base images) are untouched.
+	"""
+	result: dict = {'removed': [], 'errors': {}}
+	try:
+		import subprocess
+		import shutil as _sh
+		if not _sh.which('docker'):
+			return result
+		try:
+			listing = subprocess.run(
+				['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'],
+				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
+			)
+		except Exception:
+			return result
+		if listing.returncode != 0:
+			return result
+		for raw in (listing.stdout or '').splitlines():
+			ref = raw.strip()
+			if not ref or ref.startswith('<none>'):
+				continue
+			repository = ref.rsplit(':', 1)[0]
+			if not CORE_SESSION_IMAGE_RE.match(repository):
+				continue
+			try:
+				removed = subprocess.run(
+					['docker', 'image', 'rm', '-f', ref],
+					stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120,
+				)
+				if removed.returncode == 0:
+					result['removed'].append(ref)
+				else:
+					result['errors'][ref] = (removed.stdout or '').strip()[-300:]
+			except Exception as exc:
+				result['errors'][ref] = str(exc)[:300]
+		return result
+	except Exception:
+		return result
+
 
 def remove_stale_scenarioforge_containers(*, include_running: bool = True) -> dict:
 	"""Remove containers left behind by earlier ScenarioForge runs.
