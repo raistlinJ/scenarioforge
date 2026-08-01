@@ -1607,6 +1607,38 @@ def _catalog_ids_with_persistent_items() -> list[str]:
     return out
 
 
+def _persistent_images_skipped_warning(*, count: int, size_bytes: int, limit: int) -> str:
+    """Explain why `persistent` pins were not applied, and what to do about it.
+
+    This is the one path where the operator's pins silently stop working, so
+    the message has to name the cause, the consequence, and a way out rather
+    than reporting a byte count.
+    """
+    from scenarioforge.utils.env_payload import MAX_ARG_STRLEN
+
+    return '\n'.join([
+        'Persistent image pins were NOT applied to this run.',
+        '',
+        f'The pinned list is {count:,} images ({size_bytes:,} bytes), over the '
+        f'{limit:,}-byte ceiling for one value in the remote environment. Linux caps a '
+        f'single argv/environment string at {MAX_ARG_STRLEN:,} bytes, and passing an '
+        'oversized one makes every command on the CORE VM fail with "Argument list too '
+        'long" -- including commands that have nothing to do with this list. It is '
+        'dropped instead.',
+        '',
+        'Effect: this run\'s cleanup cannot see the pins, so pinned images may be removed '
+        'and pulled again next run. The run itself is unaffected.',
+        '',
+        'To restore pin protection, reduce the pinned set:',
+        '  - unpin items that do not need to survive between runs',
+        '  - pin shared base images rather than every catalog item that uses one',
+        '  - unpin items already uninstalled or disabled, which still contribute pins',
+        '',
+        'If a set this large is genuinely needed, the list can be handed over as a file '
+        'instead of an environment value; that removes the ceiling entirely.',
+    ])
+
+
 def _persistent_image_keep_set(*, client: Any | None = None) -> set[str]:
     """Return the set of docker image references that must never be removed by any
     ScenarioForge cleanup routine, because they belong to a vuln-catalog or
@@ -43641,13 +43673,15 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
                 )
             elif keep_blob:
                 # This value rides on the remote command line, so an oversized
-                # one would break every execve there. Losing the pin protection
-                # for one run beats that; a sidecar file is not an option
-                # because the remote reads it before any upload of ours lands.
+                # one would break every execve there. Losing pin protection for
+                # one run beats that.
                 app.logger.warning(
-                    'Persistent image list is %d bytes; skipping it for this run '
-                    'rather than risking an oversized remote environment.',
-                    len(keep_blob.encode('utf-8', 'replace')),
+                    '%s',
+                    _persistent_images_skipped_warning(
+                        count=len(keep_images),
+                        size_bytes=len(keep_blob.encode('utf-8', 'replace')),
+                        limit=MAX_ENV_VALUE_BYTES,
+                    ),
                 )
         except Exception:
             pass

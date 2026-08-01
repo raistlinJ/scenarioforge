@@ -90,6 +90,24 @@ _PREFLIGHTED_DOCKER_NODE_COMPOSES: Set[str] = set()
 # node whose image existed seconds earlier.
 IMAGES_BUILT_THIS_RUN: Set[str] = set()
 
+# Per-node tally of whether images had to be fetched or were already cached.
+# Printed for the execute UI, which otherwise gives no sign of why one run takes
+# minutes and the next seconds.
+_IMAGE_USE_COUNTS: Dict[str, int] = {'pulling': 0, 'cached': 0}
+
+
+def _report_image_use(bucket: str) -> None:
+    try:
+        if bucket not in _IMAGE_USE_COUNTS:
+            return
+        _IMAGE_USE_COUNTS[bucket] += 1
+        print(
+            f"[images] pulling={_IMAGE_USE_COUNTS['pulling']} cached={_IMAGE_USE_COUNTS['cached']}",
+            flush=True,
+        )
+    except Exception:
+        pass
+
 
 def _docker_node_compose_token(node_name: str) -> str:
     raw = str(node_name or '').strip()
@@ -1505,7 +1523,9 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             )
         except Exception:
             pass
+        _report_image_use('cached')
     elif pull_services:
+        _report_image_use('pulling')
         # In strict mode, any pull failure should abort the run.
         pull_args = compose_base + ['pull'] + pull_services
         if not strict_pull:

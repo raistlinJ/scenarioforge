@@ -55,6 +55,49 @@ def test_indicator_element_exists_in_the_modal_header(template: str) -> None:
     assert 'ms-auto' in header, 'it is pinned to the top right'
 
 
+def test_generator_output_modal_carries_the_indicator(template: str) -> None:
+    """Showing that modal hides the overlay, so the overlay alone is invisible."""
+    header = template[template.find('id="flowComposeTitle"') - 400:]
+    header = header[:header.find('modal-body')]
+    assert 'flowComposeImages' in header, 'Generator Output needs its own indicator'
+    assert 'ms-auto' in header, 'it is pinned to the top right'
+
+
+def test_both_flow_surfaces_are_updated_together(template: str) -> None:
+    ids = template[template.find('FLOW_IMAGE_COUNT_ELEMENT_IDS'):]
+    ids = ids[:ids.find(';')]
+    assert 'flowLoadingImages' in ids and 'flowComposeImages' in ids
+
+
+def test_execute_modal_carries_the_indicator() -> None:
+    markup = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview.html').read_text(encoding='utf-8')
+    header = markup[markup.find('id="executeProgressModal"'):]
+    header = header[:header.find('modal-body')]
+    assert 'executeProgressImages' in header
+    assert 'ms-auto' in header, 'it is pinned to the top right'
+
+
+def test_execute_log_feeds_the_indicator() -> None:
+    scripts = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview_scripts.html').read_text(encoding='utf-8')
+    assert 'function applyExecuteImageCounts' in scripts
+    body = scripts[scripts.find('function appendExecuteProgressLog'):]
+    body = body[:body.find('\n    }')]
+    assert 'applyExecuteImageCounts(text)' in body, 'execute lines must reach the indicator'
+
+
+def test_execute_indicator_resets_between_runs() -> None:
+    scripts = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview_scripts.html').read_text(encoding='utf-8')
+    assert 'clearExecuteImageCounts()' in scripts
+
+
+def test_preflight_emits_the_counter_line_for_execute() -> None:
+    """The execute path has no generator runs, so preflight must report."""
+    source = (REPO_ROOT / 'scenarioforge' / 'builders' / 'topology.py').read_text(encoding='utf-8')
+    assert "f\"[images] pulling={_IMAGE_USE_COUNTS['pulling']} cached={_IMAGE_USE_COUNTS['cached']}\"" in source
+    assert "_report_image_use('cached')" in source
+    assert "_report_image_use('pulling')" in source
+
+
 def test_indicator_starts_hidden(template: str) -> None:
     block = template[template.find('id="flowLoadingImages"') - 200:template.find('id="flowLoadingImages"') + 200]
     assert 'd-none' in block
