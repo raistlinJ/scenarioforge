@@ -91,7 +91,9 @@ def test_pull_is_retried_once_before_giving_up(compose_file, monkeypatch):
         attempts['n'] += 1
         return 1 if attempts['n'] == 1 else 0
 
-    _install(monkeypatch, _runner(calls, pull_rc=pull_rc))
+    # inspect_rc=1: the image is absent, so a pull is actually attempted. With a
+    # cached image the pull is skipped and there is nothing to retry.
+    _install(monkeypatch, _runner(calls, pull_rc=pull_rc, inspect_rc=1))
     _preflight(compose_file)
 
     assert len(_pull_calls(calls)) == 2, 'a transient failure should be retried once'
@@ -150,6 +152,41 @@ def test_unverifiable_image_is_not_reported_as_missing(compose_file, monkeypatch
     ))
 
     _preflight(compose_file)  # indeterminate -> must not abort on a false claim
+
+
+def test_no_pull_at_all_when_every_image_is_cached(compose_file, monkeypatch):
+    """A fully cached scenario must not need the registry.
+
+    The pull contacted the network even when nothing needed fetching, which
+    made an otherwise offline-capable run depend on the internet.
+    """
+    calls = []
+    _install(monkeypatch, _runner(calls, pull_rc=0, inspect_rc=0))
+    _preflight(compose_file)
+
+    assert _pull_calls(calls) == [], 'a cached run must issue no pull'
+    inspects = [c for c in calls if c[:3] == ['docker', 'image', 'inspect']]
+    assert any('alpine:3.19' in c for c in inspects), 'presence must be confirmed first'
+
+
+def test_pull_still_happens_when_an_image_is_absent(compose_file, monkeypatch):
+    calls = []
+    _install(monkeypatch, _runner(calls, pull_rc=0, inspect_rc=1))
+    _preflight(compose_file)
+
+    assert _pull_calls(calls), 'a cold cache must still fetch'
+
+
+def test_pull_happens_when_presence_cannot_be_confirmed(compose_file, monkeypatch):
+    """Skipping requires certainty, not merely the absence of bad news."""
+    calls = []
+    _install(monkeypatch, _runner(
+        calls, pull_rc=0, inspect_rc=1,
+        inspect_out='permission denied while trying to connect to the Docker daemon socket',
+    ))
+    _preflight(compose_file)
+
+    assert _pull_calls(calls), 'an unverifiable cache must not suppress the pull'
 
 
 def test_buildable_services_are_never_pulled(compose_file, monkeypatch):
