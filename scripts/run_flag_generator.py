@@ -1125,28 +1125,19 @@ def run_compose(
         "OUTPUTS_DIR": str(outputs_dir.resolve()),
     }
 
-    # If a stable image tag is provided and already cached, skip the build step
-    # only when this Compose supports the explicit --no-build contract.  Older
-    # Compose releases offer no equivalent run flag, so build explicitly before
-    # running; using its implicit image selection could execute stale source.
-    no_build_requested = bool(stable_image_tag and _image_exists_locally(stable_image_tag))
-    no_build_supported = _compose_run_supports_no_build(source_dir, compose_env) if no_build_requested else False
-    no_build = bool(no_build_requested and no_build_supported)
-    if no_build:
-        print(f'[compose] using cached generator image {stable_image_tag} (--no-build)')
-    elif no_build_requested:
-        print(f'[compose] compose lacks --no-build; rebuilding generator image {stable_image_tag} explicitly')
-        build_cmd = [
-            _docker_executable(),
-            'compose',
-            '-f',
-            str(compose_path),
-            '-p',
-            project,
-            'build',
-            service,
-        ]
-        run_cmd(build_cmd, source_dir, compose_env)
+    # The tag carries a digest of the generator's own source, so a tag that
+    # exists cannot be stale: any edit produces a different tag. Reuse it and
+    # skip the build entirely. `--no-build` is passed when this Compose
+    # advertises it, but its absence is no longer a reason to rebuild -- doing
+    # so discarded the cache on every run for the sake of a staleness that the
+    # digest already rules out.
+    cached = bool(stable_image_tag and _image_exists_locally(stable_image_tag))
+    no_build = bool(cached and _compose_run_supports_no_build(source_dir, compose_env))
+    if cached:
+        print(
+            f'[compose] using cached generator image {stable_image_tag}'
+            + (' (--no-build)' if no_build else ' (compose lacks --no-build; not rebuilding)')
+        )
     elif stable_image_tag:
         print(f'[compose] generator image {stable_image_tag} not cached; will build now')
 

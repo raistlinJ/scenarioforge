@@ -151,12 +151,12 @@ def test_source_cache_digest_tracks_generator_source_and_ignores_transient_compo
     assert rfg._source_cache_digest(tmp_path) != initial
 
 
-def test_cached_image_without_no_build_rebuilds_explicitly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _run_compose_capturing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cached: bool, supports_no_build: bool) -> list[list[str]]:
     (tmp_path / 'docker-compose.yml').write_text('services:\n  generator:\n    image: example\n', encoding='utf-8')
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(rfg, '_image_exists_locally', lambda _tag: True)
-    monkeypatch.setattr(rfg, '_compose_run_supports_no_build', lambda *_args: False)
+    monkeypatch.setattr(rfg, '_image_exists_locally', lambda _tag: cached)
+    monkeypatch.setattr(rfg, '_compose_run_supports_no_build', lambda *_args: supports_no_build)
     monkeypatch.setattr(rfg, 'run_cmd', lambda cmd, *_args: calls.append(list(cmd)))
     monkeypatch.setattr(
         rfg,
@@ -173,9 +173,36 @@ def test_cached_image_without_no_build_rebuilds_explicitly(tmp_path: Path, monke
         {},
         stable_image_tag='example:cached',
     )
+    return calls
 
-    assert [command[-2:] for command in calls] == [['build', 'generator'], ['--rm', 'generator']]
-    assert '--no-build' not in calls[1]
+
+def test_cached_image_is_reused_even_without_no_build_support(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tag carries a source digest, so a cached tag can never be stale.
+
+    Rebuilding whenever Compose lacked `--no-build` discarded the cache on every
+    run -- and this Compose does not advertise the flag, so that was every run.
+    """
+    calls = _run_compose_capturing(tmp_path, monkeypatch, cached=True, supports_no_build=False)
+
+    assert len(calls) == 1, 'must not rebuild; only the run remains'
+    assert 'build' not in calls[0]
+    assert calls[0][-1] == 'generator' and '--rm' in calls[0]
+    assert '--no-build' not in calls[0], 'the flag is unsupported here'
+
+
+def test_cached_image_passes_no_build_when_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _run_compose_capturing(tmp_path, monkeypatch, cached=True, supports_no_build=True)
+
+    assert len(calls) == 1
+    assert '--no-build' in calls[0]
+
+
+def test_uncached_image_still_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold cache must still produce the image."""
+    calls = _run_compose_capturing(tmp_path, monkeypatch, cached=False, supports_no_build=False)
+
+    assert len(calls) == 1
+    assert '--no-build' not in calls[0], 'compose must be free to build what is missing'
 
 
 def test_compose_failure_uses_direct_python_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

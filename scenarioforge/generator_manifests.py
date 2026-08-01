@@ -370,16 +370,33 @@ def _reroot_installed_item_path(item_path: Path, installed_root: Path) -> Path:
 
 
 def _load_installed_generator_state(installed_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """State keyed by (kind, id). See `_installed_generator_state_maps`."""
+    return _installed_generator_state_maps(installed_root)[0]
+
+
+def _installed_generator_state_maps(
+    installed_root: Path,
+) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Return installed-pack state keyed by (kind, id) and by pack directory.
+
+    Ids are not unique across packs: an installed pack records both an assigned
+    id (the `__NNN` directory suffix) and the original `source_generator_id`,
+    and the two namespaces overlap -- pack `__110` publishes source id `126`
+    while pack `__126` is itself assigned `126`. Sharing one key space let
+    whichever pack was parsed first claim the key, so a disable could land on a
+    different generator entirely. The pack directory is unique, so prefer it.
+    """
     state_path = installed_root / '_packs_state.json'
     try:
         state = json.loads(state_path.read_text('utf-8', errors='ignore') or '{}')
     except Exception:
-        return {}
+        return {}, {}
     packs = state.get('packs') if isinstance(state, dict) else None
     if not isinstance(packs, list):
-        return {}
+        return {}, {}
 
     by_kind_id: dict[tuple[str, str], dict[str, Any]] = {}
+    by_path: dict[str, dict[str, Any]] = {}
     for pack in packs:
         if not isinstance(pack, dict):
             continue
@@ -432,6 +449,8 @@ def _load_installed_generator_state(installed_root: Path) -> dict[tuple[str, str
                     # numeric item id -- which let one generator's disabled flag
                     # suppress a different generator that shares that number.
                     item_path = _reroot_installed_item_path(item_path, installed_root)
+                if item_path.exists():
+                    by_path.setdefault(str(item_path.resolve()), info)
                 for marker_id in _read_installed_pack_marker_ids(item_path):
                     if marker_id not in ids:
                         ids.append(marker_id)
@@ -439,7 +458,7 @@ def _load_installed_generator_state(installed_root: Path) -> dict[tuple[str, str
                 pass
             for generator_id in ids:
                 by_kind_id.setdefault((item_kind, generator_id), info)
-    return by_kind_id
+    return by_kind_id, by_path
 
 
 def _lookup_installed_generator_state(
@@ -513,7 +532,7 @@ def discover_generator_manifests(
     is_installed_by_id: dict[str, bool] = {}
     conflicting_installed_ids: set[str] = set()
     errors: list[ManifestLoadError] = []
-    installed_state_by_kind_id = _load_installed_generator_state(installed_root)
+    installed_state_by_kind_id, installed_state_by_path = _installed_generator_state_maps(installed_root)
     disabled_suppressed_ids: set[str] = set()
 
     for base_dir in base_dirs:
@@ -608,11 +627,18 @@ def discover_generator_manifests(
 
             installed_disabled_info: dict[str, Any] | None = None
             if is_installed_base:
-                installed_disabled_info = _lookup_installed_generator_state(
-                    installed_state_by_kind_id,
-                    kind=plugin_type,
-                    candidate_ids=[gen_id, installed_source_id, installed_assigned_id, str(doc.get('id') or '')],
-                )
+                # The pack directory identifies exactly one installed item; ids
+                # do not, because assigned and source ids share a namespace.
+                try:
+                    installed_disabled_info = installed_state_by_path.get(str(child.resolve()))
+                except Exception:
+                    installed_disabled_info = None
+                if installed_disabled_info is None:
+                    installed_disabled_info = _lookup_installed_generator_state(
+                        installed_state_by_kind_id,
+                        kind=plugin_type,
+                        candidate_ids=[gen_id, installed_source_id, installed_assigned_id, str(doc.get('id') or '')],
+                    )
                 if (not include_disabled) and installed_disabled_info and installed_disabled_info.get('disabled') is True:
                     disabled_suppressed_ids.add(gen_id)
                     plugins_by_id.pop(gen_id, None)
