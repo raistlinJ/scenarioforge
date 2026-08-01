@@ -1145,6 +1145,16 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             except Exception:
                 pass
         except Exception as exc:
+            # The command never ran to completion, which is not the same as a
+            # command that ran and failed -- but both returned (1, '') here, so
+            # every caller reported a bare rc=1 with nothing to act on. Put the
+            # reason in the tail so it reaches the error message.
+            if isinstance(exc, subprocess.TimeoutExpired):
+                tail = f'[timeout] command exceeded {timeout}s and was killed'
+            elif isinstance(exc, FileNotFoundError):
+                tail = f'[not found] {args[0] if args else "command"} is not installed or not on PATH'
+            else:
+                tail = f'[{type(exc).__name__}] {exc}'
             try:
                 logger.warning('[docker-node] preflight cmd failed node=%s compose=%s cmd=%s err=%s', node_name, compose_path, ' '.join(args), exc)
             except Exception:
@@ -1515,6 +1525,15 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                             if status in ('exited', 'dead') and exit_code != 0:
                                 helper_failed = True
                                 helper_rc = exit_code
+                    if helper_failed and helper_container:
+                        # The container's own output is the only thing that says
+                        # *why* the copy failed; an exit code alone never did.
+                        log_rc, log_tail = _run(
+                            docker_cmd + ['logs', '--tail', '40', helper_container],
+                            timeout=30,
+                        )
+                        if log_rc == 0 and str(log_tail or '').strip():
+                            helper_reason = f'{helper_reason}\n--- {helper_service} logs ---\n{log_tail}'.strip()
                 except Exception:
                     pass
                 if helper_failed:
@@ -1534,8 +1553,13 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                     except Exception:
                         allow_helper_failure = False
                     if inject_copy_required or not allow_helper_failure:
+                        detail = str(helper_reason or '').strip() or (
+                            '(no output from the helper, and no container was left to inspect; '
+                            'the compose command itself most likely never ran)'
+                        )
                         raise RuntimeError(
-                            f"docker compose inject helper failed (node={node_name} compose={compose_path} helper={helper_service} rc={helper_rc})\n{helper_reason}".strip()
+                            f"docker compose inject helper failed (node={node_name} compose={compose_path} "
+                            f"helper={helper_service} rc={helper_rc})\n{detail}"
                         )
 
             up_services = [str(target_service)]
