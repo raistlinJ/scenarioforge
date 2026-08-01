@@ -3322,13 +3322,41 @@
       setExecuteProgressUI({ status: 'Starting…', meta: '', barText: 'Working…', animate: true });
       const logEl = document.getElementById('executeProgressLog');
       if (logEl) logEl.textContent = '';
+      clearExecuteImageCounts();
       try { inst?.show(); } catch (e) { }
+    }
+
+    // Preflight reports whether each node's images were fetched or already
+    // cached. Surface the tally in the header instead of leaving it to scroll
+    // past in the log, since it explains the run's duration.
+    function applyExecuteImageCounts(line) {
+      const match = /^\[images\]\s+pulling=(\d+)\s+cached=(\d+)$/.exec(String(line || '').trim());
+      if (!match) return false;
+      try {
+        const el = document.getElementById('executeProgressImages');
+        if (el) {
+          el.textContent = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached';
+          el.classList.remove('d-none');
+        }
+      } catch (e) { }
+      return true;
+    }
+
+    function clearExecuteImageCounts() {
+      try {
+        const el = document.getElementById('executeProgressImages');
+        if (el) {
+          el.textContent = '';
+          el.classList.add('d-none');
+        }
+      } catch (e) { }
     }
 
     function appendExecuteProgressLog(line) {
       const logEl = document.getElementById('executeProgressLog');
       if (!logEl) return;
       const text = (line === undefined || line === null) ? '' : String(line);
+      if (applyExecuteImageCounts(text)) return;
       try {
         const finalizeMatch = text.match(/\[ui\]\s*Waiting for CORE host to finalize\s*\((\d+)s\)\s*\(([^)]*)\)\s*(?:\[upload:\s*(\d+)%\])?\s*(?:\[finalize:\s*(\d+)%\])?\s*\[last update:\s*(\d+)s ago\]/i);
         if (finalizeMatch) {

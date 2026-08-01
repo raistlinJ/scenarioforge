@@ -305,10 +305,15 @@
                 style="max-width: 1200px; width: calc(100% - 2rem);">
                 <div class="modal-content">
                   <div class="modal-header">
-                    <div class="d-flex align-items-center gap-2">
+                    <div class="d-flex align-items-center gap-2 w-100">
                       <span id="flowComposeSpinner" class="spinner-border spinner-border-sm" role="status"
                         aria-hidden="true"></span>
                       <h5 class="modal-title mb-0" id="flowComposeTitle">Generator Output</h5>
+                      <span
+                        class="small text-muted ms-auto text-nowrap d-none"
+                        id="flowComposeImages"
+                        title="Generator images built or pulled this run, and images reused from the local cache"
+                      ></span>
                     </div>
                   </div>
                   <div class="modal-body">
@@ -2504,27 +2509,37 @@
   // either reuses a cached image or has to build one. The split is the reason a
   // first Generate takes minutes and the next takes seconds, so it belongs in
   // the header rather than buried in the details log.
+  // Whichever surface is up gets the counts: the overlay is hidden outright
+  // while the Generator Output modal is showing, so writing to only one of them
+  // left the indicator invisible exactly when generators were running.
+  const FLOW_IMAGE_COUNT_ELEMENT_IDS = ['flowLoadingImages', 'flowComposeImages'];
+
   function _applyFlowImageCounts(line) {
     const match = /^\[images\]\s+pulling=(\d+)\s+cached=(\d+)$/.exec(String(line || '').trim());
     if (!match) return false;
-    try {
-      const el = document.getElementById('flowLoadingImages');
-      if (el) {
-        el.textContent = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached';
-        el.classList.remove('d-none');
-      }
-    } catch (e) { }
+    const text = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached';
+    FLOW_IMAGE_COUNT_ELEMENT_IDS.forEach((id) => {
+      try {
+        const el = document.getElementById(id);
+        if (el) {
+          el.textContent = text;
+          el.classList.remove('d-none');
+        }
+      } catch (e) { }
+    });
     return true;
   }
 
   function clearFlowImageCounts() {
-    try {
-      const el = document.getElementById('flowLoadingImages');
-      if (el) {
-        el.textContent = '';
-        el.classList.add('d-none');
-      }
-    } catch (e) { }
+    FLOW_IMAGE_COUNT_ELEMENT_IDS.forEach((id) => {
+      try {
+        const el = document.getElementById(id);
+        if (el) {
+          el.textContent = '';
+          el.classList.add('d-none');
+        }
+      } catch (e) { }
+    });
   }
 
   function clearLoadingLog() {

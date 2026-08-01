@@ -826,7 +826,14 @@
   <div class="modal-dialog modal-dialog-centered" style="--bs-modal-width: 1600px; max-width: 95vw;">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">Executing scenario…</h5>
+        <div class="d-flex align-items-center gap-2 w-100">
+          <h5 class="modal-title mb-0">Executing scenario…</h5>
+          <span
+            class="small text-muted ms-auto text-nowrap d-none"
+            id="executeProgressImages"
+            title="Images built or pulled this run, and images reused from the local cache"
+          ></span>
+        </div>
       </div>
       <div class="modal-body">
         <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
