@@ -43627,6 +43627,31 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         # Inject `container_name: <node>` into generated compose by default.
         docker_env_parts.append('CORETG_COMPOSE_SET_CONTAINER_NAME=1')
 
+        # The remote run cannot see the catalog state, so it cannot know which
+        # images the operator pinned as `persistent`. Hand the set over, or its
+        # conflict cleanup deletes them like anything else.
+        try:
+            from scenarioforge.utils.env_payload import MAX_ENV_VALUE_BYTES
+
+            keep_images = sorted(_persistent_image_keep_set())
+            keep_blob = json.dumps(keep_images, ensure_ascii=False) if keep_images else ''
+            if keep_blob and len(keep_blob.encode('utf-8', 'replace')) <= MAX_ENV_VALUE_BYTES:
+                docker_env_parts.append(
+                    'CORETG_PERSISTENT_IMAGES_JSON=' + shlex.quote(keep_blob)
+                )
+            elif keep_blob:
+                # This value rides on the remote command line, so an oversized
+                # one would break every execve there. Losing the pin protection
+                # for one run beats that; a sidecar file is not an option
+                # because the remote reads it before any upload of ours lands.
+                app.logger.warning(
+                    'Persistent image list is %d bytes; skipping it for this run '
+                    'rather than risking an oversized remote environment.',
+                    len(keep_blob.encode('utf-8', 'replace')),
+                )
+        except Exception:
+            pass
+
         if core_cfg.get('ssh_password') and _coerce_bool(docker_use_sudo):
             docker_env_parts.append('CORETG_DOCKER_SUDO_PASSWORD_STDIN=1')
         

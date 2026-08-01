@@ -85,6 +85,11 @@ _PREPARED_DOCKER_NODE_COMPOSES: Set[str] = set()
 # Track which per-node compose files have had docker preflight executed.
 _PREFLIGHTED_DOCKER_NODE_COMPOSES: Set[str] = set()
 
+# Wrapper images this process built. Conflict resolution runs afterwards in the
+# same process, and deleting one of these strands CORE with "No such image" on a
+# node whose image existed seconds earlier.
+IMAGES_BUILT_THIS_RUN: Set[str] = set()
+
 
 def _docker_node_compose_token(node_name: str) -> str:
     raw = str(node_name or '').strip()
@@ -1360,6 +1365,13 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             rc, tail = _run(args, timeout=1800)
             if rc == 0:
                 built_any = True
+                # Conflict resolution runs later in the same process and used to
+                # delete this image before CORE could start the node. Whatever
+                # else it clears, it must never clear what this run just built.
+                try:
+                    IMAGES_BUILT_THIS_RUN.add(str(image))
+                except Exception:
+                    pass
             else:
                 # A base image built for another architecture fails deep inside
                 # the Dockerfile, on whichever RUN executes first, which reads

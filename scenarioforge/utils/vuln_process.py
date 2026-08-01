@@ -924,14 +924,13 @@ def detect_docker_conflicts_for_compose_files(paths: list[str]) -> dict:
 			except Exception:
 				continue
 
-		# An image that exists locally is the cache, not a conflict. Docker has no
-		# image-name conflict to resolve: a tag is simply reused or overwritten.
-		# Reporting every present image here made the caller delete them, which
-		# destroyed the wrapper image preflight had just built for this very run
-		# (CORE then failed with "No such image") and re-pulled alpine:3.19 on
-		# every start. Staleness is handled elsewhere: wrapper tags carry a
-		# sha256 of their identity, and preflight rebuilds them unconditionally.
-		conflicting_images = []
+		for img in all_images:
+			try:
+				p3 = subprocess.run(['docker', 'image', 'inspect', img], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+				if p3.returncode == 0:
+					conflicting_images.append(img)
+			except Exception:
+				continue
 		return {
 			'containers': list(dict.fromkeys(conflicting_containers)),
 			'images': list(dict.fromkeys(conflicting_images)),
@@ -1023,14 +1022,26 @@ def remove_stale_scenarioforge_containers(*, include_running: bool = True) -> di
 		return result
 
 
-def remove_docker_conflicts(conflicts: dict) -> dict:
+def remove_docker_conflicts(conflicts: dict, *, keep_images: Optional[Iterable[str]] = None) -> dict:
 	"""Best-effort removal of conflicting Docker containers/images.
+
+	`keep_images` are never deleted. It must cover two groups:
+
+	- images belonging to catalog or generator items marked `persistent`, which
+	  the operator has pinned so repeat runs need no registry
+	- images this run already built, because conflict resolution runs after
+	  preflight; deleting one strands CORE with "No such image" on a node whose
+	  image existed seconds earlier
+
+	Everything else that is cached but unpinned is still cleared, so a stale
+	image cannot outlive the run that produced it.
 
 	Returns a dict with removal results.
 	"""
 	result = {
 		'removed_containers': [],
 		'removed_images': [],
+		'kept_images': [],
 		'container_errors': {},
 		'image_errors': {},
 	}
@@ -1057,14 +1068,32 @@ def remove_docker_conflicts(conflicts: dict) -> dict:
 			except Exception as exc:
 				result['container_errors'][str(cn)] = str(exc)
 
-		# Images are deliberately kept. Freeing a container name never requires
-		# deleting the image behind it, and doing so deleted the wrapper image
-		# that preflight had already built for this run -- CORE then failed with
-		# "No such image" on a node whose image had existed moments earlier.
-		#
-		# Retention cannot pin stale content: a wrapper tag embeds a sha256 of
-		# its identity, so changed content produces a different tag, and
-		# preflight rebuilds wrappers unconditionally before CORE starts.
+		keep = {str(x or '').strip() for x in (keep_images or []) if str(x or '').strip()}
+		try:
+			from scenarioforge.builders.topology import IMAGES_BUILT_THIS_RUN
+
+			keep |= {str(x or '').strip() for x in IMAGES_BUILT_THIS_RUN if str(x or '').strip()}
+		except Exception:
+			pass
+
+		for img in images:
+			name = str(img or '').strip()
+			if not name:
+				continue
+			if name in keep:
+				result['kept_images'].append(name)
+				continue
+			try:
+				p = subprocess.run(
+					['docker', 'image', 'rm', '-f', name],
+					stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+				)
+				if p.returncode == 0:
+					result['removed_images'].append(name)
+				else:
+					result['image_errors'][name] = (p.stdout or '').strip()[-500:] or f'rc={p.returncode}'
+			except Exception as exc:
+				result['image_errors'][name] = str(exc)
 		return result
 	except Exception:
 		return result

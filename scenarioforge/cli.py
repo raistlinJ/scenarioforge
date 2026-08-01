@@ -1626,6 +1626,28 @@ def _flow_state_from_xml(xml_path: str, scenario_name: str | None) -> dict[str, 
         return None
 
 
+def _persistent_images_to_keep() -> list[str]:
+    """Images the operator pinned as `persistent`, published by the web UI.
+
+    The keep set is computed where the catalog state lives and handed over for
+    the remote run, which has no view of it. Without this the execute path
+    deleted pinned images regardless of the flag, so `persistent` did nothing
+    for the one path that most needed it.
+    """
+    try:
+        from scenarioforge.utils.env_payload import read_env_payload
+
+        raw = read_env_payload('CORETG_PERSISTENT_IMAGES_JSON')
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            return []
+        return [str(x).strip() for x in data if str(x or '').strip()]
+    except Exception:
+        return []
+
+
 def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) -> None:
     """Publish flow assignments for the generator runner.
 
@@ -7451,7 +7473,7 @@ def main():
                             len(c_imgs),
                         )
                         if getattr(args, 'docker_remove_conflicts', False):
-                            rr = remove_docker_conflicts(conflicts)
+                            rr = remove_docker_conflicts(conflicts, keep_images=_persistent_images_to_keep())
                             logging.info(
                                 "Removed Docker conflicts (best-effort): containers=%d images=%d",
                                 len(rr.get('removed_containers') or []),
@@ -7474,7 +7496,7 @@ def main():
                                 except Exception:
                                     ans = ''
                                 if ans in {'y', 'yes'}:
-                                    rr = remove_docker_conflicts(conflicts)
+                                    rr = remove_docker_conflicts(conflicts, keep_images=_persistent_images_to_keep())
                                     logging.info(
                                         "Removed Docker conflicts (best-effort): containers=%d images=%d",
                                         len(rr.get('removed_containers') or []),
