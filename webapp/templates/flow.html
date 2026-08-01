@@ -129,12 +129,6 @@
                 <input id="flowLength" class="form-control" type="number" min="1" max="50" value="5"
                   title="Must be at least the number of topology vulnerability and flag-node-generator nodes.">
               </div>
-              <div class="col-sm-6 col-md-3">
-                <label class="form-label">Preset</label>
-                <select id="flowPreset" class="form-select">
-                  <option value="">Random (default)</option>
-                </select>
-              </div>
               <div class="col-md-4">
                 <div class="d-flex gap-2 flex-wrap align-items-end">
                   <div>
@@ -420,7 +414,6 @@
     const lengthEl = document.getElementById('flowLength');
     const dependencyLevelEl = document.getElementById('flowDependencyLevel');
     const dependencyLevelValueEl = document.getElementById('flowDependencyLevelValue');
-    const presetEl = document.getElementById('flowPreset');
     const btnEl = document.getElementById('flowGenerateBtn');
     const revalidateBtnEl = document.getElementById('flowRevalidateBtn');
     const generateMaxRetriesEl = document.getElementById('flowGenerateMaxRetries');
@@ -638,7 +631,6 @@
       if (!xmlPath || !scenario) return false;
       const flowStatePayload = {
         scenario,
-        preset: '',
         length: 0,
         dependency_level: getFlowDependencyLevel(),
         chain_ids: [],
@@ -739,7 +731,6 @@
     const noticeReasons = reasons.filter((reason) => reason.startsWith('No validated/tested vulnerabilities are currently eligible'));
     if (lengthEl) lengthEl.disabled = !enabled || !flowEligible;
     if (dependencyLevelEl) dependencyLevelEl.disabled = !enabled || !flowEligible;
-    if (presetEl) presetEl.disabled = !enabled || !flowEligible;
     if (btnEl) btnEl.disabled = !enabled || !flowEligible || !!generateInFlight;
     if (flowEnabledToggleEl) {
       flowEnabledToggleEl.disabled = !flowEligible;
@@ -976,11 +967,9 @@
     try {
       const scenario = (scenarioEl && scenarioEl.value || '').trim();
       if (!scenario) return;
-      const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
       const chain_ids = Array.isArray(currentChain) ? currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean) : [];
       if (typeof window.coretgSetSavedFlowStateForScenario !== 'function') return;
       window.coretgSetSavedFlowStateForScenario(scenario, {
-        preset,
         length: chain_ids.length,
         dependency_level: getFlowDependencyLevel(),
         chain_ids: chain_ids,
@@ -1035,7 +1024,6 @@
       : (Array.isArray(currentChain) ? currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean) : []);
     const payload = {
       scenario,
-      preset: (presetEl && presetEl.value) ? String(presetEl.value).trim() : '',
       length: chain_ids.length,
       dependency_level: getFlowDependencyLevel(),
       chain_ids,
@@ -1063,7 +1051,6 @@
       : [];
     return {
       scenario: String(state.scenario || '').trim(),
-      preset: String(state.preset || '').trim(),
       length: chain_ids.length,
       dependency_level: normalizeDependencyLevel(state.dependency_level),
       chain_ids,
@@ -10965,8 +10952,7 @@
     const options = (opts && typeof opts === 'object') ? opts : {};
     const usePreview = !!preferPreview;
     const scenario = (scenarioEl && scenarioEl.value || '').trim();
-    const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
-    let length = preset ? 3 : (parseInt((lengthEl && lengthEl.value) || '5', 10) || 5);
+    let length = parseInt((lengthEl && lengthEl.value) || '5', 10) || 5;
     const dependencyLevel = getFlowDependencyLevel();
     const topologyInclusionOptions = syncTopologyInclusionOptionsFromUi();
     lastResolvePayload = null;
@@ -10998,7 +10984,6 @@
     if (scenario) params.set('scenario', scenario);
     params.set('length', String(length));
     params.set('dependency_level', String(dependencyLevel));
-    if (preset) params.set('preset', preset);
     // Only force preview selection when the user explicitly clicks Generate.
     if (usePreview) {
       params.set('prefer_preview', '1');
@@ -11094,7 +11079,7 @@
           setStatus('Saving XML…', false);
           showLoading('Saving XML…');
           setLoadingSteps(progressSteps, 0);
-          appendLoadingLog(`Preset: ${preset || 'Random'} | Challenges: ${length} | Dependency: ${dependencyLevel}/5`);
+          appendLoadingLog(`Challenges: ${length} | Dependency: ${dependencyLevel}/5`);
           xmlPath = await saveXmlViaFlowState(scenario);
           if (!xmlPath) {
             throw new Error('Save did not return xml_path');
@@ -11282,7 +11267,6 @@
                 scenario,
                 length,
                 dependency_level: dependencyLevel,
-                preset,
                 preview_plan: previewPlanForRequest(),
                 allow_node_duplicates: !!allowDupes,
                 ...topologyInclusionOptions,
@@ -11574,7 +11558,6 @@
                 resolve_request_id: resolveProgressId,
                 length: chain_ids.length,
                 dependency_level: dependencyLevel,
-                preset,
                 chain_ids: chain_ids,
                 preview_plan: previewPlanForRequest(),
                 allow_node_duplicates: !!allowDupes,
@@ -11811,7 +11794,6 @@
                   scenario,
                   length,
                   dependency_level: dependencyLevel,
-                  preset,
                   preview_plan: previewPlanForRequest(),
                   allow_node_duplicates: !!allowDupes,
                   ...topologyInclusionOptions,
@@ -11877,7 +11859,6 @@
         const chain_ids = Array.isArray(currentChain) ? currentChain.map(n => (n && n.id) ? String(n.id) : '').filter(Boolean) : [];
         if (scenario && chain_ids.length && typeof window.coretgSetSavedFlowStateForScenario === 'function') {
           window.coretgSetSavedFlowStateForScenario(scenario, {
-            preset,
             length: chain_ids.length,
             dependency_level: dependencyLevel,
             chain_ids: chain_ids,
@@ -13671,7 +13652,6 @@ ${out.join('\n')}
 
   async function execute() {
     const scenario = (scenarioEl && scenarioEl.value || '').trim();
-    const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
     const length = (Array.isArray(currentChain) && currentChain.length) ? currentChain.length : (parseInt((lengthEl && lengthEl.value) || '5', 10) || 5);
     const hasRuntimeFlowValues = (assignments) => {
       if (!Array.isArray(assignments) || !assignments.length) return false;
@@ -13847,7 +13827,6 @@ ${out.join('\n')}
       showLoading('Saving flow state…');
 
       const scenario = (scenarioEl && scenarioEl.value || activeScenario || '').trim();
-      const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
       const length = (Array.isArray(currentChain) && currentChain.length) ? currentChain.length : (parseInt((lengthEl && lengthEl.value) || '5', 10) || 5);
 
       let xmlPath = '';
@@ -13923,7 +13902,6 @@ ${out.join('\n')}
   async function saveXmlOnly(opts) {
     const options = (opts && typeof opts === 'object') ? opts : {};
     const scenario = (scenarioEl && scenarioEl.value || '').trim();
-    const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
     const length = (Array.isArray(currentChain) && currentChain.length) ? currentChain.length : (parseInt((lengthEl && lengthEl.value) || '5', 10) || 5);
     if (!scenario) {
       setStatus('No scenario selected.', true);
@@ -14084,8 +14062,7 @@ ${out.join('\n')}
         : '';
 
       // Prepare params for sync (similar to generate).
-      const preset = (presetEl && presetEl.value) ? String(presetEl.value).trim() : '';
-      let length = preset ? 3 : (parseInt((lengthEl && lengthEl.value) || '5', 10) || 5);
+      let length = parseInt((lengthEl && lengthEl.value) || '5', 10) || 5;
       const chain_ids = (Array.isArray(currentChain) && currentChain.length)
         ? currentChain.map(n => String(n.id || ''))
         : null;
