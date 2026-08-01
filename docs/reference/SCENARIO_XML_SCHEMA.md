@@ -219,6 +219,10 @@ Consequences worth knowing:
 - Because the planner cannot see the installed catalog, it never names what
   fills a slot. That choice is made during flag-sequencing, where the catalog
   is available, so a slot can never be assigned something that is not installed.
+- Requesting the full challenge ceiling is what reaches the slots. Both kinds
+  count towards `Max challenges` on the flag-sequencing page, and the chain
+  draws on them only when the requested length needs them — a shorter chain
+  leaves them as plain Docker hosts.
 
 Common attributes:
 | Attribute | Applies | Meaning |
