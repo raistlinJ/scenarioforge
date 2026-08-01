@@ -11352,17 +11352,21 @@
               offerDetails.missing_count,
             ].map((value) => Number(value)).find((value) => Number.isFinite(value) && value > 0);
             const countNote = offeredCount ? ` (${offeredCount} needed)` : '';
-            const wantsExpansion = stage === 'existing_docker'
-              ? await confirmFlowAction(
-                  'Use Existing Docker Nodes?',
-                  'The chain cannot be built using only the vulnerabilities and flag-node generators selected in Topology.\n\nUse existing Docker nodes already specified in Topology as additional Flow items' + countNote + '? This does not change the Topology specification.',
-                  'Use Existing Docker Nodes'
-                )
-              : await confirmFlowAction(
-                  'Add Docker Nodes to Topology?',
-                  'The selected topology items and existing Docker nodes still cannot complete this chain.\n\nAdd Docker nodes' + countNote + ' to the Topology specification and continue? This changes the specification, regenerates the plan, and writes the updated XML.',
-                  'Add Docker Nodes'
-                );
+            // Declared slots and spare Docker hosts exist precisely so flag
+            // sequencing can draw on them, and this stage changes nothing in
+            // the Topology specification, so it proceeds without asking.
+            // Adding *new* Docker nodes does change the specification and
+            // rewrites the XML, so that one still confirms.
+            let wantsExpansion = true;
+            if (stage === 'existing_docker') {
+              appendLoadingLog('Using Docker Flow items already specified in Topology' + countNote + '.');
+            } else {
+              wantsExpansion = await confirmFlowAction(
+                'Add Docker Nodes to Topology?',
+                'The selected topology items and existing Docker nodes still cannot complete this chain.\n\nAdd Docker nodes' + countNote + ' to the Topology specification and continue? This changes the specification, regenerates the plan, and writes the updated XML.',
+                'Add Docker Nodes'
+              );
+            }
             if (!wantsExpansion) {
               hideLoading();
               setStatus('Generate cancelled.', false);
