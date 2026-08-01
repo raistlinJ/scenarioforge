@@ -68,22 +68,24 @@ services:
         yaml = None  # type: ignore
     if yaml is not None:
         obj = yaml.safe_load(open(expected_path, encoding="utf-8"))
-        svc = obj["services"]["app"]
-        node_svc = obj["services"]["host-1"]
+        # The source service was aliased to the node name and, having nothing
+        # referencing it, dropped -- so the node service is the only one left
+        # and carries everything. A genuine secondary surrendering its port
+        # intent is covered by test_compose_shared_netns_conflicts.py.
+        assert "app" not in obj["services"], 'the redundant twin should not survive'
+        svc = obj["services"]["host-1"]
+        node_svc = svc
 
         # Option B: no Docker-managed networking, so no docker eth0/default route.
         assert svc.get("network_mode") == "none"
         assert str(svc.get("user") or "") == "0:0"
-        assert str(node_svc.get("user") or "") == "0:0"
         # With network_mode none we should not be publishing ports at all.
         assert "ports" not in svc
-        # Container-side port intent is preserved, but on the node-named
-        # service. CORE moves every other service into that one's network
-        # namespace, and Docker refuses a container that both joins another's
-        # namespace and exposes ports ("conflicting options: port exposing and
-        # the container type network mode"). The port is reachable on the node
-        # service, which is where it now lives.
-        assert "expose" not in svc
+        # Container-side port intent is preserved on the node-named service.
+        # CORE moves every other service into that one's network namespace, and
+        # Docker refuses a container that both joins another's namespace and
+        # exposes ports ("conflicting options: port exposing and the container
+        # type network mode").
         assert "80" in [str(x) for x in (node_svc.get("expose") or [])]
         # Wrapped services now include an explicit working directory.
         assert isinstance(svc.get("working_dir"), str) and str(svc.get("working_dir") or "").strip()
@@ -166,7 +168,7 @@ services:
 
     out_path = tmp_path / "docker-compose-host-2.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
-    svc = (obj or {}).get("services", {}).get("app") or {}
+    svc = (obj or {}).get("services", {}).get("host-2") or (obj or {}).get("services", {}).get("app") or {}
     labels = svc.get("labels") or {}
     wrap_dir = str(labels.get("coretg.wrapper_build_context") or "").strip()
     assert wrap_dir
@@ -213,7 +215,7 @@ services:
 
     out_path = tmp_path / "docker-compose-docker-34.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
-    svc = (obj or {}).get("services", {}).get("app") or {}
+    svc = (obj or {}).get("services", {}).get("docker-34") or (obj or {}).get("services", {}).get("app") or {}
     labels = svc.get("labels") or {}
     wrap_dir = str(labels.get("coretg.wrapper_build_context") or "").strip()
     assert wrap_dir
@@ -255,7 +257,7 @@ services:
 
     out_path = tmp_path / "docker-compose-docker-1.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
-    web = (obj or {}).get("services", {}).get("web") or {}
+    web = (obj or {}).get("services", {}).get("docker-1") or (obj or {}).get("services", {}).get("web") or {}
     labels = web.get("labels") or {}
 
     image = str(web.get("image") or "")
@@ -294,7 +296,7 @@ services:
 
     out_path = tmp_path / "out" / "docker-compose-docker-1.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
-    web = (obj or {}).get("services", {}).get("web") or {}
+    web = (obj or {}).get("services", {}).get("docker-1") or (obj or {}).get("services", {}).get("web") or {}
     labels = web.get("labels") or {}
 
     image = str(web.get("image") or "")
@@ -446,7 +448,7 @@ services:
     obj = yaml.safe_load((tmp_path / "docker-compose-docker-1.yml").read_text("utf-8"))
     services = (obj or {}).get("services") or {}
 
-    assert str((services.get("app") or {}).get("user") or "") == "0:0"
+    assert str((services.get("docker-1") or services.get("app") or {}).get("user") or "") == "0:0"
     assert str((services.get("docker-1") or {}).get("user") or "") == "0:0"
 
 
@@ -497,7 +499,7 @@ CMD ["python", "aiohttpServer.py"]
 
     out_path = out_base / "docker-compose-docker-1.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
-    app = (obj or {}).get("services", {}).get("aiohttp-app") or {}
+    app = (obj or {}).get("services", {}).get("docker-1") or (obj or {}).get("services", {}).get("aiohttp-app") or {}
     labels = app.get("labels") or {}
     build = app.get("build") or {}
     build_context = build.get("context") if isinstance(build, dict) else None
@@ -560,7 +562,7 @@ CMD ["python", "aiohttpServer.py"]
 
     out_path = out_base / "docker-compose-docker-1.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
-    app = (obj or {}).get("services", {}).get("aiohttp-app") or {}
+    app = (obj or {}).get("services", {}).get("docker-1") or (obj or {}).get("services", {}).get("aiohttp-app") or {}
     labels = app.get("labels") or {}
     build = app.get("build") or {}
     build_context = build.get("context") if isinstance(build, dict) else None
@@ -636,7 +638,7 @@ CMD ["mvn", "jetty:run"]
 
         out_path = out_base / "docker-compose-docker-1.yml"
         obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
-        app = (obj or {}).get("services", {}).get("struts2") or {}
+        app = (obj or {}).get("services", {}).get("docker-1") or (obj or {}).get("services", {}).get("struts2") or {}
         labels = app.get("labels") or {}
         build = app.get("build") or {}
         build_context = build.get("context") if isinstance(build, dict) else None
@@ -753,7 +755,7 @@ ENTRYPOINT [ "/docker-entrypoint.sh" ]
     out_path = tmp_path / "docker-compose-docker-1.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
     services = (obj or {}).get("services") or {}
-    docker_svc = services.get("docker") or {}
+    docker_svc = services.get("docker-1") or services.get("docker") or {}
     build = docker_svc.get("build") or {}
     build_context = build.get("context") if isinstance(build, dict) else None
     assert isinstance(build_context, str) and build_context
@@ -798,7 +800,7 @@ def test_prepare_compose_build_only_includes_buster_archive_fallback(tmp_path):
     out_path = tmp_path / "docker-compose-docker-1.yml"
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
     services = (obj or {}).get("services") or {}
-    app = services.get("app") or {}
+    app = services.get("docker-1") or services.get("app") or {}
     build = app.get("build") or {}
     build_context = build.get("context") if isinstance(build, dict) else None
     assert isinstance(build_context, str) and build_context
@@ -1191,7 +1193,7 @@ def test_prepare_compose_materializes_missing_env_file(tmp_path):
     assert str(out_path) in created
     obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
     services = (obj or {}).get("services") or {}
-    assert "web" in services
+    assert "docker-7" in services or "web" in services
     assert "docker-7" in services
     env_paths = []
     for svc in services.values():

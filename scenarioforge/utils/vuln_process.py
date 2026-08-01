@@ -1631,6 +1631,47 @@ CONTAINER_NETWORK_MODE_CONFLICTING_KEYS = (
 )
 
 
+def _compose_service_is_referenced(services: dict, name: str) -> bool:
+	"""Whether any sibling service names `name` in its wiring.
+
+	A service can be pointed at by `depends_on`, by a namespace it joins
+	(`network_mode`/`ipc`/`pid: service:<name>`), or by the legacy `links` and
+	`volumes_from`. Removing a service any of those name breaks the compose file.
+	"""
+	target = str(name or '').strip()
+	if not target or not isinstance(services, dict):
+		return False
+
+	def _names_in(value) -> list:
+		if isinstance(value, dict):
+			return [str(key).strip() for key in value.keys()]
+		if isinstance(value, (list, tuple)):
+			return [str(item).strip() for item in value]
+		if value is None:
+			return []
+		return [str(value).strip()]
+
+	for svc_name, svc in services.items():
+		if str(svc_name).strip() == target or not isinstance(svc, dict):
+			continue
+		if target in _names_in(svc.get('depends_on')):
+			return True
+		for key in ('network_mode', 'ipc', 'pid', 'uts', 'cgroup'):
+			raw = str(svc.get(key) or '').strip()
+			if raw.startswith('service:') and raw.split(':', 1)[1].strip() == target:
+				return True
+		# `links` and `volumes_from` both allow a trailing modifier: `web:alias`,
+		# `web:ro`. The service name is whatever precedes the first colon.
+		for key in ('links', 'volumes_from'):
+			for entry in _names_in(svc.get(key)):
+				if entry.split(':', 1)[0].strip() == target:
+					return True
+		extends = svc.get('extends')
+		if isinstance(extends, dict) and str(extends.get('service') or '').strip() == target:
+			return True
+	return False
+
+
 def _strip_network_conflicts_from_secondary_services(compose_obj: dict, node_name: str) -> dict:
 	"""Drop per-container network options from services CORE will co-locate.
 
@@ -4565,6 +4606,15 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 			try:
 				if _compose_set_container_name_enabled() and isinstance(services.get(node_key), dict):
 					services.get(node_key)['container_name'] = node_key
+			except Exception:
+				pass
+			# The alias is a byte-for-byte copy, so leaving the source behind
+			# builds the same image twice and creates a container that is never
+			# started. Drop it -- but only when no sibling names it, since a
+			# multi-service vuln may wire itself together through that name.
+			try:
+				if not _compose_service_is_referenced(services, src_key):
+					services.pop(src_key, None)
 			except Exception:
 				pass
 			return compose_obj

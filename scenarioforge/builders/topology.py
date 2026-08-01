@@ -3725,6 +3725,17 @@ def _flow_assignments_from_env() -> list[dict[str, Any]]:
         return _FLOW_ASSIGNMENTS_CACHE
     raw = os.environ.get('CORETG_FLOW_ASSIGNMENTS_JSON') or ''
     if not raw:
+        # Large assignment sets travel as a file: putting them in the
+        # environment pushes past MAX_ARG_STRLEN and makes every later execve
+        # fail with E2BIG.
+        path = str(os.environ.get('CORETG_FLOW_ASSIGNMENTS_PATH') or '').strip()
+        if path:
+            try:
+                with open(path, 'r', encoding='utf-8') as fh:
+                    raw = fh.read()
+            except Exception:
+                raw = ''
+    if not raw:
         _FLOW_ASSIGNMENTS_CACHE = []
         return _FLOW_ASSIGNMENTS_CACHE
     try:
