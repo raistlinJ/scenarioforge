@@ -147,6 +147,36 @@ def test_execute_counts_pending_against_the_docker_node_total() -> None:
     assert "pending = max(0, int(_EXPECTED_IMAGE_NODES.get('total') or 0) - done)" in source
 
 
+def test_execute_pending_counts_down(capsys) -> None:
+    """It was pinned at zero: the node total never got established."""
+    from scenarioforge.builders import topology as topo
+
+    topo._IMAGE_USE_COUNTS.update({'pulling': 0, 'cached': 0})
+    topo._set_expected_image_nodes(3)
+    try:
+        for _ in range(3):
+            topo._report_image_use('cached')
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith('[images]')]
+    finally:
+        topo._IMAGE_USE_COUNTS.update({'pulling': 0, 'cached': 0})
+        topo._set_expected_image_nodes(0)
+
+    assert [ln.split('pending=')[1] for ln in lines] == ['2', '1', '0']
+
+
+def test_execute_node_total_uses_the_same_rule_as_the_loop() -> None:
+    """Counting a raw `type` string never matched, so the total stayed zero.
+
+    A host becomes Docker from its role or by the slot plan promoting it, and
+    the count has to follow both or every declared slot is missed.
+    """
+    source = (REPO_ROOT / 'scenarioforge' / 'builders' / 'topology.py').read_text(encoding='utf-8')
+    block = source[source.find('expected_docker = 0'):source.find('_set_expected_image_nodes(expected_docker)')]
+    assert 'map_role_to_node_type' in block, 'the role must be mapped, not compared as a string'
+    assert 'docker_slot_plan' in block, 'slot promotions must be counted'
+    assert "str(_hdata.get('type')" not in block, 'the raw type string never equals the enum'
+
+
 def test_pending_never_goes_negative() -> None:
     """More reports than expected nodes must not print a negative count."""
     from scenarioforge.builders import topology as topo

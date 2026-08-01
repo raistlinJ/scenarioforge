@@ -4880,11 +4880,20 @@ def _try_build_segmented_topology_from_preview(
 
     sorted_hosts = sorted(hosts_data, key=lambda h: h.get('node_id', 0))
     # Each Docker host gets one preflight pass, so this is what the image
-    # counter counts down from.
+    # counter counts down from. A host becomes Docker either from its role or
+    # by the slot plan promoting it, and the loop below decides in that order --
+    # counting only the role misses every declared slot.
     try:
-        _set_expected_image_nodes(
-            sum(1 for h in sorted_hosts if _is_docker_node_type(str(h.get('type') or '')))
-        )
+        expected_docker = 0
+        for _slot_no, _hdata in enumerate(sorted_hosts, start=1):
+            _is_docker = _is_docker_node_type(
+                map_role_to_node_type(str(_hdata.get('role') or 'Host'))
+            )
+            if not _is_docker and docker_slot_plan and f'slot-{_slot_no}' in docker_slot_plan:
+                _is_docker = True
+            if _is_docker:
+                expected_docker += 1
+        _set_expected_image_nodes(expected_docker)
     except Exception:
         pass
     for idx, hdata in enumerate(sorted_hosts):
