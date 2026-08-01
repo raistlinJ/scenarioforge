@@ -1022,6 +1022,47 @@ def _ensure_container_ip_tooling(
     return ok
 
 
+def _wrapper_base_platform_note(dockerfile_path: str, *, docker_cmd, run) -> str:
+    """Explain a wrapper build failure caused by the base image's architecture.
+
+    An amd64-only image on an arm64 host (or the reverse) fails at the first
+    RUN with `exec format error` or a bare non-zero exit, which looks like a
+    broken build step. Name the mismatch and the remedy instead.
+    """
+    try:
+        with open(dockerfile_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        return ''
+    base = ''
+    for line in lines:
+        text = line.strip()
+        if text.upper().startswith('FROM '):
+            base = text.split(None, 1)[1].split(' AS ')[0].split(' as ')[0].strip()
+            break
+    if not base:
+        return ''
+
+    def _inspect(args):
+        try:
+            rc, tail = run(docker_cmd + args, timeout=60)
+        except Exception:
+            return ''
+        return str(tail or '').strip() if rc == 0 else ''
+
+    image_arch = _inspect(['image', 'inspect', '--format', '{{.Architecture}}', base])
+    host_arch = _inspect(['version', '--format', '{{.Server.Arch}}'])
+    if not image_arch or not host_arch or image_arch == host_arch:
+        return ''
+    return (
+        f"base image {base} is built for {image_arch} but this host runs {host_arch}, "
+        f"so every RUN in the wrapper fails with an exec format error. "
+        f"Install emulation on the CORE VM "
+        f"(docker run --privileged --rm tonistiigi/binfmt --install {image_arch}) "
+        f"or choose a vulnerability whose image publishes a {host_arch} build."
+    )
+
+
 def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
     """Return the images confirmed absent from the local daemon.
 
@@ -1272,10 +1313,18 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             if rc == 0:
                 built_any = True
             else:
+                # A base image built for another architecture fails deep inside
+                # the Dockerfile, on whichever RUN executes first, which reads
+                # as a broken build step rather than an image that cannot run
+                # on this host at all.
+                platform_note = _wrapper_base_platform_note(
+                    df_path, docker_cmd=docker_cmd, run=_run,
+                )
                 wrapper_build_failures.append(
                     (
                         f"service={svc_name} image={image} rc={rc} "
                         f"context={ctx_path} dockerfile={df_path}"
+                        + (f"\n{platform_note}" if platform_note else "")
                         + (f"\n{tail}" if tail else "")
                     ).strip()
                 )
