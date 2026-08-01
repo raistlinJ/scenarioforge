@@ -16797,7 +16797,8 @@ def _build_topology_graph_from_session_xml(xml_path: str) -> tuple[list[dict[str
     return out_nodes, out_links, adj
 
 
-def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]], *, length: int) -> list[dict[str, Any]]:
+def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]], *, length: int,
+                           is_eligible: Any | None = None) -> list[dict[str, Any]]:
     """Pick an ordered list of nodes to place flags on.
 
     The chain is considered solvable if each consecutive pair is connected by
@@ -16828,7 +16829,13 @@ def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]]
         # - flag-node-generators require non-vulnerability docker-role nodes (enforced elsewhere)
         is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
-        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
+        if callable(is_eligible):
+            # Callers placing a different challenge kind supply their own rule;
+            # the default below only ever admits vulnerability nodes and
+            # flag-node-generator hosts.
+            if is_eligible(n):
+                eligible_ids.append(nid)
+        elif is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
 
     # De-dupe eligible ids to avoid accidental repeats.
@@ -16959,6 +16966,7 @@ def _pick_flag_chain_nodes_allow_duplicates(
     *,
     length: int,
     seed: int = 0,
+    is_eligible: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Pick an ordered list of eligible nodes, allowing repeats.
 
@@ -16984,7 +16992,13 @@ def _pick_flag_chain_nodes_allow_duplicates(
         t = (str(n.get('type') or '').strip().lower())
         is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
-        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
+        if callable(is_eligible):
+            # Callers placing a different challenge kind supply their own rule;
+            # the default below only ever admits vulnerability nodes and
+            # flag-node-generator hosts.
+            if is_eligible(n):
+                eligible_ids.append(nid)
+        elif is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
 
     # De-dupe eligible ids to avoid accidental repeats.
@@ -17065,6 +17079,52 @@ def _pick_flow_nonvulnerability_docker_nodes(
     if allow_node_duplicates:
         return _pick_flag_chain_nodes_allow_duplicates(eligible, adj, length=length, seed=seed)
     return _pick_flag_chain_nodes(eligible, adj, length=length)
+
+
+def _pick_flow_empty_vulnerability_slot_nodes(
+    nodes: list[dict[str, Any]],
+    adj: dict[str, set[str]],
+    *,
+    length: int,
+    allow_node_duplicates: bool = False,
+    seed: int = 0,
+) -> list[dict[str, Any]]:
+    """Pick from declared VulnerabilitySlots the chain has not filled yet.
+
+    An empty slot is not a vulnerability node yet, so it is not a mandatory
+    step; and it refuses flag-node-generators, so the generic picker skips it
+    too. That left it counted as capacity nothing could ever select. It belongs
+    in the chain: `_flow_fill_empty_vulnerability_slots` draws a vulnerability
+    for every slot the chain reaches, and any slot left over stays a plain
+    Docker node.
+    """
+    if int(length or 0) <= 0:
+        return []
+    eligible = [
+        node for node in (nodes or [])
+        if isinstance(node, dict)
+        and _flow_node_is_docker_role(node)
+        and not _flow_node_is_vuln(node)
+        and _flow_node_challenge_slot_kind(node) == 'vulnerability'
+    ]
+    if not eligible:
+        return []
+
+    def _slot_is_eligible(node: dict[str, Any]) -> bool:
+        # The default rule admits vulnerability nodes and flag-node-generator
+        # hosts; an empty slot is neither, which is what hid it from selection.
+        return (
+            isinstance(node, dict)
+            and _flow_node_is_docker_role(node)
+            and not _flow_node_is_vuln(node)
+            and _flow_node_challenge_slot_kind(node) == 'vulnerability'
+        )
+
+    if allow_node_duplicates:
+        return _pick_flag_chain_nodes_allow_duplicates(
+            eligible, adj, length=length, seed=seed, is_eligible=_slot_is_eligible,
+        )
+    return _pick_flag_chain_nodes(eligible, adj, length=length, is_eligible=_slot_is_eligible)
 
 
 def _pick_flag_chain_nodes_for_preset(
