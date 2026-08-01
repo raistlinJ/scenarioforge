@@ -1002,6 +1002,45 @@ def _ensure_container_ip_tooling(
     return ok
 
 
+def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
+    """Return the images that are not already present in the local daemon.
+
+    A failed pull only blocks the run for images the host does not already
+    have; anything cached from an earlier run starts perfectly well offline.
+    """
+    missing: list[str] = []
+    for image in images:
+        name = str(image or '').strip()
+        if not name or name in missing:
+            continue
+        try:
+            rc, _tail = run(docker_cmd + ['image', 'inspect', name], timeout=60)
+        except Exception:
+            rc = 1
+        if rc != 0:
+            missing.append(name)
+    return missing
+
+
+def _format_pull_failure(*, node_name: str, compose_path: str, args, rc: int, tail: str, missing: list[str]) -> str:
+    """Build an actionable pull-failure message.
+
+    `docker compose pull` can fail with nothing on stdout/stderr, which left the
+    original error a bare rc=1 with no cause to act on.
+    """
+    lines = [f"docker compose pull failed (node={node_name} rc={rc})"]
+    if missing:
+        lines.append(f"images not available locally either: {', '.join(missing)}")
+    lines.append(f"compose: {compose_path}")
+    try:
+        lines.append(f"command: {' '.join(str(a) for a in args)}")
+    except Exception:
+        pass
+    text = str(tail or '').strip()
+    lines.append(text if text else '(the pull produced no output; the registry is usually unreachable or rate-limiting)')
+    return '\n'.join(lines)
+
+
 def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     """Best-effort prepare docker-compose assets before CORE starts docker nodes.
 
@@ -1104,6 +1143,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     # `docker compose pull` fails for buildable services with scenario-scoped tags
     # (e.g., `coretg/scenarios-...`) because those are expected to be built locally.
     pull_services: List[str] = []
+    pull_service_images: dict[str, str] = {}  # service -> image, to check local presence on pull failure
     wrapper_builds: List[tuple[str, str, str, bool]] = []  # (service, image, context, force_pull)
     try:
         import yaml  # type: ignore
@@ -1148,9 +1188,11 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                     pass
                 # pull-only service
                 pull_services.append(str(svc_name))
+                pull_service_images[str(svc_name)] = image
     except Exception:
         # If parsing fails, fall back to best-effort pulls with flags that avoid buildables when available.
         pull_services = []
+        pull_service_images = {}
 
     # Track whether we successfully built anything.
     built_any = False
@@ -1299,14 +1341,58 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             pull_args = compose_base + ['pull', '--ignore-pull-failures'] + pull_services
         rc, tail = _run(pull_args, timeout=600)
         if strict_pull and rc != 0:
-            raise RuntimeError(f"docker compose pull failed (node={node_name} rc={rc})\n{tail}".strip())
+            # A pull is a prefetch, not the run itself. Registry hiccups and Hub
+            # rate limits are transient and routinely hit a CORE VM mid-run, so
+            # retry once, then fall back to what is already on disk: an image
+            # present locally needs no registry at all.
+            rc, tail = _run(pull_args, timeout=600)
+        if strict_pull and rc != 0:
+            missing = _images_missing_locally(
+                [pull_service_images.get(svc, '') for svc in pull_services],
+                docker_cmd=docker_cmd,
+                run=_run,
+            )
+            if not missing:
+                try:
+                    logger.warning(
+                        '[docker-node] preflight pull failed but every image is present '
+                        'locally; continuing node=%s rc=%s images=%s',
+                        node_name, rc, sorted(set(pull_service_images.values())),
+                    )
+                except Exception:
+                    pass
+            else:
+                raise RuntimeError(
+                    _format_pull_failure(
+                        node_name=node_name,
+                        compose_path=compose_path,
+                        args=pull_args,
+                        rc=rc,
+                        tail=tail,
+                        missing=missing,
+                    )
+                )
     else:
         # If we couldn't parse services, try to avoid buildables when supported by this compose version.
         # Strict mode: do not ignore failures.
         if strict_pull:
-            rc, tail = _run(compose_base + ['pull', '--ignore-buildable'], timeout=600)
+            pull_args = compose_base + ['pull', '--ignore-buildable']
+            rc, tail = _run(pull_args, timeout=600)
             if rc != 0:
-                raise RuntimeError(f"docker compose pull failed (node={node_name} rc={rc})\n{tail}".strip())
+                rc, tail = _run(pull_args, timeout=600)
+            if rc != 0:
+                # The compose file did not parse, so there is no image list to
+                # check against; report the command and output instead.
+                raise RuntimeError(
+                    _format_pull_failure(
+                        node_name=node_name,
+                        compose_path=compose_path,
+                        args=pull_args,
+                        rc=rc,
+                        tail=tail,
+                        missing=[],
+                    )
+                )
         else:
             rc, _tail = _run(compose_base + ['pull', '--ignore-buildable'], timeout=600)
             if rc != 0:
