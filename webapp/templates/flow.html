@@ -381,6 +381,11 @@
     <div class="d-flex align-items-center gap-2">
       <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
       <div class="fw-semibold" id="flowLoadingText">Loading…</div>
+      <div
+        class="small text-muted ms-auto text-nowrap d-none"
+        id="flowLoadingImages"
+        title="Generator images built or pulled this run, and images reused from the local cache"
+      ></div>
     </div>
     <div class="small text-muted mt-2" id="flowLoadingStepsLabel">Progress steps</div>
     <div
@@ -2474,6 +2479,7 @@
           const s = String(ln || '').trim();
           if (!s || seen.has(s)) return;
           seen.add(s);
+          if (_applyFlowImageCounts(s)) return;
           const display = _formatFlowProgressLine(s);
           newLines.push(display);
           const status = _composeStatusFromProgressLine(s);
@@ -2494,8 +2500,36 @@
     return () => { cancelled = true; };
   }
 
+  // Generator images are tagged with a digest of their source, so each run
+  // either reuses a cached image or has to build one. The split is the reason a
+  // first Generate takes minutes and the next takes seconds, so it belongs in
+  // the header rather than buried in the details log.
+  function _applyFlowImageCounts(line) {
+    const match = /^\[images\]\s+pulling=(\d+)\s+cached=(\d+)$/.exec(String(line || '').trim());
+    if (!match) return false;
+    try {
+      const el = document.getElementById('flowLoadingImages');
+      if (el) {
+        el.textContent = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached';
+        el.classList.remove('d-none');
+      }
+    } catch (e) { }
+    return true;
+  }
+
+  function clearFlowImageCounts() {
+    try {
+      const el = document.getElementById('flowLoadingImages');
+      if (el) {
+        el.textContent = '';
+        el.classList.add('d-none');
+      }
+    } catch (e) { }
+  }
+
   function clearLoadingLog() {
     try {
+      clearFlowImageCounts();
       if (!loadingLogEl) return;
       loadingLogEl.innerHTML = '';
       loadingLogEl.classList.add('d-none');
