@@ -1626,52 +1626,28 @@ def _flow_state_from_xml(xml_path: str, scenario_name: str | None) -> dict[str, 
         return None
 
 
-# Linux caps a single argv/envp string at MAX_ARG_STRLEN (32 pages = 128 KiB).
-# Exceed it and *every* subsequent execve fails with E2BIG, so an oversized
-# variable here breaks unrelated commands -- docker, compose, everything -- with
-# an OSError that never reaches the command being blamed. Stay well under it and
-# hand large payloads over as a file instead.
-_FLOW_ASSIGNMENTS_ENV_MAX_BYTES = 64 * 1024
-
-
 def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) -> None:
+    """Publish flow assignments for the generator runner.
+
+    17 challenges already serialize to ~140 KB, past the kernel's per-string
+    argv/envp limit, so this goes through `set_env_payload` rather than
+    straight into the environment.
+    """
     try:
+        from scenarioforge.utils.env_payload import set_env_payload
+
         fs = _flow_state_from_xml(xml_path, scenario_name)
         assigns = fs.get('flag_assignments') if isinstance(fs, dict) else None
         if not (isinstance(assigns, list) and assigns):
             return
-        blob = json.dumps(assigns, ensure_ascii=False)
-        # 17 challenges already produce ~140 KB, which is over the kernel cap.
-        if len(blob.encode('utf-8', 'replace')) <= _FLOW_ASSIGNMENTS_ENV_MAX_BYTES:
-            os.environ['CORETG_FLOW_ASSIGNMENTS_JSON'] = blob
-            os.environ.pop('CORETG_FLOW_ASSIGNMENTS_PATH', None)
-            return
-        os.environ.pop('CORETG_FLOW_ASSIGNMENTS_JSON', None)
-        path = _write_flow_assignments_sidecar(blob)
-        if path:
-            os.environ['CORETG_FLOW_ASSIGNMENTS_PATH'] = path
+        set_env_payload(
+            os.environ,
+            'CORETG_FLOW_ASSIGNMENTS_JSON',
+            json.dumps(assigns, ensure_ascii=False),
+            sidecar_dir=os.path.join('/tmp', 'vulns'),
+        )
     except Exception:
         pass
-
-
-def _write_flow_assignments_sidecar(blob: str) -> str:
-    """Write flow assignments beside the run and return the path, or ''."""
-    try:
-        base = os.path.join('/tmp', 'vulns')
-        os.makedirs(base, exist_ok=True)
-        path = os.path.join(base, 'flow_assignments.json')
-        with open(path, 'w', encoding='utf-8') as fh:
-            fh.write(blob)
-        return path
-    except Exception:
-        try:
-            import tempfile
-            fd, path = tempfile.mkstemp(prefix='flow_assignments_', suffix='.json')
-            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
-                fh.write(blob)
-            return path
-        except Exception:
-            return ''
 
 
 def _flow_read_outputs_map_from_artifacts_dir(artifacts_dir: str) -> dict[str, Any]:
