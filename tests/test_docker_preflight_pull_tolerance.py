@@ -60,14 +60,17 @@ def _preflight(compose_path, node_name='flaggenslot-1'):
     topo._docker_compose_preflight(str(compose_path), node_name=node_name)
 
 
-def _runner(calls, *, pull_rc, pull_out='', inspect_rc=0):
+def _runner(calls, *, pull_rc, pull_out='', inspect_rc=0, inspect_out=None):
+    if inspect_out is None:
+        inspect_out = '' if inspect_rc == 0 else 'Error: No such image: alpine:3.19'
+
     def fake_run(args, stdout=None, stderr=None, text=None, timeout=None, input=None):
         argv = list(args)
         calls.append(argv)
         if 'pull' in argv:
             return _Proc(pull_rc() if callable(pull_rc) else pull_rc, pull_out)
         if argv[:3] == ['docker', 'image', 'inspect']:
-            return _Proc(inspect_rc, '')
+            return _Proc(inspect_rc, inspect_out)
         if argv[:2] == ['docker', 'inspect']:
             # Preflight polls for a non-zero PID; without one it waits out the
             # full budget and then fails for an unrelated reason.
@@ -130,6 +133,23 @@ def test_empty_pull_output_still_explains_itself(compose_file, monkeypatch):
     message = str(excinfo.value)
     assert 'no output' in message
     assert str(compose_file) in message, 'the compose path locates the problem'
+
+
+def test_unverifiable_image_is_not_reported_as_missing(compose_file, monkeypatch):
+    """A daemon/sudo error is not evidence the image is absent.
+
+    Blaming a present image for a sudo failure sent the reader after the wrong
+    problem entirely.
+    """
+    calls = []
+    _install(monkeypatch, _runner(
+        calls,
+        pull_rc=1,
+        inspect_rc=1,
+        inspect_out='permission denied while trying to connect to the Docker daemon socket',
+    ))
+
+    _preflight(compose_file)  # indeterminate -> must not abort on a false claim
 
 
 def test_buildable_services_are_never_pulled(compose_file, monkeypatch):
