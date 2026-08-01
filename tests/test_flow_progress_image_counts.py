@@ -90,6 +90,30 @@ def test_execute_indicator_resets_between_runs() -> None:
     assert 'clearExecuteImageCounts()' in scripts
 
 
+def test_execute_summary_carries_the_indicator() -> None:
+    """The progress modal is gone by the time the summary is read."""
+    markup = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview.html').read_text(encoding='utf-8')
+    header = markup[markup.find('id="executeSummaryModal"'):]
+    header = header[:header.find('modal-body')]
+    assert 'executeSummaryImages' in header
+    assert 'ms-auto' in header, 'it is pinned to the top right'
+
+
+def test_both_execute_surfaces_are_updated_together() -> None:
+    scripts = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview_scripts.html').read_text(encoding='utf-8')
+    ids = scripts[scripts.find('EXECUTE_IMAGE_COUNT_ELEMENT_IDS'):]
+    ids = ids[:ids.find(';')]
+    assert 'executeProgressImages' in ids and 'executeSummaryImages' in ids
+
+
+def test_the_summary_figure_is_cleared_when_a_new_run_starts() -> None:
+    """Otherwise the summary would show the previous run's tally."""
+    scripts = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview_scripts.html').read_text(encoding='utf-8')
+    clear = scripts[scripts.find('function clearExecuteImageCounts'):]
+    clear = clear[:clear.find('\n    function ')]
+    assert 'EXECUTE_IMAGE_COUNT_ELEMENT_IDS' in clear, 'the clear must cover both surfaces'
+
+
 def test_preflight_emits_the_counter_line_for_execute() -> None:
     """The execute path has no generator runs, so preflight must report."""
     source = (REPO_ROOT / 'scenarioforge' / 'builders' / 'topology.py').read_text(encoding='utf-8')
