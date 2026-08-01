@@ -1089,6 +1089,28 @@ def _wrapper_base_platform_note(dockerfile_path: str, *, docker_cmd, run) -> str
     return ''
 
 
+def _all_images_present_locally(images, *, docker_cmd, run) -> bool:
+    """True only when every image is positively confirmed in the local store.
+
+    A pull contacts the registry even when nothing needs fetching, which makes
+    an otherwise fully cached run require the internet. Skipping it demands
+    certainty, so anything short of a clean `docker image inspect` for every
+    image answers False and the pull goes ahead.
+    """
+    names = [str(image or '').strip() for image in (images or [])]
+    names = [name for name in names if name]
+    if not names:
+        return False
+    for name in dict.fromkeys(names):
+        try:
+            rc, _tail = run(docker_cmd + ['image', 'inspect', '--format', '{{.Id}}', name], timeout=60)
+        except Exception:
+            return False
+        if rc != 0:
+            return False
+    return True
+
+
 def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
     """Return the images confirmed absent from the local daemon.
 
@@ -1455,7 +1477,23 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         _run(build_args, timeout=1200)
 
     # Pull only non-build services (if any). This avoids pulling scenario-scoped build targets.
-    if pull_services:
+    cached_pull_services = bool(pull_services) and _all_images_present_locally(
+        [pull_service_images.get(svc, '') for svc in pull_services],
+        docker_cmd=docker_cmd,
+        run=_run,
+    )
+    if cached_pull_services:
+        # Every pull-only image is already on this host, so the run needs no
+        # registry at all. Pulling anyway made a fully cached scenario depend on
+        # the internet for nothing.
+        try:
+            logger.info(
+                '[docker-node] preflight pull skipped node=%s; every pull-only image is cached: %s',
+                node_name, sorted({img for img in pull_service_images.values() if img}),
+            )
+        except Exception:
+            pass
+    elif pull_services:
         # In strict mode, any pull failure should abort the run.
         pull_args = compose_base + ['pull'] + pull_services
         if not strict_pull:
