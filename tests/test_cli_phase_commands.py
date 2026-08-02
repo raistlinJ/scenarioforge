@@ -571,8 +571,12 @@ def test_cli_execute_cleanup_runs_default_remove_actions(monkeypatch, caplog):
     assert ['core-cleanup'] in local_calls
     assert ['docker', 'container', 'prune', '-f'] in docker_calls
     assert ['docker', 'image', 'prune', '-f'] in docker_calls
-    assert any(cmd[:2] == ['sh', '-lc'] and 'coretg-gen-' in cmd[2] for cmd in local_calls)
-    assert any(cmd[:2] == ['sh', '-lc'] and '_wrapper' in cmd[2] for cmd in local_calls)
+    # Generated images are now selected in Python against the persistent keep
+    # set, replacing a `docker images | grep | xargs rmi -f` pipeline that
+    # matched only legacy names and ignored pins.
+    assert ['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'] in docker_calls
+    assert ['docker', 'builder', 'prune', '-af'] in docker_calls
+    assert not any(cmd[:2] == ['sh', '-lc'] and 'rmi -f' in cmd[2] for cmd in local_calls)
 
 
 def test_cli_flag_sequencing_cleanup_runs_default_remove_actions(monkeypatch, caplog):

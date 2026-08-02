@@ -7,6 +7,7 @@ Use this page to navigate the main project documentation.
 - [Operating Modes](OPERATING_MODES.md)
 - [Runtime Validation (strict by default)](QUICK_START.md#runtime-validation)
 - [Catalog Batch Testing](CATALOG_BATCH_TESTING.md)
+- [Artifact Checks (validate a running session)](CLI_EXECUTION_DEEP_DIVE.md#check-artifacts-phase)
 - [Screenshots](screenshots.md)
 
 ## Core workflows
@@ -16,6 +17,8 @@ Use this page to navigate the main project documentation.
 - [Full Preview Workflow](FULL_PREVIEW_WORKFLOW.md)
 - Flag Sequencing API, XML synchronization, retry IDs, and long-request behavior are documented in the [REST API Reference](reference/API.md#flag-sequencing-flow).
 - [Feature Deep Dive](FEATURE_DEEP_DIVE.md)
+- [Artifact Checks](FEATURE_DEEP_DIVE.md#artifact-checks-live-session-validation) – validate a running session's containers, services, ports, injects, segmentation, traffic, and reachability.
+- [Solutions Script](FEATURE_DEEP_DIVE.md#solutions-script) – downloadable script that verifies the deployed challenges are solvable.
 - AI Generator state flow and persistence are documented in [Feature Deep Dive](FEATURE_DEEP_DIVE.md#ai-generator-workflow).
 - Recent AI generator compiler, validation, retry, and preview-sync improvements are summarized in [AI Generator Workflow](AI_GENERATOR_WORKFLOW.md).
 

@@ -19,6 +19,8 @@ The CLI supports these phases:
 - `flag-sequencing`: compute or reuse a Flow chain and optionally resolve generator outputs into embedded `FlowState`.
 - `topo`: compute the topology and build it in CORE, then stop before segmentation, traffic, report generation, and session start.
 - `execute`: run the full legacy/default execute path.
+- `check-artifacts`: validate a running CORE session against its scenario (containers, services, ports, injects, segmentation, traffic, reachability).
+- `list-sessions`: list running CORE sessions with the scenario and source XML each one came from.
 
 If you omit the phase name, the CLI uses `execute`.
 
@@ -225,6 +227,8 @@ python -m scenarioforge.cli execute \
 Behavior:
 
 - Parses the scenario XML.
+- Removes the Docker images this application built — iproute2 wrappers (`coretg/<slug>:iproute2`), generator-pack builds (`p_<stamp>__<n>-generator`), CORE's per-node compose builds (`docker-27conf-docker-27`, `docker-11-node`), and per-session `core-<session>-<node>-*` images — and prunes the entire Docker build cache. Images an operator marked **persistent** are never removed, matching either the exact `repo:tag` or the repository. Base images, vulhub pulls, and anything else on the host are left alone, because re-pulling them needs a registry the CORE host may not be able to reach. Removal is not forced, so an image still referenced by a container (a session that is still up) is skipped rather than pulled out from under it. Expect the first run after a cleanup to rebuild wrapper and generator images.
+- Empties the shared runtime scratch directories (`/tmp/traffic`, `/tmp/segmentation`), so a scenario with no traffic or no segmentation does not inherit the previous scenario's artifacts. These directories are bind-mounted read-only into nodes and hold only the current run's live scripts and summaries, so their contents are removed wholesale; the directories themselves are kept (and created when absent) because compose bind-mounts reference the paths. `topo` does not do this, because it generates neither. Treat these directories as scratch owned by the newest run — do not park anything there you want to keep.
 - Computes planning and preview alignment.
 - Validates embedded Flow runtime values when Flow is active.
 - Builds the topology.
@@ -249,6 +253,83 @@ Execute parity notes:
 - `--seed` is still the clearest way to force deterministic recomputation across separate CLI runs. Embedded `PlanPreview` helps with saved preview alignment, but it does not replace an explicit seed when you want repeatable planner randomness end to end.
 - If the resolved CORE target is remote, the terminal CLI delegates to a remote CLI process and now forwards the resolved scenario name and effective preview-plan source to that remote process, matching the Web UI path more closely.
 - Avoid using `outputs/tmp-preview-*` XMLs as long-lived execute targets. They are temporary staging artifacts; use a saved scenario XML under `outputs/scenarios-*` or rerun preview/Flow resolve and Save before executing.
+
+## List-Sessions Phase
+
+`list-sessions` shows what is currently running on the configured CORE target, together with the scenario name and the saved source XML each session was started from. It does not need `--xml`.
+
+```bash
+python -m scenarioforge.cli list-sessions
+python -m scenarioforge.cli list-sessions --scenario "MyLab"
+```
+
+```text
+SESSION  STATE    SCENARIO   XML
+-------  -------  ---------  --------------------------------------------------
+1        RUNTIME  Scenario2  /abs/path/outputs/scenarios-08-01-26-15-26-34/Scenario2.xml
+```
+
+The XML column deliberately prefers a saved *source* scenario XML (one carrying `ScenarioEditor`) over an exported `outputs/core-sessions/session-<id>.xml`, so the path it prints is the one `check-artifacts` and the other phases expect.
+
+## Check-Artifacts Phase
+
+`check-artifacts` validates a **running** session against what the scenario said it should be. It runs seven ordered checks:
+
+1. Containers are running on the correct nodes.
+2. Services are running.
+3. Service ports are open and reachable across the CORE network.
+4. Inject files are present in the right location on the nodes.
+5. Firewall/segmentation rules are in place.
+6. Traffic scripts are running where they should be.
+7. Each traffic source can reach its destination (ping).
+
+```bash
+# Standalone against a running session
+python -m scenarioforge.cli check-artifacts \
+  --session-id 1 \
+  --xml /abs/path/outputs/scenarios-.../Scenario2.xml
+
+# Give routing convergence and slow services time to settle first
+python -m scenarioforge.cli check-artifacts --session-id 1 --xml "$XML" \
+  --check-artifacts-delay 45
+
+# Fail the run on warnings too
+python -m scenarioforge.cli check-artifacts --session-id 1 --xml "$XML" --strict
+```
+
+Behavior and options:
+
+- `--session-id` is optional. When omitted, the most recent session recorded for the scenario in `outputs/core_sessions.json` is used. The session is confirmed to be live before any checks run, so a stale or wrong id fails immediately instead of silently validating a different session.
+- `--check-artifacts-delay SECONDS` waits before probing. Use it whenever routing needs to converge or slow containers are still starting.
+- `--strict` promotes warnings to failures. By default only `fail` and `error` checks exit nonzero; `warn` exits `0`.
+- The XML you pass may be either a saved source scenario XML or the deployed session XML; the CLI recovers the real source XML from the session store when needed.
+
+Checks 1-4 reuse the same validator as `--post-execution-validation`. Checks 5-7 are live probes executed on the CORE VM over SSH, reaching Docker-backed nodes with `docker exec` and namespaced CORE vnodes (routers/PCs) with `vcmd`.
+
+Output is a per-check table followed by a single machine-readable marker line, `CHECK_ARTIFACTS_SUMMARY_JSON: {...}`, matching the `VALIDATION_SUMMARY_JSON` convention:
+
+```text
+[PASS ] Containers running on correct nodes: All 22 expected containers present.
+[PASS ] Ports open: All 32 stable service port target(s) reachable (33 listening across 24 node(s)).
+[SKIP ] Traffic scripts running: No traffic configured for this scenario.
+------------------------------------------------------------------------
+Overall: pass — 4 pass, 3 skip
+CHECK_ARTIFACTS_SUMMARY_JSON: {"ok": true, "overall": "pass", ...}
+```
+
+The console table lists only actionable detail rows (`warn`/`fail`); the marker payload retains every row for downstream harnesses.
+
+### Running checks automatically after execute
+
+`execute` accepts the same flags so a full run can validate itself:
+
+```bash
+python -m scenarioforge.cli execute --xml "$XML" --scenario "MyLab" \
+  --post-execution-validation \
+  --check-artifacts --check-artifacts-delay 45
+```
+
+The checks run after execute and post-execution validation, so they add findings rather than masking an earlier failure. `--strict` applies here too.
 
 ## Recommended Workflows
 

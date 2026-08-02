@@ -894,6 +894,12 @@ Selection precedence:
 `GET /core/session/<sid>`
 : Convenience view for a single session.
 
+`POST /core/check_artifacts/start`
+: Form or JSON body with `session_id` (required), `xml_path` (required; a saved scenario XML or the deployed session path), and optional `scenario`. Starts the artifact checks for a running session in a background job and returns `{ "ok": true, "check_id": "<hex>" }`. The server recovers the saved source scenario XML from the session store when the supplied path carries no `ScenarioEditor` data.
+
+`GET /core/check_artifacts/status/<check_id>`
+: Polled progress for a started check run. Returns `status` (`queued`/`running`/`complete`/`error`), `step`/`total`, the current `label`, `overall` plus `overall_summary`, and a `checks` array of `{key, label, status, summary, items[]}` where each status is `pass`, `warn`, `fail`, `error`, `skip`, `pending`, or `running`. Returns `404` with `{"status": "unknown"}` for an unrecognized id.
+
 `POST /test_core`
 : Form or JSON body with `host` (string) and `port` (int). Returns `{ "ok": true }` when gRPC connectivity succeeds.
 

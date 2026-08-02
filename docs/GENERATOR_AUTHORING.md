@@ -519,6 +519,24 @@ access_instructions:
 **For flag-node-generators:**
 - Describe how to mount, connect to, or exploit the generated node/service.
 
+**These steps also drive the Solutions Script.**
+
+Beyond the human guides, `access_instructions` is the input to the downloadable
+[Solutions Script](FEATURE_DEEP_DIVE.md#solutions-script), which verifies that a deployed
+scenario is actually solvable. To keep a generator automatable:
+
+- Put the entry-point command in a fenced ```bash block. The script detects `ssh`,
+  `curl`/`wget`, `nc`, and `mount -t nfs`, scanning past setup lines such as `chmod`.
+  A step whose only commands use some other tool is reported as `SKIP`.
+- Keep protocol dialogs in a fenced ```text block; those lines are piped to the service.
+- Prefer the `vars` map over relying on the heuristic placeholder table. `vars` binds a
+  placeholder to an exact artifact key and wins over the built-in guesses.
+- If a step is gated on a value produced earlier, name the fact and the parameter in
+  backticks — for example, ``Provide the previous `Checksum(sha256)` as `sha256` or
+  `X-Checksum-SHA256`.`` The script parses that phrasing and presents the resolved value
+  as both a query parameter and a header.
+- Currently only **flag-node-generators** are automated; flag-generator steps are skipped.
+
 ---
 
 ## 6) Local testing

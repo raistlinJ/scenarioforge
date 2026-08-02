@@ -173,6 +173,45 @@ Runtime validation is built into Execute and CLI runs.
 - A healthy strict validation has `validation_summary.ok == true` and zero issue counters such as `missing_nodes`, `docker_not_running`, `injects_missing`, `generator_outputs_missing`, and `generator_injects_missing`.
 - An empty editor project does not create scenario XML or runtime validation artifacts until at least one scenario exists and is executed.
 
+## Checking a running session
+
+Runtime validation above confirms the deployment. Artifact checks go further and probe the live session: containers on the correct nodes, services running, service ports reachable across the CORE network, injects placed, segmentation enforced, traffic scripts running, and each traffic source reaching its destination.
+
+From the Web UI, use the **Check Artifacts** icon button next to a running session in the CORE page's Active sessions card.
+
+From the CLI:
+
+```bash
+# See what is running, with the scenario and source XML for each session
+python -m scenarioforge.cli list-sessions
+
+# Validate one session; the delay lets routing converge first
+python -m scenarioforge.cli check-artifacts --session-id 1 --xml "$XML" \
+  --check-artifacts-delay 45
+
+# Or have execute validate itself
+python -m scenarioforge.cli execute --xml "$XML" --scenario "$SCENARIO" \
+  --post-execution-validation --check-artifacts --check-artifacts-delay 45
+```
+
+`fail` and `error` exit nonzero; `warn` exits `0` unless you add `--strict`. A `skip` simply means the scenario never configured that feature. Details are in the [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md#check-artifacts-phase).
+
+## Checking that challenges are solvable
+
+To confirm participants can actually solve a deployed scenario, download the **Solutions Script** from the Reports page **Downloads** menu. It walks the resolved attack chain, retrieves each step's flag, and prints PASS/FAIL/INCONCLUSIVE/SKIP with reasoning.
+
+```bash
+chmod +x solutions_<scenario>_<n>.sh
+
+# Run directly when this host routes to the CORE node subnet
+./solutions_<scenario>_<n>.sh
+
+# In VM mode, tunnel each step through the CORE VM
+./solutions_<scenario>_<n>.sh --ssh-host 12.0.0.100 --ssh-user corevm -v
+```
+
+It covers flag-node-generator steps; other steps are reported as `SKIP`. See [Feature Deep Dive](FEATURE_DEEP_DIVE.md#solutions-script).
+
 ## Catalog preflight and batch tests
 
 Run these before Execute when you want to catch catalog start or inject issues early.

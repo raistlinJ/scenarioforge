@@ -26,6 +26,8 @@ Generate reproducible CORE network topologies from scenario XML files using a ri
 - **VM-mode first for realistic labs** – run ScenarioForge as the control application for a Proxmox-hosted CORE 9.2 VM and a participant machine such as Kali, with CORE gRPC, SSH validation, and HITL bridge workflows tied into the UI.
 - **Preview before execution** – inspect topology graphs, challenge chains, vulnerability placement, node roles, and generated artifacts before starting the CORE session.
 - **Catalog checks before execution** – batch-test vulnerability catalog items, flag-generators, and flag-node-generators from the CLI before starting a full scenario Execute run.
+- **Artifact checks after execution** – validate a running session in place: containers on the right nodes, services up, ports reachable across the CORE network, injects delivered, segmentation enforced, traffic running, and nodes reachable. Available as a per-session button on the CORE page and as the `check-artifacts` CLI phase.
+- **Verify the challenges are solvable** – download a **Solutions Script** from the Reports page that walks the resolved attack chain, retrieves each flag, and reports pass/fail per step.
 - **Reproducible runs** – optional RNG seeds, XML scenario files, saved plans, Markdown reports, and JSON summaries make labs repeatable for students, operators, and future experiments.
 
 ## Screenshots

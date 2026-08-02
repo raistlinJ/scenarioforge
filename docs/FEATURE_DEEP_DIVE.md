@@ -94,6 +94,40 @@ flowchart LR
 	- Report filenames append microseconds for collision safety: `scenario_report_MM-DD-YY-HH-MM-SS-ffffff.{md,json}`.
 - Run history is persisted in `outputs/run_history.json` for the Reports page.
 - Safe deletion keeps reports while purging associated outputs under `outputs/` when scenarios are removed via the GUI.
+- The Reports page **Downloads** menu also produces a **Solutions Script** (`.sh`) — see below.
+
+## Solutions Script
+A downloadable, self-checking bash script generated from the resolved Attack Flow chain. Use it to confirm a deployed scenario is actually solvable, rather than only structurally correct.
+
+- Download it from the Reports page **Downloads** dropdown ("Solutions Script (sh)"), alongside the participant and facilitator guides.
+- For each step it establishes the documented entry point, retrieves the step's flag, and reports **PASS / FAIL / INCONCLUSIVE / SKIP** with reasoning, plus a summary line and a nonzero exit when anything fails.
+- Reachability: it runs directly when the host routes to the CORE node subnet, or tunnels every command through the CORE VM with `--ssh-host/--ssh-user/--ssh-key/--ssh-port`. Use `-v` to see raw command output.
+- Scope: **flag-node-generators only**. Vulnerability and flag-generator steps are emitted as `SKIP` with their reason, because they do not yet ship machine-runnable `access_instructions`.
+- Entry points it automates: SSH (password and key based), HTTP/HTTPS (including header- or query-gated steps that must present a prior step's `Checksum`/`Ticket` fact, and basic-auth WebDAV), raw TCP protocol dialogs, and NFS mounts.
+- The generated script does not replay the human `access_instructions` verbatim — those are written for people and include interactive prompts and host-side paths. Instead it detects each step's entry tool, derives a deterministic retrieval from the resolved artifacts, and asserts the known `Flag(flag_id)` value. The documented steps are preserved as comments for context.
+
+## Artifact checks (live session validation)
+Verifies that a **running** CORE session matches what the scenario said it should be. Available as a per-session icon button in the CORE page **Active sessions** card, and as the `check-artifacts` CLI phase.
+
+Seven ordered checks, each reported as `pass`, `warn`, `fail`, `error`, or `skip`:
+
+1. Containers running on the correct nodes.
+2. Services running.
+3. Service ports open and reachable across the CORE network.
+4. Inject files placed in the right location.
+5. Firewall/segmentation rules in place.
+6. Traffic scripts running where they should be.
+7. Each traffic source reaching its destination (ping).
+
+Implementation notes:
+
+- Checks 1-4 reuse the post-execution validator that backs `--post-execution-validation`.
+- Checks 5-7 are live probes run on the CORE VM over SSH. Docker-backed nodes are reached with `docker exec`; namespaced CORE vnodes (routers, PCs) with `vcmd -c /tmp/pycore.<session>/<node>`.
+- Port reachability is measured **across the CORE network**, because VM-mode nodes publish no host ports. Listening ports are discovered from `/proc/net/tcp[6]`, and loopback-only binds (for example Tomcat's AJP on `127.0.0.1`, including the IPv4-mapped `::ffff:127.0.0.1` form) are reported as context rather than probed.
+- A connection **timeout** means packets are dropped and is reported as a blocked path; a **refused** connection means the port closed between enumeration and probe and is treated as a benign transient.
+- Segmentation and traffic prefer the runtime verification artifacts (`/tmp/segmentation/allow_verification.json`, `/tmp/traffic/traffic_summary.json`) over the scenario XML's declared density, so a scenario that declares traffic but produced no flows reports `skip`, not a false warning.
+- `skip` is a normal outcome meaning the scenario never configured that feature.
+- The Web UI runs the checks in a background job with polled progress; result sections are collapsible and scrollable.
 
 ## Generator packs & manifests
 - The Web UI treats **installed generators** as the source of truth: it discovers generators from `manifest.yaml`/`manifest.yml` under `outputs/installed_generators/`.

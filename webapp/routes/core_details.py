@@ -84,6 +84,7 @@ def register(
         graph_nodes: list[dict[str, Any]] | None = None
         graph_links: list[dict[str, Any]] | None = None
         flow_meta: dict[str, Any] | None = None
+        session_export = False
         if not xml_path and sid:
             out_dir = os.path.join(outputs_dir(), 'core-sessions')
             cached_session_xml = os.path.join(out_dir, f'session-{str(sid).strip()}.xml')
@@ -102,6 +103,7 @@ def register(
             except Exception:
                 if cached_session_xml and _looks_like_xml_file(cached_session_xml):
                     xml_path = cached_session_xml
+            session_export = bool(xml_path)
         if not xml_path and scenario_norm:
             fallback = select_existing_path(scenario_paths.get(scenario_norm))
             if fallback:
@@ -138,6 +140,14 @@ def register(
                         container_flag = True
                         if classification != 'scenario':
                             classification = 'session'
+                    elif root.find('.//device[@image_compatibility]') is not None or root.find('.//device[@docker_command]') is not None:
+                        # Newer CORE session exports emit docker nodes as <device> with
+                        # docker attributes instead of <container> elements.
+                        container_flag = True
+                        if classification != 'scenario':
+                            classification = 'session'
+                if session_export and classification not in ('planner', 'scenario'):
+                    classification = 'session'
                 if planner_bundle:
                     xml_valid = True
                     errors = ''
