@@ -261,6 +261,47 @@ def test_traffic_warns_when_a_flow_source_has_no_process():
     assert any("no traffic process is running" in i["detail"] for i in res["items"])
 
 
+def test_probes_ignore_preview_directories():
+    # /tmp/scenarioforge-preview-* holds plan-time scripts that are never
+    # deployed; counting them reports traffic/segmentation for a scenario
+    # that configured none.
+    traffic = ac.traffic_probe_script('pw', 1)
+    seg = ac.segmentation_probe_script('pw', 1)
+    assert 'scenarioforge-preview-traffic' not in traffic
+    assert 'scenarioforge-preview-seg' not in seg
+    assert '"/tmp/traffic"' in traffic or "'/tmp/traffic'" in traffic
+    assert '"/tmp/segmentation"' in seg or "'/tmp/segmentation'" in seg
+
+
+def test_probes_filter_scripts_older_than_the_run():
+    # The shared runtime dirs keep .py scripts across runs; only the summary
+    # JSON is rewritten, so it is the run boundary.
+    for script in (ac.traffic_probe_script('pw', 1), ac.segmentation_probe_script('pw', 1)):
+        assert '_fresh(' in script
+        assert 'STALE_GRACE_S' in script
+        assert 'stale_files' in script
+
+
+def test_empty_runtime_summary_outranks_leftover_script_files():
+    # A scenario with no traffic must stay 'skip' even when stray traffic_*
+    # files are present in the shared runtime directory.
+    probe = {"ok": True, "traffic_files": ["/tmp/traffic/traffic_9_s1.py"],
+             "summary": {"flows": []}, "nodes": {}, "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "skip"
+    assert res["items"] == []
+
+
+def test_running_traffic_without_configured_flows_is_surfaced():
+    # Processes are real runtime evidence, so an unexpected one is worth a warn
+    # rather than being silently dropped like a stale file.
+    probe = {"ok": True, "traffic_files": [], "summary": {"flows": []},
+             "nodes": {"h": {"procs": ["1 traffic_1_s0.py"], "ip": "10.0.0.5"}}, "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "warn"
+    assert "left over" in res["summary"]
+
+
 def test_traffic_skip_when_summary_present_but_empty_even_if_xml_declares_traffic():
     # The runtime artifact is authoritative: an empty flows list means no
     # traffic, regardless of the scenario XML's Traffic-section density.

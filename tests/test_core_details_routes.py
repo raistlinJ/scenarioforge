@@ -104,6 +104,70 @@ def test_core_details_prefers_cached_session_xml_when_present(tmp_path, monkeypa
     assert b'session-9.xml' in resp.data
 
 
+NEW_FORMAT_SESSION_XML = (
+    "<?xml version='1.0' encoding='UTF-8'?>\n"
+    '<scenario>\n'
+    '  <networks><network id="28" name="rsw-1-1" type="SWITCH"/></networks>\n'
+    '  <devices>\n'
+    '    <device id="1" name="web-1" type="docker" image_compatibility="linux"'
+    ' docker_command="run" run_image_default="nginx"/>\n'
+    '  </devices>\n'
+    '</scenario>\n'
+)
+
+
+def test_core_details_suppresses_schema_errors_for_new_format_session_export(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    outdir = tmp_path / 'outputs'
+    cached_file = outdir / 'core-sessions' / 'session-9.xml'
+    cached_file.parent.mkdir(parents=True, exist_ok=True)
+    cached_file.write_text(NEW_FORMAT_SESSION_XML, encoding='utf-8')
+
+    schema_error = "Element 'device', attribute 'image_compatibility': The attribute 'image_compatibility' is not allowed."
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    monkeypatch.setattr(backend, '_core_config_for_request', lambda **kwargs: {'host': '127.0.0.1', 'port': 50051})
+    monkeypatch.setattr(backend, '_validate_core_xml', lambda path: (False, schema_error))
+    monkeypatch.setattr(backend, '_analyze_core_xml', lambda path: {'nodes': [{'id': 'n1'}], 'switch_nodes': [], 'links_detail': []})
+    monkeypatch.setattr(backend, '_build_topology_graph_from_session_xml', lambda path: ([{'id': 'n1'}], [], {}))
+    monkeypatch.setattr(backend, '_list_active_core_sessions', lambda *args, **kwargs: [{'id': 9, 'file': str(cached_file)}])
+    monkeypatch.setattr(backend, '_flow_state_from_latest_xml', lambda scenario_norm: None)
+
+    resp = client.get('/core/details?session_id=9')
+
+    assert resp.status_code == 200
+    assert b'INVALID' not in resp.data
+    assert b'image_compatibility' not in resp.data
+    assert b'>VALID<' in resp.data
+
+
+def test_core_details_classifies_docker_device_export_via_path(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    outdir = tmp_path / 'outputs'
+    exported = outdir / 'core-post' / 'session-1.xml'
+    exported.parent.mkdir(parents=True, exist_ok=True)
+    exported.write_text(NEW_FORMAT_SESSION_XML, encoding='utf-8')
+
+    monkeypatch.setattr(backend, '_uploads_dir', lambda: str(tmp_path / 'uploads'))
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    monkeypatch.setattr(backend, '_core_config_for_request', lambda **kwargs: {'host': '127.0.0.1', 'port': 50051})
+    monkeypatch.setattr(backend, '_validate_core_xml', lambda path: (False, 'schema mismatch'))
+    monkeypatch.setattr(backend, '_analyze_core_xml', lambda path: {'nodes': [{'id': 'n1'}], 'switch_nodes': [], 'links_detail': []})
+    monkeypatch.setattr(backend, '_build_topology_graph_from_session_xml', lambda path: ([{'id': 'n1'}], [], {}))
+    monkeypatch.setattr(backend, '_list_active_core_sessions', lambda *args, **kwargs: [])
+    monkeypatch.setattr(backend, '_flow_state_from_latest_xml', lambda scenario_norm: None)
+
+    resp = client.get(f'/core/details?path={exported}')
+
+    assert resp.status_code == 200
+    assert b'INVALID' not in resp.data
+    assert b'schema mismatch' not in resp.data
+
+
 def test_core_details_falls_back_to_existing_scenario_path(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)

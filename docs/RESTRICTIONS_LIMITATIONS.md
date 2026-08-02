@@ -25,3 +25,17 @@ These are general constraints that affect generator authoring and “docker vuln
 
 - **NFS recommendation (when you need file sharing).** Prefer **NFSv4-only** servers (single TCP/2049) over NFSv3 (rpcbind/mountd/statd + multiple ports).
 	- Mounts from other CORE nodes should target `<nfs_node_ip>:/exports` (not `localhost`).
+
+## Solutions Script limits
+
+- **Flag-node-generators only.** Vulnerability and flag-generator steps are emitted as `SKIP`, because those catalog entries do not yet ship machine-runnable `access_instructions`. Extending coverage is an authoring task in the catalog, not a runtime change.
+- **Steps without an automatable entry point are skipped.** The script detects `ssh`, `curl`/`wget`, `nc`, and NFS mounts. A generator whose documented steps use some other tool is reported as `SKIP` with the reason rather than guessed at.
+- **`INCONCLUSIVE` is a real outcome.** It means the service was reached but the flag was not auto-located; finish the documented steps manually. A gated step whose required value depends on a prior step's runtime output can land here.
+- **The script consumes session state.** Solve steps can mutate containers, so run it against a fresh execute and treat that session as spent.
+
+## Artifact check limits
+
+- **Segmentation rule detection needs `iptables`/`nft` in the node.** Nodes without it report no custom rules rather than a false pass. The authoritative signal for compose port-allow segmentation is the runtime `allow_verification.json`.
+- **`skip` is not a defect.** It means the scenario never configured that feature (no restricted flows, no traffic). Only `fail` and `error` indicate something is wrong; `warn` is worth investigating but is often intentional segmentation.
+- **Reachability follows configured traffic flows.** With no traffic flows there are no source→destination pairs to verify, so the reachability check reports `skip` rather than probing an arbitrary node pair.
+- **Loopback-bound service ports are not probed.** A port bound to `127.0.0.1` (including the IPv4-mapped `::ffff:127.0.0.1` form that Java/Tomcat uses for AJP) is listed as context, since it is intentionally not reachable from other nodes.

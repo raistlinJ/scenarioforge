@@ -330,6 +330,28 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "        return json.loads(out)\n"
         "    except Exception:\n"
         "        return None\n"
+        # /tmp/traffic and /tmp/segmentation are shared across runs: only the
+        # summary/verification JSON is rewritten each execute, while generated
+        # .py scripts persist. Treat that JSON's mtime as the run boundary and
+        # ignore scripts older than it, so a previous scenario's leftovers are
+        # not reported as this scenario's runtime state.
+        "STALE_GRACE_S = 300.0\n"
+        "def _mtime(path):\n"
+        "    try:\n"
+        "        return os.path.getmtime(path)\n"
+        "    except Exception:\n"
+        "        return None\n"
+        "def _fresh(paths, ref):\n"
+        "    if ref is None:\n"
+        "        return list(paths), 0\n"
+        "    keep, stale = [], 0\n"
+        "    for p in paths:\n"
+        "        m = _mtime(p)\n"
+        "        if m is None or m >= (ref - STALE_GRACE_S):\n"
+        "            keep.append(p)\n"
+        "        else:\n"
+        "            stale += 1\n"
+        "    return keep, stale\n"
         "def _containers():\n"
         "    rc, out = _run(['docker','ps','--format','{{.Names}}'])\n"
         "    return [l.strip() for l in out.splitlines() if l.strip() and 'inject_copy' not in l] if rc == 0 else []\n"
@@ -450,8 +472,13 @@ def segmentation_probe_script(sudo_password: str | None = None,
                               seg_dirs: list[str] | None = None) -> str:
     """VM-side script: report the segmentation verification artifact and any
     generated scripts on the VM, plus firewall rules inside every node (Docker
-    nodes via ``docker exec``, CORE vnodes via ``vcmd``)."""
-    dirs = seg_dirs or ["/tmp/segmentation", "/tmp/scenarioforge-preview-seg-*"]
+    nodes via ``docker exec``, CORE vnodes via ``vcmd``).
+
+    Only the runtime directory is inspected. ``/tmp/scenarioforge-preview-seg-*``
+    holds plan-time scripts that are never deployed, so counting them would
+    report segmentation for a scenario that has none.
+    """
+    dirs = seg_dirs or ["/tmp/segmentation"]
     dirs_literal = json.dumps(dirs)
     return (
         _remote_preamble(sudo_password, session_id)
@@ -459,6 +486,7 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "def main():\n"
         + "    seg_files = []\n"
         + "    verification = None\n"
+        + "    ref = None\n"
         + "    for d in SEG_DIRS:\n"
         + "        for path in glob.glob(d):\n"
         + "            if os.path.isdir(path):\n"
@@ -467,10 +495,12 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "                    if f.endswith('.json'):\n"
         + "                        if ('verif' in f.lower() or 'allow' in f.lower()) and verification is None:\n"
         + "                            verification = _read_json(fp)\n"
+        + "                            ref = _mtime(fp)\n"
         + "                    else:\n"
         + "                        seg_files.append(fp)\n"
         + "            elif os.path.isfile(path):\n"
         + "                seg_files.append(path)\n"
+        + "    seg_files, seg_stale = _fresh(seg_files, ref)\n"
         + "    nodes = {}\n"
         + "    for kind, name in _all_nodes():\n"
         + "        rc, out = _nexec(kind, name, ['sh','-lc','iptables -S 2>/dev/null || nft list ruleset 2>/dev/null'])\n"
@@ -484,7 +514,7 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "            'marker': ('custom-seg' in out) or ('scenarioforge' in out.lower()),\n"
         + "            'rule_count': len(non_default),\n"
         + "        }\n"
-        + "    print(json.dumps({'ok': True, 'seg_files': seg_files, 'verification': verification, 'nodes': nodes}))\n"
+        + "    print(json.dumps({'ok': True, 'seg_files': seg_files, 'stale_files': seg_stale, 'verification': verification, 'nodes': nodes}))\n"
         + "main()\n"
     )
 
@@ -494,9 +524,14 @@ def traffic_probe_script(sudo_password: str | None = None,
                          traffic_dirs: list[str] | None = None) -> str:
     """VM-side script: report the traffic summary artifact and generated traffic
     scripts, traffic processes and CORE IP inside every node (Docker + vnode),
-    and a ping matrix from a prober node to every other node's IP. Each ping row
-    carries the exact command to reproduce it."""
-    dirs = traffic_dirs or ["/tmp/traffic", "/tmp/scenarioforge-preview-traffic-*"]
+    and reachability along each configured flow. Each ping row carries the exact
+    command to reproduce it.
+
+    Only the runtime directory is inspected. ``/tmp/scenarioforge-preview-traffic-*``
+    holds plan-time scripts produced during preview that are never deployed, so
+    counting them would report running traffic for a scenario that has none.
+    """
+    dirs = traffic_dirs or ["/tmp/traffic"]
     dirs_literal = json.dumps(dirs)
     return (
         _remote_preamble(sudo_password, session_id)
@@ -512,6 +547,7 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "def main():\n"
         + "    traffic_files = []\n"
         + "    summary = None\n"
+        + "    ref = None\n"
         + "    for d in TRAFFIC_DIRS:\n"
         + "        for path in glob.glob(d):\n"
         + "            if os.path.isdir(path):\n"
@@ -520,10 +556,12 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "                    if f.endswith('.json'):\n"
         + "                        if 'summary' in f.lower() and summary is None:\n"
         + "                            summary = _read_json(fp)\n"
+        + "                            ref = _mtime(fp)\n"
         + "                    elif f.startswith('traffic_'):\n"
         + "                        traffic_files.append(fp)\n"
         + "            elif os.path.isfile(path):\n"
         + "                traffic_files.append(path)\n"
+        + "    traffic_files, traffic_stale = _fresh(traffic_files, ref)\n"
         + "    alln = _all_nodes()\n"
         + "    nodes = {}\n"
         + "    for kind, name in alln:\n"
@@ -559,7 +597,7 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "        ping.append({'src': sn, 'dst': dst_name, 'ip': d_ip, 'reachable': ('OK' in out),\n"
         + "                     'cmd': _repro(sk, sn, d_ip), 'port': flow.get('dst_port'),\n"
         + "                     'protocol': flow.get('protocol')})\n"
-        + "    print(json.dumps({'ok': True, 'traffic_files': traffic_files, 'summary': summary, 'nodes': nodes, 'ping': ping}))\n"
+        + "    print(json.dumps({'ok': True, 'traffic_files': traffic_files, 'stale_files': traffic_stale, 'summary': summary, 'nodes': nodes, 'ping': ping}))\n"
         + "main()\n"
     )
 
@@ -660,6 +698,22 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
     nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
     nodes_with_procs = [n for n, info in nodes.items() if isinstance(info, dict) and _as_list(info.get("procs"))]
     items: list[dict[str, Any]] = []
+
+    # The runtime traffic_summary.json is rewritten by every execute, so when it
+    # is present its flow list is the authority on whether this scenario has
+    # traffic at all. Files left in the shared /tmp/traffic directory must never
+    # override it, or a scenario with no traffic reports traffic as running.
+    if summary is not None and not flows:
+        if nodes_with_procs:
+            for node in sorted(nodes_with_procs):
+                count = len(_as_list(nodes[node].get("procs")))
+                items.append({"name": node, "status": "warn",
+                              "detail": f"{count} traffic process(es) running, but this scenario "
+                                        "configured no traffic flows"})
+            return _result("traffic", "warn",
+                           f"No traffic configured, yet {len(nodes_with_procs)} node(s) are running "
+                           "traffic processes (possibly left over from an earlier scenario).", items)
+        return _result("traffic", "skip", "No traffic configured for this scenario.", items)
 
     if flows:
         items.append({"name": "traffic flows", "status": "pass",

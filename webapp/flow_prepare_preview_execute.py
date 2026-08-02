@@ -28,6 +28,35 @@ def _classify_generator_image_use(run_stdout: Any) -> str:
     return ''
 
 
+def _image_counts_summary(image_counts: Any, total_assignments: Any) -> dict:
+    """Shape the generator-image tally for the UI.
+
+    'pulled' is the count of runs that had to build/pull an image, 'cached' reused
+    one, and 'pending' is whatever the chain never accounted for (a run that failed
+    before reporting, or one still outstanding).
+    """
+    counts = image_counts if isinstance(image_counts, dict) else {}
+
+    def _count(key: str) -> int:
+        try:
+            return max(0, int(counts.get(key) or 0))
+        except Exception:
+            return 0
+
+    pulled = _count('pulling')
+    cached = _count('cached')
+    try:
+        total = max(0, int(total_assignments or 0))
+    except Exception:
+        total = 0
+    return {
+        'pulled': pulled,
+        'cached': cached,
+        'pending': max(0, total - pulled - cached),
+        'total': total,
+    }
+
+
 def _backend_dependencies(backend: Any) -> Any:
     bound_names = [
         '_coerce_bool',
@@ -1606,6 +1635,7 @@ def _execute_or_prepare_assignments(
         'generation_failures': generation_failures,
         'generation_skipped': generation_skipped,
         'generator_runs': generator_runs,
+        'image_counts': _image_counts_summary(image_counts, total_assignments),
     }
 
 
@@ -1650,6 +1680,7 @@ def _finalize_prepare_preview_response(
     flow_errors_detail: Any,
     phase_timings: dict[str, float] | None,
     finalize_started_at: float | None,
+    image_counts: dict[str, Any] | None = None,
 ) -> tuple[Any, int]:
     phase_timings_out: dict[str, float] = dict(phase_timings or {})
     if isinstance(finalize_started_at, (int, float)):
@@ -1828,6 +1859,7 @@ def _finalize_prepare_preview_response(
         backend=backend,
         flow_run_remote=bool(flow_run_remote),
         run_generators=bool(run_generators),
+        image_counts=image_counts,
     )
     success_payload['dependency_level'] = dependency_level
     return jsonify(success_payload), (422 if generation_failures and not best_effort else 200)
@@ -2179,6 +2211,7 @@ def execute_impl(*, backend: Any, payload: dict[str, Any] | None = None):
         flow_errors_detail=flow_errors_detail,
         phase_timings=phase_timings,
         finalize_started_at=finalize_started_at,
+        image_counts=execution_state.get('image_counts'),
     )
 
 

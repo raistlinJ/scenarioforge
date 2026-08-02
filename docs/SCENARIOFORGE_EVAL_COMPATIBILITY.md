@@ -314,6 +314,7 @@ only the `--plan-output` payload:
     "plan_payload": plan_payload,
     "session_id": session_id,
     "validation_summary": validation_summary,
+    "check_artifacts_summary": check_artifacts_summary,
 }
 ```
 
@@ -321,11 +322,70 @@ For execute, parse these markers:
 
 - `CORE_SESSION_ID: <id>`
 - `VALIDATION_SUMMARY_JSON: {...}`
+- `CHECK_ARTIFACTS_SUMMARY_JSON: {...}` (only when `--check-artifacts` ran)
 - `Scenario report written to ...`
 - `Scenario summary written to ...`
 
-Useful streamed progress patterns also include `Post-execution validation:` and
-`[validate]`.
+Useful streamed progress patterns also include `Post-execution validation:`,
+`[validate]`, and `[check-artifacts]`.
+
+## Artifact Checks
+
+`execute` can optionally validate the live session it just created by adding
+`--check-artifacts`. This runs the same seven checks as the standalone
+`check-artifacts` phase: containers on the correct nodes, services running,
+service ports reachable across the CORE network, inject files placed,
+segmentation rules enforced, traffic scripts running, and each traffic source
+reaching its destination.
+
+```bash
+NO_COLOR=1 PYTHONUNBUFFERED=1 \
+python -m scenarioforge.cli execute \
+  --xml "$XML" --scenario "$SCENARIO" --seed "$SEED" \
+  --post-execution-validation \
+  --check-artifacts --check-artifacts-delay 45
+```
+
+Contract notes for evaluators:
+
+- The checks run *after* execute and post-execution validation, so they add
+  findings and never mask an earlier failure.
+- `--check-artifacts-delay SECONDS` is applied before probing, giving routing
+  convergence and slow services time to settle. Budget it into phase timeouts.
+- Exit codes: `fail` and `error` checks exit nonzero; `warn` exits `0` unless
+  `--strict` is also passed.
+- Parse `CHECK_ARTIFACTS_SUMMARY_JSON:` from combined stdout/stderr and save it
+  as `execute-check-artifacts.json`.
+
+Marker payload shape:
+
+```json
+{
+  "ok": true,
+  "overall": "pass",
+  "overall_summary": "4 pass, 3 skip",
+  "scenario": "MyLab",
+  "session_id": 1,
+  "strict": false,
+  "checks": [
+    {
+      "key": "ports",
+      "label": "Ports open",
+      "status": "pass",
+      "summary": "All 32 stable service port target(s) reachable",
+      "items": [{"name": "docker-11 (10.0.0.4)", "status": "pass", "detail": "listening on 22"}]
+    }
+  ]
+}
+```
+
+`status` for each check is one of `pass`, `warn`, `fail`, `error`, or `skip`.
+`skip` means the scenario did not configure that feature (for example, no
+traffic flows), which is a normal outcome and not a defect.
+
+Standalone use against an already-running session, plus discovery of what is
+running, is covered in
+[CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md#check-artifacts-phase).
 
 ## Artifact Contract
 
@@ -340,6 +400,7 @@ Retain these artifacts per iteration:
 | `flag-sequencing.log` | Flow diagnostics |
 | `execute.log` | Complete execution and remote delegation output |
 | `execute-validation.json` | Parsed final validation marker |
+| `execute-check-artifacts.json` | Parsed artifact-check marker, when `--check-artifacts` ran |
 | `core-post/session-<id>.xml` | Exported live CORE session, when retained |
 | `core-post/validation-session-<id>.json` | ScenarioForge validation sidecar |
 | report and summary files | ScenarioForge generated results |

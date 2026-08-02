@@ -1,11 +1,6 @@
 # ScenarioForge latest warnings/errors
-# Started: 2026-07-21T00:54:40.056823+00:00
+# Started: 2026-08-02T16:35:16.787613+00:00
 # Includes log records at WARNING and ERROR level.
 
-{
-  "error": "Failed to create starter XML: could not convert string to float: 'Random'",
-  "ok": false,
-  "phase": "new",
-  "scenario": "test",
-  "xml_path": "/Users/jcacosta/Documents/GitHub/scenarioforge/test.xml"
-}
+[2026-08-02 10:35:16,869] INFO in app_backend: [core.remote] (core.get_sessions) executing via /opt/core/venv/bin/python3
+[2026-08-02 10:35:17,041] INFO in app_backend: [core.grpc] remote returned 1 session(s)

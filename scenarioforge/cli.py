@@ -548,6 +548,98 @@ class _CaptureTextStream(_AutoFlushTextStream):
         return self._captured
 
 
+# Image references this application produces. Everything else on the host --
+# base images, vulhub pulls, unrelated projects -- is left alone.
+#   coretg/<slug>:iproute2      current iproute2 wrapper images
+#   coretg-gen-<name>:<tag>     legacy generator images
+#   <...>_wrapper<...>          legacy wrapper naming
+#   core-<session>-<node>-…     per-session builds CORE makes from our compose
+#   p_<stamp>__<n>-generator    images built from an installed generator pack
+_GENERATED_IMAGE_PATTERNS = (
+    'coretg/*', 'coretg-gen-*', '*_wrapper*', 'core-*', 'p_*-generator',
+)
+
+# Compose builds CORE names after the node, e.g. `docker-27conf-docker-27`,
+# `docker-15-docker-15`, `flaggenslot-9conf-flaggenslot-9`, `docker-11-node`.
+# Requiring the numeric node id keeps this from matching an unrelated image that
+# merely starts with one of these words (`docker-compose`, `router-utils`).
+_GENERATED_NODE_IMAGE_RE = re.compile(
+    r'^(?:docker|vulnslot|flaggenslot|router|switch|host|pc)-\d+', re.IGNORECASE
+)
+
+
+def _is_generated_image_repo(repo: str) -> bool:
+    name = str(repo or '').strip()
+    if not name:
+        return False
+    if any(fnmatch.fnmatch(name, pattern) for pattern in _GENERATED_IMAGE_PATTERNS):
+        return True
+    return bool(_GENERATED_NODE_IMAGE_RE.match(name))
+
+
+def _select_removable_generated_images(refs: Any, keep_images: Any = None) -> list[str]:
+    """Filter `repo:tag` refs down to this application's images, minus pins.
+
+    An operator marks a catalog or generator item `persistent` to keep its image
+    across runs, so a pin is honored whether it names the exact `repo:tag` or
+    just the repository.
+    """
+    keep = {str(k).strip() for k in (keep_images or []) if str(k or '').strip()}
+    keep_repos = {k.rsplit(':', 1)[0] for k in keep if ':' in k} | {k for k in keep if ':' not in k}
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in (refs or []):
+        ref = str(raw or '').strip()
+        if not ref or ':' not in ref or ref in seen:
+            continue
+        repo, tag = ref.rsplit(':', 1)
+        # Untagged leftovers are already handled by `docker image prune`.
+        if not tag or tag == '<none>' or repo == '<none>':
+            continue
+        if not _is_generated_image_repo(repo):
+            continue
+        if ref in keep or repo in keep_repos:
+            continue
+        seen.add(ref)
+        out.append(ref)
+    return out
+
+
+def _cleanup_generated_docker_images(keep_images: Any = None) -> tuple[list[str], list[str]]:
+    """Remove images this run's application built, except operator pins.
+
+    Removal is deliberately not forced: an image still referenced by a container
+    (for example a CORE session that is still up) is refused by Docker and left
+    in place rather than pulled out from under it.
+    """
+    removed: list[str] = []
+    skipped: list[str] = []
+    try:
+        listing = _run_docker_cmd(
+            ['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'],
+            timeout_s=60.0, allow_sudo_retry=True,
+        )
+    except Exception as exc:
+        logging.warning('Execute cleanup: listing images failed: %s', exc)
+        return removed, skipped
+    if getattr(listing, 'returncode', 1) != 0:
+        return removed, skipped
+
+    refs = [line.strip() for line in str(getattr(listing, 'stdout', '') or '').splitlines() if line.strip()]
+    keep = list(keep_images or [])
+    targets = _select_removable_generated_images(refs, keep)
+    for ref in targets:
+        try:
+            proc = _run_docker_cmd(['docker', 'image', 'rm', ref], timeout_s=120.0, allow_sudo_retry=True)
+            if getattr(proc, 'returncode', 1) == 0:
+                removed.append(ref)
+            else:
+                skipped.append(ref)
+        except Exception:
+            skipped.append(ref)
+    return removed, skipped
+
+
 def _cleanup_stale_vuln_temp_files() -> list[str]:
     removed: list[str] = []
     root = '/tmp/vulns'
@@ -673,18 +765,41 @@ def _best_effort_cli_execute_cleanup(args: Any, core: Any) -> bool:
                     logging.info('Execute cleanup: removed %d stale /tmp/vulns artifacts', len(removed))
             except Exception:
                 pass
-            for script, label in (
-                ("docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f", 'old generator images'),
-                ("docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f", 'wrapper images'),
-            ):
-                try:
-                    proc = _run_local_cmd(['sh', '-lc', script], timeout_s=120.0, allow_sudo_retry=True)
-                    if proc.returncode == 0:
-                        logging.info('Execute cleanup: cleaned %s', label)
-                    else:
-                        logging.warning('Execute cleanup: cleanup for %s exited %s: %s', label, proc.returncode, (proc.stdout or '').strip()[-1200:])
-                except Exception as exc:
-                    logging.warning('Execute cleanup: cleanup for %s failed: %s', label, exc)
+            # Images this application built. The previous shell form matched
+            # only legacy names (`coretg-gen-*`, `*_wrapper*`) and forced removal
+            # without consulting the keep set, so current `coretg/<slug>:iproute2`
+            # images accumulated while pinned ones could be deleted.
+            try:
+                removed_images, skipped_images = _cleanup_generated_docker_images(
+                    _persistent_images_to_keep()
+                )
+                if removed_images:
+                    logging.info(
+                        'Execute cleanup: removed %d generated image(s)', len(removed_images)
+                    )
+                if skipped_images:
+                    logging.info(
+                        'Execute cleanup: left %d generated image(s) in place (in use or pinned)',
+                        len(skipped_images),
+                    )
+            except Exception as exc:
+                logging.warning('Execute cleanup: generated image cleanup failed: %s', exc)
+
+            # Build cache is never referenced by a running scenario and is the
+            # fastest-growing artifact on a CORE host, so reclaim all of it.
+            try:
+                proc = _run_docker_cmd(
+                    ['docker', 'builder', 'prune', '-af'], timeout_s=300.0, allow_sudo_retry=True
+                )
+                if proc.returncode == 0:
+                    logging.info('Execute cleanup: pruned Docker build cache')
+                else:
+                    logging.warning(
+                        'Execute cleanup: builder prune exited %s: %s',
+                        proc.returncode, (proc.stdout or '').strip()[-600:],
+                    )
+            except Exception as exc:
+                logging.warning('Execute cleanup: builder prune failed: %s', exc)
 
         elif overwrite_existing_images:
             try:
@@ -3344,6 +3459,386 @@ def _flow_copy_error_is_startup_pending(error_text: str) -> bool:
     return any(marker in text for marker in pending_markers)
 
 
+# Runtime scratch directories shared by every run on a CORE host. Both are
+# bind-mounted read-only into nodes, so they hold the *current* run's live
+# scripts and nothing else is useful there. The traffic and segmentation
+# generators each clear their own directory, but only when that feature runs, so
+# a scenario with no traffic (or no segmentation) would otherwise inherit the
+# previous scenario's scripts and report them as its own runtime state.
+RUNTIME_ARTIFACT_DIRS: tuple[str, ...] = ('/tmp/traffic', '/tmp/segmentation')
+
+
+def _reset_runtime_artifact_dirs(dirs: Any = None, *, logger: Any = None) -> dict[str, int]:
+    """Empty the shared runtime scratch directories before a run generates into them.
+
+    Everything in these directories belongs to a previous run and has no consumer
+    once that run is over, so the contents are removed wholesale. The directories
+    themselves are kept (and created when absent) because compose bind-mounts
+    reference the paths. Best-effort: failures never abort the run.
+    """
+    log = logger or logging
+    removed_by_dir: dict[str, int] = {}
+    for out_dir in (dirs if dirs is not None else RUNTIME_ARTIFACT_DIRS):
+        removed = 0
+        try:
+            names = os.listdir(out_dir)
+        except FileNotFoundError:
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception:
+                pass
+            continue
+        except Exception:
+            continue
+        for name in names:
+            path = os.path.join(out_dir, name)
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                else:
+                    os.unlink(path)
+                removed += 1
+            except Exception:
+                continue
+        if removed:
+            removed_by_dir[out_dir] = removed
+            try:
+                log.info('Cleared %d artifact(s) from %s left by an earlier run', removed, out_dir)
+            except Exception:
+                pass
+    return removed_by_dir
+
+
+# Matches the VALIDATION_SUMMARY_JSON convention so evaluator harnesses can
+# parse both markers with the same "<NAME>: <json>" rule.
+CHECK_ARTIFACTS_MARKER = 'CHECK_ARTIFACTS_SUMMARY_JSON:'
+
+_CHECK_STATUS_GLYPH = {
+    'pass': 'PASS',
+    'warn': 'WARN',
+    'fail': 'FAIL',
+    'error': 'ERROR',
+    'skip': 'SKIP',
+    'pending': '....',
+    'running': '....',
+}
+
+
+def _artifact_check_exit_ok(payload: dict[str, Any], *, strict: bool) -> bool:
+    """Failures and errors always fail the run; warnings only under --strict."""
+    statuses = {
+        str((check or {}).get('status') or '').strip().lower()
+        for check in (payload.get('checks') or [])
+        if isinstance(check, dict)
+    }
+    if str(payload.get('status') or '').strip().lower() == 'error':
+        return False
+    if statuses & {'fail', 'error'}:
+        return False
+    if strict and 'warn' in statuses:
+        return False
+    return True
+
+
+def _print_artifact_check_summary(
+    payload: dict[str, Any],
+    *,
+    strict: bool = False,
+    verbose: bool = True,
+    stream: Any = None,
+) -> bool:
+    target = stream if stream is not None else sys.stdout
+    checks = [c for c in (payload.get('checks') or []) if isinstance(c, dict)]
+    scenario = str(payload.get('scenario') or '').strip()
+    session_id = payload.get('session_id')
+
+    print('', file=target)
+    print('Artifact checks'
+          + (f' — scenario {scenario}' if scenario else '')
+          + (f', session {session_id}' if session_id is not None else ''), file=target)
+    print('-' * 72, file=target)
+    for check in checks:
+        status = str(check.get('status') or '').strip().lower()
+        glyph = _CHECK_STATUS_GLYPH.get(status, status.upper() or '?')
+        print(f"[{glyph:5}] {check.get('label') or check.get('key')}: {check.get('summary') or ''}", file=target)
+        if not verbose:
+            continue
+        for item in (check.get('items') or []):
+            if not isinstance(item, dict):
+                continue
+            item_status = str(item.get('status') or '').strip().lower()
+            # Detail rows are noisy on a healthy run; show what needs attention.
+            if item_status in ('pass', 'skip'):
+                continue
+            print(f"          - [{_CHECK_STATUS_GLYPH.get(item_status, item_status)}] "
+                  f"{item.get('name')}: {item.get('detail') or ''}", file=target)
+    error_text = str(payload.get('error') or '').strip()
+    if error_text:
+        print(f'Error: {error_text}', file=target)
+    print('-' * 72, file=target)
+    ok = _artifact_check_exit_ok(payload, strict=strict)
+    overall = str(payload.get('overall') or '').strip() or 'unknown'
+    note = '' if ok else ('  (warnings are failures under --strict)'
+                          if strict and overall == 'warn' else '')
+    print(f"Overall: {overall} — {payload.get('overall_summary') or ''}{note}", file=target)
+
+    marker_payload = {
+        'ok': ok,
+        'overall': overall,
+        'overall_summary': payload.get('overall_summary') or '',
+        'scenario': scenario,
+        'session_id': session_id,
+        'strict': bool(strict),
+        'checks': [
+            {
+                'key': c.get('key'),
+                'label': c.get('label'),
+                'status': c.get('status'),
+                'summary': c.get('summary'),
+                'items': c.get('items') or [],
+            }
+            for c in checks
+        ],
+    }
+    if error_text:
+        marker_payload['error'] = error_text
+    print(
+        CHECK_ARTIFACTS_MARKER + ' ' + json.dumps(marker_payload, sort_keys=True, default=str),
+        file=target,
+        flush=True,
+    )
+    return ok
+
+
+def _resolve_cli_check_session_id(
+    backend: Any,
+    *,
+    session_id: Any,
+    scenario_name: str | None,
+    core_cfg: dict[str, Any],
+) -> tuple[int | None, str]:
+    """Return (session_id, source). Falls back to the most recent session the
+    session store recorded for this scenario."""
+    try:
+        if session_id not in (None, ''):
+            return int(session_id), 'argument'
+    except Exception:
+        pass
+
+    scenario_norm = ''
+    try:
+        scenario_norm = backend._normalize_scenario_label(scenario_name or '')
+    except Exception:
+        scenario_norm = str(scenario_name or '').strip().lower()
+
+    best_sid: int | None = None
+    best_ts = -1.0
+    try:
+        store = backend._load_core_sessions_store() or {}
+        for _path, entry in store.items():
+            sid = backend._session_store_entry_session_id(entry)
+            if sid is None:
+                continue
+            if scenario_norm and backend._session_store_entry_scenario_norm(entry) != scenario_norm:
+                continue
+            ts = backend._session_store_entry_updated_at_epoch(entry) or 0.0
+            if ts >= best_ts:
+                best_ts, best_sid = ts, int(sid)
+    except Exception:
+        best_sid = None
+    return best_sid, ('session store' if best_sid is not None else 'unresolved')
+
+
+def _run_cli_artifact_checks(
+    *,
+    backend: Any,
+    args: Any,
+    core_cfg: dict[str, Any],
+    session_id: Any = None,
+    delay_seconds: float = 0.0,
+    strict: bool = False,
+    stream: Any = None,
+) -> bool:
+    """Run the six/seven artifact checks against a live CORE session and print
+    a CLI summary plus a machine-readable marker line."""
+    target = stream if stream is not None else sys.stdout
+    scenario_name = str(getattr(args, 'scenario', '') or '').strip() or None
+    xml_path = os.path.abspath(str(getattr(args, 'xml', '') or '').strip()) if getattr(args, 'xml', '') else ''
+
+    resolved_sid, source = _resolve_cli_check_session_id(
+        backend, session_id=session_id, scenario_name=scenario_name, core_cfg=core_cfg,
+    )
+    if resolved_sid is None:
+        return _print_artifact_check_summary(
+            {
+                'status': 'error',
+                'overall': 'fail',
+                'overall_summary': 'no session to check',
+                'scenario': scenario_name or '',
+                'checks': [],
+                'error': 'Could not determine which CORE session to check. Pass --session-id '
+                         '(run the list-sessions phase to see running sessions).',
+            },
+            strict=strict, stream=target,
+        )
+    if source == 'session store':
+        print(f'[check-artifacts] Using session {resolved_sid} from the session store.', file=target)
+
+    # Confirm the session is actually live. Without this the session XML export
+    # silently falls back to the running session, so a wrong --session-id would
+    # validate a different session and report a misleading pass.
+    try:
+        host = str(core_cfg.get('host') or 'localhost')
+        try:
+            port = int(core_cfg.get('port') or 50051)
+        except Exception:
+            port = 50051
+        live = backend._list_active_core_sessions(host, port, core_cfg) or []
+        live_ids: list[int] = []
+        for entry in live:
+            try:
+                live_ids.append(int((entry or {}).get('id')))
+            except Exception:
+                continue
+        if live_ids and int(resolved_sid) not in live_ids:
+            known = ', '.join(str(i) for i in sorted(live_ids)) or 'none'
+            return _print_artifact_check_summary(
+                {
+                    'status': 'error',
+                    'overall': 'fail',
+                    'overall_summary': f'session {resolved_sid} is not running',
+                    'scenario': scenario_name or '',
+                    'session_id': resolved_sid,
+                    'checks': [],
+                    'error': f'CORE session {resolved_sid} is not running. Running session(s): {known}. '
+                             'Use the list-sessions phase to see them.',
+                },
+                strict=strict, stream=target,
+            )
+    except Exception as exc:
+        print(f'[check-artifacts] Warning: could not confirm session {resolved_sid} is running ({exc}).',
+              file=target)
+
+    try:
+        delay = float(delay_seconds or 0.0)
+    except Exception:
+        delay = 0.0
+    if delay > 0:
+        print(f'[check-artifacts] Waiting {delay:g}s for routing convergence and services to settle...',
+              file=target, flush=True)
+        time.sleep(delay)
+
+    check_id = f'cli-{uuid.uuid4().hex[:12]}'
+    backend._init_artifact_check_progress(check_id, session_id=resolved_sid, scenario=scenario_name or '')
+    print(f'[check-artifacts] Running checks against session {resolved_sid}...', file=target, flush=True)
+    backend._run_artifact_checks_job(
+        check_id,
+        core_cfg=core_cfg,
+        session_id=resolved_sid,
+        xml_path=xml_path,
+        scenario_label=scenario_name,
+    )
+    payload = backend._get_artifact_check_progress(check_id) or {}
+    if not payload:
+        payload = {
+            'status': 'error', 'overall': 'fail', 'overall_summary': 'checks produced no result',
+            'scenario': scenario_name or '', 'session_id': resolved_sid, 'checks': [],
+            'error': 'artifact checks returned no summary',
+        }
+    payload.setdefault('scenario', scenario_name or '')
+    payload.setdefault('session_id', resolved_sid)
+    return _print_artifact_check_summary(payload, strict=strict, stream=target)
+
+
+def _run_cli_list_sessions(
+    *,
+    backend: Any,
+    core_cfg: dict[str, Any],
+    scenario_name: str | None = None,
+    stream: Any = None,
+) -> int:
+    """Print the running CORE sessions with the scenario and source XML each one
+    came from, so a session id can be handed to the check-artifacts phase."""
+    target = stream if stream is not None else sys.stdout
+    errors: list[str] = []
+    try:
+        host = str(core_cfg.get('host') or 'localhost')
+        try:
+            port = int(core_cfg.get('port') or 50051)
+        except Exception:
+            port = 50051
+        sessions = backend._list_active_core_sessions(host, port, core_cfg, errors=errors) or []
+    except Exception as exc:
+        print(f'Failed to list CORE sessions: {exc}', file=sys.stderr)
+        return 1
+
+    # Join live sessions with the store so each row can show the scenario name
+    # and the saved source XML the session was started from.
+    store: dict[str, Any] = {}
+    try:
+        store = backend._load_core_sessions_store() or {}
+    except Exception:
+        store = {}
+
+    def _store_match(sid: Any) -> tuple[str, str]:
+        # Prefer a real source scenario XML (one carrying <ScenarioEditor>) over an
+        # exported session XML, so the listed path is what check-artifacts wants.
+        best_path, best_label, best_rank = '', '', (-1, -1.0)
+        for path, entry in store.items():
+            try:
+                if backend._session_store_entry_session_id(entry) != int(sid):
+                    continue
+            except Exception:
+                continue
+            ts = backend._session_store_entry_updated_at_epoch(entry) or 0.0
+            try:
+                is_source = 1 if backend._xml_has_scenario_editor(path) else 0
+            except Exception:
+                is_source = 0
+            rank = (is_source, ts)
+            if rank >= best_rank:
+                best_rank = rank
+                best_path = str(path)
+                best_label = str((entry or {}).get('scenario_name') or '').strip()
+        return best_label, best_path
+
+    rows: list[tuple[str, str, str, str]] = []
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        sid = session.get('id')
+        state = str(session.get('state') or '').strip() or 'unknown'
+        label, path = _store_match(sid)
+        if not label:
+            label = str(session.get('scenario_name') or '').strip()
+        if not path:
+            path = str(session.get('file') or session.get('dir') or '').strip()
+        if scenario_name:
+            try:
+                want = backend._normalize_scenario_label(scenario_name)
+                if want and backend._normalize_scenario_label(label) != want:
+                    continue
+            except Exception:
+                pass
+        rows.append((str(sid), state, label or '-', path or '-'))
+
+    for message in errors:
+        print(f'[list-sessions] {message}', file=sys.stderr)
+    if not rows:
+        print('No CORE sessions found.', file=target)
+        return 0
+
+    widths = [max(len(r[i]) for r in rows + [('SESSION', 'STATE', 'SCENARIO', 'XML')]) for i in range(4)]
+    header = ('SESSION', 'STATE', 'SCENARIO', 'XML')
+    print('  '.join(h.ljust(widths[i]) for i, h in enumerate(header)).rstrip(), file=target)
+    print('  '.join('-' * widths[i] for i in range(4)), file=target)
+    for row in sorted(rows, key=lambda r: (r[0].isdigit() and int(r[0]) or 0, r[0])):
+        print('  '.join(row[i].ljust(widths[i]) for i in range(4)).rstrip(), file=target)
+    print('', file=target)
+    print('Run: python -m scenarioforge.cli check-artifacts --session-id <SESSION> --xml <XML>', file=target)
+    return 0
+
+
 def _run_cli_post_execution_validation(
     *,
     backend: Any,
@@ -4964,9 +5459,11 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     return 0 if status_code < 400 else 1
 
 
-CLI_PHASES = ('execute', 'new', 'preview-plan', 'flag-sequencing', 'topo')
+CLI_PHASES = ('execute', 'new', 'preview-plan', 'flag-sequencing', 'topo', 'check-artifacts', 'list-sessions')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
+    'Run "cli.py list-sessions" to see running CORE sessions with their scenario and XML, then '
+    '"cli.py check-artifacts --session-id N" to validate one.\n'
     'Maintenance command: cleanup-scenarioforge-docker --dry-run inspects the configured remote CORE host; '
     'cleanup-scenarioforge-docker --force removes all Docker containers/images/build cache and unused volumes/networks on that remote host.'
 )
@@ -4998,13 +5495,42 @@ def _cli_phase_token(argv: list[str]) -> str | None:
     return token if token in CLI_PHASES else None
 
 
+def _add_cli_artifact_check_args(container: Any) -> None:
+    """Options for the check-artifacts phase and the execute auto-run hook."""
+    container.add_argument(
+        '--session-id',
+        type=int,
+        default=None,
+        help='CORE session id to check. When omitted, the most recent session recorded for the scenario is used '
+             '(see the list-sessions phase)',
+    )
+    container.add_argument(
+        '-check-artifacts',
+        '--check-artifacts',
+        action='store_true',
+        help='After a successful execute, run the artifact checks against the new session',
+    )
+    container.add_argument(
+        '--check-artifacts-delay',
+        type=float,
+        default=0.0,
+        help='Seconds to wait before running the artifact checks, giving routing convergence and slow services '
+             'time to settle',
+    )
+    container.add_argument(
+        '--strict',
+        action='store_true',
+        help='Treat warnings as failures (exit non-zero). By default only failed or errored checks exit non-zero',
+    )
+
+
 def _add_cli_phase_arg(container: Any) -> None:
     container.add_argument(
         'phase',
         nargs='?',
         choices=list(CLI_PHASES),
         default='execute',
-        help='Phase to run: execute, new, preview-plan, flag-sequencing, or topo',
+        help='Phase to run: execute, new, preview-plan, flag-sequencing, topo, check-artifacts, or list-sessions',
     )
 
 
@@ -5484,6 +6010,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     _add_cli_core_connection_args(ap)
     _add_cli_execute_topo_args(ap)
     _add_cli_flag_sequencing_args(ap)
+    _add_cli_artifact_check_args(ap)
     return ap
 
 
@@ -5515,6 +6042,13 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     elif phase in {'execute', 'topo'}:
         _add_cli_core_connection_args(ap)
         _add_cli_execute_topo_args(ap)
+        if phase == 'execute':
+            _add_cli_artifact_check_args(ap)
+    elif phase == 'check-artifacts':
+        _add_cli_core_connection_args(ap)
+        _add_cli_artifact_check_args(ap)
+    elif phase == 'list-sessions':
+        _add_cli_core_connection_args(ap)
     return ap
 
 
@@ -5527,6 +6061,11 @@ def main():
         return 0
 
     ap = _build_cli_parser()
+    # list-sessions inspects the live CORE VM, so it does not need a scenario file.
+    if _cli_phase_token(argv) == 'list-sessions':
+        for action in ap._actions:
+            if '--xml' in getattr(action, 'option_strings', ()):
+                action.required = False
     args = ap.parse_args()
     _configure_cli_logging(args)
 
@@ -5667,6 +6206,33 @@ def main():
         )
         if delegated_exit_code is not None:
             return delegated_exit_code
+
+    if args.phase in {'check-artifacts', 'list-sessions'}:
+        if backend_for_cli is None:
+            logging.error('The %s phase requires the WebUI backend module, which could not be imported.', args.phase)
+            return 1
+        try:
+            _scenario_norm, check_core_cfg, _has_saved_core = _resolve_cli_core_context(
+                args, backend=backend_for_cli, scenario_name=args.scenario,
+            )
+        except Exception as exc:
+            logging.error('Failed resolving the CORE connection: %s', exc)
+            return 1
+        if args.phase == 'list-sessions':
+            return _run_cli_list_sessions(
+                backend=backend_for_cli,
+                core_cfg=check_core_cfg,
+                scenario_name=args.scenario,
+            )
+        ok = _run_cli_artifact_checks(
+            backend=backend_for_cli,
+            args=args,
+            core_cfg=check_core_cfg,
+            session_id=getattr(args, 'session_id', None),
+            delay_seconds=float(getattr(args, 'check_artifacts_delay', 0.0) or 0.0),
+            strict=bool(getattr(args, 'strict', False)),
+        )
+        return 0 if ok else 1
 
     if args.phase == 'preview-plan':
         return _run_preview_plan_phase(args)
@@ -6599,6 +7165,11 @@ def main():
         }
         _emit_phase_json(topo_summary, output_path=args.plan_output)
         return 0
+
+    # Both generators below only clear their output directory when the feature
+    # runs, so reset here to keep a previous run's scripts from being read as
+    # this scenario's runtime state.
+    _reset_runtime_artifact_dirs()
 
     # Parse segmentation config OR fallback to preview segmentation if available
     seg_summary = None
@@ -7935,6 +8506,34 @@ def main():
             session_id=int(session_id),
         )
         if not validation_ok:
+            return 1
+
+    if (
+        args.phase == 'execute'
+        and bool(getattr(args, 'check_artifacts', False))
+        and session_id is not None
+    ):
+        if backend_for_cli is None:
+            logging.error('--check-artifacts requires the WebUI backend module, which could not be imported.')
+            return 1
+        try:
+            _scenario_norm, check_core_cfg, _has_saved_core = _resolve_cli_core_context(
+                args,
+                backend=backend_for_cli,
+                scenario_name=args.scenario,
+            )
+        except Exception as exc:
+            logging.error('Failed resolving the CORE connection for artifact checks: %s', exc)
+            return 1
+        checks_ok = _run_cli_artifact_checks(
+            backend=backend_for_cli,
+            args=args,
+            core_cfg=check_core_cfg,
+            session_id=int(session_id),
+            delay_seconds=float(getattr(args, 'check_artifacts_delay', 0.0) or 0.0),
+            strict=bool(getattr(args, 'strict', False)),
+        )
+        if not checks_ok:
             return 1
     return 0
 

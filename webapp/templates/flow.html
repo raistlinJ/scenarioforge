@@ -11920,6 +11920,21 @@
       }
       resultsHtml += '</ul>';
 
+      // Generator image reuse: explains why one Generate takes minutes and the
+      // next seconds. Pending counts runs that never reported an image outcome.
+      const imageCounts = (lastResolvePayload && lastResolvePayload.image_counts) || null;
+      if (imageCounts && Number(imageCounts.total || 0) > 0) {
+        const pulled = Number(imageCounts.pulled || 0);
+        const cached = Number(imageCounts.cached || 0);
+        const pending = Number(imageCounts.pending || 0);
+        resultsHtml += '<div class="fw-semibold mb-2">Generator Images</div>';
+        resultsHtml += '<ul class="list-group mb-3">';
+        resultsHtml += `<li class="list-group-item d-flex justify-content-between align-items-center">Pulled/built <span class="badge ${pulled ? 'bg-primary' : 'bg-secondary'} rounded-pill">${pulled}</span></li>`;
+        resultsHtml += `<li class="list-group-item d-flex justify-content-between align-items-center">Cached <span class="badge ${cached ? 'bg-success' : 'bg-secondary'} rounded-pill">${cached}</span></li>`;
+        resultsHtml += `<li class="list-group-item d-flex justify-content-between align-items-center${pending ? '' : ' text-muted'}">Pending <span class="badge ${pending ? 'bg-warning text-dark' : 'bg-secondary'} rounded-pill">${pending}</span></li>`;
+        resultsHtml += '</ul>';
+      }
+
       if (resolveOnGenerate && lastResolvePayload && Array.isArray(lastResolvePayload.generator_runs)) {
         resultsHtml += '<div class="fw-semibold mb-2">Generator Output</div>';
         // Reuse the existing table renderer which includes details/logs

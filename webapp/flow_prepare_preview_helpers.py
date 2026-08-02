@@ -3638,6 +3638,7 @@ def build_prepare_preview_success_payload(
     backend: Any,
     flow_run_remote: bool = False,
     run_generators: bool = False,
+    image_counts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         'ok': True,
@@ -3683,6 +3684,7 @@ def build_prepare_preview_success_payload(
         'phase_timings': dict(phase_timings or {}),
         'generator_execution_requested': bool(run_generators),
         'generator_execution_mode': 'remote' if bool(flow_run_remote) else 'local',
+        'image_counts': dict(image_counts or {}),
     }
     if flow_errors_detail:
         payload['flow_errors_detail'] = flow_errors_detail

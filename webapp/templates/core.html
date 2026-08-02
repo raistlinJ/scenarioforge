@@ -510,6 +510,16 @@ current_user.is_authenticated) else '' %}
   </div>
 </div>
 
+<style>
+  /* Check Artifacts result sections: collapsed by default, body scrolls. */
+  #artifactCheckList .ac-summary { cursor: pointer; list-style: none; }
+  #artifactCheckList .ac-summary::-webkit-details-marker { display: none; }
+  #artifactCheckList .ac-summary::marker { content: ''; }
+  #artifactCheckList .ac-chev { transition: transform .15s ease; }
+  #artifactCheckList .ac-check[open] .ac-chev { transform: rotate(90deg); }
+  #artifactCheckList .ac-items { max-height: 240px; overflow-y: auto; }
+  #artifactCheckList .ac-min0 { min-width: 0; }
+</style>
 <script>
 (function () {
   const STATUS_META = {
@@ -529,29 +539,54 @@ current_user.is_authenticated) else '' %}
 
   function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
 
+  // Which sections the user has expanded. Tracked across the poll re-renders so
+  // an open section does not snap shut every refresh.
+  const openChecks = new Set();
+
   function renderChecks(list) {
     const host = document.getElementById('artifactCheckList');
     if (!host) return;
     host.innerHTML = (Array.isArray(list) ? list : []).map((c) => {
       const m = meta(c.status);
       const spin = c.status === 'running' ? ' spinner-border spinner-border-sm' : '';
-      const items = (Array.isArray(c.items) ? c.items : []).map((it) => {
+      const rows = Array.isArray(c.items) ? c.items : [];
+      const items = rows.map((it) => {
         const im = meta(it.status);
         return `<li class="list-group-item d-flex justify-content-between align-items-start py-1">
           <span class="me-2"><i class="bi ${im.icon} text-${im.badge.replace('text-bg-','')} me-1"></i>${esc(it.name)}</span>
           <span class="small text-muted text-end">${esc(it.detail || '')}</span></li>`;
       }).join('');
-      const body = items ? `<ul class="list-group list-group-flush small mt-2">${items}</ul>` : '';
-      return `<div class="card border ${m.row}">
-        <div class="card-body py-2">
-          <div class="d-flex justify-content-between align-items-center">
-            <strong>${c.status === 'running' ? `<span class="${spin}" role="status"></span> ` : `<i class="bi ${m.icon} me-1"></i>`}${esc(c.label)}</strong>
-            <span class="badge ${m.badge}">${esc(c.status)}</span>
+      const head = `<div class="d-flex justify-content-between align-items-center gap-2">
+            <strong class="text-truncate">${c.status === 'running' ? `<span class="${spin}" role="status"></span> ` : `<i class="bi ${m.icon} me-1"></i>`}${esc(c.label)}</strong>
+            <span class="d-flex align-items-center gap-2 flex-shrink-0">
+              ${rows.length ? `<span class="badge text-bg-light border" title="${rows.length} detail row(s)">${rows.length}</span>` : ''}
+              <span class="badge ${m.badge}">${esc(c.status)}</span>
+            </span>
           </div>
-          ${c.summary ? `<div class="small text-muted mt-1">${esc(c.summary)}</div>` : ''}
-          ${body}
+          ${c.summary ? `<div class="small text-muted mt-1">${esc(c.summary)}</div>` : ''}`;
+      // Nothing to expand when a check produced no detail rows.
+      if (!rows.length) {
+        return `<div class="card border ${m.row}"><div class="card-body py-2">
+          <div class="d-flex align-items-start gap-2"><span class="ac-chev-space" style="width:1rem"></span>
+          <div class="flex-grow-1 ac-min0">${head}</div></div>
         </div></div>`;
+      }
+      return `<details class="card border ${m.row} ac-check" data-key="${esc(c.key || c.label || '')}"${openChecks.has(c.key) ? ' open' : ''}>
+        <summary class="card-body py-2 ac-summary">
+          <div class="d-flex align-items-start gap-2">
+            <i class="bi bi-chevron-right ac-chev small text-muted mt-1"></i>
+            <div class="flex-grow-1 ac-min0">${head}</div>
+          </div>
+        </summary>
+        <div class="ac-items border-top"><ul class="list-group list-group-flush small">${items}</ul></div>
+      </details>`;
     }).join('');
+    host.querySelectorAll('details.ac-check').forEach((d) => {
+      d.addEventListener('toggle', () => {
+        const key = d.getAttribute('data-key');
+        if (d.open) openChecks.add(key); else openChecks.delete(key);
+      });
+    });
   }
 
   function applyPayload(p) {
@@ -599,6 +634,7 @@ current_user.is_authenticated) else '' %}
 
   async function start(sessionId, xmlPath, scenario) {
     stopPolling();
+    openChecks.clear();  // every run starts with all sections collapsed
     const title = document.getElementById('artifactCheckModalLabel');
     if (title) title.textContent = `Check Artifacts — session ${sessionId}`;
     applyPayload({ status: 'running', step: 0, total: 7, label: 'Starting…', checks: [] });

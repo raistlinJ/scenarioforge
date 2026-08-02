@@ -166,6 +166,38 @@ Useful options:
 - `--layout-density` adjusts preview map spacing.
 - `--traffic-pattern`, `--traffic-rate`, and `--traffic-content` override traffic defaults.
 
+Inspect and validate running sessions without a Web UI:
+
+```bash
+# What is running, and which scenario/XML it came from
+python -m scenarioforge.cli list-sessions
+
+# Validate a running session (add --strict to fail on warnings)
+python -m scenarioforge.cli check-artifacts --session-id 1 --xml "$XML" \
+  --check-artifacts-delay 45
+```
+
+See [CLI Execution Deep Dive](CLI_EXECUTION_DEEP_DIVE.md#check-artifacts-phase).
+
+## Validation And Solvability Across Modes
+
+Two post-deployment checks behave slightly differently per mode.
+
+**Artifact checks** (CORE page button, or the `check-artifacts` CLI phase) validate a running session's containers, services, ports, injects, segmentation, traffic scripts, and reachability.
+
+| Mode | How the checks reach the session |
+| --- | --- |
+| VM mode | Probe scripts run on the CORE VM over SSH using the saved `CORE_SSH_*` credentials. This is the primary path. |
+| Native mode, remote CORE | Same as VM mode; the checks use the explicit remote CORE host's SSH settings. |
+| Native mode, local CORE | The same probes run against the local CORE host. SSH settings must still resolve to that host. |
+
+In every mode the probes reach Docker-backed nodes with `docker exec` and namespaced CORE vnodes (routers, PCs) with `vcmd`. Port reachability is always measured across the CORE-emulated network rather than through host-published ports, so results do not depend on Docker port publishing.
+
+**The Solutions Script** (Reports page → Downloads) verifies that a deployed scenario is actually solvable. It runs from wherever you launch it:
+
+- Run it directly when the host routes to the CORE node subnet — typical for native/local CORE, a bridged participant machine, or running it on the CORE VM itself.
+- In VM mode, pass `--ssh-host`/`--ssh-user`/`--ssh-key` so each step is tunneled through the CORE VM, which can reach the emulated subnet.
+
 ## Shared Environment File
 
 Docker Compose reads `.scenarioforge.env.example` and then optional `.scenarioforge.env` values. Direct Python launches read `.scenarioforge.env` when present and otherwise use built-in defaults. Prefer `.scenarioforge.env` for local changes; it is ignored by git.
