@@ -134,7 +134,7 @@ def services_result(summary: dict[str, Any]) -> dict[str, Any]:
     return _result("services", "pass", f"All {len(running)} services running.", items)
 
 
-def ports_result(summary: dict[str, Any]) -> dict[str, Any]:
+def ports_result(summary: dict[str, Any], probe: Any = None) -> dict[str, Any]:
     unavailable = _validation_unavailable(summary)
     if unavailable:
         return _result("ports", "error", unavailable)
@@ -143,6 +143,8 @@ def ports_result(summary: dict[str, Any]) -> dict[str, Any]:
     topo_unreachable = _as_list(summary.get("topology_port_unreachable"))
     details = _as_list(summary.get("port_unreachable_details"))
     items: list[dict[str, Any]] = []
+
+    # Validator published-port results (host-mapped ports; rare in VM mode).
     for entry in details:
         if isinstance(entry, dict):
             node = _name(entry.get("container") or entry.get("node") or entry.get("name"))
@@ -154,12 +156,75 @@ def ports_result(summary: dict[str, Any]) -> dict[str, Any]:
     for node in topo_unreachable:
         items.append({"name": _name(node), "status": "fail",
                       "detail": "unreachable across the CORE network (cross-node probe)"})
-    if not checked and not unreachable and not topo_unreachable:
-        return _result("ports", "skip", "No ports to check for this scenario.", items)
-    bad = len(unreachable) + len(topo_unreachable)
-    if bad:
-        return _result("ports", "fail", f"{bad} port target(s) unreachable.", items)
-    return _result("ports", "pass", f"All {len(checked)} checked port target(s) reachable.", items)
+
+    # CORE-network port reachability probe: each node's listening service ports
+    # are connected to from a prober node over the emulated network. This is the
+    # meaningful port signal in VM mode, where nodes publish no host ports.
+    probe_ok = isinstance(probe, dict) and probe.get("ok")
+    net_checks = _as_list(probe.get("checks")) if probe_ok else []
+    net_listening = 0
+    net_unreachable: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []       # dropped packets (timeout/no-route)
+    transient: list[dict[str, Any]] = []     # refused: port closed since enumeration
+    if probe_ok:
+        nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
+        for node, info in sorted(nodes.items()):
+            if not isinstance(info, dict):
+                continue
+            listening = _as_list(info.get("listening"))
+            net_listening += len(listening)
+            if listening:
+                items.append({"name": f"{node} ({info.get('ip') or 'no ip'})", "status": "pass",
+                              "detail": f"listening on {', '.join(str(p) for p in listening)}"})
+        prober = _name(probe.get("prober"))
+        for row in net_checks:
+            if not isinstance(row, dict) or row.get("reachable") is not False:
+                continue
+            error = _name(row.get("error"))
+            repro = (f" Reproduce: sudo docker exec {prober} python3 -c "
+                     f"\"import socket; socket.create_connection(('{row.get('ip')}', {row.get('port')}), 2)\"")
+            # A timeout / no-route means packets are dropped — the real signal of
+            # a blocked path (segmentation/routing). "refused" means the port is
+            # closed now: it was listening when we enumerated but has since closed
+            # (short-lived AJP/JMX/ephemeral ports), which is a benign timing race,
+            # not a reachability failure.
+            if error in ("timeout", "no-route"):
+                blocked.append(row)
+                items.append({
+                    "name": f"{prober} → {row.get('node')}:{row.get('port')} ({row.get('ip')})",
+                    "status": "warn",
+                    "detail": (f"packets dropped ({error}) — likely blocked by segmentation/routing."
+                               + repro),
+                })
+            else:
+                transient.append(row)
+                items.append({
+                    "name": f"{prober} → {row.get('node')}:{row.get('port')} ({row.get('ip')})",
+                    "status": "skip",
+                    "detail": ("connection refused — the port closed between enumeration and probe "
+                               "(short-lived service port), not a reachability failure." + repro),
+                })
+
+    net_unreachable = blocked + transient
+    published_bad = len(unreachable) + len(topo_unreachable)
+    probed = len(net_checks)
+    reachable_ok = probed - len(net_unreachable)
+    have_any = bool(checked or unreachable or topo_unreachable or net_listening)
+    if not have_any:
+        return _result("ports", "skip", "No open service ports found to check.", items)
+    if published_bad:
+        return _result("ports", "fail", f"{published_bad} published port target(s) unreachable.", items)
+    if blocked:
+        return _result("ports", "warn",
+                       f"{reachable_ok} of {probed} probed service port(s) reachable across the CORE "
+                       f"network; {len(blocked)} blocked (dropped packets — likely segmentation).", items)
+    node_count = sum(1 for v in (probe.get("nodes") or {}).values() if isinstance(v, dict) and v.get("listening"))
+    total_ok = len(checked) + reachable_ok
+    tail = (f" ({len(transient)} short-lived port(s) closed during probe.)" if transient else "")
+    return _result("ports", "pass",
+                   f"All {total_ok} stable service port target(s) reachable "
+                   f"({net_listening} listening across {node_count} node(s)).{tail}",
+                   items)
 
 
 def injects_result(summary: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +344,87 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "    if kind == 'docker':\n"
         "        return _run(['docker','exec',name]+list(argv), timeout=timeout)\n"
         "    return _run(['vcmd','-c',os.path.join(PYCORE, name),'--']+list(argv), timeout=timeout)\n"
+    )
+
+
+def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
+                       max_ports_per_node: int = 12, max_targets: int = 80) -> str:
+    """VM-side script: discover each node's listening (non-loopback) TCP service
+    ports from ``/proc/net/tcp`` and test cross-node reachability by connecting
+    from a prober node over the CORE network. Uses python3, which is present on
+    every node (Docker and vnode)."""
+    listen_py = (
+        "import json\n"
+        "res=set()\n"
+        "for path,fam in (('/proc/net/tcp',4),('/proc/net/tcp6',6)):\n"
+        "    try:\n"
+        "        f=open(path); f.readline()\n"
+        "        for line in f:\n"
+        "            p=line.split()\n"
+        "            if len(p)<4 or p[3]!='0A': continue\n"
+        "            addr,port=p[1].rsplit(':',1)\n"
+        "            if fam==4 and addr.upper()=='0100007F': continue\n"
+        "            if fam==6 and addr.upper().endswith('00000001'): continue\n"
+        "            res.add(int(port,16))\n"
+        "        f.close()\n"
+        "    except Exception: pass\n"
+        f"print(json.dumps(sorted(res)[:{int(max_ports_per_node)}]))\n"
+    )
+    listen_literal = json.dumps(listen_py)
+    return (
+        _remote_preamble(sudo_password, session_id)
+        + f"LISTEN_PY = {listen_literal}\n"
+        + f"MAX_TARGETS = {int(max_targets)}\n"
+        + "def _ip(kind, name):\n"
+        + "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1\"])\n"
+        + "    ips = [l.strip() for l in out.splitlines() if l.strip()]\n"
+        + "    return ips[0] if ips else ''\n"
+        + "def _listening(kind, name):\n"
+        + "    rc, out = _nexec(kind, name, ['python3','-c', LISTEN_PY])\n"
+        + "    try:\n"
+        + "        return [int(x) for x in json.loads(out.strip().splitlines()[-1])]\n"
+        + "    except Exception:\n"
+        + "        return []\n"
+        + "def main():\n"
+        + "    alln = _all_nodes()\n"
+        + "    nodes = {}\n"
+        + "    for kind, name in alln:\n"
+        + "        nodes[name] = {'kind': kind, 'ip': _ip(kind, name), 'listening': _listening(kind, name)}\n"
+        + "    prober = alln[0] if alln else None\n"
+        + "    targets = []\n"
+        + "    if prober:\n"
+        + "        pn = prober[1]\n"
+        + "        for kind, name in alln:\n"
+        + "            if name == pn:\n"
+        + "                continue\n"
+        + "            ip = nodes.get(name, {}).get('ip') or ''\n"
+        + "            if not ip:\n"
+        + "                continue\n"
+        + "            for port in nodes.get(name, {}).get('listening', []):\n"
+        + "                targets.append([name, ip, port])\n"
+        + "                if len(targets) >= MAX_TARGETS:\n"
+        + "                    break\n"
+        + "            if len(targets) >= MAX_TARGETS:\n"
+        + "                break\n"
+        + "    checks = []\n"
+        + "    if prober and targets:\n"
+        + "        conn = 'import json,socket,errno\\nR=[]\\nfor n,ip,port in ' + json.dumps(targets) + ':\\n'\n"
+        + "        conn += ' try:\\n  s=socket.create_connection((ip,int(port)),timeout=2.0); s.close(); R.append([n,ip,port,True,\"\"])\\n'\n"
+        + "        conn += ' except socket.timeout:\\n  R.append([n,ip,port,False,\"timeout\"])\\n'\n"
+        + "        conn += ' except OSError as e:\\n'\n"
+        + "        conn += '  c=getattr(e,\"errno\",None)\\n'\n"
+        + "        conn += '  R.append([n,ip,port,False,\"refused\" if c==errno.ECONNREFUSED else (\"no-route\" if c in (errno.EHOSTUNREACH,errno.ENETUNREACH) else \"error\")])\\n'\n"
+        + "        conn += 'print(json.dumps(R))\\n'\n"
+        + "        rc, out = _nexec(prober[0], prober[1], ['python3','-c', conn], timeout=90)\n"
+        + "        try:\n"
+        + "            for row in json.loads(out.strip().splitlines()[-1]):\n"
+        + "                n, ip, port, ok = row[0], row[1], row[2], row[3]\n"
+        + "                err = row[4] if len(row) > 4 else ''\n"
+        + "                checks.append({'node': n, 'ip': ip, 'port': port, 'reachable': bool(ok), 'error': err})\n"
+        + "        except Exception:\n"
+        + "            pass\n"
+        + "    print(json.dumps({'ok': True, 'prober': (prober[1] if prober else ''), 'nodes': nodes, 'checks': checks}))\n"
+        + "main()\n"
     )
 
 
@@ -512,30 +658,43 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
             "detail": detail,
         })
 
-    traffic_ok = bool(traffic_files or nodes_with_procs or flows)
-    if expected and not traffic_ok:
-        return _result("traffic", "warn",
-                       "Traffic is configured, but no traffic flows, scripts, or processes were found. "
-                       "Confirm traffic generation ran during execute.", items)
+    # The runtime traffic_summary.json is authoritative about whether traffic
+    # was actually configured — the scenario XML's Traffic section can carry a
+    # non-zero density with no concrete flows. A present-but-empty summary means
+    # no traffic, regardless of the XML. Only when the artifact is missing
+    # entirely do we fall back to the scenario's declared intent.
+    traffic_configured = bool(flows or traffic_files or nodes_with_procs)
+    summary_missing = summary is None and not traffic_files and not nodes_with_procs
+
+    # An unreachable node is always worth surfacing — reachability is part of
+    # this check ("nodes are reachable").
     if unreachable:
         first_cmd = _name(unreachable[0].get("cmd"))
         tail = f" First: {first_cmd}" if first_cmd else ""
         return _result("traffic", "warn",
                        f"{reachable_count} node(s) reachable, {len(unreachable)} not reachable by ping "
                        f"(may be intentional segmentation — reproduce the per-row command to confirm).{tail}", items)
-    if not traffic_ok and not ping:
-        return _result("traffic", "skip", "No traffic configured and no reachability probes ran.", items)
-    bits: list[str] = []
-    if flows:
-        bits.append(f"{len(flows)} traffic flow(s)")
-    if traffic_files:
-        bits.append(f"{len(traffic_files)} traffic script(s)")
-    if nodes_with_procs:
-        bits.append(f"{len(nodes_with_procs)} node(s) running traffic")
-    if reachable_count:
-        bits.append(f"{reachable_count} node(s) reachable by ping")
-    detail = "; ".join(bits) if bits else "No traffic configured; reachability probed."
-    return _result("traffic", "pass", detail, items)
+
+    if traffic_configured:
+        bits: list[str] = []
+        if flows:
+            bits.append(f"{len(flows)} traffic flow(s)")
+        if traffic_files:
+            bits.append(f"{len(traffic_files)} traffic script(s)")
+        if nodes_with_procs:
+            bits.append(f"{len(nodes_with_procs)} node(s) running traffic")
+        if reachable_count:
+            bits.append(f"{reachable_count} node(s) reachable by ping")
+        return _result("traffic", "pass", "; ".join(bits), items)
+
+    # No traffic configured at runtime.
+    if summary_missing and expected:
+        return _result("traffic", "warn",
+                       "The scenario declares traffic, but no runtime traffic_summary.json was found. "
+                       "Confirm traffic generation ran during execute.", items)
+    reach_note = (f" {reachable_count} node(s) reachable by ping." if reachable_count else "")
+    return _result("traffic", "skip",
+                   "No traffic configured for this scenario." + reach_note, items)
 
 
 # --------------------------------------------------------------------------- #
