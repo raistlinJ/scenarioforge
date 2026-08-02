@@ -4,33 +4,4 @@
 # is a ratchet: it may shrink freely, and should only grow with a deliberate
 # decision. Prune an entry as soon as its test passes again.
 #
-# CAUTION for the entries below: they pass on a developer machine and fail in
-# CI, so a local run reports "8 baseline failure(s) now pass -- prune them".
-# Do not. Pruning on that basis turns CI red again. Verify against a checkout
-# containing only tracked files first:
-#
-#     git ls-files -z | tar -czf /tmp/t.tgz --null -T - && \
-#       mkdir /tmp/ci && tar -xzf /tmp/t.tgz -C /tmp/ci && \
-#       cd /tmp/ci && python scripts/check_test_ratchet.py
-#
-# The entries below all share one cause: they build a Flow chain, which needs an
-# installed generator or vulnerability catalog, and `outputs/` is gitignored. A
-# developer checkout has one -- 87 flag-node-generators in one working tree -- and
-# CI has none, so `_pick_flag_chain_nodes` finds nothing eligible and the routes
-# answer 422.
-#
-# They are recorded rather than stubbed because they need differently shaped
-# fakes: some want flag-generators, others want vulnerability names drawn from a
-# real catalog. A single fixture is not enough -- one attempt broke a test that
-# was passing. The durable fix is a small tracked fixture catalog installed by
-# the workflow, which would let every entry here be pruned at once.
-#
-# Recorded count: 8
-tests/test_flow_staged_topology_expansion.py::test_flow_add_docker_stage_updates_spec_preview_and_is_idempotent
-tests/test_flow_staged_topology_expansion.py::test_flow_requires_confirmation_before_reusing_existing_docker_and_syncs_xml
-tests/test_vulnerability_slot_lazy_fill.py::test_a_slot_the_chain_skips_stays_a_plain_docker_node
-tests/test_web_preview_vulns_no_docker_fallback_flow_e2e.py::test_vulns_get_docker_hosts_even_when_none_declared_and_flow_uses_them
-tests/test_web_preview_vulns_specific_count_flow_e2e.py::test_flow_attackflow_preview_length2_generates_chain
-tests/test_web_preview_vulns_specific_count_flow_e2e.py::test_flow_attackflow_preview_with_many_vulns_does_not_error
-tests/test_web_preview_vulns_specific_count_flow_e2e.py::test_flow_attackflow_preview_without_starter_catalog_generates_chain
-tests/test_web_preview_vulns_specific_count_flow_e2e.py::test_specific_count_vulns_show_in_preview_and_flow_attackflow_preview
+# Recorded count: 0

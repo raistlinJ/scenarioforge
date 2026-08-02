@@ -33,6 +33,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install the generator fixture catalog
+        # Generators are only "enabled" when installed under
+        # outputs/installed_generators, and that directory is gitignored -- so a
+        # developer checkout has a real catalog and CI had none. Tests that build
+        # a Flow chain then found nothing eligible. These fixtures are synthetic
+        # and exist only to give CI an enabled catalog.
+        run: |
+          mkdir -p outputs
+          cp -R tests/fixtures/installed_generators outputs/installed_generators
+
       - name: Run tests against the known-failure baseline
         run: python scripts/check_test_ratchet.py
 
