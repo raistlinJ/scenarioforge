@@ -31,7 +31,8 @@ CHECK_ORDER: list[tuple[str, str]] = [
     ("ports", "Ports open"),
     ("injects", "Inject files placed"),
     ("segmentation", "Firewall/segmentation rules in place"),
-    ("traffic", "Traffic scripts running & nodes reachable"),
+    ("traffic", "Traffic scripts running"),
+    ("reachability", "Nodes reachable (traffic source → destination)"),
 ]
 
 CHECK_KEYS = [key for key, _label in CHECK_ORDER]
@@ -172,10 +173,15 @@ def ports_result(summary: dict[str, Any], probe: Any = None) -> dict[str, Any]:
             if not isinstance(info, dict):
                 continue
             listening = _as_list(info.get("listening"))
+            loopback = _as_list(info.get("loopback"))
             net_listening += len(listening)
             if listening:
+                # Loopback-only binds (e.g. Tomcat's AJP on 127.0.0.1) are noted
+                # but never probed: they are not network-exposed by design.
+                loop_note = (f" (plus {', '.join(str(p) for p in loopback)} bound to localhost only)"
+                             if loopback else "")
                 items.append({"name": f"{node} ({info.get('ip') or 'no ip'})", "status": "pass",
-                              "detail": f"listening on {', '.join(str(p) for p in listening)}"})
+                              "detail": f"listening on {', '.join(str(p) for p in listening)}{loop_note}"})
         prober = _name(probe.get("prober"))
         for row in net_checks:
             if not isinstance(row, dict) or row.get("reachable") is not False:
@@ -353,9 +359,19 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
     ports from ``/proc/net/tcp`` and test cross-node reachability by connecting
     from a prober node over the CORE network. Uses python3, which is present on
     every node (Docker and vnode)."""
+    # Loopback-bound ports are not network-exposed services, so they must not be
+    # treated as ports that "should be open" from another node. /proc stores the
+    # IPv4 address little-endian, so 127.x.x.x ends with '7F'; Java/Tomcat style
+    # localhost binds also appear in tcp6 as IPv4-mapped (::ffff:127.0.0.1).
     listen_py = (
         "import json\n"
-        "res=set()\n"
+        "def _loop(a, fam):\n"
+        "    a=a.upper()\n"
+        "    if fam==4: return a.endswith('7F')\n"
+        "    if a=='00000000000000000000000001000000': return True\n"
+        "    if a.startswith('0000000000000000FFFF0000'): return a.endswith('7F')\n"
+        "    return False\n"
+        "pub=set(); loop=set()\n"
         "for path,fam in (('/proc/net/tcp',4),('/proc/net/tcp6',6)):\n"
         "    try:\n"
         "        f=open(path); f.readline()\n"
@@ -363,12 +379,11 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         "            p=line.split()\n"
         "            if len(p)<4 or p[3]!='0A': continue\n"
         "            addr,port=p[1].rsplit(':',1)\n"
-        "            if fam==4 and addr.upper()=='0100007F': continue\n"
-        "            if fam==6 and addr.upper().endswith('00000001'): continue\n"
-        "            res.add(int(port,16))\n"
+        "            (loop if _loop(addr,fam) else pub).add(int(port,16))\n"
         "        f.close()\n"
         "    except Exception: pass\n"
-        f"print(json.dumps(sorted(res)[:{int(max_ports_per_node)}]))\n"
+        "loop -= pub\n"
+        f"print(json.dumps({{'listening': sorted(pub)[:{int(max_ports_per_node)}], 'loopback': sorted(loop)}}))\n"
     )
     listen_literal = json.dumps(listen_py)
     return (
@@ -382,14 +397,16 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + "def _listening(kind, name):\n"
         + "    rc, out = _nexec(kind, name, ['python3','-c', LISTEN_PY])\n"
         + "    try:\n"
-        + "        return [int(x) for x in json.loads(out.strip().splitlines()[-1])]\n"
+        + "        d = json.loads(out.strip().splitlines()[-1])\n"
+        + "        return [int(x) for x in d.get('listening') or []], [int(x) for x in d.get('loopback') or []]\n"
         + "    except Exception:\n"
-        + "        return []\n"
+        + "        return [], []\n"
         + "def main():\n"
         + "    alln = _all_nodes()\n"
         + "    nodes = {}\n"
         + "    for kind, name in alln:\n"
-        + "        nodes[name] = {'kind': kind, 'ip': _ip(kind, name), 'listening': _listening(kind, name)}\n"
+        + "        pub, loop = _listening(kind, name)\n"
+        + "        nodes[name] = {'kind': kind, 'ip': _ip(kind, name), 'listening': pub, 'loopback': loop}\n"
         + "    prober = alln[0] if alln else None\n"
         + "    targets = []\n"
         + "    if prober:\n"
@@ -457,8 +474,10 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "    nodes = {}\n"
         + "    for kind, name in _all_nodes():\n"
         + "        rc, out = _nexec(kind, name, ['sh','-lc','iptables -S 2>/dev/null || nft list ruleset 2>/dev/null'])\n"
-        + "        rules = [l for l in out.splitlines() if l.strip()]\n"
-        + "        non_default = [l for l in rules if not l.strip().startswith('-P ') and l.strip() not in ('-N DOCKER','')]\n"
+        + "        # Count only real applied rules. Chain policies (-P), chain\n"
+        + "        # declarations (-N) and any shell/ssh noise on the stream are not rules.\n"
+        + "        non_default = [l.strip() for l in out.splitlines()\n"
+        + "                       if l.strip().startswith('-A ') or l.strip().startswith('-I ')]\n"
         + "        nodes[name] = {\n"
         + "            'kind': kind,\n"
         + "            'rules_present': bool(non_default),\n"
@@ -511,20 +530,36 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "        rc, out = _nexec(kind, name, ['sh','-lc','pgrep -fa traffic_ 2>/dev/null || pgrep -af traffic_ 2>/dev/null'])\n"
         + "        procs = [l.strip() for l in out.splitlines() if 'traffic_' in l and 'pgrep' not in l]\n"
         + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': _ip(kind, name)}\n"
+        + "    # Reachability follows the configured traffic flows: ping from each\n"
+        + "    # flow's source node to its destination, which is the path traffic\n"
+        + "    # actually needs. Nodes are matched to a flow by their CORE IP.\n"
+        + "    by_ip = {}\n"
+        + "    for kind, name in alln:\n"
+        + "        ip = nodes.get(name, {}).get('ip') or ''\n"
+        + "        if ip and ip not in by_ip:\n"
+        + "            by_ip[ip] = (kind, name)\n"
         + "    ping = []\n"
-        + "    prober = alln[0] if alln else None\n"
-        + "    if prober:\n"
-        + "        pk, pn = prober\n"
-        + "        for kind, name in alln:\n"
-        + "            if name == pn:\n"
-        + "                continue\n"
-        + "            ip = nodes.get(name, {}).get('ip') or ''\n"
-        + "            if not ip:\n"
-        + "                ping.append({'src': pn, 'dst': name, 'ip': '', 'reachable': None, 'cmd': ''})\n"
-        + "                continue\n"
-        + "            rc, out = _nexec(pk, pn, ['sh','-lc','ping -c1 -W1 '+ip+' >/dev/null 2>&1 && echo OK || echo NO'])\n"
-        + "            ping.append({'src': pn, 'dst': name, 'ip': ip, 'reachable': ('OK' in out), 'cmd': _repro(pk, pn, ip)})\n"
-        + "    print(json.dumps({'ok': True, 'traffic_files': traffic_files, 'summary': summary, 'nodes': nodes, 'ping': ping, 'prober': (prober[1] if prober else '')}))\n"
+        + "    seen_pairs = set()\n"
+        + "    for flow in ((summary or {}).get('flows') or []):\n"
+        + "        if not isinstance(flow, dict):\n"
+        + "            continue\n"
+        + "        s_ip = str(flow.get('src_ip') or '').strip()\n"
+        + "        d_ip = str(flow.get('dst_ip') or '').strip()\n"
+        + "        if not s_ip or not d_ip or (s_ip, d_ip) in seen_pairs:\n"
+        + "            continue\n"
+        + "        seen_pairs.add((s_ip, d_ip))\n"
+        + "        src = by_ip.get(s_ip)\n"
+        + "        dst_name = (by_ip.get(d_ip) or (None, d_ip))[1]\n"
+        + "        if not src:\n"
+        + "            ping.append({'src': s_ip, 'dst': dst_name, 'ip': d_ip, 'reachable': None,\n"
+        + "                         'cmd': '', 'why': 'traffic source node not found for ' + s_ip})\n"
+        + "            continue\n"
+        + "        sk, sn = src\n"
+        + "        rc, out = _nexec(sk, sn, ['sh','-lc','ping -c1 -W1 '+d_ip+' >/dev/null 2>&1 && echo OK || echo NO'])\n"
+        + "        ping.append({'src': sn, 'dst': dst_name, 'ip': d_ip, 'reachable': ('OK' in out),\n"
+        + "                     'cmd': _repro(sk, sn, d_ip), 'port': flow.get('dst_port'),\n"
+        + "                     'protocol': flow.get('protocol')})\n"
+        + "    print(json.dumps({'ok': True, 'traffic_files': traffic_files, 'summary': summary, 'nodes': nodes, 'ping': ping}))\n"
         + "main()\n"
     )
 
@@ -573,19 +608,20 @@ def segmentation_result(probe: Any, *, expected: bool) -> dict[str, Any]:
     if seg_files:
         items.append({"name": "CORE VM", "status": "pass",
                       "detail": f"{len(seg_files)} segmentation script(s) generated"})
+    # List only nodes that actually carry rules. Emitting a row per rule-free
+    # node buries the signal under one line per node in the topology.
     for node, info in sorted(nodes.items()):
-        if not isinstance(info, dict):
+        if not isinstance(info, dict) or not info.get("rules_present"):
             continue
-        present = bool(info.get("rules_present"))
-        # Nodes legitimately carry no custom firewall rules, so absence is
-        # informational (skip), not a warning.
         items.append({
             "name": f"{node} ({info.get('kind', '?')})",
-            "status": "pass" if present else "skip",
+            "status": "pass",
             "detail": (f"{info.get('rule_count', 0)} firewall rule(s) applied"
-                       + (" [marker]" if info.get("marker") else "")) if present
-                      else "no custom firewall rules",
+                       + (" [marker]" if info.get("marker") else "")),
         })
+    if nodes and not nodes_with_rules:
+        items.append({"name": f"{len(nodes)} node(s) probed", "status": "skip",
+                      "detail": "no custom firewall rules on any node (Docker nodes and CORE vnodes)"})
 
     # Decision, most authoritative signal first.
     if verified_status == "fail":
@@ -611,6 +647,10 @@ def segmentation_result(probe: Any, *, expected: bool) -> dict[str, Any]:
 
 
 def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
+    """Check 6: are the traffic scripts generated and running where they should be?
+
+    Reachability is deliberately NOT part of this check — see reachability_result.
+    """
     if not isinstance(probe, dict) or not probe.get("ok"):
         detail = _name(probe.get("error") or probe.get("raw")) if isinstance(probe, dict) else ""
         return _result("traffic", "error", detail or "traffic probe failed")
@@ -618,7 +658,6 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
     summary = probe.get("summary") if isinstance(probe.get("summary"), dict) else None
     flows = _as_list(summary.get("flows")) if isinstance(summary, dict) else []
     nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
-    ping = _as_list(probe.get("ping"))
     nodes_with_procs = [n for n, info in nodes.items() if isinstance(info, dict) and _as_list(info.get("procs"))]
     items: list[dict[str, Any]] = []
 
@@ -632,49 +671,35 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
         count = len(_as_list(nodes[node].get("procs")))
         items.append({"name": node, "status": "pass", "detail": f"{count} traffic process(es) running"})
 
-    unreachable: list[dict[str, Any]] = []
-    reachable_count = 0
-    for row in ping:
-        if not isinstance(row, dict):
-            continue
-        reachable = row.get("reachable")
-        cmd = _name(row.get("cmd"))
-        if reachable is True:
-            reachable_count += 1
-            detail = "reachable"
-            status = "pass"
-        elif reachable is False:
-            unreachable.append(row)
-            detail = ("unreachable — the target may be down or blocked by segmentation. "
-                      + (f"Reproduce with: {cmd}. " if cmd else "")
-                      + "Then check the node is up and shares a network with the source.")
-            status = "warn"
-        else:
-            detail = "no IP resolved for the target node; cannot ping"
-            status = "skip"
-        items.append({
-            "name": f"ping {row.get('src')} → {row.get('dst')} ({row.get('ip') or 'no ip'})",
-            "status": status,
-            "detail": detail,
-        })
+    # Nodes that a flow names as a sender but where no traffic process is running.
+    expected_senders: set[str] = set()
+    ip_to_node = {
+        _name(info.get("ip")): node
+        for node, info in nodes.items()
+        if isinstance(info, dict) and _name(info.get("ip"))
+    }
+    for flow in flows:
+        if isinstance(flow, dict):
+            node = ip_to_node.get(_name(flow.get("src_ip")))
+            if node:
+                expected_senders.add(node)
+    missing_senders = sorted(expected_senders - set(nodes_with_procs))
+    for node in missing_senders:
+        items.append({"name": node, "status": "warn",
+                      "detail": "flow names this node as a traffic source, but no traffic process is running"})
 
-    # The runtime traffic_summary.json is authoritative about whether traffic
-    # was actually configured — the scenario XML's Traffic section can carry a
+    # The runtime traffic_summary.json is authoritative about whether traffic was
+    # actually configured — the scenario XML's Traffic section can carry a
     # non-zero density with no concrete flows. A present-but-empty summary means
     # no traffic, regardless of the XML. Only when the artifact is missing
     # entirely do we fall back to the scenario's declared intent.
     traffic_configured = bool(flows or traffic_files or nodes_with_procs)
     summary_missing = summary is None and not traffic_files and not nodes_with_procs
 
-    # An unreachable node is always worth surfacing — reachability is part of
-    # this check ("nodes are reachable").
-    if unreachable:
-        first_cmd = _name(unreachable[0].get("cmd"))
-        tail = f" First: {first_cmd}" if first_cmd else ""
+    if missing_senders:
         return _result("traffic", "warn",
-                       f"{reachable_count} node(s) reachable, {len(unreachable)} not reachable by ping "
-                       f"(may be intentional segmentation — reproduce the per-row command to confirm).{tail}", items)
-
+                       f"{len(nodes_with_procs)} node(s) running traffic; {len(missing_senders)} "
+                       "expected sender(s) have no traffic process.", items)
     if traffic_configured:
         bits: list[str] = []
         if flows:
@@ -683,18 +708,66 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
             bits.append(f"{len(traffic_files)} traffic script(s)")
         if nodes_with_procs:
             bits.append(f"{len(nodes_with_procs)} node(s) running traffic")
-        if reachable_count:
-            bits.append(f"{reachable_count} node(s) reachable by ping")
         return _result("traffic", "pass", "; ".join(bits), items)
-
-    # No traffic configured at runtime.
     if summary_missing and expected:
         return _result("traffic", "warn",
                        "The scenario declares traffic, but no runtime traffic_summary.json was found. "
                        "Confirm traffic generation ran during execute.", items)
-    reach_note = (f" {reachable_count} node(s) reachable by ping." if reachable_count else "")
-    return _result("traffic", "skip",
-                   "No traffic configured for this scenario." + reach_note, items)
+    return _result("traffic", "skip", "No traffic configured for this scenario.", items)
+
+
+def reachability_result(probe: Any) -> dict[str, Any]:
+    """Check 7: can each traffic source actually reach its destination?
+
+    Probed along the configured traffic flows (source node -> destination IP),
+    which is the path traffic depends on, rather than an arbitrary node pair.
+    """
+    if not isinstance(probe, dict) or not probe.get("ok"):
+        detail = _name(probe.get("error") or probe.get("raw")) if isinstance(probe, dict) else ""
+        return _result("reachability", "error", detail or "reachability probe failed")
+    ping = _as_list(probe.get("ping"))
+    items: list[dict[str, Any]] = []
+    unreachable: list[dict[str, Any]] = []
+    reachable_count = 0
+
+    for row in ping:
+        if not isinstance(row, dict):
+            continue
+        reachable = row.get("reachable")
+        cmd = _name(row.get("cmd"))
+        port = row.get("port")
+        proto = _name(row.get("protocol"))
+        flow_desc = f" [{proto or 'flow'}{':' + str(port) if port else ''}]"
+        if reachable is True:
+            reachable_count += 1
+            status, detail = "pass", "reachable"
+        elif reachable is False:
+            unreachable.append(row)
+            status = "warn"
+            detail = ("traffic destination not reachable from its source — traffic for this flow "
+                      "cannot arrive. Check the destination node is up and shares a network/route "
+                      "with the source" + (f". Reproduce: {cmd}" if cmd else ""))
+        else:
+            status = "skip"
+            detail = _name(row.get("why")) or "could not resolve the flow's source node; cannot ping"
+        items.append({
+            "name": f"{row.get('src')} → {row.get('dst')} ({row.get('ip') or 'no ip'}){flow_desc}",
+            "status": status,
+            "detail": detail,
+        })
+
+    if not ping:
+        return _result("reachability", "skip",
+                       "No traffic flows configured, so there are no source → destination pairs to verify.",
+                       items)
+    if unreachable:
+        first_cmd = _name(unreachable[0].get("cmd"))
+        tail = f" First: {first_cmd}" if first_cmd else ""
+        return _result("reachability", "warn",
+                       f"{reachable_count} of {len(ping)} traffic path(s) reachable; "
+                       f"{len(unreachable)} destination(s) unreachable from their source.{tail}", items)
+    return _result("reachability", "pass",
+                   f"All {reachable_count} traffic source → destination path(s) reachable.", items)
 
 
 # --------------------------------------------------------------------------- #

@@ -10,10 +10,12 @@ from webapp import artifact_checks as ac
 # Plan + validator-summary mapping (checks 1-4)
 # --------------------------------------------------------------------------- #
 
-def test_check_plan_has_six_pending_steps_in_order():
+def test_check_plan_has_seven_pending_steps_in_order():
     plan = ac.check_plan()
     assert [c["key"] for c in plan] == ac.CHECK_KEYS
-    assert len(plan) == 6
+    assert len(plan) == 7
+    # Traffic-script health and reachability are separate checks.
+    assert ac.CHECK_KEYS[-2:] == ["traffic", "reachability"]
     assert all(c["status"] == "pending" for c in plan)
 
 
@@ -99,6 +101,30 @@ def test_ports_result_refused_is_transient_not_a_failure():
     assert "short-lived" in res["summary"]
     # The refused port is still surfaced, as an informational (skip) item.
     assert any(str(i.get("status")) == "skip" and "8009" in i["name"] for i in res["items"])
+
+
+def test_ports_probe_excludes_loopback_bound_ports():
+    # Loopback binds are not network-exposed services and must never be probed
+    # from another node. /proc stores IPv4 little-endian, so 127.x.x.x ends in
+    # '7F' — including the IPv4-mapped IPv6 form Java/Tomcat uses for AJP.
+    script = ac.ports_probe_script("pw", 1)
+    ast.parse(script)
+    assert "0000000000000000FFFF0000" in script   # ::ffff:127.0.0.1 detection
+    assert "endswith('7F')" in script
+    assert "'loopback'" in script
+
+
+def test_ports_result_reports_loopback_ports_separately():
+    summary = {"ports_checked": [], "port_unreachable": []}
+    probe = {"ok": True, "prober": "n1",
+             "nodes": {"n1": {"ip": "10.0.0.1", "listening": []},
+                       "n2": {"ip": "10.0.0.2", "listening": [8080], "loopback": [8009]}},
+             "checks": [{"node": "n2", "ip": "10.0.0.2", "port": 8080, "reachable": True, "error": ""}]}
+    res = ac.ports_result(summary, probe)
+    assert res["status"] == "pass"
+    # The loopback port is noted on the node's row, not probed as a failure.
+    assert any("8009 bound to localhost only" in i["detail"] for i in res["items"])
+    assert not any("8009" in i["name"] for i in res["items"])
 
 
 def test_ports_published_failure_outranks_network_probe():
@@ -215,31 +241,67 @@ def test_traffic_pass_with_scripts_and_reachable():
     assert ac.traffic_result(probe, expected=True)["status"] == "pass"
 
 
-def test_traffic_warn_when_a_node_unreachable():
+def test_traffic_result_ignores_reachability():
+    # Reachability lives in its own check now; a traffic probe with an
+    # unreachable ping must not turn the traffic-script check into a warning.
     probe = {"ok": True, "traffic_files": ["/tmp/traffic/traffic_1_s0.py"],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.7"}]},
              "nodes": {"h": {"procs": ["x traffic_1_s0.py"], "ip": "10.0.0.5"}},
              "ping": [{"src": "h", "dst": "z", "ip": "10.0.0.7", "reachable": False}]}
-    assert ac.traffic_result(probe, expected=True)["status"] == "warn"
+    assert ac.traffic_result(probe, expected=True)["status"] == "pass"
+
+
+def test_traffic_warns_when_a_flow_source_has_no_process():
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.7"}]},
+             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"}},
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "warn"
+    assert any("no traffic process is running" in i["detail"] for i in res["items"])
 
 
 def test_traffic_skip_when_summary_present_but_empty_even_if_xml_declares_traffic():
     # The runtime artifact is authoritative: an empty flows list means no
     # traffic, regardless of the scenario XML's Traffic-section density.
     probe = {"ok": True, "traffic_files": [], "summary": {"flows": []},
-             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"}},
-             "ping": [{"src": "h", "dst": "w", "ip": "10.0.0.6", "reachable": True}]}
+             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"}}, "ping": []}
     res = ac.traffic_result(probe, expected=True)
     assert res["status"] == "skip"
     assert "no traffic configured" in res["summary"].lower()
-    assert "1 node(s) reachable" in res["summary"]
 
 
-def test_traffic_warn_only_when_summary_artifact_missing_and_declared():
-    # No traffic_summary.json at all + scenario declares traffic -> can't confirm.
-    probe = {"ok": True, "traffic_files": [], "nodes": {"h": {"procs": [], "ip": "10.0.0.5"}}, "ping": []}
-    res = ac.traffic_result(probe, expected=True)
+# --------------------------------------------------------------------------- #
+# Reachability: probed along traffic source -> destination
+# --------------------------------------------------------------------------- #
+
+def test_reachability_skips_when_no_flows():
+    res = ac.reachability_result({"ok": True, "ping": []})
+    assert res["status"] == "skip"
+    assert "no traffic flows" in res["summary"].lower()
+
+
+def test_reachability_passes_along_flow_paths():
+    probe = {"ok": True, "ping": [
+        {"src": "h1", "dst": "h2", "ip": "10.0.0.7", "reachable": True, "port": 9000, "protocol": "UDP"}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+    assert "1 traffic source → destination path(s) reachable" in res["summary"]
+    assert any("UDP:9000" in i["name"] for i in res["items"])
+
+
+def test_reachability_warns_with_repro_when_destination_unreachable():
+    probe = {"ok": True, "ping": [
+        {"src": "h1", "dst": "h2", "ip": "10.0.0.7", "reachable": False,
+         "cmd": "sudo vcmd -c /tmp/pycore.1/h1 -- ping -c3 -W2 10.0.0.7"}]}
+    res = ac.reachability_result(probe)
     assert res["status"] == "warn"
-    assert "traffic generation" in res["summary"].lower()
+    assert "unreachable from their source" in res["summary"]
+    assert any("vcmd -c /tmp/pycore.1/h1" in i["detail"] for i in res["items"])
+
+
+def test_reachability_error_on_probe_failure():
+    assert ac.reachability_result({"ok": False, "error": "ssh down"})["status"] == "error"
 
 
 def test_traffic_skip_when_not_declared_and_no_flows():
@@ -253,17 +315,6 @@ def test_traffic_uses_summary_flows_as_evidence():
     res = ac.traffic_result(probe, expected=True)
     assert res["status"] == "pass"
     assert "1 traffic flow" in res["summary"]
-
-
-def test_traffic_unreachable_warning_includes_reproduce_command():
-    probe = {"ok": True, "traffic_files": ["/tmp/traffic/traffic_1_s0.py"],
-             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"}},
-             "ping": [{"src": "h", "dst": "z", "ip": "10.0.0.7", "reachable": False,
-                       "cmd": "sudo vcmd -c /tmp/pycore.1/h -- ping -c3 -W2 10.0.0.7"}]}
-    res = ac.traffic_result(probe, expected=True)
-    assert res["status"] == "warn"
-    detail = next(i["detail"] for i in res["items"] if i["name"].startswith("ping"))
-    assert "vcmd -c /tmp/pycore.1/h" in detail
 
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +341,26 @@ def test_segmentation_verification_skip_when_no_restricted_flows():
     probe = {"ok": True, "seg_files": [], "nodes": {},
              "verification": {"flows_total": 0, "blocked": [], "blocked_count": 0}}
     assert ac.segmentation_result(probe, expected=True)["status"] == "skip"
+
+
+def test_segmentation_probe_counts_only_real_applied_rules():
+    # Chain policies, chain declarations, and any shell/ssh noise on the output
+    # stream (e.g. "stdin: is not a tty") must not be counted as firewall rules.
+    script = ac.segmentation_probe_script("pw", 1)
+    ast.parse(script)
+    assert "startswith('-A ')" in script
+    assert "startswith('-I ')" in script
+
+
+def test_segmentation_collapses_rule_free_nodes_into_one_row():
+    probe = {"ok": True, "seg_files": [], "verification": None,
+             "nodes": {f"n{i}": {"kind": "docker", "rules_present": False, "rule_count": 0}
+                       for i in range(5)}}
+    res = ac.segmentation_result(probe, expected=False)
+    assert res["status"] == "skip"
+    # One summary row, not one row per rule-free node.
+    assert len(res["items"]) == 1
+    assert "5 node(s) probed" in res["items"][0]["name"]
 
 
 def test_segmentation_items_label_node_kind():

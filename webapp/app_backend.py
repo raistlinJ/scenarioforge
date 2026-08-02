@@ -951,16 +951,20 @@ def _run_artifact_checks_job(
             seg_probe = {'ok': False, 'error': str(exc)}
         _apply(_ac.segmentation_result(seg_probe, expected=seg_expected)); _step(5, _ac.CHECK_LABELS['segmentation'])
 
-        # Check 6: traffic scripts running + ping reachability (live probe).
+        # Checks 6 & 7: traffic scripts running, then reachability along each
+        # configured traffic flow (source node -> destination).
         _step(6, _ac.CHECK_LABELS['traffic'])
         try:
             traffic_probe = _run_remote_python_json(
                 core_cfg, _ac.traffic_probe_script(sudo_pw, session_id),
-                logger=log, label='check_artifacts.traffic', timeout=120.0,
+                logger=log, label='check_artifacts.traffic', timeout=150.0,
             )
         except Exception as exc:
             traffic_probe = {'ok': False, 'error': str(exc)}
-        _apply(_ac.traffic_result(traffic_probe, expected=traffic_expected))
+        _apply(_ac.traffic_result(traffic_probe, expected=traffic_expected)); _step(6, _ac.CHECK_LABELS['traffic'])
+
+        _step(7, _ac.CHECK_LABELS['reachability'])
+        _apply(_ac.reachability_result(traffic_probe))
 
         results = [dict(c) for c in checks]
         _update_artifact_check_progress(
