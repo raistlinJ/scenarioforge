@@ -749,6 +749,78 @@ def _expire_artifact_check_progress() -> None:
             _ARTIFACT_CHECK_PROGRESS.pop(cid, None)
 
 
+def _xml_has_scenario_editor(path: Any) -> bool:
+    """True when the file is a saved scenario XML carrying the ScenarioEditor
+    block (planning sections, PlanPreview, FlowState) the validator needs to
+    know the expected topology. The CORE-VM deployed session XML does not."""
+    try:
+        text = str(path or '').strip()
+        if not text or not os.path.isfile(text):
+            return False
+        root = ET.parse(text).getroot()
+        return root.find('.//ScenarioEditor') is not None
+    except Exception:
+        return False
+
+
+def _resolve_check_source_xml(
+    xml_path: Any,
+    *,
+    scenario_label: Optional[str],
+    session_id: Any,
+    core_cfg: Dict[str, Any],
+) -> str:
+    """Return the best local source scenario XML to validate against.
+
+    The Check Artifacts button forwards the CORE session's ``file`` attribute,
+    which is the VM-side deployed session XML and carries no ScenarioEditor
+    data. Prefer the passed path only when it is a real source XML; otherwise
+    recover the most recent saved source XML for this session from the session
+    store (``outputs/core_sessions.json``), matching on session id and scenario.
+    """
+    passed = str(xml_path or '').strip()
+    if _xml_has_scenario_editor(passed):
+        return passed
+
+    try:
+        sid = int(session_id) if session_id not in (None, '') else None
+    except Exception:
+        sid = None
+    scenario_norm = _normalize_scenario_label(scenario_label or '')
+    host = str((core_cfg or {}).get('host') or (core_cfg or {}).get('core_host') or '').strip()
+    try:
+        port = int((core_cfg or {}).get('port') or (core_cfg or {}).get('core_port') or 0)
+    except Exception:
+        port = 0
+
+    store = _load_core_sessions_store()
+    candidates: list[tuple[float, str]] = []
+    for path_key, entry in (store or {}).items():
+        entry_sid = _session_store_entry_session_id(entry)
+        if sid is not None and entry_sid != sid:
+            continue
+        if scenario_norm and _session_store_entry_scenario_norm(entry) not in ('', scenario_norm):
+            continue
+        # Prefer entries recorded against the same CORE endpoint, but do not
+        # require it (older entries may predate host/port tagging).
+        core_ok = True
+        if host and port:
+            try:
+                core_ok = _session_store_entry_matches_core(entry, host, port)
+            except Exception:
+                core_ok = True
+        if not _xml_has_scenario_editor(path_key):
+            continue
+        updated = _session_store_entry_updated_at_epoch(entry) or 0.0
+        # Bias toward core-matched entries without excluding others.
+        candidates.append((updated + (1e12 if core_ok else 0.0), str(path_key)))
+
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+    return passed
+
+
 def _run_artifact_checks_job(
     check_id: str,
     *,
@@ -785,6 +857,21 @@ def _run_artifact_checks_job(
         # Phase A: export the running session XML and run the post-execution
         # validator, which supplies checks 1-4 (containers/services/ports/injects).
         _step(1, 'Collecting session state & validating nodes…')
+        # The button forwards the CORE deployed session path; recover the real
+        # source scenario XML so the validator can compute expected topology.
+        resolved_xml = _resolve_check_source_xml(
+            xml_path, scenario_label=scenario_label, session_id=session_id, core_cfg=core_cfg,
+        )
+        if resolved_xml and resolved_xml != xml_path:
+            log.info('[check_artifacts] using source scenario XML %s (was %s)', resolved_xml, xml_path)
+            xml_path = resolved_xml
+        if not scenario_label:
+            try:
+                store = _load_core_sessions_store()
+                entry = store.get(os.path.abspath(xml_path)) or store.get(xml_path)
+                scenario_label = str((entry or {}).get('scenario_name') or '').strip() or scenario_label
+            except Exception:
+                pass
         scenario_norm = _normalize_scenario_label(scenario_label or '')
         if not preview_plan_path and scenario_norm:
             try:
@@ -828,7 +915,20 @@ def _run_artifact_checks_job(
 
         _apply(_ac.containers_result(summary)); _step(1, _ac.CHECK_LABELS['containers'])
         _apply(_ac.services_result(summary)); _step(2, _ac.CHECK_LABELS['services'])
-        _apply(_ac.ports_result(summary)); _step(3, _ac.CHECK_LABELS['ports'])
+
+        sudo_pw = (core_cfg or {}).get('ssh_password')
+        # Check 3: CORE-network port reachability (VM-mode nodes publish no host
+        # ports; probe each node's listening service ports from a prober node).
+        _step(3, _ac.CHECK_LABELS['ports'])
+        try:
+            ports_probe = _run_remote_python_json(
+                core_cfg, _ac.ports_probe_script(sudo_pw, session_id),
+                logger=log, label='check_artifacts.ports', timeout=150.0,
+            )
+        except Exception as exc:
+            log.warning('[check_artifacts] ports probe failed: %s', exc)
+            ports_probe = None
+        _apply(_ac.ports_result(summary, ports_probe)); _step(3, _ac.CHECK_LABELS['ports'])
         _apply(_ac.injects_result(summary)); _step(4, _ac.CHECK_LABELS['injects'])
 
         seg_expected = False
@@ -839,8 +939,6 @@ def _run_artifact_checks_job(
             traffic_expected = _ac.traffic_expected(scenario_root)
         except Exception:
             pass
-
-        sudo_pw = (core_cfg or {}).get('ssh_password')
 
         # Check 5: firewall/segmentation rules (live probe on the CORE VM).
         _step(5, _ac.CHECK_LABELS['segmentation'])
