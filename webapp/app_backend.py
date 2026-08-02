@@ -687,6 +687,223 @@ _REPO_PUSH_PROGRESS: Dict[str, Dict[str, Any]] = {}
 _REPO_PUSH_PROGRESS_LOCK = threading.Lock()
 _REPO_PUSH_PROGRESS_TTL_SECONDS = 600.0
 
+# --------------------------------------------------------------------------- #
+# CORE "Check Artifacts" progress store + background job.
+# Mirrors the repo-push progress pattern: a polled in-memory dict updated by a
+# daemon worker. The check logic/result shaping lives in webapp.artifact_checks.
+# --------------------------------------------------------------------------- #
+_ARTIFACT_CHECK_PROGRESS: Dict[str, Dict[str, Any]] = {}
+_ARTIFACT_CHECK_LOCK = threading.Lock()
+_ARTIFACT_CHECK_TTL_SECONDS = 900.0
+
+
+def _init_artifact_check_progress(check_id: str, *, session_id: Any, scenario: str) -> None:
+    from webapp import artifact_checks as _ac
+    now = time.time()
+    with _ARTIFACT_CHECK_LOCK:
+        _ARTIFACT_CHECK_PROGRESS[check_id] = {
+            'check_id': check_id,
+            'status': 'queued',
+            'session_id': session_id,
+            'scenario': scenario,
+            'step': 0,
+            'total': len(_ac.CHECK_ORDER),
+            'label': 'Queued',
+            'checks': _ac.check_plan(),
+            'overall': 'running',
+            'overall_summary': '',
+            'error': None,
+            'created_at': now,
+            'updated_at': now,
+        }
+
+
+def _update_artifact_check_progress(check_id: Optional[str], **fields: Any) -> None:
+    if not check_id:
+        return
+    now = time.time()
+    with _ARTIFACT_CHECK_LOCK:
+        entry = _ARTIFACT_CHECK_PROGRESS.get(check_id)
+        if not entry:
+            return
+        entry.update(fields)
+        entry['updated_at'] = now
+
+
+def _get_artifact_check_progress(check_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not check_id:
+        return None
+    with _ARTIFACT_CHECK_LOCK:
+        entry = _ARTIFACT_CHECK_PROGRESS.get(check_id)
+        return dict(entry) if entry else None
+
+
+def _expire_artifact_check_progress() -> None:
+    cutoff = time.time() - _ARTIFACT_CHECK_TTL_SECONDS
+    with _ARTIFACT_CHECK_LOCK:
+        stale = [
+            cid for cid, payload in _ARTIFACT_CHECK_PROGRESS.items()
+            if payload.get('status') in ('complete', 'error') and payload.get('updated_at', 0) < cutoff
+        ]
+        for cid in stale:
+            _ARTIFACT_CHECK_PROGRESS.pop(cid, None)
+
+
+def _run_artifact_checks_job(
+    check_id: str,
+    *,
+    core_cfg: Dict[str, Any],
+    session_id: Any,
+    xml_path: str,
+    scenario_label: Optional[str] = None,
+    preview_plan_path: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    """Run the six ordered artifact checks against a live CORE session, updating
+    the polled progress store after each step."""
+    from webapp import artifact_checks as _ac
+    log = logger or getattr(app, 'logger', logging.getLogger(__name__))
+    checks = _ac.check_plan()
+    by_key = {c['key']: c for c in checks}
+
+    def _step(idx: int, label: str) -> None:
+        if 1 <= idx <= len(checks) and checks[idx - 1].get('status') == 'pending':
+            checks[idx - 1]['status'] = 'running'
+        _update_artifact_check_progress(
+            check_id, status='running', step=idx, total=len(_ac.CHECK_ORDER),
+            label=label, checks=[dict(c) for c in checks],
+        )
+
+    def _apply(result: Dict[str, Any]) -> None:
+        target = by_key.get(result.get('key'))
+        if isinstance(target, dict):
+            target.update(result)
+
+    try:
+        _update_artifact_check_progress(check_id, status='running')
+
+        # Phase A: export the running session XML and run the post-execution
+        # validator, which supplies checks 1-4 (containers/services/ports/injects).
+        _step(1, 'Collecting session state & validating nodes…')
+        scenario_norm = _normalize_scenario_label(scenario_label or '')
+        if not preview_plan_path and scenario_norm:
+            try:
+                preview_plan_path = _latest_preview_plan_for_scenario_norm(scenario_norm)
+            except Exception:
+                preview_plan_path = None
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(xml_path)) or _outputs_dir(), 'artifact-check')
+        session_xml_path = None
+        try:
+            session_xml_path = _grpc_save_current_session_xml_with_config(
+                core_cfg, out_dir,
+                session_id=str(session_id) if session_id is not None else None,
+            )
+        except Exception as exc:
+            log.warning('[check_artifacts] session XML export failed: %s', exc)
+
+        flow_enabled = True
+        try:
+            flow_state = _flow_state_from_xml_path(xml_path, scenario_label)
+            if isinstance(flow_state, dict):
+                flow_enabled = bool(flow_state.get('flow_enabled')) or bool(flow_state.get('flag_assignments'))
+            else:
+                flow_enabled = False
+        except Exception:
+            flow_enabled = True
+
+        try:
+            summary = _validate_session_nodes_and_injects(
+                scenario_xml_path=xml_path,
+                session_xml_path=session_xml_path,
+                core_cfg=core_cfg,
+                preview_plan_path=preview_plan_path,
+                scenario_label=scenario_label,
+                flow_enabled=flow_enabled,
+            )
+            if not isinstance(summary, dict):
+                summary = {'ok': False, 'validation_unavailable': True, 'error': 'validator returned no summary'}
+        except Exception as exc:
+            log.exception('[check_artifacts] session validation failed: %s', exc)
+            summary = {'ok': False, 'validation_unavailable': True, 'error': f'session validation failed: {exc}'}
+
+        _apply(_ac.containers_result(summary)); _step(1, _ac.CHECK_LABELS['containers'])
+        _apply(_ac.services_result(summary)); _step(2, _ac.CHECK_LABELS['services'])
+        _apply(_ac.ports_result(summary)); _step(3, _ac.CHECK_LABELS['ports'])
+        _apply(_ac.injects_result(summary)); _step(4, _ac.CHECK_LABELS['injects'])
+
+        seg_expected = False
+        traffic_expected = False
+        try:
+            scenario_root = ET.parse(xml_path).getroot()
+            seg_expected = _ac.segmentation_expected(scenario_root)
+            traffic_expected = _ac.traffic_expected(scenario_root)
+        except Exception:
+            pass
+
+        sudo_pw = (core_cfg or {}).get('ssh_password')
+
+        # Check 5: firewall/segmentation rules (live probe on the CORE VM).
+        _step(5, _ac.CHECK_LABELS['segmentation'])
+        try:
+            seg_probe = _run_remote_python_json(
+                core_cfg, _ac.segmentation_probe_script(sudo_pw, session_id),
+                logger=log, label='check_artifacts.segmentation', timeout=90.0,
+            )
+        except Exception as exc:
+            seg_probe = {'ok': False, 'error': str(exc)}
+        _apply(_ac.segmentation_result(seg_probe, expected=seg_expected)); _step(5, _ac.CHECK_LABELS['segmentation'])
+
+        # Check 6: traffic scripts running + ping reachability (live probe).
+        _step(6, _ac.CHECK_LABELS['traffic'])
+        try:
+            traffic_probe = _run_remote_python_json(
+                core_cfg, _ac.traffic_probe_script(sudo_pw, session_id),
+                logger=log, label='check_artifacts.traffic', timeout=120.0,
+            )
+        except Exception as exc:
+            traffic_probe = {'ok': False, 'error': str(exc)}
+        _apply(_ac.traffic_result(traffic_probe, expected=traffic_expected))
+
+        results = [dict(c) for c in checks]
+        _update_artifact_check_progress(
+            check_id, status='complete', step=len(_ac.CHECK_ORDER), total=len(_ac.CHECK_ORDER),
+            label='Complete', checks=results,
+            overall=_ac.overall_status(results), overall_summary=_ac.overall_summary(results),
+        )
+    except Exception as exc:
+        log.exception('[check_artifacts] job failed: %s', exc)
+        _update_artifact_check_progress(
+            check_id, status='error', label='Error', error=str(exc), overall='fail',
+        )
+
+
+def _schedule_artifact_checks(
+    check_id: str,
+    core_cfg: Dict[str, Any],
+    *,
+    session_id: Any,
+    xml_path: str,
+    scenario_label: Optional[str] = None,
+    preview_plan_path: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    log = logger or getattr(app, 'logger', logging.getLogger(__name__))
+    _expire_artifact_check_progress()
+
+    def _worker() -> None:
+        try:
+            _run_artifact_checks_job(
+                check_id, core_cfg=core_cfg, session_id=session_id, xml_path=xml_path,
+                scenario_label=scenario_label, preview_plan_path=preview_plan_path, logger=log,
+            )
+        except Exception as exc:
+            _update_artifact_check_progress(check_id, status='error', label='Error', error=str(exc), overall='fail')
+
+    try:
+        threading.Thread(target=_worker, daemon=True, name=f'artifact-check-{check_id[:8]}').start()
+    except Exception as exc:
+        _update_artifact_check_progress(check_id, status='error', label='Error', error=f'Failed to schedule: {exc}', overall='fail')
+
 # Best-effort cancellation context for long-running remote repo finalize.
 # Stored in-memory only; entries are removed when finalize completes/errors/cancels.
 _REPO_PUSH_CANCEL_CTX: Dict[str, Dict[str, Any]] = {}
@@ -44489,6 +44706,24 @@ try:
 except Exception:
     try:
         app.logger.exception('Failed to register core_push_progress routes.')
+    except Exception:
+        pass
+
+
+try:
+    from webapp.routes import core_artifact_checks as _core_artifact_checks_routes
+
+    _core_artifact_checks_routes.register(
+        app,
+        core_config_for_request=lambda **kwargs: _core_config_for_request(**kwargs),
+        init_artifact_check_progress=lambda *args, **kwargs: _init_artifact_check_progress(*args, **kwargs),
+        schedule_artifact_checks=lambda *args, **kwargs: _schedule_artifact_checks(*args, **kwargs),
+        get_artifact_check_progress=lambda check_id: _get_artifact_check_progress(check_id),
+        uuid_hex=lambda: uuid.uuid4().hex,
+    )
+except Exception:
+    try:
+        app.logger.exception('Failed to register core_artifact_checks routes.')
     except Exception:
         pass
 

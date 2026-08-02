@@ -102,6 +102,7 @@
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-pdf" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Graph (pdf)</a></li>
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="participant-guide" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Participant Steps Guide (html)</a></li>
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="facilitator-guide" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Facilitator Guide (html)</a></li>
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="solutions-script" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Solutions Script (sh)</a></li>
                       {% endif %}
                     </ul>
                   </div>
@@ -247,6 +248,7 @@ function reportDownloadLabel(kind){
     'attack-graph-pdf': 'Attack Graph (.pdf)',
     'participant-guide': 'Participant Steps Guide',
     'facilitator-guide': 'Facilitator Guide',
+    'solutions-script': 'Solutions Script',
   };
   return labels[String(kind || '').trim()] || 'download';
 }
@@ -303,6 +305,7 @@ function buildReportDownloadsHtml(r){
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-pdf"${attrs}>Attack Graph (pdf)</a></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="participant-guide"${attrs}>Participant Steps Guide (html)</a></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="facilitator-guide"${attrs}>Facilitator Guide (html)</a></li>`;
+    items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="solutions-script"${attrs}>Solutions Script (sh)</a></li>`;
   }
   return `<div class="dropdown"><button class="btn btn-sm btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" aria-expanded="false">Download</button><ul class="dropdown-menu">${items}</ul></div>`;
 }
@@ -2387,6 +2390,12 @@ async function handleReportDownloadAction(link) {
     if (!b64) throw new Error('Attack graph PDF unavailable (Graphviz not installed).');
     const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
     downloadBlob(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${exportLen}.pdf`);
+    return;
+  }
+  if (kind === 'solutions-script') {
+    const script = exportData.solutions_script ? String(exportData.solutions_script) : '';
+    if (!script.trim()) throw new Error('No solutions script returned by server (flow may not be resolved).');
+    downloadBlob(new Blob([script], { type: 'application/x-sh;charset=utf-8' }), `solutions_${norm}_${exportLen}.sh`);
     return;
   }
   throw new Error('Unknown download type.');

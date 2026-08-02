@@ -483,6 +483,151 @@ current_user.is_authenticated) else '' %}
     </div>
   </div>
 </div>
+
+<!-- Check Artifacts Modal -->
+<div class="modal fade" id="artifactCheckModal" tabindex="-1" aria-labelledby="artifactCheckModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="artifactCheckModalLabel">Check Artifacts</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <div class="small text-muted" id="artifactCheckSub">Preparing…</div>
+          <span class="badge text-bg-secondary" id="artifactCheckOverall">running</span>
+        </div>
+        <div class="progress mb-3" role="progressbar" aria-label="Check progress" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar progress-bar-striped progress-bar-animated" id="artifactCheckBar" style="width: 0%">0%</div>
+        </div>
+        <div id="artifactCheckList" class="vstack gap-2"></div>
+        <div class="alert alert-danger mt-2 d-none" id="artifactCheckError"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const STATUS_META = {
+    pass:  { badge: 'text-bg-success',   icon: 'bi-check-circle-fill',        row: 'border-success' },
+    warn:  { badge: 'text-bg-warning',   icon: 'bi-exclamation-triangle-fill',row: 'border-warning' },
+    fail:  { badge: 'text-bg-danger',    icon: 'bi-x-circle-fill',            row: 'border-danger' },
+    error: { badge: 'text-bg-danger',    icon: 'bi-x-octagon-fill',           row: 'border-danger' },
+    skip:  { badge: 'text-bg-secondary', icon: 'bi-slash-circle',             row: 'border-secondary' },
+    running:{ badge: 'text-bg-primary',  icon: 'bi-arrow-repeat',             row: 'border-primary' },
+    pending:{ badge: 'text-bg-light',    icon: 'bi-clock',                    row: '' },
+  };
+  const esc = (s) => (s || '').toString().replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const meta = (st) => STATUS_META[st] || STATUS_META.pending;
+
+  let modal = null;
+  let pollTimer = null;
+
+  function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
+
+  function renderChecks(list) {
+    const host = document.getElementById('artifactCheckList');
+    if (!host) return;
+    host.innerHTML = (Array.isArray(list) ? list : []).map((c) => {
+      const m = meta(c.status);
+      const spin = c.status === 'running' ? ' spinner-border spinner-border-sm' : '';
+      const items = (Array.isArray(c.items) ? c.items : []).map((it) => {
+        const im = meta(it.status);
+        return `<li class="list-group-item d-flex justify-content-between align-items-start py-1">
+          <span class="me-2"><i class="bi ${im.icon} text-${im.badge.replace('text-bg-','')} me-1"></i>${esc(it.name)}</span>
+          <span class="small text-muted text-end">${esc(it.detail || '')}</span></li>`;
+      }).join('');
+      const body = items ? `<ul class="list-group list-group-flush small mt-2">${items}</ul>` : '';
+      return `<div class="card border ${m.row}">
+        <div class="card-body py-2">
+          <div class="d-flex justify-content-between align-items-center">
+            <strong>${c.status === 'running' ? `<span class="${spin}" role="status"></span> ` : `<i class="bi ${m.icon} me-1"></i>`}${esc(c.label)}</strong>
+            <span class="badge ${m.badge}">${esc(c.status)}</span>
+          </div>
+          ${c.summary ? `<div class="small text-muted mt-1">${esc(c.summary)}</div>` : ''}
+          ${body}
+        </div></div>`;
+    }).join('');
+  }
+
+  function applyPayload(p) {
+    const total = p.total || 6;
+    const step = p.step || 0;
+    const pct = Math.max(0, Math.min(100, Math.round((step / total) * 100)));
+    const bar = document.getElementById('artifactCheckBar');
+    if (bar) {
+      bar.style.width = pct + '%';
+      bar.textContent = pct + '%';
+      const done = p.status === 'complete' || p.status === 'error';
+      bar.classList.toggle('progress-bar-animated', !done);
+      bar.classList.toggle('bg-success', p.overall === 'pass');
+      bar.classList.toggle('bg-warning', p.overall === 'warn');
+      bar.classList.toggle('bg-danger', p.overall === 'fail');
+    }
+    const sub = document.getElementById('artifactCheckSub');
+    if (sub) sub.textContent = (p.status === 'complete') ? (p.overall_summary || 'Complete')
+      : (p.status === 'error') ? 'Failed' : (`Step ${step}/${total}: ${p.label || ''}`);
+    const overall = document.getElementById('artifactCheckOverall');
+    if (overall) {
+      const m = meta(p.overall === 'pass' ? 'pass' : p.overall === 'warn' ? 'warn' : p.overall === 'fail' ? 'fail' : 'running');
+      overall.className = 'badge ' + m.badge;
+      overall.textContent = p.status === 'complete' ? (p.overall || 'done') : p.status;
+    }
+    const err = document.getElementById('artifactCheckError');
+    if (err) {
+      if (p.error) { err.textContent = p.error; err.classList.remove('d-none'); }
+      else err.classList.add('d-none');
+    }
+    renderChecks(p.checks);
+  }
+
+  async function poll(checkId) {
+    try {
+      const res = await fetch(`/core/check_artifacts/status/${encodeURIComponent(checkId)}`, { cache: 'no-store' });
+      if (res.ok) {
+        const p = await res.json();
+        applyPayload(p);
+        if (p.status === 'complete' || p.status === 'error') { stopPolling(); return; }
+      }
+    } catch (e) { /* transient; keep polling */ }
+    pollTimer = setTimeout(() => poll(checkId), 1200);
+  }
+
+  async function start(sessionId, xmlPath, scenario) {
+    stopPolling();
+    const title = document.getElementById('artifactCheckModalLabel');
+    if (title) title.textContent = `Check Artifacts — session ${sessionId}`;
+    applyPayload({ status: 'running', step: 0, total: 6, label: 'Starting…', checks: [] });
+    const errDiv = document.getElementById('artifactCheckError');
+    if (errDiv) errDiv.classList.add('d-none');
+    modal = modal || new bootstrap.Modal(document.getElementById('artifactCheckModal'));
+    modal.show();
+    try {
+      const body = new URLSearchParams({ session_id: sessionId, xml_path: xmlPath || '', scenario: scenario || '' });
+      const res = await fetch('/core/check_artifacts/start', { method: 'POST', body });
+      const data = await res.json();
+      if (!res.ok || !data.check_id) throw new Error(data.error || 'Failed to start checks.');
+      poll(data.check_id);
+    } catch (e) {
+      if (errDiv) { errDiv.textContent = e.message || String(e); errDiv.classList.remove('d-none'); }
+    }
+  }
+
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.check-artifacts-btn') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    start(btn.getAttribute('data-session') || '', btn.getAttribute('data-xml') || '', btn.getAttribute('data-scenario') || '');
+  });
+
+  const el = document.getElementById('artifactCheckModal');
+  if (el) el.addEventListener('hidden.bs.modal', stopPolling);
+})();
+</script>
 {% endblock %}
 {% block extra_scripts %}
 {% set runtime_managed_vm_mode = (webui_runtime_mode|default('native')|lower) == 'vm' %}
@@ -1081,9 +1226,13 @@ current_user.is_authenticated) else '' %}
         <button class="btn btn-sm btn-outline-danger" ${(!sidText) ? 'disabled' : ''}><i class="bi bi-trash"></i></button>
       </form>`;
     const detailsBtn = `<a class="btn btn-sm btn-outline-info" href="${detailsHref}" title="Details"><i class="bi bi-info-circle"></i></a>`;
+    const checkArtifactsBtn = (isRunning && sidText) ? `
+      <button type="button" class="btn btn-sm btn-outline-primary check-artifacts-btn" title="Check Artifacts"
+        data-session="${esc(sidText)}" data-xml="${esc(filePath)}" data-scenario="${esc(scen)}">
+        <i class="bi bi-clipboard-check"></i></button>` : '';
 
     // Mirror the Saved XML Topologies actions layout (no d-flex wrapper).
-    const actions = `${detailsBtn}${startStopBtn}${downloadBtn}${deleteBtn}`;
+    const actions = `${detailsBtn}${startStopBtn}${checkArtifactsBtn}${downloadBtn}${deleteBtn}`;
 
     return `<tr>
       <td class="col-check"><input type="checkbox" class="row-select" data-type="session" data-id="${esc(sidText)}" ${sidText && selectedSessionIds.has(sidText) ? 'checked' : ''} ${(!sidText) ? 'disabled' : ''}></td>

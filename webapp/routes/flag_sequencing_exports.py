@@ -370,6 +370,16 @@ def register(app, *, backend_module: Any) -> None:
         )
         attack_graph_dot = backend._attack_graph_dot(attack_graph)
         attack_graph_pdf_base64 = backend._attack_graph_pdf_base64(attack_graph_dot or '')
+        try:
+            from webapp.solutions_script import build_solutions_script
+            solutions_script = build_solutions_script(
+                scenario_label or scenario_norm,
+                chain_nodes,
+                flag_assignments,
+            )
+        except Exception:
+            app.logger.exception('[flow.afb_from_chain] solutions script generation failed')
+            solutions_script = ''
         return jsonify(
             {
                 'ok': True,
@@ -381,6 +391,7 @@ def register(app, *, backend_module: Any) -> None:
                 'attack_graph': attack_graph,
                 'attack_graph_dot': attack_graph_dot,
                 'attack_graph_pdf_base64': attack_graph_pdf_base64,
+                'solutions_script': solutions_script,
                 'flow_valid': bool(flow_valid),
                 'flow_errors': list(flow_errors or []),
                 'flags_enabled': bool(flags_enabled),

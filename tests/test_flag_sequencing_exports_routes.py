@@ -65,6 +65,7 @@ def test_afb_from_chain_returns_export_payload():
     assert body['attack_graph_dot'] == 'digraph G {}'
     assert body['attack_graph_pdf_base64'] == 'cGRm'
     assert body['flags_enabled'] is True
+    assert body['solutions_script'].startswith('#!/usr/bin/env bash')
 
 
 def test_afb_from_chain_rejects_duplicate_node_ids():
