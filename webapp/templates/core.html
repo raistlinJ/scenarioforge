@@ -555,7 +555,7 @@ current_user.is_authenticated) else '' %}
   }
 
   function applyPayload(p) {
-    const total = p.total || 6;
+    const total = p.total || 7;
     const step = p.step || 0;
     const pct = Math.max(0, Math.min(100, Math.round((step / total) * 100)));
     const bar = document.getElementById('artifactCheckBar');
@@ -601,7 +601,7 @@ current_user.is_authenticated) else '' %}
     stopPolling();
     const title = document.getElementById('artifactCheckModalLabel');
     if (title) title.textContent = `Check Artifacts — session ${sessionId}`;
-    applyPayload({ status: 'running', step: 0, total: 6, label: 'Starting…', checks: [] });
+    applyPayload({ status: 'running', step: 0, total: 7, label: 'Starting…', checks: [] });
     const errDiv = document.getElementById('artifactCheckError');
     if (errDiv) errDiv.classList.add('d-none');
     modal = modal || new bootstrap.Modal(document.getElementById('artifactCheckModal'));
