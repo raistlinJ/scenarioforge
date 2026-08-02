@@ -3,6 +3,10 @@ from unittest.mock import patch
 
 from webapp.app_backend import app
 
+# These routes exist only outside VM mode (`participant_ui_enabled` is
+# `_webui_runtime_mode() != 'vm'`). The runtime mode is pinned to native for the
+# whole suite by `_isolate_core_runtime_env` in conftest.
+
 
 def _stats_path() -> str:
     # Keep in sync with app_backend's stats path.

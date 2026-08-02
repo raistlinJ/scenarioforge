@@ -101,6 +101,11 @@ def test_ensure_core_daemon_listening_stops_after_socket_refused(monkeypatch):
 
     monkeypatch.setattr(backend, 'paramiko', _FakeParamiko())
     monkeypatch.setattr(backend, '_exec_ssh_python_probe', _fake_probe)
+    # The SSH endpoint is TCP-probed before any client is built, so the fake host
+    # below would otherwise be resolved for real. Reachability has its own
+    # coverage in tests/test_core_connect_fast_feedback.py; this test is about
+    # what happens once the connection is already up.
+    monkeypatch.setattr(backend, '_core_ssh_endpoint_reachable', lambda *_a, **_k: '')
 
     with pytest.raises(RuntimeError) as exc:
         backend._ensure_core_daemon_listening({

@@ -1607,6 +1607,38 @@ def _catalog_ids_with_persistent_items() -> list[str]:
     return out
 
 
+def _persistent_images_skipped_warning(*, count: int, size_bytes: int, limit: int) -> str:
+    """Explain why `persistent` pins were not applied, and what to do about it.
+
+    This is the one path where the operator's pins silently stop working, so
+    the message has to name the cause, the consequence, and a way out rather
+    than reporting a byte count.
+    """
+    from scenarioforge.utils.env_payload import MAX_ARG_STRLEN
+
+    return '\n'.join([
+        'Persistent image pins were NOT applied to this run.',
+        '',
+        f'The pinned list is {count:,} images ({size_bytes:,} bytes), over the '
+        f'{limit:,}-byte ceiling for one value in the remote environment. Linux caps a '
+        f'single argv/environment string at {MAX_ARG_STRLEN:,} bytes, and passing an '
+        'oversized one makes every command on the CORE VM fail with "Argument list too '
+        'long" -- including commands that have nothing to do with this list. It is '
+        'dropped instead.',
+        '',
+        'Effect: this run\'s cleanup cannot see the pins, so pinned images may be removed '
+        'and pulled again next run. The run itself is unaffected.',
+        '',
+        'To restore pin protection, reduce the pinned set:',
+        '  - unpin items that do not need to survive between runs',
+        '  - pin shared base images rather than every catalog item that uses one',
+        '  - unpin items already uninstalled or disabled, which still contribute pins',
+        '',
+        'If a set this large is genuinely needed, the list can be handed over as a file '
+        'instead of an environment value; that removes the ceiling entirely.',
+    ])
+
+
 def _persistent_image_keep_set(*, client: Any | None = None) -> set[str]:
     """Return the set of docker image references that must never be removed by any
     ScenarioForge cleanup routine, because they belong to a vuln-catalog or
@@ -4867,9 +4899,6 @@ def _extract_inject_dirs_from_plan_xml(scenario_xml_path: str, scenario_label: s
             merged.append(d)
     return merged
 
-    if not inject_specs:
-        return []
-
 
 def _extract_inject_files_from_plan_xml(scenario_xml_path: str, scenario_label: str | None) -> List[str]:
     payload = None
@@ -5332,24 +5361,6 @@ def _extract_inject_node_ids_from_flow_state(scenario_xml_path: str, scenario_la
         except Exception:
             continue
     return node_ids
-
-    dests: List[str] = []
-    for raw in inject_specs:
-        dest = ''
-        if '->' in raw:
-            _, dest = raw.split('->', 1)
-        elif '=>' in raw:
-            _, dest = raw.split('=>', 1)
-        dests.append(_normalize_inject_dest_dir_for_validation(dest))
-
-    seen: set[str] = set()
-    out: List[str] = []
-    for d in dests:
-        if not d or d in seen:
-            continue
-        seen.add(d)
-        out.append(d)
-    return out
 
 
 def _extract_expected_docker_and_vuln_nodes_from_plan_xml(
@@ -5868,6 +5879,84 @@ def _flow_assignment_missing_remote_paths(sftp: Any, assignment: dict[str, Any])
     return missing
 
 
+def _installed_generator_repo_relpath(generator_id: str) -> str:
+    """Repo-relative directory of an installed generator, or ''.
+
+    Resolved from the local tree, which is the same content just synced to the
+    CORE VM, so the relative path is valid on both sides.
+    """
+    gid = str(generator_id or '').strip()
+    if not gid:
+        return ''
+    try:
+        root = os.path.join(_get_repo_root(), 'outputs', 'installed_generators')
+        for kind in ('flag_node_generators', 'flag_generators'):
+            base = os.path.join(root, kind)
+            if not os.path.isdir(base):
+                continue
+            for name in os.listdir(base):
+                marker = os.path.join(base, name, '.coretg_pack.json')
+                if not os.path.isfile(marker):
+                    continue
+                try:
+                    with open(marker, 'r', encoding='utf-8') as handle:
+                        meta = json.load(handle)
+                except Exception:
+                    continue
+                if str(meta.get('generator_id') or '').strip() == gid:
+                    return f'outputs/installed_generators/{kind}/{name}'
+    except Exception:
+        return ''
+    return ''
+
+
+def _flow_assignment_artifacts_are_stale(
+    sftp: Any,
+    assignment: dict[str, Any],
+    *,
+    remote_repo: str,
+) -> str:
+    """Return why an assignment's artifacts are outdated, or ''.
+
+    Regeneration used to trigger only on *missing* artifacts. A generator whose
+    code changed therefore kept producing nothing: the previous run's output was
+    still present, so it was reused, and the fix silently never took effect --
+    a broken generated app survived repeated executes until someone deleted the
+    output directory by hand.
+
+    Compares the generator's own source against what it produced. Unknown on
+    error: a comparison we cannot make must not force needless regeneration.
+    """
+    try:
+        generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+        rel = _installed_generator_repo_relpath(generator_id)
+        if not rel:
+            return ''
+        source_path = f"{str(remote_repo).rstrip('/')}/{rel}/generator.py"
+        try:
+            source_mtime = float(sftp.stat(source_path).st_mtime or 0)
+        except Exception:
+            return ''
+        if source_mtime <= 0:
+            return ''
+        newest_artifact = 0.0
+        for path in _remote_flow_assignment_expected_paths(assignment):
+            try:
+                newest_artifact = max(newest_artifact, float(sftp.stat(path).st_mtime or 0))
+            except Exception:
+                continue
+        if newest_artifact <= 0:
+            return ''
+        if source_mtime > newest_artifact:
+            return (
+                f'generator.py is newer than its output '
+                f'({int(source_mtime - newest_artifact)}s)'
+            )
+        return ''
+    except Exception:
+        return ''
+
+
 def _flow_regeneration_plan_context(preview_plan_path: str) -> tuple[Any, str]:
     seed_val: Any = None
     scenario_norm = ''
@@ -6032,7 +6121,11 @@ try:
     if sudo_password:
         env['CORETG_DOCKER_SUDO_PASSWORD'] = sudo_password
     if inject_files:
-        env['CORETG_INJECT_FILES_JSON'] = json.dumps(inject_files)
+        # Same class as the flow assignments: a long enough list would push past
+        # the kernel's per-string argv/envp limit and break every execve here.
+        from scenarioforge.utils.env_payload import set_env_payload
+
+        set_env_payload(env, 'CORETG_INJECT_FILES_JSON', json.dumps(inject_files))
     preflight = ''
     deps_dir = '/tmp/coretg_pydeps'
     try:
@@ -6107,8 +6200,20 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
         if not out_dir:
             continue
         missing_before = _flow_assignment_missing_remote_paths(sftp, assignment)
+        stale_reason = ''
         if not missing_before:
-            continue
+            stale_reason = _flow_assignment_artifacts_are_stale(
+                sftp, assignment, remote_repo=remote_repo
+            )
+            if not stale_reason:
+                continue
+            try:
+                log_handle.write(
+                    f"[remote] flow.artifacts.regenerate stale index={index} "
+                    f"out_dir={out_dir} reason={stale_reason}\n"
+                )
+            except Exception:
+                pass
         generator_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
         if not generator_id:
             failures.append(f"assignment {index} missing generator id")
@@ -7406,6 +7511,47 @@ def _stale_core_veth_cleanup_enabled() -> bool:
     if raw is None:
         return True
     return str(raw).strip().lower() not in {'0', 'false', 'no', 'off', ''}
+
+
+def _docker_home_permission_repair_enabled() -> bool:
+    """Whether to repair root-owned files in the SSH user's ~/.docker before execute.
+
+    Default: enabled. Disable with
+    `CORETG_REPAIR_DOCKER_HOME_PERMS=0/false/no/off`.
+    """
+    raw = os.environ.get('CORETG_REPAIR_DOCKER_HOME_PERMS')
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in {'0', 'false', 'no', 'off', ''}
+
+
+def _docker_home_permission_repair_command(ssh_username: str) -> str:
+    """Return a command that gives the SSH user back its own ~/.docker.
+
+    Running any docker command as root seeds root-owned state into the invoking
+    user's config directory -- `buildx/.lock` is the usual casualty. Every later
+    `docker compose up` that has to build then dies on
+
+        open /home/<user>/.docker/buildx/.lock: permission denied
+
+    which Compose reports only as `rc=1`, so the scenario surfaces as nodes that
+    will not start with no stated cause.
+
+    Only files that are *not* already owned by the user are touched, and only
+    below that user's own ~/.docker.
+    """
+    user = shlex.quote(str(ssh_username or '').strip())
+    return (
+        'sh -c '
+        + shlex.quote(
+            f'HOME_DIR=$(getent passwd {user} | cut -d: -f6); '
+            '[ -n "$HOME_DIR" ] && [ -d "$HOME_DIR/.docker" ] || exit 0; '
+            f'BAD=$(find "$HOME_DIR/.docker" ! -user {user} -print 2>/dev/null | wc -l); '
+            '[ "$BAD" -gt 0 ] || exit 0; '
+            f'find "$HOME_DIR/.docker" ! -user {user} -exec chown {user}:{user} {{}} + 2>/dev/null; '
+            'echo "repaired $BAD path(s) under $HOME_DIR/.docker"'
+        )
+    )
 
 
 def _stale_core_veth_cleanup_command() -> str:
@@ -10467,6 +10613,77 @@ def _exec_ssh_python_probe(client: Any, command: str, *, timeout: float) -> Tupl
     return exit_code, stdout_text, stderr_text
 
 
+def _core_ssh_endpoint_reachable(ssh_host: str, ssh_port: int, *, timeout: float = 3.0) -> str:
+    """Return '' when a TCP connection to the SSH endpoint succeeds, else why not.
+
+    Paramiko spends its full connect, banner and auth budget before reporting an
+    unreachable host, and callers phrase the result in terms of the gRPC target
+    they were ultimately after -- which is a loopback address reached *through*
+    this SSH hop, so the message names a host that was never the problem. A
+    short TCP probe first fails in seconds and can name the real endpoint.
+    """
+    import socket as _socket
+
+    host = str(ssh_host or '').strip()
+    if not host:
+        return 'no SSH host configured'
+    try:
+        port = int(ssh_port or 22)
+    except Exception:
+        port = 22
+    sock = None
+    try:
+        sock = _socket.create_connection((host, port), timeout=max(1.0, float(timeout)))
+        return ''
+    except _socket.gaierror as exc:
+        return f'{host} does not resolve ({exc})'
+    except _socket.timeout:
+        return (
+            f'no response from {host}:{port} within {max(1.0, float(timeout)):.0f}s. '
+            'The CORE VM may be powered off, or it may be on a network this machine cannot currently reach.'
+        )
+    except ConnectionRefusedError:
+        return f'{host}:{port} refused the connection (nothing is listening on that port)'
+    except OSError as exc:
+        return f'cannot reach {host}:{port} ({exc})'
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def _core_daemon_journal_tail(client: Any, *, lines: int = 40, timeout: float = 15.0) -> str:
+    """Best-effort `journalctl -u core-daemon` tail over an open SSH client.
+
+    Only useful once SSH works: when the daemon is the thing that is down, its
+    own log says why, and otherwise the operator is left with a bare timeout.
+    """
+    try:
+        command = f'sh -c "timeout {int(timeout)}s journalctl -u core-daemon -n {int(lines)} --no-pager 2>&1 || true"'
+        _stdin, stdout, _stderr = client.exec_command(command, timeout=timeout + 2.0)
+        data = stdout.read()
+        text = data.decode('utf-8', 'ignore') if isinstance(data, bytes) else str(data)
+        return text.strip()
+    except Exception:
+        return ''
+
+
+def _core_daemon_journal_suffix(client: Any, *, lines: int = 20) -> str:
+    """Render the daemon's own log as a suffix for a failure message.
+
+    Empty when nothing could be read, so callers can append unconditionally.
+    """
+    tail = _core_daemon_journal_tail(client, lines=lines)
+    if not tail:
+        return ''
+    kept = [ln for ln in tail.splitlines() if ln.strip()][-lines:]
+    if not kept:
+        return ''
+    return '\n\nRecent core-daemon log:\n' + '\n'.join(kept)
+
+
 def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 5.0) -> None:
     cfg = _require_core_ssh_credentials(core_cfg)
     _ensure_paramiko_available()
@@ -10479,6 +10696,10 @@ def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 
     username = str(cfg.get('ssh_username') or '').strip()
     password = cfg.get('ssh_password') or ''
     logger = getattr(app, 'logger', logging.getLogger(__name__))
+    # Fail on an unreachable VM in seconds, naming the endpoint actually dialled.
+    unreachable = _core_ssh_endpoint_reachable(ssh_host, ssh_port, timeout=3.0)
+    if unreachable:
+        raise RuntimeError(f'Cannot reach the CORE VM over SSH at {ssh_host}:{ssh_port}: {unreachable}')
     client = paramiko.SSHClient()  # type: ignore[assignment]
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # type: ignore[attr-defined]
     try:
@@ -10517,11 +10738,15 @@ def _ensure_core_daemon_listening(core_cfg: Dict[str, Any], *, timeout: float = 
                     'Test Venv only verifies that the CORE Python modules import; Save & Validate also requires '
                     'a running core-daemon listening on the configured gRPC host/port. '
                     'Check the configured gRPC port and run `systemctl status core-daemon` on the CORE host.'
+                    + _core_daemon_journal_suffix(client)
                 )
             if 'not found' in lower or 'command not found' in lower:
                 continue
         error_detail = _summarize_core_daemon_probe_errors(probe_errors)
-        raise RuntimeError(f'core-daemon did not respond on {daemon_host}:{daemon_port} ({error_detail})')
+        raise RuntimeError(
+            f'core-daemon did not respond on {daemon_host}:{daemon_port} ({error_detail})'
+            + _core_daemon_journal_suffix(client)
+        )
     finally:
         try:
             client.close()
@@ -12340,9 +12565,6 @@ def _enumerate_core_vm_interfaces_from_secret(
         include_down=include_down,
         vm_context=vm_meta,
     )
-
-    results.sort(key=lambda item: item['name'])
-    return results
 
 
 _PROXMOX_INTERFACE_ID_RE = re.compile(r"^net\d+$", re.IGNORECASE)
@@ -16611,7 +16833,8 @@ def _build_topology_graph_from_session_xml(xml_path: str) -> tuple[list[dict[str
     return out_nodes, out_links, adj
 
 
-def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]], *, length: int) -> list[dict[str, Any]]:
+def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]], *, length: int,
+                           is_eligible: Any | None = None) -> list[dict[str, Any]]:
     """Pick an ordered list of nodes to place flags on.
 
     The chain is considered solvable if each consecutive pair is connected by
@@ -16642,7 +16865,13 @@ def _pick_flag_chain_nodes(nodes: list[dict[str, Any]], adj: dict[str, set[str]]
         # - flag-node-generators require non-vulnerability docker-role nodes (enforced elsewhere)
         is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
-        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
+        if callable(is_eligible):
+            # Callers placing a different challenge kind supply their own rule;
+            # the default below only ever admits vulnerability nodes and
+            # flag-node-generator hosts.
+            if is_eligible(n):
+                eligible_ids.append(nid)
+        elif is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
 
     # De-dupe eligible ids to avoid accidental repeats.
@@ -16773,6 +17002,7 @@ def _pick_flag_chain_nodes_allow_duplicates(
     *,
     length: int,
     seed: int = 0,
+    is_eligible: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Pick an ordered list of eligible nodes, allowing repeats.
 
@@ -16798,7 +17028,13 @@ def _pick_flag_chain_nodes_allow_duplicates(
         t = (str(n.get('type') or '').strip().lower())
         is_docker = _flow_node_is_docker_role(n)
         is_vuln = _flow_node_is_vuln(n)
-        if is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
+        if callable(is_eligible):
+            # Callers placing a different challenge kind supply their own rule;
+            # the default below only ever admits vulnerability nodes and
+            # flag-node-generator hosts.
+            if is_eligible(n):
+                eligible_ids.append(nid)
+        elif is_vuln or (allow_nonvuln_docker and is_docker and (not is_vuln) and _flow_node_allows_flag_node_generator(n)):
             eligible_ids.append(nid)
 
     # De-dupe eligible ids to avoid accidental repeats.
@@ -16881,91 +17117,50 @@ def _pick_flow_nonvulnerability_docker_nodes(
     return _pick_flag_chain_nodes(eligible, adj, length=length)
 
 
-def _pick_flag_chain_nodes_for_preset(
+def _pick_flow_empty_vulnerability_slot_nodes(
     nodes: list[dict[str, Any]],
     adj: dict[str, set[str]],
     *,
-    steps: list[dict[str, str]],
+    length: int,
+    allow_node_duplicates: bool = False,
+    seed: int = 0,
 ) -> list[dict[str, Any]]:
-    """Pick a chain that satisfies preset step constraints.
+    """Pick from declared VulnerabilitySlots the chain has not filled yet.
 
-    Currently enforced:
-    - flag-generator steps: must be placed on vulnerability nodes
-    - flag-node-generator steps: must be placed on a non-vulnerability docker-role node
+    An empty slot is not a vulnerability node yet, so it is not a mandatory
+    step; and it refuses flag-node-generators, so the generic picker skips it
+    too. That left it counted as capacity nothing could ever select. It belongs
+    in the chain: `_flow_fill_empty_vulnerability_slots` draws a vulnerability
+    for every slot the chain reaches, and any slot left over stays a plain
+    Docker node.
     """
-    try:
-        length = len(steps or [])
-    except Exception:
-        length = 0
-    length = max(1, min(int(length or 1), 50))
-
-    id_to_node: dict[str, dict[str, Any]] = {}
-    eligible_ids: list[str] = []
-    docker_ids: set[str] = set()
-    vuln_ids: set[str] = set()
-    for n in nodes or []:
-        if not isinstance(n, dict):
-            continue
-        nid = str(n.get('id') or '').strip()
-        if not nid:
-            continue
-        id_to_node[nid] = n
-        is_docker = _flow_node_is_docker_role(n)
-        is_vuln = _flow_node_is_vuln(n)
-        if is_vuln:
-            vuln_ids.add(nid)
-            eligible_ids.append(nid)
-        if is_docker and not is_vuln:
-            docker_ids.add(nid)
-            eligible_ids.append(nid)
-
-    if not eligible_ids:
+    if int(length or 0) <= 0:
         return []
-    if length > len(set(eligible_ids)):
+    eligible = [
+        node for node in (nodes or [])
+        if isinstance(node, dict)
+        and _flow_node_is_docker_role(node)
+        and not _flow_node_is_vuln(node)
+        and _flow_node_challenge_slot_kind(node) == 'vulnerability'
+    ]
+    if not eligible:
         return []
 
-    # Prefer a connected component for a serial preset, but nodes in separate
-    # components remain valid parallel challenges.  This is deliberate Flow
-    # topology semantics, not an assignment/dependency fallback.
-    start = next(iter(sorted(docker_ids))) if docker_ids else eligible_ids[0]
-    visited: list[str] = []
-    try:
-        seen: set[str] = set()
-        q = deque([start])
-        while q:
-            cur = q.popleft()
-            if cur in seen:
-                continue
-            seen.add(cur)
-            visited.append(cur)
-            for nb in sorted(adj.get(cur, set())):
-                if nb not in seen:
-                    q.append(nb)
-    except Exception:
-        visited = list(dict.fromkeys(eligible_ids))
+    def _slot_is_eligible(node: dict[str, Any]) -> bool:
+        # The default rule admits vulnerability nodes and flag-node-generator
+        # hosts; an empty slot is neither, which is what hid it from selection.
+        return (
+            isinstance(node, dict)
+            and _flow_node_is_docker_role(node)
+            and not _flow_node_is_vuln(node)
+            and _flow_node_challenge_slot_kind(node) == 'vulnerability'
+        )
 
-    comp_eligible = [nid for nid in visited if nid in set(eligible_ids)]
-    if len(comp_eligible) < length:
-        comp_eligible = list(dict.fromkeys(eligible_ids))
-
-    used: set[str] = set()
-    chosen: list[str] = []
-    for step in (steps or [])[:length]:
-        kind = str((step or {}).get('kind') or '').strip()
-        need_docker = (kind == 'flag-node-generator')
-        if need_docker:
-            pool = [nid for nid in comp_eligible if nid not in used and nid in docker_ids]
-        else:
-            pool = [nid for nid in comp_eligible if nid not in used and nid in vuln_ids]
-        if not pool:
-            return []
-        pick = pool[0]
-        used.add(pick)
-        chosen.append(pick)
-
-    if len(chosen) < length:
-        return []
-    return [id_to_node[nid] for nid in chosen if nid in id_to_node]
+    if allow_node_duplicates:
+        return _pick_flag_chain_nodes_allow_duplicates(
+            eligible, adj, length=length, seed=seed, is_eligible=_slot_is_eligible,
+        )
+    return _pick_flag_chain_nodes(eligible, adj, length=length, is_eligible=_slot_is_eligible)
 
 
 def _flow_node_allows_flag_node_generator(node: Any) -> bool:
@@ -18152,319 +18347,6 @@ def _flow_render_hint_level_templates(
             if text:
                 rendered[level].append(text)
     return rendered
-
-
-def _flow_preset_steps(preset: str) -> list[dict[str, str]]:
-    _p = str(preset or '').strip().lower()
-    return []
-
-
-def _flow_compute_flag_assignments_for_preset(
-    preview: dict,
-    chain_nodes: list[dict[str, Any]],
-    scenario_label: str,
-    preset: str,
-    *,
-    pivot_context: Any | None = None,
-) -> tuple[list[dict[str, Any]], str | None]:
-    steps = _flow_preset_steps(preset)
-    if not steps:
-        return [], 'unknown preset'
-
-    def _preset_stats() -> dict[str, int]:
-        try:
-            _nodes, _links, _adj = _build_topology_graph_from_preview_plan(preview)
-            st = _flow_compose_docker_stats(_nodes)
-            return st if isinstance(st, dict) else {}
-        except Exception:
-            return {}
-
-    def _requirement_message(*, required_total: int, required_nonvuln_docker: int) -> str:
-        st = _preset_stats()
-        docker_total = int(st.get('docker_total') or 0)
-        docker_nonvuln_total = int(st.get('docker_nonvuln_total') or 0)
-        vuln_total = int(st.get('vuln_total') or 0)
-        eligible_total = int(st.get('eligible_total') or 0)
-        required_vuln = max(0, int(required_total) - int(required_nonvuln_docker))
-        return (
-            f"Requires {required_vuln} Vuln and {int(required_nonvuln_docker)} Non-Vuln Docker. "
-            f"Current: Eligible: {eligible_total}, Docker: {docker_total} (Non-Vuln: {docker_nonvuln_total}), Vuln: {vuln_total}"
-        )
-
-    required_total = len(steps)
-    required_nonvuln_docker = sum(1 for s in steps if str((s or {}).get('kind') or '').strip() == 'flag-node-generator')
-
-    if len(chain_nodes) < required_total:
-        return [], _requirement_message(required_total=required_total, required_nonvuln_docker=required_nonvuln_docker)
-
-    try:
-        gens, _ = _flag_generators_from_enabled_sources()
-    except Exception:
-        gens = []
-    try:
-        node_gens, _ = _flag_node_generators_from_enabled_sources()
-    except Exception:
-        node_gens = []
-
-    by_id: dict[str, dict[str, Any]] = {}
-    for g in (gens or []):
-        if not isinstance(g, dict):
-            continue
-        gid = str(g.get('id') or '').strip()
-        if gid and gid not in by_id:
-            by_id[gid] = g
-    for g in (node_gens or []):
-        if not isinstance(g, dict):
-            continue
-        gid = str(g.get('id') or '').strip()
-        if gid and gid not in by_id:
-            by_id[gid] = g
-
-    chain_ids: list[str] = [str(n.get('id') or '').strip() for n in chain_nodes if isinstance(n, dict) and str(n.get('id') or '').strip()]
-    id_to_name: dict[str, str] = {}
-    id_to_ip: dict[str, str] = {}
-    vuln_names_by_id: dict[str, list[str]] = {}
-    try:
-        hosts = preview.get('hosts') if isinstance(preview, dict) else None
-        if isinstance(hosts, list):
-            for h in hosts:
-                if not isinstance(h, dict):
-                    continue
-                hid = str(h.get('node_id') or '').strip()
-                if not hid:
-                    continue
-                vulns = h.get('vulnerabilities') if isinstance(h.get('vulnerabilities'), list) else []
-                names: list[str] = []
-                for v in (vulns or []):
-                    if isinstance(v, str):
-                        s = v.strip()
-                        if s:
-                            names.append(s)
-                        continue
-                    if isinstance(v, dict):
-                        for key in ('name', 'title', 'id', 'vuln', 'cve', 'cve_id', 'slug'):
-                            val = v.get(key)
-                            if isinstance(val, str) and val.strip():
-                                names.append(val.strip())
-                                break
-                if names:
-                    uniq = []
-                    seen = set()
-                    for n in names:
-                        if n and n not in seen:
-                            seen.add(n)
-                            uniq.append(n)
-                    vuln_names_by_id[hid] = uniq
-    except Exception:
-        vuln_names_by_id = {}
-    def _extract_vuln_names(obj: dict[str, Any]) -> list[str]:
-        names: list[str] = []
-        try:
-            raw = obj.get('vulnerabilities')
-            if isinstance(raw, list):
-                for v in raw:
-                    if isinstance(v, str):
-                        s = v.strip()
-                        if s:
-                            names.append(s)
-                        continue
-                    if isinstance(v, dict):
-                        for key in ('name', 'title', 'id', 'vuln', 'cve', 'cve_id', 'slug'):
-                            val = v.get(key)
-                            if isinstance(val, str) and val.strip():
-                                names.append(val.strip())
-                                break
-        except Exception:
-            pass
-        return names
-    try:
-        for n in (chain_nodes or []):
-            if not isinstance(n, dict):
-                continue
-            nid = str(n.get('id') or '').strip()
-            if not nid or nid in vuln_names_by_id:
-                continue
-            names = _extract_vuln_names(n)
-            if names:
-                uniq = []
-                seen = set()
-                for nm in names:
-                    if nm and nm not in seen:
-                        seen.add(nm)
-                        uniq.append(nm)
-                vuln_names_by_id[nid] = uniq
-    except Exception:
-        pass
-    for n in chain_nodes:
-        try:
-            nid = str(n.get('id') or '').strip()
-            nm = str(n.get('name') or '').strip()
-            if nid:
-                id_to_name[nid] = nm or nid
-                ip = ''
-                try:
-                    ip = _first_valid_ipv4(n.get('ip4') or n.get('ipv4') or n.get('ip') or '')
-                except Exception:
-                    ip = ''
-                if ip:
-                    id_to_ip[nid] = ip
-        except Exception:
-            pass
-
-    # Prefer v3 plugin contracts for artifact-level chaining semantics.
-    try:
-        plugins_by_id = _flow_enabled_plugin_contracts_by_id()
-    except Exception:
-        plugins_by_id = {}
-    try:
-        start_positions = _flow_parallel_start_assignment_indexes(flag_assignments, gen_defs_by_id=by_id)
-    except Exception:
-        start_positions = {0} if flag_assignments else set()
-
-    out: list[dict[str, Any]] = []
-    for i, step in enumerate(steps):
-        cid = chain_ids[i] if i < len(chain_ids) else ''
-        next_id = chain_ids[i + 1] if (i + 1) < len(chain_ids) else ''
-        gen_id = str(step.get('id') or '').strip()
-        kind = str(step.get('kind') or '').strip() or 'flag-generator'
-        catalog = str(step.get('catalog') or '').strip() or ('flag_node_generators' if kind == 'flag-node-generator' else 'flag_generators')
-
-        # Mirror the existing rule: vuln nodes are only assigned flag-generators.
-        try:
-            node = chain_nodes[i] if i < len(chain_nodes) else {}
-            if kind == 'flag-node-generator' and isinstance(node, dict) and bool(node.get('is_vuln')):
-                return [], _requirement_message(required_total=required_total, required_nonvuln_docker=required_nonvuln_docker)
-        except Exception:
-            pass
-
-        gen = by_id.get(gen_id)
-        if not isinstance(gen, dict):
-            return [], f'generator not found/enabled: {gen_id}'
-
-        hint_level_templates = _flow_hint_level_templates_from_generator(gen)
-        rendered_hint_levels = _flow_render_hint_level_templates(
-            hint_level_templates,
-            scenario_label=scenario_label,
-            id_to_name=id_to_name,
-            id_to_ip=id_to_ip,
-            this_id=str(cid),
-            next_id=str(next_id),
-        )
-        hint_templates = [str(x or '').strip() for x in (hint_level_templates.get('low') or []) if str(x or '').strip()]
-        hint_tpl = hint_templates[0] if hint_templates else 'Next: {{NEXT_NODE_NAME}}'
-
-        # Runtime IO (generator input/output fields).
-        # Show required + optional separately (UI), but only required participates in feasibility.
-        input_fields_all = sorted([
-            str(x.get('name') or '').strip()
-            for x in (gen.get('inputs') or [])
-            if isinstance(x, dict) and str(x.get('name') or '').strip()
-        ])
-        input_fields_required = sorted([
-            str(x.get('name') or '').strip()
-            for x in (gen.get('inputs') or [])
-            if isinstance(x, dict) and str(x.get('name') or '').strip() and x.get('required') is not False
-        ])
-        input_fields_optional = sorted([x for x in input_fields_all if x and x not in set(input_fields_required)])
-        output_fields = sorted([
-            str(x.get('name') or '').strip()
-            for x in (gen.get('outputs') or [])
-            if isinstance(x, dict) and str(x.get('name') or '').strip()
-        ])
-
-        # Artifact-level contracts (plugin requires/produces).
-        requires_artifacts: list[str] = []
-        produces_artifacts: list[str] = []
-        try:
-            plugin = plugins_by_id.get(gen_id)
-            if isinstance(plugin, dict):
-                req = plugin.get('requires')
-                if isinstance(req, list):
-                    requires_artifacts = sorted([str(x).strip() for x in req if str(x).strip()])
-                prod = plugin.get('produces')
-                if isinstance(prod, list):
-                    produces_artifacts = sorted([
-                        str(it.get('artifact') or '').strip()
-                        for it in prod
-                        if isinstance(it, dict) and str(it.get('artifact') or '').strip()
-                    ])
-        except Exception:
-            requires_artifacts = []
-            produces_artifacts = []
-
-        # If an artifact "requires" token also appears as an optional input field,
-        # treat it as optional (exclude from effective chaining requirements).
-        try:
-            optional_field_set = set(input_fields_optional)
-            requires_effective = sorted([x for x in (requires_artifacts or []) if x and x not in optional_field_set])
-        except Exception:
-            requires_effective = list(requires_artifacts or [])
-
-        # Effective chaining semantics used by ordering validation.
-        inputs_effective = sorted(set(requires_effective) | set(input_fields_required))
-        outputs_effective = sorted(set(produces_artifacts) | set(output_fields))
-        output_fields = sorted(set(output_fields) | set(produces_artifacts))
-
-        rendered_hints = [str(x or '').strip() for x in (rendered_hint_levels.get('low') or []) if str(x or '').strip()]
-        if not rendered_hints:
-            rendered_hints = [
-                _flow_render_hint_template(
-                    t,
-                    scenario_label=scenario_label,
-                    id_to_name=id_to_name,
-                    id_to_ip=id_to_ip,
-                    this_id=str(cid),
-                    next_id=str(next_id),
-                )
-                for t in (hint_templates or [])
-            ]
-        out.append({
-            'node_id': str(cid),
-            'id': gen_id,
-            'name': str(gen.get('name') or ''),
-            'description': str(gen.get('description') or ''),
-            'type': kind,
-            'flag_generator': str(gen.get('_source_name') or '').strip() or 'unknown',
-            'generator_catalog': catalog,
-            'language': str(gen.get('language') or ''),
-            'vulnerabilities': list(vuln_names_by_id.get(str(cid), []) or []),
-            'description_hints': list(gen.get('description_hints') or []) if isinstance(gen.get('description_hints'), list) else [],
-            'inject_files': list(gen.get('inject_files') or []) if isinstance(gen.get('inject_files'), list) else [],
-            # Effective union (used for chaining feasibility / ordering validation).
-            'inputs': inputs_effective,
-            'outputs': outputs_effective,
-
-            # Split-out views for UI transparency.
-            'requires': requires_artifacts,
-            'produces': produces_artifacts,
-            'input_fields': input_fields_all,
-            'input_fields_required': input_fields_required,
-            'input_fields_optional': input_fields_optional,
-            'output_fields': output_fields,
-            'hint_level_templates': hint_level_templates,
-            'hint_levels': rendered_hint_levels,
-            'hint_template': hint_tpl,
-            'hint_templates': hint_templates,
-            'hint': rendered_hints[0] if rendered_hints else _flow_render_hint_template(
-                hint_tpl,
-                scenario_label=scenario_label,
-                id_to_name=id_to_name,
-                id_to_ip=id_to_ip,
-                this_id=str(cid),
-                next_id=str(next_id),
-            ),
-            'hints': rendered_hints,
-            'next_node_id': str(next_id),
-            'next_node_name': str(id_to_name.get(str(next_id)) or ''),
-        })
-
-    return _flow_apply_pivot_context_to_assignments(
-        out,
-        chain_nodes,
-        preview=preview,
-        pivot_context=pivot_context,
-        scenario_label=scenario_label,
-    ), None
 
 
 @app.before_request
@@ -20394,7 +20276,20 @@ def _flow_compute_flag_assignments(
             # produced; it is updated for this step just below.
             available_now = set(initial_facts) | set(state_known)
             unresolved_supplied = supplied_names_for_start - available_now
-            required_for_start = set(_required_inputs_of(gen)) - available_now - supplied_names_for_start
+            # Synthesized inputs -- Knowledge(ip), node_name, seed and the rest
+            # -- are written into every generator config, but no step ever
+            # "produces" them, so they never appear in state. Counting them as
+            # unmet requirements suppressed the supply for any generator that
+            # declares one: a manifest requiring Knowledge(ip) alongside a
+            # flow_supply_when_first input got placed (eligibility knows the
+            # value is always there) and then ran without the supplied value,
+            # failing with "required and not supplied".
+            required_for_start = (
+                set(_required_inputs_of(gen))
+                - available_now
+                - supplied_names_for_start
+                - _flow_synthesized_inputs()
+            )
             # Only fabricate (and disclose) a value at a genuine branch start.
             # When an earlier step already produced the fact, the consumer gets
             # that real value through flow_context, and hinting a fabricated one
@@ -21394,6 +21289,29 @@ def _flow_clear_chain_supplied_inputs(assignment: dict[str, Any]) -> dict[str, A
     return assignment
 
 
+def _flow_supply_definition_for(
+    assignment: dict[str, Any] | Any,
+    gen_defs_by_id: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Return the generator definition backing an assignment, or None.
+
+    Only a generator definition carries `inputs` as descriptor dicts, which is
+    the sole place `flow_supply_when_first` is recorded.  An assignment lists
+    `inputs` as bare fact names, so it can never stand in for its own
+    definition here.
+    """
+    if not isinstance(assignment, dict) or not isinstance(gen_defs_by_id, dict):
+        return None
+    try:
+        gen_id = str(assignment.get('id') or assignment.get('generator_id') or '').strip()
+    except Exception:
+        return None
+    if not gen_id:
+        return None
+    found = gen_defs_by_id.get(gen_id)
+    return found if isinstance(found, dict) else None
+
+
 def _flow_apply_first_step_chain_supplied_inputs(
     assignment: dict[str, Any],
     gen_def: dict[str, Any] | None = None,
@@ -21417,6 +21335,13 @@ def _flow_apply_first_step_chain_supplied_inputs(
     if not names and source is not assignment:
         names = _flow_first_step_chain_supplied_input_names(assignment)
     if not names:
+        # Without a generator definition the supply flags are simply invisible
+        # here -- that is not evidence the step needs no supply.  Keep whatever
+        # an earlier pass supplied rather than clearing a value this call was
+        # never able to see, which would starve the generator at run time.
+        existing_supplied = assignment.get('chain_supplied_input_values')
+        if isinstance(existing_supplied, dict) and existing_supplied:
+            return assignment
         return _flow_clear_chain_supplied_inputs(assignment)
 
     node_id = str(assignment.get('node_id') or '').strip()
@@ -24587,9 +24512,13 @@ def _flow_reorder_chain_by_generator_dag(
                         levels['low'] = low_values
                         assignment['hint_levels'] = levels
                     try:
+                        # An assignment lists `inputs` as bare fact names, so it
+                        # can never reveal `flow_supply_when_first`. Passing it as
+                        # its own definition made this pass clear a value the
+                        # assignment step had correctly supplied.
                         _flow_apply_first_step_chain_supplied_inputs(
                             assignment,
-                            assignment,
+                            _flow_supply_definition_for(assignment, gen_defs_by_id_for_reorder),
                             scenario_label=scenario_label,
                             position=idx,
                             supply_on_start=(idx in start_positions),
@@ -24955,7 +24884,7 @@ def _flow_reorder_chain_by_generator_dag(
                 a['hints'] = rendered
                 _flow_apply_first_step_chain_supplied_inputs(
                     a,
-                    a,
+                    _flow_supply_definition_for(a, gen_defs_by_id_for_reorder),
                     scenario_label=scenario_label,
                     position=i,
                     supply_on_start=(i in dag_start_positions),
@@ -25054,366 +24983,6 @@ def _flow_inject_uploads_dir() -> str:
     d = os.path.join(_outputs_dir(), 'flow_inject_uploads')
     os.makedirs(d, exist_ok=True)
     return d
-
-
-    out_assignments: list[dict[str, Any]] = []
-    for i, cid in enumerate(chain_ids):
-        req = fas_in[i] if i < len(fas_in) else {}
-        if not isinstance(req, dict):
-            return jsonify({'ok': False, 'error': 'flag_assignments entries must be objects.'}), 400
-        node_id = str(req.get('node_id') or '').strip()
-        if node_id != str(cid):
-            return jsonify({'ok': False, 'error': 'flag_assignments must align to chain_ids (node_id mismatch).'}), 400
-        gen_id = str(req.get('id') or req.get('generator_id') or '').strip()
-        if not gen_id:
-            return jsonify({'ok': False, 'error': f'Missing generator id for node {node_id}.'}), 400
-        gen = gen_by_id.get(gen_id)
-        if not isinstance(gen, dict):
-            return jsonify({'ok': False, 'error': f'Generator not found/enabled: {gen_id}'}), 422
-
-        node = chain_nodes[i] if i < len(chain_nodes) else {}
-        is_vuln_node = bool(node.get('is_vuln'))
-        is_docker_node = False
-        try:
-            is_docker_node = bool(_flow_node_is_docker_role(node))
-        except Exception:
-            try:
-                t_raw = str(node.get('type') or '')
-                t = t_raw.strip().lower()
-                is_docker_node = ('docker' in t) or (t_raw.strip().upper() == 'DOCKER')
-            except Exception:
-                is_docker_node = False
-
-        kind = str(gen.get('_flow_kind') or 'flag-generator')
-        if is_vuln_node and kind != 'flag-generator':
-            return jsonify({'ok': False, 'error': f'Generator {gen_id} is not compatible with vulnerability node {node_id} (must be flag-generator).'}), 422
-        if kind == 'flag-node-generator':
-            if is_vuln_node or (not is_docker_node):
-                return jsonify({'ok': False, 'error': f'Generator {gen_id} is not compatible with node {node_id} (flag-node-generator requires docker-role, non-vulnerability node).'}), 422
-        else:
-            # flag-generator
-            if not is_vuln_node:
-                return jsonify({'ok': False, 'error': f'Generator {gen_id} is not compatible with node {node_id} (flag-generator requires vulnerability node).'}), 422
-
-        next_id = chain_ids[i + 1] if (i + 1) < len(chain_ids) else ''
-        hint_level_templates = _flow_hint_level_templates_from_generator(gen)
-        rendered_hint_levels = _flow_render_hint_level_templates(
-            hint_level_templates,
-            scenario_label=(scenario_label or scenario_norm),
-            id_to_name=id_to_name,
-            id_to_ip=id_to_ip,
-            this_id=str(node_id),
-            next_id=str(next_id),
-        )
-        hint_templates = [str(x or '').strip() for x in (hint_level_templates.get('low') or []) if str(x or '').strip()]
-        hint_tpl = hint_templates[0] if hint_templates else 'Next: {{NEXT_NODE_NAME}}'
-        rendered_hints = [str(x or '').strip() for x in (rendered_hint_levels.get('low') or []) if str(x or '').strip()]
-        if not rendered_hints:
-            rendered_hints = [
-                _flow_render_hint_template(t, scenario_label=(scenario_label or scenario_norm), id_to_name=id_to_name, id_to_ip=id_to_ip, this_id=str(node_id), next_id=str(next_id))
-                for t in (hint_templates or [])
-            ]
-
-        # Optional user overrides for hint text. Contract:
-        # - If key is absent: use generated hints.
-        # - If key is present and value is null: clear any override and use generated hints.
-        # - If key is present and value is a list (possibly empty): use it verbatim (after trimming).
-        hint_overrides_present = False
-        raw_hint_overrides: Any = None
-        try:
-            hint_overrides_present = 'hint_overrides' in req
-            raw_hint_overrides = req.get('hint_overrides')
-        except Exception:
-            hint_overrides_present = False
-            raw_hint_overrides = None
-
-        hint_overrides: list[str] | None = None
-        clear_hint_overrides = False
-        if hint_overrides_present:
-            if raw_hint_overrides is None:
-                clear_hint_overrides = True
-                hint_overrides = None
-            elif isinstance(raw_hint_overrides, list):
-                cleaned = [str(x or '').strip() for x in (raw_hint_overrides or [])]
-                cleaned = [x for x in cleaned if x]
-                hint_overrides = cleaned
-            elif isinstance(raw_hint_overrides, str):
-                s = str(raw_hint_overrides or '').strip()
-                hint_overrides = [s] if s else []
-            else:
-                # Unsupported type: ignore.
-                hint_overrides = None
-
-        # Optional user override for the realized FLAG value.
-        flag_override_present = False
-        raw_flag_override: Any = None
-        try:
-            flag_override_present = 'flag_override' in req
-            raw_flag_override = req.get('flag_override')
-        except Exception:
-            flag_override_present = False
-            raw_flag_override = None
-
-        flag_override: str | None = None
-        clear_flag_override = False
-        if flag_override_present:
-            if raw_flag_override is None:
-                clear_flag_override = True
-                flag_override = None
-            elif isinstance(raw_flag_override, str):
-                s = str(raw_flag_override or '').strip()
-                flag_override = s if s else None
-            else:
-                flag_override = None
-
-        # Optional user overrides for outputs (dict of output_key -> value).
-        output_overrides_present = False
-        raw_output_overrides: Any = None
-        try:
-            output_overrides_present = 'output_overrides' in req
-            raw_output_overrides = req.get('output_overrides')
-        except Exception:
-            output_overrides_present = False
-            raw_output_overrides = None
-
-        output_overrides: dict[str, Any] | None = None
-        clear_output_overrides = False
-        if output_overrides_present:
-            if raw_output_overrides is None:
-                clear_output_overrides = True
-                output_overrides = None
-            elif isinstance(raw_output_overrides, dict):
-                cleaned: dict[str, Any] = {}
-                for k, v in (raw_output_overrides or {}).items():
-                    kk = str(k or '').strip()
-                    if not kk:
-                        continue
-                    cleaned[kk] = v
-                output_overrides = cleaned
-            else:
-                output_overrides = None
-
-        # Optional override for inject_files allowlist.
-        inject_files_override_present = False
-        raw_inject_files_override: Any = None
-        try:
-            inject_files_override_present = 'inject_files_override' in req
-            raw_inject_files_override = req.get('inject_files_override')
-        except Exception:
-            inject_files_override_present = False
-            raw_inject_files_override = None
-
-        inject_files_override: list[str] | None = None
-        clear_inject_files_override = False
-        if inject_files_override_present:
-            if raw_inject_files_override is None:
-                clear_inject_files_override = True
-                inject_files_override = None
-            elif isinstance(raw_inject_files_override, list):
-                cleaned = [str(x or '').strip() for x in (raw_inject_files_override or [])]
-                cleaned = [x for x in cleaned if x]
-                inject_files_override = cleaned
-            else:
-                inject_files_override = None
-
-        requires_artifacts = sorted(list(_artifact_requires_of(gen)))
-        produces_artifacts = sorted(list(_artifact_produces_of(gen)))
-        input_fields_required = sorted(list(_required_input_fields_of(gen)))
-        input_fields_all = sorted(list(_all_input_fields_of(gen)))
-        input_fields_optional = sorted([x for x in input_fields_all if x and x not in set(input_fields_required)])
-        output_fields = sorted(list(_output_fields_of(gen)))
-
-        raw_overrides = req.get('config_overrides')
-        if not isinstance(raw_overrides, dict):
-            raw_overrides = req.get('inputs_overrides')
-        if not isinstance(raw_overrides, dict):
-            raw_overrides = req.get('input_overrides')
-
-        allowed_override_keys: set[str] = set(input_fields_all)
-        try:
-            allowed_override_keys |= set(_flow_synthesized_inputs())
-        except Exception:
-            pass
-
-        config_overrides: dict[str, Any] = {}
-        if isinstance(raw_overrides, dict):
-            for k, v in (raw_overrides or {}).items():
-                kk = str(k or '').strip()
-                if kk and kk in allowed_override_keys:
-                    config_overrides[kk] = v
-
-        # If an artifact "requires" token also appears as an optional input field,
-        # treat it as optional (exclude from effective chaining requirements).
-        try:
-            optional_field_set = set(input_fields_optional)
-            requires_effective = [x for x in (requires_artifacts or []) if x and x not in optional_field_set]
-        except Exception:
-            requires_effective = list(requires_artifacts or [])
-
-        # Effective union for chaining.
-        inputs_effective = sorted(list(set(requires_effective) | set(input_fields_required)))
-        outputs_effective = sorted(list(_provides_of(gen)))
-
-        out_a: dict[str, Any] = {
-            'node_id': str(node_id),
-            'id': str(gen.get('id') or ''),
-            'name': str(gen.get('name') or ''),
-            'type': kind,
-            'flag_generator': str(gen.get('_source_name') or '').strip() or 'unknown',
-            'generator_catalog': str(gen.get('_flow_catalog') or 'flag_generators'),
-            'language': str(gen.get('language') or ''),
-            'description_hints': list(gen.get('description_hints') or []) if isinstance(gen.get('description_hints'), list) else [],
-            'inject_candidate_paths': _normalize_inject_candidate_paths(gen.get('inject_candidate_paths')),
-            'config_overrides': dict(config_overrides),
-            'inputs': inputs_effective,
-            'outputs': outputs_effective,
-            'requires': requires_artifacts,
-            'produces': produces_artifacts,
-            'input_fields': input_fields_all,
-            'input_fields_required': input_fields_required,
-            'input_fields_optional': input_fields_optional,
-            'output_fields': output_fields,
-            'input_defs': list(gen.get('inputs') or []) if isinstance(gen.get('inputs'), list) else [],
-            'output_defs': list(gen.get('outputs') or []) if isinstance(gen.get('outputs'), list) else [],
-            'hint_level_templates': hint_level_templates,
-            'hint_levels': rendered_hint_levels,
-            'hint_template': hint_tpl,
-            'hint_templates': hint_templates,
-            'hint': rendered_hints[0] if rendered_hints else _flow_render_hint_template(hint_tpl, scenario_label=(scenario_label or scenario_norm), id_to_name=id_to_name, this_id=str(node_id), next_id=str(next_id)),
-            'hints': rendered_hints,
-            'next_node_id': str(next_id),
-            'next_node_name': str(id_to_name.get(str(next_id)) or ''),
-        }
-
-        if hint_overrides_present:
-            if clear_hint_overrides:
-                # Explicit clear: do not persist overrides.
-                out_a.pop('hint_overrides', None)
-            elif hint_overrides is not None:
-                out_a['hint_overrides'] = list(hint_overrides)
-                out_a['hints'] = list(hint_overrides)
-                out_a['hint'] = hint_overrides[0] if hint_overrides else ''
-
-        out_a = _flow_apply_first_step_chain_supplied_inputs(
-            out_a,
-            gen,
-            scenario_label=(scenario_label or scenario_norm),
-            position=i,
-        )
-
-        if flag_override_present:
-            if clear_flag_override:
-                out_a.pop('flag_override', None)
-            elif flag_override is not None:
-                out_a['flag_override'] = str(flag_override)
-
-        if output_overrides_present:
-            if clear_output_overrides:
-                out_a.pop('output_overrides', None)
-            elif output_overrides is not None:
-                if output_overrides:
-                    out_a['output_overrides'] = dict(output_overrides)
-                else:
-                    out_a.pop('output_overrides', None)
-
-        if inject_files_override_present:
-            if clear_inject_files_override:
-                out_a.pop('inject_files_override', None)
-            elif inject_files_override is not None:
-                out_a['inject_files_override'] = list(inject_files_override)
-                # Mirror to inject_files for effective view.
-                out_a['inject_files'] = list(inject_files_override)
-
-        out_assignments.append(out_a)
-
-    # Validate (non-blocking)
-    try:
-        flow_valid, flow_errors = _flow_validate_chain_order_by_requires_produces(
-            chain_nodes,
-            out_assignments,
-            scenario_label=(scenario_label or scenario_norm),
-        )
-    except Exception:
-        flow_valid, flow_errors = True, []
-    flags_enabled = bool(flow_valid)
-
-    # Persist into the single per-scenario plan.
-    try:
-        persisted_flag_assignments = _flow_strip_runtime_sensitive_fields(out_assignments)
-        flow_meta = {
-            'source_preview_plan_path': _abs_path_or_original(base_plan_path),
-            'scenario': scenario_label or scenario_norm,
-            'length': len(chain_nodes),
-            'requested_length': len(chain_nodes),
-            'allow_node_duplicates': bool(allow_node_duplicates),
-            'chain': [{'id': str(n.get('id') or ''), 'name': str(n.get('name') or ''), 'type': str(n.get('type') or '')} for n in chain_nodes],
-            'flag_assignments': persisted_flag_assignments,
-            'flags_enabled': bool(flags_enabled),
-            'flow_valid': bool(flow_valid),
-            'flow_errors': list(flow_errors or []),
-            'modified_at': _iso_now(),
-        }
-        if isinstance(meta, dict):
-            meta2 = dict(meta)
-            meta2['flow'] = flow_meta
-        else:
-            meta2 = {'flow': flow_meta}
-    except Exception:
-        meta2 = meta
-
-    try:
-        if isinstance(meta2, dict):
-            meta2 = dict(meta2)
-            meta2['updated_at'] = _iso_now()
-        out_path = ''
-        xml_target = _existing_xml_path_or_none(str((meta2 or {}).get('xml_path') or '').strip())
-        if not xml_target:
-            xml_target = _existing_xml_path_or_none(base_plan_path)
-        if not xml_target:
-            xml_target = _existing_xml_path_or_none(_latest_xml_path_for_scenario(scenario_norm) or '')
-        if not xml_target:
-            return jsonify({'ok': False, 'error': 'Failed to persist flow-modified preview plan: XML path not found.'}), 500
-        if isinstance(meta2, dict):
-            meta2['xml_path'] = xml_target
-        out_payload = {
-            'full_preview': preview,
-            'metadata': meta2,
-        }
-        ok, err = _update_plan_preview_in_xml(xml_target, scenario_label or scenario_norm, out_payload)
-        if not ok:
-            return jsonify({'ok': False, 'error': f'Failed to persist flow-modified preview plan: {err}'}), 500
-        try:
-            _update_flow_state_in_xml(xml_target, scenario_label or scenario_norm, flow_meta)
-        except Exception:
-            pass
-        out_path = xml_target
-        try:
-            _planner_set_plan(scenario_norm, plan_path=xml_target, xml_path=xml_target, seed=(meta2 or {}).get('seed'))
-        except Exception:
-            pass
-    except Exception as e:
-        return jsonify({'ok': False, 'error': f'Failed to persist flow-modified preview plan: {e}'}), 500
-
-    # Stats for UI.
-    try:
-        stats = _flow_compose_docker_stats(nodes)
-    except Exception:
-        stats = {}
-
-    return jsonify({
-        'ok': True,
-        'scenario': scenario_label or scenario_norm,
-        'length': len(chain_nodes),
-        'stats': stats,
-        'chain': [{'id': str(n.get('id') or ''), 'name': str(n.get('name') or ''), 'type': str(n.get('type') or ''), 'is_vuln': bool(n.get('is_vuln'))} for n in chain_nodes],
-        'flag_assignments': out_assignments,
-        'flags_enabled': bool(flags_enabled),
-        'flow_valid': bool(flow_valid),
-        'flow_errors': list(flow_errors or []),
-        'preview_plan_path': out_path,
-        'base_preview_plan_path': base_plan_path,
-        'allow_node_duplicates': bool(allow_node_duplicates),
-    })
 
 
 def users_page():
@@ -29622,6 +29191,18 @@ def _select_core_config_for_page(
                 if not include_password:
                     merged.pop('ssh_password', None)
                 return _ensure_core_vm_metadata(merged)
+        # VM mode targets one CORE VM, declared by the runtime environment
+        # (.scenarioforge.env). The fallbacks below are implicit and
+        # stale-prone: a credential stored during an earlier remote setup, or a
+        # run-history entry from another host, would silently shadow that VM and
+        # send every connection to an address the operator has already moved
+        # away from. An explicit per-scenario config above still wins, because
+        # that is a visible setting; these are not.
+        if _webui_runtime_mode() == 'vm':
+            return _ensure_core_vm_metadata(
+                _core_backend_defaults(include_password=include_password)
+            )
+
         # Fall back to the latest VM/Access secret record for this scenario.
         try:
             secret_record = _select_latest_core_secret_record(scenario_norm or None)
@@ -35085,24 +34666,6 @@ def _build_execute_error_logs(
 
     return logs
 
-    if summary_path and os.path.exists(summary_path):
-        try:
-            with open(summary_path, 'r', encoding='utf-8') as sf:
-                payload = json.load(sf)
-            if not isinstance(payload, dict):
-                return
-            payload['validation_summary'] = validation
-            counts_obj = payload.get('counts') if isinstance(payload.get('counts'), dict) else {}
-            counts_obj['validation_ok'] = status_ok
-            counts_obj.update(counts)
-            payload['counts'] = counts_obj
-            meta = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
-            meta['execute_validation_summary'] = validation
-            payload['metadata'] = meta
-            with open(summary_path, 'w', encoding='utf-8') as sf:
-                json.dump(payload, sf, indent=2, sort_keys=True, default=str)
-        except Exception:
-            pass
 
 def _attach_base_upload(payload: Dict[str, Any]):
     """Ensure payload['base_upload'] is present if first scenario has a base filepath referencing an existing file.
@@ -35305,7 +34868,24 @@ def _core_config_from_xml_path(
 
     if not scenario_core and not global_core:
         return None
-    return _merge_core_configs(global_core, scenario_core, include_password=include_password)
+    merged_xml_core = _merge_core_configs(global_core, scenario_core, include_password=include_password)
+
+    # A scenario XML records the CORE endpoint it was last saved against.
+    # Callers merge that *over* the resolved config, so in VM mode -- where the
+    # deployment targets one CORE VM declared in the runtime environment -- a
+    # scenario saved against a previous VM drags every connection back to it,
+    # however the environment has since been changed. Keep the metadata, drop
+    # the transport, including the stored credential id that would otherwise
+    # refill the transport from that same old record.
+    if isinstance(merged_xml_core, dict) and _webui_runtime_mode() == 'vm':
+        merged_xml_core = {
+            key: value
+            for key, value in merged_xml_core.items()
+            if key not in _CORE_FIELD_KEYS and key != 'core_secret_id'
+        }
+        if not merged_xml_core:
+            return None
+    return merged_xml_core
 
 
 def _flow_state_from_latest_xml(scenario_norm: str) -> dict[str, Any] | None:
@@ -36034,33 +35614,6 @@ def _flow_attach_pivoting_plan_from_xml(
     except Exception:
         pass
     return True
-
-    scenario_norm = _normalize_scenario_label(scenario_label or '')
-    scen_el = None
-    try:
-        scenarios = root.findall('.//Scenario')
-        if scenario_norm:
-            for sc in scenarios:
-                nm = str(sc.get('name') or '').strip()
-                if _normalize_scenario_label(nm) == scenario_norm:
-                    scen_el = sc
-                    break
-        if scen_el is None and scenarios:
-            scen_el = scenarios[0]
-    except Exception:
-        scen_el = None
-
-    if scen_el is None:
-        return None
-    try:
-        flow_el = scen_el.find('.//FlagSequencing/FlowState')
-        raw = (flow_el.text or '').strip() if flow_el is not None else ''
-        if not raw:
-            return None
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
 
 
 def _clear_flow_state_in_xml(xml_path: str, scenario_label: str | None) -> tuple[bool, str]:
@@ -43495,6 +43048,34 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
          _fail_run(msg, code=1, extra={'error_code': 'active_sessions_blocking'})
          return
 
+    if _docker_home_permission_repair_enabled():
+        try:
+            ssh_user_for_docker = str(core_cfg.get('ssh_username') or '').strip()
+        except Exception:
+            ssh_user_for_docker = ''
+        if ssh_user_for_docker:
+            try:
+                rc, out_text, err_text = _exec_sudo(
+                    _docker_home_permission_repair_command(ssh_user_for_docker),
+                    timeout=25.0,
+                    stage='docker_home_perms',
+                )
+                note = (out_text or '').strip()
+                if rc == 0 and note:
+                    # Only logged when something was actually wrong, so a clean
+                    # VM stays quiet.
+                    log_f.write(f"{log_prefix}Docker config permissions: {note}\n")
+                elif rc != 0:
+                    log_f.write(
+                        f"{log_prefix}WARN: docker config permission repair exited {rc}; continuing. "
+                        f"stderr={_summarize_for_log((err_text or '').strip())}\n"
+                    )
+            except Exception as exc:
+                try:
+                    log_f.write(f"{log_prefix}WARN: docker config permission repair failed: {exc}; continuing.\n")
+                except Exception:
+                    pass
+
     if _stale_core_veth_cleanup_enabled():
         try:
             log_f.write(f"{log_prefix}Cleaning stale CORE host veth interfaces (best-effort)...\n")
@@ -43677,6 +43258,33 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         # CORE docker nodes expect to be able to address the container by node name.
         # Inject `container_name: <node>` into generated compose by default.
         docker_env_parts.append('CORETG_COMPOSE_SET_CONTAINER_NAME=1')
+
+        # The remote run cannot see the catalog state, so it cannot know which
+        # images the operator pinned as `persistent`. Hand the set over, or its
+        # conflict cleanup deletes them like anything else.
+        try:
+            from scenarioforge.utils.env_payload import MAX_ENV_VALUE_BYTES
+
+            keep_images = sorted(_persistent_image_keep_set())
+            keep_blob = json.dumps(keep_images, ensure_ascii=False) if keep_images else ''
+            if keep_blob and len(keep_blob.encode('utf-8', 'replace')) <= MAX_ENV_VALUE_BYTES:
+                docker_env_parts.append(
+                    'CORETG_PERSISTENT_IMAGES_JSON=' + shlex.quote(keep_blob)
+                )
+            elif keep_blob:
+                # This value rides on the remote command line, so an oversized
+                # one would break every execve there. Losing pin protection for
+                # one run beats that.
+                app.logger.warning(
+                    '%s',
+                    _persistent_images_skipped_warning(
+                        count=len(keep_images),
+                        size_bytes=len(keep_blob.encode('utf-8', 'replace')),
+                        limit=MAX_ENV_VALUE_BYTES,
+                    ),
+                )
+        except Exception:
+            pass
 
         if core_cfg.get('ssh_password') and _coerce_bool(docker_use_sudo):
             docker_env_parts.append('CORETG_DOCKER_SUDO_PASSWORD_STDIN=1')

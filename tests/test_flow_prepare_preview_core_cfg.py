@@ -15,7 +15,6 @@ def test_prepare_preview_context_uses_saved_page_core_cfg_when_xml_lacks_passwor
     deps = SimpleNamespace(
         _coerce_bool=lambda value: bool(value),
         _normalize_scenario_label=lambda value: str(value or '').strip().lower(),
-        _flow_preset_steps=lambda preset: [],
         _existing_xml_path_or_none=lambda value: str(value) if value and str(value) in {str(xml_path), str(latest_xml_path)} else None,
         _latest_xml_path_for_scenario=lambda scenario_norm: str(latest_xml_path),
         _planner_get_plan=lambda scenario_norm: None,
@@ -92,7 +91,6 @@ def test_prepare_preview_context_prefers_explicit_current_preview_plan(tmp_path)
     deps = SimpleNamespace(
         _coerce_bool=lambda value: bool(value),
         _normalize_scenario_label=lambda value: str(value or '').strip().lower(),
-        _flow_preset_steps=lambda preset: [],
         _existing_xml_path_or_none=lambda value: str(value) if value and str(value) in {str(stale_xml), str(latest_xml)} else None,
         _latest_xml_path_for_scenario=lambda scenario_norm: str(latest_xml),
         _planner_get_plan=lambda scenario_norm: None,

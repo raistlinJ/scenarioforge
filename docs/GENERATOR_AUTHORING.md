@@ -278,6 +278,64 @@ Current default behavior in ScenarioForge is conservative:
 
 Author generators assuming transforms can happen, and make startup robust to them.
 
+### Only the node-named service owns the network
+
+CORE runs a Docker node's whole stack in **one network namespace**. It rewrites
+every service except the node-named one to `network_mode: service:<node>`, and
+manages the node's own namespace itself — that is where it attaches the veth and
+the scenario address.
+
+A container that joins another's namespace cannot own its own networking, and
+Docker refuses to create it:
+
+```
+service:node:1 Error response from daemon: conflicting options:
+              hostname and the container type network mode
+service:node:1 Error response from daemon: conflicting options:
+              port exposing and the container type network mode
+```
+
+The whole stack then sits in `created`, every node reports "not running", and
+the cause appears only in the core-daemon journal. ScenarioForge strips
+`hostname`, `ports`, `expose`, `dns`, `dns_search`, `dns_opt`, `extra_hosts`,
+`mac_address`, `domainname` and `networks` from those services to prevent it,
+merging their port intent into the node service where it is actually reachable.
+
+You do not need to do anything for this to work, but do not rely on a secondary
+service keeping its own hostname or published ports — it will not.
+
+### Python you generate must run
+
+Generators commonly build their challenge app by templating values into a `.py`
+file. A very easy mistake is to paste JSON into Python source:
+
+```python
+# Wrong: json.dumps writes true/false/null, which are not Python.
+CONFIG = __CONFIG_JSON__
+APP_TEMPLATE.replace("__CONFIG_JSON__", json.dumps(app_config, indent=2))
+```
+
+Any config carrying a boolean then produces an app that fails at import with
+`NameError: name 'true' is not defined`. That is not a syntax error, so the file
+looks fine to a parser; the container simply crash-loops, CORE cannot read its
+PID or attach an interface, and the session never leaves `configuration`.
+
+Parse the JSON at runtime instead, which also keeps the formatting readable when
+the app serves its own source as the challenge artifact:
+
+```python
+APP_TEMPLATE.replace("__CONFIG_JSON__",
+                     'json.loads(r"""' + json.dumps(app_config, indent=2) + '""")')
+```
+
+The runner validates every `.py` a generator emits and fails the run with the
+file and line rather than letting it reach a container:
+
+```
+[validation error] generator emitted Python that will not import:
+app.py line 20: JSON literal 'true' used as Python (did you mean True?)
+```
+
 ---
 
 ## 5) Hint levels and substitution

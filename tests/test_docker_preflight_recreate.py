@@ -230,6 +230,10 @@ def test_docker_compose_preflight_fails_on_wrapper_build_failure(tmp_path, monke
         calls.append(argv)
         if argv[:2] == ['docker', 'build']:
             return _Proc(1, 'base image pull failed')
+        # A failed wrapper build asks whether the base image's architecture is
+        # the reason before reporting; the answer here is that it is not.
+        if argv[:3] == ['docker', 'image', 'inspect'] or argv[:2] == ['docker', 'version']:
+            return _Proc(1, '')
         raise AssertionError(f'unexpected args after wrapper build failure: {argv}')
 
     monkeypatch.setattr(topo, '_docker_compose_cmd', lambda: ['docker', 'compose'])
@@ -248,7 +252,10 @@ def test_docker_compose_preflight_fails_on_wrapper_build_failure(tmp_path, monke
     assert 'docker wrapper image build failed' in message
     assert 'coretg/unique-flow-chain-docker-7:iproute2' in message
     assert 'base image pull failed' in message
-    assert calls == [
+    # The point is that preflight stops here: one build attempt, no retry and no
+    # compose command that could fall back to a stale local image. Read-only
+    # diagnostics may follow, so assert the intent rather than an exact list.
+    assert [call for call in calls if call[:2] == ['docker', 'build']] == [
         [
             'docker',
             'build',
@@ -261,6 +268,7 @@ def test_docker_compose_preflight_fails_on_wrapper_build_failure(tmp_path, monke
             str(wrapper_ctx),
         ]
     ]
+    assert not [call for call in calls if 'compose' in call], 'must not reach compose'
 
 
 def test_docker_compose_preflight_runs_inject_helpers_before_target_service(tmp_path, monkeypatch):

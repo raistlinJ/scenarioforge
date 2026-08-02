@@ -502,7 +502,7 @@ def test_prepare_preview_for_execute_preserves_docker_only_chain(monkeypatch: py
     was being re-selected during execute, causing flag-generators to be assigned instead of
     flag-node-generators.
     
-    The fix ensures that when preset_steps is empty, non-vuln Docker nodes are recognized
+    The fix ensures non-vulnerability Docker nodes are recognized
     as requiring flag-node-generators and are not replaced with vulnerability nodes.
     """
     app_backend.app.config['TESTING'] = True

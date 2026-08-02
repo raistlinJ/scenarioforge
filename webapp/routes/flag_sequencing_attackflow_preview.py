@@ -20,7 +20,6 @@ def register(app, *, backend_module: Any) -> None:
     def api_flow_attackflow_preview():
         scenario_label = (request.args.get('scenario') or '').strip()
         scenario_norm = backend._normalize_scenario_label(scenario_label)
-        preset = str(request.args.get('preset') or '').strip()
         mode = str(request.args.get('mode') or '').strip().lower()
         xml_hint = (request.args.get('xml_path') or '').strip()
         length_raw = request.args.get('length')
@@ -28,9 +27,6 @@ def register(app, *, backend_module: Any) -> None:
             length = int(length_raw) if length_raw is not None else 5
         except Exception:
             length = 5
-        preset_steps = backend._flow_preset_steps(preset)
-        if preset_steps:
-            length = len(preset_steps)
         length = max(1, min(length, 50))
         requested_length = length
 
@@ -212,13 +208,12 @@ def register(app, *, backend_module: Any) -> None:
         stats = backend._flow_compose_docker_stats(nodes)
         required_vulnerability_count = 0
         required_node_generator_count = 0
-        if not preset_steps:
-            required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
-            required_node_generator_count = max(0, int(stats.get('topology_flag_node_generator_total') or 0))
-            required_topology_count = required_vulnerability_count + required_node_generator_count
-            if length < required_topology_count:
-                length = required_topology_count
-                requested_length = length
+        required_vulnerability_count = max(0, int(stats.get('vuln_total') or 0))
+        required_node_generator_count = max(0, int(stats.get('topology_flag_node_generator_total') or 0))
+        required_topology_count = required_vulnerability_count + required_node_generator_count
+        if length < required_topology_count:
+            length = required_topology_count
+            requested_length = length
 
         try:
             metadata_for_options = payload.get('metadata') if isinstance(payload, dict) else None
@@ -400,7 +395,7 @@ def register(app, *, backend_module: Any) -> None:
 
         chain_nodes: list[dict[str, Any]] = []
         used_saved_chain = False
-        if (not ignore_saved_flow) and (not preset_steps):
+        if not ignore_saved_flow:
             try:
                 meta = payload.get('metadata') if isinstance(payload, dict) else None
                 flow_meta = meta.get('flow') if isinstance(meta, dict) else None
@@ -422,20 +417,17 @@ def register(app, *, backend_module: Any) -> None:
                 chain_nodes = []
 
         if not chain_nodes:
-            if preset_steps:
-                chain_nodes = backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
-            else:
-                try:
-                    seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
-                except Exception:
-                    seed_val = 0
-                chain_nodes = backend._pick_flow_nonvulnerability_docker_nodes(
-                    nodes,
-                    adj,
-                    length=max(0, length - required_vulnerability_count),
-                    allow_node_duplicates=allow_node_duplicates,
-                    seed=seed_val,
-                )
+            try:
+                seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
+            except Exception:
+                seed_val = 0
+            chain_nodes = backend._pick_flow_nonvulnerability_docker_nodes(
+                nodes,
+                adj,
+                length=max(0, length - required_vulnerability_count),
+                allow_node_duplicates=allow_node_duplicates,
+                seed=seed_val,
+            )
 
         warning: str | None = None
         if used_saved_chain:
@@ -445,7 +437,7 @@ def register(app, *, backend_module: Any) -> None:
                     length = eff
             except Exception:
                 pass
-        if (not used_saved_chain) and (not preset_steps) and best_effort_query:
+        if (not used_saved_chain) and best_effort_query:
             try:
                 available = len(chain_nodes)
             except Exception:
@@ -466,18 +458,15 @@ def register(app, *, backend_module: Any) -> None:
             'added_pivot_node_ids': [],
             'effective_length': len(chain_nodes or []),
         }
-        if not preset_steps:
-            chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
-                nodes,
-                chain_nodes,
-                preview,
-                include_all_topology_vulns=True,
-                include_all_topology_pivots=include_all_topology_pivots,
-                pivot_context=payload,
-            )
-            length = max(length, len(chain_nodes or []))
-        elif preset_steps and include_all_topology_pivots:
-            topology_inclusion_info['ignored'] = 'preset'
+        chain_nodes, topology_inclusion_info = backend._flow_expand_chain_for_topology_requirements(
+            nodes,
+            chain_nodes,
+            preview,
+            include_all_topology_vulns=True,
+            include_all_topology_pivots=include_all_topology_pivots,
+            pivot_context=payload,
+        )
+        length = max(length, len(chain_nodes or []))
 
         try:
             host_by_id: dict[str, dict[str, Any]] = {}
@@ -573,44 +562,32 @@ def register(app, *, backend_module: Any) -> None:
             goal_facts_override = None
 
         if not flag_assignments:
-            if preset_steps and not used_saved_chain:
-                preset_assignments, preset_err = backend._flow_compute_flag_assignments_for_preset(
-                    preview,
-                    chain_nodes,
-                    scenario_label or scenario_norm,
-                    preset,
-                    pivot_context=payload,
-                )
-                if preset_err:
-                    return jsonify({'ok': False, 'error': f'Error: {preset_err}', 'stats': stats, 'preview_plan_path': preview_plan_path}), 422
-                flag_assignments = preset_assignments
-            else:
+            flag_assignments = backend._flow_compute_flag_assignments(
+                preview,
+                chain_nodes,
+                scenario_label or scenario_norm,
+                initial_facts_override=initial_facts_override,
+                goal_facts_override=goal_facts_override,
+                disallow_generator_reuse=(not allow_node_duplicates),
+                dependency_level=dependency_level,
+                pivot_context=payload,
+            )
+            if (not flag_assignments) and (not allow_node_duplicates):
                 flag_assignments = backend._flow_compute_flag_assignments(
                     preview,
                     chain_nodes,
                     scenario_label or scenario_norm,
                     initial_facts_override=initial_facts_override,
                     goal_facts_override=goal_facts_override,
-                    disallow_generator_reuse=(not allow_node_duplicates),
+                    disallow_generator_reuse=False,
                     dependency_level=dependency_level,
                     pivot_context=payload,
                 )
-                if (not flag_assignments) and (not allow_node_duplicates):
-                    flag_assignments = backend._flow_compute_flag_assignments(
-                        preview,
-                        chain_nodes,
-                        scenario_label or scenario_norm,
-                        initial_facts_override=initial_facts_override,
-                        goal_facts_override=goal_facts_override,
-                        disallow_generator_reuse=False,
-                        dependency_level=dependency_level,
-                        pivot_context=payload,
-                    )
-                    if flag_assignments:
-                        try:
-                            warning = warning or 'Not enough unique generators for this chain length; generator reuse was enabled.'
-                        except Exception:
-                            pass
+                if flag_assignments:
+                    try:
+                        warning = warning or 'Not enough unique generators for this chain length; generator reuse was enabled.'
+                    except Exception:
+                        pass
 
         if not flag_assignments and chain_nodes:
             requested = sorted({
@@ -646,7 +623,7 @@ def register(app, *, backend_module: Any) -> None:
         except Exception:
             has_dupes = False
 
-        if (not used_saved_chain) and (not preset_steps) and (not has_dupes):
+        if (not used_saved_chain) and (not has_dupes):
             debug_dag = str(request.args.get('debug_dag') or '').strip().lower() in ('1', 'true', 'yes', 'y')
             chain_nodes, flag_assignments, dag_debug = backend._flow_reorder_chain_by_generator_dag(
                 chain_nodes,

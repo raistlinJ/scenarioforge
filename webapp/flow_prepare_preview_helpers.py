@@ -309,7 +309,15 @@ def flow_try_run_generator(
         env.setdefault('CORETG_DOCKER_HOST_NETWORK', '1')
         try:
             if isinstance(inject_files_override, list):
-                env['CORETG_INJECT_FILES_JSON'] = json.dumps(list(inject_files_override))
+                # Routed through set_env_payload so a long list spills to a file
+                # rather than pushing past the kernel's argv/envp string limit.
+                from scenarioforge.utils.env_payload import set_env_payload
+
+                set_env_payload(
+                    env,
+                    'CORETG_INJECT_FILES_JSON',
+                    json.dumps(list(inject_files_override)),
+                )
         except Exception:
             pass
 
@@ -468,7 +476,10 @@ def flow_try_run_generator_remote(
         f"SOURCE={json.dumps(str(source_dir or ''))}\n"
         f"KIND={json.dumps(str(kind or 'flag-generator'))}\n"
         f"CFG={json.dumps(cfg_json)}\n"
-        f"INJECT={inject_json if inject_json is not None else 'None'}\n"
+        # Embed as a JSON *string*, not a bare literal: a bare list made the
+        # json.loads below raise and the fallback assign a list to an env var,
+        # which subprocess rejects outright.
+        f"INJECT={json.dumps(inject_json) if inject_json is not None else 'None'}\n"
         "OUT=os.path.abspath(OUT)\n"
         "safe_roots=('/tmp/vulns/flag_node_generators_runs/', '/tmp/vulns/flag_generators_runs/')\n"
         "if not any((OUT + '/').startswith(root) for root in safe_roots):\n"
@@ -506,11 +517,17 @@ def flow_try_run_generator_remote(
         f"SUDO_PW={json.dumps(str(sudo_pw or ''))}\n"
         "if SUDO_PW:\n"
         "  env['CORETG_DOCKER_SUDO_PASSWORD']=SUDO_PW\n"
+        # Mirrors scenarioforge.utils.env_payload on the remote side, where that
+        # module may not be importable: an oversized value would make every
+        # execve from this environment fail with E2BIG.
         "if INJECT is not None:\n"
-        "  try:\n"
-        "    env['CORETG_INJECT_FILES_JSON']=json.dumps(json.loads(INJECT))\n"
-        "  except Exception:\n"
+        "  if len(INJECT.encode('utf-8','replace')) <= 65536:\n"
         "    env['CORETG_INJECT_FILES_JSON']=INJECT\n"
+        "  else:\n"
+        "    import tempfile\n"
+        "    _ifd,_ipath=tempfile.mkstemp(prefix='coretg_inject_files_',suffix='.json')\n"
+        "    with os.fdopen(_ifd,'w') as _ifh: _ifh.write(INJECT)\n"
+        "    env['CORETG_INJECT_FILES_PATH']=_ipath\n"
         "cmd=[sys.executable, runner, '--kind', KIND, '--generator-id', GEN, '--out-dir', OUT, '--config', CFG, '--repo-root', REPO]\n"
         "if SOURCE: cmd.extend(['--source-dir', SOURCE])\n"
         f"p=subprocess.run(cmd, cwd=REPO, env=env, check=False, capture_output=True, text=True, timeout=max(1, int({timeout_literal})))\n"
@@ -1577,13 +1594,10 @@ def pick_chain_nodes(
     adj: Any,
     *,
     preview: Any,
-    preset_steps: list[Any],
     allow_node_duplicates: bool,
     length: int,
     backend: Any,
 ) -> list[Any]:
-    if preset_steps:
-        return backend._pick_flag_chain_nodes_for_preset(nodes, adj, steps=preset_steps)
     try:
         seed_val = int((preview.get('seed') if isinstance(preview, dict) else None) or 0)
     except Exception:
@@ -1603,7 +1617,6 @@ def repair_explicit_chain_nodes(
     adj: Any,
     *,
     preview: Any,
-    preset_steps: list[Any],
     allow_node_duplicates: bool,
     length: int,
     requested_length: int,
@@ -1633,11 +1646,7 @@ def repair_explicit_chain_nodes(
             }
 
             def _needs_nonvuln_docker(pos: int) -> bool:
-                if not preset_steps:
-                    return False
-                if pos < 0 or pos >= len(preset_steps):
-                    return False
-                return str((preset_steps[pos] or {}).get('kind') or '').strip() == 'flag-node-generator'
+                return False
 
             def _eligible(candidate: dict[str, Any], pos: int) -> bool:
                 try:
@@ -1707,40 +1716,6 @@ def repair_explicit_chain_nodes(
                 },
             }
 
-    if preset_steps and chain_nodes:
-        try:
-            used = {str(node.get('id') or '').strip() for node in chain_nodes if isinstance(node, dict)}
-            for index, step in enumerate(preset_steps[:len(chain_nodes)]):
-                if str((step or {}).get('kind') or '').strip() != 'flag-node-generator':
-                    continue
-                node = chain_nodes[index] if index < len(chain_nodes) else None
-                if not isinstance(node, dict):
-                    continue
-                if not bool(node.get('is_vuln')):
-                    continue
-                replacement = None
-                for candidate in (nodes or []):
-                    if not isinstance(candidate, dict):
-                        continue
-                    candidate_id = str(candidate.get('id') or '').strip()
-                    if not candidate_id:
-                        continue
-                    if (not allow_node_duplicates) and candidate_id in used:
-                        continue
-                    type_raw = str(candidate.get('type') or '')
-                    type_name = type_raw.strip().lower()
-                    is_docker = ('docker' in type_name) or (type_raw.strip().upper() == 'DOCKER')
-                    if is_docker and not bool(candidate.get('is_vuln')):
-                        replacement = candidate
-                        break
-                if replacement is not None:
-                    replacement_id = str(replacement.get('id') or '').strip()
-                    if replacement_id:
-                        chain_nodes[index] = replacement
-                        chain_ids[index] = replacement_id
-                        used.add(replacement_id)
-        except Exception:
-            pass
 
     if chain_nodes:
         try:
@@ -1757,12 +1732,9 @@ def repair_explicit_chain_nodes(
                 is_docker = backend._flow_node_is_docker_role(node)
                 is_vuln = backend._flow_node_is_vuln(node)
 
-                need_nonvuln_docker = False
-                if preset_steps and index < len(preset_steps):
-                    need_nonvuln_docker = str((preset_steps[index] or {}).get('kind') or '').strip() == 'flag-node-generator'
-                elif is_docker and (not is_vuln):
-                    # When no preset: non-vuln docker nodes can ONLY be used with flag-node-generators
-                    need_nonvuln_docker = True
+                # A non-vulnerability docker node can only host a
+                # flag-node-generator.
+                need_nonvuln_docker = bool(is_docker and (not is_vuln))
 
                 if need_nonvuln_docker:
                     if is_docker and (not is_vuln) and backend._flow_node_accepts_challenge_kind(node, 'flag-node-generator'):
@@ -1824,7 +1796,6 @@ def repair_explicit_chain_nodes(
                     nodes,
                     adj,
                     preview=preview,
-                    preset_steps=preset_steps,
                     allow_node_duplicates=allow_node_duplicates,
                     length=length,
                     backend=backend,
@@ -1882,7 +1853,6 @@ def repair_explicit_chain_nodes(
             nodes,
             adj,
             preview=preview,
-            preset_steps=preset_steps,
             allow_node_duplicates=allow_node_duplicates,
             length=length,
             backend=backend,

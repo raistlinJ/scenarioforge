@@ -262,6 +262,93 @@ def _stage_injected_dir(out_dir: Path, inject_files: list[str]) -> Path | None:
     return injected_dir
 
 
+def _validate_generated_python_compiles(out_dir: Path) -> None:
+    """Reject a generator that emitted Python which cannot be imported.
+
+    Generators build their challenge app by templating values into a `.py`
+    file, and a mistake there is invisible until the container runs. One
+    generator pasted `json.dumps()` output into Python source, so any config
+    holding a boolean produced::
+
+        "directory_traversal": true,
+        NameError: name 'true' is not defined
+
+    The container then crash-looped, CORE could not read its PID or attach an
+    interface, the session never left `configuration`, and the run reported
+    success. Four layers, none of which named the syntax error.
+
+    Parsing is cheap and the failure is exact, so do it while we still know
+    which generator produced the file.
+    """
+    import ast
+
+    # JSON's literals are ordinary names in Python, so `{"x": true}` parses
+    # cleanly and only fails when the line executes. Syntax checking alone
+    # therefore misses the exact bug this exists to catch, and the names have to
+    # be looked for directly.
+    json_literals = {'true': 'True', 'false': 'False', 'null': 'None'}
+
+    broken: list[str] = []
+    try:
+        candidates = sorted(out_dir.rglob('*.py'))
+    except Exception:
+        return
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            source = path.read_text(encoding='utf-8', errors='ignore')
+        except Exception:
+            continue
+        try:
+            rel = path.relative_to(out_dir)
+        except Exception:
+            rel = path
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError as exc:
+            detail = f"{rel} line {exc.lineno}: {exc.msg}"
+            text = (exc.text or '').strip()
+            if text:
+                detail += f" -> {text[:120]}"
+            broken.append(detail)
+            continue
+        # A name the module actually binds is a real variable, however oddly
+        # spelled, not a JSON literal that leaked into source.
+        bound: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, ast.arg):
+                bound.add(node.arg)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    bound.add((alias.asname or alias.name).split('.')[0])
+
+        seen: set[tuple[int, str]] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+                continue
+            replacement = json_literals.get(node.id)
+            if not replacement or node.id in bound:
+                continue
+            key = (node.lineno, node.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            broken.append(
+                f"{rel} line {node.lineno}: JSON literal '{node.id}' used as Python "
+                f"(did you mean {replacement}?)"
+            )
+    if broken:
+        raise SystemExit(
+            '[validation error] generator emitted Python that will not import: '
+            + '; '.join(broken[:5])
+        )
+
+
 def _validate_injected_sources_exist(out_dir: Path, inject_files: list[str]) -> None:
     """Validate that inject source files produced by a generator exist.
 
@@ -1038,28 +1125,19 @@ def run_compose(
         "OUTPUTS_DIR": str(outputs_dir.resolve()),
     }
 
-    # If a stable image tag is provided and already cached, skip the build step
-    # only when this Compose supports the explicit --no-build contract.  Older
-    # Compose releases offer no equivalent run flag, so build explicitly before
-    # running; using its implicit image selection could execute stale source.
-    no_build_requested = bool(stable_image_tag and _image_exists_locally(stable_image_tag))
-    no_build_supported = _compose_run_supports_no_build(source_dir, compose_env) if no_build_requested else False
-    no_build = bool(no_build_requested and no_build_supported)
-    if no_build:
-        print(f'[compose] using cached generator image {stable_image_tag} (--no-build)')
-    elif no_build_requested:
-        print(f'[compose] compose lacks --no-build; rebuilding generator image {stable_image_tag} explicitly')
-        build_cmd = [
-            _docker_executable(),
-            'compose',
-            '-f',
-            str(compose_path),
-            '-p',
-            project,
-            'build',
-            service,
-        ]
-        run_cmd(build_cmd, source_dir, compose_env)
+    # The tag carries a digest of the generator's own source, so a tag that
+    # exists cannot be stale: any edit produces a different tag. Reuse it and
+    # skip the build entirely. `--no-build` is passed when this Compose
+    # advertises it, but its absence is no longer a reason to rebuild -- doing
+    # so discarded the cache on every run for the sake of a staleness that the
+    # digest already rules out.
+    cached = bool(stable_image_tag and _image_exists_locally(stable_image_tag))
+    no_build = bool(cached and _compose_run_supports_no_build(source_dir, compose_env))
+    if cached:
+        print(
+            f'[compose] using cached generator image {stable_image_tag}'
+            + (' (--no-build)' if no_build else ' (compose lacks --no-build; not rebuilding)')
+        )
     elif stable_image_tag:
         print(f'[compose] generator image {stable_image_tag} not cached; will build now')
 
@@ -1160,7 +1238,17 @@ def main() -> int:
         inject_files = []
     # Optional override from environment (e.g., Flow inject overrides).
     try:
+        # A large list travels as a file so it cannot push the environment past
+        # the kernel's per-string argv/envp limit; accept either form.
         raw_override = os.environ.get('CORETG_INJECT_FILES_JSON')
+        if not raw_override:
+            override_path = str(os.environ.get('CORETG_INJECT_FILES_PATH') or '').strip()
+            if override_path:
+                try:
+                    with open(override_path, 'r', encoding='utf-8') as handle:
+                        raw_override = handle.read()
+                except Exception:
+                    raw_override = None
         if raw_override:
             parsed = json.loads(raw_override)
             if isinstance(parsed, list):
@@ -1298,6 +1386,7 @@ def main() -> int:
         # rewrite compose during Generate/Resolve.
         expanded_inject = expand_inject_files([str(x) for x in inject_files if x is not None], env)
         expanded_inject = expand_inject_files_from_outputs(out_dir, expanded_inject)
+        _validate_generated_python_compiles(out_dir)
         _validate_injected_sources_exist(out_dir, expanded_inject)
 
         manifest = out_dir / "outputs.json"
@@ -1323,6 +1412,7 @@ def main() -> int:
 
     expanded_inject = expand_inject_files([str(x) for x in inject_files if x is not None], env)
     expanded_inject = expand_inject_files_from_outputs(out_dir, expanded_inject)
+    _validate_generated_python_compiles(out_dir)
     _validate_injected_sources_exist(out_dir, expanded_inject)
 
     # Print manifest if present

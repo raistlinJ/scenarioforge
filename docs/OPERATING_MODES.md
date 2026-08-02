@@ -100,6 +100,50 @@ docker compose up -d --build
 - Compose publishes nginx on `80/443` and the backend on `127.0.0.1:9090`. In native Docker bridge mode, container-local CORE targets such as `127.0.0.1` are treated as `host.docker.internal`; in VM mode, `127.0.0.1` is preserved because it means core-daemon on the remote CORE host reached over SSH. Set `CORETG_KEEP_CONTAINER_LOCAL_CORE=1` only when CORE really runs inside the web container.
 - The image includes Graphviz, so attack graph PDF export works without installing Graphviz on the application host.
 
+## Image Retention And Offline Runs
+
+A repeat run on unchanged content should not need a registry. Three kinds of
+image live on the CORE VM and they are treated differently, because only some of
+them can be restored without the network.
+
+| Kind | Example | Keyed by | On cleanup |
+| --- | --- | --- | --- |
+| Upstream base image | `alpine:3.19`, `vulhub/solr:8.11.0` | registry digest | **kept** — only a pull could restore it |
+| Generator image | `coretg-gen-<pack>-<service>-<source-digest>` | digest of the generator source | **kept** — a source edit yields a new tag |
+| Wrapper image | `coretg/scenarios-<scenario>-<node>-<hash>:iproute2` | hash of the wrapper identity | **kept** — preflight rebuilds it each run anyway |
+| CORE session build | `core-<session>-<node>-<name>-<service>` | project name only | **always removed** before the topology build |
+
+That last row is the one that must not survive. CORE builds it with
+`docker compose up -d`, which builds only when the tag is absent, and session and
+node ids repeat between runs — so a retained image silently runs a previous
+run's code.
+
+What this means in practice:
+
+- Preflight skips `docker compose pull` entirely when every pull-only image for a
+  node is already present, so a cached run contacts no registry.
+- Cleanup deletes locally built images that are not pinned, and never deletes an
+  image carrying a repo digest.
+- Generator images are reused when their source digest is unchanged; the
+  Generate and Execute progress modals report the split as
+  `Pulling: x images / Using: y cached / Pending: z`.
+- A cached generator image still produces different flags, filenames and injects
+  every run: the image holds the generator's code, while the values come from the
+  per-run configuration (seed, node name, scenario).
+
+### Pinning An Image As Persistent
+
+Marking a vulnerability-catalog or generator item **persistent** adds its images
+to a keep set that no ScenarioForge cleanup will remove. The set is computed
+where the catalog state lives and handed to the remote run, which has no view of
+it. If the list ever grows past what can be passed safely, it is dropped for that
+run with a warning explaining how to reduce it — the run still succeeds, but
+pinned images may be removed and pulled again next time.
+
+Pinning is not required for ordinary caching: base images and content-addressed
+builds already survive. Pin an item when you want its images kept even though
+they are locally built and unpinned images of that kind are cleared.
+
 ## CLI Mode
 
 Run the CLI with uv:

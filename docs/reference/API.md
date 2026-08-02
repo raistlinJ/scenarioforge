@@ -226,7 +226,6 @@ Reuse `sequence_request_id` only when retrying the same logical request. Generat
 Common query params:
 - `scenario=<name>` (optional; best to provide explicitly)
 - `length=<int>` (default 5)
-- `preset=<name>` (optional; forces a fixed chain)
 - `best_effort=1` (optional; clamps to available eligible nodes)
 - `debug_dag=1` (optional; include sequencing DAG diagnostics)
 
@@ -238,7 +237,6 @@ Request JSON (typical):
 {
 	"scenario": "My Scenario",
 	"length": 5,
-	"preset": "",
 	"chain_ids": ["n1", "n2"],
 	"preview_plan": "/abs/path/to/scenario.xml",
 	"mode": "resolve",
@@ -1116,7 +1114,6 @@ CLI help defaults now reflect these same Web UI/backend defaults rather than onl
 
 - `--flow-mode`: `preview | resolve | resolve_hints | hint | hint_only` (default `resolve`)
 - `--flow-length`: Requested chain length.
-- `--flow-preset`: Optional preset name.
 - `--flow-chain-id`: Repeatable explicit chain node id.
 - `--flow-chain-ids`: Comma-separated explicit chain node ids.
 - `--flow-best-effort`: Clamp to eligible nodes when necessary.

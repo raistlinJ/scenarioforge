@@ -1,0 +1,25 @@
+manifest_version: 1
+id: testfix_node_echo
+kind: flag-node-generator
+name: 'Fixture: Node Echo'
+description: Deterministic fixture flag-node-generator.
+inputs:
+- name: seed
+  type: string
+  required: true
+- name: node_name
+  type: string
+  required: true
+outputs: []
+hint_levels:
+  low:
+  - 'Next: {{NEXT_NODE_NAME}}'
+  medium:
+  - Look on {{NEXT_NODE_NAME}} at {{NEXT_NODE_IP}}
+  high:
+  - The flag is staged on {{NEXT_NODE_NAME}} ({{NEXT_NODE_IP}})
+hint_template: 'Next: {{NEXT_NODE_NAME}}'
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
