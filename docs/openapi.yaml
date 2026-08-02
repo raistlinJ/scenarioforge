@@ -1084,12 +1084,6 @@ paths:
             minimum: 1
             maximum: 50
             default: 5
-        - name: preset
-          in: query
-          required: false
-          schema:
-            type: string
-          description: Optional preset (forces a fixed chain shape/length).
         - name: prefer_preview
           in: query
           required: false
@@ -4185,9 +4179,6 @@ components:
         length:
           type: integer
           nullable: true
-        preset:
-          type: string
-          nullable: true
         chain_ids:
           type: array
           items:
@@ -4279,9 +4270,6 @@ components:
           type: integer
           minimum: 1
           maximum: 5
-          nullable: true
-        preset:
-          type: string
           nullable: true
         allow_node_duplicates:
           type: boolean

@@ -99,6 +99,23 @@ management endpoint and should not be inferred from a gRPC address. At execute
 time the Web UI synchronizes its validated target into the saved XML before
 invoking the CLI.
 
+**VM mode ignores the recorded transport.** A deployment running with
+`CORETG_WEBUI_MODE=vm` targets one CORE VM, declared by `CORE_HOST`,
+`CORE_PORT`, and `CORE_SSH_*` in `.scenarioforge.env`. The `host`, `port`,
+`ssh_*`, `venv_bin` and `core_secret_id` attributes recorded in a scenario are
+therefore dropped when that scenario is loaded, and the environment supplies
+them instead. Everything else in the element — `vm_key`, `vm_name`,
+`cached_host_interfaces` and the rest — is kept.
+
+This matters because a scenario records the endpoint it was last *saved*
+against. Without this, a scenario saved against a previous CORE VM keeps
+dragging every connection back to it however the environment has since changed,
+and the resulting failure names the gRPC target (a loopback address reached
+*through* the SSH hop) rather than the host actually being dialled. Editing a
+scenario's CORE connection consequently has no effect while in VM mode; change
+`.scenarioforge.env` instead. Native mode is unaffected and still honours the
+recorded transport.
+
 #### `<HardwareInLoop>`
 
 This optional element is emitted when HITL is enabled or when per-scenario
@@ -202,6 +219,10 @@ Consequences worth knowing:
 - Because the planner cannot see the installed catalog, it never names what
   fills a slot. That choice is made during flag-sequencing, where the catalog
   is available, so a slot can never be assigned something that is not installed.
+- Requesting the full challenge ceiling is what reaches the slots. Both kinds
+  count towards `Max challenges` on the flag-sequencing page, and the chain
+  draws on them only when the requested length needs them — a shorter chain
+  leaves them as plain Docker hosts.
 
 Common attributes:
 | Attribute | Applies | Meaning |

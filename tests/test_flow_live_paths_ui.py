@@ -96,7 +96,9 @@ def test_flow_sequencing_progress_is_request_scoped_and_visible() -> None:
         "const display = _formatFlowProgressLine(s);",
         "if (newLines.length && opts.loadingLog) newLines.forEach((line) => appendLoadingLog(line));",
         "const sequenceProgressId = `seq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;",
-        "startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false });",
+        # The poll also feeds the request's staleness budget; see
+        # tests/test_flow_request_staleness_timeout.py.
+        "startFlowProgressPoll({ progressId: sequenceProgressId, loadingLog: true, composeLog: false, activity: sequenceActivitySignal });",
         "progress_id: sequenceProgressId,",
         "if (s.includes('phase: building topology graph')) return 'Building topology graph…';",
         "if (s.includes('phase: computing generator assignments')) return 'Assigning generators…';",

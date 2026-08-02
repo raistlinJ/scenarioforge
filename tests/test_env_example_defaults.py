@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 ENV_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / ".scenarioforge.env.example"
 ENV_DEFAULTS_PATH = Path(__file__).resolve().parent.parent / ".scenarioforge.env"
@@ -32,6 +34,12 @@ def test_env_example_includes_runtime_hitl_defaults_for_direct_python_and_compos
 
 
 def test_repo_runtime_defaults_drop_vm_participant_ui_line() -> None:
+    # `.scenarioforge.env` is the operator's local override and is gitignored,
+    # so it exists on a developer machine and never in CI. The assertion below
+    # is about that local file, not about anything the repository ships.
+    if not ENV_DEFAULTS_PATH.exists():
+        pytest.skip("no local .scenarioforge.env override in this checkout")
+
     text = ENV_DEFAULTS_PATH.read_text(encoding="utf-8", errors="ignore")
 
     assert "CORETG_VM_MODE_PARTICIPANT_URL=" not in text

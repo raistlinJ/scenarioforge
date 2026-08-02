@@ -80,6 +80,8 @@ from .utils.vuln_process import (
     resolve_vulnerability_catalog_entry,
     detect_docker_conflicts_for_compose_files,
     remove_docker_conflicts,
+    remove_stale_core_session_images,
+    remove_stale_scenarioforge_containers,
 )
 
 
@@ -1077,6 +1079,22 @@ def _restart_not_running_docker_nodes(
                     compose_path,
                     result.get('error'),
                 )
+                # The return code alone says nothing about why. Compose already
+                # captured its output; without printing it a build failure --
+                # a missing image, a permission problem on the buildx lock --
+                # reaches the operator as a bare "rc=1".
+                try:
+                    output_tail = str(result.get('output') or '').strip()
+                    if output_tail:
+                        kept = [ln for ln in output_tail.splitlines() if ln.strip()][-12:]
+                        if kept:
+                            logging.warning(
+                                "docker compose output (node=%s):\n%s",
+                                name,
+                                '\n'.join(kept),
+                            )
+                except Exception:
+                    pass
         except Exception:
             pass
     return attempts
@@ -1127,6 +1145,83 @@ def _ensure_docker_nodes_running(
     if any(bool(item.get('ok')) for item in restart_attempts):
         docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
     return docker_runtime
+
+
+def _repair_docker_home_permissions() -> str:
+    """Give the invoking user back its own ~/.docker; return what was fixed.
+
+    Mirrors the Web UI's SSH preflight so a CLI-only run gets the same repair.
+    Only files not already owned by this user are touched, and only below this
+    user's own ~/.docker. Empty string when there was nothing to do, so a clean
+    host stays quiet.
+    """
+    try:
+        import getpass
+        import pwd
+
+        user = getpass.getuser()
+        home = pwd.getpwnam(user).pw_dir
+    except Exception:
+        return ''
+    docker_home = os.path.join(str(home or ''), '.docker')
+    if not docker_home or not os.path.isdir(docker_home):
+        return ''
+    try:
+        uid = os.getuid()
+    except Exception:
+        return ''
+
+    bad: list[str] = []
+    for root, dirnames, filenames in os.walk(docker_home):
+        for name in list(dirnames) + list(filenames):
+            path = os.path.join(root, name)
+            try:
+                if os.lstat(path).st_uid != uid:
+                    bad.append(path)
+            except Exception:
+                continue
+    if not bad:
+        return ''
+    try:
+        _run_local_cmd(
+            ['chown', '-R', f'{user}:{user}', docker_home],
+            timeout_s=30.0,
+            allow_sudo_retry=True,
+        )
+    except Exception:
+        return ''
+    return f'repaired {len(bad)} path(s) under {docker_home}'
+
+
+def _first_docker_restart_failure_reason(generation_meta: Any) -> str:
+    """Pull the most actionable line out of a failed compose restart.
+
+    `docker compose up` reports its cause on the last non-empty output lines;
+    the return code carries none of it.
+    """
+    try:
+        if not isinstance(generation_meta, dict):
+            return ''
+        attempts = generation_meta.get('docker_nodes_start_recovery_attempts')
+        if not isinstance(attempts, list):
+            return ''
+        for item in attempts:
+            if not isinstance(item, dict) or item.get('ok'):
+                continue
+            output = str(item.get('output') or '').strip()
+            lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+            for line in reversed(lines):
+                lowered = line.lower()
+                if 'permission denied' in lowered or 'error' in lowered or 'failed' in lowered:
+                    return line[:300]
+            if lines:
+                return lines[-1][:300]
+            error_text = str(item.get('error') or '').strip()
+            if error_text:
+                return error_text[:300]
+        return ''
+    except Exception:
+        return ''
 
 
 def _wait_for_docker_running(
@@ -1431,12 +1526,51 @@ def _docker_compose_node_names(docker_by_name: Any) -> list[str]:
     return sorted(set([n for n in names if n]))
 
 
+def _docker_nodes_without_core_interfaces(names: list[str]) -> list[str]:
+    """Return the node containers CORE has not attached an interface to.
+
+    A container started by compose has only loopback: `network_mode: none` is
+    deliberate, and CORE is what later moves a veth into the namespace and
+    assigns the scenario address. So a node holding nothing but `lo` is a node
+    CORE never wired, however healthy the container looks.
+
+    Unknown on error -- a node we cannot inspect is not reported as missing,
+    since this decides whether to fail a run.
+    """
+    missing: list[str] = []
+    try:
+        import subprocess
+        import shutil as _sh
+        if not _sh.which('docker'):
+            return []
+        for name in (names or []):
+            node = str(name or '').strip()
+            if not node:
+                continue
+            try:
+                probe = subprocess.run(
+                    ['docker', 'exec', node, 'sh', '-c',
+                     "ip -o -4 addr show 2>/dev/null | awk '$2 != \"lo\" {print $2}'"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=20,
+                )
+            except Exception:
+                continue
+            if probe.returncode != 0:
+                continue
+            if not (probe.stdout or '').strip():
+                missing.append(node)
+    except Exception:
+        return missing
+    return missing
+
+
 def _should_tolerate_configuration_state_for_docker(
     session_state: str,
     docker_names: list[str],
     docker_runtime: dict[str, Any] | None,
     *,
     mismatches: list[dict[str, Any]] | None = None,
+    unwired_nodes: list[str] | None = None,
 ) -> bool:
     if not _is_configuration_state(session_state):
         return False
@@ -1447,6 +1581,12 @@ def _should_tolerate_configuration_state_for_docker(
     if list(docker_runtime.get('not_running') or []):
         return False
     if list(mismatches or []):
+        return False
+    # Running containers are not a deployed scenario. Staying in
+    # `configuration` means CORE never instantiated the topology, so a node can
+    # be up and still have no interface, no address and no reachable service --
+    # which reported as a successful run.
+    if list(unwired_nodes or []):
         return False
     return True
 
@@ -1487,12 +1627,48 @@ def _flow_state_from_xml(xml_path: str, scenario_name: str | None) -> dict[str, 
         return None
 
 
-def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) -> None:
+def _persistent_images_to_keep() -> list[str]:
+    """Images the operator pinned as `persistent`, published by the web UI.
+
+    The keep set is computed where the catalog state lives and handed over for
+    the remote run, which has no view of it. Without this the execute path
+    deleted pinned images regardless of the flag, so `persistent` did nothing
+    for the one path that most needed it.
+    """
     try:
+        from scenarioforge.utils.env_payload import read_env_payload
+
+        raw = read_env_payload('CORETG_PERSISTENT_IMAGES_JSON')
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            return []
+        return [str(x).strip() for x in data if str(x or '').strip()]
+    except Exception:
+        return []
+
+
+def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) -> None:
+    """Publish flow assignments for the generator runner.
+
+    17 challenges already serialize to ~140 KB, past the kernel's per-string
+    argv/envp limit, so this goes through `set_env_payload` rather than
+    straight into the environment.
+    """
+    try:
+        from scenarioforge.utils.env_payload import set_env_payload
+
         fs = _flow_state_from_xml(xml_path, scenario_name)
         assigns = fs.get('flag_assignments') if isinstance(fs, dict) else None
-        if isinstance(assigns, list) and assigns:
-            os.environ['CORETG_FLOW_ASSIGNMENTS_JSON'] = json.dumps(assigns, ensure_ascii=False)
+        if not (isinstance(assigns, list) and assigns):
+            return
+        set_env_payload(
+            os.environ,
+            'CORETG_FLOW_ASSIGNMENTS_JSON',
+            json.dumps(assigns, ensure_ascii=False),
+            sidecar_dir=os.path.join('/tmp', 'vulns'),
+        )
     except Exception:
         pass
 
@@ -4654,9 +4830,6 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     chain_ids = _cli_phase_chain_ids(args)
     if chain_ids:
         payload['chain_ids'] = chain_ids
-    preset = str(args.flow_preset or '').strip()
-    if preset:
-        payload['preset'] = preset
     if args.flow_timeout_s is not None:
         payload['timeout_s'] = int(args.flow_timeout_s)
     if args.flow_run_remote:
@@ -4719,8 +4892,6 @@ def _run_flag_sequencing_phase(args: Any) -> int:
         'allow_node_duplicates': bool(args.flow_allow_node_duplicates),
         'dependency_level': int(args.flow_dependency_level),
     }
-    if preset:
-        sequence_payload['preset'] = preset
     if chain_ids:
         sequence_payload['chain_ids'] = chain_ids
 
@@ -5118,7 +5289,6 @@ def _add_cli_flag_sequencing_args(container: Any) -> None:
         help='Flag-sequencing mode for the flag-sequencing phase (default: resolve)',
     )
     container.add_argument('--flow-length', type=int, default=5, help='Requested chain length for the flag-sequencing phase')
-    container.add_argument('--flow-preset', default='', help='Optional flow preset name for the flag-sequencing phase')
     container.add_argument('--flow-chain-id', dest='flow_chain_ids', action='append', help='Explicit flow chain node id (repeatable)')
     container.add_argument('--flow-chain-ids', dest='flow_chain_ids_csv', default='', help='Comma-separated explicit flow chain node ids')
     container.add_argument('--flow-best-effort', action='store_true', help='Allow the flag-sequencing phase to clamp to available eligible nodes')
@@ -6227,6 +6397,50 @@ def main():
         pass
     # If any routing item carries abs_count>0, we should build a segmented topology even if density==0
     has_routing_counts = any(getattr(ri, 'abs_count', 0) and int(getattr(ri, 'abs_count', 0)) > 0 for ri in (routing_items or []))
+    # The Web UI repairs this over SSH during its own preflight, but a CLI-only
+    # run never passes through that path and hits the same wall: a docker
+    # command once run as root leaves root-owned state in the invoking user's
+    # ~/.docker, and every later build fails on it with a bare rc=1.
+    if str(os.getenv('CORETG_REPAIR_DOCKER_HOME_PERMS') or '').strip().lower() not in {'0', 'false', 'no', 'off'}:
+        try:
+            _repaired = _repair_docker_home_permissions()
+            if _repaired:
+                logging.info('Docker config permissions: %s', _repaired)
+        except Exception as _perm_exc:
+            logging.debug('Docker config permission repair skipped: %s', _perm_exc)
+
+    # Clear leftovers before anything brings compose up. Building the topology
+    # is what first runs `docker compose up`, so a container still holding a
+    # node's name aborts the run there -- long before the conflict check that
+    # used to handle this, which is why that check never got the chance.
+    if str(os.getenv('CORETG_SKIP_STALE_DOCKER_CLEANUP') or '').strip().lower() not in {'1', 'true', 'yes', 'on'}:
+        try:
+            _stale = remove_stale_scenarioforge_containers()
+            _stale_removed = _stale.get('removed') or []
+            if _stale_removed:
+                logging.info(
+                    "Removed %d container(s) left by previous runs: %s",
+                    len(_stale_removed),
+                    ', '.join(sorted(_stale_removed)[:12])
+                    + ('…' if len(_stale_removed) > 12 else ''),
+                )
+            # CORE reuses a project-scoped image tag whenever it exists, so a
+            # node whose generator changed would otherwise run the previous
+            # session's code. These are build outputs, not a cache.
+            _stale_imgs = remove_stale_core_session_images()
+            _stale_imgs_removed = _stale_imgs.get('removed') or []
+            if _stale_imgs_removed:
+                logging.info(
+                    "Removed %d CORE session image(s) so nodes rebuild from current context: %s",
+                    len(_stale_imgs_removed),
+                    ', '.join(sorted(_stale_imgs_removed)[:12])
+                    + ('…' if len(_stale_imgs_removed) > 12 else ''),
+                )
+            for _nm, _err in (_stale.get('errors') or {}).items():
+                logging.warning('Could not remove leftover container %s: %s', _nm, _err)
+        except Exception as _stale_exc:
+            logging.debug('Leftover container cleanup skipped: %s', _stale_exc)
+
     # Always build directly from current scenario plan (phased path removed)
     logging.info("PHASE: Building topology")
     routers = []
@@ -7200,6 +7414,8 @@ def main():
                     docker_names = []
                 docker_names = sorted(set([n for n in docker_names if n]))
                 if docker_names:
+                    # Leftovers were already cleared before the topology build,
+                    # which is the first thing to run `docker compose up`.
                     compose_paths = [_docker_node_compose_path(nm) for nm in docker_names]
                     compose_paths = [p for p in compose_paths if p and os.path.exists(p)]
                     # Detect conflicts from compose files (if present) AND from existing containers
@@ -7264,7 +7480,7 @@ def main():
                             len(c_imgs),
                         )
                         if getattr(args, 'docker_remove_conflicts', False):
-                            rr = remove_docker_conflicts(conflicts)
+                            rr = remove_docker_conflicts(conflicts, keep_images=_persistent_images_to_keep())
                             logging.info(
                                 "Removed Docker conflicts (best-effort): containers=%d images=%d",
                                 len(rr.get('removed_containers') or []),
@@ -7287,7 +7503,7 @@ def main():
                                 except Exception:
                                     ans = ''
                                 if ans in {'y', 'yes'}:
-                                    rr = remove_docker_conflicts(conflicts)
+                                    rr = remove_docker_conflicts(conflicts, keep_images=_persistent_images_to_keep())
                                     logging.info(
                                         "Removed Docker conflicts (best-effort): containers=%d images=%d",
                                         len(rr.get('removed_containers') or []),
@@ -7350,6 +7566,12 @@ def main():
                     start_ok = False
                     configuration_state_pending_docker_validation = False
                     start_error = f"Docker node(s) not running: {', '.join(docker_runtime.get('not_running') or [])}"
+                    # Attach why the restart failed. The node list alone says
+                    # which containers are down but nothing about the cause,
+                    # which is what the operator actually has to act on.
+                    reason = _first_docker_restart_failure_reason(generation_meta)
+                    if reason:
+                        start_error = f"{start_error} ({reason})"
 
             # Install default routes from the host once interfaces exist. The
             # in-node DockerDefaultRoute service needs `ip`, NET_ADMIN, a shell
@@ -7488,7 +7710,15 @@ def main():
                     pass
 
             if configuration_state_pending_docker_validation and start_ok:
-                if _should_tolerate_configuration_state_for_docker(session_state, docker_names2, docker_runtime):
+                unwired_nodes = _docker_nodes_without_core_interfaces(docker_names2)
+                if unwired_nodes:
+                    try:
+                        generation_meta['docker_nodes_without_core_interfaces'] = list(unwired_nodes)
+                    except Exception:
+                        pass
+                if _should_tolerate_configuration_state_for_docker(
+                    session_state, docker_names2, docker_runtime, unwired_nodes=unwired_nodes
+                ):
                     configuration_state_pending_docker_validation = False
                     start_error = None
                     try:
@@ -7506,7 +7736,15 @@ def main():
                 else:
                     start_ok = False
                     configuration_state_pending_docker_validation = False
-                    start_error = 'CORE session stayed in "configuration"'
+                    if unwired_nodes:
+                        start_error = (
+                            'CORE session stayed in "configuration": it never instantiated the '
+                            'topology, so no interface or address was attached to '
+                            + ', '.join(sorted(unwired_nodes))
+                            + '. The containers are running but the scenario is not deployed.'
+                        )
+                    else:
+                        start_error = 'CORE session stayed in "configuration"'
 
         # CORE can swallow per-node boot exceptions from its thread pool while the
         # session or Docker containers still appear to be running. Inspect only the

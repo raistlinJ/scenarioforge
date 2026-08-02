@@ -3322,13 +3322,51 @@
       setExecuteProgressUI({ status: 'Starting…', meta: '', barText: 'Working…', animate: true });
       const logEl = document.getElementById('executeProgressLog');
       if (logEl) logEl.textContent = '';
+      clearExecuteImageCounts();
       try { inst?.show(); } catch (e) { }
+    }
+
+    // Preflight reports whether each node's images were fetched or already
+    // cached. Surface the tally in the header instead of leaving it to scroll
+    // past in the log, since it explains the run's duration.
+    // The summary keeps the final figures: it is where they are read after the
+    // fact, since the progress modal is gone by then.
+    const EXECUTE_IMAGE_COUNT_ELEMENT_IDS = ['executeProgressImages', 'executeSummaryImages'];
+
+    function applyExecuteImageCounts(line) {
+      const match = /^\[images\]\s+pulling=(\d+)\s+cached=(\d+)(?:\s+pending=(\d+))?$/.exec(String(line || '').trim());
+      if (!match) return false;
+      const text = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached'
+        + (match[3] === undefined ? '' : ' / Pending: ' + match[3]);
+      EXECUTE_IMAGE_COUNT_ELEMENT_IDS.forEach((id) => {
+        try {
+          const el = document.getElementById(id);
+          if (el) {
+            el.textContent = text;
+            el.classList.remove('d-none');
+          }
+        } catch (e) { }
+      });
+      return true;
+    }
+
+    function clearExecuteImageCounts() {
+      EXECUTE_IMAGE_COUNT_ELEMENT_IDS.forEach((id) => {
+        try {
+          const el = document.getElementById(id);
+          if (el) {
+            el.textContent = '';
+            el.classList.add('d-none');
+          }
+        } catch (e) { }
+      });
     }
 
     function appendExecuteProgressLog(line) {
       const logEl = document.getElementById('executeProgressLog');
       if (!logEl) return;
       const text = (line === undefined || line === null) ? '' : String(line);
+      if (applyExecuteImageCounts(text)) return;
       try {
         const finalizeMatch = text.match(/\[ui\]\s*Waiting for CORE host to finalize\s*\((\d+)s\)\s*\(([^)]*)\)\s*(?:\[upload:\s*(\d+)%\])?\s*(?:\[finalize:\s*(\d+)%\])?\s*\[last update:\s*(\d+)s ago\]/i);
         if (finalizeMatch) {

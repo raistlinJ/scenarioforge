@@ -85,6 +85,41 @@ _PREPARED_DOCKER_NODE_COMPOSES: Set[str] = set()
 # Track which per-node compose files have had docker preflight executed.
 _PREFLIGHTED_DOCKER_NODE_COMPOSES: Set[str] = set()
 
+# Wrapper images this process built. Conflict resolution runs afterwards in the
+# same process, and deleting one of these strands CORE with "No such image" on a
+# node whose image existed seconds earlier.
+IMAGES_BUILT_THIS_RUN: Set[str] = set()
+
+# Per-node tally of whether images had to be fetched or were already cached.
+# Printed for the execute UI, which otherwise gives no sign of why one run takes
+# minutes and the next seconds.
+_IMAGE_USE_COUNTS: Dict[str, int] = {'pulling': 0, 'cached': 0}
+_EXPECTED_IMAGE_NODES: Dict[str, int] = {'total': 0}
+
+
+def _set_expected_image_nodes(total: int) -> None:
+    """Record how many Docker nodes this run will preflight."""
+    try:
+        _EXPECTED_IMAGE_NODES['total'] = max(0, int(total or 0))
+    except Exception:
+        _EXPECTED_IMAGE_NODES['total'] = 0
+
+
+def _report_image_use(bucket: str) -> None:
+    try:
+        if bucket not in _IMAGE_USE_COUNTS:
+            return
+        _IMAGE_USE_COUNTS[bucket] += 1
+        done = _IMAGE_USE_COUNTS['pulling'] + _IMAGE_USE_COUNTS['cached']
+        pending = max(0, int(_EXPECTED_IMAGE_NODES.get('total') or 0) - done)
+        print(
+            f"[images] pulling={_IMAGE_USE_COUNTS['pulling']} "
+            f"cached={_IMAGE_USE_COUNTS['cached']} pending={pending}",
+            flush=True,
+        )
+    except Exception:
+        pass
+
 
 def _docker_node_compose_token(node_name: str) -> str:
     raw = str(node_name or '').strip()
@@ -489,6 +524,7 @@ def _docker_compose_cmd() -> List[str]:
             return []
 
     prefix = _sudo_prefix()
+    probe_failure = 'unknown'
     try:
         sudo_pw = _docker_sudo_password()
         use_sudo_stdin = bool(sudo_pw) and ('-S' in prefix)
@@ -502,6 +538,25 @@ def _docker_compose_cmd() -> List[str]:
         )
         if p.returncode == 0:
             return prefix + ['docker', 'compose']
+        probe_failure = f'rc={p.returncode}'
+    except Exception as exc:
+        probe_failure = f'{type(exc).__name__}: {exc}'
+
+    # The probe is not proof that the v2 plugin is absent -- it also fails on a
+    # sudo hiccup or a timeout under load. Falling back unconditionally selected
+    # `docker-compose` on hosts that never had v1 installed, so every later
+    # command died as "command not found" with no output to explain it.
+    if not shutil.which('docker-compose'):
+        try:
+            logger.warning(
+                '[docker-node] `docker compose` probe failed (%s) but docker-compose (v1) '
+                'is not installed; using the v2 plugin anyway', probe_failure,
+            )
+        except Exception:
+            pass
+        return prefix + ['docker', 'compose']
+    try:
+        logger.info('[docker-node] `docker compose` probe failed (%s); falling back to docker-compose', probe_failure)
     except Exception:
         pass
     return prefix + ['docker-compose']
@@ -1002,6 +1057,150 @@ def _ensure_container_ip_tooling(
     return ok
 
 
+def _wrapper_base_platform_note(dockerfile_path: str, *, docker_cmd, run) -> str:
+    """Explain a wrapper build failure caused by the base image's architecture.
+
+    An amd64-only image on an arm64 host (or the reverse) fails at the first
+    RUN with `exec format error` or a bare non-zero exit, which looks like a
+    broken build step. Name the mismatch and the remedy instead.
+    """
+    try:
+        with open(dockerfile_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        return ''
+    # Every stage matters, not just the first: the wrapper opens with helper
+    # stages (busybox and friends) that are multi-arch, and the image that
+    # actually fails is the application one further down.
+    bases: list[str] = []
+    for line in lines:
+        text = line.strip()
+        if not text.upper().startswith('FROM '):
+            continue
+        name = text.split(None, 1)[1].split(' AS ')[0].split(' as ')[0].strip()
+        # A later stage may build FROM an earlier stage's alias, which is not an
+        # image and cannot be inspected.
+        if name and name not in bases:
+            bases.append(name)
+    if not bases:
+        return ''
+
+    def _inspect(args):
+        try:
+            rc, tail = run(docker_cmd + args, timeout=60)
+        except Exception:
+            return ''
+        return str(tail or '').strip() if rc == 0 else ''
+
+    host_arch = _inspect(['version', '--format', '{{.Server.Arch}}'])
+    if not host_arch:
+        return ''
+    for base in bases:
+        image_arch = _inspect(['image', 'inspect', '--format', '{{.Architecture}}', base])
+        if not image_arch:
+            # A failed build may leave nothing pulled, so ask the registry what
+            # platforms the tag publishes. Absence of the host's architecture is
+            # the same answer, without needing the image on disk.
+            manifest = _inspect(['manifest', 'inspect', base])
+            if not manifest:
+                continue
+            if f'"architecture": "{host_arch}"' in manifest:
+                continue
+            return (
+                f"{base} publishes no {host_arch} build, so nothing from it can run on this host. "
+                f"Install emulation on the CORE VM "
+                f"(docker run --privileged --rm tonistiigi/binfmt --install amd64) "
+                f"or choose a vulnerability whose image publishes a {host_arch} build."
+            )
+        if image_arch == host_arch:
+            continue
+        return (
+            f"base image {base} is built for {image_arch} but this host runs {host_arch}, "
+            f"so every RUN against it fails with an exec format error. "
+            f"Install emulation on the CORE VM "
+            f"(docker run --privileged --rm tonistiigi/binfmt --install {image_arch}) "
+            f"or choose a vulnerability whose image publishes a {host_arch} build."
+        )
+    return ''
+
+
+def _all_images_present_locally(images, *, docker_cmd, run) -> bool:
+    """True only when every image is positively confirmed in the local store.
+
+    A pull contacts the registry even when nothing needs fetching, which makes
+    an otherwise fully cached run require the internet. Skipping it demands
+    certainty, so anything short of a clean `docker image inspect` for every
+    image answers False and the pull goes ahead.
+    """
+    names = [str(image or '').strip() for image in (images or [])]
+    names = [name for name in names if name]
+    if not names:
+        return False
+    for name in dict.fromkeys(names):
+        try:
+            rc, _tail = run(docker_cmd + ['image', 'inspect', '--format', '{{.Id}}', name], timeout=60)
+        except Exception:
+            return False
+        if rc != 0:
+            return False
+    return True
+
+
+def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
+    """Return the images confirmed absent from the local daemon.
+
+    A failed pull only blocks the run for images the host does not already
+    have; anything cached from an earlier run starts perfectly well offline.
+
+    Only positive evidence of absence counts. `docker image inspect` also fails
+    when it could not talk to the daemon at all -- a sudo prompt, a bad socket
+    permission -- and reporting those as "image not available locally" blamed a
+    perfectly present image for someone else's failure.
+    """
+    missing: list[str] = []
+    for image in images:
+        name = str(image or '').strip()
+        if not name or name in missing:
+            continue
+        try:
+            rc, tail = run(docker_cmd + ['image', 'inspect', name], timeout=60)
+        except Exception:
+            continue
+        if rc == 0:
+            continue
+        text = str(tail or '').lower()
+        if 'no such image' in text or 'error: no such object' in text:
+            missing.append(name)
+        else:
+            try:
+                logger.warning(
+                    '[docker-node] could not verify image %s locally (rc=%s); '
+                    'not treating it as missing: %s', name, rc, str(tail or '').strip()[:200],
+                )
+            except Exception:
+                pass
+    return missing
+
+
+def _format_pull_failure(*, node_name: str, compose_path: str, args, rc: int, tail: str, missing: list[str]) -> str:
+    """Build an actionable pull-failure message.
+
+    `docker compose pull` can fail with nothing on stdout/stderr, which left the
+    original error a bare rc=1 with no cause to act on.
+    """
+    lines = [f"docker compose pull failed (node={node_name} rc={rc})"]
+    if missing:
+        lines.append(f"images not available locally either: {', '.join(missing)}")
+    lines.append(f"compose: {compose_path}")
+    try:
+        lines.append(f"command: {' '.join(str(a) for a in args)}")
+    except Exception:
+        pass
+    text = str(tail or '').strip()
+    lines.append(text if text else '(the pull produced no output; the registry is usually unreachable or rate-limiting)')
+    return '\n'.join(lines)
+
+
 def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     """Best-effort prepare docker-compose assets before CORE starts docker nodes.
 
@@ -1070,6 +1269,16 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             except Exception:
                 pass
         except Exception as exc:
+            # The command never ran to completion, which is not the same as a
+            # command that ran and failed -- but both returned (1, '') here, so
+            # every caller reported a bare rc=1 with nothing to act on. Put the
+            # reason in the tail so it reaches the error message.
+            if isinstance(exc, subprocess.TimeoutExpired):
+                tail = f'[timeout] command exceeded {timeout}s and was killed'
+            elif isinstance(exc, FileNotFoundError):
+                tail = f'[not found] {args[0] if args else "command"} is not installed or not on PATH'
+            else:
+                tail = f'[{type(exc).__name__}] {exc}'
             try:
                 logger.warning('[docker-node] preflight cmd failed node=%s compose=%s cmd=%s err=%s', node_name, compose_path, ' '.join(args), exc)
             except Exception:
@@ -1104,6 +1313,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     # `docker compose pull` fails for buildable services with scenario-scoped tags
     # (e.g., `coretg/scenarios-...`) because those are expected to be built locally.
     pull_services: List[str] = []
+    pull_service_images: dict[str, str] = {}  # service -> image, to check local presence on pull failure
     wrapper_builds: List[tuple[str, str, str, bool]] = []  # (service, image, context, force_pull)
     try:
         import yaml  # type: ignore
@@ -1148,9 +1358,11 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                     pass
                 # pull-only service
                 pull_services.append(str(svc_name))
+                pull_service_images[str(svc_name)] = image
     except Exception:
         # If parsing fails, fall back to best-effort pulls with flags that avoid buildables when available.
         pull_services = []
+        pull_service_images = {}
 
     # Track whether we successfully built anything.
     built_any = False
@@ -1183,11 +1395,26 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             rc, tail = _run(args, timeout=1800)
             if rc == 0:
                 built_any = True
+                # Conflict resolution runs later in the same process and used to
+                # delete this image before CORE could start the node. Whatever
+                # else it clears, it must never clear what this run just built.
+                try:
+                    IMAGES_BUILT_THIS_RUN.add(str(image))
+                except Exception:
+                    pass
             else:
+                # A base image built for another architecture fails deep inside
+                # the Dockerfile, on whichever RUN executes first, which reads
+                # as a broken build step rather than an image that cannot run
+                # on this host at all.
+                platform_note = _wrapper_base_platform_note(
+                    df_path, docker_cmd=docker_cmd, run=_run,
+                )
                 wrapper_build_failures.append(
                     (
                         f"service={svc_name} image={image} rc={rc} "
                         f"context={ctx_path} dockerfile={df_path}"
+                        + (f"\n{platform_note}" if platform_note else "")
                         + (f"\n{tail}" if tail else "")
                     ).strip()
                 )
@@ -1292,21 +1519,83 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         _run(build_args, timeout=1200)
 
     # Pull only non-build services (if any). This avoids pulling scenario-scoped build targets.
-    if pull_services:
+    cached_pull_services = bool(pull_services) and _all_images_present_locally(
+        [pull_service_images.get(svc, '') for svc in pull_services],
+        docker_cmd=docker_cmd,
+        run=_run,
+    )
+    if cached_pull_services:
+        # Every pull-only image is already on this host, so the run needs no
+        # registry at all. Pulling anyway made a fully cached scenario depend on
+        # the internet for nothing.
+        try:
+            logger.info(
+                '[docker-node] preflight pull skipped node=%s; every pull-only image is cached: %s',
+                node_name, sorted({img for img in pull_service_images.values() if img}),
+            )
+        except Exception:
+            pass
+        _report_image_use('cached')
+    elif pull_services:
+        _report_image_use('pulling')
         # In strict mode, any pull failure should abort the run.
         pull_args = compose_base + ['pull'] + pull_services
         if not strict_pull:
             pull_args = compose_base + ['pull', '--ignore-pull-failures'] + pull_services
         rc, tail = _run(pull_args, timeout=600)
         if strict_pull and rc != 0:
-            raise RuntimeError(f"docker compose pull failed (node={node_name} rc={rc})\n{tail}".strip())
+            # A pull is a prefetch, not the run itself. Registry hiccups and Hub
+            # rate limits are transient and routinely hit a CORE VM mid-run, so
+            # retry once, then fall back to what is already on disk: an image
+            # present locally needs no registry at all.
+            rc, tail = _run(pull_args, timeout=600)
+        if strict_pull and rc != 0:
+            missing = _images_missing_locally(
+                [pull_service_images.get(svc, '') for svc in pull_services],
+                docker_cmd=docker_cmd,
+                run=_run,
+            )
+            if not missing:
+                try:
+                    logger.warning(
+                        '[docker-node] preflight pull failed but every image is present '
+                        'locally; continuing node=%s rc=%s images=%s',
+                        node_name, rc, sorted(set(pull_service_images.values())),
+                    )
+                except Exception:
+                    pass
+            else:
+                raise RuntimeError(
+                    _format_pull_failure(
+                        node_name=node_name,
+                        compose_path=compose_path,
+                        args=pull_args,
+                        rc=rc,
+                        tail=tail,
+                        missing=missing,
+                    )
+                )
     else:
         # If we couldn't parse services, try to avoid buildables when supported by this compose version.
         # Strict mode: do not ignore failures.
         if strict_pull:
-            rc, tail = _run(compose_base + ['pull', '--ignore-buildable'], timeout=600)
+            pull_args = compose_base + ['pull', '--ignore-buildable']
+            rc, tail = _run(pull_args, timeout=600)
             if rc != 0:
-                raise RuntimeError(f"docker compose pull failed (node={node_name} rc={rc})\n{tail}".strip())
+                rc, tail = _run(pull_args, timeout=600)
+            if rc != 0:
+                # The compose file did not parse, so there is no image list to
+                # check against; report the command and output instead.
+                raise RuntimeError(
+                    _format_pull_failure(
+                        node_name=node_name,
+                        compose_path=compose_path,
+                        args=pull_args,
+                        rc=rc,
+                        tail=tail,
+                        missing=[],
+                    )
+                )
         else:
             rc, _tail = _run(compose_base + ['pull', '--ignore-buildable'], timeout=600)
             if rc != 0:
@@ -1393,6 +1682,15 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                             if status in ('exited', 'dead') and exit_code != 0:
                                 helper_failed = True
                                 helper_rc = exit_code
+                    if helper_failed and helper_container:
+                        # The container's own output is the only thing that says
+                        # *why* the copy failed; an exit code alone never did.
+                        log_rc, log_tail = _run(
+                            docker_cmd + ['logs', '--tail', '40', helper_container],
+                            timeout=30,
+                        )
+                        if log_rc == 0 and str(log_tail or '').strip():
+                            helper_reason = f'{helper_reason}\n--- {helper_service} logs ---\n{log_tail}'.strip()
                 except Exception:
                     pass
                 if helper_failed:
@@ -1412,8 +1710,13 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                     except Exception:
                         allow_helper_failure = False
                     if inject_copy_required or not allow_helper_failure:
+                        detail = str(helper_reason or '').strip() or (
+                            '(no output from the helper, and no container was left to inspect; '
+                            'the compose command itself most likely never ran)'
+                        )
                         raise RuntimeError(
-                            f"docker compose inject helper failed (node={node_name} compose={compose_path} helper={helper_service} rc={helper_rc})\n{helper_reason}".strip()
+                            f"docker compose inject helper failed (node={node_name} compose={compose_path} "
+                            f"helper={helper_service} rc={helper_rc})\n{detail}"
                         )
 
             up_services = [str(target_service)]
@@ -3577,7 +3880,14 @@ def _flow_assignments_from_env() -> list[dict[str, Any]]:
     global _FLOW_ASSIGNMENTS_CACHE
     if _FLOW_ASSIGNMENTS_CACHE is not None:
         return _FLOW_ASSIGNMENTS_CACHE
-    raw = os.environ.get('CORETG_FLOW_ASSIGNMENTS_JSON') or ''
+    # Large assignment sets travel as a file: putting them in the environment
+    # pushes past MAX_ARG_STRLEN and makes every later execve fail with E2BIG.
+    try:
+        from scenarioforge.utils.env_payload import read_env_payload
+
+        raw = read_env_payload('CORETG_FLOW_ASSIGNMENTS_JSON')
+    except Exception:
+        raw = os.environ.get('CORETG_FLOW_ASSIGNMENTS_JSON') or ''
     if not raw:
         _FLOW_ASSIGNMENTS_CACHE = []
         return _FLOW_ASSIGNMENTS_CACHE
@@ -4569,6 +4879,23 @@ def _try_build_segmented_topology_from_preview(
     docker_ifid_start = _docker_ifid_start()
 
     sorted_hosts = sorted(hosts_data, key=lambda h: h.get('node_id', 0))
+    # Each Docker host gets one preflight pass, so this is what the image
+    # counter counts down from. A host becomes Docker either from its role or
+    # by the slot plan promoting it, and the loop below decides in that order --
+    # counting only the role misses every declared slot.
+    try:
+        expected_docker = 0
+        for _slot_no, _hdata in enumerate(sorted_hosts, start=1):
+            _is_docker = _is_docker_node_type(
+                map_role_to_node_type(str(_hdata.get('role') or 'Host'))
+            )
+            if not _is_docker and docker_slot_plan and f'slot-{_slot_no}' in docker_slot_plan:
+                _is_docker = True
+            if _is_docker:
+                expected_docker += 1
+        _set_expected_image_nodes(expected_docker)
+    except Exception:
+        pass
     for idx, hdata in enumerate(sorted_hosts):
         try:
             hid = int(hdata.get('node_id', idx + len(router_objs) + 1))

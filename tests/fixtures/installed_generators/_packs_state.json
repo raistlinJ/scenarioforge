@@ -1,0 +1,40 @@
+{
+  "packs": [
+    {
+      "id": "coretg-test-fixture",
+      "label": "Test Fixture",
+      "installed": [
+        {
+          "id": "testfix_flag_alpha",
+          "kind": "flag-generator",
+          "path": "flag_generators/p_testfixture__1"
+        },
+        {
+          "id": "testfix_flag_bravo",
+          "kind": "flag-generator",
+          "path": "flag_generators/p_testfixture__2"
+        },
+        {
+          "id": "testfix_flag_charlie",
+          "kind": "flag-generator",
+          "path": "flag_generators/p_testfixture__3"
+        },
+        {
+          "id": "testfix_flag_delta",
+          "kind": "flag-generator",
+          "path": "flag_generators/p_testfixture__4"
+        },
+        {
+          "id": "testfix_node_echo",
+          "kind": "flag-node-generator",
+          "path": "flag_node_generators/p_testfixture__5"
+        },
+        {
+          "id": "testfix_node_foxtrot",
+          "kind": "flag-node-generator",
+          "path": "flag_node_generators/p_testfixture__6"
+        }
+      ]
+    }
+  ]
+}

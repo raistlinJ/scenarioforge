@@ -939,14 +939,169 @@ def detect_docker_conflicts_for_compose_files(paths: list[str]) -> dict:
 		return {'containers': [], 'images': []}
 
 
-def remove_docker_conflicts(conflicts: dict) -> dict:
+SCENARIOFORGE_COMPOSE_PATH_PREFIXES = ('/tmp/pycore.', '/tmp/vulns/')
+
+# CORE starts a node with `docker compose --project-name core-<session>-<node>-<name>`,
+# which tags any image it builds `core-<session>-<node>-<name>-<service>`. Session
+# and node ids repeat between runs, so that tag says nothing about content -- and
+# `up -d` builds only when the tag is absent.
+CORE_SESSION_IMAGE_RE = re.compile(r'^core-\d+-\d+-\S+$')
+
+
+def remove_stale_core_session_images() -> dict:
+	"""Remove images CORE built for a previous session's nodes.
+
+	These are not a cache. The tag is project-scoped rather than
+	content-addressed, so a node whose generator changed still matches the old
+	tag and CORE skips the build, silently running the previous run's code:
+
+	    flaggenslot-5 was rebuilt from a Python ticket-portal context, but CORE
+	    reused a 12-hour-old WebDAV image and the container crash-looped on
+	    "DAV_USER: parameter not set"
+
+	Rebuilding costs little -- the layers are cached and no network is needed --
+	whereas keeping them serves a different generator's code. Images that *are*
+	a cache (coretg-gen-* by source digest, coretg/scenarios-*:iproute2 by
+	identity hash, and upstream base images) are untouched.
+	"""
+	result: dict = {'removed': [], 'errors': {}}
+	try:
+		import subprocess
+		import shutil as _sh
+		if not _sh.which('docker'):
+			return result
+		try:
+			listing = subprocess.run(
+				['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'],
+				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
+			)
+		except Exception:
+			return result
+		if listing.returncode != 0:
+			return result
+		for raw in (listing.stdout or '').splitlines():
+			ref = raw.strip()
+			if not ref or ref.startswith('<none>'):
+				continue
+			repository = ref.rsplit(':', 1)[0]
+			if not CORE_SESSION_IMAGE_RE.match(repository):
+				continue
+			try:
+				removed = subprocess.run(
+					['docker', 'image', 'rm', '-f', ref],
+					stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120,
+				)
+				if removed.returncode == 0:
+					result['removed'].append(ref)
+				else:
+					result['errors'][ref] = (removed.stdout or '').strip()[-300:]
+			except Exception as exc:
+				result['errors'][ref] = str(exc)[:300]
+		return result
+	except Exception:
+		return result
+
+
+def remove_stale_scenarioforge_containers(*, include_running: bool = True) -> dict:
+	"""Remove containers left behind by earlier ScenarioForge runs.
+
+	Every execute leaves its containers behind once the CORE session goes away,
+	and they hold the names the next run needs. Compose then fails with
+
+	    Conflict. The container name "/docker-11" is already in use
+
+	which aborts the topology build outright; the conflict check that used to
+	handle this ran later and resolved collisions by deleting *images*, forcing
+	a rebuild of work already done.
+
+	Running containers are included by default. Execute refuses to start while
+	another CORE session is active (``active_sessions_blocking``), so anything
+	still running here belongs to a run that is already over -- and a leftover
+	that is *running* is exactly the case that blocks the new one hardest. Pass
+	``include_running=False`` to restrict this to stopped containers.
+
+	The one rule that always holds: Compose must label the container as
+	belonging to a CORE or ScenarioForge project (``/tmp/pycore.*`` or
+	``/tmp/vulns/``). An operator's own containers carry neither and are never
+	considered, running or not.
+	"""
+	result: dict = {'removed': [], 'skipped_running': [], 'errors': {}}
+	try:
+		import subprocess
+		import shutil as _sh
+		if not _sh.which('docker'):
+			return result
+		try:
+			listing = subprocess.run(
+				['docker', 'ps', '-a', '--format', '{{.Names}}\t{{.State}}'],
+				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
+			)
+		except Exception:
+			return result
+		if listing.returncode != 0:
+			return result
+
+		for raw in (listing.stdout or '').splitlines():
+			parts = raw.split('\t')
+			if len(parts) < 2:
+				continue
+			name = parts[0].strip()
+			state = parts[1].strip().lower()
+			if not name:
+				continue
+			if state == 'running' and not include_running:
+				result['skipped_running'].append(name)
+				continue
+			try:
+				probe = subprocess.run(
+					['docker', 'inspect', name, '--format',
+					 '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+					 '|{{index .Config.Labels "com.docker.compose.project.working_dir"}}'],
+					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30,
+				)
+			except Exception:
+				continue
+			if probe.returncode != 0:
+				continue
+			marker = (probe.stdout or '').strip()
+			if not any(prefix in marker for prefix in SCENARIOFORGE_COMPOSE_PATH_PREFIXES):
+				continue
+			try:
+				removed = subprocess.run(
+					['docker', 'rm', '-f', name],
+					stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+				)
+				if removed.returncode == 0:
+					result['removed'].append(name)
+				else:
+					result['errors'][name] = (removed.stdout or '').strip()[:300]
+			except Exception as exc:
+				result['errors'][name] = str(exc)[:300]
+		return result
+	except Exception:
+		return result
+
+
+def remove_docker_conflicts(conflicts: dict, *, keep_images: Optional[Iterable[str]] = None) -> dict:
 	"""Best-effort removal of conflicting Docker containers/images.
+
+	`keep_images` are never deleted. It must cover two groups:
+
+	- images belonging to catalog or generator items marked `persistent`, which
+	  the operator has pinned so repeat runs need no registry
+	- images this run already built, because conflict resolution runs after
+	  preflight; deleting one strands CORE with "No such image" on a node whose
+	  image existed seconds earlier
+
+	Everything else that is cached but unpinned is still cleared, so a stale
+	image cannot outlive the run that produced it.
 
 	Returns a dict with removal results.
 	"""
 	result = {
 		'removed_containers': [],
 		'removed_images': [],
+		'kept_images': [],
 		'container_errors': {},
 		'image_errors': {},
 	}
@@ -962,57 +1117,6 @@ def remove_docker_conflicts(conflicts: dict) -> dict:
 		if not isinstance(images, list):
 			images = []
 
-		def _container_image_ids(name: str) -> list[str]:
-			ids: list[str] = []
-			try:
-				p0 = subprocess.run(
-					['docker', 'container', 'inspect', '-f', '{{.Image}}', str(name)],
-					stdout=subprocess.PIPE,
-					stderr=subprocess.DEVNULL,
-					text=True,
-				)
-				if p0.returncode == 0:
-					val = (p0.stdout or '').strip()
-					if val:
-						ids.append(val)
-			except Exception:
-				pass
-			return list(dict.fromkeys([x for x in ids if x]))
-
-		def _image_unused(img: str) -> bool:
-			try:
-				p1 = subprocess.run(
-					['docker', 'ps', '-a', '-q', '--filter', f'ancestor={img}'],
-					stdout=subprocess.PIPE,
-					stderr=subprocess.DEVNULL,
-					text=True,
-				)
-				if p1.returncode != 0:
-					return False
-				return not bool((p1.stdout or '').strip())
-			except Exception:
-				return False
-
-		def _try_remove_image(img: str) -> None:
-			try:
-				p = subprocess.run(['docker', 'image', 'rm', '-f', str(img)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-				if p.returncode == 0:
-					result['removed_images'].append(str(img))
-				else:
-					out = (p.stdout or '').strip()[-500:]
-					result['image_errors'][str(img)] = out or f'rc={p.returncode}'
-			except Exception as exc:
-				result['image_errors'][str(img)] = str(exc)
-
-		# Collect image IDs for containers we intend to remove.
-		container_image_ids: list[str] = []
-		for cn in containers:
-			try:
-				container_image_ids.extend(_container_image_ids(str(cn)))
-			except Exception:
-				pass
-		container_image_ids = list(dict.fromkeys([x for x in container_image_ids if x]))
-
 		for cn in containers:
 			try:
 				p = subprocess.run(['docker', 'rm', '-f', str(cn)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -1024,21 +1128,60 @@ def remove_docker_conflicts(conflicts: dict) -> dict:
 			except Exception as exc:
 				result['container_errors'][str(cn)] = str(exc)
 
-		# Remove explicit conflicting images.
-		for img in images:
-			if not img:
-				continue
-			_try_remove_image(str(img))
+		keep = {str(x or '').strip() for x in (keep_images or []) if str(x or '').strip()}
+		try:
+			from scenarioforge.builders.topology import IMAGES_BUILT_THIS_RUN
 
-		# Remove images associated with removed containers (only if unused now).
-		for img_id in container_image_ids:
+			keep |= {str(x or '').strip() for x in IMAGES_BUILT_THIS_RUN if str(x or '').strip()}
+		except Exception:
+			pass
+
+		def _came_from_a_registry(ref: str) -> bool:
+			"""True when this image was pulled rather than built here.
+
+			Deleting it can only be undone over the network, so it is exactly
+			what must survive for a cached run to work offline. A locally built
+			image has no repo digest and can be rebuilt from cached layers.
+			"""
 			try:
-				if img_id in (result.get('removed_images') or []):
-					continue
-				if _image_unused(img_id):
-					_try_remove_image(img_id)
+				probe = subprocess.run(
+					['docker', 'image', 'inspect', '--format', '{{len .RepoDigests}}', ref],
+					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
+				)
 			except Exception:
-				pass
+				return True  # unknown: err towards keeping it
+			if probe.returncode != 0:
+				return True
+			try:
+				return int((probe.stdout or '0').strip() or 0) > 0
+			except Exception:
+				return True
+
+		for img in images:
+			name = str(img or '').strip()
+			if not name:
+				continue
+			if name in keep:
+				result['kept_images'].append(name)
+				continue
+			if _came_from_a_registry(name):
+				# Re-fetching it needs a registry, and a run whose images are all
+				# cached must not need one. alpine:3.19 was deleted here every
+				# run and re-pulled by CORE, which failed outright the moment
+				# DNS was unavailable.
+				result['kept_images'].append(name)
+				continue
+			try:
+				p = subprocess.run(
+					['docker', 'image', 'rm', '-f', name],
+					stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+				)
+				if p.returncode == 0:
+					result['removed_images'].append(name)
+				else:
+					result['image_errors'][name] = (p.stdout or '').strip()[-500:] or f'rc={p.returncode}'
+			except Exception as exc:
+				result['image_errors'][name] = str(exc)
 		return result
 	except Exception:
 		return result
@@ -1529,6 +1672,123 @@ def _drop_service_dependencies_for_no_network(service: Dict[str, object]) -> Non
 	else:
 		service.pop('depends_on', None)
 	service.pop('links', None)
+
+
+# Options Docker refuses on a container that joins another container's network
+# namespace. Each raises "conflicting options: <thing> and the container type
+# network mode" (or "... and the network mode") and aborts container creation.
+CONTAINER_NETWORK_MODE_CONFLICTING_KEYS = (
+	'hostname',
+	'domainname',
+	'ports',
+	'expose',
+	'dns',
+	'dns_search',
+	'dns_opt',
+	'extra_hosts',
+	'mac_address',
+	'networks',
+)
+
+
+def _compose_service_is_referenced(services: dict, name: str) -> bool:
+	"""Whether any sibling service names `name` in its wiring.
+
+	A service can be pointed at by `depends_on`, by a namespace it joins
+	(`network_mode`/`ipc`/`pid: service:<name>`), or by the legacy `links` and
+	`volumes_from`. Removing a service any of those name breaks the compose file.
+	"""
+	target = str(name or '').strip()
+	if not target or not isinstance(services, dict):
+		return False
+
+	def _names_in(value) -> list:
+		if isinstance(value, dict):
+			return [str(key).strip() for key in value.keys()]
+		if isinstance(value, (list, tuple)):
+			return [str(item).strip() for item in value]
+		if value is None:
+			return []
+		return [str(value).strip()]
+
+	for svc_name, svc in services.items():
+		if str(svc_name).strip() == target or not isinstance(svc, dict):
+			continue
+		if target in _names_in(svc.get('depends_on')):
+			return True
+		for key in ('network_mode', 'ipc', 'pid', 'uts', 'cgroup'):
+			raw = str(svc.get(key) or '').strip()
+			if raw.startswith('service:') and raw.split(':', 1)[1].strip() == target:
+				return True
+		# `links` and `volumes_from` both allow a trailing modifier: `web:alias`,
+		# `web:ro`. The service name is whatever precedes the first colon.
+		for key in ('links', 'volumes_from'):
+			for entry in _names_in(svc.get(key)):
+				if entry.split(':', 1)[0].strip() == target:
+					return True
+		extends = svc.get('extends')
+		if isinstance(extends, dict) and str(extends.get('service') or '').strip() == target:
+			return True
+	return False
+
+
+def _strip_network_conflicts_from_secondary_services(compose_obj: dict, node_name: str) -> dict:
+	"""Drop per-container network options from services CORE will co-locate.
+
+	CORE runs a Docker node's stack in one network namespace: it rewrites each
+	secondary service to ``network_mode: service:<node>`` and leaves the
+	node-named service on ``none``, whose namespace it manages itself. A
+	container sharing another's namespace cannot own any of the options above,
+	and Docker refuses to create it::
+
+	    service:node:1 Error response from daemon: conflicting options:
+	    hostname and the network mode
+	    service:node:1 Error response from daemon: conflicting options:
+	    port exposing and the container type network mode
+
+	The stack then sits in `created` and every node reports "not running", with
+	the cause recorded only in the core-daemon journal.
+
+	Nothing is lost: the namespace those services join belongs to the node-named
+	service, which keeps its own hostname and exposed ports and is what CORE
+	attaches to the scenario network.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		primary = str(node_name or '').strip()
+		primary_svc = services.get(primary) if primary else None
+
+		def _as_list(value: object) -> list:
+			if isinstance(value, list):
+				return list(value)
+			if value in (None, ''):
+				return []
+			return [value]
+
+		for svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			if primary and str(svc_name) == primary:
+				continue
+			# Port intent is not discarded: every one of these services shares
+			# the node's namespace, so a port they meant to expose is reachable
+			# on the node service and belongs there. Reporting reads it from the
+			# compose file, so moving it keeps that working.
+			if isinstance(primary_svc, dict):
+				moved = [str(p) for p in (_as_list(svc.get('expose')) + _as_list(svc.get('ports')))]
+				if moved:
+					existing = [str(p) for p in _as_list(primary_svc.get('expose'))]
+					merged = list(dict.fromkeys(existing + [p.split(':')[-1] for p in moved]))
+					primary_svc['expose'] = merged
+			for key in CONTAINER_NETWORK_MODE_CONFLICTING_KEYS:
+				svc.pop(key, None)
+		return compose_obj
+	except Exception:
+		return compose_obj
 
 
 def _force_compose_no_network(compose_obj: dict) -> dict:
@@ -4408,6 +4668,15 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					services.get(node_key)['container_name'] = node_key
 			except Exception:
 				pass
+			# The alias is a byte-for-byte copy, so leaving the source behind
+			# builds the same image twice and creates a container that is never
+			# started. Drop it -- but only when no sibling names it, since a
+			# multi-service vuln may wire itself together through that name.
+			try:
+				if not _compose_service_is_referenced(services, src_key):
+					services.pop(src_key, None)
+			except Exception:
+				pass
 			return compose_obj
 		except Exception:
 			return compose_obj
@@ -5295,6 +5564,15 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					except Exception:
 						alias_src = None
 					obj = _ensure_service_named_as_node(obj, node_name, prefer_service=alias_src or prefer)
+					# Done after the alias exists, so the node-named service is
+					# known and keeps its hostname while the rest -- which CORE
+					# will move into that service's network namespace -- lose
+					# theirs.
+					try:
+						if _compose_force_no_network_enabled():
+							obj = _strip_network_conflicts_from_secondary_services(obj, node_name)
+					except Exception:
+						pass
 					try:
 						replace_original = _is_truthy(rec.get('ReplaceComposeServiceWithNode') or rec.get('replace_compose_service_with_node'))
 						services_obj = obj.get('services') if isinstance(obj, dict) else None

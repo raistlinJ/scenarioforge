@@ -1,0 +1,9 @@
+{
+  "pack_id": "coretg-test-fixture",
+  "pack_label": "Test Fixture",
+  "origin": "flag_generators/testfixture",
+  "installed_at": "2026-01-01T00:00:00",
+  "generator_id": "testfix_flag_bravo",
+  "kind": "flag-generator",
+  "source_generator_id": "testfix_flag_bravo"
+}

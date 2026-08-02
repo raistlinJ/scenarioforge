@@ -429,6 +429,11 @@ Add or update tests that prove:
 10. shared-VM execution uses a lock
 11. remote VM execution does not require a locally importable `core` package
 12. a missing validation marker fails a full execute evaluation
+13. a spec can declare `Docker`, `VulnerabilitySlot` and `FlagGenSlot` rows in
+    `Node Information`, and they reach the generated XML as `Count` rows
+14. a spec exercising slots requests the full challenge ceiling — specified
+    vulnerabilities plus generators plus both slot kinds — since a shorter chain
+    never reaches a slot and proves nothing about it
 
 ## Current Compatibility Baseline
 
