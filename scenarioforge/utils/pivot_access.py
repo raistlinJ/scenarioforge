@@ -333,10 +333,15 @@ def plan_pivot_access(
 
     for subnet_text, detail in blocked.items():
         blocked_from = detail["sources"]
-        # Prefer the routers that actually enforce this block; fall back to every
-        # known router when the rule did not say who carries it.
-        enforcing = [n for n in detail["enforced_by"] if n in set(router_id_list)]
-        forward_nodes = enforcing or router_id_list
+        # Every router on the path, not just the one carrying the block.
+        #
+        # Narrowing this to the enforcing router looked tidier and was wrong: a
+        # live run showed the enforcer correctly passing the SYN while an
+        # upstream router dropped it, because segmentation leaves every router
+        # with `-P FORWARD DROP`. A packet has to survive each hop, and the
+        # planner cannot know the route, so the allow goes everywhere. The
+        # enforcing ids stay in `walled_off_details` for reporting.
+        forward_nodes = router_id_list
         subnet = _network_of(subnet_text)
         if subnet is None:
             continue
