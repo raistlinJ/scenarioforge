@@ -41,21 +41,40 @@ def _assignments():
 # The happy path: an RCE step earns the star
 # --------------------------------------------------------------------------- #
 
-def test_rce_step_is_stamped_with_the_subnet_it_opens():
+def test_nothing_is_stamped_when_the_provider_has_to_be_added():
+    # With no reusable offering in the subnet the provider is an added Docker
+    # SSH node, which has no address and is nobody's chain step, so no row can
+    # claim it. See test_flow_time_cannot_yet_reuse_a_provider for why this is
+    # the common case today.
     out = ab._flow_stamp_pivot_grants(_assignments(), _chain(), _preview())
-    assert out[0]['pivot_grants'] == ['172.21.240.0/24']
+    assert 'pivot_grants' not in out[0]
+    assert out[0]['pivot_decisions'][0]['provider_node'] == ''
+
+
+def test_flow_time_cannot_yet_reuse_a_provider():
+    """Documents a known gap rather than asserting desired behaviour.
+
+    _flow_stamp_pivot_grants calls the planner without entry_points, so tiers
+    1-3 (reuse a node already serving a vulnerability, flag-node-generator or
+    SSH) can never fire and every provider comes back as `added`. Until the
+    preview carries per-node offerings with ports, the star only lights up for
+    a provider supplied some other way.
+    """
+    import inspect
+    src = inspect.getsource(ab._flow_stamp_pivot_grants)
+    assert 'entry_points' not in src.split('plan_pivot_access(')[1].split(')')[0]
 
 
 def test_the_full_classification_rides_along_for_explanations():
     out = ab._flow_stamp_pivot_grants(_assignments(), _chain(), _preview())
     decisions = out[0]['pivot_decisions']
-    assert decisions and decisions[0]['disposition'] == 'absorbed'
-    assert decisions[0]['provider_node'] == 'docker-21'
+    # An added provider is nobody's chain challenge, so the pivot is its own step.
+    assert decisions and decisions[0]['disposition'] == 'own_step'
     assert decisions[0]['reason']
+    assert decisions[0]['instruction']
 
 
 def test_a_step_without_code_execution_gets_no_star():
-    # Its pivot is its own step, so this row must stay unmarked.
     out = ab._flow_stamp_pivot_grants(
         _assignments(), _chain(provides=['Credential(user, password)']), _preview())
     assert 'pivot_grants' not in out[0]
@@ -102,7 +121,7 @@ def test_a_broken_preview_does_not_break_sequencing():
 # Matching the provider to the right row
 # --------------------------------------------------------------------------- #
 
-def test_only_the_provider_row_is_stamped():
+def test_no_row_is_stamped_for_an_added_provider():
     assignments = [
         {'node_id': 'flaggenslot-1', 'name': 'flaggenslot-1'},
         {'node_id': 'docker-21', 'name': 'docker-21'},
@@ -112,13 +131,12 @@ def test_only_the_provider_row_is_stamped():
         {'id': 'docker-21', 'name': 'docker-21', 'provides': ['Shell(host)']},
     ]
     out = ab._flow_stamp_pivot_grants(assignments, chain, _preview())
-    assert 'pivot_grants' not in out[0]
-    assert out[1]['pivot_grants'] == ['172.21.240.0/24']
+    assert all('pivot_grants' not in a for a in out)
 
 
-def test_row_is_matched_by_position_when_the_assignment_lacks_a_name():
+def test_decisions_still_ride_on_every_row():
     out = ab._flow_stamp_pivot_grants([{}], _chain(), _preview())
-    assert out[0]['pivot_grants'] == ['172.21.240.0/24']
+    assert out[0]['pivot_decisions']
 
 
 # --------------------------------------------------------------------------- #
@@ -197,11 +215,12 @@ def test_own_step_pivot_carries_an_instruction():
 
 
 def test_absorbed_pivot_has_no_position_or_instruction():
-    out = ab._flow_stamp_pivot_grants(_assignments(), _chain(), _preview())
-    decision = out[0]['pivot_decisions'][0]
-    assert decision['disposition'] == 'absorbed'
-    assert decision['insert_before'] == -1
-    assert decision['instruction'] == ''
+    from scenarioforge.utils import pivot_chain as pc
+    d = pc.classify_pivot('docker-21', '172.21.240.0/24',
+                          [{'name': 'docker-21', 'provides': ['CodeExecution(host)']}])
+    assert d.disposition == pc.ABSORBED
+    assert d.as_dict()['insert_before'] == -1
+    assert d.as_dict()['instruction'] == ''
 
 
 def test_pivot_for_a_subnet_the_chain_never_visits_has_no_position():

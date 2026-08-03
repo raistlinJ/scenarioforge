@@ -104,8 +104,14 @@ Provider selection is hybrid and prefers what already exists:
 1. a node already offering a **vulnerability** — the pivot becomes a real challenge step;
 2. a node already offering a **flag-node-generator**;
 3. a node already running **SSH**;
-4. otherwise an existing **non-slot Docker node**, which gets SSH enabled;
-5. otherwise a **Docker SSH node is added**.
+4. otherwise a **Docker SSH node is added**, built from `PIVOT_SSH_IMAGE`
+   (override with `CORETG_PIVOT_SSH_IMAGE`).
+
+There is deliberately no "turn SSH on for whatever Docker node is already
+there" tier. Node images are built offline-safe with **no package manager** —
+the wrapper only injects a busybox `ip` — so a minimal image cannot grow an
+`sshd`, and enabling the CORE SSH service on it produces an open path to a
+closed port. A node that genuinely serves SSH is already tier 3.
 
 **Only Docker-backed nodes are ever eligible.** CORE vnodes — routers, PCs,
 servers, workstations — get a network namespace but not a mount namespace, so
@@ -119,9 +125,8 @@ silently spend capacity the author allocated for challenges, so **a provider
 never counts against configured vulnerability or flag-node-generator slot
 counts** — anything placed for pivot access is additive.
 
-The SSH fallback needs a daemon actually listening. A minimal container image
-has none, so an added provider must come from an SSH-capable image; a Docker
-node whose image lacks `sshd` yields an open path to a closed port.
+The planner records the required image on the provider (`image` in the
+`pivot_access` report); materialising that node is the topology builder's job.
 
 The resulting allow rules are appended to `segmentation_summary.json` tagged
 `reason: pivot-access`, so they are distinguishable from the allow rules written
