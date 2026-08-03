@@ -1271,6 +1271,31 @@ function applyReportGuideHintNodeIps(text, nameToIp) {
   return dedupeRenderedIps(out);
 }
 
+function reportPivotGrantsFor(node, assignment) {
+  const out = [];
+  const push = (value) => {
+    const text = String(value == null ? '' : value).trim();
+    if (text && !out.includes(text)) out.push(text);
+  };
+  const readFrom = (src) => {
+    if (!src || typeof src !== 'object') return;
+    ['pivot_grants', 'pivotGrants', 'pivot_opens', 'PivotGrants'].forEach((key) => {
+      const value = src[key];
+      if (Array.isArray(value)) value.forEach(push);
+      else if (typeof value === 'string') value.split(',').forEach(push);
+    });
+    const decisions = src.pivot_decisions || src.pivotDecisions;
+    if (Array.isArray(decisions)) {
+      decisions.forEach((d) => {
+        if (d && typeof d === 'object' && String(d.disposition || '') === 'absorbed') push(d.subnet);
+      });
+    }
+  };
+  readFrom(node);
+  readFrom(assignment);
+  return out;
+}
+
 function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const opts = (options && typeof options === 'object') ? options : {};
   const facilitatorMode = !!opts.facilitator;
@@ -1679,8 +1704,14 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     lines.push('');
     lines.push('| Key | Value |');
     lines.push('| --- | --- |');
-    lines.push(`| Node | ${_cell(nodeName)} |`);
+    const pivotGrants = reportPivotGrantsFor(node, assignment);
+    lines.push(`| Node | ${_cell(nodeName)}${pivotGrants.length ? ' \u2605' : ''} |`);
     lines.push(`| IP Address | ${_cell(nodeIp)} |`);
+    // The pivot rides on this step rather than being a step of its own, so the
+    // guide has to say that solving it also buys network reach.
+    if (pivotGrants.length) {
+      lines.push(`| \u2605 Pivot | Solving this step also opens ${_cell(pivotGrants.join(', '))} \u2014 no separate step |`);
+    }
     if (nodeId) lines.push(`| Node ID | ${_cell(nodeId)} |`);
     // Facilitators only. Naming the generator that built a challenge tells a
     // participant how it was constructed, which is the same disclosure that

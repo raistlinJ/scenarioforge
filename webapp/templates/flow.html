@@ -4343,6 +4343,35 @@
     return out;
   }
 
+  // Subnets a chain step opens by virtue of granting code execution on its
+  // node. Populated when the pivot is absorbed into this step; empty when the
+  // pivot is a chain entry of its own (which renders as a normal step).
+  function pivotGrantsFor(node, assignment) {
+    const out = [];
+    const push = (value) => {
+      const text = String(value == null ? '' : value).trim();
+      if (text && !out.includes(text)) out.push(text);
+    };
+    const readFrom = (src) => {
+      if (!src || typeof src !== 'object') return;
+      ['pivot_grants', 'pivotGrants', 'pivot_opens', 'PivotGrants'].forEach((key) => {
+        const value = src[key];
+        if (Array.isArray(value)) value.forEach(push);
+        else if (typeof value === 'string') value.split(',').forEach(push);
+      });
+      // The classifier's own shape, so a caller can hand the decision straight through.
+      const decisions = src.pivot_decisions || src.pivotDecisions;
+      if (Array.isArray(decisions)) {
+        decisions.forEach((d) => {
+          if (d && typeof d === 'object' && String(d.disposition || '') === 'absorbed') push(d.subnet);
+        });
+      }
+    };
+    readFrom(node);
+    readFrom(assignment);
+    return out;
+  }
+
   function renderChainEditor() {
     const wrap = document.getElementById('flowChainList');
     if (!wrap) return;
@@ -5372,6 +5401,22 @@
         badge.textContent = 'Duplicate flag' + sameAs;
         titleRow.appendChild(badge);
       }
+      // A step that also opens a segmented-off subnet carries the pivot here
+      // rather than as its own chain entry, so the row has to say so -- the
+      // participant earns network reach from this challenge, not just a flag.
+      try {
+        const fa2 = (Array.isArray(currentFlagAssignments) && currentFlagAssignments[idx]) ? currentFlagAssignments[idx] : null;
+        const grants = pivotGrantsFor(node, fa2);
+        if (grants.length) {
+          const badge = document.createElement('span');
+          badge.className = 'badge text-bg-info fw-bold';
+          badge.textContent = '\u2605 Pivot';
+          badge.title = 'Solving this challenge also opens the way into '
+            + grants.join(', ')
+            + '. The pivot is part of this step, so it is not a separate challenge.';
+          titleRow.appendChild(badge);
+        }
+      } catch (e) { }
 
       // Per-step actions (top-right).
       try {
