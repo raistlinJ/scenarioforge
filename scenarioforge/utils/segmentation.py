@@ -503,6 +503,17 @@ def _apply_pivot_access(
     for node_id, commands in commands_by_node.items():
         script_path = _next_segmentation_script_path(out_dir, int(node_id), "pivot", counters)
         _write_idempotent_iptables_script(script_path, commands, f"pivot-access:{node_id}")
+        # The scripts are run by the Segmentation service, which is enabled on
+        # routers only unless include_hosts is set. A provider is usually a
+        # host, so without this its INPUT allow is written and never applied --
+        # the FORWARD rules open the path across the routers and the packet is
+        # then dropped on arrival by the provider's own default-deny.
+        if session is not None:
+            try:
+                ensure_service(session, int(node_id), "Segmentation")
+            except Exception as exc:
+                logger.warning("Pivot access: could not enable Segmentation on node %s: %s",
+                               node_id, exc)
 
     summary["pivot_access"] = plan.as_dict()
     logger.info(

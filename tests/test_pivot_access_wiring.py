@@ -173,3 +173,45 @@ def test_section_element_carries_the_attribute_when_enabled():
     # Guards the exact attribute name the parser looks for.
     el = ET.fromstring('<section name="Segmentation" density="0.5" accessible_by_pivot="true"/>')
     assert el.get("accessible_by_pivot") == "true"
+
+
+def test_provider_nodes_get_the_segmentation_service_enabled(tmp_path, monkeypatch):
+    # Segmentation scripts are run by the Segmentation service, which is on
+    # routers only by default. Without enabling it on the provider its INPUT
+    # allow is written and never applied, so the path opens across the routers
+    # and is dropped on arrival.
+    enabled: list[tuple[int, str]] = []
+
+    def _fake_ensure(session, node_id, service_name, node_obj=None):
+        enabled.append((int(node_id), str(service_name)))
+        return True
+
+    monkeypatch.setattr(seg, 'ensure_service', _fake_ensure)
+    summary = _summary_with_block()
+    seg._apply_pivot_access(
+        summary=summary,
+        hosts=_hosts(),
+        routers=[NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")],
+        out_dir=str(tmp_path),
+        session=object(),                      # any non-None session
+        lookup_node_name=lambda nid: f"node-{nid}",
+    )
+    services = dict(enabled)
+    # The provider gets SSH (it had nothing reachable) and Segmentation (so its
+    # own script actually runs).
+    assert (6, 'SSH') in enabled
+    assert (6, 'Segmentation') in enabled
+    # The enforcing router needs it too, for the FORWARD half.
+    assert (1, 'Segmentation') in enabled
+
+
+def test_no_services_are_touched_without_a_session(tmp_path, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(seg, 'ensure_service', lambda *a, **k: calls.append(a))
+    seg._apply_pivot_access(
+        summary=_summary_with_block(), hosts=_hosts(),
+        routers=[NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")],
+        out_dir=str(tmp_path), session=None,
+        lookup_node_name=lambda nid: f"node-{nid}",
+    )
+    assert calls == []

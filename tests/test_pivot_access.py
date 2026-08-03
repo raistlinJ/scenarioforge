@@ -276,9 +276,11 @@ def test_added_node_remains_the_last_resort():
     assert plan.providers[0].added is True
 
 
-def test_forward_rules_target_only_the_routers_enforcing_the_block():
-    # Five routers exist but only router 1 carries the block, so only it needs
-    # the FORWARD allow.
+def test_forward_rules_go_to_every_router_not_just_the_enforcer():
+    # Narrowing to the enforcing router is wrong: segmentation leaves every
+    # router with -P FORWARD DROP, so a packet that survives the enforcer still
+    # dies at an upstream hop. Verified live -- the enforcer passed the SYN and
+    # an intermediate router dropped it.
     rules = [_rule(1, type="subnet_block", src="10.0.140.0/24",
                    dst="172.21.240.0/24", default_deny=True)]
     hosts = [NodeInfo(node_id=6, ip4="172.21.240.6/24", role="Docker")]
@@ -286,10 +288,10 @@ def test_forward_rules_target_only_the_routers_enforcing_the_block():
     entries = {6: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)]}
     plan = pa.plan_pivot_access(rules, hosts, routers=routers, entry_points=entries)
     forwards = [r for r in plan.allow_rules if r["rule"]["chain"] == "FORWARD"]
-    assert [r["node_id"] for r in forwards] == [1]
+    assert sorted(r["node_id"] for r in forwards) == [1, 2, 3, 4, 5]
 
 
-def test_all_routers_are_used_when_the_block_names_no_enforcer():
+def test_all_routers_are_used_when_the_block_names_no_enforcer():  # noqa: D103
     rules = [{"type": "subnet_block", "src": "10.0.140.0/24", "dst": "172.21.240.0/24"}]
     hosts = [NodeInfo(node_id=6, ip4="172.21.240.6/24", role="Docker")]
     routers = [NodeInfo(node_id=i, ip4=f"10.{i}.0.1/24", role="Router") for i in (1, 2)]
