@@ -3784,6 +3784,118 @@ def _flow_flag_record_from_host_metadata(hdata: Any) -> Optional[Dict[str, str]]
         return None
 
 
+def _pivot_access_compose_template_path() -> str:
+    """The shared compose definition for an added pivot provider."""
+    return os.path.join(
+        _repo_root_path(), 'generator_templates', 'pivot-ssh-compose', 'docker-compose.yml'
+    )
+
+
+def _write_pivot_access_compose(node_name: str, image: str, port: int, out_base: str = "/tmp/vulns") -> str:
+    """Render this provider's compose file with its image pinned.
+
+    The template carries the container's configuration; the image comes from the
+    plan, because a site can point `CORETG_PIVOT_SSH_IMAGE` at its own mirror
+    and the node has to boot what the plan promised -- and what the offline
+    image preparation actually made available locally.
+    """
+    project_dir = os.path.join(out_base, 'pivot-access', _docker_node_compose_token(node_name))
+    os.makedirs(project_dir, exist_ok=True)
+    out_path = os.path.join(project_dir, 'docker-compose.yml')
+
+    service = 'pivot_ssh'
+    body: Dict[str, Any] = {}
+    try:
+        import yaml as _yaml
+        with open(_pivot_access_compose_template_path(), 'r', encoding='utf-8') as fh:
+            loaded = _yaml.safe_load(fh) or {}
+        services = loaded.get('services') if isinstance(loaded, dict) else None
+        if isinstance(services, dict) and services:
+            service = next(iter(services))
+            body = services.get(service) if isinstance(services.get(service), dict) else {}
+    except Exception as exc:
+        logger.warning(
+            'Pivot access: compose template unavailable (%s); falling back to a bare %s container',
+            exc, image,
+        )
+        body = {}
+
+    body = dict(body)
+    body['image'] = str(image)
+    body['expose'] = [f"{int(port)}/tcp"]
+    compose = {'services': {service: body}}
+
+    try:
+        import yaml as _yaml
+        text = _yaml.safe_dump(compose, sort_keys=False)
+    except Exception:
+        env = body.get('environment') or []
+        lines = ['services:', f'  {service}:', f'    image: {image}']
+        if env:
+            lines.append('    environment:')
+            lines.extend(f'      - {item}' for item in env)
+        lines += ['    expose:', f'      - "{int(port)}/tcp"']
+        text = '\n'.join(lines) + '\n'
+    with open(out_path, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    return out_path
+
+
+def _pivot_access_record_from_host_metadata(
+    hdata: Any, node_name: str, out_base: str = "/tmp/vulns"
+) -> Optional[Dict[str, str]]:
+    """Compose record for a node the pivot-access plan added, if this is one.
+
+    Such a node exists only to serve the entry the plan opened a hole for, so it
+    runs the plan's image on the plan's port and nothing else. It never carries
+    a vulnerability or a flag: it is additive to the scenario, not part of it.
+    """
+    try:
+        from ..utils.pivot_access import (
+            PIVOT_PROVIDER_METADATA_KEY, PIVOT_SSH_IMAGE, PIVOT_SSH_PORT,
+        )
+    except Exception:
+        return None
+    if not isinstance(hdata, dict):
+        return None
+    meta = hdata.get('metadata')
+    if not isinstance(meta, dict):
+        return None
+    marker = meta.get(PIVOT_PROVIDER_METADATA_KEY)
+    if not isinstance(marker, dict):
+        return None
+
+    image = str(marker.get('image') or '').strip() or PIVOT_SSH_IMAGE
+    try:
+        port = int(marker.get('port') or PIVOT_SSH_PORT)
+    except Exception:
+        port = PIVOT_SSH_PORT
+    if not 0 < port < 65536:
+        port = PIVOT_SSH_PORT
+
+    try:
+        path = _write_pivot_access_compose(node_name, image, port, out_base=out_base)
+    except Exception as exc:
+        logger.error(
+            'Pivot access: could not write the compose file for provider node %s: %s',
+            node_name, exc,
+        )
+        return None
+    logger.info(
+        '[pivot-access] provider node=%s image=%s port=%d subnet=%s',
+        node_name, image, port, marker.get('subnet') or '?',
+    )
+    return {
+        'Type': 'docker-compose',
+        'Name': f'pivot-access-{_docker_node_compose_token(node_name)}',
+        'Path': path,
+        'Vector': 'pivot-access',
+        'PivotAccessProvider': 'added',
+        'ReplaceComposeServiceWithNode': 'true',
+        'compose_ports': [{'service': 'pivot_ssh', 'protocol': 'tcp', 'port': int(port)}],
+    }
+
+
 def _compose_record_for_docker_slot(base_rec: Dict[str, str], hdata: Any) -> Dict[str, str]:
     """Choose the effective compose record for a Flow-targeted Docker slot.
 
@@ -4127,9 +4239,10 @@ def build_star_from_roles(core,
         if is_explicit_docker:
             created_docker += 1
         if is_docker_node and node_name not in docker_by_name:
-            flow_rec = _flow_flag_record_from_host_metadata(hdata)
-            base_rec = flow_rec or _standard_docker_compose_record()
-            overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+            pivot_rec = _pivot_access_record_from_host_metadata(hdata, node_name)
+            flow_rec = None if pivot_rec else _flow_flag_record_from_host_metadata(hdata)
+            base_rec = pivot_rec or flow_rec or _standard_docker_compose_record()
+            overlay = None if pivot_rec else _flow_flag_artifacts_overlay_from_host_metadata(hdata)
             docker_by_name[node_name] = {**base_rec, **overlay} if overlay else base_rec
             _apply_mount_overlays(docker_by_name.get(node_name))
 
@@ -4950,8 +5063,14 @@ def _try_build_segmented_topology_from_preview(
             try:
                 created_docker += 1
                 if name not in docker_by_name:
-                    flow_rec = _flow_flag_record_from_host_metadata(hdata)
-                    if flow_rec:
+                    # A node the pivot-access plan added answers first: it must
+                    # run the SSH image the plan pinned, not the standard
+                    # template, which serves nothing to pivot through.
+                    pivot_rec = _pivot_access_record_from_host_metadata(hdata, name)
+                    flow_rec = None if pivot_rec else _flow_flag_record_from_host_metadata(hdata)
+                    if pivot_rec:
+                        docker_by_name[name] = pivot_rec
+                    elif flow_rec:
                         docker_by_name[name] = flow_rec
                     else:
                         base_rec = _standard_docker_compose_record()
@@ -4962,9 +5081,11 @@ def _try_build_segmented_topology_from_preview(
                 pass
 
         if is_docker_node and name not in docker_by_name:
-            flow_rec = _flow_flag_record_from_host_metadata(hdata)
-            base_rec = flow_rec or _standard_docker_compose_record()
-            overlay = _flow_flag_artifacts_overlay_from_host_metadata(hdata)
+            pivot_rec = _pivot_access_record_from_host_metadata(hdata, name)
+            flow_rec = None if pivot_rec else _flow_flag_record_from_host_metadata(hdata)
+            base_rec = pivot_rec or flow_rec or _standard_docker_compose_record()
+            # A provider node carries no Flow artifacts, so nothing overlays it.
+            overlay = None if pivot_rec else _flow_flag_artifacts_overlay_from_host_metadata(hdata)
             docker_by_name[name] = {**base_rec, **overlay} if overlay else base_rec
             _apply_mount_overlays(docker_by_name.get(name))
 

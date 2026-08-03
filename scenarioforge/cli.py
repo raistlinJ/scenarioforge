@@ -1835,8 +1835,9 @@ def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
 def _warn_unmaterialised_pivot_providers(summary: Any) -> list[str]:
     """Warn about walled-off subnets left with no usable pivot.
 
-    A provider marked `added` has no node behind it yet: nothing creates the
-    container or compose entry, so the subnet is reachable only if something
+    A provider marked `added` normally has a node behind it: the plan allocates
+    one into the topology. When it does not -- no switch serves the subnet, or
+    the subnet has no address left -- the subnet is reachable only if something
     else in it happens to serve a port. Silence here would mean an unsolvable
     challenge discovered by a participant, so it is logged at WARNING, which the
     run's latest.errors artifact also captures.
@@ -1856,8 +1857,8 @@ def _warn_unmaterialised_pivot_providers(summary: Any) -> list[str]:
     stranded = [s for s in stranded if s]
     if stranded:
         logging.warning(
-            'Pivot access: %d subnet(s) have no usable pivot because their provider '
-            'node is not created yet (%s). Nothing in those subnets serves a '
+            'Pivot access: %d subnet(s) have no usable pivot because a provider node '
+            'could not be placed in them (%s). Nothing in those subnets serves a '
             'vulnerability, flag-node-generator or SSH, so a participant cannot get '
             'in. Give one of their nodes a reachable service, or disable '
             'accessible_by_pivot for this scenario.',
@@ -2132,12 +2133,32 @@ def _validate_flow_state_for_cli_execute(
     return True, None, []
 
 
+def _pivot_provider_hosts(full_prev: Any) -> list[dict[str, Any]]:
+    """Preview hosts that exist only because pivot access needed a provider.
+
+    They are excluded from every count that describes the author's plan. The
+    parity check compares a saved preview against one rebuilt from the XML, and
+    the XML says nothing about a node this feature decided to add -- counting it
+    would make every pivot-enabled scenario fail preflight as "does not match".
+    """
+    if not isinstance(full_prev, dict):
+        return []
+    try:
+        from .utils.pivot_access import is_pivot_provider_host
+    except Exception:
+        return []
+    hosts = full_prev.get('hosts')
+    if not isinstance(hosts, list):
+        return []
+    return [h for h in hosts if isinstance(h, dict) and is_pivot_provider_host(h)]
+
+
 def _plan_summary_from_full_preview(full_prev: dict[str, Any]) -> dict[str, Any]:
     try:
         role_counts = full_prev.get('role_counts') or {}
     except Exception:
         role_counts = {}
-    hosts_total = len(full_prev.get('hosts') or [])
+    hosts_total = len(full_prev.get('hosts') or []) - len(_pivot_provider_hosts(full_prev))
     routers_planned = len(full_prev.get('routers') or [])
     switches = full_prev.get('switches_detail') or []
     services_plan = full_prev.get('services_plan') or full_prev.get('services_preview') or {}
@@ -3634,24 +3655,57 @@ def _seg_accessible_by_pivot(args: Any) -> bool:
         return False
 
 
+def _preview_host_names(preview_hosts: Any) -> dict[int, str]:
+    """node_id -> name straight from the plan.
+
+    The plan is the only reliable source for this. `core.api.grpc.wrappers.Session`
+    has no `get_node` on the CORE builds this runs against, so asking the live
+    session for node names yields nothing at all -- which silently emptied every
+    lookup keyed on them.
+    """
+    out: dict[int, str] = {}
+    for host in preview_hosts or []:
+        if not isinstance(host, dict):
+            continue
+        try:
+            node_id = int(host.get('node_id'))
+        except Exception:
+            continue
+        name = str(host.get('name') or '').strip()
+        if name:
+            out[node_id] = name
+    return out
+
+
 def _seg_pivot_entry_points(
     docker_by_name: Any,
     hosts: Any,
     session: Any = None,
+    preview_hosts: Any = None,
 ) -> dict[int, list]:
     """What each node already offers that a participant could pivot through.
 
-    Lets the planner prefer a real challenge artifact over a plain SSH box. Best
-    effort: anything that cannot be resolved simply leaves that node out, and
-    the planner falls back to SSH.
+    Lets the planner prefer a real challenge artifact over a plain SSH box, and
+    lets it recognise a provider node an earlier plan already added instead of
+    adding a second one. Best effort: anything that cannot be resolved simply
+    leaves that node out, and the planner falls back to SSH.
     """
     from .utils.pivot_access import (
         PivotEntry, ENTRY_VULNERABILITY, ENTRY_FLAG_GEN, ENTRY_SSH,
+        provisioned_entry_points,
     )
     from .planning.node_plan import challenge_slot_kind
 
     out: dict[int, list] = {}
-    name_to_id: dict[str, int] = {}
+    # A node the plan added is recognised from the plan itself, with no name
+    # resolution in the way: it is the one entry point that must never be lost,
+    # because losing it means adding another provider for a subnet that has one.
+    for node_id, entries in provisioned_entry_points(preview_hosts or []).items():
+        out.setdefault(int(node_id), []).extend(entries)
+
+    name_to_id: dict[str, int] = {
+        name: node_id for node_id, name in _preview_host_names(preview_hosts).items()
+    }
     for host in hosts or []:
         try:
             node_id = int(getattr(host, 'node_id'))
@@ -3684,6 +3738,17 @@ def _seg_pivot_entry_points(
         except Exception:
             ports = []
         if not ports:
+            continue
+        # A node this feature added serves SSH and nothing else. Left to the
+        # rule below it would be reported as a vulnerability the scenario never
+        # contains, and the report would read as though the subnet was already
+        # solvable rather than made so.
+        if str(record.get('PivotAccessProvider') or '').strip():
+            out.setdefault(node_id, []).extend(
+                PivotEntry(kind=ENTRY_SSH, port=port, protocol='tcp',
+                           label='SSH', provisioned=True)
+                for port in sorted(set(ports))
+            )
             continue
         # A slot's role says which kind of challenge it holds; a plain Docker
         # node running a compose stack is treated as a vulnerability entry.
@@ -6616,7 +6681,16 @@ def main():
             hosts_preview = preview_full.get('hosts') or []
             if isinstance(hosts_preview, list):
                 preview_role_counts: Dict[str, int] = {}
+                # A pivot provider is left out so it never widens the challenge
+                # slot range: slots are numbered positionally over this count,
+                # and a vulnerability landing on the provider's slot would
+                # replace the SSH image the subnet's only way in depends on.
+                pivot_provider_ids = {
+                    h.get('node_id') for h in _pivot_provider_hosts(preview_full)
+                }
                 for h in hosts_preview:
+                    if isinstance(h, dict) and h.get('node_id') in pivot_provider_ids:
+                        continue
                     role = (h.get('role') if isinstance(h, dict) else None) or 'Host'
                     preview_role_counts[role] = preview_role_counts.get(role, 0) + 1
                 if preview_role_counts:
@@ -7275,6 +7349,21 @@ def main():
         except Exception as _stale_exc:
             logging.debug('Leftover container cleanup skipped: %s', _stale_exc)
 
+    # A pivot provider node is created by the topology build, and CORE starts a
+    # Docker node the moment it is added -- so its image has to be on this host
+    # before the build, not when segmentation gets around to reporting it. The
+    # plan carries the providers because that is where they were decided.
+    try:
+        if isinstance(preview_full, dict):
+            _pivot_images = _ensure_pivot_provider_images(preview_full.get('segmentation_preview'))
+            if _pivot_images:
+                logging.info(
+                    "Pivot provider images ready: %s",
+                    ', '.join(f'{image}={outcome}' for image, outcome in sorted(_pivot_images.items())),
+                )
+    except Exception as exc_img:
+        logging.warning("Pivot image preparation failed: %s", exc_img)
+
     # Always build directly from current scenario plan (phased path removed)
     logging.info("PHASE: Building topology")
     routers = []
@@ -7477,7 +7566,9 @@ def main():
                         docker_by_name if isinstance(docker_by_name, dict) else None,
                         hosts,
                         session,
+                        preview_hosts=(preview_full or {}).get('hosts'),
                     ),
+                    pivot_node_names=_preview_host_names((preview_full or {}).get('hosts')),
                 )
                 logging.info("Applied segmentation rules: %d", len(seg_summary.get("rules", [])))
                 try:

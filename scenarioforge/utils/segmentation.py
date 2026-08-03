@@ -427,6 +427,7 @@ def _apply_pivot_access(
     session: object,
     lookup_node_name,
     entry_points: Optional[Dict[int, object]] = None,
+    node_names: Optional[Dict[int, str]] = None,
     ssh_port: int = 22,
 ) -> None:
     """Guarantee each walled-off subnet keeps one reachable pivot provider.
@@ -441,14 +442,19 @@ def _apply_pivot_access(
     if not isinstance(existing, list):
         return
 
-    node_names: Dict[int, str] = {}
+    # Names come from the plan first. The live session cannot answer for them on
+    # the CORE builds this runs against, so a provider would otherwise be
+    # reported as "node-14" in the summary and in every guide built from it.
+    resolved_names: Dict[int, str] = {int(k): str(v) for k, v in (node_names or {}).items()}
     for node in list(hosts or []) + list(routers or []):
+        if int(node.node_id) in resolved_names:
+            continue
         try:
             name = lookup_node_name(int(node.node_id))
         except Exception:
             name = None
         if name:
-            node_names[int(node.node_id)] = str(name)
+            resolved_names[int(node.node_id)] = str(name)
 
     router_ids = []
     for router in routers or []:
@@ -460,7 +466,7 @@ def _apply_pivot_access(
     plan = plan_pivot_access(
         existing,
         hosts,
-        node_names=node_names,
+        node_names=resolved_names,
         entry_points=entry_points,
         routers=routers,
         router_ids=router_ids,
@@ -537,6 +543,7 @@ def plan_and_apply_segmentation(
     docker_nodes: Optional[Dict[str, Dict[str, object]]] = None,
     accessible_by_pivot: bool = False,
     pivot_entry_points: Optional[Dict[int, object]] = None,
+    pivot_node_names: Optional[Dict[int, str]] = None,
     pivot_ssh_port: int = 22,
 ) -> Dict[str, object]:
     """
@@ -1434,6 +1441,7 @@ print('[segmentation] applied', len(cmds), 'commands')
                 session=session,
                 lookup_node_name=_lookup_node_name,
                 entry_points=pivot_entry_points,
+                node_names=pivot_node_names,
                 ssh_port=pivot_ssh_port,
             )
         except Exception as exc:

@@ -23275,6 +23275,14 @@ def _flow_preview_entry_points(preview: Any) -> dict[int, list]:
     for node_id, names in _names_by_node('flag_node_generators_by_node', 'flag_generators_preview').items():
         for name in names:
             _add(node_id, ENTRY_FLAG_GEN, name)
+
+    # Provider nodes the plan already added are entry points too. Without them
+    # Flow re-decides the subnet as needing a node, and the chain row loses the
+    # provider it should be naming.
+    from scenarioforge.utils.pivot_access import provisioned_entry_points
+
+    for node_id, provisioned in provisioned_entry_points(preview.get('hosts') or []).items():
+        entries.setdefault(int(node_id), []).extend(provisioned)
     return entries
 
 

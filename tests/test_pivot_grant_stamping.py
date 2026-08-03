@@ -43,12 +43,12 @@ def _assignments():
 
 def test_nothing_is_stamped_when_the_provider_has_to_be_added():
     # With no reusable offering in the subnet the provider is an added Docker
-    # SSH node, which has no address and is nobody's chain step, so no row can
-    # claim it. See test_flow_time_cannot_yet_reuse_a_provider for why this is
-    # the common case today.
+    # SSH node. It is named from the subnet so the plan can create it and a
+    # guide can refer to it, but it carries no challenge, so it is nobody's
+    # chain step and no row can claim it.
     out = ab._flow_stamp_pivot_grants(_assignments(), _chain(), _preview())
     assert 'pivot_grants' not in out[0]
-    assert out[0]['pivot_decisions'][0]['provider_node'] == ''
+    assert out[0]['pivot_decisions'][0]['provider_node'] == 'pivot-172-21-240-0'
 
 
 def test_flow_time_supplies_offerings_so_a_provider_can_be_reused():

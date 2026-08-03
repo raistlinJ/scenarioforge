@@ -105,7 +105,13 @@ Provider selection is hybrid and prefers what already exists:
 2. a node already offering a **flag-node-generator**;
 3. a node already running **SSH**;
 4. otherwise a **Docker SSH node is added**, built from `PIVOT_SSH_IMAGE`
-   (override with `CORETG_PIVOT_SSH_IMAGE`).
+   (override with `CORETG_PIVOT_SSH_IMAGE`) and reachable on `PIVOT_SSH_PORT`
+   (override with `CORETG_PIVOT_SSH_PORT`).
+
+The added provider's port is **2222, not 22**, because the default image is a
+rootless sshd. The port follows the image: it is what the allow rule opens and
+what the participant connects to, so a site pointing `CORETG_PIVOT_SSH_IMAGE` at
+its own mirror sets `CORETG_PIVOT_SSH_PORT` alongside it.
 
 There is deliberately no "turn SSH on for whatever Docker node is already
 there" tier. Node images are built offline-safe with **no package manager** —
@@ -120,13 +126,10 @@ escape, not a pivot. That excludes the routers too, so a subnet whose hosts are
 all unfilled challenge slots has to grow a node rather than borrow the router
 already sitting in it.
 
-Steps 4-5 deliberately skip unfilled challenge slots. Consuming one would
+Step 4 deliberately skips unfilled challenge slots. Consuming one would
 silently spend capacity the author allocated for challenges, so **a provider
 never counts against configured vulnerability or flag-node-generator slot
 counts** — anything placed for pivot access is additive.
-
-The planner records the required image on the provider (`image` in the
-`pivot_access` report).
 
 **Provider selection happens at plan time**, not at execute time. The topology
 is built well before the segmentation phase runs, so a provider that has to be
@@ -135,14 +138,46 @@ therefore computes the plan and publishes it as
 `segmentation_preview.pivot_access`, making the requirement — including how many
 nodes must be created and from which image — visible before anything is built.
 
-> **Not yet implemented:** nothing consumes `added: true` providers. Such a
-> provider is reported with no `node_id` and no address, and no container or
-> compose entry is created for it, so a subnet that serves nothing still ends up
-> without a usable pivot. Subnets with a reusable provider (tiers 1-3) are
-> unaffected and work end to end.
+An `added` provider is then **materialised into the same plan**: the node is
+allocated an id above every existing node, given a free address inside the
+walled-off subnet, linked to that subnet's switch and router, and marked with
+the image it must boot. From there it is an ordinary Docker host in the preview
+payload and the builder creates it like any other — except that its compose
+entry is pinned to the provider image rather than the standard node template,
+which serves nothing to pivot through. Its address is what the allow rules then
+open, so `pivot_access` reports a `node_id`, a `node_name` and an `address` for
+every provider.
 
-**Docker nodes never need the internet at execute time.** Before a run uses a
-provider image, execute resolves it in this order:
+The node is allocated **above every existing id** deliberately. Challenge slots
+are numbered positionally over the sorted host list, so an id in the middle
+would shift every later host's slot and hand a challenge to the wrong node. For
+the same reason the provider is excluded from the role counts that produce the
+slot range, and from the plan-parity totals execute compares against the XML —
+the XML never asked for this node, so counting it would make every
+pivot-enabled scenario fail preflight as "does not match".
+
+A later plan over a topology that already carries a provider **reuses that
+node** rather than adding a second one: the materialiser leaves a marker on the
+node, and `provisioned_entry_points` turns it back into an SSH entry point. Such
+a provider keeps reporting as `added: true` — the node exists only because of
+this feature, and calling it *reused* would credit the scenario with a node it
+never asked for.
+
+That recognition reads the **plan**, never the live CORE session.
+`core.api.grpc.wrappers.Session` has no `get_node` on the CORE builds this runs
+against, so a lookup keyed on session node names comes back empty and the
+provider goes unrecognised — which is exactly how a live run ended up adding a
+second provider per subnet. Node names and provider identity therefore come
+from the preview payload.
+
+When a provider cannot be placed at all — no switch serves the subnet, or the
+subnet has no free address — it is left in `unresolved` with the reason, and
+execute logs a WARNING naming the affected subnets rather than letting a
+participant discover an unsolvable challenge.
+
+**Docker nodes never need the internet at execute time.** CORE starts a Docker
+node the moment it is added, so execute resolves every provider image **before
+the topology is built**, in this order:
 
 1. **already present** — `docker image inspect` succeeds and nothing is pulled;
 2. **pre-seeded tarball** — `<CORETG_PIVOT_IMAGE_CACHE_DIR>/<safe-name>.tar`
@@ -159,9 +194,11 @@ and does not fail the run.
 The resulting allow rules are appended to `segmentation_summary.json` tagged
 `reason: pivot-access`, so they are distinguishable from the allow rules written
 for traffic flows, and a `pivot_access` block records which provider was chosen
-for each subnet and how. FORWARD allows are installed only on the routers that
-actually enforce the block, not on every router; INPUT lands on the provider,
-where a default-deny policy would otherwise drop the packet.
+for each subnet and how. FORWARD allows are installed on **every** router, not
+only the one enforcing the block: segmentation leaves every router with
+`-P FORWARD DROP`, so a packet has to survive each hop and the planner cannot
+know the route. INPUT lands on the provider, where a default-deny policy would
+otherwise drop the packet on arrival.
 
 The toggle is **off by default**, so an existing scenario keeps the exact
 segmentation it was authored with.

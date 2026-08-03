@@ -37,6 +37,7 @@ from .node_plan import (  # internal normalization helper
     is_docker_backed_role,
 )
 from .preview_validation import validate_full_preview
+from ..utils.pivot_access import PIVOT_PROVIDER_METADATA_KEY, allow_rules_for_provider
 
 
 @dataclass
@@ -353,6 +354,165 @@ def _derive_r2s_policy_from_items(routing_items: Optional[List[Any]]) -> Optiona
             return {'mode': 'Exact', 'target_per_router': edges_val}
         return {'mode': m}
     return None
+
+
+def _materialise_pivot_providers(
+    plan: Any,
+    *,
+    host_nodes: List[PreviewNode],
+    host_map: Dict[int, PreviewNode],
+    host_router_map: Dict[int, int],
+    switches_detail: List[Dict[str, Any]],
+    switch_nodes: List[PreviewNode],
+    router_nodes: List[PreviewNode],
+    assigned_ips: Set[str],
+) -> List[PreviewNode]:
+    """Create the nodes a pivot-access plan says have to be added.
+
+    A provider the planner marked `added` is a requirement, not a node: it has
+    no id, no address and nothing to run. This turns each one into a real
+    Docker host in the plan -- addressed inside the walled-off subnet, hung off
+    that subnet's switch, and carrying the image it must boot -- then writes the
+    allow rules that were impossible before it had an address.
+
+    The node is appended with an id above every existing one on purpose. Slot
+    numbering downstream is positional over the sorted host list, so an id in
+    the middle would shift every later host's slot and hand a challenge to the
+    wrong node.
+
+    Returns the nodes created. A provider whose subnet has no switch to attach
+    to is left alone and reported in `plan.unresolved`, which is what the
+    execute-time warning then picks up.
+    """
+    added = [p for p in getattr(plan, 'providers', []) if getattr(p, 'added', False) and p.node_id is None]
+    if not added:
+        return []
+
+    used_ids: Set[int] = set()
+    for group in (host_nodes, router_nodes, switch_nodes):
+        for node in group or []:
+            try:
+                used_ids.add(int(node.node_id))
+            except Exception:
+                continue
+    used_names = {str(node.name) for group in (host_nodes, router_nodes, switch_nodes) for node in group or []}
+
+    def _switch_for(subnet: str) -> Optional[Dict[str, Any]]:
+        try:
+            wanted = ipaddress.ip_network(str(subnet), strict=False)
+        except Exception:
+            return None
+        for detail in switches_detail or []:
+            if not isinstance(detail, dict):
+                continue
+            try:
+                lan = ipaddress.ip_network(str(detail.get('lan_subnet') or ''), strict=False)
+            except Exception:
+                continue
+            if lan == wanted:
+                return detail
+        return None
+
+    def _free_address(detail: Dict[str, Any], net: Any) -> Optional[str]:
+        taken: Set[str] = set()
+        for key in ('router_ip', 'switch_ip'):
+            raw = str(detail.get(key) or '').split('/')[0].strip()
+            if raw:
+                taken.add(raw)
+        host_if_ips = detail.get('host_if_ips')
+        if isinstance(host_if_ips, dict):
+            for value in host_if_ips.values():
+                raw = str(value or '').split('/')[0].strip()
+                if raw:
+                    taken.add(raw)
+        taken |= {str(ip) for ip in assigned_ips}
+        for candidate in net.hosts():
+            if str(candidate) not in taken:
+                return f"{candidate}/{net.prefixlen}"
+        return None
+
+    created: List[PreviewNode] = []
+    for provider in added:
+        detail = _switch_for(provider.subnet)
+        if detail is None:
+            plan.unresolved.append({
+                'subnet': provider.subnet,
+                'blocked_from': list(provider.blocked_from),
+                'reason': (
+                    'no switch serves this subnet in the planned topology, so a provider '
+                    'node has nowhere to attach'
+                ),
+            })
+            continue
+        try:
+            net = ipaddress.ip_network(str(detail.get('lan_subnet')), strict=False)
+        except Exception:
+            continue
+        address = _free_address(detail, net)
+        if not address:
+            plan.unresolved.append({
+                'subnet': provider.subnet,
+                'blocked_from': list(provider.blocked_from),
+                'reason': 'no free address left in this subnet for a provider node',
+            })
+            continue
+
+        node_id = (max(used_ids) + 1) if used_ids else 1
+        used_ids.add(node_id)
+        name = provider.node_name or f"pivot-{node_id}"
+        while name in used_names:
+            name = f"{name}-{node_id}"
+        used_names.add(name)
+
+        node = PreviewNode(
+            node_id=node_id,
+            name=name,
+            role='Docker',
+            kind='host',
+            ip4=address,
+            metadata={
+                # Read back by `provisioned_entry_points`, so a later plan over
+                # this topology reuses this node instead of adding another, and
+                # by the builder, which pins the container to this image.
+                PIVOT_PROVIDER_METADATA_KEY: {
+                    'subnet': provider.subnet,
+                    'image': provider.image,
+                    'port': int(provider.entry.port),
+                    'protocol': provider.entry.protocol,
+                    'kind': provider.entry.kind,
+                    'label': provider.entry.label or 'SSH',
+                    # Additive by construction: this node is created on top of
+                    # the plan, never taken from a configured slot.
+                    'consumes_slot': False,
+                },
+            },
+        )
+        host_nodes.append(node)
+        host_map[node_id] = node
+        created.append(node)
+        assigned_ips.add(address.split('/')[0])
+
+        router_id = detail.get('router_id')
+        if router_id is not None:
+            try:
+                host_router_map[node_id] = int(router_id)
+            except Exception:
+                pass
+        hosts_list = detail.setdefault('hosts', [])
+        if isinstance(hosts_list, list):
+            hosts_list.append(node_id)
+        host_if_ips = detail.setdefault('host_if_ips', {})
+        if isinstance(host_if_ips, dict):
+            host_if_ips[node_id] = address
+
+        provider.node_id = node_id
+        provider.node_name = name
+        provider.address = address.split('/')[0]
+        plan.allow_rules.extend(
+            allow_rules_for_provider(provider, router_ids=plan.router_ids)
+        )
+
+    return created
 
 
 def build_full_preview(
@@ -1562,11 +1722,36 @@ def build_full_preview(
             _names = {int(getattr(n, 'node_id')): str(getattr(n, 'name', '') or '')
                       for n in list(host_nodes or []) + list(router_nodes or [])
                       if getattr(n, 'node_id', None) is not None}
+            # Without this the planner sees no offerings at all and every
+            # walled-off subnet needs a node added -- including the ones whose
+            # challenge is already reachable. Adding a container per subnet that
+            # did not need one is the expensive way to get that wrong.
+            from .pivot_entry_points import entry_points_for_plan as _pivot_entries
+            _entry_points = _pivot_entries(
+                vulnerabilities_by_node={n.node_id: n.vulnerabilities
+                                         for n in host_nodes if n.vulnerabilities},
+                flag_generators_by_node=nodegen_assignments,
+                hosts=host_nodes,
+            )
             _pivot_plan = _plan_pivot(
                 seg_preview.get('rules') or [],
                 _as_nodeinfo(host_nodes),
                 routers=_as_nodeinfo(router_nodes),
                 node_names=_names,
+                entry_points=_entry_points,
+            )
+            # A provider that has to be added is created here, while nodes are
+            # still being planned. After this it is an ordinary host in the
+            # payload and the builder creates it like any other.
+            _materialise_pivot_providers(
+                _pivot_plan,
+                host_nodes=host_nodes,
+                host_map=host_map,
+                host_router_map=host_router_map,
+                switches_detail=switches_detail,
+                switch_nodes=switch_nodes,
+                router_nodes=router_nodes,
+                assigned_ips=assigned_ips,
             )
             seg_preview['pivot_access'] = _pivot_plan.as_dict()
         except Exception as _exc:
