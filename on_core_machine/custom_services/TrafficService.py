@@ -66,7 +66,13 @@ class TrafficService(CoreService):
         # per node and runs every flow for that node in a single process.
         runtime_dir=/tmp/coretg_traffic
         mkdir -p "$runtime_dir"
-        log="$runtime_dir/output.txt"
+        # Every path here is per-node. CORE vnodes share the host's /tmp (they
+        # get a network namespace, not a mount namespace), so a fixed filename
+        # means each vnode's agent overwrites the last one's stats and log --
+        # leaving one file that describes whichever node happened to write last.
+        # Docker nodes have their own /tmp and are unaffected either way.
+        log="$runtime_dir/output_$NODE_ID.txt"
+        stats="$runtime_dir/stats_$NODE_ID.json"
         config=/tmp/traffic/traffic_"$NODE_ID".json
 
         if [ ! -f "$config" ]; then
@@ -101,14 +107,14 @@ class TrafficService(CoreService):
 
         # Copy locally so a running flow does not depend on the shared
         # directory surviving the rest of the run.
-        cp "$agent" "$runtime_dir/traffic-agent" 2>/dev/null || true
-        chmod +x "$runtime_dir/traffic-agent" 2>/dev/null || true
-        [ -x "$runtime_dir/traffic-agent" ] || runtime_dir_agent="$agent"
-        run_agent="${runtime_dir_agent:-$runtime_dir/traffic-agent}"
+        cp "$agent" "$runtime_dir/traffic-agent-$NODE_ID" 2>/dev/null || true
+        chmod +x "$runtime_dir/traffic-agent-$NODE_ID" 2>/dev/null || true
+        [ -x "$runtime_dir/traffic-agent-$NODE_ID" ] || runtime_dir_agent="$agent"
+        run_agent="${runtime_dir_agent:-$runtime_dir/traffic-agent-$NODE_ID}"
 
         echo "running: $run_agent -config $config" >> "$log"
         "$run_agent" -config "$config" \\
-            -stats "$runtime_dir/stats.json" >> "$log" 2>&1 &
+            -stats "$stats" >> "$log" 2>&1 &
         </%text>
         """
 
