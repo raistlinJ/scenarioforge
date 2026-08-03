@@ -9,6 +9,7 @@ from ..types import NodeInfo, SegmentationInfo
 from .services import ensure_service
 from ..plugins import segmentation as seg_plugins
 from .vuln_process import extract_compose_ports
+from .pivot_access import plan_pivot_access
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +418,101 @@ def _write_idempotent_iptables_script(script_path: str, commands: List[str], lab
         pass
 
 
+def _apply_pivot_access(
+    *,
+    summary: Dict[str, object],
+    hosts: List[NodeInfo],
+    routers: List[NodeInfo],
+    out_dir: str,
+    session: object,
+    lookup_node_name,
+    entry_points: Optional[Dict[int, object]] = None,
+    ssh_port: int = 22,
+) -> None:
+    """Guarantee each walled-off subnet keeps one reachable pivot provider.
+
+    Runs after the block rules are planned, because what needs opening is
+    decided by what this run actually closed. The allow rules are appended to
+    the same summary so `segmentation_summary.json` stays the single description
+    of the enforced policy, and each one is tagged `reason: pivot-access` so it
+    is distinguishable from the allow rules written for traffic flows.
+    """
+    existing = summary.get("rules")
+    if not isinstance(existing, list):
+        return
+
+    node_names: Dict[int, str] = {}
+    for node in list(hosts or []) + list(routers or []):
+        try:
+            name = lookup_node_name(int(node.node_id))
+        except Exception:
+            name = None
+        if name:
+            node_names[int(node.node_id)] = str(name)
+
+    router_ids = []
+    for router in routers or []:
+        try:
+            router_ids.append(int(router.node_id))
+        except Exception:
+            continue
+
+    plan = plan_pivot_access(
+        existing,
+        hosts,
+        node_names=node_names,
+        entry_points=entry_points,
+        routers=routers,
+        router_ids=router_ids,
+        ssh_port=int(ssh_port),
+    )
+    if not plan.providers:
+        return
+
+    # A provider that only needs SSH turned on gets the service enabled here;
+    # one that must be added is reported for the caller to materialize, since
+    # this planner cannot create nodes.
+    for provider in plan.services_to_enable:
+        if provider.node_id is None or session is None:
+            continue
+        try:
+            ensure_service(session, int(provider.node_id), "SSH")
+        except Exception as exc:
+            logger.warning("Pivot access: could not enable SSH on node %s: %s",
+                           provider.node_id, exc)
+
+    counters: Dict[Tuple[int, str], int] = {}
+    commands_by_node: Dict[int, List[str]] = {}
+    for entry in plan.allow_rules:
+        rule = entry.get("rule") or {}
+        node_id = entry.get("node_id")
+        if node_id is None:
+            continue
+        chain = str(rule.get("chain") or "FORWARD").upper()
+        proto = str(rule.get("proto") or "tcp").lower()
+        src = str(rule.get("src") or "0.0.0.0/0")
+        dst = str(rule.get("dst") or "")
+        port = rule.get("port")
+        if not dst or not port:
+            continue
+        commands_by_node.setdefault(int(node_id), []).append(
+            f"iptables -I {chain} 1 -p {proto} -s {src} -d {dst} --dport {int(port)} -j ACCEPT"
+        )
+        existing.append(entry)
+
+    for node_id, commands in commands_by_node.items():
+        script_path = _next_segmentation_script_path(out_dir, int(node_id), "pivot", counters)
+        _write_idempotent_iptables_script(script_path, commands, f"pivot-access:{node_id}")
+
+    summary["pivot_access"] = plan.as_dict()
+    logger.info(
+        "Pivot access: %d provider(s) across %d walled-off subnet(s) (%d reused, %d need SSH, %d to add)",
+        len(plan.providers), len(plan.providers),
+        sum(1 for p in plan.providers if p.reused),
+        len(plan.services_to_enable), len(plan.added_nodes),
+    )
+
+
 def plan_and_apply_segmentation(
     session: object,
     routers: List[NodeInfo],
@@ -428,12 +524,22 @@ def plan_and_apply_segmentation(
     include_hosts: bool = False,
     allow_docker_ports: bool = False,
     docker_nodes: Optional[Dict[str, Dict[str, object]]] = None,
+    accessible_by_pivot: bool = False,
+    pivot_entry_points: Optional[Dict[int, object]] = None,
+    pivot_ssh_port: int = 22,
 ) -> Dict[str, object]:
     """
     Create a number of segmentation "slots" based on density and assign selected services by factor.
     Adds and configures chosen services on nodes. Generates simple iptables scripts to enforce policies.
     When allow_docker_ports is True, host-level firewall scripts automatically add INPUT accept rules
     for container ports defined by docker-compose records associated with the host (best-effort).
+
+    When accessible_by_pivot is True, every subnet this planner walls off is
+    guaranteed a reachable *provider* -- a node inside it exposing a
+    vulnerability, a flag-node-generator, or SSH through the boundary. Without
+    it a subnet can end up with no way in at all, which makes any challenge
+    inside it unsolvable. Providers never consume challenge-slot capacity; see
+    `pivot_access`.
 
     Returns a summary dictionary with planned rules per node.
     """
@@ -1306,6 +1412,21 @@ print('[segmentation] applied', len(cmds), 'commands')
                         pass
                 # Reset allow_services for next iteration without leaking previous values
                 allow_services = []
+
+    if accessible_by_pivot:
+        try:
+            _apply_pivot_access(
+                summary=summary,
+                hosts=hosts,
+                routers=routers,
+                out_dir=out_dir,
+                session=session,
+                lookup_node_name=_lookup_node_name,
+                entry_points=pivot_entry_points,
+                ssh_port=pivot_ssh_port,
+            )
+        except Exception as exc:
+            logger.warning("Pivot access planning failed: %s", exc)
 
     # Summary logging similar to traffic
     try:

@@ -32193,7 +32193,7 @@ def _prepare_payload_for_index(payload: Optional[Dict[str, Any]], *, user: Optio
         'Traffic': {'density': 0.5},
         'Vulnerabilities': {'density': 0.5, 'flag_type': 'text'},
         'Flag Node Generators': {'density': 0.5},
-        'Segmentation': {'density': 0.5},
+        'Segmentation': {'density': 0.5, 'accessible_by_pivot': False},
         'HITL': {},
     }
 
@@ -36649,6 +36649,13 @@ def _parse_scenario_editor(se):
             entry["density"] = float(dens) if dens is not None else 0.5
         if name == "Vulnerabilities":
             entry["flag_type"] = (sec.get("flag_type") or "text").strip() or "text"
+        if name == "Segmentation":
+            raw_pivot = ""
+            for attr in ("accessible_by_pivot", "accessibleByPivot", "pivot_access"):
+                raw_pivot = (sec.get(attr) or "").strip()
+                if raw_pivot:
+                    break
+            entry["accessible_by_pivot"] = raw_pivot.lower() in ("1", "true", "yes", "on")
         for item in sec.findall("item"):
             d = {
                 "selected": item.get("selected", "Random"),
@@ -37119,6 +37126,11 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
             items_list = sec.get("items", []) or []
             if name == "Vulnerabilities":
                 sec_el.set("flag_type", str(sec.get("flag_type") or "text"))
+            if name == "Segmentation":
+                # Only written when on, so a scenario that never used the toggle
+                # keeps the exact section markup it had before.
+                if _coerce_bool(sec.get("accessible_by_pivot")):
+                    sec_el.set("accessible_by_pivot", "true")
             weight_rows = [it for it in items_list if (it.get('v_metric') or (it.get('selected')=='Specific' and name in {'Vulnerabilities', 'Flag Node Generators'}) or 'Weight') == 'Weight']
             count_rows = [it for it in items_list if (it.get('v_metric') == 'Count') or (name in {'Vulnerabilities', 'Flag Node Generators'} and it.get('selected') == 'Specific')]
             weight_sum = sum(float(it.get('factor', 0) or 0) for it in weight_rows) if weight_rows else 0.0
