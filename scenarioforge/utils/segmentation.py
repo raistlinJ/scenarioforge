@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import os
 import ipaddress
 import random
@@ -477,6 +478,24 @@ def write_segmentation_script(script_path: str, spec: Dict[str, object]) -> bool
     except Exception as exc:
         logger.debug("Failed to write policy script %s: %s", script_path, exc)
         return False
+
+
+def flow_draw(flow: Dict[str, object], salt: str) -> float:
+    """A stable [0,1) draw for one flow, so a decision about it never wavers.
+
+    These decisions -- widen an allow rule to the whole subnet, port-forward this
+    flow -- used to come from `random.random()`, which meant the preview and the
+    live scenario answered differently for the same flow. Deriving the draw from
+    the flow's own identity keeps the probability semantics while making the
+    answer a property of the flow rather than of when it was asked.
+    """
+    key = "|".join((
+        str(salt),
+        str(flow.get("src_id")), str(flow.get("dst_id")),
+        str(flow.get("protocol")), str(flow.get("dst_port")),
+    ))
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / float(1 << 64)
 
 
 def replay_planned_rules(
@@ -1779,9 +1798,10 @@ def write_allow_rules_for_flows(
             continue
         src_ip = ip_only(src_host.ip4)
 
-        # Randomly widen to subnet on src and/or dst
-        use_src_subnet = random.random() < max(0.0, min(1.0, float(src_subnet_prob)))
-        use_dst_subnet = random.random() < max(0.0, min(1.0, float(dst_subnet_prob)))
+        # Widen to subnet on src and/or dst. The draw is the flow's own, so the
+        # plan and the run reach the same answer for it.
+        use_src_subnet = flow_draw(flow, "allow-src") < max(0.0, min(1.0, float(src_subnet_prob)))
+        use_dst_subnet = flow_draw(flow, "allow-dst") < max(0.0, min(1.0, float(dst_subnet_prob)))
         src_sel = subnet_of(src_host) if use_src_subnet else src_ip
         dst_sel = subnet_of(dst_host) if use_dst_subnet else dst_ip
 
@@ -2366,7 +2386,7 @@ def write_dnat_for_flows(
 
     # For each flow, select and generate DNAT rules with some probability
     for flow in flows:
-        if random.random() > max(0.0, min(1.0, float(dnat_prob))):
+        if flow_draw(flow, "dnat") > max(0.0, min(1.0, float(dnat_prob))):
             continue
         proto = (flow.get("protocol") or "").lower()
         if proto not in ("tcp", "udp"):

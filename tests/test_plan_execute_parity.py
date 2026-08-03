@@ -235,3 +235,162 @@ def test_execute_reads_a_complete_flow_list():
 def test_execute_tolerates_a_plan_without_traffic():
     assert _planned_traffic_flows({}) == []
     assert _planned_traffic_flows({'traffic_scripts_preview': {'preview_flows': []}}) == []
+
+
+# --------------------------------------------------------------------------- #
+# Settings that shape the policy are plan-time inputs
+# --------------------------------------------------------------------------- #
+
+SEGMENTATION_XML = """<?xml version='1.0' encoding='utf-8'?>
+<Scenarios><Scenario name="S"><ScenarioEditor>
+  <section name="Segmentation" density="0.5" {attrs}>
+    <item selected="Firewall" factor="1.000" v_metric="Count" v_count="1" />
+  </section>
+</ScenarioEditor></Scenario></Scenarios>
+"""
+
+
+def _xml(tmp_path, attrs=''):
+    path = tmp_path / 'scenario.xml'
+    path.write_text(SEGMENTATION_XML.format(attrs=attrs), encoding='utf-8')
+    return str(path)
+
+
+class _Args:
+    """A CLI namespace where nothing was passed."""
+
+    scenario = 'S'
+    nat_mode = None
+    seg_include_hosts = None
+    seg_accessible_by_pivot = None
+    dnat_prob = None
+    allow_src_subnet_prob = None
+    allow_dst_subnet_prob = None
+
+    def __init__(self, xml, **overrides):
+        self.xml = xml
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+
+def test_a_scenario_without_settings_gets_the_documented_defaults(tmp_path):
+    from scenarioforge.cli import _seg_settings
+    from scenarioforge.parsers.segmentation import SEGMENTATION_SETTING_DEFAULTS
+
+    assert _seg_settings(_Args(_xml(tmp_path))) == SEGMENTATION_SETTING_DEFAULTS
+
+
+def test_settings_travel_with_the_scenario(tmp_path):
+    from scenarioforge.cli import _seg_settings
+
+    path = _xml(tmp_path, 'nat_mode="MASQUERADE" include_hosts="true" dnat_probability="0.25"')
+    settings = _seg_settings(_Args(path))
+    assert settings['nat_mode'] == 'MASQUERADE'
+    assert settings['include_hosts'] is True
+    assert settings['dnat_probability'] == 0.25
+
+
+def test_a_flag_that_was_passed_overrides_the_scenario(tmp_path):
+    from scenarioforge.cli import _seg_settings
+
+    path = _xml(tmp_path, 'nat_mode="MASQUERADE"')
+    assert _seg_settings(_Args(path, nat_mode='SNAT'))['nat_mode'] == 'SNAT'
+
+
+def test_a_flag_that_was_not_passed_leaves_the_scenario_alone(tmp_path):
+    # The flags default to None so this stays distinguishable from passing the
+    # value that happens to be the default.
+    from scenarioforge.cli import _seg_settings
+
+    path = _xml(tmp_path, 'nat_mode="MASQUERADE" allow_src_subnet_prob="0.9"')
+    settings = _seg_settings(_Args(path))
+    assert settings['nat_mode'] == 'MASQUERADE'
+    assert settings['allow_src_subnet_prob'] == 0.9
+
+
+def test_an_absent_switch_never_turns_a_scenario_setting_off(tmp_path):
+    # A store_true flag only ever turns something on; not passing it is not an
+    # instruction to override a scenario that turns it on.
+    from scenarioforge.cli import _seg_settings
+
+    path = _xml(tmp_path, 'include_hosts="true" accessible_by_pivot="true"')
+    settings = _seg_settings(_Args(path, seg_include_hosts=False, seg_accessible_by_pivot=False))
+    assert settings['include_hosts'] is True
+    assert settings['accessible_by_pivot'] is True
+
+
+def test_the_plan_records_the_settings_it_was_built_with(tmp_path):
+    from scenarioforge.planning.full_preview import build_full_preview
+
+    full = build_full_preview(
+        role_counts={'PC': 4}, routers_planned=2, services_plan={}, vulnerabilities_plan={},
+        r2r_policy=None, r2s_policy={'mode': 'Exact', 'target_per_router': 1},
+        routing_items=None, routing_plan={}, segmentation_density=0.8,
+        segmentation_items=[{'selected': 'Firewall', 'factor': 1.0}],
+        traffic_plan=None, seed=7, ip4_prefix='10.10.0.0/16',
+        segmentation_settings={'nat_mode': 'MASQUERADE', 'dnat_probability': 0.5},
+    )
+    settings = full['segmentation_preview']['settings']
+    assert settings['nat_mode'] == 'MASQUERADE'
+    assert settings['dnat_probability'] == 0.5
+
+
+def test_execute_reads_the_settings_from_the_plan():
+    from scenarioforge.cli import _plan_segmentation_settings
+
+    plan = {'segmentation_preview': {'settings': {'nat_mode': 'MASQUERADE'}}}
+    settings = _plan_segmentation_settings(plan)
+    assert settings['nat_mode'] == 'MASQUERADE'
+    # Filled out, so callers never have to decide what a missing key means.
+    assert settings['allow_src_subnet_prob'] == 0.3
+
+
+def test_a_setting_that_arrives_too_late_is_reported(tmp_path):
+    # Silently ignoring it would let someone pass --nat-mode MASQUERADE and get
+    # SNAT with no indication of why.
+    from scenarioforge.cli import _segmentation_settings_conflicts
+
+    conflicts = _segmentation_settings_conflicts(
+        {'nat_mode': 'SNAT', 'dnat_probability': 0.0},
+        {'nat_mode': 'MASQUERADE', 'dnat_probability': 0.0},
+    )
+    assert len(conflicts) == 1
+    assert 'nat_mode' in conflicts[0] and 'MASQUERADE' in conflicts[0]
+
+
+def test_matching_settings_are_not_reported_as_a_conflict():
+    from scenarioforge.cli import _segmentation_settings_conflicts
+
+    settings = {'nat_mode': 'SNAT', 'allow_src_subnet_prob': 0.3, 'include_hosts': False}
+    assert _segmentation_settings_conflicts(settings, dict(settings)) == []
+
+
+# --------------------------------------------------------------------------- #
+# Per-flow decisions are the flow's, not the moment's
+# --------------------------------------------------------------------------- #
+
+def test_a_flows_draw_is_the_same_every_time_it_is_asked():
+    from scenarioforge.utils.segmentation import flow_draw
+
+    flow = {'src_id': 4, 'dst_id': 9, 'protocol': 'TCP', 'dst_port': 5009}
+    random.seed(1)
+    first = flow_draw(flow, 'dnat')
+    random.seed(999)
+    assert flow_draw(dict(flow), 'dnat') == first
+
+
+def test_different_flows_and_different_questions_draw_independently():
+    from scenarioforge.utils.segmentation import flow_draw
+
+    a = {'src_id': 4, 'dst_id': 9, 'protocol': 'TCP', 'dst_port': 5009}
+    b = {'src_id': 7, 'dst_id': 8, 'protocol': 'TCP', 'dst_port': 5008}
+    assert flow_draw(a, 'dnat') != flow_draw(b, 'dnat')
+    assert flow_draw(a, 'dnat') != flow_draw(a, 'allow-src')
+
+
+def test_a_draw_stays_inside_the_unit_interval():
+    from scenarioforge.utils.segmentation import flow_draw
+
+    for port in range(5000, 5050):
+        value = flow_draw({'src_id': 1, 'dst_id': 2, 'protocol': 'TCP', 'dst_port': port}, 'x')
+        assert 0.0 <= value < 1.0

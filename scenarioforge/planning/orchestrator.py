@@ -234,15 +234,20 @@ def compute_full_plan(
     seg_density, seg_items = parse_segmentation_info(xml_path, scenario)
     segmentation_plan, seg_breakdown = compute_segmentation_plan(seg_density, seg_items, density_base)
     seg_breakdown['raw_items_serialized'] = [{'selected': si.name, 'factor': si.factor} for si in seg_items]
-    # Travels with the plan so the preview -- and through it Flow -- can decide
-    # whether a walled-off subnet's pivot belongs in the chain.
+    # The settings travel with the plan because execute enforces the plan rather
+    # than planning again, so anything that shapes the policy has to be known
+    # here. `accessible_by_pivot` additionally lets the preview -- and through it
+    # Flow -- decide whether a walled-off subnet's pivot belongs in the chain.
     try:
-        from ..parsers.segmentation import parse_segmentation_accessible_by_pivot
-        seg_breakdown['accessible_by_pivot'] = bool(
-            parse_segmentation_accessible_by_pivot(xml_path, scenario)
+        from ..parsers.segmentation import (
+            SEGMENTATION_SETTING_DEFAULTS, parse_segmentation_settings,
         )
+        seg_settings = parse_segmentation_settings(xml_path, scenario)
     except Exception:
-        seg_breakdown['accessible_by_pivot'] = False
+        from ..parsers.segmentation import SEGMENTATION_SETTING_DEFAULTS
+        seg_settings = dict(SEGMENTATION_SETTING_DEFAULTS)
+    seg_breakdown['settings'] = dict(seg_settings)
+    seg_breakdown['accessible_by_pivot'] = bool(seg_settings.get('accessible_by_pivot'))
 
     # --- Pivoting ---
     pivot_density, pivot_items = parse_pivoting_info(xml_path, scenario)

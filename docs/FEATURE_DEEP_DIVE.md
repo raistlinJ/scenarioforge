@@ -115,6 +115,49 @@ Both degrade loudly, never silently. A plan whose rules carry no `script_spec`
 is refused, execute logs why, and the planner runs as it used to — so the run
 succeeds and the mismatch is stated rather than hidden.
 
+#### Settings that shape the policy are plan-time inputs
+
+A setting that only reaches execute arrives after the decisions it was meant to
+influence have been made and reviewed. So everything that shapes segmentation
+lives on the **Segmentation section**, travels with the scenario, and is read
+when the plan is computed:
+
+| Attribute | Default | What it does |
+|---|---|---|
+| `nat_mode` | `SNAT` | `SNAT` or `MASQUERADE` for NAT rules on routers |
+| `include_hosts` | `false` | let hosts, not just routers, carry segmentation |
+| `dnat_probability` | `0.0` | chance a generated flow gets a router port-forward |
+| `allow_src_subnet_prob` | `0.3` | chance a traffic allow widens to the source subnet |
+| `allow_dst_subnet_prob` | `0.3` | chance it widens to the destination subnet |
+| `accessible_by_pivot` | `false` | the pivot-access toggle above |
+
+The matching CLI flags (`--nat-mode`, `--seg-include-hosts`, `--dnat-prob`,
+`--allow-src-subnet-prob`, `--allow-dst-subnet-prob`,
+`--seg-accessible-by-pivot`) still work and now apply **when the plan is
+computed**. Each defaults to `None` rather than to its value, so "not passed"
+stays distinguishable from "passed the value that happens to be the default" —
+without that, a flag could not sensibly override a scenario that sets the
+attribute itself. The two switches only ever turn something *on*: omitting
+`--seg-include-hosts` is not an instruction to override a scenario that enables
+it.
+
+Passing one of these at execute against a plan built without it cannot be
+honoured, so execute logs exactly which settings it is ignoring and which values
+the plan holds, rather than quietly giving you SNAT when you asked for
+MASQUERADE.
+
+`--seg-allow-docker-ports` is deliberately **not** a plan-time setting. It opens
+ports belonging to containers, which do not exist until execute, so it stays a
+run-time flag; the pass that implements it (`write_allow_rules_for_compose_ports`)
+runs after the policy is in place and only adds ACCEPTs.
+
+The two probabilities needed one more change to be meaningful as plan-time
+inputs: the per-flow decisions they govern used to come from `random.random()`,
+so the plan and the run answered differently for the same flow. `flow_draw`
+derives the draw from the flow's own identity (endpoints, protocol, port)
+instead, which keeps the probability semantics while making the answer a
+property of the flow rather than of when it was asked.
+
 ## Router connectivity & aggregation
 - Per-routing-item `r2r_mode` supports `Exact`, `Uniform`, `NonUniform`, and `Min`.
 - R2S policies (`r2s_mode`, `r2s_edges`, optional `r2s_hosts_min/max`) regroup hosts behind dedicated switches, with “Exact=1” aggregating all hosts per router into a single switch.
