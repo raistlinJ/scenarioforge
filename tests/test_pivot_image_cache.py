@@ -170,3 +170,53 @@ def test_execute_prepares_images_after_segmentation():
     import inspect
     src = inspect.getsource(cli)
     assert '_ensure_pivot_provider_images(seg_summary)' in src
+
+
+# --------------------------------------------------------------------------- #
+# A subnet left without a usable pivot must not fail silently
+# --------------------------------------------------------------------------- #
+
+def test_an_uncreated_provider_is_warned_about(caplog):
+    summary = {"pivot_access": {"providers": [
+        {"subnet": "10.0.123.0/24", "added": True, "node_id": None},
+        {"subnet": "172.18.9.0/24", "added": True, "node_id": None},
+    ]}}
+    with caplog.at_level('WARNING'):
+        stranded = cli._warn_unmaterialised_pivot_providers(summary)
+    assert stranded == ["10.0.123.0/24", "172.18.9.0/24"]
+    text = caplog.text
+    assert "no usable pivot" in text
+    assert "10.0.123.0/24" in text and "172.18.9.0/24" in text
+    # It says what to do about it, not just that it happened.
+    assert "disable" in text or "reachable service" in text
+
+
+def test_a_reused_provider_is_not_warned_about(caplog):
+    summary = {"pivot_access": {"providers": [
+        {"subnet": "10.0.0.0/24", "added": False, "node_id": 6, "node_name": "docker-1"},
+    ]}}
+    with caplog.at_level('WARNING'):
+        assert cli._warn_unmaterialised_pivot_providers(summary) == []
+    assert "no usable pivot" not in caplog.text
+
+
+def test_a_provider_that_gained_a_node_is_not_warned_about(caplog):
+    # Once materialisation lands, an added provider with a node is fine.
+    summary = {"pivot_access": {"providers": [
+        {"subnet": "10.0.0.0/24", "added": True, "node_id": 42},
+    ]}}
+    with caplog.at_level('WARNING'):
+        assert cli._warn_unmaterialised_pivot_providers(summary) == []
+
+
+def test_no_pivot_access_block_is_silent(caplog):
+    with caplog.at_level('WARNING'):
+        assert cli._warn_unmaterialised_pivot_providers({}) == []
+        assert cli._warn_unmaterialised_pivot_providers(None) == []
+    assert caplog.text == ""
+
+
+def test_execute_warns_after_preparing_images():
+    import inspect
+    src = inspect.getsource(cli)
+    assert '_warn_unmaterialised_pivot_providers(seg_summary)' in src
