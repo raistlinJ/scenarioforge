@@ -117,6 +117,7 @@ Popular options:
 - The file passed with `--xml` is the execution ground truth, including the CORE VM identity. WebUI Execute synchronizes its validated CORE selection into that XML before invoking the runner.
 - `--layout-density {compact|normal|spacious}` adjust map spacing
 - `--seg-include-hosts`, `--seg-allow-docker-ports`, `--nat-mode`, `--dnat-prob` fine-tune segmentation
+- `--seg-accessible-by-pivot` guarantees each walled-off subnet keeps one reachable provider node (vulnerability, flag-node-generator, or SSH) so challenges behind the boundary stay solvable; providers never consume challenge-slot capacity
 - `--traffic-pattern`, `--traffic-rate`, `--traffic-content` override traffic defaults
 
 Saved-XML execute notes:
