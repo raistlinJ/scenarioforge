@@ -234,6 +234,15 @@ def compute_full_plan(
     seg_density, seg_items = parse_segmentation_info(xml_path, scenario)
     segmentation_plan, seg_breakdown = compute_segmentation_plan(seg_density, seg_items, density_base)
     seg_breakdown['raw_items_serialized'] = [{'selected': si.name, 'factor': si.factor} for si in seg_items]
+    # Travels with the plan so the preview -- and through it Flow -- can decide
+    # whether a walled-off subnet's pivot belongs in the chain.
+    try:
+        from ..parsers.segmentation import parse_segmentation_accessible_by_pivot
+        seg_breakdown['accessible_by_pivot'] = bool(
+            parse_segmentation_accessible_by_pivot(xml_path, scenario)
+        )
+    except Exception:
+        seg_breakdown['accessible_by_pivot'] = False
 
     # --- Pivoting ---
     pivot_density, pivot_items = parse_pivoting_info(xml_path, scenario)
