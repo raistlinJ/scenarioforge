@@ -538,6 +538,7 @@ def build_full_preview(
     reserved_ipv4_addrs: Optional[Iterable[str]] = None,
     reserved_ipv4_networks: Optional[Iterable[str]] = None,
     segmentation_accessible_by_pivot: bool = False,
+    segmentation_settings: Optional[Dict[str, Any]] = None,
 ):
     """Return a topology preview dictionary.
 
@@ -1435,10 +1436,23 @@ def build_full_preview(
     # Carried into the preview so Flow can decide pivot steps without the
     # scenario XML in hand: Flow runs before execute, so the runtime
     # segmentation_summary.json that would otherwise carry it does not exist yet.
+    # The settings that shape the policy travel with the plan, because execute
+    # enforces the plan rather than planning again: a setting it learned about
+    # only at run time would arrive after the decisions it was meant to
+    # influence. Recorded here so execute can also tell when it was handed a
+    # plan built under different settings than the ones it now has.
+    from ..parsers.segmentation import SEGMENTATION_SETTING_DEFAULTS as _SEG_DEFAULTS
+    seg_settings: Dict[str, Any] = dict(_SEG_DEFAULTS)
+    seg_settings.update({k: v for k, v in (segmentation_settings or {}).items() if k in seg_settings})
+    if segmentation_accessible_by_pivot:
+        seg_settings['accessible_by_pivot'] = True
+    segmentation_accessible_by_pivot = bool(seg_settings['accessible_by_pivot'])
+
     seg_preview: Dict[str, Any] = {
         "density": segmentation_density or 0.0, "planned": [], "rules": [],
         'source': 'runtime_planner',
         'accessible_by_pivot': bool(segmentation_accessible_by_pivot),
+        'settings': dict(seg_settings),
     }
     segmentation_rules_preview: List[Dict[str, Any]] = []
     deep_segmentation_error: Optional[str] = None
@@ -1497,9 +1511,9 @@ def build_full_preview(
                 hosts=host_infos,
                 density=float(segmentation_density or 0.0),
                 items=seg_objs,
-                nat_mode='SNAT',
+                nat_mode=str(seg_settings['nat_mode']),
                 out_dir=seg_tmp,
-                include_hosts=False,
+                include_hosts=bool(seg_settings['include_hosts']),
             )
             # Extract rules
             for rr in summary.get('rules', []):

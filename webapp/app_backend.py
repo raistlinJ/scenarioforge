@@ -23208,6 +23208,52 @@ def _flow_preview_segmentation_rules(preview: Any) -> list[dict[str, Any]]:
     return [r for r in rules if isinstance(r, dict)] if isinstance(rules, list) else []
 
 
+def _read_segmentation_settings_attrs(section: Any, entry: dict) -> None:
+    """Lift the Segmentation section's plan-shaping settings into the UI model.
+
+    Only the ones actually present are lifted, so a scenario that never set them
+    round-trips unchanged instead of growing attributes it never had.
+    """
+    from scenarioforge.parsers.segmentation import (
+        SEGMENTATION_SETTING_DEFAULTS, coerce_bool, coerce_nat_mode, coerce_probability,
+    )
+
+    for key, default in SEGMENTATION_SETTING_DEFAULTS.items():
+        if key == 'accessible_by_pivot':
+            continue  # handled by the caller, which accepts more spellings
+        raw = section.get(key)
+        if raw is None or not str(raw).strip():
+            continue
+        if key == 'nat_mode':
+            entry[key] = coerce_nat_mode(raw, default)
+        elif isinstance(default, bool):
+            entry[key] = coerce_bool(raw, default)
+        else:
+            entry[key] = coerce_probability(raw, default)
+
+
+def _write_segmentation_settings_attrs(section_el: Any, sec: dict) -> None:
+    """Persist the plan-shaping settings that differ from their defaults."""
+    from scenarioforge.parsers.segmentation import (
+        SEGMENTATION_SETTING_DEFAULTS, coerce_bool, coerce_nat_mode, coerce_probability,
+    )
+
+    for key, default in SEGMENTATION_SETTING_DEFAULTS.items():
+        if key == 'accessible_by_pivot':
+            continue
+        if key not in sec or sec.get(key) is None:
+            continue
+        if key == 'nat_mode':
+            value = coerce_nat_mode(sec.get(key), default)
+        elif isinstance(default, bool):
+            value = coerce_bool(sec.get(key), default)
+        else:
+            value = coerce_probability(sec.get(key), default)
+        if value == default:
+            continue
+        section_el.set(key, 'true' if value is True else ('false' if value is False else str(value)))
+
+
 def _flow_pivot_access_enabled(preview: Any) -> bool:
     """Whether the scenario asked for pivot access.
 
@@ -36983,6 +37029,7 @@ def _parse_scenario_editor(se):
                 if raw_pivot:
                     break
             entry["accessible_by_pivot"] = raw_pivot.lower() in ("1", "true", "yes", "on")
+            _read_segmentation_settings_attrs(sec, entry)
         for item in sec.findall("item"):
             d = {
                 "selected": item.get("selected", "Random"),
@@ -37454,10 +37501,12 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
             if name == "Vulnerabilities":
                 sec_el.set("flag_type", str(sec.get("flag_type") or "text"))
             if name == "Segmentation":
-                # Only written when on, so a scenario that never used the toggle
-                # keeps the exact section markup it had before.
+                # Only written when set to something other than the default, so a
+                # scenario that never touched these keeps the exact section markup
+                # it had before.
                 if _coerce_bool(sec.get("accessible_by_pivot")):
                     sec_el.set("accessible_by_pivot", "true")
+                _write_segmentation_settings_attrs(sec_el, sec)
             weight_rows = [it for it in items_list if (it.get('v_metric') or (it.get('selected')=='Specific' and name in {'Vulnerabilities', 'Flag Node Generators'}) or 'Weight') == 'Weight']
             count_rows = [it for it in items_list if (it.get('v_metric') == 'Count') or (name in {'Vulnerabilities', 'Flag Node Generators'} and it.get('selected') == 'Specific')]
             weight_sum = sum(float(it.get('factor', 0) or 0) for it in weight_rows) if weight_rows else 0.0
@@ -39758,6 +39807,9 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
         segmentation_accessible_by_pivot=_coerce_bool(
             plan.get('breakdowns', {}).get('segmentation', {}).get('accessible_by_pivot')
         ),
+        # Everything that shapes the policy is decided here, because execute
+        # enforces this plan rather than planning its own.
+        segmentation_settings=plan.get('breakdowns', {}).get('segmentation', {}).get('settings'),
     )
     fp['router_plan'] = plan.get('breakdowns', {}).get('router', {})
     try:

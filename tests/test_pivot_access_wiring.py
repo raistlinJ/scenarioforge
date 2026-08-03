@@ -140,7 +140,25 @@ def test_planner_accepts_the_toggle_without_it_changing_default_behaviour(tmp_pa
 def test_cli_exposes_the_flag():
     src = Path("scenarioforge/cli.py").read_text(encoding="utf-8")
     assert "'--seg-accessible-by-pivot'" in src
-    assert "accessible_by_pivot=_seg_accessible_by_pivot(args)" in src
+    # The toggle reaches the planner through the resolved segmentation settings,
+    # which is what the plan records and execute enforces.
+    assert "accessible_by_pivot=bool(seg_settings['accessible_by_pivot'])" in src
+
+
+def test_the_flag_reaches_the_resolved_settings():
+    from scenarioforge.cli import _seg_settings
+
+    class Args:
+        xml = ""
+        scenario = None
+        seg_accessible_by_pivot = True
+        nat_mode = None
+        seg_include_hosts = None
+        dnat_prob = None
+        allow_src_subnet_prob = None
+        allow_dst_subnet_prob = None
+
+    assert _seg_settings(Args())['accessible_by_pivot'] is True
 
 
 def test_cli_flag_or_xml_enables_it():

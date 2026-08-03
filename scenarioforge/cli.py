@@ -2311,6 +2311,7 @@ def _current_plan_summary_for_execute(
     ip_mode: str,
     ip_region: str,
     hitl_preview_reservations: dict[str, Any] | None,
+    segmentation_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     full_prev = build_full_preview(
         role_counts=orchestrated_plan.get('role_counts_raw') or orchestrated_plan.get('role_counts') or {},
@@ -2325,6 +2326,7 @@ def _current_plan_summary_for_execute(
         segmentation_density=segmentation_density,
         segmentation_items=segmentation_items,
         traffic_plan=traffic_plan,
+        segmentation_settings=segmentation_settings,
         seed=seed,
         ip4_prefix=ip4_prefix,
         ip_mode=ip_mode,
@@ -3634,6 +3636,57 @@ def _flow_copy_error_is_startup_pending(error_text: str) -> bool:
 RUNTIME_ARTIFACT_DIRS: tuple[str, ...] = ('/tmp/traffic', '/tmp/segmentation')
 
 
+# Which CLI flag supplies each plan-shaping segmentation setting. Each flag
+# defaults to None so "not passed" stays distinguishable from "passed the same
+# value the default happens to be" -- without that, a flag could not sensibly
+# override a scenario that sets the attribute itself.
+_SEG_SETTING_FLAGS: dict[str, str] = {
+    'nat_mode': 'nat_mode',
+    'include_hosts': 'seg_include_hosts',
+    'dnat_probability': 'dnat_prob',
+    'allow_src_subnet_prob': 'allow_src_subnet_prob',
+    'allow_dst_subnet_prob': 'allow_dst_subnet_prob',
+    'accessible_by_pivot': 'seg_accessible_by_pivot',
+}
+
+
+def _seg_settings(args: Any, xml_path: str | None = None, scenario: Any = None) -> dict[str, Any]:
+    """The segmentation settings this run plans with.
+
+    The scenario's own attributes are the base, so a setting travels with the
+    scenario; a flag that was actually passed overrides it for this run. Both
+    are read here, at plan time, because execute enforces the plan rather than
+    planning again -- a setting supplied only at execute would arrive too late
+    to affect anything it names.
+    """
+    from .parsers.segmentation import (
+        SEGMENTATION_SETTING_DEFAULTS, coerce_bool, coerce_nat_mode,
+        coerce_probability, parse_segmentation_settings,
+    )
+
+    path = str(xml_path if xml_path is not None else getattr(args, 'xml', '') or '').strip()
+    scenario_name = scenario if scenario is not None else getattr(args, 'scenario', None)
+    if path:
+        settings = parse_segmentation_settings(os.path.abspath(path), scenario_name)
+    else:
+        settings = dict(SEGMENTATION_SETTING_DEFAULTS)
+
+    for key, flag in _SEG_SETTING_FLAGS.items():
+        value = getattr(args, flag, None)
+        if value is None:
+            continue
+        if key == 'nat_mode':
+            settings[key] = coerce_nat_mode(value, settings[key])
+        elif key in ('include_hosts', 'accessible_by_pivot'):
+            # A store_true flag only ever turns something on; leaving it off is
+            # not an instruction to override a scenario that turns it on.
+            if coerce_bool(value, False):
+                settings[key] = True
+        else:
+            settings[key] = coerce_probability(value, settings[key])
+    return settings
+
+
 def _seg_accessible_by_pivot(args: Any) -> bool:
     """Whether pivot access is on, from the CLI flag or the scenario XML.
 
@@ -3674,6 +3727,48 @@ def _preview_host_names(preview_hosts: Any) -> dict[int, str]:
         name = str(host.get('name') or '').strip()
         if name:
             out[node_id] = name
+    return out
+
+
+def _plan_segmentation_settings(preview_full: Any) -> dict[str, Any]:
+    """The settings the saved plan was built with, filled out with defaults.
+
+    Execute uses these rather than its own, so the passes that run after the
+    plan -- traffic allow rules, DNAT -- act on the same settings that shaped
+    the policy they are extending.
+    """
+    from .parsers.segmentation import SEGMENTATION_SETTING_DEFAULTS
+
+    settings = dict(SEGMENTATION_SETTING_DEFAULTS)
+    if isinstance(preview_full, dict):
+        seg = preview_full.get('segmentation_preview')
+        if isinstance(seg, dict) and isinstance(seg.get('settings'), dict):
+            settings.update({k: v for k, v in seg['settings'].items() if k in settings})
+    return settings
+
+
+def _segmentation_settings_conflicts(plan_settings: Any, current: Any) -> list[str]:
+    """Settings the run asks for that the saved plan was not built with.
+
+    A setting reaching execute too late to be honoured has to be said out loud.
+    Silently ignoring it would let someone pass `--nat-mode MASQUERADE` and get
+    SNAT with no indication of why.
+    """
+    if not isinstance(plan_settings, dict) or not isinstance(current, dict):
+        return []
+    out: list[str] = []
+    for key in sorted(set(plan_settings) & set(current)):
+        planned, wanted = plan_settings[key], current[key]
+        if isinstance(planned, float) or isinstance(wanted, float):
+            try:
+                if abs(float(planned) - float(wanted)) < 1e-9:
+                    continue
+            except Exception:
+                pass
+        elif planned == wanted:
+            continue
+        if planned != wanted:
+            out.append(f'{key}: plan={planned!r} requested={wanted!r}')
     return out
 
 
@@ -6284,36 +6379,61 @@ def _add_cli_execute_topo_args(container: Any) -> None:
     container.add_argument(
         '--allow-src-subnet-prob',
         type=float,
-        default=0.3,
-        help='Probability [0..1] to widen firewall allow rules to the source subnet',
+        default=None,
+        help=(
+            'Probability [0..1] to widen firewall allow rules to the source subnet. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's allow_src_subnet_prob attribute"
+        ),
     )
     container.add_argument(
         '--allow-dst-subnet-prob',
         type=float,
-        default=0.3,
-        help='Probability [0..1] to widen firewall allow rules to the destination subnet',
+        default=None,
+        help=(
+            'Probability [0..1] to widen firewall allow rules to the destination subnet. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's allow_dst_subnet_prob attribute"
+        ),
     )
     container.add_argument(
         '--nat-mode',
         choices=['SNAT', 'MASQUERADE'],
-        default='SNAT',
-        help='NAT mode when segmentation selects NAT (routers): SNAT or MASQUERADE',
+        default=None,
+        help=(
+            'NAT mode when segmentation selects NAT (routers): SNAT or MASQUERADE. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's nat_mode attribute"
+        ),
     )
     container.add_argument(
         '--dnat-prob',
         type=float,
-        default=0.0,
-        help='Probability [0..1] to create DNAT (port-forward) on routers for generated flows',
+        default=None,
+        help=(
+            'Probability [0..1] to create DNAT (port-forward) on routers for generated flows. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's dnat_probability attribute"
+        ),
     )
     container.add_argument(
         '--seg-include-hosts',
         action='store_true',
-        help='Include host nodes as candidates for segmentation placement (default: routers only)',
+        default=None,
+        help=(
+            'Include host nodes as candidates for segmentation placement (default: routers only). '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's include_hosts attribute"
+        ),
     )
     container.add_argument(
         '--seg-allow-docker-ports',
         action='store_true',
-        help='Allow docker-compose container ports through host INPUT chains when segmentation enforces default-deny',
+        help=(
+            'Allow docker-compose container ports through host INPUT chains when segmentation '
+            'enforces default-deny. Stays a run-time flag: the ports belong to containers, which '
+            'do not exist until execute, so it cannot be decided when the plan is made'
+        ),
     )
     container.add_argument(
         '--seg-accessible-by-pivot',
@@ -6886,6 +7006,7 @@ def main():
                 ip_mode=args.ip_mode,
                 ip_region=args.ip_region,
                 hitl_preview_reservations=hitl_preview_reservations,
+                segmentation_settings=_seg_settings(args),
             )
             diffs = _diff_plan_summaries(preview_summary, current_summary)
             if diffs:
@@ -6919,6 +7040,7 @@ def main():
                 segmentation_density=seg_density_plan,
                 segmentation_items=seg_items_serialized,
                 traffic_plan=traffic_plan_preview,
+                segmentation_settings=_seg_settings(args),
                 seed=args.seed,
                 ip4_prefix=args.prefix,
                 ip_mode=args.ip_mode,
@@ -7023,6 +7145,7 @@ def main():
                             routing_plan=routing_plan,
                             segmentation_density=orchestrated_plan.get('breakdowns', {}).get('segmentation', {}).get('density'),
                             segmentation_items=orchestrated_plan.get('breakdowns', {}).get('segmentation', {}).get('raw_items_serialized'),
+                            segmentation_settings=_seg_settings(args),
                             seed=args.seed,
                             ip4_prefix=args.prefix,
                             ip_mode=args.ip_mode,
@@ -7609,6 +7732,9 @@ def main():
 
     # Parse segmentation config OR fallback to preview segmentation if available
     seg_summary = None
+    # Set before the phase so the traffic passes below still have it if
+    # segmentation fails; they extend the same policy and need the same settings.
+    seg_settings = _plan_segmentation_settings(preview_full) if _planned_segmentation_rules(preview_full) else _seg_settings(args)
     try:
         logging.info("PHASE: Segmentation")
         seg_density = orchestrated_plan.get('breakdowns', {}).get('segmentation', {}).get('density')
@@ -7617,11 +7743,25 @@ def main():
             seg_density, seg_items = parse_segmentation_info(args.xml, args.scenario)
         logging.info("Segmentation config: density=%.3f, items=%d", float(seg_density or 0.0), len(seg_items or []))
         seg_planned_rules = _planned_segmentation_rules(preview_full)
+        # The settings the plan was built with, not the ones this invocation
+        # happens to carry: every pass below extends a policy those settings
+        # already shaped.
+        seg_settings = _plan_segmentation_settings(preview_full)
         if seg_planned_rules:
             logging.info(
                 "Segmentation: enforcing the %d rule(s) the saved plan decided; not planning again",
                 len(seg_planned_rules),
             )
+            conflicts = _segmentation_settings_conflicts(seg_settings, _seg_settings(args))
+            if conflicts:
+                logging.warning(
+                    'Segmentation: %d setting(s) cannot be applied to a plan that was built '
+                    'without them, so the plan\'s values are used: %s. Set them on the '
+                    'Segmentation section and regenerate the plan to change them.',
+                    len(conflicts), '; '.join(conflicts),
+                )
+        else:
+            seg_settings = _seg_settings(args)
         if (seg_density and seg_density > 0 and seg_items) or seg_planned_rules:
             try:
                 from .utils.segmentation import plan_and_apply_segmentation
@@ -7631,11 +7771,11 @@ def main():
                     hosts,
                     seg_density,
                     seg_items,
-                    nat_mode=str(getattr(args, 'nat_mode', 'SNAT')).upper(),
-                    include_hosts=bool(getattr(args, 'seg_include_hosts', False)),
+                    nat_mode=str(seg_settings['nat_mode']),
+                    include_hosts=bool(seg_settings['include_hosts']),
                     allow_docker_ports=bool(getattr(args, 'seg_allow_docker_ports', False)),
                     docker_nodes=docker_by_name if isinstance(docker_by_name, dict) else None,
-                    accessible_by_pivot=_seg_accessible_by_pivot(args),
+                    accessible_by_pivot=bool(seg_settings['accessible_by_pivot']),
                     pivot_entry_points=_seg_pivot_entry_points(
                         docker_by_name if isinstance(docker_by_name, dict) else None,
                         hosts,
@@ -7728,9 +7868,9 @@ def main():
                     hosts,
                     os.path.join(traffic_out_dir, "traffic_summary.json"),
                     out_dir="/tmp/segmentation",
-                    src_subnet_prob=max(0.0, min(1.0, float(getattr(args, 'allow_src_subnet_prob', 0.3)))),
-                    dst_subnet_prob=max(0.0, min(1.0, float(getattr(args, 'allow_dst_subnet_prob', 0.3)))),
-                    include_hosts=bool(getattr(args, 'seg_include_hosts', False)),
+                    src_subnet_prob=float(seg_settings['allow_src_subnet_prob']),
+                    dst_subnet_prob=float(seg_settings['allow_dst_subnet_prob']),
+                    include_hosts=bool(seg_settings['include_hosts']),
                 )
                 logging.info("Inserted allow rules for generated traffic")
                 # Flow verification artifact
@@ -7748,7 +7888,7 @@ def main():
                 except Exception as e_vf:
                     logging.warning("Flow verification failed: %s", e_vf)
                 # Optional DNAT port-forwarding
-                dnat_p = max(0.0, min(1.0, float(getattr(args, 'dnat_prob', 0.0))))
+                dnat_p = float(seg_settings['dnat_probability'])
                 if dnat_p > 0:
                     write_dnat_for_flows(
                         session,
