@@ -18,8 +18,13 @@ Provider selection is hybrid, preferring what already exists:
    real challenge step);
 2. a node already offering a flag-node-generator;
 3. a node already running SSH;
-4. otherwise an existing **non-slot Docker** node, which gets SSH enabled;
-5. otherwise a Docker SSH node is added.
+4. otherwise a Docker SSH node is added.
+
+There is deliberately no "turn SSH on for whatever Docker node is already
+there" tier. Node images are built offline-safe with no package manager -- the
+wrapper only injects a busybox `ip` -- so a minimal image cannot grow an `sshd`,
+and enabling the CORE SSH service on it yields an open path to a closed port. A
+node that genuinely serves SSH is already covered by tier 3.
 
 **Only Docker-backed nodes are ever eligible.** CORE vnodes -- routers, PCs,
 servers, workstations -- get a network namespace but not a mount namespace, so
@@ -28,14 +33,14 @@ escape, not a pivot. That rules out the routers too, which is why a subnet whose
 hosts are all unfilled challenge slots has to grow a node rather than borrow the
 router that is already sitting there.
 
-Step 4 deliberately skips empty challenge slots. Consuming one would silently
+Selection deliberately skips empty challenge slots. Consuming one would silently
 spend capacity the scenario author allocated for challenges, so a provider never
 counts against the configured vulnerability or flag-node-generator slot counts.
 Anything placed for pivot access is additive.
 
-An added provider is a Docker node running SSH. The SSH fallback needs a daemon
-listening, which a vnode would have had by way of the host and a minimal
-container image does not, so the added node must come from an SSH-capable image.
+An added provider is a Docker node built from `PIVOT_SSH_IMAGE`, overridable
+with `CORETG_PIVOT_SSH_IMAGE`. The planner records the image on the provider;
+materialising the node is the topology builder's job.
 
 This module is pure: it decides *what* should be reachable and returns the allow
 rules that express it. Writing iptables and mutating the session stays in
@@ -46,6 +51,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -61,6 +67,11 @@ ENTRY_SSH = "ssh"
 ENTRY_PREFERENCE: tuple[str, ...] = (ENTRY_VULNERABILITY, ENTRY_FLAG_GEN, ENTRY_SSH)
 
 DEFAULT_SSH_PORT = 22
+
+# Image for an added SSH provider. Node images are built offline-safe with no
+# package manager, so a provider that must serve SSH has to come from an image
+# that already does. Overridable for sites that mirror their own.
+PIVOT_SSH_IMAGE = os.environ.get("CORETG_PIVOT_SSH_IMAGE", "lscr.io/linuxserver/openssh-server:latest")
 
 # Roles that reserve challenge capacity. A provider is never taken from one of
 # these unless it already hosts a challenge, so the toggle cannot quietly eat a
@@ -110,6 +121,9 @@ class PivotProvider:
     needs_service: bool = False   # existing node, SSH must be enabled on it
     added: bool = False           # a node had to be created for this subnet
     role: str = ""
+    # Set when the provider must be built from an SSH-capable image, which the
+    # topology builder materialises.
+    image: str = ""
 
     # A provider never consumes challenge-slot capacity. Kept explicit so the
     # invariant is visible in the plan itself rather than only in this docstring.
@@ -126,6 +140,7 @@ class PivotProvider:
             "reused": bool(self.reused),
             "needs_service": bool(self.needs_service),
             "added": bool(self.added),
+            "image": self.image or "",
             "consumes_slot": False,
         }
 
@@ -382,20 +397,7 @@ def plan_pivot_access(
                 role=str(getattr(node, "role", "") or ""),
             )
         else:
-            # Routers are vnodes and therefore never eligible, however
-            # convenient they would be.
-            fallback = _pick_non_slot(inside)
-            if fallback is not None:
-                provider = PivotProvider(
-                    subnet=subnet_text,
-                    node_id=int(fallback.node_id),
-                    node_name=node_names.get(int(fallback.node_id), "") or f"node-{fallback.node_id}",
-                    entry=PivotEntry(kind=ENTRY_SSH, port=int(ssh_port), protocol="tcp", label="SSH"),
-                    blocked_from=list(blocked_from),
-                    needs_service=True,
-                    role=str(getattr(fallback, "role", "") or ""),
-                )
-            elif allow_add_nodes:
+            if allow_add_nodes:
                 # Every node in the subnet is an unfilled challenge slot. Taking
                 # one would spend capacity the author reserved, so add a node.
                 provider = PivotProvider(
@@ -406,16 +408,18 @@ def plan_pivot_access(
                     blocked_from=list(blocked_from),
                     added=True,
                     role="Docker",
+                    image=PIVOT_SSH_IMAGE,
                 )
             else:
                 plan.unresolved.append({
                     "subnet": subnet_text,
                     "blocked_from": list(blocked_from),
                     "reason": (
-                        "no eligible provider: this subnet has no Docker node that is not "
-                        "an unfilled challenge slot, and adding nodes is disabled. Routers "
-                        "and other vnodes are not eligible because they share the CORE VM "
-                        "filesystem"
+                        "no eligible provider: nothing in this subnet serves a "
+                        "vulnerability, flag-node-generator or SSH, and adding nodes is "
+                        "disabled. Routers and other vnodes are never eligible because they "
+                        "share the CORE VM filesystem, and a minimal container image cannot "
+                        "grow an sshd"
                     ),
                 })
                 continue

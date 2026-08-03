@@ -106,14 +106,17 @@ def test_existing_ssh_is_used_before_changing_anything():
     assert plan.providers[0].reused is True
 
 
-def test_empty_slots_are_never_consumed_ssh_lands_on_a_non_slot_node():
-    # Nothing is offered yet. The two slot nodes are reserved capacity, so the
-    # plain Docker node takes SSH instead (and it must be Docker, not a vnode).
+def test_a_subnet_serving_nothing_gets_an_added_ssh_node():
+    # There is no "switch SSH on for whatever Docker node is there" tier: node
+    # images are built offline-safe with no package manager, so a minimal image
+    # cannot grow an sshd and enabling the service would open a path to a closed
+    # port. A node that really serves SSH is tier 3 instead.
     plan = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points={})
     provider = plan.providers[0]
-    assert provider.node_id == 6            # the Docker node, not a slot
+    assert provider.added is True
+    assert provider.needs_service is False
     assert provider.entry.kind == pa.ENTRY_SSH
-    assert provider.needs_service is True
+    assert provider.image == pa.PIVOT_SSH_IMAGE
     assert provider.consumes_slot is False
 
 
@@ -137,7 +140,7 @@ def test_adding_can_be_refused_and_is_reported_not_silently_dropped():
     plan = pa.plan_pivot_access([_block()], hosts, entry_points={}, allow_add_nodes=False)
     assert plan.providers == []
     assert len(plan.unresolved) == 1
-    assert "unfilled challenge slot" in plan.unresolved[0]["reason"]
+    assert "adding nodes is disabled" in plan.unresolved[0]["reason"]
     assert plan.unresolved[0]["subnet"] == "172.21.240.0/24"
 
 
@@ -189,13 +192,27 @@ def test_nothing_blocked_means_nothing_to_do():
     assert plan.as_dict()["provider_count"] == 0
 
 
+def test_added_provider_records_the_image_to_build_from():
+    plan = pa.plan_pivot_access([_block()], [], entry_points={})
+    assert plan.providers[0].image == pa.PIVOT_SSH_IMAGE
+    assert plan.providers[0].as_dict()["image"] == pa.PIVOT_SSH_IMAGE
+
+
+def test_reused_providers_need_no_image():
+    entries = {5: [pa.PivotEntry(kind=pa.ENTRY_VULNERABILITY, port=8080)]}
+    plan = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points=entries)
+    assert plan.providers[0].image == ""
+
+
 def test_each_walled_off_subnet_gets_its_own_provider():
     rules = [
         _block(src="10.0.1.0/24", dst="172.21.240.0/24"),
         _block(src="10.0.1.0/24", dst="10.99.0.0/24"),
     ]
     hosts = _subnet_nodes() + [NodeInfo(node_id=20, ip4="10.99.0.4/24", role="Docker")]
-    plan = pa.plan_pivot_access(rules, hosts, entry_points={})
+    entries = {6: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)],
+               20: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)]}
+    plan = pa.plan_pivot_access(rules, hosts, entry_points=entries)
     assert {p.subnet for p in plan.providers} == {"172.21.240.0/24", "10.99.0.0/24"}
     assert {p.node_id for p in plan.providers} == {6, 20}
 
@@ -255,16 +272,20 @@ def test_vnode_hosts_are_not_eligible_either():
         assert plan.providers[0].added is True, role
 
 
-def test_a_docker_node_is_preferred_over_growing_the_topology():
+def test_a_docker_node_that_already_serves_ssh_is_preferred_over_adding_one():
     hosts = [
         NodeInfo(node_id=2, ip4="172.21.240.2/24", role="FlagGenSlot"),
         NodeInfo(node_id=6, ip4="172.21.240.6/24", role="Docker"),
         NodeInfo(node_id=7, ip4="172.21.240.7/24", role="Server"),
     ]
     routers = [NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")]
-    plan = pa.plan_pivot_access([_block()], hosts, routers=routers, entry_points={})
+    entries = {6: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)]}
+    plan = pa.plan_pivot_access([_block()], hosts, routers=routers, entry_points=entries)
     assert plan.providers[0].node_id == 6
     assert plan.providers[0].added is False
+    assert plan.providers[0].reused is True
+    # Nothing to build: it already serves SSH.
+    assert plan.providers[0].image == ""
 
 
 def test_an_offer_on_a_vnode_is_ignored():

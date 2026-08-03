@@ -68,6 +68,12 @@ def _hosts():
     ]
 
 
+def _entries():
+    """Node 6 already serves SSH, so it is a reusable provider with an address."""
+    from scenarioforge.utils.pivot_access import ENTRY_SSH, PivotEntry
+    return {6: [PivotEntry(kind=ENTRY_SSH, port=22)]}
+
+
 def test_apply_pivot_access_appends_allow_rules_and_a_report(tmp_path):
     summary = _summary_with_block()
     seg._apply_pivot_access(
@@ -76,6 +82,7 @@ def test_apply_pivot_access_appends_allow_rules_and_a_report(tmp_path):
         routers=[NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")],
         out_dir=str(tmp_path),
         session=None,
+        entry_points=_entries(),
         lookup_node_name=lambda nid: f"node-{nid}",
     )
     allows = [r for r in summary["rules"] if r["rule"].get("type") == "allow"]
@@ -96,6 +103,7 @@ def test_apply_pivot_access_writes_an_idempotent_script(tmp_path):
         routers=[NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")],
         out_dir=str(tmp_path),
         session=None,
+        entry_points=_entries(),
         lookup_node_name=lambda nid: f"node-{nid}",
     )
     scripts = sorted(Path(tmp_path).glob("seg_pivot_*.py"))
@@ -194,12 +202,11 @@ def test_provider_nodes_get_the_segmentation_service_enabled(tmp_path, monkeypat
         routers=[NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")],
         out_dir=str(tmp_path),
         session=object(),                      # any non-None session
+        entry_points=_entries(),
         lookup_node_name=lambda nid: f"node-{nid}",
     )
-    services = dict(enabled)
-    # The provider gets SSH (it had nothing reachable) and Segmentation (so its
-    # own script actually runs).
-    assert (6, 'SSH') in enabled
+    # The provider already serves SSH, so only Segmentation is enabled -- that
+    # is what runs its own generated script.
     assert (6, 'Segmentation') in enabled
     # The enforcing router needs it too, for the FORWARD half.
     assert (1, 'Segmentation') in enabled
