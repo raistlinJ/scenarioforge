@@ -128,6 +128,21 @@ counts** — anything placed for pivot access is additive.
 The planner records the required image on the provider (`image` in the
 `pivot_access` report); materialising that node is the topology builder's job.
 
+**Docker nodes never need the internet at execute time.** Before a run uses a
+provider image, execute resolves it in this order:
+
+1. **already present** — `docker image inspect` succeeds and nothing is pulled;
+2. **pre-seeded tarball** — `<CORETG_PIVOT_IMAGE_CACHE_DIR>/<safe-name>.tar`
+   (default `/opt/coretg/images`) is `docker load`ed, so an air-gapped host
+   never touches the network. Seed it with
+   `docker save <image> -o /opt/coretg/images/<safe-name>.tar`;
+3. **pulled once** — only if neither of the above applies.
+
+Once present the image is **cached forever**: it is added to the persistent
+keep set, so the execute-time image cleanup cannot reclaim it and force another
+download. A pull that fails is logged with the `docker save` command to seed it,
+and does not fail the run.
+
 The resulting allow rules are appended to `segmentation_summary.json` tagged
 `reason: pivot-access`, so they are distinguishable from the allow rules written
 for traffic flows, and a `pivot_access` block records which provider was chosen

@@ -1742,6 +1742,96 @@ def _flow_state_from_xml(xml_path: str, scenario_name: str | None) -> dict[str, 
         return None
 
 
+def _pivot_image_cache_dir() -> str:
+    """Where a pre-seeded pivot image tarball may be dropped.
+
+    Lets a site avoid the network entirely: `docker save` the image to
+    `<dir>/<safe-name>.tar` and it is loaded instead of pulled.
+    """
+    return str(os.getenv('CORETG_PIVOT_IMAGE_CACHE_DIR') or '/opt/coretg/images').strip() or '/opt/coretg/images'
+
+
+def _pivot_image_tar_name(image: str) -> str:
+    return ''.join(ch if ch.isalnum() or ch in '.-_' else '_' for ch in str(image or '')) + '.tar'
+
+
+def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
+    """Make each pivot provider image available locally, pulling at most once.
+
+    Docker nodes must not need the internet at execute time. An image already
+    present is never re-pulled, so only the very first run for a given image
+    touches the network -- and a site that pre-seeds a `docker save` tarball
+    never does. Once present the image is kept forever: it is added to the
+    persistent keep set so execute-time cleanup cannot reclaim it and force
+    another download.
+
+    Returns image -> outcome, for logging.
+    """
+    results: dict[str, str] = {}
+    providers = []
+    if isinstance(summary, dict):
+        access = summary.get('pivot_access')
+        if isinstance(access, dict):
+            providers = access.get('providers') or []
+    images = []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        image = str(provider.get('image') or '').strip()
+        if image and image not in images:
+            images.append(image)
+    if not images:
+        return results
+
+    try:
+        from .builders.topology import _docker_cmd, _docker_sudo_password
+    except Exception:
+        return results
+    docker = _docker_cmd()
+
+    def _run(args: list[str], timeout: int = 900) -> tuple[int, str]:
+        try:
+            pw = _docker_sudo_password()
+            use_stdin = bool(pw) and args and args[0] == 'sudo' and '-S' in args
+            proc = subprocess.run(
+                args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                timeout=timeout, input=(pw + '\n') if use_stdin else None,
+            )
+            return int(proc.returncode or 0), (proc.stdout or '').strip()
+        except Exception as exc:
+            return 1, str(exc)
+
+    for image in images:
+        rc, _out = _run(docker + ['image', 'inspect', image], timeout=60)
+        if rc == 0:
+            results[image] = 'cached'
+            logging.info('Pivot image already present, not pulling: %s', image)
+            continue
+
+        tar = os.path.join(_pivot_image_cache_dir(), _pivot_image_tar_name(image))
+        if os.path.isfile(tar):
+            rc, out = _run(docker + ['load', '-i', tar], timeout=900)
+            if rc == 0:
+                results[image] = 'loaded-from-tarball'
+                logging.info('Pivot image loaded from %s (no network used)', tar)
+                continue
+            logging.warning('Pivot image tarball %s failed to load: %s', tar, out[-300:])
+
+        rc, out = _run(docker + ['pull', image], timeout=900)
+        if rc == 0:
+            results[image] = 'pulled'
+            logging.info('Pivot image pulled once and now cached locally: %s', image)
+        else:
+            results[image] = 'unavailable'
+            logging.warning(
+                'Pivot image %s is not present and could not be pulled, so an added '
+                'pivot provider will have nothing to run. Pre-seed it with '
+                '"docker save %s -o %s" to keep this host offline. Error: %s',
+                image, image, tar, out[-300:],
+            )
+    return results
+
+
 def _persistent_images_to_keep() -> list[str]:
     """Images the operator pinned as `persistent`, published by the web UI.
 
@@ -1754,14 +1844,22 @@ def _persistent_images_to_keep() -> list[str]:
         from scenarioforge.utils.env_payload import read_env_payload
 
         raw = read_env_payload('CORETG_PERSISTENT_IMAGES_JSON')
-        if not raw:
-            return []
-        data = json.loads(raw)
+        data = json.loads(raw) if raw else []
         if not isinstance(data, list):
-            return []
-        return [str(x).strip() for x in data if str(x or '').strip()]
+            data = []
+        keep = [str(x).strip() for x in data if str(x or '').strip()]
     except Exception:
-        return []
+        keep = []
+    # Pivot provider images are cached forever by design: reclaiming one would
+    # force another download on the next execute, which is exactly what the
+    # offline requirement forbids.
+    try:
+        from .utils.pivot_access import PIVOT_SSH_IMAGE
+        if PIVOT_SSH_IMAGE and PIVOT_SSH_IMAGE not in keep:
+            keep.append(PIVOT_SSH_IMAGE)
+    except Exception:
+        pass
+    return keep
 
 
 def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) -> None:
@@ -7348,6 +7446,10 @@ def main():
                     ),
                 )
                 logging.info("Applied segmentation rules: %d", len(seg_summary.get("rules", [])))
+                try:
+                    _ensure_pivot_provider_images(seg_summary)
+                except Exception as exc_img:
+                    logging.warning("Pivot image preparation failed: %s", exc_img)
             except Exception as e:
                 logging.warning("Failed applying segmentation: %s", e)
         else:
