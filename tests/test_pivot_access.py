@@ -37,11 +37,18 @@ def test_protect_internal_blocks_from_everywhere():
     assert plan == {"10.9.0.0/24": ["*"]}
 
 
-def test_host_block_is_read_as_its_subnet():
-    # host_block names single addresses; what matters is the segment that lost
-    # its way in.
-    plan = pa.walled_off_subnets([_rule(1, type="host_block", src="10.0.1.5", dst="10.0.2.7")])
-    assert list(plan) == ["10.0.2.7/32"]
+def test_host_block_does_not_wall_off_anything():
+    # It stops one host reaching one host; the rest of the subnet is still
+    # reachable both ways, so nothing is isolated and no provider is owed. The
+    # only node in a /32 is the blocked host, so a "provider" there would be an
+    # SSH allow straight back into the host the rule exists to block.
+    assert pa.walled_off_subnets([_rule(1, type="host_block", src="10.0.1.5", dst="10.0.2.7")]) == {}
+
+
+def test_host_block_alongside_a_subnet_block_does_not_add_a_provider():
+    rules = [_block(src="10.0.1.0/24", dst="10.0.2.0/24"),
+             _rule(1, type="host_block", src="10.0.1.5", dst="10.0.2.7")]
+    assert list(pa.walled_off_subnets(rules)) == ["10.0.2.0/24"]
 
 
 def test_non_blocking_rules_are_ignored():

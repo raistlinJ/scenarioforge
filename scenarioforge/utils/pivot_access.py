@@ -62,8 +62,15 @@ DEFAULT_SSH_PORT = 22
 # slot the author meant for a vulnerability or flag-node-generator.
 CHALLENGE_SLOT_ROLES = {"VulnerabilitySlot", "FlagGenSlot"}
 
-# Blocking rule types this module understands.
-_BLOCK_TYPES = {"subnet_block", "host_block", "protect_internal"}
+# Rule types that actually isolate a segment.
+#
+# `host_block` is deliberately excluded. It stops one host reaching one host,
+# which leaves the rest of the subnet reachable in both directions -- nothing is
+# walled off, so there is no accessibility problem to solve. Provisioning a
+# provider for it would also be self-defeating: the only node in a /32 is the
+# blocked host itself, so the "pivot" would be an SSH allow straight back into
+# the host the rule exists to block.
+_BLOCK_TYPES = {"subnet_block", "protect_internal"}
 
 
 @dataclass
@@ -220,8 +227,6 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
         src = _network_of(rule.get("src"))
         if dst is None:
             continue
-        # A host_block names single addresses; the subnet is what matters for
-        # deciding whether a whole segment lost its way in.
         slot = _slot(str(dst))
         slot["sources"].add(str(src) if src is not None else "*")
         if enforcer is not None:
