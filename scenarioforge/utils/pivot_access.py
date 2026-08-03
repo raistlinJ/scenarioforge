@@ -174,13 +174,21 @@ def _is_slot_role(role: str) -> bool:
     }
 
 
-def walled_off_subnets(rules: Sequence[dict]) -> Dict[str, List[str]]:
-    """Destination subnets that segmentation blocks, and what they are blocked from.
+def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
+    """Blocked destination subnets, their sources, and who enforces the block.
+
+    The enforcing node ids matter: a FORWARD allow only has to be installed on
+    the routers that actually carry a block for that path, not on every router
+    in the topology.
 
     Accepts the summary shape (`{"node_id", "service", "rule"}`) as well as bare
     rule dicts, because callers hold both.
     """
-    found: Dict[str, set] = {}
+    found: Dict[str, dict] = {}
+
+    def _slot(dst: str) -> dict:
+        return found.setdefault(dst, {"sources": set(), "enforced_by": set()})
+
     for entry in rules or []:
         if not isinstance(entry, dict):
             continue
@@ -191,12 +199,21 @@ def walled_off_subnets(rules: Sequence[dict]) -> Dict[str, List[str]]:
         if rtype not in _BLOCK_TYPES:
             continue
 
+        node_id = entry.get("node_id", rule.get("node"))
+        try:
+            enforcer = int(node_id) if node_id is not None else None
+        except Exception:
+            enforcer = None
+
         if rtype == "protect_internal":
             # Blocks every other subnet from reaching this one.
             dst = _network_of(rule.get("subnet"))
             if dst is None:
                 continue
-            found.setdefault(str(dst), set()).add("*")
+            slot = _slot(str(dst))
+            slot["sources"].add("*")
+            if enforcer is not None:
+                slot["enforced_by"].add(enforcer)
             continue
 
         dst = _network_of(rule.get("dst"))
@@ -205,9 +222,20 @@ def walled_off_subnets(rules: Sequence[dict]) -> Dict[str, List[str]]:
             continue
         # A host_block names single addresses; the subnet is what matters for
         # deciding whether a whole segment lost its way in.
-        found.setdefault(str(dst), set()).add(str(src) if src is not None else "*")
+        slot = _slot(str(dst))
+        slot["sources"].add(str(src) if src is not None else "*")
+        if enforcer is not None:
+            slot["enforced_by"].add(enforcer)
 
-    return {dst: sorted(srcs) for dst, srcs in sorted(found.items())}
+    return {
+        dst: {"sources": sorted(v["sources"]), "enforced_by": sorted(v["enforced_by"])}
+        for dst, v in sorted(found.items())
+    }
+
+
+def walled_off_subnets(rules: Sequence[dict]) -> Dict[str, List[str]]:
+    """Destination subnets that segmentation blocks, and what they are blocked from."""
+    return {dst: v["sources"] for dst, v in walled_off_details(rules).items()}
 
 
 def _nodes_in(subnet: ipaddress._BaseNetwork, hosts: Iterable[NodeInfo]) -> List[NodeInfo]:
@@ -294,11 +322,16 @@ def plan_pivot_access(
     derived_router_ids = {int(getattr(r, "node_id")) for r in routers if getattr(r, "node_id", None) is not None}
     router_id_list = sorted({int(r) for r in (router_ids or [])} | derived_router_ids)
 
-    blocked = walled_off_subnets(rules)
+    blocked = walled_off_details(rules)
     if not blocked:
         return plan
 
-    for subnet_text, blocked_from in blocked.items():
+    for subnet_text, detail in blocked.items():
+        blocked_from = detail["sources"]
+        # Prefer the routers that actually enforce this block; fall back to every
+        # known router when the rule did not say who carries it.
+        enforcing = [n for n in detail["enforced_by"] if n in set(router_id_list)]
+        forward_nodes = enforcing or router_id_list
         subnet = _network_of(subnet_text)
         if subnet is None:
             continue
@@ -374,7 +407,7 @@ def plan_pivot_access(
             # FORWARD on every router that carries a block, so the packet
             # survives the boundary; INPUT on the provider itself, which is
             # where a default-deny policy would otherwise drop it.
-            for router_id in router_id_list:
+            for router_id in forward_nodes:
                 plan.allow_rules.append(_allow_rule(
                     router_id, selector, dst_ip,
                     provider.entry.port, provider.entry.protocol, "FORWARD",

@@ -86,6 +86,46 @@ flowchart LR
 - Docker vulnerabilities attach per-node docker-compose files in `/tmp/vulns`; generated services default to `network_mode: none` so CORE owns `eth0` and Docker does not add an unmanaged backend interface. Multi-service Compose networking is an explicit opt-in via `CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1` plus `CORETG_DOCKER_IFID_START=1`.
 - Custom traffic plugins can register via `scenarioforge.plugins.traffic.register()` for bespoke sender/receiver code.
 
+### Accessible by pivot
+
+Segmentation under a default-deny policy can wall a subnet off so completely
+that nothing inside it is reachable, which makes any challenge placed there
+unsolvable. A real scenario hit exactly this: `172.21.240.0/24` was blocked from
+two subnets and none of its seven nodes exposed SSH, so the only path through
+the boundary was one chain flow scoped to a single source IP.
+
+The **Accessible by pivot** toggle (Segmentation section, or `--seg-accessible-by-pivot`,
+or `accessible_by_pivot="true"` on the section element) guarantees every
+walled-off subnet keeps one reachable **provider**: a node inside it exposing a
+vulnerability, a flag-node-generator, or SSH through the boundary.
+
+Provider selection is hybrid and prefers what already exists:
+
+1. a node already offering a **vulnerability** — the pivot becomes a real challenge step;
+2. a node already offering a **flag-node-generator**;
+3. a node already running **SSH**;
+4. otherwise an existing **non-slot host**, which gets SSH enabled;
+5. otherwise the subnet's **own router**, which gets SSH enabled;
+6. otherwise a node is added.
+
+Steps 4-6 deliberately skip unfilled challenge slots. Consuming one would
+silently spend capacity the author allocated for challenges, so **a provider
+never counts against configured vulnerability or flag-node-generator slot
+counts** — anything placed for pivot access is additive. Step 5 matters more
+than it looks: a subnet whose hosts are all empty slots still has a router by
+construction, and a router is not slot capacity, so the guarantee holds without
+growing the topology in almost every real scenario.
+
+The resulting allow rules are appended to `segmentation_summary.json` tagged
+`reason: pivot-access`, so they are distinguishable from the allow rules written
+for traffic flows, and a `pivot_access` block records which provider was chosen
+for each subnet and how. FORWARD allows are installed only on the routers that
+actually enforce the block, not on every router; INPUT lands on the provider,
+where a default-deny policy would otherwise drop the packet.
+
+The toggle is **off by default**, so an existing scenario keeps the exact
+segmentation it was authored with.
+
 ## Reports & artifacts
 - Markdown reports (`./reports/scenario_report_<timestamp>.md`) enumerate topology stats, planning metadata, segmentation results, and runtime artefacts. Each run also emits a JSON summary alongside the Markdown file (`scenario_report_<timestamp>.json`) plus per-run connectivity CSVs when router degree data is available.
 - Timestamp conventions:

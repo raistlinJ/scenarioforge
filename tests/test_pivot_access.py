@@ -267,3 +267,34 @@ def test_added_node_remains_the_last_resort():
     hosts = [NodeInfo(node_id=2, ip4="172.21.240.2/24", role="FlagGenSlot")]
     plan = pa.plan_pivot_access([_block()], hosts, routers=[], entry_points={})
     assert plan.providers[0].added is True
+
+
+def test_forward_rules_target_only_the_routers_enforcing_the_block():
+    # Five routers exist but only router 1 carries the block, so only it needs
+    # the FORWARD allow.
+    rules = [_rule(1, type="subnet_block", src="10.0.140.0/24",
+                   dst="172.21.240.0/24", default_deny=True)]
+    hosts = [NodeInfo(node_id=6, ip4="172.21.240.6/24", role="Docker")]
+    routers = [NodeInfo(node_id=i, ip4=f"10.{i}.0.1/24", role="Router") for i in (1, 2, 3, 4, 5)]
+    entries = {6: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)]}
+    plan = pa.plan_pivot_access(rules, hosts, routers=routers, entry_points=entries)
+    forwards = [r for r in plan.allow_rules if r["rule"]["chain"] == "FORWARD"]
+    assert [r["node_id"] for r in forwards] == [1]
+
+
+def test_all_routers_are_used_when_the_block_names_no_enforcer():
+    rules = [{"type": "subnet_block", "src": "10.0.140.0/24", "dst": "172.21.240.0/24"}]
+    hosts = [NodeInfo(node_id=6, ip4="172.21.240.6/24", role="Docker")]
+    routers = [NodeInfo(node_id=i, ip4=f"10.{i}.0.1/24", role="Router") for i in (1, 2)]
+    entries = {6: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)]}
+    plan = pa.plan_pivot_access(rules, hosts, routers=routers, entry_points=entries)
+    forwards = [r for r in plan.allow_rules if r["rule"]["chain"] == "FORWARD"]
+    assert sorted(r["node_id"] for r in forwards) == [1, 2]
+
+
+def test_details_expose_who_enforces_each_block():
+    rules = [_rule(1, type="subnet_block", src="10.0.1.0/24", dst="10.0.2.0/24"),
+             _rule(4, type="subnet_block", src="10.0.3.0/24", dst="10.0.2.0/24")]
+    detail = pa.walled_off_details(rules)["10.0.2.0/24"]
+    assert detail["sources"] == ["10.0.1.0/24", "10.0.3.0/24"]
+    assert detail["enforced_by"] == [1, 4]
