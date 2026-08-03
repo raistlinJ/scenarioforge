@@ -3481,6 +3481,98 @@ def _flow_copy_error_is_startup_pending(error_text: str) -> bool:
 RUNTIME_ARTIFACT_DIRS: tuple[str, ...] = ('/tmp/traffic', '/tmp/segmentation')
 
 
+def _seg_accessible_by_pivot(args: Any) -> bool:
+    """Whether pivot access is on, from the CLI flag or the scenario XML.
+
+    The flag turns it on for the run; the XML attribute travels with the
+    scenario. Either enables it, so a scenario authored with the toggle keeps
+    working without callers having to remember the flag.
+    """
+    if bool(getattr(args, 'seg_accessible_by_pivot', False)):
+        return True
+    try:
+        from .parsers.segmentation import parse_segmentation_accessible_by_pivot
+        xml_path = str(getattr(args, 'xml', '') or '').strip()
+        if not xml_path:
+            return False
+        return bool(parse_segmentation_accessible_by_pivot(
+            os.path.abspath(xml_path), getattr(args, 'scenario', None)
+        ))
+    except Exception:
+        return False
+
+
+def _seg_pivot_entry_points(
+    docker_by_name: Any,
+    hosts: Any,
+    session: Any = None,
+) -> dict[int, list]:
+    """What each node already offers that a participant could pivot through.
+
+    Lets the planner prefer a real challenge artifact over a plain SSH box. Best
+    effort: anything that cannot be resolved simply leaves that node out, and
+    the planner falls back to SSH.
+    """
+    from .utils.pivot_access import (
+        PivotEntry, ENTRY_VULNERABILITY, ENTRY_FLAG_GEN, ENTRY_SSH,
+    )
+    from .planning.node_plan import challenge_slot_kind
+
+    out: dict[int, list] = {}
+    name_to_id: dict[str, int] = {}
+    for host in hosts or []:
+        try:
+            node_id = int(getattr(host, 'node_id'))
+        except Exception:
+            continue
+        name = None
+        if session is not None and hasattr(session, 'get_node'):
+            try:
+                node_obj = session.get_node(node_id)
+                name = getattr(node_obj, 'name', None) or getattr(node_obj, 'label', None)
+            except Exception:
+                name = None
+        if name:
+            name_to_id[str(name)] = node_id
+
+    for node_name, record in (docker_by_name or {}).items():
+        node_id = name_to_id.get(str(node_name))
+        if node_id is None:
+            continue
+        ports: list[int] = []
+        try:
+            from .utils.vuln_process import extract_compose_ports
+            for entry in extract_compose_ports(record, out_base='/tmp/vulns') or []:
+                try:
+                    value = int(entry.get('port'))
+                except Exception:
+                    continue
+                if 0 < value < 65536:
+                    ports.append(value)
+        except Exception:
+            ports = []
+        if not ports:
+            continue
+        # A slot's role says which kind of challenge it holds; a plain Docker
+        # node running a compose stack is treated as a vulnerability entry.
+        kind = ENTRY_VULNERABILITY
+        for host in hosts or []:
+            try:
+                if int(getattr(host, 'node_id')) != node_id:
+                    continue
+            except Exception:
+                continue
+            slot_kind = challenge_slot_kind(str(getattr(host, 'role', '') or ''))
+            if slot_kind == 'flag-node-generator':
+                kind = ENTRY_FLAG_GEN
+            break
+        label = str(record.get('Name') or record.get('name') or node_name)
+        out.setdefault(node_id, []).extend(
+            PivotEntry(kind=kind, port=port, protocol='tcp', label=label) for port in sorted(set(ports))
+        )
+    return out
+
+
 def _reset_runtime_artifact_dirs(dirs: Any = None, *, logger: Any = None) -> dict[str, int]:
     """Empty the shared runtime scratch directories before a run generates into them.
 
@@ -5959,6 +6051,16 @@ def _add_cli_execute_topo_args(container: Any) -> None:
         help='Allow docker-compose container ports through host INPUT chains when segmentation enforces default-deny',
     )
     container.add_argument(
+        '--seg-accessible-by-pivot',
+        action='store_true',
+        help=(
+            'Guarantee every subnet segmentation walls off keeps one reachable "provider" node '
+            '(a vulnerability, flag-node-generator, or SSH) so challenges behind the boundary stay '
+            'solvable. Providers never consume challenge-slot capacity. '
+            'Also settable per scenario via the Segmentation section\'s accessible_by_pivot attribute'
+        ),
+    )
+    container.add_argument(
         '--docker-check-conflicts',
         action='store_true',
         default=True,
@@ -7238,6 +7340,12 @@ def main():
                     include_hosts=bool(getattr(args, 'seg_include_hosts', False)),
                     allow_docker_ports=bool(getattr(args, 'seg_allow_docker_ports', False)),
                     docker_nodes=docker_by_name if isinstance(docker_by_name, dict) else None,
+                    accessible_by_pivot=_seg_accessible_by_pivot(args),
+                    pivot_entry_points=_seg_pivot_entry_points(
+                        docker_by_name if isinstance(docker_by_name, dict) else None,
+                        hosts,
+                        session,
+                    ),
                 )
                 logging.info("Applied segmentation rules: %d", len(seg_summary.get("rules", [])))
             except Exception as e:

@@ -58,3 +58,32 @@ def parse_segmentation_info(xml_path: str, scenario_name: Optional[str]) -> Tupl
             items.append(SegmentationInfo(name=name, factor=factor, abs_count=abs_count))
     logger.debug("Parsed segmentation: density=%s items=%s", density, [(i.name, i.factor) for i in items])
     return density, items
+
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def parse_segmentation_accessible_by_pivot(xml_path: str, scenario_name: Optional[str]) -> bool:
+    """Read the Segmentation section's "accessible by pivot" toggle.
+
+    Off unless explicitly enabled, so an existing scenario keeps the exact
+    segmentation it was authored with.
+    """
+    if not os.path.exists(xml_path):
+        return False
+    try:
+        root = ET.parse(xml_path).getroot()
+    except Exception as exc:
+        logger.warning("Failed to parse XML for pivot-access toggle (%s)", exc)
+        return False
+    scenario = find_scenario(root, scenario_name)
+    if scenario is None:
+        return False
+    section = scenario.find(".//section[@name='Segmentation']")
+    if section is None:
+        return False
+    for attr in ("accessible_by_pivot", "accessibleByPivot", "pivot_access"):
+        raw = (section.get(attr) or "").strip().lower()
+        if raw:
+            return raw in _TRUTHY
+    return False
