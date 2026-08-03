@@ -1,15 +1,137 @@
 from __future__ import annotations
+import json
+import logging
 import os
-import stat
 import random
+import shutil
+import stat
 from typing import Dict, List, Tuple, Optional
 from ..plugins import traffic as custom_traffic
 from ..plugins import static_profile as _static_profile
 from ..types import NodeInfo, TrafficInfo
 
+logger = logging.getLogger(__name__)
+
 
 def _ip_only(cidr: str) -> str:
     return cidr.split("/")[0] if "/" in cidr else cidr
+
+
+AGENT_BINARY_PREFIX = "traffic-agent-linux-"
+
+
+def _agent_source_dir() -> str:
+    """Repo directory holding the prebuilt static agent binaries.
+
+    Deliberately not named `dist`: that name is in REPO_PUSH_EXCLUDE_DIRS (and
+    in .gitignore, for Python build output), so binaries under it would be
+    stripped from the repo push and never reach the CORE VM.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(os.path.dirname(here))
+    return os.path.join(repo_root, "traffic_agent", "bin")
+
+
+def _stage_traffic_agent(out_dir: str) -> list:
+    """Copy the static agent binaries next to the flow configs.
+
+    The agent replaces the per-flow Python scripts this module used to emit.
+    Those required a python3 interpreter inside the node, which CORE vnodes have
+    (they share the host filesystem) but most vulnerability images do not, so
+    traffic assigned to a Docker node silently never ran. A static binary needs
+    no interpreter, no package manager, and no network at run time.
+
+    Both architectures are staged because a Docker node may be emulated (an
+    amd64 image on an arm64 host), so the node -- not the host -- decides which
+    binary applies.
+    """
+    staged = []
+    src_dir = _agent_source_dir()
+    try:
+        names = sorted(os.listdir(src_dir))
+    except Exception:
+        logger.warning(
+            "Traffic agent binaries not found under %s; run traffic_agent/build.sh", src_dir
+        )
+        return staged
+    for name in names:
+        if not name.startswith(AGENT_BINARY_PREFIX):
+            continue
+        src = os.path.join(src_dir, name)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(out_dir, name)
+        try:
+            shutil.copyfile(src, dst)
+            os.chmod(dst, os.stat(dst).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            staged.append(dst)
+        except Exception as exc:
+            logger.warning("Failed staging traffic agent %s: %s", name, exc)
+    if not staged:
+        logger.warning("No traffic agent binaries staged from %s", src_dir)
+    return staged
+
+
+def _write_agent_configs(out_dir: str, flows: List[Dict[str, object]]) -> Dict[int, List[str]]:
+    """Write one JSON config per node and return node_id -> [config path].
+
+    A node gets a single config describing every flow it participates in, so one
+    agent process per node replaces one Python process per flow.
+    """
+    by_node: Dict[int, Dict[str, object]] = {}
+
+    def _node_entry(node_id: int) -> Dict[str, object]:
+        entry = by_node.get(node_id)
+        if entry is None:
+            entry = {"node_id": str(node_id), "node_name": "", "seed": 0, "flows": []}
+            by_node[node_id] = entry
+        return entry
+
+    for index, flow in enumerate(flows or []):
+        try:
+            src_id = int(flow.get("src_id"))
+            dst_id = int(flow.get("dst_id"))
+            port = int(flow.get("dst_port"))
+        except Exception:
+            continue
+        protocol = str(flow.get("protocol") or "TCP")
+        label = f"{protocol.lower()}-{src_id}-{dst_id}-{port}"
+        # Deterministic per-flow seed so a seeded scenario reproduces its traffic.
+        seed = (src_id * 100003) + (dst_id * 397) + port + index
+
+        _node_entry(src_id)["flows"].append({
+            "id": f"{label}-tx",
+            "role": "sender",
+            "protocol": protocol,
+            "host": str(flow.get("dst_ip") or ""),
+            "port": port,
+            "rate_kbps": float(flow.get("rate_kbps") or 0.0),
+            "period_s": float(flow.get("period_s") or 0.0),
+            "jitter_pct": float(flow.get("jitter_pct") or 0.0),
+            "pattern": str(flow.get("pattern") or ""),
+            "content_type": str(flow.get("content_type") or ""),
+            "seed": seed,
+        })
+        _node_entry(dst_id)["flows"].append({
+            "id": f"{label}-rx",
+            "role": "receiver",
+            "protocol": protocol,
+            "port": port,
+            "seed": seed + 1,
+        })
+
+    written: Dict[int, List[str]] = {}
+    for node_id, entry in by_node.items():
+        # The filename keeps the historical `traffic_<node>` prefix so tooling
+        # that looks for traffic artifacts by name still finds them.
+        path = os.path.join(out_dir, f"traffic_{node_id}.json")
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(entry, handle, indent=2)
+            written[node_id] = [path]
+        except Exception as exc:
+            logger.warning("Failed writing traffic config for node %s: %s", node_id, exc)
+    return written
 
 
 def _clean_traffic_dir(out_dir: str) -> None:
@@ -550,12 +672,10 @@ def generate_traffic_scripts(hosts: List[NodeInfo], density: float, items: List[
                     recv_content = _tcp_receiver_script(rx_port) if proto_key == "TCP" else _udp_receiver_script(rx_port)
             else:
                 recv_content = _tcp_receiver_script(rx_port) if proto_key == "TCP" else _udp_receiver_script(rx_port)
-            with open(recv_name, "w", encoding="utf-8") as f:
-                f.write(recv_content)
-            os.chmod(recv_name, os.stat(recv_name).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            # The receiver body is computed above only so a CUSTOM plugin can
+            # still influence the flow; the Go agent performs the actual receive.
+            del recv_content
             recv_idx_by_node[rx_node_id] = r_index + 1
-            # Track in result mapping under receiver node id
-            result.setdefault(rx_node_id, []).append(recv_name)
 
             # Sender script from the current host to the receiver node/port
             # Always create a sender, even when target is None (self-traffic)
@@ -605,11 +725,8 @@ def generate_traffic_scripts(hosts: List[NodeInfo], density: float, items: List[
                     if proto_key == "TCP"
                     else _udp_sender_script(dst_ip, dst_port, rate_kbps, period_s, jitter_pct, pattern, content_type)
                 )
-            with open(send_name, "w", encoding="utf-8") as f:
-                f.write(send_content)
-            os.chmod(send_name, os.stat(send_name).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            del send_content
             send_idx_by_node[host.node_id] = s_index + 1
-            result.setdefault(host.node_id, []).append(send_name)
 
             # record a flow summary for reporting
             flows.append({
@@ -629,9 +746,26 @@ def generate_traffic_scripts(hosts: List[NodeInfo], density: float, items: List[
                 "receiver_script": recv_name,
             })
 
+    # One JSON config per node drives the Go agent, replacing the per-flow
+    # Python scripts. `result` maps node -> artifacts, and is what the caller
+    # uses to decide which nodes get the Traffic service enabled.
+    result = _write_agent_configs(out_dir, flows)
+    _stage_traffic_agent(out_dir)
+
+    # The summary is a stable contract: reports, the segmentation allow
+    # verification, and the artifact checks all read it. Keep every existing
+    # key and point the script fields at each side's agent config.
+    for flow in flows:
+        try:
+            src_cfg = result.get(int(flow.get("src_id")), [])
+            dst_cfg = result.get(int(flow.get("dst_id")), [])
+        except Exception:
+            continue
+        flow["sender_script"] = src_cfg[0] if src_cfg else ""
+        flow["receiver_script"] = dst_cfg[0] if dst_cfg else ""
+
     # write a machine-readable summary to the out_dir for report generator
     try:
-        import json
         with open(os.path.join(out_dir, "traffic_summary.json"), "w", encoding="utf-8") as jf:
             json.dump({"flows": flows}, jf, indent=2)
     except Exception:

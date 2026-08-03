@@ -821,6 +821,33 @@ def _resolve_check_source_xml(
     return passed
 
 
+def _latest_session_id_for_scenario(scenario: Any) -> Optional[int]:
+    """Most recent CORE session recorded for a scenario.
+
+    Callers such as the Execution Summary know which scenario they just ran but
+    not its session id, so they can ask for the checks without one.
+    """
+    scenario_norm = _normalize_scenario_label(scenario or '')
+    if not scenario_norm:
+        return None
+    best_sid: Optional[int] = None
+    best_ts = -1.0
+    try:
+        store = _load_core_sessions_store() or {}
+    except Exception:
+        return None
+    for _path, entry in store.items():
+        sid = _session_store_entry_session_id(entry)
+        if sid is None:
+            continue
+        if _session_store_entry_scenario_norm(entry) != scenario_norm:
+            continue
+        ts = _session_store_entry_updated_at_epoch(entry) or 0.0
+        if ts >= best_ts:
+            best_ts, best_sid = ts, int(sid)
+    return best_sid
+
+
 def _run_artifact_checks_job(
     check_id: str,
     *,
@@ -10005,6 +10032,158 @@ def _install_custom_services_to_core_vm(
         'modules': module_names,
         'service_names': verify_payload.get('custom_service_names') if isinstance(verify_payload, dict) else None,
         'module_service_names': verify_payload.get('module_service_names') if isinstance(verify_payload, dict) else None,
+    }
+
+
+def _core_conf_custom_services_dirs_local() -> tuple[str, list[str], list[str]]:
+    """Read `custom_services_dir` entries from a local core.conf.
+
+    Returns (conf_path, dirs, matching_lines). Mirrors the remote reader so both
+    installers agree on where CORE expects custom services to live.
+    """
+    conf_path = ''
+    for candidate in ('/opt/core/etc/core.conf', '/etc/core/core.conf'):
+        try:
+            if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+                conf_path = candidate
+                break
+        except Exception:
+            continue
+    if not conf_path:
+        return '', [], []
+    dirs: list[str] = []
+    lines: list[str] = []
+    try:
+        with open(conf_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if not re.match(r'^(custom_services|custom_services_dir|custom_service_dir|custom_services_dirs)\s*=', line, re.IGNORECASE):
+                    continue
+                lines.append(line)
+                value = line.split('=', 1)[1].strip()
+                for part in value.split(','):
+                    entry = part.strip()
+                    if entry and entry not in dirs:
+                        dirs.append(entry)
+    except Exception:
+        return conf_path, [], []
+    return conf_path, dirs, lines
+
+
+def _install_custom_services_locally(
+    *,
+    logger: logging.Logger,
+    sudo_password: str | None = None,
+) -> dict:
+    """Install the repo's CORE custom services into a local CORE installation.
+
+    Native mode talks to a CORE daemon on this machine, so there is no SSH
+    session to push through. CORE imports service classes inside core-daemon,
+    so copying the files is not enough: the daemon has to be restarted for an
+    edited service to take effect, exactly as in the remote path.
+    """
+    local_files = _local_custom_service_files()
+    if not local_files:
+        raise RuntimeError(f'No custom services found under {_local_custom_services_dir()}')
+    module_names = [os.path.splitext(os.path.basename(p))[0] for p in local_files]
+
+    services_dirs: list[str] = []
+
+    def _add_dir(candidate: Any) -> None:
+        path = str(candidate or '').strip()
+        if path and path not in services_dirs:
+            services_dirs.append(path)
+
+    # The installed core package's services directory.
+    try:
+        import core.services as _core_services  # noqa: F401  (probe only)
+
+        pkg_dir = os.path.dirname(getattr(_core_services, '__file__', '') or '')
+        _add_dir(pkg_dir)
+    except Exception as exc:
+        logger.debug('[core] local core.services import failed: %s', exc)
+
+    conf_path, conf_dirs, conf_lines = _core_conf_custom_services_dirs_local()
+    for entry in conf_dirs:
+        _add_dir(entry)
+    _add_dir('/opt/core/custom_services')
+
+    if not services_dirs:
+        raise RuntimeError(
+            'Could not locate a local CORE services directory. Install CORE on this host, '
+            'or point the Web UI at a remote CORE VM.'
+        )
+
+    def _run(cmd: list[str], *, timeout: float = 60.0) -> tuple[int, str]:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return proc.returncode, ((proc.stdout or '') + (proc.stderr or '')).strip()
+        except Exception as exc:
+            return 127, str(exc)
+
+    def _sudo(cmd: list[str], *, timeout: float = 60.0) -> tuple[int, str]:
+        code, out = _run(cmd, timeout=timeout)
+        if code == 0:
+            return code, out
+        # Retry with sudo for root-owned destinations such as site-packages.
+        if sudo_password:
+            try:
+                proc = subprocess.run(
+                    ['sudo', '-S', '-p', ''] + cmd,
+                    input=str(sudo_password) + '\n',
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                return proc.returncode, ((proc.stdout or '') + (proc.stderr or '')).strip()
+            except Exception as exc:
+                return 127, str(exc)
+        return _run(['sudo', '-n'] + cmd, timeout=timeout)
+
+    installed_dirs: list[str] = []
+    failures: list[str] = []
+    for services_dir in services_dirs:
+        dir_failed = False
+        code, out = _sudo(['mkdir', '-p', services_dir])
+        if code != 0:
+            failures.append(f'{services_dir}: mkdir exit={code} {out}')
+            continue
+        for local_path in local_files:
+            dest = os.path.join(services_dir, os.path.basename(local_path))
+            code, out = _sudo(['cp', '-f', local_path, dest])
+            if code != 0:
+                failures.append(f'{dest}: copy exit={code} {out}')
+                dir_failed = True
+        if not dir_failed:
+            installed_dirs.append(services_dir)
+
+    if not installed_dirs:
+        raise RuntimeError('Failed installing custom services locally: ' + ' | '.join(failures))
+
+    logger.info('[core] Installed custom services into %s', ', '.join(installed_dirs))
+
+    # CORE loads these classes at daemon start, so restart to pick up edits.
+    restart_code, restart_out = _sudo(
+        ['sh', '-c', 'systemctl restart core-daemon || systemctl start core-daemon'], timeout=90.0,
+    )
+    if restart_code != 0:
+        raise RuntimeError(
+            f'Custom services were copied but restarting core-daemon failed (exit={restart_code}): {restart_out}'
+        )
+
+    return {
+        'services_dir': installed_dirs[0] if installed_dirs else None,
+        'services_dirs': installed_dirs,
+        'core_conf_path': conf_path or None,
+        'core_conf_readable': bool(conf_path),
+        'core_conf_custom_services_configured': bool(conf_dirs),
+        'core_conf_custom_services_dirs': conf_dirs,
+        'core_conf_custom_services_lines': conf_lines,
+        'modules': module_names,
+        'service_names': _local_custom_service_names(),
+        'module_service_names': None,
+        'mode': 'native',
+        'install_failures': failures,
     }
 
 
@@ -43773,6 +43952,7 @@ try:
         open_ssh_client=lambda core_cfg: _open_ssh_client(core_cfg),
         remote_core_service_names=lambda *args, **kwargs: _remote_core_service_names(*args, **kwargs),
         install_custom_services_to_core_vm=lambda *args, **kwargs: _install_custom_services_to_core_vm(*args, **kwargs),
+        install_custom_services_locally=lambda **kwargs: _install_custom_services_locally(**kwargs),
         local_custom_service_names=lambda: _local_custom_service_names(),
     )
 except Exception:
@@ -44818,6 +44998,7 @@ try:
     _core_artifact_checks_routes.register(
         app,
         core_config_for_request=lambda **kwargs: _core_config_for_request(**kwargs),
+        latest_session_id_for_scenario=lambda scenario: _latest_session_id_for_scenario(scenario),
         init_artifact_check_progress=lambda *args, **kwargs: _init_artifact_check_progress(*args, **kwargs),
         schedule_artifact_checks=lambda *args, **kwargs: _schedule_artifact_checks(*args, **kwargs),
         get_artifact_check_progress=lambda check_id: _get_artifact_check_progress(check_id),

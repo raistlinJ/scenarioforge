@@ -53,7 +53,14 @@ class CoreTGPrereqsService(CoreService):
     files: list[str] = ["/runprereqs.sh"]
     executables: list[str] = []
     dependencies: list[str] = []
-    startup: list[str] = ["/bin/sh /runprereqs.sh"]
+    # Resolve on both node kinds: a Docker node gets the file at the container
+    # root, while a namespaced vnode only has it in its `.conf` directory (the
+    # startup working directory). Traffic and Segmentation both depend on this
+    # service, so an absolute-only path meant their prerequisite never ran on
+    # vnodes. See TrafficService for the full explanation.
+    startup: list[str] = [
+        "/bin/sh -c 'f=runprereqs.sh; [ -f \"$f\" ] || f=/runprereqs.sh; exec sh \"$f\"'"
+    ]
     validate: list[str] = []
     shutdown: list[str] = []
     validation_mode: ServiceMode = ServiceMode.NON_BLOCKING

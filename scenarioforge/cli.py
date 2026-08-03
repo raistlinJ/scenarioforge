@@ -3252,6 +3252,19 @@ _POST_EXECUTION_VALIDATION_OPTIONS = {
     '--post-execution-validation',
 }
 
+# Artifact checks run from the machine that owns the WebUI backend and the SSH
+# session, never inside the delegated remote CLI: the CORE VM runs the repo
+# without the webapp dependencies, so forwarding these would abort the remote
+# execute with "requires the WebUI backend module".
+_CHECK_ARTIFACTS_OPTIONS = {
+    '-check-artifacts',
+    '--check-artifacts',
+}
+# Flags that take a value, so the value token has to be dropped as well.
+_CHECK_ARTIFACTS_VALUE_OPTIONS = {
+    '--check-artifacts-delay',
+}
+
 _POST_EXECUTION_ERROR_FIELDS = (
     ('missing_nodes', 'Missing scenario nodes'),
     ('missing_docker_nodes', 'Missing expected Docker nodes'),
@@ -4032,7 +4045,13 @@ def _build_remote_cli_tokens(
     idx = 0
     while idx < len(source_tokens):
         token = source_tokens[idx]
-        if token in _POST_EXECUTION_VALIDATION_OPTIONS:
+        if token in _POST_EXECUTION_VALIDATION_OPTIONS or token in _CHECK_ARTIFACTS_OPTIONS:
+            idx += 1
+            continue
+        if token in _CHECK_ARTIFACTS_VALUE_OPTIONS:
+            idx += 2  # drop the flag and its value
+            continue
+        if any(token.startswith(opt + '=') for opt in _CHECK_ARTIFACTS_VALUE_OPTIONS):
             idx += 1
             continue
         if token == '--xml':
@@ -4477,6 +4496,21 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
                 stream=progress_stream,
             )
             if not validation_ok:
+                return 1
+        # The remote CLI never sees these flags (they are stripped from the
+        # delegated command), so the checks run here, where the backend and the
+        # SSH session already exist.
+        if bool(getattr(args, 'check_artifacts', False)):
+            checks_ok = _run_cli_artifact_checks(
+                backend=backend,
+                args=args,
+                core_cfg=core_cfg,
+                session_id=session_id_int,
+                delay_seconds=float(getattr(args, 'check_artifacts_delay', 0.0) or 0.0),
+                strict=bool(getattr(args, 'strict', False)),
+                stream=progress_stream,
+            )
+            if not checks_ok:
                 return 1
         return 0
     finally:
@@ -7030,6 +7064,14 @@ def main():
             docker_slot_plan=docker_slot_plan,
             router_mesh_style=args.router_mesh,
             preview_plan=preview_full,
+            # Give every Docker node a read-only view of the traffic directory.
+            # Which nodes actually carry a flow is not known until the Traffic
+            # phase, which runs after compose is written, so the mount cannot be
+            # applied per node. It is a small read-only directory, and a node
+            # only runs the agent when the Traffic service is enabled and its
+            # config exists. The mount also carries any input files a flow
+            # needs, which arguments and environment cannot.
+            enable_traffic_mount=True,
         )
         # Preview parity signal (authoritative when preview_full was provided)
         try:
@@ -7062,6 +7104,9 @@ def main():
             layout_density=args.layout_density,
             docker_slot_plan=docker_slot_plan,
             preview_plan=preview_full,
+            # See the segmented-topology call above: mounted for every Docker
+            # node because traffic selection happens after compose is written.
+            enable_traffic_mount=True,
         )
         # Star topologies retain their lightweight builder, but it realizes every
         # host address from the persisted preview plan.
@@ -7294,7 +7339,9 @@ def main():
             except Exception as e:
                 logging.warning("Failed to insert allow rules for traffic: %s", e)
 
-            # Summarize traffic scripts (receivers/senders)
+            # Summarize the generated flows. Roles come from each node's agent
+            # config rather than a filename suffix, since one config per node
+            # replaced the per-flow scripts.
             total_r = 0
             total_s = 0
             nodes_with_r = 0
@@ -7302,22 +7349,27 @@ def main():
             for nid, paths in traffic_map.items():
                 r = s = 0
                 for p in paths:
-                    b = os.path.basename(p)
-                    stem = b.rsplit(".", 1)[0]
-                    suffix = stem.split("_")[-1]
-                    if suffix.startswith("r"):
-                        r += 1
-                    elif suffix.startswith("s"):
-                        s += 1
+                    if not str(p).endswith('.json'):
+                        continue
+                    try:
+                        with open(p, 'r', encoding='utf-8') as handle:
+                            node_cfg = json.load(handle)
+                    except Exception:
+                        continue
+                    for flow in (node_cfg.get('flows') or []):
+                        if str(flow.get('role') or '').lower() == 'receiver':
+                            r += 1
+                        else:
+                            s += 1
                 total_r += r
                 total_s += s
                 if r:
                     nodes_with_r += 1
                 if s:
                     nodes_with_s += 1
-                logging.debug("Node %s traffic scripts: receivers=%d, senders=%d", nid, r, s)
+                logging.debug("Node %s traffic flows: receivers=%d, senders=%d", nid, r, s)
             logging.info(
-                "Traffic scripts written to /tmp/traffic (receivers=%d on %d nodes; senders=%d on %d nodes; up to %.0f%% of hosts)",
+                "Traffic configs written to /tmp/traffic (receivers=%d on %d nodes; senders=%d on %d nodes; up to %.0f%% of hosts)",
                 total_r,
                 nodes_with_r,
                 total_s,
@@ -7763,6 +7815,14 @@ def main():
                             _rec.setdefault('ScenarioTag', _scenario_tag)
                             if segmentation_active:
                                 _rec.setdefault('EnableSegmentationMount', 'true')
+                            # Every docker-compose node -- vulnerability, flag
+                            # node generator, and plain docker alike -- gets a
+                            # read-only view of /tmp/traffic. That is where the
+                            # agent config lives, and where any input files a
+                            # flow needs will live. Set here as well as at build
+                            # time so it does not depend on the record carrying
+                            # the builder's flag this far.
+                            _rec.setdefault('EnableTrafficMount', 'true')
                 except Exception:
                     pass
                 created = prepare_compose_for_assignments(all_docker_nodes, out_base="/tmp/vulns")

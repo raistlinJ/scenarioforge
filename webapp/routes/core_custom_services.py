@@ -17,6 +17,7 @@ def register(
     open_ssh_client: Callable[[dict[str, Any]], Any],
     remote_core_service_names: Callable[..., set[str]],
     install_custom_services_to_core_vm: Callable[..., dict[str, Any]],
+    install_custom_services_locally: Callable[..., dict[str, Any]] | None = None,
     local_custom_service_names: Callable[[], list[str]],
 ) -> None:
     if not begin_route_registration(app, 'core_custom_services_routes'):
@@ -46,14 +47,41 @@ def register(
         raw_payload = request.get_json(silent=True) or {}
         payload = raw_payload if isinstance(raw_payload, dict) else {}
         core_cfg, _scenario_name, error = _payload_core_config(payload)
-        if error:
-            body, status = error
-            return jsonify(body), status
         required = local_custom_service_names()
         if not required:
             return jsonify({'ok': False, 'error': 'No local custom CORE services found.'}), 500
 
         install_requested = bool(payload.get('install'))
+
+        # Native mode runs CORE on this machine, so there is no SSH session to
+        # push through. Install straight into the local CORE instead of failing
+        # on the missing credentials the remote path needs.
+        if error:
+            if not install_custom_services_locally:
+                body, status = error
+                return jsonify(body), status
+            try:
+                install_meta = install_custom_services_locally(
+                    logger=app.logger,
+                    sudo_password=(core_cfg or {}).get('ssh_password') if isinstance(core_cfg, dict) else None,
+                ) if install_requested else None
+            except Exception as exc:
+                body, _status = error
+                return jsonify({
+                    'ok': False,
+                    'error': f'No CORE VM credentials, and installing into the local CORE failed: {exc}',
+                    'remote_error': body.get('error') if isinstance(body, dict) else None,
+                    'required_services': required,
+                }), 500
+            return jsonify({
+                'ok': True,
+                'mode': 'native',
+                'installed': bool(install_meta),
+                'missing_services': [] if install_meta else required,
+                'required_services': required,
+                'discovered_services': (install_meta or {}).get('service_names') or [],
+                'install_custom_services': install_meta,
+            })
         client = None
         install_meta = None
         try:
@@ -63,7 +91,11 @@ def register(
                 key=str.lower,
             )
             missing = sorted([name for name in required if name not in set(discovered)], key=str.lower)
-            if install_requested and missing:
+            # Install whenever a push is requested, not only when a service is
+            # absent. CORE loads these classes into core-daemon at start, so an
+            # edited service that is already present would otherwise never reach
+            # the host and the daemon would keep running the old definition.
+            if install_requested:
                 install_meta = install_custom_services_to_core_vm(
                     client,
                     sudo_password=(core_cfg or {}).get('ssh_password'),

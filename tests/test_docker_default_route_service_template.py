@@ -33,7 +33,9 @@ def test_docker_default_route_service_uses_absolute_paths() -> None:
     txt = SERVICE.read_text(encoding="utf-8")
     assert 'name: str = "DockerDefaultRoute"' in txt
     assert 'files: list[str] = ["/defaultroute.sh"]' in txt
-    assert 'startup: list[str] = ["/bin/sh /defaultroute.sh"]' in txt
+    # Relative first (namespaced vnode), absolute fallback (Docker node).
+    assert "f=defaultroute.sh;" in txt
+    assert "f=/defaultroute.sh" in txt
     assert 'validate: list[str] = []' in txt
     assert "grep -q '^default '" not in txt
 
