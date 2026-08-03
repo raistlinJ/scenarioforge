@@ -158,6 +158,61 @@ derives the draw from the flow's own identity (endpoints, protocol, port)
 instead, which keeps the probability semantics while making the answer a
 property of the flow rather than of when it was asked.
 
+### What a rule blocks: `effect`
+
+`segmentation_summary.json` records the planner's **intent**, and its fields
+change meaning with the chain a rule lands on:
+
+| type | chain | emitted iptables | what it actually blocks |
+|---|---|---|---|
+| `subnet_block` | FORWARD | `-s src -d dst -j DROP` | transit, src to dst |
+| `subnet_block` | INPUT | `-s src -j DROP` | **this node only** - `dst` is recorded but never matched |
+| `host_block` | FORWARD | `-s a -d b -j DROP` | transit, a to b |
+| `host_block` | INPUT | `-s a -d b -j DROP` | this node, a to b |
+| `protect_internal` | FORWARD | `! -s net -d net -j DROP` | transit into net |
+| `protect_internal` | INPUT | `! -s net -j DROP` | **this node only**, from outside net - and the node need not be in net |
+
+The two bold rows only occur with `include_hosts`, which is why they went
+unnoticed. Every consumer re-derived "what does this block" from those fields
+and they disagreed - pivot access read every rule as subnet-scoped and built a
+provider node in a subnet nothing was protecting.
+
+So each rule now carries a normalized **`effect`**, computed in
+`utils/segmentation_effects.py` where the chain, the node and the rule are all
+still in hand:
+
+```python
+{'scope': 'transit' | 'node',   # FORWARD vs INPUT
+ 'enforced_by': node_id,
+ 'blocks': bool,                # False for NAT and CUSTOM, which deny no path
+ 'protects': '<cidr or ip>',    # what is actually shielded
+ 'blocks_from': '<cidr or ip>', # what is actually shut out
+ 'invert_source': bool,         # blocks everything EXCEPT blocks_from
+ 'default_deny_chain': '<chain>'}
+```
+
+What keeps it honest is `effect_from_iptables`, which reads the effect back out
+of the emitted command. The two are computed from different things on purpose -
+one from the planner's variables, one from the text actually written - and a
+property test compares them across every rule the planner can produce, over a
+sweep of seeds and both placement modes. An effect that does not describe the
+rule that was written is exactly the fault the model exists to prevent, so it is
+the one thing worth testing that way.
+
+`walled_off_details` now reads effects: only a **transit** block walls a subnet
+off, and a block protecting a single address is skipped for the reason
+`host_block` always was - the only node in a `/32` is the blocked host, so the
+"pivot" would be an allow straight back into what the rule exists to block.
+Plans saved before effects existed still work, falling back to the emitted
+command and then to the old fields.
+
+Still to migrate onto effects: `_flow_allowed_by_summary` (which currently
+misses host-enforced rules, so no allow rule gets written for a flow they drop),
+`verify_flows_allowed` (which invents synthetic `/24` hosts because it never
+sees the topology), and `webapp/artifact_checks.py` (which filters on
+`"block" in type`, so a `protect_internal` drop is reported as a fault rather
+than as configured behaviour).
+
 ## Router connectivity & aggregation
 - Per-routing-item `r2r_mode` supports `Exact`, `Uniform`, `NonUniform`, and `Min`.
 - R2S policies (`r2s_mode`, `r2s_edges`, optional `r2s_hosts_min/max`) regroup hosts behind dedicated switches, with “Exact=1” aggregating all hosts per router into a single switch.

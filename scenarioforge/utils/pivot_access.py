@@ -103,7 +103,8 @@ PIVOT_PROVIDER_METADATA_KEY = "pivot_access_provider"
 # slot the author meant for a vulnerability or flag-node-generator.
 CHALLENGE_SLOT_ROLES = {"VulnerabilitySlot", "FlagGenSlot"}
 
-# Rule types that actually isolate a segment.
+# Rule types that isolate a segment, for a plan saved before rules carried their
+# effect. Kept only as a fallback; `_effect_of` prefers the recorded effect.
 #
 # `host_block` is deliberately excluded. It stops one host reaching one host,
 # which leaves the rest of the subnet reachable in both directions -- nothing is
@@ -251,8 +252,60 @@ def _is_slot_role(role: str) -> bool:
     }
 
 
+def _effect_of(entry: dict, rule: dict) -> Optional[dict]:
+    """What this rule denies, preferring what the planner recorded.
+
+    Falls back to reading the emitted iptables command, and then to the rule's
+    own fields, so a plan saved before rules carried their effect still works --
+    with the old fields' ambiguity, which is what the effect exists to remove.
+    """
+    from .segmentation_effects import EFFECT_TRANSIT, effect_from_iptables
+
+    effect = rule.get("effect")
+    if isinstance(effect, dict):
+        return effect
+
+    spec = rule.get("script_spec")
+    if isinstance(spec, dict):
+        for command in spec.get("commands") or []:
+            observed = effect_from_iptables(str(command))
+            if observed:
+                observed = dict(observed)
+                observed["enforced_by"] = entry.get("node_id", rule.get("node"))
+                return observed
+
+    rtype = str(rule.get("type") or "").strip().lower()
+    if rtype not in _BLOCK_TYPES:
+        return None
+    if rtype == "protect_internal":
+        internal = str(rule.get("subnet") or "")
+        return {
+            "scope": EFFECT_TRANSIT, "blocks": True, "protects": internal,
+            "blocks_from": internal, "invert_source": True,
+            "enforced_by": entry.get("node_id", rule.get("node")),
+        }
+    return {
+        "scope": EFFECT_TRANSIT, "blocks": True,
+        "protects": str(rule.get("dst") or ""), "blocks_from": str(rule.get("src") or ""),
+        "invert_source": False,
+        "enforced_by": entry.get("node_id", rule.get("node")),
+    }
+
+
 def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
     """Blocked destination subnets, their sources, and who enforces the block.
+
+    Reads each rule's recorded effect rather than its fields, because the fields
+    mean different things depending on the chain the rule landed on. Only a
+    *transit* block walls a subnet off: an INPUT rule shields the single node
+    running it, whatever subnet its `dst` or `subnet` field happens to name. A
+    live run placed a provider node in `192.168.67.0/24` for a rule that
+    protected one host in `192.168.12.0/24`.
+
+    A block that protects a single address is skipped for the same reason
+    `host_block` always was: the only node in a /32 is the blocked host itself,
+    so the "pivot" would be an allow straight back into the thing the rule
+    exists to block.
 
     The enforcing node ids matter: a FORWARD allow only has to be installed on
     the routers that actually carry a block for that path, not on every router
@@ -261,6 +314,8 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
     Accepts the summary shape (`{"node_id", "service", "rule"}`) as well as bare
     rule dicts, because callers hold both.
     """
+    from .segmentation_effects import EFFECT_TRANSIT
+
     found: Dict[str, dict] = {}
 
     def _slot(dst: str) -> dict:
@@ -272,33 +327,30 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
         rule = entry.get("rule") if isinstance(entry.get("rule"), dict) else entry
         if not isinstance(rule, dict):
             continue
-        rtype = str(rule.get("type") or "").strip().lower()
-        if rtype not in _BLOCK_TYPES:
+
+        effect = _effect_of(entry, rule)
+        if not isinstance(effect, dict) or not effect.get("blocks"):
+            continue
+        if str(effect.get("scope") or "") != EFFECT_TRANSIT:
             continue
 
-        node_id = entry.get("node_id", rule.get("node"))
+        dst = _network_of(effect.get("protects"))
+        if dst is None or dst.num_addresses <= 1:
+            continue
+
         try:
+            node_id = effect.get("enforced_by", entry.get("node_id", rule.get("node")))
             enforcer = int(node_id) if node_id is not None else None
         except Exception:
             enforcer = None
 
-        if rtype == "protect_internal":
-            # Blocks every other subnet from reaching this one.
-            dst = _network_of(rule.get("subnet"))
-            if dst is None:
-                continue
-            slot = _slot(str(dst))
-            slot["sources"].add("*")
-            if enforcer is not None:
-                slot["enforced_by"].add(enforcer)
-            continue
-
-        dst = _network_of(rule.get("dst"))
-        src = _network_of(rule.get("src"))
-        if dst is None:
-            continue
         slot = _slot(str(dst))
-        slot["sources"].add(str(src) if src is not None else "*")
+        if effect.get("invert_source"):
+            # Everything outside the protected network is shut out.
+            slot["sources"].add("*")
+        else:
+            src = _network_of(effect.get("blocks_from"))
+            slot["sources"].add(str(src) if src is not None else "*")
         if enforcer is not None:
             slot["enforced_by"].add(enforcer)
 

@@ -264,6 +264,11 @@ def _allow_rule_covers_flow(rule: dict, chain: str, proto: str, src_ip: str, dst
     return _selector_matches_ip(str(rule.get("src") or ""), src_ip) and _selector_matches_ip(str(rule.get("dst") or ""), dst_ip)
 
 
+from .segmentation_effects import (  # noqa: F401  (re-exported for callers)
+    EFFECT_NODE, EFFECT_TRANSIT, _empty_effect, effect_from_iptables, rule_effect,
+)
+
+
 def _flow_allowed_by_summary(
     existing_rules: List[dict],
     hosts: List[NodeInfo],
@@ -1152,6 +1157,10 @@ def plan_and_apply_segmentation(
             script_name = f"seg_{rtype}_{node.node_id}_{cnt}.py"
             script_path = os.path.join(out_dir, script_name)
             rule["script_spec"] = {"kind": "literal", "body": script_body}
+            # A CUSTOM script only logs, so it denies no path of its own.
+            rule["effect"] = _empty_effect(
+                EFFECT_TRANSIT if on_router else EFFECT_NODE, node.node_id, "",
+            )
             try:
                 write_segmentation_script(script_path, rule["script_spec"])
                 logger.debug("Segmentation: wrote custom script %s for node %s", script_name, node.node_id)
@@ -1261,6 +1270,9 @@ def plan_and_apply_segmentation(
                             forward_allow = f"iptables -A FORWARD -s {internal} -d {ext} -j ACCEPT"
                     except Exception:
                         forward_allow = None
+                # NAT denies nothing itself; its script sets -P FORWARD DROP,
+                # which is what the rest of the model needs to know about it.
+                rule["effect"] = _empty_effect(EFFECT_TRANSIT, node.node_id, "FORWARD")
                 rule["script_spec"] = {
                     "kind": "nat",
                     "chain": "FORWARD",
@@ -1465,6 +1477,7 @@ def plan_and_apply_segmentation(
                         if target and target not in docker_ports_seen:
                             docker_ports_seen.add(target)
                             docker_ports_opened.append(target)
+                rule["effect"] = rule_effect(rule, chain=chain_fw, node=node)
                 rule["script_spec"] = {
                     "kind": "firewall",
                     "chain": chain_fw,
