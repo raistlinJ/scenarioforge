@@ -222,3 +222,37 @@ def test_no_services_are_touched_without_a_session(tmp_path, monkeypatch):
         lookup_node_name=lambda nid: f"node-{nid}",
     )
     assert calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Pivot access is decided at plan time, because topology is built before
+# segmentation runs and an added provider must exist by then.
+# --------------------------------------------------------------------------- #
+
+def test_preview_computes_pivot_access_when_the_toggle_is_on():
+    import inspect
+    from scenarioforge.planning import full_preview as fp
+    src = inspect.getsource(fp.build_full_preview)
+    assert "if segmentation_accessible_by_pivot:" in src
+    assert "seg_preview['pivot_access']" in src
+    # It must run before the node payloads are frozen, so a provider that has to
+    # be added is known while nodes are still being planned.
+    assert src.index("seg_preview['pivot_access']") < src.index("routers_payload = ")
+
+
+def test_preview_pivot_access_is_absent_when_the_toggle_is_off():
+    import inspect
+    from scenarioforge.planning import full_preview as fp
+    src = inspect.getsource(fp.build_full_preview)
+    guard = src[src.index("if segmentation_accessible_by_pivot:"):]
+    # Guarded, so an untouched scenario carries no pivot_access block at all.
+    assert guard.index("seg_preview['pivot_access']") < guard.index("routers_payload = ")
+
+
+def test_preview_pivot_failure_is_recorded_not_raised():
+    import inspect
+    from scenarioforge.planning import full_preview as fp
+    src = inspect.getsource(fp.build_full_preview)
+    block = src[src.index("if segmentation_accessible_by_pivot:"):src.index("routers_payload = ")]
+    assert "except Exception" in block
+    assert "'error'" in block
