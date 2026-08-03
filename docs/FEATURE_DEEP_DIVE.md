@@ -126,7 +126,20 @@ never counts against configured vulnerability or flag-node-generator slot
 counts** — anything placed for pivot access is additive.
 
 The planner records the required image on the provider (`image` in the
-`pivot_access` report); materialising that node is the topology builder's job.
+`pivot_access` report).
+
+**Provider selection happens at plan time**, not at execute time. The topology
+is built well before the segmentation phase runs, so a provider that has to be
+*added* must be known while nodes are still being planned. `build_full_preview`
+therefore computes the plan and publishes it as
+`segmentation_preview.pivot_access`, making the requirement — including how many
+nodes must be created and from which image — visible before anything is built.
+
+> **Not yet implemented:** nothing consumes `added: true` providers. Such a
+> provider is reported with no `node_id` and no address, and no container or
+> compose entry is created for it, so a subnet that serves nothing still ends up
+> without a usable pivot. Subnets with a reusable provider (tiers 1-3) are
+> unaffected and work end to end.
 
 **Docker nodes never need the internet at execute time.** Before a run uses a
 provider image, execute resolves it in this order:

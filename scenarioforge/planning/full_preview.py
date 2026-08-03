@@ -1539,6 +1539,39 @@ def build_full_preview(
     except Exception:
         pass
 
+    # Pivot access is decided here, not at execute time, because the topology is
+    # built long before segmentation runs -- a provider that has to be *added*
+    # must be known while nodes are still being planned. Reported on the preview
+    # so the requirement is visible before anything is created.
+    if segmentation_accessible_by_pivot:
+        try:
+            from ..types import NodeInfo as _NodeInfo
+            from ..utils.pivot_access import plan_pivot_access as _plan_pivot
+
+            def _as_nodeinfo(nodes):
+                out = []
+                for n in nodes or []:
+                    ip = str(getattr(n, 'ip4', '') or '').strip()
+                    if not ip:
+                        continue
+                    out.append(_NodeInfo(node_id=int(getattr(n, 'node_id')),
+                                         ip4=ip,
+                                         role=str(getattr(n, 'role', '') or '')))
+                return out
+
+            _names = {int(getattr(n, 'node_id')): str(getattr(n, 'name', '') or '')
+                      for n in list(host_nodes or []) + list(router_nodes or [])
+                      if getattr(n, 'node_id', None) is not None}
+            _pivot_plan = _plan_pivot(
+                seg_preview.get('rules') or [],
+                _as_nodeinfo(host_nodes),
+                routers=_as_nodeinfo(router_nodes),
+                node_names=_names,
+            )
+            seg_preview['pivot_access'] = _pivot_plan.as_dict()
+        except Exception as _exc:
+            seg_preview['pivot_access'] = {'error': str(_exc)}
+
     routers_payload = [r.__dict__ for r in router_nodes]
     hosts_payload = [h.__dict__ for h in host_nodes]
     switches_payload = [s.__dict__ for s in switch_nodes]
