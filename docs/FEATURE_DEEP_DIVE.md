@@ -126,6 +126,41 @@ where a default-deny policy would otherwise drop the packet.
 The toggle is **off by default**, so an existing scenario keeps the exact
 segmentation it was authored with.
 
+#### Where the pivot shows up in the chain
+
+Whether a pivot is its own challenge is decided by capability, not by node. If
+the challenge already on the provider grants code execution there, solving it
+leaves the participant on the node, so pivoting onward is a consequence of work
+already done and folds into that step (**absorbed**). A bare SSH box, a router,
+or a challenge that only leaks a file or a credential earns a step of its own
+(**own_step**).
+
+`CodeExecution(host)` is the test, because the fact subsumption in
+`vulns.metadata` already routes every RCE-shaped impact through it, so
+`remote_code_execution`, `command_injection`, `deserialization`, `web_rce` and
+`privilege_escalation` qualify while `auth_bypass`, `arbitrary_file_read`,
+`sql_injection` and `credential_disclosure` do not. One wrinkle compensated for
+in `pivot_chain`: `_SUBSUMES` maps the one-argument `Shell(host)` but not
+`Shell(host, user)`, which is equally a shell on the host.
+
+Because Flow runs *before* execute, this is decided from the **preview**
+topology and preview segmentation rules, not the runtime
+`segmentation_summary.json`. The toggle therefore travels with the plan:
+orchestrator → `segmentation_preview.accessible_by_pivot` → Flow.
+
+- **Absorbed** pivots stamp `pivot_grants` on the assignment. Flow chain rows
+  draw a bold star badge next to the node and the guides add a star plus a row
+  naming what solving the step opens.
+- **own_step** pivots are rendered as their own row in Flow and their own
+  section in the guides, positioned immediately before the first chain step
+  inside the subnet they unlock (`insert_before`).
+
+An own_step pivot is deliberately **not** injected into `currentChain`. Chain
+nodes and flag assignments are aligned by index throughout the Flow UI and the
+exports, and a synthetic step has no generator to resolve, so injecting one
+would desynchronise sequencing and break execute. It is a presentation step:
+real work for the participant, not a generator to run.
+
 ## Reports & artifacts
 - Markdown reports (`./reports/scenario_report_<timestamp>.md`) enumerate topology stats, planning metadata, segmentation results, and runtime artefacts. Each run also emits a JSON summary alongside the Markdown file (`scenario_report_<timestamp>.json`) plus per-run connectivity CSVs when router degree data is available.
 - Timestamp conventions:

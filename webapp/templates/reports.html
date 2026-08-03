@@ -1296,6 +1296,24 @@ function reportPivotGrantsFor(node, assignment) {
   return out;
 }
 
+function reportOwnStepPivots(assignments) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(assignments) ? assignments : []).forEach((a) => {
+    const decisions = (a && typeof a === 'object') ? (a.pivot_decisions || a.pivotDecisions) : null;
+    if (!Array.isArray(decisions)) return;
+    decisions.forEach((d) => {
+      if (!d || typeof d !== 'object') return;
+      if (String(d.disposition || '') !== 'own_step') return;
+      const key = String(d.subnet || '') + '|' + String(d.provider_node || '');
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(d);
+    });
+  });
+  return out;
+}
+
 function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const opts = (options && typeof options === 'object') ? options : {};
   const facilitatorMode = !!opts.facilitator;
@@ -1636,6 +1654,19 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   nodes.forEach((node, index) => {
     const step = index + 1;
     const assignment = (alignedAssignments[index] && typeof alignedAssignments[index] === 'object') ? alignedAssignments[index] : {};
+    // A pivot that is nobody else's challenge is its own step, and has to be
+    // performed before anything in the subnet it opens can be reached.
+    try {
+      reportOwnStepPivots(alignedAssignments).forEach((d) => {
+        if (Number(d.insert_before) !== index) return;
+        lines.push(`### \u2605 Pivot step: reach ${_cell(String(d.subnet || ''))}`);
+        lines.push('');
+        lines.push(String(d.instruction || d.reason || ''));
+        lines.push('');
+        lines.push('This pivot is not part of another challenge, so it counts as a step of its own.');
+        lines.push('');
+      });
+    } catch (e) { }
     const nodeName = String((node && node.name) ? node.name : `Node ${step}`).trim();
     const nodeId = String((node && node.id) ? node.id : '').trim();
     const generatorId = String(assignment.id || assignment.generator_id || '').trim();

@@ -4372,6 +4372,28 @@
     return out;
   }
 
+  // Pivots that are NOT absorbed into an existing challenge. They are real work
+  // for the participant but have no generator to run, so they are rendered as
+  // their own row without entering currentChain -- chain nodes and flag
+  // assignments are aligned by index everywhere downstream.
+  function ownStepPivotsFor(assignments) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(assignments) ? assignments : []).forEach((a) => {
+      const decisions = (a && typeof a === 'object') ? (a.pivot_decisions || a.pivotDecisions) : null;
+      if (!Array.isArray(decisions)) return;
+      decisions.forEach((d) => {
+        if (!d || typeof d !== 'object') return;
+        if (String(d.disposition || '') !== 'own_step') return;
+        const key = String(d.subnet || '') + '|' + String(d.provider_node || '');
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(d);
+      });
+    });
+    return out;
+  }
+
   function renderChainEditor() {
     const wrap = document.getElementById('flowChainList');
     if (!wrap) return;
@@ -5257,7 +5279,52 @@
       });
     } catch (e) { }
 
+    const ownStepPivots = ownStepPivotsFor(currentFlagAssignments);
+    function appendPivotStepRow(decision) {
+      const row = document.createElement('div');
+      row.className = 'list-group-item list-group-item-info';
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '84px 1fr 76px';
+      row.style.columnGap = '.5rem';
+      row.style.alignItems = 'start';
+      const seqCell = document.createElement('div');
+      seqCell.className = 'text-muted small fw-semibold';
+      seqCell.style.width = '84px';
+      seqCell.style.whiteSpace = 'nowrap';
+      seqCell.style.borderRight = '1px solid var(--bs-border-color, #dee2e6)';
+      seqCell.style.paddingRight = '.5rem';
+      seqCell.textContent = '\u2605';
+      const body = document.createElement('div');
+      body.className = 'd-flex flex-column';
+      body.style.minWidth = '0';
+      const head = document.createElement('div');
+      head.className = 'd-flex align-items-center gap-2';
+      const heading = document.createElement('div');
+      heading.className = 'fw-semibold';
+      heading.textContent = 'Pivot into ' + String(decision.subnet || '');
+      head.appendChild(heading);
+      const tag = document.createElement('span');
+      tag.className = 'badge text-bg-info fw-bold';
+      tag.textContent = '\u2605 Pivot step';
+      tag.title = 'This pivot is not part of another challenge, so it is a step of its own.';
+      head.appendChild(tag);
+      body.appendChild(head);
+      const detail = document.createElement('div');
+      detail.className = 'small text-muted';
+      detail.textContent = String(decision.instruction || decision.reason || '');
+      body.appendChild(detail);
+      row.appendChild(seqCell);
+      row.appendChild(body);
+      row.appendChild(document.createElement('div'));
+      wrap.appendChild(row);
+    }
+
     currentChain.forEach((node, idx) => {
+      try {
+        ownStepPivots.forEach((d) => {
+          if (Number(d.insert_before) === idx) appendPivotStepRow(d);
+        });
+      } catch (e) { }
       const item = document.createElement('div');
       item.className = 'list-group-item';
       let isDupNode = false;

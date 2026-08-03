@@ -71,10 +71,30 @@ class PivotStepDecision:
     provider_challenge: str = ""
     entry_kind: str = ""
     entry_port: Optional[int] = None
+    # Chain index this step belongs before, for own_step pivots. -1 means the
+    # chain never visits the subnet, so there is nothing to order it against.
+    insert_before: int = -1
 
     @property
     def is_own_step(self) -> bool:
         return self.disposition == OWN_STEP
+
+    def instruction(self) -> str:
+        """What the participant actually has to do, for guides and chain rows."""
+        if self.disposition != OWN_STEP:
+            return ""
+        where = f" on {self.provider_node}" if self.provider_node else ""
+        port = f":{self.entry_port}" if self.entry_port else ""
+        kind = (self.entry_kind or "").strip().lower()
+        if kind == "ssh":
+            how = f"Gain access over SSH{where}{port}"
+        elif kind == "vulnerability":
+            how = f"Exploit the vulnerability{where}{port}"
+        elif kind == "flag-node-generator":
+            how = f"Work the challenge{where}{port}"
+        else:
+            how = f"Gain access{where}{port}"
+        return f"{how}, then pivot through it to reach {self.subnet}."
 
     def as_dict(self) -> dict:
         return {
@@ -86,6 +106,8 @@ class PivotStepDecision:
             "provider_challenge": self.provider_challenge,
             "entry_kind": self.entry_kind,
             "entry_port": self.entry_port,
+            "insert_before": self.insert_before,
+            "instruction": self.instruction(),
         }
 
 

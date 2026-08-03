@@ -23265,6 +23265,13 @@ def _flow_stamp_pivot_grants(
         log.debug('[flow] pivot grant stamping skipped: %s', exc)
         return flag_assignments
 
+    # An own_step pivot is real work for the participant but has no generator to
+    # run, so it is never injected into the executable chain -- chain nodes and
+    # flag assignments are aligned by index everywhere downstream, and a step
+    # with nothing to resolve would break execute. It is positioned here and
+    # rendered as a presentation step instead.
+    _position_pivot_steps(decisions, chain_nodes, preview)
+
     grants_by_node: dict[str, list[str]] = {}
     for decision in decisions:
         if decision.disposition != ABSORBED:
@@ -23309,6 +23316,66 @@ def _flow_stamp_pivot_grants(
             a2['pivot_decisions'] = payload
         out.append(a2)
     return out
+
+
+def _position_pivot_steps(decisions: Any, chain_nodes: Any, preview: Any) -> None:
+    """Place each own_step pivot before the first chain step it unlocks.
+
+    The pivot has to be performed before the participant can reach anything in
+    the walled-off subnet, so it belongs immediately before the first chain step
+    that lives there. Sets `insert_before` on the decision (an index into the
+    chain); -1 when no chain step is inside that subnet, meaning the pivot opens
+    a subnet the chain never visits and there is nothing to order it against.
+    """
+    import ipaddress
+
+    if not decisions:
+        return
+
+    # Chain position -> address, from the chain node itself or the preview.
+    ip_by_name: dict[str, str] = {}
+    if isinstance(preview, dict):
+        for key in ('hosts', 'routers'):
+            for entry in (preview.get(key) or []):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name') or '').strip().lower()
+                ip = str(entry.get('ip4') or entry.get('ipv4') or entry.get('ip') or '').split('/')[0].strip()
+                if name and ip:
+                    ip_by_name.setdefault(name, ip)
+
+    chain_ips: list[str] = []
+    for node in (chain_nodes or []):
+        ip = ''
+        if isinstance(node, dict):
+            ip = str(node.get('ip4') or node.get('ipv4') or node.get('ip') or '').split('/')[0].strip()
+            if not ip:
+                for key in ('name', 'node_name', 'id'):
+                    candidate = str(node.get(key) or '').strip().lower()
+                    if candidate and candidate in ip_by_name:
+                        ip = ip_by_name[candidate]
+                        break
+        chain_ips.append(ip)
+
+    for decision in decisions:
+        if getattr(decision, 'disposition', '') != 'own_step':
+            continue
+        try:
+            network = ipaddress.ip_network(str(decision.subnet or ''), strict=False)
+        except Exception:
+            decision.insert_before = -1
+            continue
+        position = -1
+        for index, ip in enumerate(chain_ips):
+            if not ip:
+                continue
+            try:
+                if ipaddress.ip_address(ip) in network:
+                    position = index
+                    break
+            except Exception:
+                continue
+        decision.insert_before = position
 
 
 def _flow_normalize_dependency_level(raw: Any) -> int:
