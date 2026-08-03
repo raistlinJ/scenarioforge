@@ -1832,6 +1832,40 @@ def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
     return results
 
 
+def _warn_unmaterialised_pivot_providers(summary: Any) -> list[str]:
+    """Warn about walled-off subnets left with no usable pivot.
+
+    A provider marked `added` has no node behind it yet: nothing creates the
+    container or compose entry, so the subnet is reachable only if something
+    else in it happens to serve a port. Silence here would mean an unsolvable
+    challenge discovered by a participant, so it is logged at WARNING, which the
+    run's latest.errors artifact also captures.
+
+    Returns the affected subnets, for callers that want to report them.
+    """
+    providers = []
+    if isinstance(summary, dict):
+        access = summary.get('pivot_access')
+        if isinstance(access, dict):
+            providers = access.get('providers') or []
+    stranded = [
+        str(p.get('subnet') or '')
+        for p in providers
+        if isinstance(p, dict) and p.get('added') and not p.get('node_id')
+    ]
+    stranded = [s for s in stranded if s]
+    if stranded:
+        logging.warning(
+            'Pivot access: %d subnet(s) have no usable pivot because their provider '
+            'node is not created yet (%s). Nothing in those subnets serves a '
+            'vulnerability, flag-node-generator or SSH, so a participant cannot get '
+            'in. Give one of their nodes a reachable service, or disable '
+            'accessible_by_pivot for this scenario.',
+            len(stranded), ', '.join(stranded),
+        )
+    return stranded
+
+
 def _persistent_images_to_keep() -> list[str]:
     """Images the operator pinned as `persistent`, published by the web UI.
 
@@ -7450,6 +7484,10 @@ def main():
                     _ensure_pivot_provider_images(seg_summary)
                 except Exception as exc_img:
                     logging.warning("Pivot image preparation failed: %s", exc_img)
+                try:
+                    _warn_unmaterialised_pivot_providers(seg_summary)
+                except Exception:
+                    pass
             except Exception as e:
                 logging.warning("Failed applying segmentation: %s", e)
         else:
