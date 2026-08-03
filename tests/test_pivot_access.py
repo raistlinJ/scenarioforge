@@ -108,7 +108,7 @@ def test_existing_ssh_is_used_before_changing_anything():
 
 def test_empty_slots_are_never_consumed_ssh_lands_on_a_non_slot_node():
     # Nothing is offered yet. The two slot nodes are reserved capacity, so the
-    # plain Docker node takes SSH instead.
+    # plain Docker node takes SSH instead (and it must be Docker, not a vnode).
     plan = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points={})
     provider = plan.providers[0]
     assert provider.node_id == 6            # the Docker node, not a slot
@@ -194,7 +194,7 @@ def test_each_walled_off_subnet_gets_its_own_provider():
         _block(src="10.0.1.0/24", dst="172.21.240.0/24"),
         _block(src="10.0.1.0/24", dst="10.99.0.0/24"),
     ]
-    hosts = _subnet_nodes() + [NodeInfo(node_id=20, ip4="10.99.0.4/24", role="Server")]
+    hosts = _subnet_nodes() + [NodeInfo(node_id=20, ip4="10.99.0.4/24", role="Docker")]
     plan = pa.plan_pivot_access(rules, hosts, entry_points={})
     assert {p.subnet for p in plan.providers} == {"172.21.240.0/24", "10.99.0.0/24"}
     assert {p.node_id for p in plan.providers} == {6, 20}
@@ -231,9 +231,10 @@ def test_inventory_is_empty_without_input():
 # The router fallback: a subnet of only empty slots still has a way in
 # --------------------------------------------------------------------------- #
 
-def test_router_is_used_before_growing_the_topology():
-    # Every host here is reserved challenge capacity, but the subnet's router is
-    # not, so it becomes the provider instead of adding a node.
+def test_a_router_is_never_a_provider():
+    # Routers are vnodes: they share the CORE VM filesystem, so SSH on one is a
+    # host escape rather than a pivot. A subnet of only empty slots must grow a
+    # Docker node instead of borrowing the router sitting right there.
     hosts = [
         NodeInfo(node_id=2, ip4="172.21.240.2/24", role="FlagGenSlot"),
         NodeInfo(node_id=5, ip4="172.21.240.5/24", role="VulnerabilitySlot"),
@@ -241,23 +242,38 @@ def test_router_is_used_before_growing_the_topology():
     routers = [NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")]
     plan = pa.plan_pivot_access([_block()], hosts, routers=routers, entry_points={})
     provider = plan.providers[0]
-    assert provider.node_id == 1
-    assert provider.added is False
-    assert provider.needs_service is True
-    assert provider.entry.kind == pa.ENTRY_SSH
-    assert provider.consumes_slot is False
-    # The router has an address, so rules can be written immediately.
-    assert plan.allow_rules and all(r["rule"]["dst"] == "172.21.240.1" for r in plan.allow_rules)
+    assert provider.added is True
+    assert provider.node_id is None
+    assert provider.role == "Docker"
 
 
-def test_a_real_host_still_beats_the_router():
+def test_vnode_hosts_are_not_eligible_either():
+    # PC/Server/Workstation are vnodes too, however host-like they look.
+    for role in ("PC", "Server", "Workstation"):
+        hosts = [NodeInfo(node_id=6, ip4="172.21.240.6/24", role=role)]
+        plan = pa.plan_pivot_access([_block()], hosts, entry_points={})
+        assert plan.providers[0].added is True, role
+
+
+def test_a_docker_node_is_preferred_over_growing_the_topology():
     hosts = [
         NodeInfo(node_id=2, ip4="172.21.240.2/24", role="FlagGenSlot"),
         NodeInfo(node_id=6, ip4="172.21.240.6/24", role="Docker"),
+        NodeInfo(node_id=7, ip4="172.21.240.7/24", role="Server"),
     ]
     routers = [NodeInfo(node_id=1, ip4="172.21.240.1/24", role="Router")]
     plan = pa.plan_pivot_access([_block()], hosts, routers=routers, entry_points={})
     assert plan.providers[0].node_id == 6
+    assert plan.providers[0].added is False
+
+
+def test_an_offer_on_a_vnode_is_ignored():
+    # Even an existing service on a vnode must not be used as the way in.
+    hosts = [NodeInfo(node_id=7, ip4="172.21.240.7/24", role="Server")]
+    entries = {7: [pa.PivotEntry(kind=pa.ENTRY_VULNERABILITY, port=8080)]}
+    plan = pa.plan_pivot_access([_block()], hosts, entry_points=entries)
+    assert plan.providers[0].added is True
+    assert plan.providers[0].reused is False
 
 
 def test_router_ids_are_derived_so_forward_rules_land_correctly():
@@ -274,6 +290,9 @@ def test_added_node_remains_the_last_resort():
     hosts = [NodeInfo(node_id=2, ip4="172.21.240.2/24", role="FlagGenSlot")]
     plan = pa.plan_pivot_access([_block()], hosts, routers=[], entry_points={})
     assert plan.providers[0].added is True
+    # An added provider is a Docker SSH node, never a vnode.
+    assert plan.providers[0].role == "Docker"
+    assert plan.providers[0].entry.kind == pa.ENTRY_SSH
 
 
 def test_forward_rules_go_to_every_router_not_just_the_enforcer():

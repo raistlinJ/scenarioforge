@@ -18,19 +18,24 @@ Provider selection is hybrid, preferring what already exists:
    real challenge step);
 2. a node already offering a flag-node-generator;
 3. a node already running SSH;
-4. otherwise an existing **non-slot** host, which gets SSH enabled;
-5. otherwise the subnet's own router, which gets SSH enabled;
-6. otherwise a new node is added.
+4. otherwise an existing **non-slot Docker** node, which gets SSH enabled;
+5. otherwise a Docker SSH node is added.
 
-Step 5 matters more than it looks: a subnet whose hosts are all unfilled
-challenge slots still has a router by construction, and a router is not slot
-capacity. It makes the guarantee satisfiable without growing the topology in
-almost every real scenario.
+**Only Docker-backed nodes are ever eligible.** CORE vnodes -- routers, PCs,
+servers, workstations -- get a network namespace but not a mount namespace, so
+they share the CORE VM's filesystem. Handing a participant SSH on one is a host
+escape, not a pivot. That rules out the routers too, which is why a subnet whose
+hosts are all unfilled challenge slots has to grow a node rather than borrow the
+router that is already sitting there.
 
 Step 4 deliberately skips empty challenge slots. Consuming one would silently
 spend capacity the scenario author allocated for challenges, so a provider never
 counts against the configured vulnerability or flag-node-generator slot counts.
 Anything placed for pivot access is additive.
+
+An added provider is a Docker node running SSH. The SSH fallback needs a daemon
+listening, which a vnode would have had by way of the host and a minimal
+container image does not, so the added node must come from an SSH-capable image.
 
 This module is pure: it decides *what* should be reachable and returns the allow
 rules that express it. Writing iptables and mutating the session stays in
@@ -173,6 +178,20 @@ def _host_network(node: NodeInfo) -> Optional[ipaddress._BaseNetwork]:
     return _network_of(raw)
 
 
+def _is_docker_backed(node: NodeInfo) -> bool:
+    """Only Docker-backed nodes can host a pivot.
+
+    A CORE vnode shares the CORE VM's filesystem, so SSH on one hands the
+    participant the host rather than a foothold in the scenario.
+    """
+    try:
+        from ..planning.node_plan import is_docker_backed_role
+        return bool(is_docker_backed_role(str(getattr(node, "role", "") or "")))
+    except Exception:
+        normalized = "".join(ch for ch in str(getattr(node, "role", "") or "").lower() if ch.isalnum())
+        return normalized in {"docker", "vulnerabilityslot", "flaggenslot"}
+
+
 def _is_slot_role(role: str) -> bool:
     normalized = "".join(ch for ch in str(role or "").lower() if ch.isalnum())
     return normalized in {r.lower() for r in CHALLENGE_SLOT_ROLES} or normalized in {
@@ -264,6 +283,8 @@ def _pick_existing(
     """The best node already offering a way in, following ENTRY_PREFERENCE."""
     for kind in ENTRY_PREFERENCE:
         for node in inside:
+            if not _is_docker_backed(node):
+                continue
             for entry in entry_points.get(int(node.node_id)) or []:
                 if str(entry.kind or "").strip().lower() == kind:
                     return node, entry
@@ -271,9 +292,9 @@ def _pick_existing(
 
 
 def _pick_non_slot(inside: Sequence[NodeInfo]) -> Optional[NodeInfo]:
-    """An existing node that can take SSH without spending challenge capacity."""
+    """A Docker node that can take SSH without spending challenge capacity."""
     for node in inside:
-        if not _is_slot_role(getattr(node, "role", "")):
+        if _is_docker_backed(node) and not _is_slot_role(getattr(node, "role", "")):
             return node
     return None
 
@@ -346,7 +367,6 @@ def plan_pivot_access(
         if subnet is None:
             continue
         inside = _nodes_in(subnet, hosts)
-        routers_inside = _nodes_in(subnet, routers)
 
         node, entry = _pick_existing(inside, entry_points)
         provider: Optional[PivotProvider] = None
@@ -362,9 +382,9 @@ def plan_pivot_access(
                 role=str(getattr(node, "role", "") or ""),
             )
         else:
-            # A router in the subnet is never slot capacity, so it is a better
-            # last resort than growing the topology.
-            fallback = _pick_non_slot(inside) or (routers_inside[0] if routers_inside else None)
+            # Routers are vnodes and therefore never eligible, however
+            # convenient they would be.
+            fallback = _pick_non_slot(inside)
             if fallback is not None:
                 provider = PivotProvider(
                     subnet=subnet_text,
@@ -385,16 +405,17 @@ def plan_pivot_access(
                     entry=PivotEntry(kind=ENTRY_SSH, port=int(ssh_port), protocol="tcp", label="SSH"),
                     blocked_from=list(blocked_from),
                     added=True,
-                    role="Server",
+                    role="Docker",
                 )
             else:
                 plan.unresolved.append({
                     "subnet": subnet_text,
                     "blocked_from": list(blocked_from),
                     "reason": (
-                        "no eligible provider: every node in this subnet is an unfilled "
-                        "challenge slot, no router is attached to it, and adding nodes "
-                        "is disabled"
+                        "no eligible provider: this subnet has no Docker node that is not "
+                        "an unfilled challenge slot, and adding nodes is disabled. Routers "
+                        "and other vnodes are not eligible because they share the CORE VM "
+                        "filesystem"
                     ),
                 })
                 continue
@@ -405,7 +426,7 @@ def plan_pivot_access(
         # caller allocates the node first, then re-plans.
         dst_ip = ""
         if provider.node_id is not None:
-            for candidate in list(inside) + list(routers_inside):
+            for candidate in inside:
                 if int(candidate.node_id) == int(provider.node_id):
                     dst_ip = _host_ip(candidate)
                     break

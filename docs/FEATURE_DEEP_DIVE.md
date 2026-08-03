@@ -104,17 +104,24 @@ Provider selection is hybrid and prefers what already exists:
 1. a node already offering a **vulnerability** — the pivot becomes a real challenge step;
 2. a node already offering a **flag-node-generator**;
 3. a node already running **SSH**;
-4. otherwise an existing **non-slot host**, which gets SSH enabled;
-5. otherwise the subnet's **own router**, which gets SSH enabled;
-6. otherwise a node is added.
+4. otherwise an existing **non-slot Docker node**, which gets SSH enabled;
+5. otherwise a **Docker SSH node is added**.
 
-Steps 4-6 deliberately skip unfilled challenge slots. Consuming one would
+**Only Docker-backed nodes are ever eligible.** CORE vnodes — routers, PCs,
+servers, workstations — get a network namespace but not a mount namespace, so
+they share the CORE VM's filesystem. Handing a participant SSH on one is a host
+escape, not a pivot. That excludes the routers too, so a subnet whose hosts are
+all unfilled challenge slots has to grow a node rather than borrow the router
+already sitting in it.
+
+Steps 4-5 deliberately skip unfilled challenge slots. Consuming one would
 silently spend capacity the author allocated for challenges, so **a provider
 never counts against configured vulnerability or flag-node-generator slot
-counts** — anything placed for pivot access is additive. Step 5 matters more
-than it looks: a subnet whose hosts are all empty slots still has a router by
-construction, and a router is not slot capacity, so the guarantee holds without
-growing the topology in almost every real scenario.
+counts** — anything placed for pivot access is additive.
+
+The SSH fallback needs a daemon actually listening. A minimal container image
+has none, so an added provider must come from an SSH-capable image; a Docker
+node whose image lacks `sshd` yields an open path to a closed port.
 
 The resulting allow rules are appended to `segmentation_summary.json` tagged
 `reason: pivot-access`, so they are distinguishable from the allow rules written
