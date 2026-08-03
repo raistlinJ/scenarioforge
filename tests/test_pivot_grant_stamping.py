@@ -164,3 +164,58 @@ def test_orchestrator_reads_the_toggle_from_the_scenario(tmp_path):
     import pathlib
     orch = pathlib.Path('scenarioforge/planning/orchestrator.py').read_text(encoding='utf-8')
     assert "seg_breakdown['accessible_by_pivot']" in orch
+
+
+# --------------------------------------------------------------------------- #
+# own_step pivots are ordered against the chain
+# --------------------------------------------------------------------------- #
+
+def _two_step_chain():
+    return [
+        {'id': 'docker-23', 'name': 'docker-23', 'ip4': '10.0.140.6/24',
+         'provides': ['Knowledge(value)']},
+        {'id': 'docker-21', 'name': 'docker-21', 'ip4': '172.21.240.6/24',
+         'provides': ['Credential(user, password)']},
+    ]
+
+
+def test_own_step_pivot_is_placed_before_the_step_it_unlocks():
+    assignments = [{'node_id': 'docker-23'}, {'node_id': 'docker-21'}]
+    out = ab._flow_stamp_pivot_grants(assignments, _two_step_chain(), _preview())
+    decision = out[0]['pivot_decisions'][0]
+    assert decision['disposition'] == 'own_step'
+    # docker-21 (172.21.240.6) is chain index 1, the first step in the subnet.
+    assert decision['insert_before'] == 1
+
+
+def test_own_step_pivot_carries_an_instruction():
+    assignments = [{'node_id': 'docker-23'}, {'node_id': 'docker-21'}]
+    out = ab._flow_stamp_pivot_grants(assignments, _two_step_chain(), _preview())
+    instruction = out[0]['pivot_decisions'][0]['instruction']
+    assert '172.21.240.0/24' in instruction
+    assert 'pivot through it' in instruction
+
+
+def test_absorbed_pivot_has_no_position_or_instruction():
+    out = ab._flow_stamp_pivot_grants(_assignments(), _chain(), _preview())
+    decision = out[0]['pivot_decisions'][0]
+    assert decision['disposition'] == 'absorbed'
+    assert decision['insert_before'] == -1
+    assert decision['instruction'] == ''
+
+
+def test_pivot_for_a_subnet_the_chain_never_visits_has_no_position():
+    chain = [{'id': 'docker-23', 'name': 'docker-23', 'ip4': '10.0.140.6/24',
+              'provides': ['Knowledge(value)']}]
+    out = ab._flow_stamp_pivot_grants([{'node_id': 'docker-23'}], chain, _preview())
+    assert out[0]['pivot_decisions'][0]['insert_before'] == -1
+
+
+def test_position_falls_back_to_the_preview_for_a_chain_node_without_an_ip():
+    chain = [
+        {'id': 'docker-23', 'name': 'docker-23', 'provides': ['Knowledge(value)']},
+        {'id': 'docker-21', 'name': 'docker-21', 'provides': ['Credential(user)']},
+    ]
+    out = ab._flow_stamp_pivot_grants([{'node_id': 'docker-23'}, {'node_id': 'docker-21'}],
+                                      chain, _preview())
+    assert out[0]['pivot_decisions'][0]['insert_before'] == 1

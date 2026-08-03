@@ -27,7 +27,7 @@ def _reports():
 
 def test_chain_row_shows_a_star_badge_for_an_absorbed_pivot():
     html = _flow()
-    at = html.index("\\u2605 Pivot")
+    at = html.index("badge.textContent = '\\u2605 Pivot';")
     block = html[at - 700:at + 500]
     assert "badge" in block
     assert "fw-bold" in block          # the emphasis the marker exists for
@@ -36,7 +36,7 @@ def test_chain_row_shows_a_star_badge_for_an_absorbed_pivot():
 
 def test_the_badge_explains_what_it_opens():
     html = _flow()
-    at = html.index("\\u2605 Pivot")
+    at = html.index("badge.textContent = '\\u2605 Pivot';")
     block = html[at:at + 500]
     assert "badge.title" in block
     assert "opens the way into" in block
@@ -46,7 +46,7 @@ def test_the_badge_explains_what_it_opens():
 
 def test_badge_only_renders_when_the_step_grants_a_pivot():
     html = _flow()
-    at = html.index("\\u2605 Pivot")
+    at = html.index("badge.textContent = '\\u2605 Pivot';")
     block = html[at - 700:at]
     assert "if (grants.length)" in block
 
@@ -74,7 +74,7 @@ def test_a_step_with_no_pivot_is_unchanged():
     # Guard against the marker leaking into every row: the badge is built only
     # inside the grants check, never unconditionally.
     html = _flow()
-    assert html.count("\\u2605 Pivot") == 1
+    assert html.count("badge.textContent = '\\u2605 Pivot';") == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -113,3 +113,65 @@ def test_guide_reader_is_a_twin_of_the_flow_reader():
 def test_both_surfaces_agree_on_the_absorbed_marker():
     assert "'absorbed'" in _flow()
     assert "'absorbed'" in _reports()
+
+
+# --------------------------------------------------------------------------- #
+# own_step pivots render as steps of their own
+# --------------------------------------------------------------------------- #
+
+def test_flow_renders_an_own_step_pivot_row():
+    html = _flow()
+    at = html.index("function appendPivotStepRow(")
+    block = html[at:at + 2200]
+    assert "Pivot into " in block
+    assert "\\u2605 Pivot step" in block
+    assert "step of its own" in block
+    # Uses the server-computed instruction, falling back to the reason.
+    assert "decision.instruction" in block
+
+
+def test_flow_places_the_pivot_row_before_the_step_it_unlocks():
+    html = _flow()
+    at = html.index("ownStepPivots.forEach((d) => {")
+    block = html[at:at + 220]
+    assert "Number(d.insert_before) === idx" in block
+    # Emitted before the chain item for that index is built, so the pivot row
+    # precedes the step it unlocks.
+    forEach_at = html.index("ownStepPivots.forEach((d) => {")
+    item_at = html.index("item.className = 'list-group-item';", forEach_at)
+    assert forEach_at < item_at
+
+
+def test_flow_own_step_reader_dedupes_and_filters():
+    html = _flow()
+    fn = html[html.index("function ownStepPivotsFor("):]
+    fn = fn[:fn.index("function renderChainEditor()")]
+    assert "'own_step'" in fn
+    assert "seen.has(key)" in fn
+
+
+def test_own_step_pivots_never_enter_the_executable_chain():
+    # Chain nodes and flag assignments are aligned by index downstream, and a
+    # synthetic step has no generator to resolve.
+    html = _flow()
+    fn = html[html.index("function ownStepPivotsFor("):]
+    fn = fn[:fn.index("function renderChainEditor()")]
+    assert "currentChain.push" not in fn
+    assert "currentChain.splice" not in fn
+
+
+def test_guide_emits_the_pivot_as_its_own_step():
+    html = _reports()
+    at = html.index("reportOwnStepPivots(alignedAssignments).forEach(")
+    block = html[at:at + 900]
+    assert "Pivot step: reach" in block
+    assert "Number(d.insert_before) !== index" in block
+    assert "step of its own" in block
+
+
+def test_guide_own_step_reader_is_a_twin():
+    reports = _reports()
+    fn = reports[reports.index("function reportOwnStepPivots("):]
+    fn = fn[:fn.index("function buildReportGuideMarkdown(")]
+    assert "'own_step'" in fn
+    assert "seen.has(key)" in fn
