@@ -23227,6 +23227,107 @@ def _flow_pivot_access_enabled(preview: Any) -> bool:
     return False
 
 
+def _flow_preview_entry_points(preview: Any) -> dict[int, list]:
+    """What each preview node already offers, for pivot provider selection.
+
+    The preview records vulnerability and flag-generator *names* per node but no
+    ports, so ports are resolved from the catalog by name. An offering whose
+    port cannot be resolved is left out rather than guessed: the entry port is
+    what the allow rule opens, and opening the wrong one would be worse than
+    falling through to a provider that has to be added.
+    """
+    from scenarioforge.utils.pivot_access import (
+        ENTRY_FLAG_GEN, ENTRY_VULNERABILITY, PivotEntry,
+    )
+
+    if not isinstance(preview, dict):
+        return {}
+
+    def _names_by_node(*keys: str) -> dict[int, list[str]]:
+        out: dict[int, list[str]] = {}
+        for key in keys:
+            raw = preview.get(key)
+            if not isinstance(raw, dict):
+                continue
+            for node_id, names in raw.items():
+                try:
+                    nid = int(node_id)
+                except Exception:
+                    continue
+                values = names if isinstance(names, list) else [names]
+                for name in values:
+                    text = str(name or '').strip()
+                    if text and text not in out.setdefault(nid, []):
+                        out[nid].append(text)
+        return out
+
+    entries: dict[int, list] = {}
+
+    def _add(node_id: int, kind: str, name: str) -> None:
+        for port in _flow_ports_for_offering(name):
+            entries.setdefault(int(node_id), []).append(
+                PivotEntry(kind=kind, port=int(port), protocol='tcp', label=name)
+            )
+
+    for node_id, names in _names_by_node('vulnerabilities_by_node', 'vulnerabilities_preview').items():
+        for name in names:
+            _add(node_id, ENTRY_VULNERABILITY, name)
+    for node_id, names in _names_by_node('flag_node_generators_by_node', 'flag_generators_preview').items():
+        for name in names:
+            _add(node_id, ENTRY_FLAG_GEN, name)
+    return entries
+
+
+def _flow_ports_for_offering(name: str) -> list[int]:
+    """TCP ports a named vulnerability or generator exposes, best effort.
+
+    Returns empty when the catalog cannot answer, which keeps a guessed port out
+    of a firewall rule.
+    """
+    label = str(name or '').strip()
+    if not label:
+        return []
+    try:
+        record = _vuln_catalog_record_for_name(label)
+    except Exception:
+        record = None
+    if not isinstance(record, dict):
+        return []
+    ports: list[int] = []
+    try:
+        from scenarioforge.utils.vuln_process import extract_compose_ports
+        for entry in extract_compose_ports(record, out_base='/tmp/vulns') or []:
+            try:
+                value = int(entry.get('port'))
+            except Exception:
+                continue
+            if 0 < value < 65536 and value not in ports:
+                ports.append(value)
+    except Exception:
+        return []
+    return ports
+
+
+def _vuln_catalog_record_for_name(name: str) -> dict[str, Any] | None:
+    """Look a catalog entry up by the name the preview recorded."""
+    wanted = str(name or '').strip().lower()
+    if not wanted:
+        return None
+    try:
+        items = _load_backend_vuln_catalog_items(selectable_only=False)
+    except Exception:
+        return None
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in ('Name', 'name', 'label', 'id', 'Path'):
+            if str(item.get(key) or '').strip().lower() == wanted:
+                return item
+    return None
+
+
 def _flow_stamp_pivot_grants(
     flag_assignments: list[dict[str, Any]],
     chain_nodes: list[dict[str, Any]],
@@ -23257,7 +23358,10 @@ def _flow_stamp_pivot_grants(
         hosts, routers, names = _flow_preview_nodeinfo(preview)
         if not hosts and not routers:
             return flag_assignments
-        plan = plan_pivot_access(rules, hosts, routers=routers, node_names=names)
+        plan = plan_pivot_access(
+            rules, hosts, routers=routers, node_names=names,
+            entry_points=_flow_preview_entry_points(preview),
+        )
         if not plan.providers:
             return flag_assignments
         decisions = classify_pivot_access(plan.as_dict(), chain_nodes or [])
