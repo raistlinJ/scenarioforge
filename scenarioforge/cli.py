@@ -3677,6 +3677,74 @@ def _preview_host_names(preview_hosts: Any) -> dict[int, str]:
     return out
 
 
+def _planned_segmentation_rules(preview_full: Any) -> list[dict[str, Any]]:
+    """The segmentation rules the saved plan decided, for execute to enforce.
+
+    Execute must not plan segmentation again. The planner draws from the global
+    `random` module at a dozen points, so a second run walls off different
+    subnets than the preview did -- and the preview is what the author reviewed,
+    what Flow built its chain against, and what pivot access placed provider
+    nodes for. A live run showed the preview blocking three subnets and the same
+    scenario blocking two others.
+
+    Empty when the plan carries no usable rules, which leaves the planner to run
+    as before rather than silently producing a scenario with no segmentation.
+    """
+    if not isinstance(preview_full, dict):
+        return []
+    seg = preview_full.get('segmentation_preview')
+    if not isinstance(seg, dict):
+        return []
+    rules = seg.get('rules')
+    if not isinstance(rules, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in rules:
+        if not isinstance(entry, dict):
+            continue
+        rule = entry.get('rule')
+        if not isinstance(rule, dict) or not rule.get('script_spec'):
+            continue
+        out.append(entry)
+    if rules and not out:
+        logging.warning(
+            'Segmentation: the saved plan has %d rule(s) but none carry their script, so '
+            'the policy has to be planned again and will not match what the plan shows. '
+            'Regenerate the plan to keep them in step.',
+            len(rules),
+        )
+    return out
+
+
+def _planned_traffic_flows(preview_full: Any) -> list[dict[str, Any]]:
+    """The traffic flows the saved plan decided, for execute to write out.
+
+    Same reason as `_planned_segmentation_rules`: flow selection shuffles hosts
+    and picks targets from the global `random` module, so generating a second
+    time gives the scenario different traffic than the plan showed.
+
+    Empty when the plan holds no flows, or holds only part of them -- replaying
+    a truncated list would build a scenario with less traffic than planned,
+    which is worse than planning afresh and saying so.
+    """
+    if not isinstance(preview_full, dict):
+        return []
+    preview = preview_full.get('traffic_scripts_preview')
+    if not isinstance(preview, dict):
+        return []
+    flows = preview.get('preview_flows')
+    if not isinstance(flows, list) or not flows:
+        return []
+    if preview.get('preview_flows_truncated'):
+        logging.warning(
+            'Traffic: the saved plan holds only %d of its %s flows, so traffic has to be '
+            'generated again and will not match what the plan shows.',
+            len(flows), preview.get('preview_flows_total') or '?',
+        )
+        return []
+    return [flow for flow in flows if isinstance(flow, dict)]
+
+
 def _seg_pivot_entry_points(
     docker_by_name: Any,
     hosts: Any,
@@ -7548,7 +7616,13 @@ def main():
         if seg_density is None:
             seg_density, seg_items = parse_segmentation_info(args.xml, args.scenario)
         logging.info("Segmentation config: density=%.3f, items=%d", float(seg_density or 0.0), len(seg_items or []))
-        if seg_density and seg_density > 0 and seg_items:
+        seg_planned_rules = _planned_segmentation_rules(preview_full)
+        if seg_planned_rules:
+            logging.info(
+                "Segmentation: enforcing the %d rule(s) the saved plan decided; not planning again",
+                len(seg_planned_rules),
+            )
+        if (seg_density and seg_density > 0 and seg_items) or seg_planned_rules:
             try:
                 from .utils.segmentation import plan_and_apply_segmentation
                 seg_summary = plan_and_apply_segmentation(
@@ -7569,6 +7643,7 @@ def main():
                         preview_hosts=(preview_full or {}).get('hosts'),
                     ),
                     pivot_node_names=_preview_host_names((preview_full or {}).get('hosts')),
+                    planned_rules=seg_planned_rules,
                 )
                 logging.info("Applied segmentation rules: %d", len(seg_summary.get("rules", [])))
                 try:
@@ -7597,7 +7672,13 @@ def main():
     )
     traffic_out_dir = "/tmp/traffic"
     traffic_map = {}
-    if traffic_density and traffic_density > 0:
+    traffic_planned_flows = _planned_traffic_flows(preview_full)
+    if traffic_planned_flows:
+        logging.info(
+            "Traffic: writing the %d flow(s) the saved plan decided; not generating again",
+            len(traffic_planned_flows),
+        )
+    if (traffic_density and traffic_density > 0) or traffic_planned_flows:
         try:
             # apply CLI overrides, if provided
             if traffic_items:
@@ -7613,7 +7694,10 @@ def main():
                         ti.jitter_pct = max(0.0, min(100.0, float(args.traffic_jitter)))
                     if args.traffic_content:
                         ti.content_type = args.traffic_content
-            traffic_map = generate_traffic_scripts(hosts, traffic_density, traffic_items, out_dir=traffic_out_dir)
+            traffic_map = generate_traffic_scripts(
+                hosts, traffic_density, traffic_items, out_dir=traffic_out_dir,
+                planned_flows=traffic_planned_flows,
+            )
             if not traffic_map:
                 logging.info("No hosts selected for traffic after generation (density too low or no eligible hosts)")
             # Enable 'Traffic' service on all nodes that have traffic (additive)
@@ -7736,7 +7820,10 @@ def main():
                         jitter_pct=ti.jitter_pct,
                         content_type=ti.content_type,
                     ))
-                traffic_map = generate_traffic_scripts(hosts, traffic_density, safe_items, out_dir=traffic_out_dir)
+                traffic_map = generate_traffic_scripts(
+                    hosts, traffic_density, safe_items, out_dir=traffic_out_dir,
+                    planned_flows=traffic_planned_flows,
+                )
                 logging.warning("Traffic generation succeeded after fallback to safe kinds (unknown kinds -> TCP)")
             except Exception as e2:
                 logging.warning("Fallback traffic generation also failed: %s", e2)

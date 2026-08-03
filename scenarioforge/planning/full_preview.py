@@ -1588,6 +1588,12 @@ def build_full_preview(
                 flows_with_scripts = _preview_summary.get('flows') or []
                 if flows_with_scripts:
                     traffic_scripts_preview['preview_flows'] = flows_with_scripts[:250]
+                    # Execute writes these flows rather than drawing its own, so
+                    # it has to know when the list it was handed is only part of
+                    # the plan -- replaying a truncated list would quietly build
+                    # a scenario with less traffic than the plan shows.
+                    traffic_scripts_preview['preview_flows_total'] = len(flows_with_scripts)
+                    traffic_scripts_preview['preview_flows_truncated'] = len(flows_with_scripts) > 250
                     traffic_summary = {
                         'flows': flows_with_scripts,
                         'count': len(flows_with_scripts)
