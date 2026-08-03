@@ -75,6 +75,46 @@ flowchart LR
 - Parser helpers expose metadata programmatically: `scenarioforge.parsers.planning_metadata.parse_planning_metadata()`.
 - Hardware-in-the-Loop plans persist per-scenario preferences (enabled state, interface list, attachment choice). Attachments normalize to `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`. When interfaces map to Proxmox VMs, the apply flow ensures the selected bridge exists on the node (creating it if needed) and rewrites the CORE/external VM adapters to land on that bridge.
 
+### The plan is what runs
+
+Everything a scenario is made of is decided **before** execute, and execute
+realizes those decisions rather than making its own. This is not a nicety: the
+plan is what the author reviews, what Flow builds its challenge chain against,
+and what "accessible by pivot" places provider nodes for. A scenario that
+quietly differs from its plan invalidates all three.
+
+| What | How execute realizes it |
+|---|---|
+| Routers, hosts, switches, addresses, links | `_try_build_segmented_topology_from_preview` builds straight from `preview['hosts'] / ['routers'] / ['switches_detail']` |
+| Services per node | applied from `services_preview` |
+| Vulnerabilities per slot | forced onto the planned slots from `vulnerabilities_by_node` |
+| Pivot provider nodes | materialised into the plan, then created like any other host |
+| Segmentation rules | `plan_and_apply_segmentation(planned_rules=…)` applies the plan's rules; no new policy is drawn |
+| Traffic flows | `generate_traffic_scripts(planned_flows=…)` writes the plan's flows; none are drawn |
+
+Segmentation and traffic are the two that needed the most care, because both
+planners draw from the **global `random` module** — at a dozen points in
+segmentation's case. Re-running either is not "the same plan again" but a
+different plan, and no amount of seed management fixes that, because the two
+runs reach the planner with different amounts of unrelated randomness behind
+them. A live run had the preview walling off three subnets and the same
+scenario walling off two entirely different ones.
+
+So each of those planners can now be handed its own earlier output:
+
+- **Segmentation** — every planned rule carries a `script_spec`, everything its
+  policy script depends on. Replaying is writing that script and enabling the
+  recorded service, which reproduces the plan's policy *and* its scripts byte
+  for byte. Only the script's file name carries over from the plan, since the
+  run may be on a different host than the preview was.
+- **Traffic** — flows fully determine every traffic artifact (`_write_agent_configs`
+  draws nothing), so the plan's flow list is written out directly.
+
+Both degrade loudly, never silently. A plan whose rules carry no `script_spec`
+(saved before this existed) or whose flow list was truncated for payload size
+is refused, execute logs why, and the planner runs as it used to — so the run
+succeeds and the mismatch is stated rather than hidden.
+
 ## Router connectivity & aggregation
 - Per-routing-item `r2r_mode` supports `Exact`, `Uniform`, `NonUniform`, and `Min`.
 - R2S policies (`r2s_mode`, `r2s_edges`, optional `r2s_hosts_min/max`) regroup hosts behind dedicated switches, with “Exact=1” aggregating all hosts per router into a single switch.
@@ -83,6 +123,7 @@ flowchart LR
 ## Traffic, segmentation, and services
 - Traffic scripts land in `/tmp/traffic` (with companion services) and respect overrides for pattern, rate, jitter, and content hints.
 - Segmentation scripts land in `/tmp/segmentation` alongside a `segmentation_summary.json`; NAT mode, DNAT probability, host inclusion, and docker port allowances are configurable.
+- Both traffic and segmentation are decided at plan time and replayed at execute; see [The plan is what runs](#the-plan-is-what-runs).
 - Docker vulnerabilities attach per-node docker-compose files in `/tmp/vulns`; generated services default to `network_mode: none` so CORE owns `eth0` and Docker does not add an unmanaged backend interface. Multi-service Compose networking is an explicit opt-in via `CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1` plus `CORETG_DOCKER_IFID_START=1`.
 - Custom traffic plugins can register via `scenarioforge.plugins.traffic.register()` for bespoke sender/receiver code.
 
@@ -174,6 +215,11 @@ When a provider cannot be placed at all — no switch serves the subnet, or the
 subnet has no free address — it is left in `unresolved` with the reason, and
 execute logs a WARNING naming the affected subnets rather than letting a
 participant discover an unsolvable challenge.
+
+Providers are placed for the subnets the **plan** walls off, so this feature
+depends on execute enforcing that same policy rather than drawing a new one —
+see [The plan is what runs](#the-plan-is-what-runs). Without it, providers sit
+in the subnets the preview blocked while the running scenario blocks others.
 
 **Docker nodes never need the internet at execute time.** CORE starts a Docker
 node the moment it is added, so execute resolves every provider image **before

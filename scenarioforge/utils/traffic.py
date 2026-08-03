@@ -438,11 +438,60 @@ def _choose_kind(kinds: List[Tuple[str, float]]) -> str:
     return kinds[-1][0]
 
 
-def generate_traffic_scripts(hosts: List[NodeInfo], density: float, items: List[TrafficInfo], out_dir: str = "/tmp/traffic") -> Dict[int, List[str]]:
+def _write_flow_artifacts(out_dir: str, flows: List[Dict[str, object]]) -> Dict[int, List[str]]:
+    """Turn a flow list into the per-node agent configs and the summary.
+
+    Flows fully determine every traffic artifact, which is what makes a planned
+    set of flows replayable: nothing here draws a host, a target or a port.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    result = _write_agent_configs(out_dir, flows)
+    _stage_traffic_agent(out_dir)
+
+    # The summary is a stable contract: reports, the segmentation allow
+    # verification, and the artifact checks all read it. Keep every existing
+    # key and point the script fields at each side's agent config.
+    for flow in flows:
+        try:
+            src_cfg = result.get(int(flow.get("src_id")), [])
+            dst_cfg = result.get(int(flow.get("dst_id")), [])
+        except Exception:
+            continue
+        flow["sender_script"] = src_cfg[0] if src_cfg else ""
+        flow["receiver_script"] = dst_cfg[0] if dst_cfg else ""
+
+    try:
+        with open(os.path.join(out_dir, "traffic_summary.json"), "w", encoding="utf-8") as jf:
+            json.dump({"flows": flows}, jf, indent=2)
+    except Exception:
+        pass
+    return result
+
+
+def generate_traffic_scripts(
+    hosts: List[NodeInfo],
+    density: float,
+    items: List[TrafficInfo],
+    out_dir: str = "/tmp/traffic",
+    planned_flows: Optional[List[Dict[str, object]]] = None,
+) -> Dict[int, List[str]]:
     """Generate simple TCP/UDP sender/receiver scripts for a subset of hosts.
 
     Returns a mapping of node_id -> list of script file paths (created locally).
+
+    With `planned_flows`, those flows are written out as-is and none are drawn.
+    Flow selection shuffles hosts and picks targets from the global `random`
+    module, so generating a second time produces different flows than the plan
+    showed; execute passes the plan's flows so the running scenario carries the
+    traffic the author reviewed.
     """
+    if planned_flows:
+        logger.info(
+            "Traffic: writing the %d flow(s) the saved plan decided; no new flows were drawn",
+            len(planned_flows),
+        )
+        return _write_flow_artifacts(out_dir, [dict(f) for f in planned_flows])
+
     result: Dict[int, List[str]] = {}
     flows: List[Dict[str, object]] = []
     # Determine if any item specifies an absolute count of flows
@@ -749,26 +798,4 @@ def generate_traffic_scripts(hosts: List[NodeInfo], density: float, items: List[
     # One JSON config per node drives the Go agent, replacing the per-flow
     # Python scripts. `result` maps node -> artifacts, and is what the caller
     # uses to decide which nodes get the Traffic service enabled.
-    result = _write_agent_configs(out_dir, flows)
-    _stage_traffic_agent(out_dir)
-
-    # The summary is a stable contract: reports, the segmentation allow
-    # verification, and the artifact checks all read it. Keep every existing
-    # key and point the script fields at each side's agent config.
-    for flow in flows:
-        try:
-            src_cfg = result.get(int(flow.get("src_id")), [])
-            dst_cfg = result.get(int(flow.get("dst_id")), [])
-        except Exception:
-            continue
-        flow["sender_script"] = src_cfg[0] if src_cfg else ""
-        flow["receiver_script"] = dst_cfg[0] if dst_cfg else ""
-
-    # write a machine-readable summary to the out_dir for report generator
-    try:
-        with open(os.path.join(out_dir, "traffic_summary.json"), "w", encoding="utf-8") as jf:
-            json.dump({"flows": flows}, jf, indent=2)
-    except Exception:
-        pass
-
-    return result
+    return _write_flow_artifacts(out_dir, flows)
