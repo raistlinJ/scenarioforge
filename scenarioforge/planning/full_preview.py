@@ -377,6 +377,7 @@ def build_full_preview(
     base_scenario: Optional[Dict[str, Any]] = None,
     reserved_ipv4_addrs: Optional[Iterable[str]] = None,
     reserved_ipv4_networks: Optional[Iterable[str]] = None,
+    segmentation_accessible_by_pivot: bool = False,
 ):
     """Return a topology preview dictionary.
 
@@ -1271,7 +1272,14 @@ def build_full_preview(
             traffic_summary = {'error': str(_e)}
 
     # ---- Segmentation Preview (lightweight) ----
-    seg_preview: Dict[str, Any] = {"density": segmentation_density or 0.0, "planned": [], "rules": [], 'source': 'runtime_planner'}
+    # Carried into the preview so Flow can decide pivot steps without the
+    # scenario XML in hand: Flow runs before execute, so the runtime
+    # segmentation_summary.json that would otherwise carry it does not exist yet.
+    seg_preview: Dict[str, Any] = {
+        "density": segmentation_density or 0.0, "planned": [], "rules": [],
+        'source': 'runtime_planner',
+        'accessible_by_pivot': bool(segmentation_accessible_by_pivot),
+    }
     segmentation_rules_preview: List[Dict[str, Any]] = []
     deep_segmentation_error: Optional[str] = None
     if segmentation_density and segmentation_density > 0 and segmentation_items:
