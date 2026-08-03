@@ -17,7 +17,18 @@ class TrafficService(CoreService):
     # other services that this service depends on, defines service start order
     dependencies: list[str] = ["CoreTGPrereqs"]
     # commands to run to start this service
-    startup: list[str] = ["/bin/bash /runtraffic.sh &"]
+    #
+    # The script has to be found on both node kinds. CORE writes a Docker node's
+    # service files into the container, so they land at `/runtraffic.sh`; for a
+    # namespaced vnode (PC/router) the node shares the host filesystem and the
+    # file only exists in the node's `.conf` directory, which is the working
+    # directory the startup command runs from. An absolute-only path therefore
+    # fails silently on vnodes, which is how traffic could be configured and
+    # deployed yet never actually start. CORE's own services use the relative
+    # form; try that first and fall back to the absolute Docker location.
+    startup: list[str] = [
+        "/bin/bash -c 'f=runtraffic.sh; [ -f \"$f\" ] || f=/runtraffic.sh; exec bash \"$f\"' &"
+    ]
     # commands to run to validate this service
     validate: list[str] = []
     # commands to run to stop this service
@@ -46,16 +57,58 @@ class TrafficService(CoreService):
         NODE_ID='${node.id}'
         NODE_NAME='${node.name}'
         <%text>
-        # Traffic starter
-        set -e
+        # Traffic starter.
+        #
+        # Runs the static Go agent rather than per-flow Python scripts. Most
+        # vulnerability images ship no python3, so the old approach silently
+        # generated no traffic on Docker nodes; a static binary has no
+        # interpreter or package-manager dependency. The agent takes one config
+        # per node and runs every flow for that node in a single process.
         runtime_dir=/tmp/coretg_traffic
         mkdir -p "$runtime_dir"
-        cp /tmp/traffic/traffic_"$NODE_ID"_*.py "$runtime_dir"/ 2>/dev/null || true
-        for file in "$runtime_dir"/traffic_"$NODE_ID"_*.py; do
-            [ -f "$file" ] || continue
-            echo "running: python3 $file" >> "$runtime_dir/output.txt"
-            python3 "$file" >> "$runtime_dir/output.txt" 2>&1 &
+        log="$runtime_dir/output.txt"
+        config=/tmp/traffic/traffic_"$NODE_ID".json
+
+        if [ ! -f "$config" ]; then
+            echo "no traffic config at $config; nothing to run" >> "$log"
+            exit 0
+        fi
+
+        # The node decides its own architecture: a Docker node may be an
+        # emulated amd64 image on an arm64 host, so the host's arch is not
+        # authoritative.
+        case "$(uname -m)" in
+            x86_64|amd64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) arch="$(uname -m)" ;;
+        esac
+
+        agent=""
+        for candidate in \\
+            "/tmp/traffic/traffic-agent-linux-$arch" \\
+            "/usr/local/coretg/bin/traffic-agent" \\
+            "$(command -v traffic-agent 2>/dev/null)"; do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                agent="$candidate"
+                break
+            fi
         done
+
+        if [ -z "$agent" ]; then
+            echo "no traffic-agent binary for arch $arch (looked in /tmp/traffic and /usr/local/coretg/bin)" >> "$log"
+            exit 0
+        fi
+
+        # Copy locally so a running flow does not depend on the shared
+        # directory surviving the rest of the run.
+        cp "$agent" "$runtime_dir/traffic-agent" 2>/dev/null || true
+        chmod +x "$runtime_dir/traffic-agent" 2>/dev/null || true
+        [ -x "$runtime_dir/traffic-agent" ] || runtime_dir_agent="$agent"
+        run_agent="${runtime_dir_agent:-$runtime_dir/traffic-agent}"
+
+        echo "running: $run_agent -config $config" >> "$log"
+        "$run_agent" -config "$config" \\
+            -stats "$runtime_dir/stats.json" >> "$log" 2>&1 &
         </%text>
         """
 

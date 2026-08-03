@@ -240,3 +240,35 @@ def test_list_sessions_filters_by_scenario():
     text = out.getvalue()
     assert "/a.xml" in text
     assert "/b.xml" not in text
+
+
+# --------------------------------------------------------------------------- #
+# Remote delegation
+# --------------------------------------------------------------------------- #
+
+def test_check_artifacts_flags_are_not_forwarded_to_the_remote_cli():
+    """The CORE VM runs the repo without the WebUI backend.
+
+    Forwarding these flags made the delegated execute abort with "--check-artifacts
+    requires the WebUI backend module", failing the whole run. The checks belong
+    on the machine that owns the backend and the SSH session, so the flags are
+    stripped from the remote command exactly like --post-execution-validation.
+    """
+    stripped = cli._CHECK_ARTIFACTS_OPTIONS | cli._CHECK_ARTIFACTS_VALUE_OPTIONS
+    assert '--check-artifacts' in stripped
+    assert '-check-artifacts' in stripped
+    assert '--check-artifacts-delay' in stripped
+
+
+def test_delay_value_token_is_dropped_with_its_flag():
+    # Dropping only the flag would leave a bare "45" in the remote argv.
+    source = open(cli.__file__, encoding='utf-8').read()
+    assert 'idx += 2  # drop the flag and its value' in source
+
+
+def test_local_side_runs_the_checks_after_a_remote_execute():
+    source = open(cli.__file__, encoding='utf-8').read()
+    remote_fn = source.index('_remote_execute_failure_detail')
+    # The local post-remote path invokes the checks itself.
+    assert source.count('_run_cli_artifact_checks(') >= 2
+    assert remote_fn > 0

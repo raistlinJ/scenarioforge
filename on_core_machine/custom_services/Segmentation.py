@@ -17,7 +17,12 @@ class SegmentationService(CoreService):
     # other services that this service depends on, defines service start order
     dependencies: list[str] = ["CoreTGPrereqs"]
     # commands to run to start this service
-    startup: list[str] = ["/bin/bash /runsegmentation.sh &"]
+    # Resolve on both node kinds: a Docker node gets the file at the container
+    # root, while a namespaced vnode only has it in its `.conf` directory (the
+    # startup working directory). See TrafficService for the full explanation.
+    startup: list[str] = [
+        "/bin/bash -c 'f=runsegmentation.sh; [ -f \"$f\" ] || f=/runsegmentation.sh; exec bash \"$f\"' &"
+    ]
     # commands to run to validate this service
     validate: list[str] = []
     # commands to run to stop this service

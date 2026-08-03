@@ -12,6 +12,7 @@ def register(
     app,
     *,
     core_config_for_request: Callable[..., dict[str, Any]],
+    latest_session_id_for_scenario: Callable[[str], Optional[int]] | None = None,
     init_artifact_check_progress: Callable[..., None],
     schedule_artifact_checks: Callable[..., None],
     get_artifact_check_progress: Callable[[str], Optional[dict[str, Any]]],
@@ -38,14 +39,24 @@ def register(
         session_raw = _request_field('session_id')
         xml_path = _request_field('xml_path', 'path')
         scenario = _request_field('scenario', 'scenario_name')
-        if not session_raw:
-            return jsonify({'ok': False, 'error': 'A running session id is required.'}), 400
         if not xml_path:
             return jsonify({'ok': False, 'error': 'The session scenario XML path is required.'}), 400
-        try:
-            session_id: Any = int(session_raw)
-        except Exception:
-            session_id = session_raw
+
+        session_id: Any = None
+        if session_raw:
+            try:
+                session_id = int(session_raw)
+            except Exception:
+                session_id = session_raw
+        elif scenario and latest_session_id_for_scenario:
+            # Callers such as the Execution Summary know the scenario they just
+            # ran but not its session id.
+            session_id = latest_session_id_for_scenario(scenario)
+        if session_id in (None, ''):
+            return jsonify({
+                'ok': False,
+                'error': 'No running session id was given, and none is recorded for this scenario.',
+            }), 400
 
         try:
             core_cfg = core_config_for_request(include_password=True)

@@ -3655,6 +3655,27 @@
       ].join('\n');
     }
 
+    // Hand off to the shared Check Artifacts UI (partials/artifact_checks.html).
+    // The session id is left to the server, which resolves the most recent
+    // session recorded for this scenario -- the summary does not carry one.
+    function startFullValidation() {
+      const scen = (() => {
+        try {
+          return (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '').trim()
+            || '{{ (scenario or "")|e }}';
+        } catch (e) { return '{{ (scenario or "")|e }}'; }
+      })();
+      if (typeof window.coretgRunArtifactChecks !== 'function') {
+        window.alert('Full validation is unavailable on this page.');
+        return;
+      }
+      window.coretgRunArtifactChecks({
+        xmlPath: '{{ xml_path or "" }}',
+        scenario: scen,
+        title: scen ? `Full Validation — ${scen}` : 'Full Validation',
+      });
+    }
+
     function presentExecuteSummary(runStatus, reportsHref) {
       const modalEl = document.getElementById('executeSummaryModal');
       const listEl = document.getElementById('executeSummaryList');
@@ -3680,6 +3701,31 @@
         });
       }
       if (copyBtn) copyBtn._runStatus = runStatus;
+
+      // Full Validation probes the live session, so it is only meaningful once
+      // routing has converged; the confirmation says so before running.
+      const fullValidationBtn = document.getElementById('executeSummaryFullValidationBtn');
+      if (fullValidationBtn && !fullValidationBtn.dataset.boundExecuteSummary) {
+        fullValidationBtn.dataset.boundExecuteSummary = '1';
+        fullValidationBtn.addEventListener('click', () => {
+          const confirmEl = document.getElementById('fullValidationConfirmModal');
+          if (!confirmEl || !window.bootstrap) {
+            startFullValidation();
+            return;
+          }
+          const confirmModal = bootstrap.Modal.getOrCreateInstance(confirmEl);
+          const confirmBtn = document.getElementById('fullValidationConfirmBtn');
+          if (confirmBtn && !confirmBtn.dataset.boundFullValidation) {
+            confirmBtn.dataset.boundFullValidation = '1';
+            confirmBtn.addEventListener('click', () => {
+              bootstrap.Modal.getOrCreateInstance(confirmEl).hide();
+              startFullValidation();
+            });
+          }
+          confirmModal.show();
+        });
+      }
+
       executeSummaryModalInst = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
       const progressEl = document.getElementById('executeProgressModal');
       const showSummary = () => executeSummaryModalInst?.show();
@@ -3733,6 +3779,20 @@
       const originalLabel = executeRunBtn.textContent;
       executeRunBtn.addEventListener('click', async () => {
         if (executing) return;
+        // Claim the button before anything that yields. The saved-XML
+        // confirmation below is awaited, and while it is pending the event loop
+        // is free: leaving the button live there lets a second click start a
+        // concurrent execute against the same scenario.
+        executing = true;
+        executeRunBtn.disabled = true;
+
+        // Release the button when the user backs out, so a cancelled run can be
+        // retried without reloading the page.
+        const releaseExecuteButton = () => {
+          executing = false;
+          executeRunBtn.disabled = false;
+          if (originalLabel) { executeRunBtn.textContent = originalLabel; }
+        };
 
         // Preview is an execution surface in its own right.  Keeping the run
         // here lets a cancelled or failed execution remain on Preview for an
@@ -3745,15 +3805,14 @@
             allowStored: true,
           }) ?? true);
           if (!proceedWithSavedXml) {
+            releaseExecuteButton();
             return;
           }
         } catch (e) { }
 
         const confirmMsg = 'Execute scenario now? This will invoke the CLI and start a CORE session.';
-        if (!window.confirm(confirmMsg)) return;
-        executing = true;
+        if (!window.confirm(confirmMsg)) { releaseExecuteButton(); return; }
         dockerRetryAttempted = false;
-        executeRunBtn.disabled = true;
         if (originalLabel) { executeRunBtn.textContent = 'Executing…'; }
         try {
           openExecuteProgress('Executing scenario…');

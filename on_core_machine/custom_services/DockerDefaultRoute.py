@@ -13,7 +13,12 @@ class DockerDefaultRouteService(CoreService):
     files: list[str] = ["/defaultroute.sh"]
     executables: list[str] = []
     dependencies: list[str] = ["CoreTGPrereqs"]
-    startup: list[str] = ["/bin/sh /defaultroute.sh"]
+    # Docker-oriented, but kept consistent with the other services so the same
+    # startup works if it is ever applied to a namespaced vnode, whose service
+    # files live in the node's `.conf` directory rather than at the root.
+    startup: list[str] = [
+        "/bin/sh -c 'f=defaultroute.sh; [ -f \"$f\" ] || f=/defaultroute.sh; exec sh \"$f\"'"
+    ]
     # Route setup is best-effort. CORE starts node services concurrently, so the
     # attached interface or peer route may not be ready during service validation.
     validate: list[str] = []

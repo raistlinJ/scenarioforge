@@ -6,12 +6,16 @@ import types
 from pathlib import Path
 
 
-def test_coretg_prereqs_service_uses_absolute_paths() -> None:
+def test_coretg_prereqs_service_declares_absolute_file_and_dual_path_startup() -> None:
     p = Path("on_core_machine/custom_services/CoreTGPrereqs.py")
     txt = p.read_text("utf-8", errors="ignore")
 
+    # The file declaration stays absolute: that is where CORE puts it inside a
+    # Docker node. The startup command must find it on a namespaced vnode too,
+    # where the script only exists in the node's `.conf` working directory.
     assert 'files: list[str] = ["/runprereqs.sh"]' in txt
-    assert 'startup: list[str] = ["/bin/sh /runprereqs.sh"]' in txt
+    assert "f=runprereqs.sh" in txt
+    assert 'f=/runprereqs.sh' in txt
     assert 'LOG="/tmp/coretg_prereqs_output.txt"' in txt
 
 
@@ -82,9 +86,33 @@ def test_coretg_prereqs_mako_hook_serializes_concurrent_lookups(monkeypatch) -> 
     assert state["max_active"] == 1
 
 
-def test_segmentation_service_uses_absolute_paths() -> None:
+def test_segmentation_service_declares_absolute_file_and_dual_path_startup() -> None:
     p = Path("on_core_machine/custom_services/Segmentation.py")
     txt = p.read_text("utf-8", errors="ignore")
 
     assert 'files: list[str] = ["/runsegmentation.sh"]' in txt
-    assert 'startup: list[str] = ["/bin/bash /runsegmentation.sh &"]' in txt
+    assert "f=runsegmentation.sh" in txt
+    assert "f=/runsegmentation.sh" in txt
+
+
+def test_every_script_service_startup_resolves_on_both_node_kinds() -> None:
+    """A vnode only has the script in its `.conf` working directory.
+
+    CORE writes a Docker node's service files into the container (so the
+    absolute path resolves) but a namespaced vnode shares the host filesystem
+    and only gets the file in `/tmp/pycore.<id>/<node>.conf/`. A startup command
+    that names only the absolute path fails silently there, which is how traffic
+    could be fully configured and deployed yet never start.
+    """
+    expected = {
+        "TrafficService.py": "runtraffic.sh",
+        "Segmentation.py": "runsegmentation.sh",
+        "CoreTGPrereqs.py": "runprereqs.sh",
+        "DockerDefaultRoute.py": "defaultroute.sh",
+    }
+    for filename, script in expected.items():
+        txt = Path("on_core_machine/custom_services", filename).read_text("utf-8", errors="ignore")
+        startup = next(line for line in txt.splitlines() if "f=" + script in line)
+        # relative first (vnode), absolute fallback (Docker node)
+        assert f"f={script};" in startup
+        assert f"f=/{script}" in startup

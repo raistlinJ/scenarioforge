@@ -486,6 +486,7 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "def main():\n"
         + "    seg_files = []\n"
         + "    verification = None\n"
+        + "    rules_summary = None\n"
         + "    ref = None\n"
         + "    for d in SEG_DIRS:\n"
         + "        for path in glob.glob(d):\n"
@@ -493,9 +494,12 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "                for f in os.listdir(path):\n"
         + "                    fp = os.path.join(path, f)\n"
         + "                    if f.endswith('.json'):\n"
-        + "                        if ('verif' in f.lower() or 'allow' in f.lower()) and verification is None:\n"
+        + "                        low = f.lower()\n"
+        + "                        if ('verif' in low or 'allow' in low) and verification is None:\n"
         + "                            verification = _read_json(fp)\n"
         + "                            ref = _mtime(fp)\n"
+        + "                        elif 'summary' in low and rules_summary is None:\n"
+        + "                            rules_summary = _read_json(fp)\n"
         + "                    else:\n"
         + "                        seg_files.append(fp)\n"
         + "            elif os.path.isfile(path):\n"
@@ -514,7 +518,7 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "            'marker': ('custom-seg' in out) or ('scenarioforge' in out.lower()),\n"
         + "            'rule_count': len(non_default),\n"
         + "        }\n"
-        + "    print(json.dumps({'ok': True, 'seg_files': seg_files, 'stale_files': seg_stale, 'verification': verification, 'nodes': nodes}))\n"
+        + "    print(json.dumps({'ok': True, 'seg_files': seg_files, 'stale_files': seg_stale, 'verification': verification, 'rules_summary': rules_summary, 'nodes': nodes}))\n"
         + "main()\n"
     )
 
@@ -602,52 +606,73 @@ def traffic_probe_script(sudo_password: str | None = None,
     )
 
 
-def _flows_total(verification: Any) -> int | None:
+def _blocked_flows(verification: Any) -> list[Any]:
+    """Traffic flows that segmentation is still blocking.
+
+    `allow_verification.json` is written by `verify_flows_allowed`, whose job is
+    to confirm every generated traffic flow is *permitted*. So `blocked` lists
+    flows that cannot get through -- a misconfiguration -- and an empty list is
+    the healthy outcome. `flows_total` counts the traffic flows examined, not
+    rules that ought to be enforced.
+    """
     if not isinstance(verification, dict):
-        return None
-    total = verification.get("flows_total")
-    return total if isinstance(total, int) else None
+        return []
+    return _as_list(verification.get("blocked"))
+
+
+def _segmentation_rule_count(rules_summary: Any) -> int:
+    if not isinstance(rules_summary, dict):
+        return 0
+    return len(_as_list(rules_summary.get("rules")))
 
 
 def segmentation_result(probe: Any, *, expected: bool) -> dict[str, Any]:
+    """Check 5: are the firewall/segmentation rules the scenario asked for in place?
+
+    Whether segmentation exists comes from the rules it generated (the runtime
+    `segmentation_summary.json` plus rules visible inside nodes). The allow
+    verification is a separate signal: it flags traffic that segmentation is
+    wrongly blocking.
+    """
     if not isinstance(probe, dict) or not probe.get("ok"):
         detail = _name(probe.get("error") or probe.get("raw")) if isinstance(probe, dict) else ""
         return _result("segmentation", "error", detail or "segmentation probe failed")
     seg_files = _as_list(probe.get("seg_files"))
     verification = probe.get("verification") if isinstance(probe.get("verification"), dict) else None
+    rules_summary = probe.get("rules_summary") if isinstance(probe.get("rules_summary"), dict) else None
     nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
     nodes_with_rules = [n for n, info in nodes.items() if isinstance(info, dict) and info.get("rules_present")]
+    rule_count = _segmentation_rule_count(rules_summary)
+    blocked = _blocked_flows(verification)
     items: list[dict[str, Any]] = []
 
-    # The execute-time verification artifact is the authoritative signal for
-    # compose port-allow segmentation: it records how many restricted flows
-    # exist and how many were confirmed blocked.
-    flows_total = _flows_total(verification)
-    verified_status = ""
-    if flows_total is not None and verification is not None:
-        blocked = _as_list(verification.get("blocked"))
-        blocked_count = verification.get("blocked_count")
-        if not isinstance(blocked_count, int):
-            blocked_count = len(blocked)
-        if flows_total > 0:
-            verified_status = "pass" if blocked_count >= flows_total else "fail"
-            items.append({
-                "name": "segmentation enforcement",
-                "status": verified_status,
-                "detail": f"{blocked_count}/{flows_total} restricted flow(s) verified blocked",
-            })
-        else:
-            items.append({
-                "name": "segmentation enforcement",
-                "status": "skip",
-                "detail": "no cross-node restricted flows to enforce",
-            })
+    # Traffic that segmentation is blocking is a real defect, so report it first.
+    if blocked:
+        for flow in blocked[:20]:
+            if isinstance(flow, dict):
+                target = f"{flow.get('dst_ip')}:{flow.get('dst_port')}"
+                proto = _name(flow.get("proto")) or "flow"
+                items.append({"name": target, "status": "fail",
+                              "detail": f"{proto} traffic flow is blocked by segmentation and cannot arrive"})
+            else:
+                items.append({"name": _name(flow) or "flow", "status": "fail",
+                              "detail": "traffic flow is blocked by segmentation"})
+    elif verification is not None:
+        checked = verification.get("flows_total")
+        checked = checked if isinstance(checked, int) else 0
+        items.append({
+            "name": "traffic flows permitted",
+            "status": "pass" if checked else "skip",
+            "detail": (f"all {checked} traffic flow(s) pass the segmentation rules"
+                       if checked else "no traffic flows to verify against segmentation"),
+        })
 
+    if rule_count:
+        items.append({"name": "segmentation rules", "status": "pass",
+                      "detail": f"{rule_count} rule(s) generated for this run"})
     if seg_files:
         items.append({"name": "CORE VM", "status": "pass",
                       "detail": f"{len(seg_files)} segmentation script(s) generated"})
-    # List only nodes that actually carry rules. Emitting a row per rule-free
-    # node buries the signal under one line per node in the topology.
     for node, info in sorted(nodes.items()):
         if not isinstance(info, dict) or not info.get("rules_present"):
             continue
@@ -661,27 +686,24 @@ def segmentation_result(probe: Any, *, expected: bool) -> dict[str, Any]:
         items.append({"name": f"{len(nodes)} node(s) probed", "status": "skip",
                       "detail": "no custom firewall rules on any node (Docker nodes and CORE vnodes)"})
 
-    # Decision, most authoritative signal first.
-    if verified_status == "fail":
-        blocked_count = verification.get("blocked_count") if isinstance(verification, dict) else None
+    if blocked:
         return _result("segmentation", "fail",
-                       f"Segmentation not fully enforced: only {blocked_count} of {flows_total} "
-                       "restricted flow(s) are blocked.", items)
-    if verified_status == "pass":
-        return _result("segmentation", "pass",
-                       f"Segmentation enforced: all {flows_total} restricted flow(s) blocked.", items)
-    if not expected:
+                       f"{len(blocked)} traffic flow(s) blocked by segmentation and cannot arrive.", items)
+
+    applied = bool(rule_count or nodes_with_rules or seg_files)
+    if applied:
+        bits: list[str] = []
+        if rule_count:
+            bits.append(f"{rule_count} rule(s)")
+        if nodes_with_rules:
+            bits.append(f"{len(nodes_with_rules)} node(s) with firewall rules")
+        if seg_files:
+            bits.append(f"{len(seg_files)} script(s)")
+        return _result("segmentation", "pass", "Segmentation in place: " + ", ".join(bits) + ".", items)
+    if expected:
         return _result("segmentation", "skip",
-                       "No segmentation configured for this scenario.", items)
-    if flows_total == 0:
-        return _result("segmentation", "skip",
-                       "Segmentation configured, but it produced no cross-node restricted flows to enforce.", items)
-    if seg_files or nodes_with_rules:
-        return _result("segmentation", "pass",
-                       f"Segmentation in place ({len(seg_files)} script(s), "
-                       f"{len(nodes_with_rules)} node(s) with rules).", items)
-    return _result("segmentation", "fail",
-                   "Segmentation is configured but no verification artifact, rules, or scripts were found.", items)
+                       "Segmentation is enabled for this scenario but generated no rules.", items)
+    return _result("segmentation", "skip", "No segmentation configured for this scenario.", items)
 
 
 def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:

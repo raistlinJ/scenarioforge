@@ -219,10 +219,13 @@ def test_segmentation_pass_when_rules_present():
     assert res["status"] == "pass"
 
 
-def test_segmentation_fail_when_expected_but_absent():
+def test_segmentation_skips_when_enabled_but_no_rules_were_generated():
+    # Enabling the section does not guarantee rules: density can round to none.
+    # That is a "nothing to check" outcome, not a failure.
     probe = {"ok": True, "seg_files": [], "nodes": {"r1": {"rules_present": False, "rule_count": 0}}}
     res = ac.segmentation_result(probe, expected=True)
-    assert res["status"] == "fail"
+    assert res["status"] == "skip"
+    assert "generated no rules" in res["summary"]
 
 
 def test_segmentation_skip_when_not_expected():
@@ -362,20 +365,35 @@ def test_traffic_uses_summary_flows_as_evidence():
 # Segmentation verification artifact (allow_verification.json)
 # --------------------------------------------------------------------------- #
 
-def test_segmentation_verification_pass_when_all_flows_blocked():
-    probe = {"ok": True, "seg_files": [], "nodes": {},
-             "verification": {"flows_total": 3, "blocked": ["a", "b", "c"], "blocked_count": 3}}
+def test_no_blocked_flows_is_the_healthy_outcome():
+    # allow_verification.json comes from `verify_flows_allowed`, which confirms
+    # every traffic flow is *permitted*. An empty `blocked` list is good; it is
+    # not evidence that segmentation exists, so the rules decide the status.
+    probe = {"ok": True, "seg_files": [], "rules_summary": {"rules": [{"a": 1}]},
+             "nodes": {}, "verification": {"flows_total": 3, "blocked": [], "blocked_count": 0}}
     res = ac.segmentation_result(probe, expected=True)
     assert res["status"] == "pass"
-    assert "3 restricted flow" in res["summary"]
+    assert any("all 3 traffic flow(s) pass" in i["detail"] for i in res["items"])
 
 
-def test_segmentation_verification_fail_when_partially_blocked():
+def test_blocked_traffic_flow_is_a_failure():
+    # A flow segmentation still blocks cannot arrive, which is a misconfiguration.
     probe = {"ok": True, "seg_files": [], "nodes": {},
-             "verification": {"flows_total": 3, "blocked": ["a"], "blocked_count": 1}}
+             "verification": {"flows_total": 3,
+                              "blocked": [{"dst_ip": "10.0.0.9", "dst_port": 6007, "proto": "UDP"}],
+                              "blocked_count": 1}}
     res = ac.segmentation_result(probe, expected=True)
     assert res["status"] == "fail"
-    assert "1 of 3" in res["summary"]
+    assert "1 traffic flow(s) blocked" in res["summary"]
+    assert any("10.0.0.9:6007" in i["name"] for i in res["items"])
+
+
+def test_generated_rules_make_segmentation_pass():
+    probe = {"ok": True, "seg_files": ["/tmp/segmentation/seg_allow_1_1.py"],
+             "rules_summary": {"rules": [{"a": 1}, {"b": 2}]}, "nodes": {}}
+    res = ac.segmentation_result(probe, expected=True)
+    assert res["status"] == "pass"
+    assert "2 rule(s)" in res["summary"]
 
 
 def test_segmentation_verification_skip_when_no_restricted_flows():

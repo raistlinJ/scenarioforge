@@ -872,12 +872,43 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" id="executeSummaryCopyBtn">Copy summary</button>
+        <button type="button" class="btn btn-outline-info" id="executeSummaryFullValidationBtn"
+          title="Validate the running session: containers, services, ports, injects, segmentation, traffic, and reachability">Full Validation</button>
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Stay on Preview</button>
         <button type="button" class="btn btn-primary" id="executeSummaryReportsBtn">View Reports</button>
       </div>
     </div>
   </div>
 </div>
+
+<!-- Confirmation for Full Validation: the checks probe a live session, so they
+     are only meaningful once routing has converged and services have started. -->
+<div class="modal fade" id="fullValidationConfirmModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Run full validation?</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">This checks the running session: containers on the correct nodes, services running,
+          service ports reachable across the CORE network, inject files placed, segmentation rules,
+          traffic scripts, and node reachability.</p>
+        <div class="alert alert-warning mb-0 py-2">
+          <strong>Recommended:</strong> run this at least <strong>60 seconds</strong> after execution starts,
+          so routing convergence and other startup processes have completed. Running it earlier can report
+          services or routes that simply have not come up yet.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-info" id="fullValidationConfirmBtn">Run validation</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% include 'partials/artifact_checks.html' %}
 
 <!-- Flag Sequencing: node click (sequence badge) details modal -->
 <div class="modal fade" id="flowNodeFlagModal" tabindex="-1" aria-hidden="true">

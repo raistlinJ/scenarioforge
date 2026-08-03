@@ -35,7 +35,8 @@ These are general constraints that affect generator authoring and “docker vuln
 
 ## Artifact check limits
 
-- **Segmentation rule detection needs `iptables`/`nft` in the node.** Nodes without it report no custom rules rather than a false pass. The authoritative signal for compose port-allow segmentation is the runtime `allow_verification.json`.
-- **`skip` is not a defect.** It means the scenario never configured that feature (no restricted flows, no traffic). Only `fail` and `error` indicate something is wrong; `warn` is worth investigating but is often intentional segmentation.
+- **Segmentation rule detection needs `iptables`/`nft` in the node.** Nodes without it report no custom rules rather than a false pass. Whether segmentation exists is taken from the rules it generated (`segmentation_summary.json` plus rules visible inside nodes).
+- **`allow_verification.json` answers a different question.** It is written by `verify_flows_allowed`, which confirms each generated traffic flow is *permitted*. Its `blocked` list therefore names traffic that segmentation is wrongly blocking, so an empty list is the healthy outcome and `flows_total` counts traffic flows examined — not rules that ought to be enforced.
+- **`skip` is not a defect.** It means the scenario never configured that feature, or enabled it but generated no rules. Only `fail` and `error` indicate something is wrong; `warn` is worth investigating but is often intentional segmentation.
 - **Reachability follows configured traffic flows.** With no traffic flows there are no source→destination pairs to verify, so the reachability check reports `skip` rather than probing an arbitrary node pair.
 - **Loopback-bound service ports are not probed.** A port bound to `127.0.0.1` (including the IPv4-mapped `::ffff:127.0.0.1` form that Java/Tomcat uses for AJP) is listed as context, since it is intentionally not reachable from other nodes.
