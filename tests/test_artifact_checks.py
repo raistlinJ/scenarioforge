@@ -327,20 +327,22 @@ def test_reachability_skips_when_no_flows():
 
 def test_reachability_passes_along_flow_paths():
     probe = {"ok": True, "ping": [
-        {"src": "h1", "dst": "h2", "ip": "10.0.0.7", "reachable": True, "port": 9000, "protocol": "UDP"}]}
+        {"src": "h1", "dst": "h2", "ip": "10.0.0.7", "reachable": True, "port": 9000,
+         "protocol": "UDP", "method": "udp-send", "error": "icmp-port-unreachable"}]}
     res = ac.reachability_result(probe)
     assert res["status"] == "pass"
-    assert "1 traffic source → destination path(s) reachable" in res["summary"]
+    assert "All 1 testable traffic flow(s) reach their destination" in res["summary"]
     assert any("UDP:9000" in i["name"] for i in res["items"])
 
 
 def test_reachability_warns_with_repro_when_destination_unreachable():
     probe = {"ok": True, "ping": [
         {"src": "h1", "dst": "h2", "ip": "10.0.0.7", "reachable": False,
+         "protocol": "TCP", "port": 9000, "method": "tcp-handshake", "error": "timeout",
          "cmd": "sudo vcmd -c /tmp/pycore.1/h1 -- ping -c3 -W2 10.0.0.7"}]}
     res = ac.reachability_result(probe)
     assert res["status"] == "warn"
-    assert "unreachable from their source" in res["summary"]
+    assert "cannot reach their destination" in res["summary"]
     assert any("vcmd -c /tmp/pycore.1/h1" in i["detail"] for i in res["items"])
 
 
@@ -442,3 +444,346 @@ def test_overall_status_precedence():
 def test_overall_summary_counts():
     summary = ac.overall_summary([{"status": "pass"}, {"status": "pass"}, {"status": "fail"}, {"status": "skip"}])
     assert "2 pass" in summary and "1 fail" in summary and "1 skip" in summary
+
+
+# --------------------------------------------------------------------------- #
+# A port the scenario deliberately walls off is not a fault
+# --------------------------------------------------------------------------- #
+
+def _segmented_probe(src="10.0.140.0/24", dst="172.21.240.0/24"):
+    """Segmentation probe reporting one subnet_block rule."""
+    return {"ok": True,
+            "rules_summary": {"rules": [
+                {"node_id": 1, "service": "Segmentation",
+                 "rule": {"type": "subnet_block", "src": src, "dst": dst, "default_deny": True}},
+                {"node_id": 1, "service": "Segmentation",
+                 "rule": {"type": "allow", "src": src, "dst": "10.0.173.0/24"}},
+            ]}}
+
+
+def _cross_subnet_probe():
+    """Prober on 10.0.140.0/24 timing out against three 172.21.240.0/24 ports."""
+    return {"ok": True, "prober": "docker-23",
+            "nodes": {"docker-23": {"ip": "10.0.140.6", "listening": []},
+                      "docker-26": {"ip": "172.21.240.7", "listening": [16379]},
+                      "docker-21": {"ip": "172.21.240.6", "listening": [1053]},
+                      "flaggenslot-6": {"ip": "172.21.240.3", "listening": [5011]}},
+            "checks": [
+                {"node": "docker-26", "ip": "172.21.240.7", "port": 16379,
+                 "reachable": False, "error": "timeout"},
+                {"node": "docker-21", "ip": "172.21.240.6", "port": 1053,
+                 "reachable": False, "error": "timeout"},
+                {"node": "flaggenslot-6", "ip": "172.21.240.3", "port": 5011,
+                 "reachable": False, "error": "timeout"},
+            ]}
+
+
+def test_ports_drops_explained_by_a_block_rule_are_not_a_warning():
+    # The prober sits in a subnet the scenario blocks from the target subnet, so
+    # the dropped packets are segmentation working, not a reachability problem.
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=_segmented_probe())
+    assert res["status"] == "pass"
+    assert "3 blocked as configured by segmentation" in res["summary"]
+    assert "blocked (dropped packets" not in res["summary"]
+    # Each blocked path is still shown, naming the rule that explains it.
+    segmented = [i for i in res["items"] if "blocked as configured" in i["detail"]]
+    assert len(segmented) == 3
+    assert all(i["status"] == "pass" for i in segmented)
+    assert all("172.21.240.0/24" in i["detail"] for i in segmented)
+
+
+def test_ports_drops_with_no_matching_rule_still_warn():
+    # Same drops, but the block rule covers a different source subnet.
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(),
+                          segmentation=_segmented_probe(src="10.9.9.0/24"))
+    assert res["status"] == "warn"
+    assert "3 blocked" in res["summary"]
+    assert any("no segmentation rule covers this path" in i["detail"] for i in res["items"])
+
+
+def test_ports_without_segmentation_data_keeps_warning():
+    # No segmentation probe at all: nothing can explain the drops.
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=None)
+    assert res["status"] == "warn"
+
+
+def test_ports_only_block_rules_excuse_a_drop():
+    # An allow/nat rule spanning the same subnets must not silence a real drop.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"rule": {"type": "nat", "internal": "10.0.140.0/24", "external": "172.21.240.0/24"}},
+        {"rule": {"type": "allow", "src": "10.0.140.0/24", "dst": "172.21.240.0/24"}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "warn"
+
+
+def test_ports_host_block_rule_excuses_a_single_host():
+    # host_block rules carry bare IPs rather than CIDRs.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"rule": {"type": "host_block", "src": "10.0.140.6", "dst": "172.21.240.7"}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    # One of the three drops is explained; the other two still warn.
+    assert res["status"] == "warn"
+    assert "2 blocked" in res["summary"]
+    assert any("blocked as configured" in i["detail"] and "172.21.240.7" in i["name"]
+               for i in res["items"])
+
+
+def test_ports_malformed_segmentation_rules_are_ignored_safely():
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"rule": {"type": "subnet_block", "src": "", "dst": "not-a-network"}},
+        "junk",
+        {"no_rule_key": True},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "warn"
+
+
+# --------------------------------------------------------------------------- #
+# Each port is probed from a node that should reach it, not one global prober
+# --------------------------------------------------------------------------- #
+
+def test_ports_probe_prefers_the_traffic_source_then_a_subnet_peer():
+    script = ac.ports_probe_script("pw", 7)
+    compile(script, "<probe>", "exec")          # the remote script must be valid
+    assert "traffic source" in script            # first choice
+    assert "same-subnet peer" in script          # fallback
+    assert "traffic_summary" in script or "summary" in script
+    # Targets are grouped per prober so each node is entered once.
+    assert "plan.setdefault(pname, [])" in script
+
+
+def test_ports_result_uses_each_rows_own_source():
+    # Two targets probed from two different nodes; the item labels and the
+    # segmentation match must both follow the row, not a single global prober.
+    probe = {"ok": True, "prober": "n1", "probers": ["n1", "n9"],
+             "nodes": {"n1": {"ip": "10.0.1.1", "listening": []},
+                       "n9": {"ip": "10.0.9.9", "listening": []},
+                       "n2": {"ip": "10.0.2.2", "listening": [80]},
+                       "n3": {"ip": "10.0.3.3", "listening": [443]}},
+             "checks": [
+                 {"node": "n2", "ip": "10.0.2.2", "port": 80, "src": "n1", "src_ip": "10.0.1.1",
+                  "via": "traffic source", "reachable": False, "error": "timeout"},
+                 {"node": "n3", "ip": "10.0.3.3", "port": 443, "src": "n9", "src_ip": "10.0.9.9",
+                  "via": "same-subnet peer", "reachable": False, "error": "timeout"},
+             ]}
+    # Only n1 -> 10.0.2.0/24 is a configured block.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"rule": {"type": "subnet_block", "src": "10.0.1.0/24", "dst": "10.0.2.0/24"}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []}, probe, segmentation=seg)
+    assert res["status"] == "warn"          # n9 -> n3 is a real, unexplained drop
+    labels = {i["name"]: i for i in res["items"]}
+    n2 = next(v for k, v in labels.items() if "n2:80" in k)
+    n3 = next(v for k, v in labels.items() if "n3:443" in k)
+    assert n2["name"].startswith("n1 →") and n2["status"] == "pass"
+    assert n3["name"].startswith("n9 →") and n3["status"] == "warn"
+    # The unexplained one says where it was probed from, to aid follow-up.
+    assert "same-subnet peer" in n3["detail"]
+
+
+def test_ports_summary_credits_traffic_source_probes():
+    probe = {"ok": True, "prober": "n1",
+             "nodes": {"n1": {"ip": "10.0.0.1", "listening": []},
+                       "n2": {"ip": "10.0.0.2", "listening": [80]}},
+             "checks": [{"node": "n2", "ip": "10.0.0.2", "port": 80, "src": "n1",
+                         "src_ip": "10.0.0.1", "via": "traffic source", "reachable": True}]}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []}, probe)
+    assert res["status"] == "pass"
+    assert "1 probed from their traffic source" in res["summary"]
+
+
+def test_ports_result_still_handles_probes_without_per_row_source():
+    # Older probe payloads carry only a single global prober.
+    probe = {"ok": True, "prober": "n1",
+             "nodes": {"n1": {"ip": "10.0.0.1", "listening": []},
+                       "n2": {"ip": "10.0.0.2", "listening": [80]}},
+             "checks": [{"node": "n2", "ip": "10.0.0.2", "port": 80,
+                         "reachable": False, "error": "timeout"}]}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []}, probe)
+    assert res["status"] == "warn"
+    assert any(i["name"].startswith("n1 →") for i in res["items"])
+
+
+# --------------------------------------------------------------------------- #
+# TCP is two-way: the destination must be able to answer the source
+# --------------------------------------------------------------------------- #
+
+def test_traffic_probe_tests_each_flow_on_its_own_protocol_and_port():
+    script = ac.traffic_probe_script("pw", 7)
+    compile(script, "<probe>", "exec")
+    # Ping is the wrong instrument under default-deny segmentation.
+    assert "tcp-handshake" in script
+    assert "udp-send" in script
+    assert "socket.create_connection" in script
+    # Ping survives only as a diagnostic once a flow has already failed.
+    assert "separates" in script
+
+
+def test_reachability_tcp_handshake_proves_both_directions():
+    # A completed handshake means the SYN-ACK came back, so the return path is
+    # verified without a separate reverse probe.
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 80, "protocol": "TCP",
+         "method": "tcp-handshake", "error": "", "reachable": True}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+    assert "1 TCP flow(s) verified in both directions" in res["summary"]
+    item = res["items"][0]
+    assert "both directions" in item["detail"]
+    assert "SYN-ACK" in item["detail"]
+
+
+def test_reachability_tcp_rst_still_proves_the_path():
+    # RST means the packet reached the host and the reply returned; the service
+    # simply is not listening. That is a service problem, not a path problem.
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 80, "protocol": "TCP",
+         "method": "tcp-handshake", "error": "refused", "reachable": True}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+    assert "nothing is listening" in res["items"][0]["detail"]
+
+
+def test_reachability_distinguishes_filtered_port_from_dead_path():
+    # Host answers ping but the port is filtered -> point at a port rule.
+    filtered = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 80, "protocol": "TCP",
+         "method": "tcp-handshake", "error": "timeout", "reachable": False, "icmp": True}]}
+    res = ac.reachability_result(filtered)
+    assert res["status"] == "warn"
+    assert "port is filtered or closed" in res["items"][0]["detail"]
+
+    # Nothing answers at all -> the whole path is down.
+    dead = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 80, "protocol": "TCP",
+         "method": "tcp-handshake", "error": "timeout", "reachable": False, "icmp": False}]}
+    res2 = ac.reachability_result(dead)
+    assert "whole path is blocked" in res2["items"][0]["detail"]
+
+    # No route at all is its own diagnosis.
+    noroute = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 80, "protocol": "TCP",
+         "method": "tcp-handshake", "error": "no-route", "reachable": False}]}
+    assert "no route to the destination" in ac.reachability_result(noroute)["items"][0]["detail"]
+
+
+def test_reachability_icmp_only_block_no_longer_warns():
+    # The real-world regression: default-deny segmentation drops ICMP while the
+    # configured TCP flow is explicitly allowed. Pinging reported this healthy
+    # scenario as broken; testing the flow's own port does not.
+    probe = {"ok": True, "ping": [
+        {"src": "flaggenslot-5", "dst": "flaggenslot-6", "ip": "172.21.240.3", "port": 5011,
+         "protocol": "TCP", "method": "tcp-handshake", "error": "", "reachable": True}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+
+
+def test_reachability_udp_is_reported_as_unconfirmable():
+    # UDP has no handshake, so a sent datagram is not proof of delivery.
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 53, "protocol": "UDP",
+         "method": "udp-send", "error": "sent", "reachable": None}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+    assert "1 UDP flow(s) sent but not confirmable" in res["summary"]
+    assert res["items"][0]["status"] == "skip"
+    assert "cannot be confirmed" in res["items"][0]["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# UDP delivery is confirmed by the receiving agent's byte counter
+# --------------------------------------------------------------------------- #
+
+def test_traffic_probe_reads_per_node_agent_stats():
+    script = ac.traffic_probe_script("pw", 7)
+    compile(script, "<probe>", "exec")
+    # Per-node filename: CORE vnodes share the host /tmp, so a fixed name would
+    # return whichever node's agent happened to write last.
+    assert "'/tmp/coretg_traffic/stats_' + str(node_id) + '.json'" in script
+    # Flow labels are <proto>-<src_id>-<dst_id>-<port>-tx|rx.
+    assert "'-tx'" in script and "'-rx'" in script
+
+
+def test_udp_flow_confirmed_by_bytes_at_the_destination():
+    # The sender-side probe cannot confirm UDP, but the receiving agent counted
+    # bytes, which settles it.
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 6007, "protocol": "UDP",
+         "method": "udp-send", "error": "sent", "reachable": None,
+         "flow_id": "udp-6-7-6007", "bytes_sent": 900000, "bytes_received": 850112,
+         "achieved_kbps": 253.1}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+    assert "1 confirmed by bytes counted at the destination" in res["summary"]
+    item = res["items"][0]
+    assert item["status"] == "pass"
+    assert "850,112 bytes" in item["detail"]
+    assert "253.1 kbps" in item["detail"]
+
+
+def test_udp_sent_but_nothing_arriving_is_a_warning():
+    # The failure mode UDP hides: the sender writes happily into a black hole.
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 6007, "protocol": "UDP",
+         "method": "udp-send", "error": "sent", "reachable": None,
+         "bytes_sent": 900000, "bytes_received": 0}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "warn"
+    assert "cannot reach their destination" in res["summary"]
+    detail = res["items"][0]["detail"]
+    assert "900,000 bytes" in detail
+    assert "dropped in flight" in detail
+    assert "segmentation rule covering this port" in detail
+
+
+def test_udp_without_counters_stays_unconfirmable():
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 6007, "protocol": "UDP",
+         "method": "udp-send", "error": "sent", "reachable": None}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+    assert res["items"][0]["status"] == "skip"
+    assert "No agent counters were readable" in res["items"][0]["detail"]
+
+
+def test_udp_sender_not_started_is_reported_distinctly():
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 6007, "protocol": "UDP",
+         "method": "udp-send", "error": "sent", "reachable": None,
+         "bytes_sent": 0, "bytes_received": 0}]}
+    res = ac.reachability_result(probe)
+    # Nothing sent means nothing could arrive; that is not a dropped-traffic fault.
+    assert res["status"] == "pass"
+    assert "written no bytes yet" in res["items"][0]["detail"]
+
+
+def test_tcp_pass_reports_measured_bytes_when_available():
+    probe = {"ok": True, "ping": [
+        {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 5011, "protocol": "TCP",
+         "method": "tcp-handshake", "error": "", "reachable": True,
+         "bytes_sent": 177345916, "bytes_received": 177345916}]}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "pass"
+    assert "177,345,916 bytes" in res["items"][0]["detail"]
+    assert "both directions" in res["items"][0]["detail"]
+
+
+def test_traffic_service_writes_per_node_stats_and_logs():
+    # CORE vnodes share the host's /tmp, so fixed filenames make every vnode's
+    # agent clobber the previous one's stats.
+    from pathlib import Path
+    svc = Path("on_core_machine/custom_services/TrafficService.py").read_text(encoding="utf-8")
+    assert 'stats="$runtime_dir/stats_$NODE_ID.json"' in svc
+    assert 'log="$runtime_dir/output_$NODE_ID.txt"' in svc
+    assert '-stats "$stats"' in svc
+    # The copied binary is per-node too, so two nodes cannot race on the copy.
+    assert 'traffic-agent-$NODE_ID' in svc
+    assert '"$runtime_dir/stats.json"' not in svc

@@ -944,20 +944,6 @@ def _run_artifact_checks_job(
         _apply(_ac.services_result(summary)); _step(2, _ac.CHECK_LABELS['services'])
 
         sudo_pw = (core_cfg or {}).get('ssh_password')
-        # Check 3: CORE-network port reachability (VM-mode nodes publish no host
-        # ports; probe each node's listening service ports from a prober node).
-        _step(3, _ac.CHECK_LABELS['ports'])
-        try:
-            ports_probe = _run_remote_python_json(
-                core_cfg, _ac.ports_probe_script(sudo_pw, session_id),
-                logger=log, label='check_artifacts.ports', timeout=150.0,
-            )
-        except Exception as exc:
-            log.warning('[check_artifacts] ports probe failed: %s', exc)
-            ports_probe = None
-        _apply(_ac.ports_result(summary, ports_probe)); _step(3, _ac.CHECK_LABELS['ports'])
-        _apply(_ac.injects_result(summary)); _step(4, _ac.CHECK_LABELS['injects'])
-
         seg_expected = False
         traffic_expected = False
         try:
@@ -967,8 +953,10 @@ def _run_artifact_checks_job(
         except Exception:
             pass
 
-        # Check 5: firewall/segmentation rules (live probe on the CORE VM).
-        _step(5, _ac.CHECK_LABELS['segmentation'])
+        # The segmentation rules are collected before the port check reports, so
+        # a port the scenario deliberately walls off is recognised as configured
+        # behaviour instead of being reported as an unreachable service.
+        _step(3, _ac.CHECK_LABELS['ports'])
         try:
             seg_probe = _run_remote_python_json(
                 core_cfg, _ac.segmentation_probe_script(sudo_pw, session_id),
@@ -976,6 +964,23 @@ def _run_artifact_checks_job(
             )
         except Exception as exc:
             seg_probe = {'ok': False, 'error': str(exc)}
+
+        # Check 3: CORE-network port reachability (VM-mode nodes publish no host
+        # ports; probe each node's listening service ports from a prober node).
+        try:
+            ports_probe = _run_remote_python_json(
+                core_cfg, _ac.ports_probe_script(sudo_pw, session_id),
+                logger=log, label='check_artifacts.ports', timeout=300.0,
+            )
+        except Exception as exc:
+            log.warning('[check_artifacts] ports probe failed: %s', exc)
+            ports_probe = None
+        _apply(_ac.ports_result(summary, ports_probe, segmentation=seg_probe))
+        _step(3, _ac.CHECK_LABELS['ports'])
+        _apply(_ac.injects_result(summary)); _step(4, _ac.CHECK_LABELS['injects'])
+
+        # Check 5: firewall/segmentation rules (probed above).
+        _step(5, _ac.CHECK_LABELS['segmentation'])
         _apply(_ac.segmentation_result(seg_probe, expected=seg_expected)); _step(5, _ac.CHECK_LABELS['segmentation'])
 
         # Checks 6 & 7: traffic scripts running, then reachability along each
