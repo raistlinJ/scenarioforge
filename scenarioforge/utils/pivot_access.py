@@ -39,8 +39,14 @@ counts against the configured vulnerability or flag-node-generator slot counts.
 Anything placed for pivot access is additive.
 
 An added provider is a Docker node built from `PIVOT_SSH_IMAGE`, overridable
-with `CORETG_PIVOT_SSH_IMAGE`. The planner records the image on the provider;
-materialising the node is the topology builder's job.
+with `CORETG_PIVOT_SSH_IMAGE`. The planner records the image and the port that
+image actually serves on the provider; `planning.full_preview` then allocates
+the node into the topology plan, and the builder creates it from that plan.
+
+Once a run has materialised such a node, later re-plans must recognise it
+rather than add a second one. That is what `provisioned_entry_points` is for:
+it reads the marker the materialiser left on the node and hands the planner an
+SSH entry for it, so the provider comes back as the same added node.
 
 This module is pure: it decides *what* should be reachable and returns the allow
 rules that express it. Writing iptables and mutating the session stays in
@@ -73,6 +79,25 @@ DEFAULT_SSH_PORT = 22
 # that already does. Overridable for sites that mirror their own.
 PIVOT_SSH_IMAGE = os.environ.get("CORETG_PIVOT_SSH_IMAGE", "lscr.io/linuxserver/openssh-server:latest")
 
+
+def _env_port(name: str, default: int) -> int:
+    try:
+        value = int(str(os.environ.get(name) or "").strip())
+    except Exception:
+        return default
+    return value if 0 < value < 65536 else default
+
+
+# The port `PIVOT_SSH_IMAGE` actually listens on, which is not 22: the default
+# image is a rootless sshd serving 2222. This is the port the allow rule opens
+# and the port the participant connects to, so it has to follow the image. A
+# site pointing `CORETG_PIVOT_SSH_IMAGE` at its own mirror sets this alongside.
+PIVOT_SSH_PORT = _env_port("CORETG_PIVOT_SSH_PORT", 2222)
+
+# Marker the materialiser leaves on a node it created, so a later plan reuses
+# that node instead of adding another one for the same subnet.
+PIVOT_PROVIDER_METADATA_KEY = "pivot_access_provider"
+
 # Roles that reserve challenge capacity. A provider is never taken from one of
 # these unless it already hosts a challenge, so the toggle cannot quietly eat a
 # slot the author meant for a vulnerability or flag-node-generator.
@@ -97,6 +122,10 @@ class PivotEntry:
     port: int
     protocol: str = "tcp"
     label: str = ""
+    # True when this entry belongs to a node an earlier pivot-access plan added.
+    # Reusing it is still "added", not "reused": the node exists only because of
+    # this feature, and reporting it as pre-existing would hide that.
+    provisioned: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -124,6 +153,9 @@ class PivotProvider:
     # Set when the provider must be built from an SSH-capable image, which the
     # topology builder materialises.
     image: str = ""
+    # The provider's address inside the walled-off subnet. Empty until the node
+    # exists, which is exactly when allow rules can first be written for it.
+    address: str = ""
 
     # A provider never consumes challenge-slot capacity. Kept explicit so the
     # invariant is visible in the plan itself rather than only in this docstring.
@@ -141,6 +173,7 @@ class PivotProvider:
             "needs_service": bool(self.needs_service),
             "added": bool(self.added),
             "image": self.image or "",
+            "address": self.address or "",
             "consumes_slot": False,
         }
 
@@ -150,6 +183,9 @@ class PivotAccessPlan:
     providers: List[PivotProvider] = field(default_factory=list)
     allow_rules: List[dict] = field(default_factory=list)
     unresolved: List[dict] = field(default_factory=list)
+    # Every router the FORWARD allows have to be installed on, kept so a caller
+    # that materialises a provider afterwards opens the same set of hops.
+    router_ids: List[int] = field(default_factory=list)
 
     @property
     def added_nodes(self) -> List[PivotProvider]:
@@ -338,6 +374,107 @@ def _allow_rule(
     }
 
 
+def allow_rules_for_provider(
+    provider: PivotProvider,
+    *,
+    router_ids: Sequence[int],
+) -> List[dict]:
+    """The allow rules that make one provider reachable across the boundary.
+
+    Split out of `plan_pivot_access` because a provider whose node is created
+    later -- an added one -- gets its rules once the materialiser has given it
+    an address, and both paths must open exactly the same thing.
+
+    Returns nothing while the provider has no address or no port: there is no
+    rule to write for a destination that does not exist yet, and a `--dport 0`
+    would be a rule that matches nothing while looking like the path is open.
+    """
+    dst_ip = str(provider.address or "").split("/")[0].strip()
+    port = int(provider.entry.port or 0)
+    if not dst_ip or port <= 0:
+        return []
+
+    out: List[dict] = []
+    for src in provider.blocked_from:
+        selector = "0.0.0.0/0" if src == "*" else src
+        # FORWARD on every router, so the packet survives the boundary; INPUT on
+        # the provider itself, which is where a default-deny policy would
+        # otherwise drop it.
+        for router_id in router_ids:
+            out.append(_allow_rule(
+                router_id, selector, dst_ip,
+                port, provider.entry.protocol, "FORWARD",
+            ))
+        out.append(_allow_rule(
+            provider.node_id, selector, dst_ip,
+            port, provider.entry.protocol, "INPUT",
+        ))
+    return out
+
+
+def provider_node_name(subnet: str) -> str:
+    """Deterministic name for a provider node added for `subnet`.
+
+    Derived from the subnet so the same plan always yields the same name, which
+    keeps the topology stable across re-previews and lets a report name the node
+    before it exists.
+    """
+    text = str(subnet or "").split("/")[0].strip()
+    slug = "".join(ch if ch.isalnum() else "-" for ch in text).strip("-") or "subnet"
+    return f"pivot-{slug}"
+
+
+def is_pivot_provider_host(host: object) -> bool:
+    """True for a node this feature added, in either preview or object form.
+
+    Callers use it to keep such a node out of counts that describe the scenario
+    the author configured -- challenge slots and plan-parity totals -- because
+    the node is additive and was never part of that configuration.
+    """
+    metadata = host.get("metadata") if isinstance(host, dict) else getattr(host, "metadata", None)
+    return isinstance(metadata, dict) and isinstance(
+        metadata.get(PIVOT_PROVIDER_METADATA_KEY), dict
+    )
+
+
+def provisioned_entry_points(hosts: Iterable[object]) -> Dict[int, List[PivotEntry]]:
+    """Entry points for provider nodes an earlier plan already added.
+
+    Without this, re-planning against a topology that already carries a provider
+    finds nothing it recognises in the subnet and adds a *second* one. Accepts
+    preview host payloads (dicts) and node objects alike, because the plan-time
+    and execute-time callers hold different shapes.
+    """
+    out: Dict[int, List[PivotEntry]] = {}
+    for host in hosts or []:
+        if not is_pivot_provider_host(host):
+            continue
+        if isinstance(host, dict):
+            node_id = host.get("node_id")
+            marker = host.get("metadata", {}).get(PIVOT_PROVIDER_METADATA_KEY)
+        else:
+            node_id = getattr(host, "node_id", None)
+            marker = getattr(host, "metadata", {}).get(PIVOT_PROVIDER_METADATA_KEY)
+        try:
+            key = int(node_id)
+        except Exception:
+            continue
+        try:
+            port = int(marker.get("port") or PIVOT_SSH_PORT)
+        except Exception:
+            port = PIVOT_SSH_PORT
+        if not 0 < port < 65536:
+            port = PIVOT_SSH_PORT
+        out.setdefault(key, []).append(PivotEntry(
+            kind=str(marker.get("kind") or ENTRY_SSH),
+            port=port,
+            protocol=str(marker.get("protocol") or "tcp"),
+            label=str(marker.get("label") or "SSH"),
+            provisioned=True,
+        ))
+    return out
+
+
 def plan_pivot_access(
     rules: Sequence[dict],
     hosts: Sequence[NodeInfo],
@@ -353,8 +490,12 @@ def plan_pivot_access(
 
     `entry_points` maps node_id to what that node already offers, so the planner
     can prefer a real challenge artifact over a plain SSH box. Callers supply
-    whatever they know; an empty map simply means every provider falls back to
-    SSH.
+    whatever they know; an empty map simply means every subnet needs a node
+    added, so callers that can resolve ports should.
+
+    `ssh_port` is the port callers use when registering an existing SSH node in
+    `entry_points`; it does not apply to an added provider, whose port follows
+    the image it runs (`PIVOT_SSH_PORT`).
     """
     plan = PivotAccessPlan()
     node_names = node_names or {}
@@ -393,8 +534,14 @@ def plan_pivot_access(
                 node_name=node_names.get(int(node.node_id), "") or f"node-{node.node_id}",
                 entry=entry,
                 blocked_from=list(blocked_from),
-                reused=True,
+                # A node this feature added in an earlier pass stays "added":
+                # calling it reused would credit the scenario with a node it
+                # never asked for.
+                reused=not entry.provisioned,
+                added=bool(entry.provisioned),
                 role=str(getattr(node, "role", "") or ""),
+                image=PIVOT_SSH_IMAGE if entry.provisioned else "",
+                address=_host_ip(node),
             )
         else:
             if allow_add_nodes:
@@ -403,8 +550,11 @@ def plan_pivot_access(
                 provider = PivotProvider(
                     subnet=subnet_text,
                     node_id=None,
-                    node_name="",
-                    entry=PivotEntry(kind=ENTRY_SSH, port=int(ssh_port), protocol="tcp", label="SSH"),
+                    node_name=provider_node_name(subnet_text),
+                    entry=PivotEntry(
+                        kind=ENTRY_SSH, port=PIVOT_SSH_PORT, protocol="tcp",
+                        label="SSH", provisioned=True,
+                    ),
                     blocked_from=list(blocked_from),
                     added=True,
                     role="Docker",
@@ -426,32 +576,12 @@ def plan_pivot_access(
 
         plan.providers.append(provider)
 
-        # A provider with no address yet cannot have rules written for it; the
-        # caller allocates the node first, then re-plans.
-        dst_ip = ""
-        if provider.node_id is not None:
-            for candidate in inside:
-                if int(candidate.node_id) == int(provider.node_id):
-                    dst_ip = _host_ip(candidate)
-                    break
-        if not dst_ip:
-            continue
+        # A provider with no address yet cannot have rules written for it. That
+        # is the added case: `full_preview` allocates the node, fills in the
+        # address and appends the rules through `allow_rules_for_provider`.
+        plan.allow_rules.extend(allow_rules_for_provider(provider, router_ids=forward_nodes))
 
-        for src in provider.blocked_from:
-            selector = "0.0.0.0/0" if src == "*" else src
-            # FORWARD on every router that carries a block, so the packet
-            # survives the boundary; INPUT on the provider itself, which is
-            # where a default-deny policy would otherwise drop it.
-            for router_id in forward_nodes:
-                plan.allow_rules.append(_allow_rule(
-                    router_id, selector, dst_ip,
-                    provider.entry.port, provider.entry.protocol, "FORWARD",
-                ))
-            plan.allow_rules.append(_allow_rule(
-                provider.node_id, selector, dst_ip,
-                provider.entry.port, provider.entry.protocol, "INPUT",
-            ))
-
+    plan.router_ids = list(router_id_list)
     return plan
 
 
