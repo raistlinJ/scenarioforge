@@ -51,18 +51,12 @@ def test_nothing_is_stamped_when_the_provider_has_to_be_added():
     assert out[0]['pivot_decisions'][0]['provider_node'] == ''
 
 
-def test_flow_time_cannot_yet_reuse_a_provider():
-    """Documents a known gap rather than asserting desired behaviour.
-
-    _flow_stamp_pivot_grants calls the planner without entry_points, so tiers
-    1-3 (reuse a node already serving a vulnerability, flag-node-generator or
-    SSH) can never fire and every provider comes back as `added`. Until the
-    preview carries per-node offerings with ports, the star only lights up for
-    a provider supplied some other way.
-    """
+def test_flow_time_supplies_offerings_so_a_provider_can_be_reused():
+    # Without entry_points every provider comes back as `added` and the star
+    # never lights up, however good the classification is.
     import inspect
     src = inspect.getsource(ab._flow_stamp_pivot_grants)
-    assert 'entry_points' not in src.split('plan_pivot_access(')[1].split(')')[0]
+    assert '_flow_preview_entry_points(preview)' in src
 
 
 def test_the_full_classification_rides_along_for_explanations():
@@ -238,3 +232,69 @@ def test_position_falls_back_to_the_preview_for_a_chain_node_without_an_ip():
     out = ab._flow_stamp_pivot_grants([{'node_id': 'docker-23'}, {'node_id': 'docker-21'}],
                                       chain, _preview())
     assert out[0]['pivot_decisions'][0]['insert_before'] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Flow-time provider reuse
+# --------------------------------------------------------------------------- #
+
+def _preview_with_vuln(node_id=6, name='some-vuln'):
+    p = _preview()
+    p['vulnerabilities_by_node'] = {str(node_id): [name]}
+    return p
+
+
+def test_a_node_hosting_a_vulnerability_becomes_the_provider(monkeypatch):
+    # Ports come from the catalog by name, since the preview records names only.
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [8080])
+    out = ab._flow_stamp_pivot_grants(
+        _assignments(), _chain(), _preview_with_vuln(node_id=6, name='some-vuln'))
+    decision = out[0]['pivot_decisions'][0]
+    assert decision['provider_node'] == 'docker-21'
+    assert decision['entry_kind'] == 'vulnerability'
+    assert decision['entry_port'] == 8080
+
+
+def test_reused_provider_with_rce_lights_the_star(monkeypatch):
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [8080])
+    out = ab._flow_stamp_pivot_grants(
+        _assignments(), _chain(), _preview_with_vuln())
+    assert out[0]['pivot_grants'] == ['172.21.240.0/24']
+    assert out[0]['pivot_decisions'][0]['disposition'] == 'absorbed'
+
+
+def test_reused_provider_without_rce_is_its_own_step(monkeypatch):
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [8080])
+    out = ab._flow_stamp_pivot_grants(
+        _assignments(), _chain(provides=['Credential(user, password)']),
+        _preview_with_vuln())
+    assert 'pivot_grants' not in out[0]
+    assert out[0]['pivot_decisions'][0]['disposition'] == 'own_step'
+
+
+def test_an_offering_with_no_resolvable_port_is_skipped(monkeypatch):
+    # Guessing the entry port would put the wrong rule in a firewall.
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [])
+    entries = ab._flow_preview_entry_points(_preview_with_vuln())
+    assert entries == {}
+
+
+def test_entry_points_read_both_vulnerabilities_and_generators(monkeypatch):
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [5011])
+    preview = _preview()
+    preview['vulnerabilities_by_node'] = {'6': ['v1']}
+    preview['flag_node_generators_by_node'] = {'7': ['g1']}
+    entries = ab._flow_preview_entry_points(preview)
+    assert entries[6][0].kind == 'vulnerability'
+    assert entries[7][0].kind == 'flag-node-generator'
+
+
+def test_entry_points_survive_malformed_preview_shapes():
+    for bad in (None, {}, {'vulnerabilities_by_node': 'nope'},
+                {'vulnerabilities_by_node': {'x': ['v']}}):
+        assert ab._flow_preview_entry_points(bad) == {}
+
+
+def test_port_lookup_returns_nothing_for_an_unknown_name():
+    assert ab._flow_ports_for_offering('definitely-not-in-the-catalog') == []
+    assert ab._flow_ports_for_offering('') == []
