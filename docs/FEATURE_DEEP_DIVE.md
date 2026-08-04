@@ -206,12 +206,29 @@ off, and a block protecting a single address is skipped for the reason
 Plans saved before effects existed still work, falling back to the emitted
 command and then to the old fields.
 
-Still to migrate onto effects: `_flow_allowed_by_summary` (which currently
-misses host-enforced rules, so no allow rule gets written for a flow they drop),
-`verify_flows_allowed` (which invents synthetic `/24` hosts because it never
-sees the topology), and `webapp/artifact_checks.py` (which filters on
-`"block" in type`, so a `protect_internal` drop is reported as a fault rather
-than as configured behaviour).
+Every consumer reads effects now, through `effect_of` (which prefers the
+recorded effect, then the emitted command, then the old fields) and
+`effect_blocks` (which answers "does this deny src to dst"). One matcher serves
+both scopes because `protects` already carries the difference: a transit rule
+protects a network, a node-scoped one protects the single address of the node
+running it, so "is the destination behind this rule" is the same question either
+way. What each consumer stopped getting wrong:
+
+- **`_flow_allowed_by_summary`** required the destination to sit inside the
+  subnet a `protect_internal` names, which is false for a host-enforced one. A
+  flow it drops was judged fine, no allow was written, and the traffic silently
+  never flowed - while the FORWARD allow *was* written, so the packet crossed
+  the routers and died on arrival.
+- **`verify_flows_allowed`** calls that same checker, so it inherits the fix.
+  Its synthetic hosts remain: it sees flows and rules but never the topology, so
+  it reconstructs hosts from flow addresses purely to work out whether a flow
+  crosses a router. The prefix is `DEFAULT_IPV4_PREFIXLEN`, which
+  `preview_validation` enforces on every subnet - an assumption the plan
+  guarantees rather than a guess.
+- **`webapp/artifact_checks.py`** filtered on `"block" in type`, so no
+  `protect_internal` drop was ever explained and every one was reported as
+  "packets dropped and no segmentation rule covers this path" - a fault, for a
+  scenario doing exactly what it was told.
 
 ## Router connectivity & aggregation
 - Per-routing-item `r2r_mode` supports `Exact`, `Uniform`, `NonUniform`, and `Min`.

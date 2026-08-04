@@ -6,6 +6,7 @@ import random
 import logging
 from typing import Dict, Iterable, List, Tuple, Optional, Sequence, Set
 import shutil
+from ..constants import DEFAULT_IPV4_PREFIXLEN
 from ..types import NodeInfo, SegmentationInfo
 from .services import ensure_service
 from ..plugins import segmentation as seg_plugins
@@ -265,7 +266,8 @@ def _allow_rule_covers_flow(rule: dict, chain: str, proto: str, src_ip: str, dst
 
 
 from .segmentation_effects import (  # noqa: F401  (re-exported for callers)
-    EFFECT_NODE, EFFECT_TRANSIT, _empty_effect, effect_from_iptables, rule_effect,
+    EFFECT_NODE, EFFECT_TRANSIT, _empty_effect, effect_blocks, effect_from_iptables,
+    effect_of, rule_effect, selector_covers_ip,
 )
 
 
@@ -301,27 +303,19 @@ def _flow_allowed_by_summary(
         if flow_crosses_router and rule.get("default_deny") and chain == "FORWARD" and node_id is not None:
             required_forward_nodes.add(node_id)
 
-        if rule_type == "subnet_block":
-            src_sel = str(rule.get("src") or "")
-            dst_sel = str(rule.get("dst") or "")
-            if _selector_matches_ip(src_sel, src_ip) and _selector_matches_ip(dst_sel, dst_ip):
-                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
+        # What the rule denies, read from its recorded effect rather than
+        # re-derived from fields that mean different things per chain. The old
+        # reading required the destination to sit inside the subnet a
+        # `protect_internal` names, which is false for a host-enforced one -- so
+        # a flow it drops was judged fine, no allow was written for it, and the
+        # traffic silently never flowed.
+        effect = effect_of(rr, rule)
+        if effect_blocks(effect, src_ip, dst_ip):
+            if str(effect.get("scope") or "") == EFFECT_NODE:
+                if recv_node_id is not None and node_id == int(recv_node_id):
                     requires_input_allow = True
-                elif chain == "FORWARD" and node_id is not None:
-                    required_forward_nodes.add(node_id)
-        elif rule_type == "host_block":
-            if str(rule.get("src") or "") == src_ip and str(rule.get("dst") or "") == dst_ip:
-                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
-                    requires_input_allow = True
-                elif chain == "FORWARD" and node_id is not None:
-                    required_forward_nodes.add(node_id)
-        elif rule_type == "protect_internal":
-            internal = str(rule.get("subnet") or "")
-            if internal and (not _selector_matches_ip(internal, src_ip)) and _selector_matches_ip(internal, dst_ip):
-                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
-                    requires_input_allow = True
-                elif chain == "FORWARD" and node_id is not None:
-                    required_forward_nodes.add(node_id)
+            elif node_id is not None:
+                required_forward_nodes.add(node_id)
 
     if requires_input_allow:
         input_allowed = any(
@@ -2488,6 +2482,11 @@ def verify_flows_allowed(
     except Exception:
         rules = []
     blocked: List[dict] = []
+    # This pass sees the flows and the rules but never the topology, so hosts are
+    # reconstructed from the flow addresses. They exist only to work out whether
+    # a flow crosses a router; node identity comes from the flow's own dst_id.
+    # The prefix is the planner's, which `preview_validation` enforces on every
+    # subnet -- so this is an assumption the plan guarantees rather than a guess.
     synthetic_hosts: List[NodeInfo] = []
     synthetic_seen: Set[str] = set()
     next_node_id = 1
@@ -2502,7 +2501,9 @@ def verify_flows_allowed(
             if not ip or ip in synthetic_seen:
                 continue
             synthetic_seen.add(ip)
-            synthetic_hosts.append(NodeInfo(node_id=next_node_id, ip4=f"{ip}/24", role="Host"))
+            synthetic_hosts.append(
+                NodeInfo(node_id=next_node_id, ip4=f"{ip}/{DEFAULT_IPV4_PREFIXLEN}", role="Host")
+            )
             next_node_id += 1
         recv_node_id = fl.get('dst_id')
         try:

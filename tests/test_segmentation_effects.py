@@ -256,6 +256,60 @@ def test_a_plan_without_effects_still_reads(tmp_path):
     assert list(walled_off_details([_entry(1, bare)])) == ['10.0.1.0/24']
 
 
+# --------------------------------------------------------------------------- #
+# What the traffic allow generator now sees
+# --------------------------------------------------------------------------- #
+
+def _flow_allowed(rules, *, src, dst, recv_node_id, hosts=None):
+    from scenarioforge.utils.segmentation import _flow_allowed_by_summary
+
+    hosts = hosts or [
+        NodeInfo(node_id=5, ip4='192.168.60.2/24', role='PC'),
+        NodeInfo(node_id=9, ip4='10.0.7.9/24', role='PC'),
+    ]
+    return _flow_allowed_by_summary(rules, hosts, src, dst, 'tcp', 5001, recv_node_id)
+
+
+def test_a_host_enforced_block_is_no_longer_missed():
+    # The old reading required the destination to sit inside the subnet the rule
+    # names. A host-enforced protect_internal names a subnet the node is not in,
+    # so the flow was judged fine, no allow was written, and the traffic
+    # silently never flowed.
+    rule = {'type': 'protect_internal', 'node': 5, 'subnet': '172.21.240.0/24', 'chain': 'INPUT'}
+    rule['effect'] = rule_effect(rule, chain='INPUT', node=_Node(5, '192.168.60.2/24'))
+    rules = [_entry(5, rule)]
+    assert _flow_allowed(rules, src='10.0.7.9', dst='192.168.60.2', recv_node_id=5) is False
+
+
+def test_a_host_enforced_block_does_not_touch_a_flow_to_another_host():
+    rule = {'type': 'protect_internal', 'node': 5, 'subnet': '172.21.240.0/24', 'chain': 'INPUT'}
+    rule['effect'] = rule_effect(rule, chain='INPUT', node=_Node(5, '192.168.60.2/24'))
+    rules = [_entry(5, rule)]
+    assert _flow_allowed(rules, src='192.168.60.2', dst='10.0.7.9', recv_node_id=9) is True
+
+
+def test_a_source_inside_the_protected_network_is_still_let_through():
+    rule = {'type': 'protect_internal', 'node': 5, 'subnet': '10.0.7.0/24', 'chain': 'INPUT'}
+    rule['effect'] = rule_effect(rule, chain='INPUT', node=_Node(5, '192.168.60.2/24'))
+    rules = [_entry(5, rule)]
+    # 10.0.7.9 is inside the network the rule accepts from.
+    assert _flow_allowed(rules, src='10.0.7.9', dst='192.168.60.2', recv_node_id=5) is True
+
+
+def test_a_transit_block_still_demands_a_forward_allow():
+    rule = {'type': 'subnet_block', 'node': 1, 'src': '10.0.7.0/24', 'dst': '192.168.60.0/24'}
+    rule['effect'] = rule_effect(rule, chain='FORWARD', node=_Node(1, '192.168.60.1/24'))
+    rules = [_entry(1, rule)]
+    assert _flow_allowed(rules, src='10.0.7.9', dst='192.168.60.2', recv_node_id=5) is False
+
+
+def test_an_unrelated_block_leaves_the_flow_alone():
+    rule = {'type': 'subnet_block', 'node': 1, 'src': '172.16.0.0/24', 'dst': '172.31.0.0/24'}
+    rule['effect'] = rule_effect(rule, chain='FORWARD', node=_Node(1, '172.31.0.1/24'))
+    rules = [_entry(1, rule)]
+    assert _flow_allowed(rules, src='10.0.7.9', dst='192.168.60.2', recv_node_id=5) is True
+
+
 def test_providers_are_only_planned_for_transit_blocks(tmp_path):
     # End to end: a policy of host-enforced rules asks for no provider at all.
     from scenarioforge.types import NodeInfo as _NI

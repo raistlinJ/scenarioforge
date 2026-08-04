@@ -546,6 +546,75 @@ def test_ports_malformed_segmentation_rules_are_ignored_safely():
     assert res["status"] == "warn"
 
 
+def _effect(scope, protects, blocks_from, *, invert=False, node_id=1):
+    return {"scope": scope, "enforced_by": node_id, "blocks": True,
+            "protects": protects, "blocks_from": blocks_from,
+            "invert_source": invert, "default_deny_chain": "FORWARD"}
+
+
+def test_ports_a_protect_internal_drop_is_explained_not_reported_as_a_fault():
+    # Previously invisible: the rule filter looked for "block" in the type name,
+    # so every protect_internal drop was reported as "no segmentation rule
+    # covers this path" -- a fault, for a scenario doing exactly what it was
+    # told to do.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "172.21.240.0/24",
+                  "chain": "FORWARD", "default_deny": True,
+                  "effect": _effect("transit", "172.21.240.0/24", "172.21.240.0/24", invert=True)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "pass"
+    assert "3 blocked as configured by segmentation" in res["summary"]
+    assert not any("no segmentation rule covers this path" in i["detail"] for i in res["items"])
+
+
+def test_ports_a_protect_internal_does_not_excuse_traffic_from_inside_it():
+    # It shuts out everything *except* its own network, so a drop sourced from
+    # inside is not explained by it.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "10.0.140.0/24",
+                  "effect": _effect("transit", "10.0.140.0/24", "10.0.140.0/24", invert=True)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "warn"
+
+
+def test_ports_a_host_enforced_rule_only_excuses_drops_to_that_host():
+    # Read from the fields, this rule names 172.21.240.0/24 and would have
+    # excused all three drops. It is an INPUT rule on one node, so it shields
+    # only 172.21.240.7.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 26, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "172.21.240.0/24",
+                  "chain": "INPUT",
+                  "effect": _effect("node", "172.21.240.7", "172.21.240.0/24",
+                                    invert=True, node_id=26)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "warn"
+    explained = [i for i in res["items"] if "blocked as configured" in i["detail"]]
+    assert len(explained) == 1
+    assert "172.21.240.7" in explained[0]["name"]
+
+
+def test_ports_the_explanation_describes_what_the_rule_actually_does():
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "172.21.240.0/24",
+                  "effect": _effect("transit", "172.21.240.0/24", "172.21.240.0/24", invert=True)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    detail = next(i["detail"] for i in res["items"] if "blocked as configured" in i["detail"])
+    assert "everything outside 172.21.240.0/24" in detail
+    assert "172.21.240.0/24" in detail
+
+
 # --------------------------------------------------------------------------- #
 # Each port is probed from a node that should reach it, not one global prober
 # --------------------------------------------------------------------------- #
