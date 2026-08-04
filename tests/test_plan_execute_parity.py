@@ -238,6 +238,142 @@ def test_execute_tolerates_a_plan_without_traffic():
 
 
 # --------------------------------------------------------------------------- #
+# The preview's predicted allow rules are the run's actual allow rules
+# --------------------------------------------------------------------------- #
+
+def _policy_and_flows(tmp_path):
+    """A segmentation summary and a flow list, as the plan would hold them."""
+    import json
+
+    seg_dir = tmp_path / 'policy'
+    seg_dir.mkdir()
+    summary = {'rules': [
+        {'node_id': 1, 'service': 'Segmentation', 'rule': {
+            'type': 'subnet_block', 'node': 1, 'src': '10.0.2.0/24', 'dst': '10.0.1.0/24',
+            'chain': 'FORWARD', 'default_deny': True,
+            'effect': {'scope': 'transit', 'enforced_by': 1, 'blocks': True,
+                       'protects': '10.0.1.0/24', 'blocks_from': '10.0.2.0/24',
+                       'invert_source': False, 'default_deny_chain': 'FORWARD'}}},
+    ]}
+    (seg_dir / 'segmentation_summary.json').write_text(json.dumps(summary), encoding='utf-8')
+
+    traffic_dir = tmp_path / 'flows'
+    traffic_dir.mkdir()
+    flows = [
+        {'src_id': 10, 'dst_id': 11, 'protocol': 'TCP', 'src_ip': '10.0.2.5',
+         'dst_ip': '10.0.1.4', 'dst_port': 5011},
+        {'src_id': 11, 'dst_id': 12, 'protocol': 'UDP', 'src_ip': '10.0.1.4',
+         'dst_ip': '10.0.3.6', 'dst_port': 6012},
+    ]
+    (traffic_dir / 'traffic_summary.json').write_text(json.dumps({'flows': flows}), encoding='utf-8')
+    return seg_dir, traffic_dir
+
+
+def _allow_topology():
+    routers = [NodeInfo(node_id=1, ip4='10.0.1.1/24', role='Router')]
+    hosts = [NodeInfo(node_id=10, ip4='10.0.2.5/24', role='PC'),
+             NodeInfo(node_id=11, ip4='10.0.1.4/24', role='PC'),
+             NodeInfo(node_id=12, ip4='10.0.3.6/24', role='PC')]
+    return routers, hosts
+
+
+def _shape(rules):
+    return [(e['node_id'], e['rule'].get('chain'), e['rule'].get('src'),
+             e['rule'].get('dst'), e['rule'].get('port')) for e in rules]
+
+
+def test_the_preview_predicts_the_allow_rules_the_run_writes(tmp_path):
+    # The preview used to sample random host pairs and invent a port per traffic
+    # kind, so it displayed allow rules for flows the scenario does not have.
+    import json
+    import shutil as _shutil
+    from scenarioforge.utils.segmentation import (
+        predict_allow_rules_for_flows, write_allow_rules_for_flows,
+    )
+
+    seg_dir, traffic_dir = _policy_and_flows(tmp_path)
+    routers, hosts = _allow_topology()
+
+    predicted = predict_allow_rules_for_flows(
+        routers=routers, hosts=hosts,
+        traffic_summary_path=str(traffic_dir / 'traffic_summary.json'),
+        segmentation_summary_path=str(seg_dir / 'segmentation_summary.json'),
+        out_dir=str(tmp_path / 'prediction'),
+    )['predicted_allow_rules']
+
+    # What the run does: the same policy, in the directory it enforces from.
+    run_dir = tmp_path / 'run'
+    run_dir.mkdir()
+    _shutil.copy(seg_dir / 'segmentation_summary.json', run_dir / 'segmentation_summary.json')
+    written = write_allow_rules_for_flows(
+        None, routers, hosts, str(traffic_dir / 'traffic_summary.json'), out_dir=str(run_dir),
+    )['rules']
+
+    assert predicted, 'a blocked flow must earn allow rules'
+    assert _shape(predicted) == _shape(written)
+
+
+def test_the_prediction_leaves_the_policy_it_read_untouched(tmp_path):
+    import json
+    from scenarioforge.utils.segmentation import predict_allow_rules_for_flows
+
+    seg_dir, traffic_dir = _policy_and_flows(tmp_path)
+    routers, hosts = _allow_topology()
+    before = (seg_dir / 'segmentation_summary.json').read_text(encoding='utf-8')
+
+    predict_allow_rules_for_flows(
+        routers=routers, hosts=hosts,
+        traffic_summary_path=str(traffic_dir / 'traffic_summary.json'),
+        segmentation_summary_path=str(seg_dir / 'segmentation_summary.json'),
+        out_dir=str(tmp_path / 'prediction'),
+    )
+    # The writer appends to the summary in its out_dir; that must be the scratch
+    # copy, never the plan's own artifact.
+    assert (seg_dir / 'segmentation_summary.json').read_text(encoding='utf-8') == before
+    assert not list(seg_dir.glob('seg_allow_*.py'))
+
+
+def test_the_prediction_follows_the_planned_probabilities(tmp_path):
+    from scenarioforge.utils.segmentation import predict_allow_rules_for_flows
+
+    seg_dir, traffic_dir = _policy_and_flows(tmp_path)
+    routers, hosts = _allow_topology()
+
+    def _predict(src_prob, dst_prob, name):
+        return predict_allow_rules_for_flows(
+            routers=routers, hosts=hosts,
+            traffic_summary_path=str(traffic_dir / 'traffic_summary.json'),
+            segmentation_summary_path=str(seg_dir / 'segmentation_summary.json'),
+            out_dir=str(tmp_path / name),
+            src_subnet_prob=src_prob, dst_subnet_prob=dst_prob,
+        )['predicted_allow_rules']
+
+    never = _predict(0.0, 0.0, 'never')
+    always = _predict(1.0, 1.0, 'always')
+    # Never widening keeps bare addresses; always widening yields networks.
+    assert all('/' not in str(e['rule'].get('src')) for e in never)
+    assert all('/' in str(e['rule'].get('src')) for e in always)
+
+
+def test_the_prediction_is_the_same_every_time(tmp_path):
+    from scenarioforge.utils.segmentation import predict_allow_rules_for_flows
+
+    seg_dir, traffic_dir = _policy_and_flows(tmp_path)
+    routers, hosts = _allow_topology()
+
+    def _predict(name, seed):
+        random.seed(seed)
+        return predict_allow_rules_for_flows(
+            routers=routers, hosts=hosts,
+            traffic_summary_path=str(traffic_dir / 'traffic_summary.json'),
+            segmentation_summary_path=str(seg_dir / 'segmentation_summary.json'),
+            out_dir=str(tmp_path / name),
+        )['predicted_allow_rules']
+
+    assert _shape(_predict('a', 1)) == _shape(_predict('b', 99999))
+
+
+# --------------------------------------------------------------------------- #
 # Settings that shape the policy are plan-time inputs
 # --------------------------------------------------------------------------- #
 

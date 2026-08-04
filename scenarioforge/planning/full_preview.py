@@ -17,7 +17,9 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Tuple, Any, Optional, Set
 import ipaddress
 import random
+import hashlib
 import os
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 import math
@@ -1565,7 +1567,7 @@ def build_full_preview(
         try:
             from ..types import TrafficInfo, NodeInfo  # type: ignore
             from ..utils.traffic import generate_traffic_scripts  # type: ignore
-            from ..utils.segmentation import plan_preview_allow_rules  # type: ignore
+            from ..utils.segmentation import predict_allow_rules_for_flows  # type: ignore
             # Heuristic density: average of factors capped at 1.0
             factors = [float(it.get('factor') or 0.0) for it in traffic_plan]
             density_est = 0.0
@@ -1614,10 +1616,24 @@ def build_full_preview(
                     }
             except Exception:
                 pass
-            # Predicted allow rules (dry-run) for preview purposes
-            host_ip_map = {h.node_id: h.ip4.split('/')[0] for h in host_nodes if h.ip4}
+            # The allow rules this scenario will actually get. Run against the
+            # planned flows and the planned policy, in a scratch directory so
+            # the prediction writes nothing the run would read.
             try:
-                predicted = plan_preview_allow_rules(seg_preview or {}, traffic_plan, host_ip_map, seed=seed)
+                _allow_dir = os.path.join(tempfile.gettempdir(), f"scenarioforge-preview-allow-{seed}")
+                shutil.rmtree(_allow_dir, ignore_errors=True)
+                predicted = predict_allow_rules_for_flows(
+                    routers=[NodeInfo(node_id=r.node_id, ip4=r.ip4 or '', role=r.role)
+                             for r in router_nodes if r.ip4],
+                    hosts=ninfos,
+                    traffic_summary_path=os.path.join(preview_dir, 'traffic_summary.json'),
+                    segmentation_summary_path=os.path.join(
+                        str(seg_preview.get('out_dir') or ''), 'segmentation_summary.json'),
+                    out_dir=_allow_dir,
+                    src_subnet_prob=float(seg_settings['allow_src_subnet_prob']),
+                    dst_subnet_prob=float(seg_settings['allow_dst_subnet_prob']),
+                    include_hosts=bool(seg_settings['include_hosts']),
+                )
                 traffic_scripts_preview['predicted_allow_rules'] = predicted.get('predicted_allow_rules')
             except Exception as _pae:
                 traffic_scripts_preview['predicted_allow_rules_error'] = str(_pae)
@@ -1626,7 +1642,6 @@ def build_full_preview(
 
     # ---- Unify Preview -> Runtime Scripts + Hashing (Segmentation & Traffic) ----
     try:
-        import hashlib, shutil
         # Segmentation scripts
         seg_prev_dir = seg_preview.get('out_dir') if isinstance(seg_preview, dict) else None
         if seg_prev_dir and os.path.isdir(seg_prev_dir):
