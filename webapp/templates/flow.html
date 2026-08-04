@@ -4376,6 +4376,25 @@
   // for the participant but have no generator to run, so they are rendered as
   // their own row without entering currentChain -- chain nodes and flag
   // assignments are aligned by index everywhere downstream.
+  const PIVOT_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
+
+  function pivotHintGroupsFor(decision) {
+    const src = (decision && typeof decision === 'object') ? decision : {};
+    const levels = (src.hint_levels && typeof src.hint_levels === 'object' && !Array.isArray(src.hint_levels))
+      ? src.hint_levels : null;
+    if (!levels) return [];
+    const groups = [];
+    PIVOT_HINT_LEVEL_ORDER.forEach((level) => {
+      const raw = levels[level];
+      const values = (Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []))
+        .map((v) => String(v || '').trim()).filter(Boolean);
+      if (values.length) {
+        groups.push({ title: 'Hint ' + level.charAt(0).toUpperCase() + level.slice(1), values });
+      }
+    });
+    return groups;
+  }
+
   function ownStepPivotsFor(assignments) {
     const out = [];
     const seen = new Set();
@@ -5313,6 +5332,21 @@
       detail.className = 'small text-muted';
       detail.textContent = String(decision.instruction || decision.reason || '');
       body.appendChild(detail);
+      // Tiered by how discoverable the provider is: a challenge node the
+      // participant is scanning anyway earns a medium nudge, a bare SSH box the
+      // most explicit tier, since nothing about it says "this is the door".
+      // Tier comes from the decision, never recomputed here, so the chain row
+      // and the guide cannot drift apart.
+      pivotHintGroupsFor(decision).forEach((group) => {
+        const line = document.createElement('div');
+        line.className = 'small';
+        const label = document.createElement('span');
+        label.className = 'fw-semibold';
+        label.textContent = group.title + ': ';
+        line.appendChild(label);
+        line.appendChild(document.createTextNode(group.values.join(' ')));
+        body.appendChild(line);
+      });
       row.appendChild(seqCell);
       row.appendChild(body);
       row.appendChild(document.createElement('div'));

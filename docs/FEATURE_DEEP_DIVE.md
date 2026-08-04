@@ -467,6 +467,25 @@ outside the walled-off subnet instead.
 It fails when a provider has no node placed for it at all, and when no allow
 rule opens the provider's own entry port from the participant.
 
+#### Hinting a pivot that is its own step
+
+An `own_step` pivot is real work with no generator behind it, so it needs a hint
+of its own. The tier follows how discoverable the provider is:
+
+| provider offers | tier | why |
+|---|---|---|
+| a vulnerability or a flag-node-generator | **medium** | the participant is scanning that node anyway and will find the challenge; a nudge is enough |
+| SSH only (an added provider) | **high** | nothing to solve on it, and nothing about it says "this is the door" - without being told, there is no reason to try it |
+
+An **absorbed** pivot gets no hint of its own. It is a consequence of a
+challenge the participant is already being hinted through, so hinting it
+separately would give that step away for free.
+
+The tier is computed on the decision (`hint_level`, `hint_levels`) and rendered
+from there by both guides. Neither template recomputes it - the chain row in
+`flow.html` and the guide in `reports.html` read the same server-side answer, or
+they would drift.
+
 #### Where the pivot shows up in the chain
 
 Whether a pivot is its own challenge is decided by capability, not by node. If

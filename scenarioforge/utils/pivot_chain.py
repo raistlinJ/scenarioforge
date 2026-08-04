@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from .pivot_access import ENTRY_FLAG_GEN, ENTRY_VULNERABILITY
 from ..vulns.metadata import _apply_subsumption, _canonical_set, canonical_fact_key
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,33 @@ class PivotStepDecision:
     def is_own_step(self) -> bool:
         return self.disposition == OWN_STEP
 
+    def hint_level(self) -> str:
+        """Which tier this pivot's hint belongs in.
+
+        A pivot onto a node that already carries a challenge is discoverable:
+        the participant is scanning it anyway and will find the vulnerability or
+        the generator's service, so a `medium` nudge is enough.
+
+        A bare SSH box is not discoverable in the same way. There is nothing to
+        solve on it and nothing about the scenario says "this is the door" --
+        without being told, a participant has no reason to try it at all. That
+        earns the most explicit tier.
+        """
+        kind = (self.entry_kind or "").strip().lower()
+        return "medium" if kind in (ENTRY_VULNERABILITY, ENTRY_FLAG_GEN) else "high"
+
+    def hint_levels(self) -> Dict[str, List[str]]:
+        """The pivot's hint, keyed by tier, in the shape the guides render.
+
+        Only own_step pivots get one. An absorbed pivot is a consequence of a
+        challenge the participant is already being hinted through, so hinting it
+        separately would give away that step for free.
+        """
+        if self.disposition != OWN_STEP:
+            return {}
+        text = self.instruction()
+        return {self.hint_level(): [text]} if text else {}
+
     def instruction(self) -> str:
         """What the participant actually has to do, for guides and chain rows."""
         if self.disposition != OWN_STEP:
@@ -108,6 +136,8 @@ class PivotStepDecision:
             "entry_port": self.entry_port,
             "insert_before": self.insert_before,
             "instruction": self.instruction(),
+            "hint_level": self.hint_level(),
+            "hint_levels": self.hint_levels(),
         }
 
 

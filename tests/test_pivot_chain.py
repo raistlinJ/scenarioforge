@@ -194,3 +194,68 @@ def test_granting_set_covers_the_whole_shell_family():
     for fact in ("Shell(host)", "Shell(host, user)", "RootShell(host)",
                  "CodeExecution(host)", "WebRCE(app)", "Pivot(host)"):
         assert pc.grants_pivot([fact]) is True, fact
+
+
+# --------------------------------------------------------------------------- #
+# A pivot that is its own step earns a hint, tiered by how findable it is
+# --------------------------------------------------------------------------- #
+
+def _own_step(entry_kind, port=2222):
+    from scenarioforge.utils.pivot_chain import OWN_STEP, PivotStepDecision
+
+    return PivotStepDecision(
+        subnet='172.21.240.0/24', provider_node='pivot-172-21-240-0',
+        disposition=OWN_STEP, reason='bare SSH box', entry_kind=entry_kind,
+        entry_port=port,
+    )
+
+
+def test_a_pivot_onto_a_challenge_node_is_a_medium_hint():
+    # The participant is scanning that node anyway and will find the challenge,
+    # so a nudge is enough.
+    for kind in ('vulnerability', 'flag-node-generator'):
+        decision = _own_step(kind)
+        assert decision.hint_level() == 'medium'
+        assert list(decision.hint_levels()) == ['medium']
+        assert decision.hint_levels()['medium'] == [decision.instruction()]
+
+
+def test_a_pivot_onto_a_bare_ssh_box_is_a_high_hint():
+    # Nothing to solve on it and nothing saying "this is the door", so without
+    # being told a participant has no reason to try it at all.
+    decision = _own_step('ssh')
+    assert decision.hint_level() == 'high'
+    assert list(decision.hint_levels()) == ['high']
+    assert 'SSH' in decision.hint_levels()['high'][0]
+
+
+def test_an_absorbed_pivot_gets_no_hint_of_its_own():
+    # It is a consequence of a challenge the participant is already hinted
+    # through; hinting it separately would give that step away.
+    from scenarioforge.utils.pivot_chain import ABSORBED, PivotStepDecision
+
+    decision = PivotStepDecision(
+        subnet='172.21.240.0/24', provider_node='docker-21', disposition=ABSORBED,
+        reason='the challenge already grants code execution', entry_kind='vulnerability',
+        entry_port=8080,
+    )
+    assert decision.hint_levels() == {}
+
+
+def test_the_hint_travels_on_the_decision_payload():
+    payload = _own_step('ssh').as_dict()
+    assert payload['hint_level'] == 'high'
+    assert payload['hint_levels']['high']
+    assert payload['instruction'] in payload['hint_levels']['high']
+
+
+def test_both_guides_render_the_pivot_hint_from_the_decision():
+    # Guides are client-rendered, so a hint rule needs a twin in each template
+    # or they drift. Neither may recompute the tier.
+    from pathlib import Path
+
+    for name, helper in (('webapp/templates/flow.html', 'pivotHintGroupsFor'),
+                         ('webapp/templates/reports.html', 'reportPivotHintGroups')):
+        src = Path(name).read_text(encoding='utf-8')
+        assert helper in src, name
+        assert 'hint_levels' in src, name
