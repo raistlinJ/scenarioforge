@@ -229,3 +229,25 @@ def effect_blocks(effect: Optional[Dict[str, object]], src_ip: str, dst_ip: str)
         if bool(effect.get("invert_source")) == inside:
             return False
     return True
+
+
+def allow_covers(rule: Dict[str, object], src_ip: str, dst_ip: str,
+                 port: object, proto: str = "tcp") -> bool:
+    """Whether an allow rule opens this path, on whichever chain it sits.
+
+    The companion to `effect_blocks`. Under a default-deny policy the absence of
+    an allow is *why* a path is closed, so telling "closed because nothing opens
+    it" apart from "closed despite something opening it" is the difference
+    between configured behaviour and a fault worth investigating.
+    """
+    if not isinstance(rule, dict) or str(rule.get("type") or "").lower() != "allow":
+        return False
+    if str(rule.get("proto") or "tcp").lower() != str(proto or "tcp").lower():
+        return False
+    try:
+        if int(rule.get("port")) != int(port):
+            return False
+    except Exception:
+        return False
+    return (selector_covers_ip(rule.get("src"), src_ip)
+            and selector_covers_ip(rule.get("dst"), dst_ip))
