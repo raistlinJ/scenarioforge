@@ -21,7 +21,11 @@ it and the former already imports the latter.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Dict, Optional
+
+# Rule types that deny a path, for a plan saved before rules carried an effect.
+_LEGACY_BLOCK_TYPES = frozenset({"subnet_block", "host_block", "protect_internal"})
 
 
 # The shape of an effect:
@@ -140,3 +144,88 @@ def effect_from_iptables(command: str, *, node_ip: str = "") -> Optional[Dict[st
     }
 
 
+
+
+def selector_covers_ip(selector: object, ip: object) -> bool:
+    """Whether an effect selector (an address or a network) covers an address."""
+    text = str(selector or "").strip()
+    address = str(ip or "").strip().split("/")[0]
+    if not text or not address:
+        return False
+    if text in ("*", "0.0.0.0/0"):
+        return True
+    try:
+        return ipaddress.ip_address(address) in ipaddress.ip_network(text, strict=False)
+    except Exception:
+        return False
+
+
+def effect_of(entry: Dict[str, object], rule: Optional[Dict[str, object]] = None) -> Optional[Dict[str, object]]:
+    """The effect of one summary entry, preferring what the planner recorded.
+
+    Falls back to reading the emitted iptables command, and then to the rule's
+    own fields, so a plan saved before rules carried their effect still works --
+    with the old fields' ambiguity, which is what the effect exists to remove.
+
+    Returns None for an entry that denies nothing.
+    """
+    if rule is None:
+        candidate = entry.get("rule") if isinstance(entry, dict) else None
+        rule = candidate if isinstance(candidate, dict) else (entry if isinstance(entry, dict) else {})
+    if not isinstance(rule, dict):
+        return None
+
+    recorded = rule.get("effect")
+    if isinstance(recorded, dict):
+        return recorded if recorded.get("blocks") else None
+
+    node_id = entry.get("node_id", rule.get("node")) if isinstance(entry, dict) else rule.get("node")
+
+    spec = rule.get("script_spec")
+    if isinstance(spec, dict):
+        for command in spec.get("commands") or []:
+            observed = effect_from_iptables(str(command))
+            if observed:
+                observed = dict(observed)
+                observed["enforced_by"] = node_id
+                return observed
+
+    rtype = str(rule.get("type") or "").strip().lower()
+    if rtype not in _LEGACY_BLOCK_TYPES:
+        return None
+    chain = str(rule.get("chain") or "").upper()
+    scope = EFFECT_NODE if chain == "INPUT" else EFFECT_TRANSIT
+    if rtype == "protect_internal":
+        internal = str(rule.get("subnet") or "")
+        return {
+            "scope": scope, "enforced_by": node_id, "blocks": True,
+            "protects": internal, "blocks_from": internal, "invert_source": True,
+            "default_deny_chain": chain,
+        }
+    return {
+        "scope": scope, "enforced_by": node_id, "blocks": True,
+        "protects": str(rule.get("dst") or ""), "blocks_from": str(rule.get("src") or ""),
+        "invert_source": False, "default_deny_chain": chain,
+    }
+
+
+def effect_blocks(effect: Optional[Dict[str, object]], src_ip: str, dst_ip: str) -> bool:
+    """Whether this effect denies a packet from `src_ip` to `dst_ip`.
+
+    One test serves both scopes because `protects` already carries the
+    difference: a transit rule protects a network, a node-scoped one protects
+    the single address of the node running it, so "is the destination behind
+    this rule" is the same question either way.
+    """
+    if not isinstance(effect, dict) or not effect.get("blocks"):
+        return False
+    protects = effect.get("protects")
+    if protects and not selector_covers_ip(protects, dst_ip):
+        return False
+    blocks_from = effect.get("blocks_from")
+    if blocks_from:
+        inside = selector_covers_ip(blocks_from, src_ip)
+        # protect_internal shuts out everything except its own network.
+        if bool(effect.get("invert_source")) == inside:
+            return False
+    return True

@@ -252,46 +252,6 @@ def _is_slot_role(role: str) -> bool:
     }
 
 
-def _effect_of(entry: dict, rule: dict) -> Optional[dict]:
-    """What this rule denies, preferring what the planner recorded.
-
-    Falls back to reading the emitted iptables command, and then to the rule's
-    own fields, so a plan saved before rules carried their effect still works --
-    with the old fields' ambiguity, which is what the effect exists to remove.
-    """
-    from .segmentation_effects import EFFECT_TRANSIT, effect_from_iptables
-
-    effect = rule.get("effect")
-    if isinstance(effect, dict):
-        return effect
-
-    spec = rule.get("script_spec")
-    if isinstance(spec, dict):
-        for command in spec.get("commands") or []:
-            observed = effect_from_iptables(str(command))
-            if observed:
-                observed = dict(observed)
-                observed["enforced_by"] = entry.get("node_id", rule.get("node"))
-                return observed
-
-    rtype = str(rule.get("type") or "").strip().lower()
-    if rtype not in _BLOCK_TYPES:
-        return None
-    if rtype == "protect_internal":
-        internal = str(rule.get("subnet") or "")
-        return {
-            "scope": EFFECT_TRANSIT, "blocks": True, "protects": internal,
-            "blocks_from": internal, "invert_source": True,
-            "enforced_by": entry.get("node_id", rule.get("node")),
-        }
-    return {
-        "scope": EFFECT_TRANSIT, "blocks": True,
-        "protects": str(rule.get("dst") or ""), "blocks_from": str(rule.get("src") or ""),
-        "invert_source": False,
-        "enforced_by": entry.get("node_id", rule.get("node")),
-    }
-
-
 def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
     """Blocked destination subnets, their sources, and who enforces the block.
 
@@ -314,7 +274,7 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
     Accepts the summary shape (`{"node_id", "service", "rule"}`) as well as bare
     rule dicts, because callers hold both.
     """
-    from .segmentation_effects import EFFECT_TRANSIT
+    from .segmentation_effects import EFFECT_TRANSIT, effect_of
 
     found: Dict[str, dict] = {}
 
@@ -328,7 +288,7 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
         if not isinstance(rule, dict):
             continue
 
-        effect = _effect_of(entry, rule)
+        effect = effect_of(entry, rule)
         if not isinstance(effect, dict) or not effect.get("blocks"):
             continue
         if str(effect.get("scope") or "") != EFFECT_TRANSIT:

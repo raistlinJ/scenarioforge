@@ -139,45 +139,66 @@ def services_result(summary: dict[str, Any]) -> dict[str, Any]:
     return _result("services", "pass", f"All {len(running)} services running.", items)
 
 
-def _segmentation_block_rules(segmentation: Any) -> list[tuple[Any, Any, dict[str, Any]]]:
-    """Parsed (src_network, dst_network, rule) triples for subnet block rules.
+def _segmentation_block_rules(segmentation: Any) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """(effect, rule) pairs for every rule that denies a path.
 
     Read from the runtime `segmentation_summary.json` so a path that segmentation
     is deliberately blocking can be recognised as configured behaviour rather
     than reported as a fault.
+
+    Each rule's recorded effect says what it denies. Matching on the rule's own
+    fields instead used to miss two whole classes: `protect_internal` never
+    matched because its name has no "block" in it, and a host-enforced rule was
+    read as covering the subnet it names rather than the single node running it.
+    Both meant a legitimately blocked path was reported as a fault.
     """
     if not isinstance(segmentation, dict):
         return []
     rules_summary = segmentation.get("rules_summary")
     if not isinstance(rules_summary, dict):
         return []
-    out: list[tuple[Any, Any, dict[str, Any]]] = []
+    try:
+        from scenarioforge.utils.segmentation_effects import effect_of
+    except Exception:
+        return []
+    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for entry in _as_list(rules_summary.get("rules")):
-        rule = entry.get("rule") if isinstance(entry, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        rule = entry.get("rule")
         if not isinstance(rule, dict):
             continue
-        if "block" not in _name(rule.get("type")).lower():
-            continue
-        try:
-            src = ipaddress.ip_network(_name(rule.get("src")), strict=False)
-            dst = ipaddress.ip_network(_name(rule.get("dst")), strict=False)
-        except Exception:
-            continue
-        out.append((src, dst, rule))
+        effect = effect_of(entry, rule)
+        if isinstance(effect, dict) and effect.get("blocks"):
+            out.append((effect, rule))
     return out
 
 
-def _blocking_rule_for(src_ip: str, dst_ip: str, rules: list[tuple[Any, Any, dict[str, Any]]]) -> dict[str, Any] | None:
+def _blocking_rule_for(src_ip: str, dst_ip: str,
+                       rules: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any] | None:
     """The configured rule that explains a dropped path, if any."""
     try:
-        source = ipaddress.ip_address(_name(src_ip))
-        target = ipaddress.ip_address(_name(dst_ip))
+        from scenarioforge.utils.segmentation_effects import effect_blocks
     except Exception:
         return None
-    for src_net, dst_net, rule in rules:
-        if source in src_net and target in dst_net:
+    for effect, rule in rules:
+        if effect_blocks(effect, _name(src_ip), _name(dst_ip)):
             return rule
     return None
+
+
+def _blocking_rule_detail(rule: dict[str, Any]) -> str:
+    """How a rule is described when it explains a dropped path."""
+    effect = rule.get("effect") if isinstance(rule.get("effect"), dict) else {}
+    protects = _name(effect.get("protects")) or _name(rule.get("dst")) or _name(rule.get("subnet"))
+    blocks_from = _name(effect.get("blocks_from")) or _name(rule.get("src"))
+    kind = _name(rule.get("type")) or "segmentation"
+    if effect.get("invert_source") and blocks_from:
+        source = f"everything outside {blocks_from}"
+    else:
+        source = blocks_from or "any source"
+    where = " on this node" if _name(effect.get("scope")) == "node" else ""
+    return f"{kind}: {source} to {protects or 'it'}{where}"
 
 
 def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any = None) -> dict[str, Any]:
@@ -263,7 +284,7 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
                         "name": label,
                         "status": "pass",
                         "detail": (f"blocked as configured by segmentation "
-                                   f"({rule.get('type')} {rule.get('src')} → {rule.get('dst')})"),
+                                   f"({_blocking_rule_detail(rule)})"),
                     })
                     continue
                 blocked.append(row)
