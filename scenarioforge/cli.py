@@ -5056,13 +5056,34 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
 
 
 def _emit_phase_json(payload: Any, *, output_path: str | None = None, stream: Any = None) -> None:
+    """Print a phase's result, and copy it to `--plan-output` when asked.
+
+    The copy is best-effort on purpose. In VM mode the run is delegated to the
+    CORE VM, so `--plan-output` names a directory that exists on the machine the
+    command was typed on and quite possibly not on the one running it. Letting
+    that raise turned a topology that built correctly into a phase reporting
+    failure, which is a worse lie than a missing side file -- the result is on
+    stdout either way.
+    """
     text = json.dumps(_json_ready(payload), indent=2, sort_keys=True, ensure_ascii=False)
     target = stream if stream is not None else sys.stdout
     print(text, file=target)
-    if output_path:
+    if not output_path:
+        return
+    try:
+        parent = os.path.dirname(os.path.abspath(output_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as handle:
             handle.write(text)
             handle.write('\n')
+    except Exception as exc:
+        print(
+            f'[phase] could not write --plan-output {output_path}: {exc}. '
+            f'The phase result above is complete; in VM mode the run happens on '
+            f'the CORE VM, so a path from your own machine may not exist there.',
+            file=sys.stderr,
+        )
 
 
 def _response_payload_and_status(response: Any) -> tuple[int, Any]:
