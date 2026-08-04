@@ -997,6 +997,26 @@ def _run_artifact_checks_job(
 
         _step(7, _ac.CHECK_LABELS['reachability'])
         _apply(_ac.reachability_result(traffic_probe))
+        _step(7, _ac.CHECK_LABELS['reachability'])
+
+        # Check 8: the participant can reach each pivot provider. Read from the
+        # rules rather than probed: the HITL node is an RJ45 bound to a physical
+        # interface, not a namespace this check could enter.
+        _step(8, _ac.CHECK_LABELS['pivot_access'])
+        participant_subnets: list[str] = []
+        try:
+            from scenarioforge.parsers.hitl import parse_hitl_info
+            from scenarioforge.utils.hitl import collect_hitl_preview_ip_reservations
+
+            hitl_cfg = parse_hitl_info(xml_path, scenario_label or None) or {}
+            if not hitl_cfg.get('scenario_key'):
+                hitl_cfg['scenario_key'] = scenario_label or '__default__'
+            participant_subnets = sorted(
+                collect_hitl_preview_ip_reservations(hitl_cfg).get('network_cidrs') or []
+            )
+        except Exception as exc:
+            log.debug('[check_artifacts] participant subnets unavailable: %s', exc)
+        _apply(_ac.pivot_access_result(seg_probe, participant_subnets))
 
         results = [dict(c) for c in checks]
         _update_artifact_check_progress(

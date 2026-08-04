@@ -10,12 +10,13 @@ from webapp import artifact_checks as ac
 # Plan + validator-summary mapping (checks 1-4)
 # --------------------------------------------------------------------------- #
 
-def test_check_plan_has_seven_pending_steps_in_order():
+def test_check_plan_has_eight_pending_steps_in_order():
     plan = ac.check_plan()
     assert [c["key"] for c in plan] == ac.CHECK_KEYS
-    assert len(plan) == 7
-    # Traffic-script health and reachability are separate checks.
-    assert ac.CHECK_KEYS[-2:] == ["traffic", "reachability"]
+    assert len(plan) == 8
+    # Traffic-script health and reachability are separate checks, and pivot
+    # access comes last because it reads what segmentation produced.
+    assert ac.CHECK_KEYS[-3:] == ["traffic", "reachability", "pivot_access"]
     assert all(c["status"] == "pending" for c in plan)
 
 
@@ -898,3 +899,98 @@ def test_traffic_service_writes_per_node_stats_and_logs():
     # The copied binary is per-node too, so two nodes cannot race on the copy.
     assert 'traffic-agent-$NODE_ID' in svc
     assert '"$runtime_dir/stats.json"' not in svc
+
+
+# --------------------------------------------------------------------------- #
+# Check 8: the participant can reach each pivot provider
+# --------------------------------------------------------------------------- #
+
+def _pivot_probe(providers, allows=()):
+    rules = [{"node_id": 1, "service": "Segmentation", "rule": dict(a)} for a in allows]
+    return {"ok": True, "rules_summary": {
+        "rules": rules,
+        "pivot_access": {"providers": list(providers)},
+    }}
+
+
+def _provider(subnet="172.21.240.0/24", address="172.21.240.4", port=2222,
+              name="pivot-172-21-240-0"):
+    return {"subnet": subnet, "node_id": 14, "node_name": name, "address": address,
+            "entry": {"kind": "ssh", "port": port, "protocol": "tcp", "label": "SSH"},
+            "added": True}
+
+
+def _allow(src, dst="172.21.240.4", port=2222):
+    return {"type": "allow", "chain": "FORWARD", "proto": "tcp",
+            "port": port, "src": src, "dst": dst, "reason": "pivot-access"}
+
+
+HITL_NET = "10.254.200.0/24"
+
+
+def test_pivot_access_passes_when_the_provider_is_open_to_everyone():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [HITL_NET])
+    assert res["status"] == "pass"
+    assert "1 pivot provider(s) reachable" in res["summary"]
+
+
+def test_pivot_access_fails_when_the_participant_is_not_covered():
+    # The shape that used to ship: the allow was scoped to the subnet the block
+    # shut out, and the participant is on neither side of that rule.
+    seg = _pivot_probe([_provider()], [_allow("10.0.140.0/24")])
+    res = ac.pivot_access_result(seg, [HITL_NET])
+    assert res["status"] == "fail"
+    assert "unsolvable" in res["summary"]
+    assert any("no allow rule opens this provider" in i["detail"] for i in res["items"])
+
+
+def test_pivot_access_passes_when_the_allow_names_the_participant_subnet():
+    seg = _pivot_probe([_provider()], [_allow(HITL_NET)])
+    assert ac.pivot_access_result(seg, [HITL_NET])["status"] == "pass"
+
+
+def test_pivot_access_fails_when_no_node_was_placed():
+    # An added provider with no address means nothing was created for the
+    # subnet, so there is no way in at all.
+    provider = _provider(address="", name="pivot-172-21-240-0")
+    res = ac.pivot_access_result(_pivot_probe([provider]), [HITL_NET])
+    assert res["status"] == "fail"
+    assert any("no node was placed" in i["detail"] for i in res["items"])
+
+
+def test_pivot_access_checks_the_providers_own_port():
+    # An allow on a different port does not open the entry.
+    seg = _pivot_probe([_provider(port=2222)], [_allow("0.0.0.0/0", port=22)])
+    assert ac.pivot_access_result(seg, [HITL_NET])["status"] == "fail"
+
+
+def test_pivot_access_without_hitl_asks_from_outside_the_subnet():
+    # Still a meaningful question: the provider has to be reachable from
+    # somewhere outside the subnet it guards.
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [])
+    assert res["status"] == "pass"
+    assert any("outside the walled-off subnet" in i["detail"] for i in res["items"])
+
+    scoped = _pivot_probe([_provider()], [_allow("10.0.140.0/24")])
+    assert ac.pivot_access_result(scoped, [])["status"] == "fail"
+
+
+def test_pivot_access_skips_when_the_scenario_has_no_providers():
+    res = ac.pivot_access_result(_pivot_probe([]), [HITL_NET])
+    assert res["status"] == "skip"
+    assert "accessible-by-pivot is off" in res["summary"]
+
+
+def test_pivot_access_errors_when_the_probe_failed():
+    res = ac.pivot_access_result({"ok": False, "error": "ssh died"}, [HITL_NET])
+    assert res["status"] == "error"
+    assert "ssh died" in res["summary"]
+
+
+def test_participant_sources_are_addresses_on_each_network():
+    assert ac.participant_probe_sources(["10.254.200.0/24"]) == ["10.254.200.1"]
+    # A single address is not a network and answers a different question.
+    assert ac.participant_probe_sources(["10.254.200.3/32"]) == []
+    assert ac.participant_probe_sources(["nonsense", None, ""]) == []

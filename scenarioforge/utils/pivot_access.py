@@ -101,6 +101,25 @@ PIVOT_PROVIDER_METADATA_KEY = "pivot_access_provider"
 # What a provider's entry port is opened to. See `allow_rules_for_provider`.
 ANY_SOURCE = "0.0.0.0/0"
 
+# Nested pivots -- a provider you can only reach by first working through
+# another provider -- are not supported. Every provider is opened to
+# `ANY_SOURCE`, so all of them are directly reachable and the ordering between
+# them is flattened.
+#
+# This is deliberate rather than an oversight, and turning it on is more than
+# flipping this flag. FORWARD allows go to *every* router by necessity (the
+# planner cannot know the route, and a live run showed the enforcing router
+# passing a SYN while an upstream router dropped it), so there is no hop at
+# which a later provider could be held back. Real support needs route-aware
+# per-hop allow placement, which the planner deliberately does not attempt.
+#
+# Until then, ordering between pivots is enforced by the *challenge* -- you need
+# what the earlier step gave you -- which is how `pivot_chain` already reasons:
+# on capability, not on topology. `nested_pivot_candidates` reports where an
+# author's segmentation implies an ordering, so the limitation is stated rather
+# than discovered.
+NESTED_PIVOTS_SUPPORTED = False
+
 # Roles that reserve challenge capacity. A provider is never taken from one of
 # these unless it already hosts a challenge, so the toggle cannot quietly eat a
 # slot the author meant for a vulnerability or flag-node-generator.
@@ -190,6 +209,9 @@ class PivotAccessPlan:
     # Every router the FORWARD allows have to be installed on, kept so a caller
     # that materialises a provider afterwards opens the same set of hops.
     router_ids: List[int] = field(default_factory=list)
+    # Subnets whose segmentation implies a pivot behind a pivot. Reported, not
+    # enforced -- see `NESTED_PIVOTS_SUPPORTED`.
+    nested_candidates: List[dict] = field(default_factory=list)
 
     @property
     def added_nodes(self) -> List[PivotProvider]:
@@ -207,6 +229,8 @@ class PivotAccessPlan:
             "provider_count": len(self.providers),
             "added_node_count": len(self.added_nodes),
             "reused_count": sum(1 for p in self.providers if p.reused),
+            "nested_supported": bool(NESTED_PIVOTS_SUPPORTED),
+            "nested_candidates": list(self.nested_candidates),
         }
 
 
@@ -321,6 +345,38 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
         dst: {"sources": sorted(v["sources"]), "enforced_by": sorted(v["enforced_by"])}
         for dst, v in sorted(found.items())
     }
+
+
+def nested_pivot_candidates(blocked: Dict[str, dict]) -> List[dict]:
+    """Walled-off subnets whose only way in is itself behind another boundary.
+
+    A subnet blocked *only* from other walled-off subnets reads as an author
+    asking for a two-step chain: get into the outer subnet, then through it to
+    this one. That ordering is not enforced -- see `NESTED_PIVOTS_SUPPORTED` --
+    so it is reported instead, and both providers are directly reachable.
+
+    A subnet with any source that is not itself walled off has a direct way in
+    and is not nested.
+    """
+    walled = set(blocked or {})
+    out: List[dict] = []
+    for subnet, detail in sorted((blocked or {}).items()):
+        sources = [s for s in (detail.get("sources") or []) if s != "*"]
+        if not sources:
+            # Blocked from everything, so no particular subnet gates it.
+            continue
+        gating = [s for s in sources if s in walled]
+        if gating and len(gating) == len(sources):
+            out.append({
+                "subnet": subnet,
+                "reached_through": sorted(gating),
+                "note": (
+                    "reaching this subnet's provider would mean working through "
+                    "another walled-off subnet first; that ordering is not enforced, "
+                    "so both providers are directly reachable"
+                ),
+            })
+    return out
 
 
 def walled_off_subnets(rules: Sequence[dict]) -> Dict[str, List[str]]:
@@ -558,6 +614,17 @@ def plan_pivot_access(
     blocked = walled_off_details(rules)
     if not blocked:
         return plan
+
+    plan.nested_candidates = nested_pivot_candidates(blocked)
+    if plan.nested_candidates and not NESTED_PIVOTS_SUPPORTED:
+        logger.info(
+            "Pivot access: %d subnet(s) are walled off only from other walled-off subnets "
+            "(%s). Reaching their providers is not gated behind the outer pivot -- every "
+            "provider is directly reachable, and the ordering between them is carried by "
+            "the challenges rather than by the network.",
+            len(plan.nested_candidates),
+            ", ".join(c["subnet"] for c in plan.nested_candidates),
+        )
 
     for subnet_text, detail in blocked.items():
         # The participant has to get in too, and is in no segmentation rule, so
