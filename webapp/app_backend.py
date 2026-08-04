@@ -21471,6 +21471,25 @@ def _flow_truthy_flag(value: Any) -> bool:
     return False
 
 
+def _flow_input_defs_with_metadata(source: Any) -> list[dict[str, Any]]:
+    """The input definitions carrying per-input metadata, from either shape.
+
+    A generator manifest keeps its input dicts under `inputs`. An *assignment*
+    keeps plain fact names there and the dicts under `input_defs`. Reading
+    `inputs` whenever it is a list therefore yielded a list of strings for an
+    assignment, every entry got skipped as "not a dict", and the metadata came
+    back empty -- which silently cost a Flow-supplied input its declared type,
+    and made its supply marker invisible.
+    """
+    if not isinstance(source, dict):
+        return []
+    for key in ('inputs', 'input_defs'):
+        value = source.get(key)
+        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
 def _flow_input_supply_when_first(input_item: dict[str, Any]) -> bool:
     if not isinstance(input_item, dict):
         return False
@@ -21503,20 +21522,7 @@ def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any
     if not isinstance(gen_or_assignment, dict):
         return []
 
-    # A generator definition carries its input dicts under `inputs`; an
-    # assignment carries plain fact names there and the dicts under
-    # `input_defs`. Preferring `inputs` outright therefore found nothing on an
-    # assignment -- every entry is a string and gets skipped below -- so a
-    # Flow-supplied input read as an unmet dependency whenever the caller had an
-    # assignment rather than the manifest. Take whichever actually holds dicts.
-    def _defs_with_dicts(*keys: str) -> list:
-        for key in keys:
-            value = gen_or_assignment.get(key)
-            if isinstance(value, list) and any(isinstance(item, dict) for item in value):
-                return value
-        return []
-
-    input_defs = _defs_with_dicts('inputs', 'input_defs')
+    input_defs = _flow_input_defs_with_metadata(gen_or_assignment)
     names_from_defs: list[str] = []
     if isinstance(input_defs, list):
         for item in input_defs:
@@ -21893,14 +21899,14 @@ def _flow_apply_first_step_chain_supplied_inputs(
     supplied_values: dict[str, Any] = {}
     input_meta_by_name: dict[str, dict[str, Any]] = {}
     try:
-        raw_input_defs = source.get('inputs') if isinstance(source.get('inputs'), list) else source.get('input_defs')
-        if isinstance(raw_input_defs, list):
-            for item in raw_input_defs:
-                if not isinstance(item, dict):
-                    continue
-                input_name = str(item.get('name') or '').strip()
-                if input_name:
-                    input_meta_by_name[input_name] = item
+        # Falls back to the assignment when there is no manifest, so the
+        # metadata has to be found in either shape -- without it every supplied
+        # value is typed as a string, and a numeric or boolean input reaches the
+        # generator as text.
+        for item in _flow_input_defs_with_metadata(source) or _flow_input_defs_with_metadata(assignment):
+            input_name = str(item.get('name') or '').strip()
+            if input_name:
+                input_meta_by_name[input_name] = item
     except Exception:
         input_meta_by_name = {}
     for name in names:
