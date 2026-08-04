@@ -645,6 +645,7 @@ def _apply_pivot_access(
     lookup_node_name,
     entry_points: Optional[Dict[int, object]] = None,
     node_names: Optional[Dict[int, str]] = None,
+    participant_subnets: Optional[Sequence[str]] = None,
     ssh_port: int = 22,
 ) -> None:
     """Guarantee each walled-off subnet keeps one reachable pivot provider.
@@ -688,6 +689,7 @@ def _apply_pivot_access(
         routers=routers,
         router_ids=router_ids,
         ssh_port=int(ssh_port),
+        participant_subnets=participant_subnets,
     )
     if not plan.providers:
         return
@@ -761,6 +763,7 @@ def plan_and_apply_segmentation(
     accessible_by_pivot: bool = False,
     pivot_entry_points: Optional[Dict[int, object]] = None,
     pivot_node_names: Optional[Dict[int, str]] = None,
+    pivot_participant_subnets: Optional[Sequence[str]] = None,
     pivot_ssh_port: int = 22,
     planned_rules: Optional[Sequence[dict]] = None,
 ) -> Dict[str, object]:
@@ -1556,6 +1559,7 @@ def plan_and_apply_segmentation(
                 lookup_node_name=_lookup_node_name,
                 entry_points=pivot_entry_points,
                 node_names=pivot_node_names,
+                participant_subnets=pivot_participant_subnets,
                 ssh_port=pivot_ssh_port,
             )
         except Exception as exc:

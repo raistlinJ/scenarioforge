@@ -98,6 +98,9 @@ PIVOT_SSH_PORT = _env_port("CORETG_PIVOT_SSH_PORT", 2222)
 # that node instead of adding another one for the same subnet.
 PIVOT_PROVIDER_METADATA_KEY = "pivot_access_provider"
 
+# What a provider's entry port is opened to. See `allow_rules_for_provider`.
+ANY_SOURCE = "0.0.0.0/0"
+
 # Roles that reserve challenge capacity. A provider is never taken from one of
 # these unless it already hosts a challenge, so the toggle cannot quietly eat a
 # slot the author meant for a vulnerability or flag-node-generator.
@@ -397,6 +400,17 @@ def allow_rules_for_provider(
     later -- an added one -- gets its rules once the materialiser has given it
     an address, and both paths must open exactly the same thing.
 
+    The source is `0.0.0.0/0`, not the subnets the block took access away from.
+    A provider is the subnet's entrance, and whoever has to walk through it is
+    not knowable from the rule that closed the subnet: the participant sits on a
+    HITL link subnet that exists in no segmentation rule at all, and what
+    actually stops them is the blanket `-P FORWARD DROP` rather than any
+    specific block. Scoping the allow to `blocked_from` locked the participant
+    out of the one node built to let them in -- and did so only for subnets
+    walled off by `subnet_block`, since `protect_internal` yields `*` and opened
+    it to everyone by accident. Exactly one port on one node becomes reachable;
+    the rest of the subnet stays walled off, which is the whole design.
+
     Returns nothing while the provider has no address or no port: there is no
     rule to write for a destination that does not exist yet, and a `--dport 0`
     would be a rule that matches nothing while looking like the path is open.
@@ -407,20 +421,18 @@ def allow_rules_for_provider(
         return []
 
     out: List[dict] = []
-    for src in provider.blocked_from:
-        selector = "0.0.0.0/0" if src == "*" else src
-        # FORWARD on every router, so the packet survives the boundary; INPUT on
-        # the provider itself, which is where a default-deny policy would
-        # otherwise drop it.
-        for router_id in router_ids:
-            out.append(_allow_rule(
-                router_id, selector, dst_ip,
-                port, provider.entry.protocol, "FORWARD",
-            ))
+    # FORWARD on every router, so the packet survives the boundary; INPUT on
+    # the provider itself, which is where a default-deny policy would
+    # otherwise drop it.
+    for router_id in router_ids:
         out.append(_allow_rule(
-            provider.node_id, selector, dst_ip,
-            port, provider.entry.protocol, "INPUT",
+            router_id, ANY_SOURCE, dst_ip,
+            port, provider.entry.protocol, "FORWARD",
         ))
+    out.append(_allow_rule(
+        provider.node_id, ANY_SOURCE, dst_ip,
+        port, provider.entry.protocol, "INPUT",
+    ))
     return out
 
 
@@ -497,6 +509,7 @@ def plan_pivot_access(
     router_ids: Optional[Iterable[int]] = None,
     ssh_port: int = DEFAULT_SSH_PORT,
     allow_add_nodes: bool = True,
+    participant_subnets: Optional[Sequence[str]] = None,
 ) -> PivotAccessPlan:
     """Ensure every walled-off subnet has a reachable pivot provider.
 
@@ -508,6 +521,13 @@ def plan_pivot_access(
     `ssh_port` is the port callers use when registering an existing SSH node in
     `entry_points`; it does not apply to an added provider, whose port follows
     the image it runs (`PIVOT_SSH_PORT`).
+
+    `participant_subnets` are the networks a human sits on -- the HITL link
+    subnets -- recorded on each provider so reports and guides name the audience
+    the entrance was opened for. They are networks, never single addresses: a
+    participant who re-addresses within their own subnet is still the same
+    participant, and a rule pinned to one address would be defeated by a DHCP
+    lease change.
     """
     plan = PivotAccessPlan()
     node_names = node_names or {}
@@ -516,12 +536,42 @@ def plan_pivot_access(
     derived_router_ids = {int(getattr(r, "node_id")) for r in routers if getattr(r, "node_id", None) is not None}
     router_id_list = sorted({int(r) for r in (router_ids or [])} | derived_router_ids)
 
+    # Networks only. A bare address arrives as a /32, which describes the
+    # audience wrongly: the participant who re-addresses inside their own subnet
+    # is the same participant. Widening it would mean guessing a prefix, so a
+    # single address is dropped and said out loud instead -- callers hand over
+    # the HITL link networks, which are already CIDRs.
+    participants: List[str] = []
+    for raw in participant_subnets or []:
+        net = _network_of(raw)
+        if net is None:
+            continue
+        if net.num_addresses <= 1:
+            logger.warning(
+                "Pivot access: ignoring participant source %s -- a single address, "
+                "not the network the participant sits on", raw,
+            )
+            continue
+        if str(net) not in participants:
+            participants.append(str(net))
+
     blocked = walled_off_details(rules)
     if not blocked:
         return plan
 
     for subnet_text, detail in blocked.items():
-        blocked_from = detail["sources"]
+        # The participant has to get in too, and is in no segmentation rule, so
+        # they are added to the audience rather than discovered from one.
+        blocked_from = list(detail["sources"])
+        subnet_net = _network_of(subnet_text)
+        for participant in participants:
+            if participant in blocked_from:
+                continue
+            # A participant already inside the walled-off subnet needs no way in.
+            participant_net = _network_of(participant)
+            if subnet_net is not None and participant_net is not None and participant_net.subnet_of(subnet_net):
+                continue
+            blocked_from.append(participant)
         # Every router on the path, not just the one carrying the block.
         #
         # Narrowing this to the enforcing router looked tidier and was wrong: a

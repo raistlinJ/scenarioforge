@@ -155,15 +155,18 @@ def test_provider_never_reports_consuming_a_slot():
 # The allow rules that actually open the path
 # --------------------------------------------------------------------------- #
 
-def test_allow_rules_open_the_provider_from_every_blocked_source():
+def test_allow_rules_open_the_provider_to_any_source():
+    # A provider is the subnet's entrance. Who walks through it is not knowable
+    # from the rule that closed the subnet -- the participant sits on a HITL link
+    # subnet that appears in no segmentation rule at all.
     rules = [_block(src="10.0.140.0/24"), _block(src="10.0.173.0/24")]
     entries = {6: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)]}
     plan = pa.plan_pivot_access(rules, _subnet_nodes(), entry_points=entries, router_ids=[1])
 
     forwards = [r for r in plan.allow_rules if r["rule"]["chain"] == "FORWARD"]
     inputs = [r for r in plan.allow_rules if r["rule"]["chain"] == "INPUT"]
-    assert len(forwards) == 2 and len(inputs) == 2
-    assert {r["rule"]["src"] for r in forwards} == {"10.0.140.0/24", "10.0.173.0/24"}
+    assert len(forwards) == 1 and len(inputs) == 1
+    assert {r["rule"]["src"] for r in plan.allow_rules} == {pa.ANY_SOURCE}
     assert all(r["rule"]["dst"] == "172.21.240.6" for r in plan.allow_rules)
     assert all(r["rule"]["port"] == 22 and r["rule"]["proto"] == "tcp" for r in plan.allow_rules)
     # FORWARD lands on the router carrying the block; INPUT on the provider.

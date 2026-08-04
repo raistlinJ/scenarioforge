@@ -170,12 +170,91 @@ def test_the_provider_gets_its_own_input_allow():
     assert [r['node_id'] for r in inputs] == [created[0].node_id]
 
 
-def test_rules_open_the_providers_port_from_the_blocked_side():
+def test_rules_open_the_providers_port_to_any_source():
+    # Not just the subnets the block took access away from: the participant is
+    # in none of them, and locking them out of the entrance defeats the point.
+    from scenarioforge.utils.pivot_access import ANY_SOURCE
+
     plan, _topo, _created = _materialise()
     for entry in plan.allow_rules:
         assert entry['rule']['port'] == PIVOT_SSH_PORT
-        assert entry['rule']['src'] == OUTSIDE
+        assert entry['rule']['src'] == ANY_SOURCE
         assert entry['rule']['reason'] == 'pivot-access'
+
+
+# --------------------------------------------------------------------------- #
+# The participant has to be able to reach the entrance
+# --------------------------------------------------------------------------- #
+
+HITL_SUBNET = '10.254.200.0/24'
+
+
+def _plan_with_participant(rules, hosts, **kwargs):
+    return plan_pivot_access(
+        rules, hosts, router_ids=[1],
+        entry_points={4: [PivotEntry(kind='vulnerability', port=8080)]},
+        participant_subnets=[HITL_SUBNET], **kwargs,
+    )
+
+
+def _subnet_block_rules():
+    # The shape that used to lock the participant out: the subnet is walled off
+    # from one other subnet, so the allow was scoped to that subnet alone.
+    return [{'node_id': 1, 'service': 'Segmentation', 'rule': {
+        'type': 'subnet_block', 'node': 1, 'src': OUTSIDE, 'dst': WALLED_OFF,
+        'chain': 'FORWARD', 'default_deny': True}}]
+
+
+def _inside_hosts():
+    return [NodeInfo(node_id=4, ip4='172.21.240.6/24', role='Docker')]
+
+
+def test_the_participant_can_reach_a_provider_behind_a_subnet_block():
+    plan = _plan_with_participant(_subnet_block_rules(), _inside_hosts())
+    assert plan.providers
+    assert plan.allow_rules
+    # Opening only OUTSIDE would leave the participant, who is on neither side
+    # of that rule, unable to reach the one node built to let them in.
+    for entry in plan.allow_rules:
+        assert entry['rule']['src'] == '0.0.0.0/0'
+
+
+def test_the_participant_network_is_named_on_the_provider():
+    plan = _plan_with_participant(_subnet_block_rules(), _inside_hosts())
+    assert HITL_SUBNET in plan.providers[0].blocked_from
+    # The rule that closed the subnet is still named, since it explains why a
+    # provider was needed at all.
+    assert OUTSIDE in plan.providers[0].blocked_from
+
+
+def test_the_participant_is_recorded_as_a_network_never_an_address():
+    # A participant who re-addresses inside their own subnet is still the same
+    # participant; a single address would be defeated by a new DHCP lease.
+    plan = plan_pivot_access(
+        _subnet_block_rules(), _inside_hosts(), router_ids=[1],
+        entry_points={4: [PivotEntry(kind='vulnerability', port=8080)]},
+        participant_subnets=['10.254.200.3', '10.254.200.0/24'],
+    )
+    recorded = [s for s in plan.providers[0].blocked_from if s.startswith('10.254.200.')]
+    assert recorded == ['10.254.200.0/24']
+
+
+def test_a_participant_already_inside_the_subnet_is_not_added():
+    # They need no way in; they are already there.
+    plan = plan_pivot_access(
+        _subnet_block_rules(), _inside_hosts(), router_ids=[1],
+        entry_points={4: [PivotEntry(kind='vulnerability', port=8080)]},
+        participant_subnets=[WALLED_OFF],
+    )
+    assert WALLED_OFF not in plan.providers[0].blocked_from
+
+
+def test_no_participant_subnets_leaves_the_report_unchanged():
+    plan = plan_pivot_access(
+        _subnet_block_rules(), _inside_hosts(), router_ids=[1],
+        entry_points={4: [PivotEntry(kind='vulnerability', port=8080)]},
+    )
+    assert plan.providers[0].blocked_from == [OUTSIDE]
 
 
 # --------------------------------------------------------------------------- #
