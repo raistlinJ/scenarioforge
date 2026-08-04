@@ -91,6 +91,7 @@ quietly differs from its plan invalidates all three.
 | Pivot provider nodes | materialised into the plan, then created like any other host |
 | Segmentation rules | `plan_and_apply_segmentation(planned_rules=…)` applies the plan's rules; no new policy is drawn |
 | Traffic flows | `generate_traffic_scripts(planned_flows=…)` writes the plan's flows; none are drawn |
+| Traffic allow rules | the same code the preview predicted them with, over the same flows and the same policy |
 
 Segmentation and traffic are the two that needed the most care, because both
 planners draw from the **global `random` module** — at a dozen points in
@@ -109,6 +110,17 @@ So each of those planners can now be handed its own earlier output:
   run may be on a different host than the preview was.
 - **Traffic** — flows fully determine every traffic artifact (`_write_agent_configs`
   draws nothing), so the plan's flow list is written out directly.
+
+The preview's **predicted allow rules** are the run's actual allow rules, not an
+estimate of them. `predict_allow_rules_for_flows` runs the same
+`write_allow_rules_for_flows` the run uses, over the planned flows and the
+planned policy, with no session (so it enables no services) and against a
+scratch copy of the summary (so it writes nothing the run would read). It used
+to sample random host pairs and invent a port per traffic kind, which meant the
+preview displayed allow rules for flows the scenario does not have and omitted
+the ones it does. Both halves became knowable once flows were planned and the
+per-flow widen decisions were drawn from each flow's identity rather than from
+`random`.
 
 Both degrade loudly, never silently. A plan whose rules carry no `script_spec`
 (saved before this existed) or whose flow list was truncated for payload size
