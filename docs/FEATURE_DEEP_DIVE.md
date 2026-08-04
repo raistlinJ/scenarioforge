@@ -242,6 +242,30 @@ way. What each consumer stopped getting wrong:
   "packets dropped and no segmentation rule covers this path" - a fault, for a
   scenario doing exactly what it was told.
 
+#### What "port unreachable" means under default-deny
+
+The ports check probes each node's listening TCP ports from a node that should
+reach them. Two things decide whether a drop is a fault:
+
+**Which node probes which port.** The prober is chosen per **(node, port)**: the
+source of the flow that uses *that port* when one exists, otherwise a peer on
+the target's own subnet, otherwise any node. Choosing it per *node* instead
+meant a node receiving three flows had all three ports probed from the source of
+the first, and its service ports probed from a sender that was never meant to
+reach them. Falling back to a same-subnet peer also asks the more useful
+question of a service port - does this service answer at all - without crossing
+a segmentation boundary to do it.
+
+**Whether anything was supposed to open the path.** A drop is classified in this
+order: a specific rule whose effect covers it (configured); an allow rule that
+opens it, meaning the scenario arranged for this path and it failed anyway (a
+fault, and the one shape here worth investigating); the default-deny policy,
+under which a port no rule opens is *meant* to be unreachable (configured); and
+otherwise, unexplained (a fault). Without the third case a segmented scenario
+reports most of its ports as faults - routing-daemon vty ports, database ports,
+every flow port probed from the wrong sender - and the real signal is lost in
+them.
+
 ## Router connectivity & aggregation
 - Per-routing-item `r2r_mode` supports `Exact`, `Uniform`, `NonUniform`, and `Min`.
 - R2S policies (`r2s_mode`, `r2s_edges`, optional `r2s_hosts_min/max`) regroup hosts behind dedicated switches, with “Exact=1” aggregating all hosts per router into a single switch.

@@ -187,6 +187,58 @@ def _blocking_rule_for(src_ip: str, dst_ip: str,
     return None
 
 
+def _segmentation_allow_rules(segmentation: Any) -> list[dict[str, Any]]:
+    """Every allow rule the run installed, from the runtime summary."""
+    if not isinstance(segmentation, dict):
+        return []
+    rules_summary = segmentation.get("rules_summary")
+    if not isinstance(rules_summary, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in _as_list(rules_summary.get("rules")):
+        rule = entry.get("rule") if isinstance(entry, dict) else None
+        if isinstance(rule, dict) and _name(rule.get("type")).lower() == "allow":
+            out.append(rule)
+    return out
+
+
+def _segmentation_is_default_deny(segmentation: Any) -> bool:
+    """Whether the policy closes everything it does not explicitly open.
+
+    Under default-deny, a port that no rule opens is *meant* to be unreachable
+    from anywhere the scenario did not arrange for. Without knowing that, every
+    such port reads as a fault -- which for a segmented scenario is most of them.
+    """
+    if not isinstance(segmentation, dict):
+        return False
+    rules_summary = segmentation.get("rules_summary")
+    if not isinstance(rules_summary, dict):
+        return False
+    for entry in _as_list(rules_summary.get("rules")):
+        rule = entry.get("rule") if isinstance(entry, dict) else None
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("default_deny"):
+            return True
+        effect = rule.get("effect")
+        if isinstance(effect, dict) and _name(effect.get("default_deny_chain")):
+            return True
+    return False
+
+
+def _allow_rule_opening(src_ip: str, dst_ip: str, port: Any,
+                        allow_rules: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The allow rule that was supposed to open this path, if there is one."""
+    try:
+        from scenarioforge.utils.segmentation_effects import allow_covers
+    except Exception:
+        return None
+    for rule in allow_rules:
+        if allow_covers(rule, _name(src_ip), _name(dst_ip), port):
+            return rule
+    return None
+
+
 def _blocking_rule_detail(rule: dict[str, Any]) -> str:
     """How a rule is described when it explains a dropped path."""
     effect = rule.get("effect") if isinstance(rule.get("effect"), dict) else {}
@@ -235,8 +287,11 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
     net_unreachable: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []       # dropped packets with no rule to explain them
     segmented: list[dict[str, Any]] = []     # dropped packets a segmentation rule explains
+    by_policy: list[dict[str, Any]] = []     # dropped because nothing opens the path
     transient: list[dict[str, Any]] = []     # refused: port closed since enumeration
     block_rules = _segmentation_block_rules(segmentation)
+    allow_rules = _segmentation_allow_rules(segmentation)
+    default_deny = _segmentation_is_default_deny(segmentation)
     prober_ip = ""
     if probe_ok:
         nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
@@ -287,6 +342,30 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
                                    f"({_blocking_rule_detail(rule)})"),
                     })
                     continue
+                # A path the scenario arranged for is a different matter: an
+                # allow was installed and the packets were dropped anyway, which
+                # is the one shape here worth investigating.
+                opened = _allow_rule_opening(src_ip, _name(row.get("ip")), row.get("port"), allow_rules)
+                if opened is not None:
+                    blocked.append(row)
+                    items.append({
+                        "name": label,
+                        "status": "warn",
+                        "detail": (f"packets dropped ({error}) even though an allow rule opens this "
+                                   f"path ({opened.get('chain')} {opened.get('src')} -> "
+                                   f"{opened.get('dst')}:{opened.get('port')})." + via_note + repro),
+                    })
+                    continue
+                if default_deny:
+                    by_policy.append(row)
+                    items.append({
+                        "name": label,
+                        "status": "pass",
+                        "detail": ("closed by the default-deny segmentation policy: no rule opens "
+                                   "this path, and nothing in the scenario asks for it to be open."
+                                   + via_note),
+                    })
+                    continue
                 blocked.append(row)
                 items.append({
                     "name": label,
@@ -303,7 +382,7 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
                                "(short-lived service port), not a reachability failure." + repro),
                 })
 
-    net_unreachable = blocked + segmented + transient
+    net_unreachable = blocked + segmented + by_policy + transient
     published_bad = len(unreachable) + len(topo_unreachable)
     probed = len(net_checks)
     reachable_ok = probed - len(net_unreachable)
@@ -312,11 +391,6 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
         return _result("ports", "skip", "No open service ports found to check.", items)
     if published_bad:
         return _result("ports", "fail", f"{published_bad} published port target(s) unreachable.", items)
-    if blocked:
-        return _result("ports", "warn",
-                       f"{reachable_ok} of {probed} probed service port(s) reachable across the CORE "
-                       f"network; {len(blocked)} blocked (dropped packets, with no segmentation "
-                       f"rule to explain them).", items)
     node_count = sum(1 for v in (probe.get("nodes") or {}).values() if isinstance(v, dict) and v.get("listening"))
     total_ok = len(checked) + reachable_ok
     notes = []
@@ -326,9 +400,18 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
         notes.append(f"{from_traffic} probed from their traffic source")
     if segmented:
         notes.append(f"{len(segmented)} blocked as configured by segmentation")
+    if by_policy:
+        notes.append(f"{len(by_policy)} closed by the default-deny policy")
     if transient:
         notes.append(f"{len(transient)} short-lived port(s) closed during probe")
     tail = f" ({'; '.join(notes)}.)" if notes else ""
+    # The warning carries the same tail: a reader deciding whether one dropped
+    # path matters needs to know how much of the run was closed on purpose.
+    if blocked:
+        return _result("ports", "warn",
+                       f"{reachable_ok} of {probed} probed service port(s) reachable across the CORE "
+                       f"network; {len(blocked)} blocked (dropped packets that no segmentation rule "
+                       f"or policy explains).{tail}", items)
     return _result("ports", "pass",
                    f"All {total_ok} stable service port target(s) reachable "
                    f"({net_listening} listening across {node_count} node(s)).{tail}",
@@ -572,18 +655,31 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + "        ip = nodes.get(name, {}).get('ip') or ''\n"
         + "        if ip and ip not in by_ip:\n"
         + "            by_ip[ip] = name\n"
-        + "    # Destination IP -> the traffic source that talks to it.\n"
+        + "    # (destination, port) -> the source of the flow that uses THAT port.\n"
+        + "    # Keyed by port because a node commonly receives several flows from\n"
+        + "    # different senders: the allow rules are per flow, so the source of one\n"
+        + "    # flow is the wrong vantage point for another flow's port, and for a\n"
+        + "    # service port that is no flow's at all.\n"
         + "    flow_src = {}\n"
         + "    for flow in _traffic_flows():\n"
+        + "        if str(flow.get('protocol') or '').strip().upper() != 'TCP':\n"
+        + "            continue\n"
         + "        s_ip = str(flow.get('src_ip') or '').strip()\n"
         + "        d_ip = str(flow.get('dst_ip') or '').strip()\n"
-        + "        if s_ip and d_ip and d_ip not in flow_src:\n"
-        + "            flow_src[d_ip] = s_ip\n"
-        + "    def _prober_for(tname, tip):\n"
-        + "        s_ip = flow_src.get(tip)\n"
+        + "        try:\n"
+        + "            d_port = int(flow.get('dst_port'))\n"
+        + "        except Exception:\n"
+        + "            continue\n"
+        + "        if s_ip and d_ip and (d_ip, d_port) not in flow_src:\n"
+        + "            flow_src[(d_ip, d_port)] = s_ip\n"
+        + "    def _prober_for(tname, tip, tport):\n"
+        + "        s_ip = flow_src.get((tip, int(tport)))\n"
         + "        cand = by_ip.get(s_ip) if s_ip else None\n"
         + "        if cand and cand != tname:\n"
         + "            return cand, 'traffic source'\n"
+        + "        # No flow uses this port, so the meaningful question is whether the\n"
+        + "        # service answers at all -- which a peer on its own subnet can ask\n"
+        + "        # without crossing a segmentation boundary.\n"
         + "        tnet = nodes.get(tname, {}).get('net') or ''\n"
         + "        if tnet:\n"
         + "            for kind, name in alln:\n"
@@ -605,7 +701,7 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + "        for port in info.get('listening', []):\n"
         + "            if total >= MAX_TARGETS:\n"
         + "                break\n"
-        + "            pname, why = _prober_for(name, ip)\n"
+        + "            pname, why = _prober_for(name, ip, port)\n"
         + "            if not pname:\n"
         + "                continue\n"
         + "            plan.setdefault(pname, []).append([name, ip, port, why])\n"

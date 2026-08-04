@@ -493,14 +493,51 @@ def test_ports_drops_explained_by_a_block_rule_are_not_a_warning():
     assert all("172.21.240.0/24" in i["detail"] for i in segmented)
 
 
-def test_ports_drops_with_no_matching_rule_still_warn():
-    # Same drops, but the block rule covers a different source subnet.
+def test_ports_drops_with_no_rule_and_no_default_deny_still_warn():
+    # The block rule covers a different source subnet, and the policy is not
+    # default-deny, so nothing explains these drops.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "subnet_block", "src": "10.9.9.0/24", "dst": "172.21.240.0/24"}},
+    ]}}
     res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
-                          _cross_subnet_probe(),
-                          segmentation=_segmented_probe(src="10.9.9.0/24"))
+                          _cross_subnet_probe(), segmentation=seg)
     assert res["status"] == "warn"
     assert "3 blocked" in res["summary"]
     assert any("no segmentation rule covers this path" in i["detail"] for i in res["items"])
+
+
+def test_ports_drops_under_default_deny_are_configured_behaviour():
+    # Same drops, but the policy closes everything it does not open. A port no
+    # rule opens is meant to be unreachable, so reporting it as a fault would
+    # flag most of a segmented scenario.
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(),
+                          segmentation=_segmented_probe(src="10.9.9.0/24"))
+    assert res["status"] == "pass"
+    assert "3 closed by the default-deny policy" in res["summary"]
+    assert all("no segmentation rule covers this path" not in i["detail"] for i in res["items"])
+
+
+def test_ports_a_drop_on_a_path_an_allow_opens_is_still_a_fault():
+    # The one shape here worth investigating: the scenario arranged for this
+    # path, the allow was installed, and the packets were dropped anyway.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "subnet_block", "src": "10.0.140.0/24", "dst": "10.9.9.0/24",
+                  "default_deny": True, "chain": "FORWARD"}},
+        {"node_id": 26, "service": "Segmentation",
+         "rule": {"type": "allow", "chain": "INPUT", "proto": "tcp", "port": 16379,
+                  "src": "10.0.140.6", "dst": "172.21.240.7", "reason": "traffic"}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "warn"
+    opened = [i for i in res["items"] if "even though an allow rule opens this path" in i["detail"]]
+    assert len(opened) == 1
+    assert "172.21.240.7" in opened[0]["name"]
+    # The other two drops have no allow, so the policy explains them.
+    assert "2 closed by the default-deny policy" in res["summary"]
 
 
 def test_ports_without_segmentation_data_keeps_warning():
@@ -580,7 +617,10 @@ def test_ports_a_protect_internal_does_not_excuse_traffic_from_inside_it():
     ]}}
     res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
                           _cross_subnet_probe(), segmentation=seg)
-    assert res["status"] == "warn"
+    # Not attributed to that rule; the default-deny policy explains it instead.
+    assert res["status"] == "pass"
+    assert all("blocked as configured" not in i["detail"] for i in res["items"])
+    assert "3 closed by the default-deny policy" in res["summary"]
 
 
 def test_ports_a_host_enforced_rule_only_excuses_drops_to_that_host():
@@ -596,10 +636,12 @@ def test_ports_a_host_enforced_rule_only_excuses_drops_to_that_host():
     ]}}
     res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
                           _cross_subnet_probe(), segmentation=seg)
-    assert res["status"] == "warn"
     explained = [i for i in res["items"] if "blocked as configured" in i["detail"]]
     assert len(explained) == 1
     assert "172.21.240.7" in explained[0]["name"]
+    # Read from the fields this rule names 172.21.240.0/24 and would have
+    # claimed all three; the other two fall to the policy instead.
+    assert "2 closed by the default-deny policy" in res["summary"]
 
 
 def test_ports_the_explanation_describes_what_the_rule_actually_does():
