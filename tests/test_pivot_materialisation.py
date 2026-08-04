@@ -604,3 +604,79 @@ def test_nesting_is_reported_on_the_plan_and_not_enforced():
     # Flattened: the inner provider is reachable without crossing the outer one.
     assert plan.allow_rules
     assert {e['rule']['src'] for e in plan.allow_rules} == {ANY_SOURCE}
+
+
+# --------------------------------------------------------------------------- #
+# What the CLI reports about pivot access
+# --------------------------------------------------------------------------- #
+
+def _access_payload(**overrides):
+    payload = {
+        'providers': [{
+            'subnet': WALLED_OFF, 'node_id': 14, 'node_name': 'pivot-172-21-240-0',
+            'address': '172.21.240.4', 'added': True, 'reused': False,
+            'image': PIVOT_SSH_IMAGE, 'blocked_from': [OUTSIDE, HITL_SUBNET],
+            'entry': {'kind': 'ssh', 'port': PIVOT_SSH_PORT, 'protocol': 'tcp'},
+        }],
+        'unresolved': [], 'nested_supported': False, 'nested_candidates': [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_the_cli_summarises_pivot_access_from_a_preview():
+    from scenarioforge.cli import _pivot_access_summary
+
+    summary = _pivot_access_summary({'segmentation_preview': {'pivot_access': _access_payload()}})
+    assert summary['provider_count'] == 1
+    assert summary['added_node_count'] == 1
+    provider = summary['providers'][0]
+    assert provider['node'] == 'pivot-172-21-240-0'
+    assert provider['entry'] == f'ssh:{PIVOT_SSH_PORT}'
+    assert provider['address'] == '172.21.240.4'
+    # Who the entrance was opened for, which is not who the block shut out.
+    assert HITL_SUBNET in provider['opened_for']
+
+
+def test_the_cli_summarises_pivot_access_from_a_runtime_summary():
+    from scenarioforge.cli import _pivot_access_summary
+
+    # Execute holds the segmentation summary, not a preview.
+    summary = _pivot_access_summary({'rules': [], 'pivot_access': _access_payload()})
+    assert summary['provider_count'] == 1
+
+
+def test_the_cli_reports_a_subnet_with_no_way_in():
+    from scenarioforge.cli import _pivot_access_summary
+
+    payload = _access_payload(providers=[], unresolved=[
+        {'subnet': '10.9.9.0/24', 'reason': 'no switch serves this subnet'},
+    ])
+    summary = _pivot_access_summary({'pivot_access': payload})
+    assert summary['unresolved'][0]['subnet'] == '10.9.9.0/24'
+
+
+def test_the_cli_reports_nested_candidates_and_that_they_are_not_enforced():
+    from scenarioforge.cli import _pivot_access_summary
+
+    payload = _access_payload(nested_candidates=[{'subnet': '10.0.20.0/24',
+                                                  'reached_through': ['10.0.10.0/24']}])
+    summary = _pivot_access_summary({'pivot_access': payload})
+    assert summary['nested_supported'] is False
+    assert summary['nested_candidates'][0]['subnet'] == '10.0.20.0/24'
+
+
+def test_the_cli_summary_is_absent_when_pivot_access_is_off():
+    from scenarioforge.cli import _pivot_access_summary
+
+    assert _pivot_access_summary({'segmentation_preview': {}}) is None
+    assert _pivot_access_summary({}) is None
+    assert _pivot_access_summary(None) is None
+
+
+def test_the_topo_phase_reports_pivot_access():
+    import inspect
+    from scenarioforge import cli
+
+    src = inspect.getsource(cli)
+    assert "'pivot_access': _pivot_access_summary(preview_full)" in src
