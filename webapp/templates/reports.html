@@ -1895,9 +1895,13 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     if (pivotEntries.length) {
       lines.push('### Pivot Path');
       lines.push('');
-      lines.push('| Role | Source | Target | Facts | Provider |');
+      lines.push('| Role | Source | Targets | Facts | Provider |');
       lines.push('| --- | --- | --- | --- | --- |');
-      const pivotRows = pivotEntries.map((entry) => {
+      // One entry per (source, target) pair, so a source reaching twenty nodes
+      // produced twenty rows identical but for the target. The provider and the
+      // facts belong to the source, so group on those and list the targets.
+      const pivotGroups = new Map();
+      pivotEntries.forEach((entry) => {
         const role = String(entry.role || '').trim() || 'pivot';
         const source = String(entry.source || '').trim();
         const target = String(entry.target || '').trim();
@@ -1906,15 +1910,22 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
           ...normalizeChainFacts(entry.produces),
         ])).join(', ');
         const provider = String(entry.provider_label || entry.provider || '').trim();
-        return `| ${_cell(role)} | ${_cell(source)} | ${_cell(target)} | ${_cell(facts)} | ${_cell(provider)} |`;
+        const key = JSON.stringify([role, source, facts, provider]);
+        const group = pivotGroups.get(key) || { role, source, facts, provider, targets: [] };
+        if (target && !group.targets.includes(target)) group.targets.push(target);
+        pivotGroups.set(key, group);
       });
+      const pivotRows = Array.from(pivotGroups.values()).map((group) => (
+        `| ${_cell(group.role)} | ${_cell(group.source)} | ${_cell(group.targets.join(', '))} `
+        + `| ${_cell(group.facts)} | ${_cell(group.provider)} |`
+      ));
       lines.push(pivotRows[0]);
       if (pivotRows.length > 1) {
         lines.push('');
         lines.push('<details>');
         lines.push(`<summary>${pivotRows.length - 1} other pivot path${(pivotRows.length - 1) === 1 ? '' : 's'} exist (click to see)</summary>`);
         lines.push('');
-        lines.push('| Role | Source | Target | Facts | Provider |');
+        lines.push('| Role | Source | Targets | Facts | Provider |');
         lines.push('| --- | --- | --- | --- | --- |');
         pivotRows.slice(1).forEach((row) => lines.push(row));
         lines.push('');

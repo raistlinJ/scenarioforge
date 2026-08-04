@@ -175,3 +175,40 @@ def test_guide_own_step_reader_is_a_twin():
     fn = fn[:fn.index("function buildReportGuideMarkdown(")]
     assert "'own_step'" in fn
     assert "seen.has(key)" in fn
+
+
+# --------------------------------------------------------------------------- #
+# One source reaching many targets is one row, not one row per target
+# --------------------------------------------------------------------------- #
+
+def _template(name):
+    from pathlib import Path
+    return Path(f'webapp/templates/{name}').read_text(encoding='utf-8')
+
+
+def test_the_chain_row_groups_pivot_paths_by_everything_but_the_target():
+    # A source that reaches twenty nodes produced twenty rows differing only in
+    # the target. The provider and the facts belong to the source, so repeating
+    # them per target buried the one line that says anything.
+    src = _template('flow.html')
+    assert 'pivotGroups' in src
+    assert 'MAX_NAMED_TARGETS' in src
+    # Grouped on the source and the descriptive parts, never the target.
+    assert "JSON.stringify([source, parts])" in src
+
+
+def test_the_guide_groups_pivot_paths_too():
+    # Guides are client-rendered: a rule without a twin drifts.
+    src = _template('reports.html')
+    assert 'pivotGroups' in src
+    assert "JSON.stringify([role, source, facts, provider])" in src
+    # The column is now plural, because a row carries every target it reaches.
+    assert '| Role | Source | Targets | Facts | Provider |' in src
+    assert '| Role | Source | Target | Facts | Provider |' not in src
+
+
+def test_the_grouped_row_still_names_some_targets():
+    # Collapsing must not cost the reader the targets entirely.
+    src = _template('flow.html')
+    assert 'and ${extra} more' in src
+    assert 'group.targets.slice(0, MAX_NAMED_TARGETS)' in src

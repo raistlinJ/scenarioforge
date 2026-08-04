@@ -5672,26 +5672,50 @@
         }
 
         if (pivotEntries.length) {
-          const pivotRows = [];
+          // One entry per (source, target) pair, so a source that reaches
+          // twenty nodes produced twenty rows differing only in the target --
+          // the provider and the facts are properties of the source, and
+          // repeating them per target buried the one line that says anything.
+          // Group on everything except the target and name the targets once.
+          const pivotGroups = new Map();
           pivotEntries.forEach((entry) => {
             const parts = [];
             const source = String(entry.source || '').trim();
             const target = String(entry.target || '').trim();
-            const pathText = source || target ? `${source || '?'} -> ${target || '?'}` : '';
-            parts.push(pathText ? `${roleLabel(entry.role)} ${pathText}` : roleLabel(entry.role));
+            parts.push({ key: 'role', value: roleLabel(entry.role) });
             const provider = String(entry.provider_label || entry.provider || '').trim();
-            if (provider) parts.push(`provider: ${provider}`);
+            if (provider) parts.push({ key: 'provider', value: provider });
             const produces = factsText(entry.produces);
-            if (produces) parts.push(`produces: ${produces}`);
+            if (produces) parts.push({ key: 'produces', value: produces });
             const requires = factsText(entry.requires);
-            if (requires) parts.push(`requires: ${requires}`);
+            if (requires) parts.push({ key: 'requires', value: requires });
             const ports = factsText(entry.target_ports);
-            if (ports) parts.push(`ports: ${ports}`);
+            if (ports) parts.push({ key: 'ports', value: ports });
             const protocols = factsText(entry.target_protocols);
-            if (protocols) parts.push(`protocols: ${protocols}`);
+            if (protocols) parts.push({ key: 'protocols', value: protocols });
             const exposure = String(entry.exposure || '').trim();
-            if (exposure) parts.push(`exposure: ${exposure}`);
-            const rowText = parts.filter(Boolean).join('; ');
+            if (exposure) parts.push({ key: 'exposure', value: exposure });
+            const signature = JSON.stringify([source, parts]);
+            const group = pivotGroups.get(signature) || { source, parts, targets: [] };
+            if (target && !group.targets.includes(target)) group.targets.push(target);
+            pivotGroups.set(signature, group);
+          });
+          const MAX_NAMED_TARGETS = 6;
+          const pivotRows = [];
+          pivotGroups.forEach((group) => {
+            const named = group.targets.slice(0, MAX_NAMED_TARGETS).join(', ');
+            const extra = group.targets.length - MAX_NAMED_TARGETS;
+            const targetText = group.targets.length
+              ? (extra > 0 ? `${named} and ${extra} more` : named)
+              : '';
+            const roleValue = (group.parts.find((p) => p.key === 'role') || {}).value || 'Pivot';
+            const head = group.source || targetText
+              ? `${roleValue} ${group.source || '?'} -> ${targetText || '?'}`
+              : roleValue;
+            const rest = group.parts
+              .filter((p) => p.key !== 'role')
+              .map((p) => `${p.key}: ${p.value}`);
+            const rowText = [head].concat(rest).filter(Boolean).join('; ');
             if (rowText) pivotRows.push(rowText);
           });
           appendPrimaryWithExpandableList(
