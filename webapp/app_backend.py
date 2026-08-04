@@ -21503,9 +21503,20 @@ def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any
     if not isinstance(gen_or_assignment, dict):
         return []
 
-    input_defs = gen_or_assignment.get('inputs')
-    if not isinstance(input_defs, list):
-        input_defs = gen_or_assignment.get('input_defs')
+    # A generator definition carries its input dicts under `inputs`; an
+    # assignment carries plain fact names there and the dicts under
+    # `input_defs`. Preferring `inputs` outright therefore found nothing on an
+    # assignment -- every entry is a string and gets skipped below -- so a
+    # Flow-supplied input read as an unmet dependency whenever the caller had an
+    # assignment rather than the manifest. Take whichever actually holds dicts.
+    def _defs_with_dicts(*keys: str) -> list:
+        for key in keys:
+            value = gen_or_assignment.get(key)
+            if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+                return value
+        return []
+
+    input_defs = _defs_with_dicts('inputs', 'input_defs')
     names_from_defs: list[str] = []
     if isinstance(input_defs, list):
         for item in input_defs:
@@ -25075,6 +25086,21 @@ def _flow_validate_chain_order_by_requires_produces(
         if opt_set:
             base_requires = {r for r in base_requires if r not in opt_set}
             inferred_requires = {r for r in inferred_requires if r not in opt_set}
+
+        # An input the generator marks for Flow to supply is not a chain
+        # dependency. The sequencer already excludes these when it decides a
+        # step can be placed, so a validator that counts them reports a chain
+        # Flow itself built -- and resolved, with a real value -- as unsolvable.
+        # The same helper is used deliberately: two readings of one marker is
+        # how the two disagreed in the first place.
+        supplied_by_flow = {
+            str(name).strip()
+            for name in _flow_first_step_chain_supplied_input_names(a)
+            if str(name or '').strip()
+        }
+        if supplied_by_flow:
+            base_requires -= supplied_by_flow
+            inferred_requires = {r for r in inferred_requires if r not in supplied_by_flow}
 
         requires = set(_flow_prune_unavailable_or_self_pivot_facts(
             sorted(base_requires | inferred_requires),
