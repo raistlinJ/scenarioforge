@@ -388,6 +388,29 @@ keep set, so the execute-time image cleanup cannot reclaim it and force another
 download. A pull that fails is logged with the `docker save` command to seed it,
 and does not fail the run.
 
+**A provider's entry port is opened to `0.0.0.0/0`**, not to the subnets the
+block took access away from. A provider is the subnet's entrance, and who has to
+walk through it is not knowable from the rule that closed the subnet: the
+participant sits on a HITL link subnet that appears in no segmentation rule at
+all, and what actually stops them is the blanket `-P FORWARD DROP` rather than
+any specific block. Scoping the allow to `blocked_from` locked the participant
+out of the one node built to let them in - and did so unevenly, since a
+`protect_internal` yields `*` and opened it to everyone by accident while a
+`subnet_block` did not. Exactly one port on one node becomes reachable; the rest
+of the subnet stays walled off, which is the whole design.
+
+That means chain ordering between nested pivots is enforced by the **challenge**
+- you need what the earlier step gave you - and not by reachability. Enforcing it
+at the network layer is not available anyway: FORWARD allows go to every router
+by necessity, so there is no hop at which a later provider could be held back.
+
+`blocked_from` stays on the provider as the *audience*: the subnets the block
+shut out, plus the HITL link networks a participant sits on. Those are recorded
+as networks, never single addresses - a participant who re-addresses inside
+their own subnet is the same participant, and a selector pinned to one address
+would be defeated by a new DHCP lease. A single address handed in is dropped
+with a warning rather than widened, since widening would mean guessing a prefix.
+
 The resulting allow rules are appended to `segmentation_summary.json` tagged
 `reason: pivot-access`, so they are distinguishable from the allow rules written
 for traffic flows, and a `pivot_access` block records which provider was chosen

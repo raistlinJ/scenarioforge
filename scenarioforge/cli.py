@@ -7783,6 +7783,9 @@ def main():
                         preview_hosts=(preview_full or {}).get('hosts'),
                     ),
                     pivot_node_names=_preview_host_names((preview_full or {}).get('hosts')),
+                    pivot_participant_subnets=sorted(
+                        (hitl_preview_reservations or {}).get('network_cidrs') or []
+                    ),
                     planned_rules=seg_planned_rules,
                 )
                 logging.info("Applied segmentation rules: %d", len(seg_summary.get("rules", [])))

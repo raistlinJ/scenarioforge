@@ -1774,6 +1774,10 @@ def build_full_preview(
                 routers=_as_nodeinfo(router_nodes),
                 node_names=_names,
                 entry_points=_entry_points,
+                # The HITL link networks, which is where a participant sits.
+                # Reserved here already, and always networks rather than the
+                # single addresses on them.
+                participant_subnets=[str(net) for net in reserved_networks],
             )
             # A provider that has to be added is created here, while nodes are
             # still being planned. After this it is an ordinary host in the
