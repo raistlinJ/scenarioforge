@@ -376,11 +376,31 @@ in the subnets the preview blocked while the running scenario blocks others.
 node the moment it is added, so execute resolves every provider image **before
 the topology is built**, in this order:
 
-This covers the **wrapper base image** as well as the provider images. Every
-Docker node's iproute2 wrapper is built `FROM` it, so without it not one node
-builds — a live run lost it and could then build nothing on a host whose Docker
-daemon had no DNS, while the provider image, being pinned, survived. It is in
-the keep set and prepared here for the same reason.
+This covers every **framework prerequisite**, not just the provider images. An
+operator picks the vulnerabilities and generators their lab contains and seeds
+those; they should not also have to discover by watching a run fail that the
+framework needs a busybox to build each node's wrapper, an ubuntu for the
+standard node, an alpine to copy inject files in, and a python for the shipped
+generator templates. `utils/prerequisite_images.py` names them, from code
+constants *and* from the repo's own compose templates so a template added later
+registers its base automatically, honouring the same environment overrides a
+site uses to mirror its own registry. All of them are in the persistent keep set
+and prepared before the topology build.
+
+That gap was real: a live run lost the wrapper base and could then build nothing
+on a host whose Docker daemon had no DNS, while the provider image, being
+pinned, survived.
+
+When an image cannot be found the run reports every missing one together, with
+the exact commands to stage them — an air-gapped host is missing them all at
+once, so a warning per image is the wrong shape:
+
+```
+Air-gapped hosts need these 2 image(s) staged before a run. On a machine with network access:
+  docker pull busybox:1.36.1-musl && docker save busybox:1.36.1-musl -o /opt/coretg/images/busybox_1.36.1-musl.tar
+  docker pull ubuntu:22.04 && docker save ubuntu:22.04 -o /opt/coretg/images/ubuntu_22.04.tar
+Copy the resulting tarballs to /opt/coretg/images on this host; they are loaded from there instead of pulled.
+```
 
 1. **already present** — `docker image inspect` succeeds and nothing is pulled;
 2. **pre-seeded tarball** — `<CORETG_PIVOT_IMAGE_CACHE_DIR>/<safe-name>.tar`
