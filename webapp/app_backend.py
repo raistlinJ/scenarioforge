@@ -22879,6 +22879,11 @@ def _flow_add_assignment_hint(assignment: dict[str, Any], hint_text: str) -> Non
         assignment['hint'] = text
 
 
+# How many pivot targets a hint names before it just counts the rest. The Pivot
+# Path rows carry the full list, so the hint optimises for being readable.
+_PIVOT_HINT_NAMED_TARGETS = 6
+
+
 def _flow_apply_pivot_context_to_assignments(
     flag_assignments: list[dict[str, Any]],
     chain_nodes: list[dict[str, Any]],
@@ -23083,6 +23088,11 @@ def _flow_apply_pivot_context_to_assignments(
         # Collect target-side hint parts so all pivot sources for this node are
         # consolidated into a single hint instead of one hint per source rule.
         _pivot_target_hint_parts: list[tuple[str, list[str], str]] = []  # (source_name, requires, port_text)
+        # And the same on the source side. The target side was already
+        # consolidated; this one emitted a hint per rule, so a node that
+        # unlocks twenty-three targets produced twenty-three hints identical
+        # but for the target name -- burying every other hint the step had.
+        _pivot_source_hint_parts: dict[tuple[str, str], list[str]] = {}  # (provider_label, produces) -> targets
 
         for rule in rules:
             source_id = str(rule.get('source_id') or '').strip()
@@ -23093,12 +23103,14 @@ def _flow_apply_pivot_context_to_assignments(
                 _flow_append_unique_values(a2, 'outputs', produces)
                 source_targets = str(rule.get('target_name') or rule.get('target_id') or '').strip()
                 provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
-                hint = (
-                    f"Pivot source: establish access on {node_name or source_id} "
-                    f"using {provider_label} to unlock pivot-only target {source_targets}. "
-                    f"Produces: {', '.join(produces)}."
+                # The work is the same whatever it unlocks: get access on this
+                # node with this provider. Only the target differs, so group on
+                # everything else and name the targets once.
+                bucket = _pivot_source_hint_parts.setdefault(
+                    (provider_label, ', '.join(produces)), []
                 )
-                _flow_add_assignment_hint(a2, hint)
+                if source_targets and source_targets not in bucket:
+                    bucket.append(source_targets)
                 pivot_entries.append({
                     'role': 'source',
                     'provider': rule.get('provider'),
@@ -23149,6 +23161,21 @@ def _flow_apply_pivot_context_to_assignments(
                 })
 
         # Emit a single consolidated "Pivot required" hint for this assignment.
+        for (_provider_label, _produces_text), _targets in _pivot_source_hint_parts.items():
+            _target_label = 'target' if len(_targets) == 1 else 'targets'
+            # A hint is meant to be read, so name a few and count the rest. The
+            # Pivot Path rows carry the full list for anyone who needs it.
+            _named = ', '.join(_targets[:_PIVOT_HINT_NAMED_TARGETS])
+            _extra = len(_targets) - _PIVOT_HINT_NAMED_TARGETS
+            _target_text = f"{_named} and {_extra} more" if _extra > 0 else _named
+            _flow_add_assignment_hint(
+                a2,
+                f"Pivot source: establish access on {node_name or node_id} "
+                f"using {_provider_label} to unlock {len(_targets)} pivot-only "
+                f"{_target_label} ({_target_text}). "
+                f"Produces: {_produces_text}."
+            )
+
         if _pivot_target_hint_parts:
             if len(_pivot_target_hint_parts) == 1:
                 s_name, s_requires, s_port_text = _pivot_target_hint_parts[0]

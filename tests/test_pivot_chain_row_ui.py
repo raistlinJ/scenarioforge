@@ -250,3 +250,71 @@ def test_a_blank_or_placeholder_value_is_still_missing():
     start = src.index('function hasMeaningfulFlowInputSourceValue(')
     block = src[start:start + 400]
     assert "value.trim() === '-'" in block
+
+
+# --------------------------------------------------------------------------- #
+# A pivot source is one hint, not one hint per target it unlocks
+# --------------------------------------------------------------------------- #
+
+def _pivot_rules(targets, provider_label='Flag-Node-Generator',
+                 produces='Shell(docker-21), Pivot(docker-21)'):
+    return [{
+        'source_id': 'docker-21', 'source_name': 'docker-21',
+        'target_id': str(t).split(' ')[0], 'target_name': str(t),
+        'provider': 'flag-node-generator', 'provider_label': provider_label,
+        'produces': produces, 'target_requires': '',
+    } for t in targets]
+
+
+def _hints_for(rules, monkeypatch):
+    from webapp import app_backend as ab
+
+    monkeypatch.setattr(ab, '_flow_pivot_rules_for_chain', lambda *a, **k: rules)
+    out = ab._flow_apply_pivot_context_to_assignments(
+        [{'node_id': 'docker-21', 'name': 'docker-21', 'hints': ['Read the zone export.']}],
+        [{'id': 'docker-21', 'name': 'docker-21', 'ip4': '10.95.5.6'}],
+        scenario_label='S',
+    )
+    return [str(h) for h in (out[0].get('hints') or [])]
+
+
+def test_one_source_unlocking_many_targets_is_one_hint(monkeypatch):
+    # A node unlocking twenty-three targets produced twenty-three hints
+    # identical but for the target name, burying every other hint the step had.
+    # The work is the same whatever it unlocks: get access on this node.
+    targets = [f'flaggenslot-{i}' for i in range(1, 24)]
+    hints = _hints_for(_pivot_rules(targets), monkeypatch)
+    pivot_hints = [h for h in hints if h.startswith('Pivot source:')]
+    assert len(pivot_hints) == 1
+    assert '23 pivot-only targets' in pivot_hints[0]
+    # The step's own hint survives the consolidation.
+    assert 'Read the zone export.' in hints
+
+
+def test_the_consolidated_hint_names_a_few_targets_and_counts_the_rest(monkeypatch):
+    targets = [f'flaggenslot-{i}' for i in range(1, 24)]
+    hint = [h for h in _hints_for(_pivot_rules(targets), monkeypatch)
+            if h.startswith('Pivot source:')][0]
+    assert 'flaggenslot-1, flaggenslot-2' in hint
+    assert 'and 17 more' in hint
+    # Naming all twenty-three would make a hint nobody reads; the Pivot Path
+    # rows carry the full list.
+    assert 'flaggenslot-23' not in hint
+
+
+def test_a_single_target_reads_naturally(monkeypatch):
+    hint = [h for h in _hints_for(_pivot_rules(['flaggenslot-1']), monkeypatch)
+            if h.startswith('Pivot source:')][0]
+    assert '1 pivot-only target (flaggenslot-1)' in hint
+    assert 'more' not in hint
+
+
+def test_different_providers_stay_separate_hints(monkeypatch):
+    # Grouping is on everything except the target, so two providers are two
+    # different pieces of work and keep their own hints.
+    rules = (_pivot_rules(['a', 'b'], provider_label='Flag-Node-Generator')
+             + _pivot_rules(['c'], provider_label='Docker SSH'))
+    pivot_hints = [h for h in _hints_for(rules, monkeypatch) if h.startswith('Pivot source:')]
+    assert len(pivot_hints) == 2
+    assert any('Flag-Node-Generator' in h and '2 pivot-only targets' in h for h in pivot_hints)
+    assert any('Docker SSH' in h and '1 pivot-only target' in h for h in pivot_hints)
