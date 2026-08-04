@@ -1755,33 +1755,40 @@ def _pivot_image_tar_name(image: str) -> str:
     return ''.join(ch if ch.isalnum() or ch in '.-_' else '_' for ch in str(image or '')) + '.tar'
 
 
-def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
-    """Make each pivot provider image available locally, pulling at most once.
+def _wrapper_base_image() -> str:
+    """The image every Docker node's iproute2 wrapper is built `FROM`.
+
+    Needed for *any* Docker node, not just a pivot provider: without it no
+    wrapper builds, and CORE gets a node with no `ip` command.
+    """
+    try:
+        from .builders.topology import _BUSYBOX_REPAIR_IMAGE
+        return str(_BUSYBOX_REPAIR_IMAGE or '').strip()
+    except Exception:
+        return 'busybox:1.36.1-musl'
+
+
+def _ensure_docker_images_available(images: Any) -> dict[str, str]:
+    """Make each image available locally, pulling at most once.
 
     Docker nodes must not need the internet at execute time. An image already
     present is never re-pulled, so only the very first run for a given image
     touches the network -- and a site that pre-seeds a `docker save` tarball
-    never does. Once present the image is kept forever: it is added to the
-    persistent keep set so execute-time cleanup cannot reclaim it and force
-    another download.
+    never does. Once present an image is kept forever: it is in the persistent
+    keep set so execute-time cleanup cannot reclaim it and force another
+    download.
 
     Returns image -> outcome, for logging.
     """
     results: dict[str, str] = {}
-    providers = []
-    if isinstance(summary, dict):
-        access = summary.get('pivot_access')
-        if isinstance(access, dict):
-            providers = access.get('providers') or []
-    images = []
-    for provider in providers:
-        if not isinstance(provider, dict):
-            continue
-        image = str(provider.get('image') or '').strip()
-        if image and image not in images:
-            images.append(image)
-    if not images:
+    wanted: list[str] = []
+    for raw in images or []:
+        image = str(raw or '').strip()
+        if image and image not in wanted:
+            wanted.append(image)
+    if not wanted:
         return results
+    images = wanted
 
     try:
         from .builders.topology import _docker_cmd, _docker_sudo_password
@@ -1824,12 +1831,50 @@ def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
         else:
             results[image] = 'unavailable'
             logging.warning(
-                'Pivot image %s is not present and could not be pulled, so an added '
-                'pivot provider will have nothing to run. Pre-seed it with '
+                'Image %s is not present and could not be pulled, so any node that '
+                'needs it will have nothing to run. Pre-seed it with '
                 '"docker save %s -o %s" to keep this host offline. Error: %s',
                 image, image, tar, out[-300:],
             )
     return results
+
+
+def _pivot_provider_images(summary: Any) -> list[str]:
+    """The images the plan's pivot providers need to boot."""
+    images: list[str] = []
+    if not isinstance(summary, dict):
+        return images
+    access = summary.get('pivot_access')
+    if not isinstance(access, dict):
+        return images
+    for provider in access.get('providers') or []:
+        if isinstance(provider, dict):
+            image = str(provider.get('image') or '').strip()
+            if image and image not in images:
+                images.append(image)
+    return images
+
+
+def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
+    """Make each pivot provider image available locally."""
+    return _ensure_docker_images_available(_pivot_provider_images(summary))
+
+
+def _ensure_runtime_docker_images(summary: Any) -> dict[str, str]:
+    """Everything this run needs pulled before a single node is created.
+
+    The pivot provider images, plus the **wrapper base** that every Docker
+    node's iproute2 wrapper is built from. A live run lost the wrapper base and
+    then could not build a single Docker node on a host whose daemon had no DNS:
+    the provider image was pinned and survived, the thing it is built on top of
+    was not. It is as necessary as any provider image and is now treated that
+    way, in the keep set and here.
+    """
+    images = _pivot_provider_images(summary)
+    base = _wrapper_base_image()
+    if base:
+        images.append(base)
+    return _ensure_docker_images_available(images)
 
 
 def _warn_unmaterialised_pivot_providers(summary: Any) -> list[str]:
@@ -1894,6 +1939,12 @@ def _persistent_images_to_keep() -> list[str]:
             keep.append(PIVOT_SSH_IMAGE)
     except Exception:
         pass
+    # The wrapper base is a hard dependency of every Docker node: without it no
+    # wrapper builds and CORE gets a node with no `ip`. Reclaiming it costs a
+    # download the offline requirement forbids, exactly like a provider image.
+    base = _wrapper_base_image()
+    if base and base not in keep:
+        keep.append(base)
     return keep
 
 
@@ -7650,10 +7701,10 @@ def main():
     # plan carries the providers because that is where they were decided.
     try:
         if isinstance(preview_full, dict):
-            _pivot_images = _ensure_pivot_provider_images(preview_full.get('segmentation_preview'))
+            _pivot_images = _ensure_runtime_docker_images(preview_full.get('segmentation_preview'))
             if _pivot_images:
                 logging.info(
-                    "Pivot provider images ready: %s",
+                    "Docker images ready: %s",
                     ', '.join(f'{image}={outcome}' for image, outcome in sorted(_pivot_images.items())),
                 )
     except Exception as exc_img:
