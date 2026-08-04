@@ -1768,6 +1768,24 @@ def _wrapper_base_image() -> str:
         return 'busybox:1.36.1-musl'
 
 
+def _framework_prerequisite_images() -> list[str]:
+    """Images ScenarioForge needs regardless of what the scenario contains.
+
+    An operator seeds the vulnerabilities and generators their lab uses. They
+    should not also have to discover that a busybox builds the wrapper, an
+    ubuntu backs the standard node, an alpine copies inject files in and a
+    python backs the shipped generator templates. Those are kept and prepared
+    by default so only the scenario's own content is left to seed.
+    """
+    try:
+        from .utils.prerequisite_images import prerequisite_images
+        return list(prerequisite_images())
+    except Exception as exc:
+        logging.debug('Prerequisite images unavailable: %s', exc)
+        base = _wrapper_base_image()
+        return [base] if base else []
+
+
 def _ensure_docker_images_available(images: Any) -> dict[str, str]:
     """Make each image available locally, pulling at most once.
 
@@ -1812,7 +1830,7 @@ def _ensure_docker_images_available(images: Any) -> dict[str, str]:
         rc, _out = _run(docker + ['image', 'inspect', image], timeout=60)
         if rc == 0:
             results[image] = 'cached'
-            logging.info('Pivot image already present, not pulling: %s', image)
+            logging.info('Image already present, not pulling: %s', image)
             continue
 
         tar = os.path.join(_pivot_image_cache_dir(), _pivot_image_tar_name(image))
@@ -1820,22 +1838,40 @@ def _ensure_docker_images_available(images: Any) -> dict[str, str]:
             rc, out = _run(docker + ['load', '-i', tar], timeout=900)
             if rc == 0:
                 results[image] = 'loaded-from-tarball'
-                logging.info('Pivot image loaded from %s (no network used)', tar)
+                logging.info('Image loaded from %s (no network used)', tar)
                 continue
-            logging.warning('Pivot image tarball %s failed to load: %s', tar, out[-300:])
+            logging.warning('Image tarball %s failed to load: %s', tar, out[-300:])
 
         rc, out = _run(docker + ['pull', image], timeout=900)
         if rc == 0:
             results[image] = 'pulled'
-            logging.info('Pivot image pulled once and now cached locally: %s', image)
+            logging.info('Image pulled once and now cached locally: %s', image)
         else:
             results[image] = 'unavailable'
             logging.warning(
                 'Image %s is not present and could not be pulled, so any node that '
-                'needs it will have nothing to run. Pre-seed it with '
-                '"docker save %s -o %s" to keep this host offline. Error: %s',
-                image, image, tar, out[-300:],
+                'needs it will have nothing to run. Error: %s',
+                image, out[-300:],
             )
+
+    missing = sorted(image for image, outcome in results.items() if outcome == 'unavailable')
+    if missing:
+        cache_dir = _pivot_image_cache_dir()
+        # One actionable block rather than a warning per image: an air-gapped
+        # host is missing all of them at once, and the operator needs the list
+        # and the commands together to fix it in one pass.
+        logging.warning(
+            'Air-gapped hosts need these %d image(s) staged before a run. On a machine '
+            'with network access:\n%s\nCopy the resulting tarballs to %s on this host; '
+            'they are loaded from there instead of pulled.',
+            len(missing),
+            '\n'.join(
+                f'  docker pull {image} && docker save {image} '
+                f'-o {os.path.join(cache_dir, _pivot_image_tar_name(image))}'
+                for image in missing
+            ),
+            cache_dir,
+        )
     return results
 
 
@@ -1863,18 +1899,16 @@ def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
 def _ensure_runtime_docker_images(summary: Any) -> dict[str, str]:
     """Everything this run needs pulled before a single node is created.
 
-    The pivot provider images, plus the **wrapper base** that every Docker
-    node's iproute2 wrapper is built from. A live run lost the wrapper base and
-    then could not build a single Docker node on a host whose daemon had no DNS:
-    the provider image was pinned and survived, the thing it is built on top of
-    was not. It is as necessary as any provider image and is now treated that
-    way, in the keep set and here.
+    The scenario's pivot provider images, plus every framework prerequisite. A
+    live run lost the wrapper base and then could not build a single Docker node
+    on a host whose daemon had no DNS: the provider image was pinned and
+    survived, the image it is built on top of was not covered at all. Anything
+    the framework needs to stand a node up is now treated like a provider image
+    -- kept, and prepared here through the same ladder.
     """
-    images = _pivot_provider_images(summary)
-    base = _wrapper_base_image()
-    if base:
-        images.append(base)
-    return _ensure_docker_images_available(images)
+    return _ensure_docker_images_available(
+        _pivot_provider_images(summary) + _framework_prerequisite_images()
+    )
 
 
 def _warn_unmaterialised_pivot_providers(summary: Any) -> list[str]:
@@ -1939,12 +1973,12 @@ def _persistent_images_to_keep() -> list[str]:
             keep.append(PIVOT_SSH_IMAGE)
     except Exception:
         pass
-    # The wrapper base is a hard dependency of every Docker node: without it no
-    # wrapper builds and CORE gets a node with no `ip`. Reclaiming it costs a
-    # download the offline requirement forbids, exactly like a provider image.
-    base = _wrapper_base_image()
-    if base and base not in keep:
-        keep.append(base)
+    # Framework prerequisites are hard dependencies of standing any node up.
+    # Reclaiming one costs a download the offline requirement forbids, exactly
+    # like a provider image.
+    for image in _framework_prerequisite_images():
+        if image and image not in keep:
+            keep.append(image)
     return keep
 
 
@@ -7708,7 +7742,7 @@ def main():
                     ', '.join(f'{image}={outcome}' for image, outcome in sorted(_pivot_images.items())),
                 )
     except Exception as exc_img:
-        logging.warning("Pivot image preparation failed: %s", exc_img)
+        logging.warning("Docker image preparation failed: %s", exc_img)
 
     # Always build directly from current scenario plan (phased path removed)
     logging.info("PHASE: Building topology")
@@ -7948,7 +7982,7 @@ def main():
                 try:
                     _ensure_pivot_provider_images(seg_summary)
                 except Exception as exc_img:
-                    logging.warning("Pivot image preparation failed: %s", exc_img)
+                    logging.warning("Docker image preparation failed: %s", exc_img)
                 try:
                     _warn_unmaterialised_pivot_providers(seg_summary)
                 except Exception:
