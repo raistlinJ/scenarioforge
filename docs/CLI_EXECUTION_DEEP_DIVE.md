@@ -209,8 +209,16 @@ The phase JSON includes a `pivot_access` block when the scenario enables
 "accessible by pivot": one entry per walled-off subnet naming the provider, its
 address, its entry (`ssh:2222`, `vulnerability:8080`, ...), whether a node was
 added for it and from which image, plus anything `unresolved` — a subnet with no
-way in at all — and any `nested_candidates`. Provider nodes are created during
-this phase, so `topo` is enough to see whether they came out right.
+way in at all — and any `nested_candidates`. Provider nodes are **created**
+during this phase: the container runs, on its pinned image, with its service
+listening. Their CORE interfaces are not addressed until the session starts, so
+`topo` shows you the node, the image and the planned address, while the address
+is only *on* the node after `execute`.
+
+`--plan-output` is best-effort. In VM mode the run is delegated to the CORE VM,
+so the path is resolved there — a directory from your own machine may not exist
+on it. The phase result is always on stdout, and a path that cannot be written
+is reported without failing a phase that otherwise succeeded.
 
 This phase does not assume the XML already contains a built topology. It computes the topology from the planning sections in the XML.
 

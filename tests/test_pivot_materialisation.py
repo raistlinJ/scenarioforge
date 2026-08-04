@@ -680,3 +680,31 @@ def test_the_topo_phase_reports_pivot_access():
 
     src = inspect.getsource(cli)
     assert "'pivot_access': _pivot_access_summary(preview_full)" in src
+
+
+def test_a_phase_result_survives_an_unwritable_plan_output(tmp_path, capsys):
+    # In VM mode the run is delegated to the CORE VM, so --plan-output names a
+    # directory from the machine the command was typed on. Letting that raise
+    # reported a topology that built correctly as a failed phase.
+    from scenarioforge.cli import _emit_phase_json
+
+    unwritable = tmp_path / 'no-such-device' / 'x'
+    unwritable.mkdir(parents=True)
+    unwritable.chmod(0o500)
+    try:
+        _emit_phase_json({'ok': True, 'phase': 'topo'}, output_path=str(unwritable / 'out.json'))
+    finally:
+        unwritable.chmod(0o700)
+    captured = capsys.readouterr()
+    assert '"phase": "topo"' in captured.out          # the result still lands on stdout
+    assert 'could not write --plan-output' in captured.err
+
+
+def test_a_plan_output_directory_is_created_when_missing(tmp_path, capsys):
+    from scenarioforge.cli import _emit_phase_json
+
+    target = tmp_path / 'nested' / 'deeper' / 'out.json'
+    _emit_phase_json({'ok': True, 'phase': 'topo'}, output_path=str(target))
+    assert target.is_file()
+    assert '"phase": "topo"' in target.read_text(encoding='utf-8')
+    assert 'could not write' not in capsys.readouterr().err
