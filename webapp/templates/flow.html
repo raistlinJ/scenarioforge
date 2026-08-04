@@ -2761,6 +2761,23 @@
     return true;
   }
 
+  // An input the assignment already resolves is not missing. `missing` means
+  // "nothing provides this", and a concrete value on the assignment -- a config
+  // default, a manual override, or a value Flow supplied for a branch start --
+  // is a provider. Deciding it from the required list alone made the badge flip
+  // between Missing and Config/default across a refresh, because the two paths
+  // classify an input required-or-optional differently while both resolve it.
+  function flowAssignmentResolvesInput(assignment, name) {
+    const a = (assignment && typeof assignment === 'object') ? assignment : {};
+    const key = String(name || '').trim();
+    if (!key) return false;
+    return ['config_overrides', 'resolved_inputs', 'chain_supplied_input_values'].some((source) => {
+      const bag = a[source];
+      if (!bag || typeof bag !== 'object' || Array.isArray(bag)) return false;
+      return hasMeaningfulFlowInputSourceValue(bag[key]);
+    });
+  }
+
   function flowInputSourceInfo(row) {
     const item = (row && typeof row === 'object') ? row : {};
     const sourceBadge = (item.sourceBadge && typeof item.sourceBadge === 'object') ? item.sourceBadge : null;
@@ -3621,7 +3638,8 @@
         const reqArtifactsEffective = reqArtifacts.filter(k => k && !optSet.has(k));
         const providedByChainArtifacts = reqArtifactsEffective.filter(k => k && haveArtifactsChain.has(k));
         const providedBySequencerArtifacts = reqArtifactsEffective.filter(k => k && haveArtifactsSequencer.has(k));
-        const missingArtifacts = reqArtifactsEffective.filter(k => k && !haveArtifacts.has(k));
+        const missingArtifacts = reqArtifactsEffective.filter(
+          k => k && !haveArtifacts.has(k) && !flowAssignmentResolvesInput(a, k));
 
         let displayFields = reqFields.slice();
         try {
@@ -3640,7 +3658,8 @@
 
         const providedByChainFields = displayFields.filter(k => k && haveFieldsChain.has(k));
         const providedBySequencerFields = displayFields.filter(k => k && haveFieldsSequencer.has(k));
-        const missingFields = reqFields.filter(k => k && !haveFields.has(k));
+        const missingFields = reqFields.filter(
+          k => k && !haveFields.has(k) && !flowAssignmentResolvesInput(a, k));
 
         const missing = missingArtifacts.concat(missingFields);
         out.push({
@@ -3657,7 +3676,8 @@
         const reqEffective = Array.isArray(a.inputs) ? a.inputs.map(String) : [];
         const providingChain = reqEffective.filter(k => k && (haveArtifactsChain.has(k) || haveFieldsChain.has(k)));
         const providingSequencer = reqEffective.filter(k => k && (haveArtifactsSequencer.has(k) || haveFieldsSequencer.has(k)));
-        const missing = reqEffective.filter(k => k && !haveEffective.has(k));
+        const missing = reqEffective.filter(
+          k => k && !haveEffective.has(k) && !flowAssignmentResolvesInput(a, k));
         out.push({
           ok: missing.length === 0,
           missing,

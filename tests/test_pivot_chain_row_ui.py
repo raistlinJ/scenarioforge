@@ -212,3 +212,41 @@ def test_the_grouped_row_still_names_some_targets():
     src = _template('flow.html')
     assert 'and ${extra} more' in src
     assert 'group.targets.slice(0, MAX_NAMED_TARGETS)' in src
+
+
+# --------------------------------------------------------------------------- #
+# An input the assignment resolves is not "missing"
+# --------------------------------------------------------------------------- #
+
+def _flow_source():
+    from pathlib import Path
+    return Path('webapp/templates/flow.html').read_text(encoding='utf-8')
+
+
+def test_a_locally_resolved_input_is_not_counted_missing():
+    # The badge flipped from Missing to Config/default across a refresh: the two
+    # paths classify an input required-or-optional differently, while both
+    # resolve it to the same value. `missing` means "nothing provides this", and
+    # a concrete value on the assignment is a provider.
+    src = _flow_source()
+    assert 'function flowAssignmentResolvesInput(' in src
+    # Applied to every missing computation, not just the field one.
+    assert src.count('!flowAssignmentResolvesInput(a, k)') == 3
+
+
+def test_the_resolved_check_looks_at_every_place_a_value_can_land():
+    src = _flow_source()
+    start = src.index('function flowAssignmentResolvesInput(')
+    block = src[start:start + 900]
+    for key in ('config_overrides', 'resolved_inputs', 'chain_supplied_input_values'):
+        assert key in block, key
+    # Reuses the existing meaningfulness test, so a blank or a '-' placeholder
+    # still counts as absent.
+    assert 'hasMeaningfulFlowInputSourceValue' in block
+
+
+def test_a_blank_or_placeholder_value_is_still_missing():
+    src = _flow_source()
+    start = src.index('function hasMeaningfulFlowInputSourceValue(')
+    block = src[start:start + 400]
+    assert "value.trim() === '-'" in block
