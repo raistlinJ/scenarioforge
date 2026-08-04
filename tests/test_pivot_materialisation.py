@@ -473,13 +473,13 @@ def test_the_provider_record_wins_over_the_standard_template():
 def test_the_image_is_prepared_before_the_topology_is_built():
     # CORE starts a Docker node the moment it is added, so the image has to be
     # local by then -- segmentation reporting it afterwards is far too late.
-    import inspect
+    # Covered by test_the_execute_path_prepares_every_image_before_building in
+    # test_pivot_image_cache.py, which asserts the same on the runtime helper
+    # that now prepares the wrapper base alongside the provider images.
     from scenarioforge import cli
 
-    src = inspect.getsource(cli.main) if hasattr(cli, 'main') else ''
-    if '_ensure_pivot_provider_images' not in src:
-        src = open(cli.__file__, encoding='utf-8').read()
-    assert (src.index('_ensure_pivot_provider_images')
+    src = open(cli.__file__, encoding='utf-8').read()
+    assert (src.index('_ensure_runtime_docker_images(')
             < src.index('PHASE: Building topology'))
 
 

@@ -376,6 +376,12 @@ in the subnets the preview blocked while the running scenario blocks others.
 node the moment it is added, so execute resolves every provider image **before
 the topology is built**, in this order:
 
+This covers the **wrapper base image** as well as the provider images. Every
+Docker node's iproute2 wrapper is built `FROM` it, so without it not one node
+builds — a live run lost it and could then build nothing on a host whose Docker
+daemon had no DNS, while the provider image, being pinned, survived. It is in
+the keep set and prepared here for the same reason.
+
 1. **already present** — `docker image inspect` succeeds and nothing is pulled;
 2. **pre-seeded tarball** — `<CORETG_PIVOT_IMAGE_CACHE_DIR>/<safe-name>.tar`
    (default `/opt/coretg/images`) is `docker load`ed, so an air-gapped host
@@ -539,6 +545,7 @@ A downloadable, self-checking bash script generated from the resolved Attack Flo
 - Reachability: it runs directly when the host routes to the CORE node subnet, or tunnels every command through the CORE VM with `--ssh-host/--ssh-user/--ssh-key/--ssh-port`. Use `-v` to see raw command output.
 - Scope: **flag-node-generators only**. Vulnerability and flag-generator steps are emitted as `SKIP` with their reason, because they do not yet ship machine-runnable `access_instructions`.
 - Entry points it automates: SSH (password and key based), HTTP/HTTPS (including header- or query-gated steps that must present a prior step's `Checksum`/`Ticket` fact, and basic-auth WebDAV), raw TCP protocol dialogs, and NFS mounts.
+- **Pivot steps are verified.** A pivot that is its own chain step is emitted as a `check_pivot` before the step it gates, asserting the provider answers on its entry port. If it does not, every challenge behind that boundary is unreachable however well it was built, so that is a **FAIL**. The script does not then tunnel through the provider: solving its challenge is the participant's work, and the steps behind it are checked from the CORE VM, which reaches the node subnets directly. An **absorbed** pivot gets no check — it is a consequence of a challenge already being checked. A provider with no address yields no check either, because the plan already reports it as `unresolved` and execute warns about it.
 - The generated script does not replay the human `access_instructions` verbatim — those are written for people and include interactive prompts and host-side paths. Instead it detects each step's entry tool, derives a deterministic retrieval from the resolved artifacts, and asserts the known `Flag(flag_id)` value. The documented steps are preserved as comments for context.
 
 ## Artifact checks (live session validation)

@@ -220,3 +220,64 @@ def test_execute_warns_after_preparing_images():
     import inspect
     src = inspect.getsource(cli)
     assert '_warn_unmaterialised_pivot_providers(seg_summary)' in src
+
+
+# --------------------------------------------------------------------------- #
+# The wrapper base is as necessary as the provider image
+# --------------------------------------------------------------------------- #
+
+def test_the_wrapper_base_is_pinned_against_cleanup():
+    # Every Docker node's iproute2 wrapper is built FROM it. A live run lost it
+    # to a prune and then could not build a single Docker node on a host whose
+    # daemon had no DNS: the provider image was pinned and survived, the thing
+    # it is built on top of was not.
+    from scenarioforge.cli import _persistent_images_to_keep, _wrapper_base_image
+
+    base = _wrapper_base_image()
+    assert base
+    assert base in _persistent_images_to_keep()
+
+
+def test_the_wrapper_base_is_prepared_alongside_the_provider_images(monkeypatch):
+    from scenarioforge import cli
+
+    asked: list[list[str]] = []
+    monkeypatch.setattr(cli, '_ensure_docker_images_available',
+                        lambda images: asked.append(list(images)) or {})
+    cli._ensure_runtime_docker_images(
+        {'pivot_access': {'providers': [{'image': 'example.invalid/ssh:1'}]}})
+    assert asked, 'image preparation was never asked for anything'
+    assert 'example.invalid/ssh:1' in asked[0]
+    assert cli._wrapper_base_image() in asked[0]
+
+
+def test_the_wrapper_base_is_prepared_even_with_no_pivot_providers(monkeypatch):
+    # A scenario with no pivot access still builds Docker nodes, and every one
+    # of them needs the wrapper base.
+    from scenarioforge import cli
+
+    asked: list[list[str]] = []
+    monkeypatch.setattr(cli, '_ensure_docker_images_available',
+                        lambda images: asked.append(list(images)) or {})
+    cli._ensure_runtime_docker_images({})
+    assert asked and asked[0] == [cli._wrapper_base_image()]
+
+
+def test_provider_images_are_collected_without_blanks_or_duplicates():
+    from scenarioforge.cli import _pivot_provider_images
+
+    images = _pivot_provider_images({'pivot_access': {'providers': [
+        {'image': 'a:1'}, {'image': 'a:1'}, {'image': ''}, {'not': 'a dict'},
+    ]}})
+    assert images == ['a:1']
+
+
+def test_the_execute_path_prepares_every_image_before_building():
+    # CORE starts a Docker node the moment it is added, so a missing image is
+    # not recoverable by the time the builder runs.
+    import inspect
+    from scenarioforge import cli
+
+    src = inspect.getsource(cli)
+    assert '_ensure_runtime_docker_images(' in src
+    assert src.index('_ensure_runtime_docker_images(') < src.index('PHASE: Building topology')

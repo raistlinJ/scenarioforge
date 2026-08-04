@@ -72,6 +72,10 @@ class PivotStepDecision:
     provider_challenge: str = ""
     entry_kind: str = ""
     entry_port: Optional[int] = None
+    # Where the provider actually is. Carried so a check can be run against it
+    # -- the solutions script has to connect to something, and the provider is
+    # frequently a node the chain never visits.
+    provider_address: str = ""
     # Chain index this step belongs before, for own_step pivots. -1 means the
     # chain never visits the subnet, so there is nothing to order it against.
     insert_before: int = -1
@@ -134,6 +138,7 @@ class PivotStepDecision:
             "provider_challenge": self.provider_challenge,
             "entry_kind": self.entry_kind,
             "entry_port": self.entry_port,
+            "provider_address": self.provider_address,
             "insert_before": self.insert_before,
             "instruction": self.instruction(),
             "hint_level": self.hint_level(),
@@ -288,12 +293,14 @@ def classify_pivot_access(
             continue
         name = str(provider.get("node_name") or "").strip()
         entry = provider.get("entry") if isinstance(provider.get("entry"), dict) else {}
-        out.append(classify_pivot(
+        decision = classify_pivot(
             name,
             str(provider.get("subnet") or ""),
             chain_nodes,
             entry_kind=str(entry.get("kind") or ""),
             entry_port=entry.get("port"),
             extra_provides=provides_by_node.get(name.lower()),
-        ))
+        )
+        decision.provider_address = str(provider.get("address") or "").split("/")[0].strip()
+        out.append(decision)
     return out
