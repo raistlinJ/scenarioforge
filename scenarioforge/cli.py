@@ -3730,6 +3730,85 @@ def _preview_host_names(preview_hosts: Any) -> dict[int, str]:
     return out
 
 
+def _pivot_access_summary(source: Any) -> dict[str, Any] | None:
+    """A compact account of pivot access, for the CLI's phase JSON.
+
+    The full plan block is verbose -- every allow rule on every router -- and a
+    CLI reader wants the answer, not the rules: which subnets needed a way in,
+    what the way in is, and whether anything was left without one. Accepts a
+    saved preview or a runtime segmentation summary, since the topo phase has
+    the first and execute has the second.
+    """
+    access = None
+    if isinstance(source, dict):
+        if isinstance(source.get('pivot_access'), dict):
+            access = source['pivot_access']
+        else:
+            seg = source.get('segmentation_preview')
+            if isinstance(seg, dict) and isinstance(seg.get('pivot_access'), dict):
+                access = seg['pivot_access']
+    if not isinstance(access, dict):
+        return None
+
+    providers = [p for p in (access.get('providers') or []) if isinstance(p, dict)]
+    summary: dict[str, Any] = {
+        'provider_count': len(providers),
+        'added_node_count': sum(1 for p in providers if p.get('added')),
+        'reused_count': sum(1 for p in providers if p.get('reused')),
+        'providers': [
+            {
+                'subnet': p.get('subnet'),
+                'node': p.get('node_name'),
+                'address': p.get('address'),
+                'entry': f"{(p.get('entry') or {}).get('kind')}:{(p.get('entry') or {}).get('port')}",
+                'added': bool(p.get('added')),
+                'image': p.get('image') or '',
+                # Who the entrance was opened for, which is not the same as who
+                # the block shut out -- the participant is in neither.
+                'opened_for': list(p.get('blocked_from') or []),
+            }
+            for p in providers
+        ],
+        # A subnet the planner could not place a provider in has no way in at
+        # all, so it is the first thing a reader needs to see.
+        'unresolved': list(access.get('unresolved') or []),
+        'nested_supported': bool(access.get('nested_supported')),
+        'nested_candidates': list(access.get('nested_candidates') or []),
+    }
+    return summary
+
+
+def _log_pivot_access_summary(source: Any) -> None:
+    """Name each pivot provider in the run log.
+
+    A walled-off subnet's way in is the thing most likely to be wrong and the
+    thing least visible: it is one line in a summary file nobody opens until a
+    participant is already stuck.
+    """
+    summary = _pivot_access_summary(source)
+    if not summary or not summary.get('providers'):
+        return
+    for provider in summary['providers']:
+        logging.info(
+            "Pivot access: %s is reachable at %s (%s)%s, opening %s",
+            provider.get('node') or '?', provider.get('address') or '?',
+            provider.get('entry') or '?',
+            ' [node added for this]' if provider.get('added') else '',
+            provider.get('subnet') or '?',
+        )
+    for entry in summary.get('unresolved') or []:
+        logging.warning(
+            "Pivot access: %s has no way in -- %s",
+            entry.get('subnet') or '?', entry.get('reason') or 'no provider could be placed',
+        )
+    if summary.get('nested_candidates') and not summary.get('nested_supported'):
+        logging.info(
+            "Pivot access: %d subnet(s) imply a pivot behind a pivot; that ordering is carried "
+            "by the challenges, not by the network (nested pivots are not supported yet)",
+            len(summary['nested_candidates']),
+        )
+
+
 def _plan_segmentation_settings(preview_full: Any) -> dict[str, Any]:
     """The settings the saved plan was built with, filled out with defaults.
 
@@ -4124,8 +4203,12 @@ def _run_cli_artifact_checks(
     strict: bool = False,
     stream: Any = None,
 ) -> bool:
-    """Run the six/seven artifact checks against a live CORE session and print
-    a CLI summary plus a machine-readable marker line."""
+    """Run the ordered artifact checks against a live CORE session and print a
+    CLI summary plus a machine-readable marker line.
+
+    The checks themselves come from `artifact_checks.CHECK_ORDER` via the shared
+    orchestrator, so the CLI never has its own list to fall behind.
+    """
     target = stream if stream is not None else sys.stdout
     scenario_name = str(getattr(args, 'scenario', '') or '').strip() or None
     xml_path = os.path.abspath(str(getattr(args, 'xml', '') or '').strip()) if getattr(args, 'xml', '') else ''
@@ -7720,6 +7803,7 @@ def main():
             'preview_attached': bool(preview_full),
             'preview_realized': bool(generation_meta.get('preview_realized')),
             'pivoting': generation_meta.get('pivoting'),
+            'pivot_access': _pivot_access_summary(preview_full),
             'hitl_attachment': generation_meta.get('hitl_attachment'),
         }
         _emit_phase_json(topo_summary, output_path=args.plan_output)
@@ -7795,6 +7879,13 @@ def main():
                     logging.warning("Pivot image preparation failed: %s", exc_img)
                 try:
                     _warn_unmaterialised_pivot_providers(seg_summary)
+                except Exception:
+                    pass
+                # What a participant can actually walk through, named in the log
+                # so a CLI-only run does not have to read the summary JSON to
+                # find out whether its walled-off subnets have a way in.
+                try:
+                    _log_pivot_access_summary(seg_summary)
                 except Exception:
                     pass
             except Exception as e:

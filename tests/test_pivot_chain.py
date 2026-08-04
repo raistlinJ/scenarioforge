@@ -259,3 +259,35 @@ def test_both_guides_render_the_pivot_hint_from_the_decision():
         src = Path(name).read_text(encoding='utf-8')
         assert helper in src, name
         assert 'hint_levels' in src, name
+
+
+# --------------------------------------------------------------------------- #
+# The attack graph and the guides show the pivot
+# --------------------------------------------------------------------------- #
+
+def test_both_attack_graphs_mark_the_step_a_pivot_gates():
+    # An own_step pivot is not a chain node, so it has no card in a
+    # dependency-staged layout. It gates a step, and `insert_before` names it,
+    # so the gate is drawn on the step it gates -- in both figures, or the two
+    # views of the same scenario disagree.
+    from pathlib import Path
+
+    for name in ('webapp/templates/flow.html', 'webapp/templates/reports.html'):
+        src = Path(name).read_text(encoding='utf-8')
+        assert 'guideFigurePivotGatesByStep' in src, name
+        assert 'pivotGates.get(nodeIndex)' in src, name
+        assert 'data-pivot-gated' in src, name
+
+
+def test_the_facilitator_guide_names_the_provider_and_the_participant_guide_does_not():
+    # A participant is meant to find the provider; naming it and its entry port
+    # in their guide would hand over the step.
+    from pathlib import Path
+
+    src = Path('webapp/templates/reports.html').read_text(encoding='utf-8')
+    start = src.index('Pivot step: reach')
+    block = src[start:start + 3000]
+    assert 'if (facilitatorMode) {' in block
+    detail = block[block.index('if (facilitatorMode) {'):]
+    assert 'Provider node' in detail
+    assert 'Hint tier' in detail
