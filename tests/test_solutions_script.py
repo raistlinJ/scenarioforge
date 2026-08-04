@@ -481,3 +481,43 @@ def test_pivots_are_counted_in_the_summary_total():
     script = build_solutions_script('S', _chain(), _pivot_assignment())
     # One chain step plus one pivot step.
     assert '"2"' in script or ' "2"' in script
+
+
+# --------------------------------------------------------------------------- #
+# Where the checks run from: a CORE VM does not route to the emulated subnets
+# --------------------------------------------------------------------------- #
+
+def test_checks_can_run_inside_a_core_node():
+    # A stock CORE VM has no route into the emulation: `ip route get <node ip>`
+    # on the VM leaves via its default gateway, so a payload run on the VM
+    # itself reaches nothing in the scenario. Only a node's namespace can.
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert '--via-node' in script
+    assert 'node_wrap()' in script
+    # Docker nodes answer to docker exec, CORE vnodes to vcmd, and which a node
+    # is is not knowable from the script -- so it tries one, then the other.
+    assert 'docker exec $VIA_NODE' in script
+    assert 'vcmd -c /tmp/pycore.$SESSION_ID/$VIA_NODE' in script
+
+
+def test_entering_a_namespace_can_be_given_a_sudo_password():
+    # Entering a namespace needs root, and a CORE VM commonly requires a
+    # password for sudo -- without this the wrapper fails with "a terminal is
+    # required" and every check reports its target unreachable.
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert '--sudo-pass' in script
+    assert '--no-sudo' in script
+    assert '-S -p' in script
+
+
+def test_the_banner_says_where_the_checks_actually_ran():
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert 'Execution: inside CORE node $VIA_NODE' in script
+    # And tells a reader what to do when it cannot reach anything.
+    assert 'pass --via-node NODE' in script
