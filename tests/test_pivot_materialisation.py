@@ -540,3 +540,67 @@ def test_the_provider_is_left_out_of_the_challenge_slot_range():
         _provider_hdata(node_id=12),
     ]}
     assert [h['node_id'] for h in _pivot_provider_hosts(preview)] == [12]
+
+
+# --------------------------------------------------------------------------- #
+# Nested pivots: detected and reported, deliberately not enforced
+# --------------------------------------------------------------------------- #
+
+def _chained_blocks():
+    """B is walled off only from A, and A is itself walled off from everything.
+
+    Reads as an author asking for two steps: get into A, then through it to B.
+    """
+    return [
+        {'node_id': 1, 'service': 'Segmentation', 'rule': {
+            'type': 'protect_internal', 'node': 1, 'subnet': '10.0.10.0/24'}},
+        {'node_id': 1, 'service': 'Segmentation', 'rule': {
+            'type': 'subnet_block', 'node': 1, 'src': '10.0.10.0/24', 'dst': '10.0.20.0/24'}},
+    ]
+
+
+def test_a_pivot_behind_a_pivot_is_detected():
+    from scenarioforge.utils.pivot_access import nested_pivot_candidates, walled_off_details
+
+    candidates = nested_pivot_candidates(walled_off_details(_chained_blocks()))
+    assert [c['subnet'] for c in candidates] == ['10.0.20.0/24']
+    assert candidates[0]['reached_through'] == ['10.0.10.0/24']
+
+
+def test_a_subnet_with_a_direct_way_in_is_not_nested():
+    from scenarioforge.utils.pivot_access import nested_pivot_candidates, walled_off_details
+
+    rules = _chained_blocks() + [
+        # Also blocked from a subnet that is not itself walled off, so there is
+        # a way in that crosses no other boundary.
+        {'node_id': 1, 'service': 'Segmentation', 'rule': {
+            'type': 'subnet_block', 'node': 1, 'src': '10.0.99.0/24', 'dst': '10.0.20.0/24'}},
+    ]
+    assert nested_pivot_candidates(walled_off_details(rules)) == []
+
+
+def test_a_subnet_blocked_from_everything_is_not_nested():
+    from scenarioforge.utils.pivot_access import nested_pivot_candidates, walled_off_details
+
+    rules = [{'node_id': 1, 'service': 'Segmentation', 'rule': {
+        'type': 'protect_internal', 'node': 1, 'subnet': '10.0.10.0/24'}}]
+    assert nested_pivot_candidates(walled_off_details(rules)) == []
+
+
+def test_nesting_is_reported_on_the_plan_and_not_enforced():
+    from scenarioforge.utils.pivot_access import NESTED_PIVOTS_SUPPORTED, ANY_SOURCE
+
+    hosts = [NodeInfo(node_id=4, ip4='10.0.10.5/24', role='Docker'),
+             NodeInfo(node_id=5, ip4='10.0.20.5/24', role='Docker')]
+    plan = plan_pivot_access(
+        _chained_blocks(), hosts, router_ids=[1],
+        entry_points={4: [PivotEntry(kind='vulnerability', port=8080)],
+                      5: [PivotEntry(kind='vulnerability', port=9090)]},
+    )
+    assert NESTED_PIVOTS_SUPPORTED is False
+    payload = plan.as_dict()
+    assert payload['nested_supported'] is False
+    assert [c['subnet'] for c in payload['nested_candidates']] == ['10.0.20.0/24']
+    # Flattened: the inner provider is reachable without crossing the outer one.
+    assert plan.allow_rules
+    assert {e['rule']['src'] for e in plan.allow_rules} == {ANY_SOURCE}

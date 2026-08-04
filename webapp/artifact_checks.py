@@ -12,6 +12,8 @@ the live CORE session:
 7. reachability - each traffic flow reaches its destination, tested on the
                   flow's own protocol and port (never with ping, which a
                   default-deny segmentation policy legitimately drops)
+8. pivot access - every pivot provider is reachable from the participant, so
+                  the challenges behind a segmentation boundary stay solvable
 
 Checks 1-4 are derived from the existing post-execution validator
 (`_validate_session_nodes_and_injects`). Checks 5-7 are live probes executed on
@@ -37,6 +39,7 @@ CHECK_ORDER: list[tuple[str, str]] = [
     ("segmentation", "Firewall/segmentation rules in place"),
     ("traffic", "Traffic scripts running"),
     ("reachability", "Nodes reachable (traffic source → destination)"),
+    ("pivot_access", "Pivot providers reachable from the participant"),
 ]
 
 CHECK_KEYS = [key for key, _label in CHECK_ORDER]
@@ -1127,6 +1130,133 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
                        "The scenario declares traffic, but no runtime traffic_summary.json was found. "
                        "Confirm traffic generation ran during execute.", items)
     return _result("traffic", "skip", "No traffic configured for this scenario.", items)
+
+
+def participant_probe_sources(participant_subnets: Any) -> list[str]:
+    """One representative address per participant network.
+
+    The participant's own address is not knowable and does not matter: what is
+    checked is whether their *network* can reach the provider, so any address on
+    it answers the question. Pinning the check to one address would make it pass
+    or fail on a DHCP lease.
+    """
+    out: list[str] = []
+    for raw in _as_list(participant_subnets):
+        text = _name(raw)
+        if not text:
+            continue
+        try:
+            net = ipaddress.ip_network(text, strict=False)
+        except Exception:
+            continue
+        if net.num_addresses <= 1:
+            continue
+        try:
+            out.append(str(next(net.hosts())))
+        except StopIteration:
+            continue
+    return out
+
+
+def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> dict[str, Any]:
+    """Check 8: can the participant reach each pivot provider?
+
+    A provider is the only way into a subnet segmentation walled off, so a
+    participant who cannot reach it cannot solve anything behind that boundary.
+    That makes an unreachable provider a broken scenario, not a warning.
+
+    This reads the rules rather than sending packets, because the participant's
+    vantage point is not available to probe from: the HITL node is an RJ45 bound
+    to a physical interface, not a namespace the check can enter. Reading the
+    rules also means the check still runs with nothing plugged in, which is when
+    an author is most likely to be looking at it.
+
+    When no HITL network is configured, the question is still meaningful -- can
+    anything outside the subnet reach the provider -- so it is asked from an
+    address outside the walled-off subnet instead.
+    """
+    if not isinstance(segmentation, dict) or not segmentation.get("ok"):
+        detail = _name(segmentation.get("error")) if isinstance(segmentation, dict) else ""
+        return _result("pivot_access", "error", detail or "segmentation probe failed")
+
+    rules_summary = segmentation.get("rules_summary")
+    access = rules_summary.get("pivot_access") if isinstance(rules_summary, dict) else None
+    providers = _as_list(access.get("providers")) if isinstance(access, dict) else []
+    if not providers:
+        return _result("pivot_access", "skip",
+                       "No pivot providers in this scenario (accessible-by-pivot is off, or "
+                       "segmentation walled nothing off).")
+
+    allow_rules = _segmentation_allow_rules(segmentation)
+    sources = participant_probe_sources(participant_subnets)
+    items: list[dict[str, Any]] = []
+    unreachable = 0
+    unplaced = 0
+
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        subnet = _name(provider.get("subnet"))
+        name = _name(provider.get("node_name")) or f"provider for {subnet}"
+        address = _name(provider.get("address"))
+        entry = provider.get("entry") if isinstance(provider.get("entry"), dict) else {}
+        port = entry.get("port")
+        label = f"{name} ({address or 'no address'}:{port or '?'}) for {subnet}"
+
+        if not address or not port:
+            unplaced += 1
+            items.append({"name": label, "status": "fail",
+                          "detail": ("no node was placed for this subnet, so nothing behind the "
+                                     "boundary can be reached")})
+            continue
+
+        # Ask from the participant's network where there is one, and from an
+        # address outside the walled-off subnet otherwise.
+        probes = list(sources)
+        origin = "the participant network"
+        if not probes:
+            probes = [_outside_address(subnet)]
+            origin = "outside the walled-off subnet"
+        probes = [p for p in probes if p]
+        if not probes:
+            continue
+
+        missing = [src for src in probes
+                   if _allow_rule_opening(src, address, port, allow_rules) is None]
+        if missing:
+            unreachable += 1
+            items.append({"name": label, "status": "fail",
+                          "detail": (f"no allow rule opens this provider from {origin} "
+                                     f"({', '.join(missing)}), so the challenges behind "
+                                     f"{subnet} cannot be started")})
+        else:
+            items.append({"name": label, "status": "pass",
+                          "detail": f"reachable from {origin} on port {port}"})
+
+    if unplaced or unreachable:
+        broken = unplaced + unreachable
+        return _result("pivot_access", "fail",
+                       f"{broken} of {len(providers)} pivot provider(s) cannot be reached by the "
+                       f"participant; the challenges behind those boundaries are unsolvable.", items)
+    return _result("pivot_access", "pass",
+                   f"All {len(providers)} pivot provider(s) reachable from the participant.", items)
+
+
+def _outside_address(subnet: str) -> str:
+    """An address that is definitely not inside `subnet`.
+
+    Used when no participant network is configured: the provider still has to be
+    reachable from somewhere outside the subnet it guards, and that is the same
+    question with a stand-in for the participant.
+    """
+    try:
+        net = ipaddress.ip_network(_name(subnet), strict=False)
+    except Exception:
+        return "203.0.113.1"
+    for candidate in ("203.0.113.1", "198.51.100.1", "192.0.2.1"):
+        if ipaddress.ip_address(candidate) not in net:
+            return candidate
+    return "203.0.113.1"
 
 
 def reachability_result(probe: Any) -> dict[str, Any]:

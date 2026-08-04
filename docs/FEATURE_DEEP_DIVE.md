@@ -399,10 +399,30 @@ out of the one node built to let them in - and did so unevenly, since a
 `subnet_block` did not. Exactly one port on one node becomes reachable; the rest
 of the subnet stays walled off, which is the whole design.
 
-That means chain ordering between nested pivots is enforced by the **challenge**
-- you need what the earlier step gave you - and not by reachability. Enforcing it
-at the network layer is not available anyway: FORWARD allows go to every router
-by necessity, so there is no hop at which a later provider could be held back.
+#### Nested pivots (not supported yet)
+
+A *nested* pivot is a provider you can only reach by first working through
+another provider. **`NESTED_PIVOTS_SUPPORTED` is `False`** and every provider is
+opened to `0.0.0.0/0`, so all of them are directly reachable and the ordering
+between them is flattened.
+
+Turning it on is more than flipping the flag. FORWARD allows go to **every**
+router by necessity - the planner cannot know the route, and a live run showed
+the enforcing router passing a SYN while an upstream router dropped it - so
+there is no hop at which a later provider could be held back. Real support needs
+route-aware, per-hop allow placement, which the planner deliberately does not
+attempt.
+
+Until then, ordering between pivots is carried by the **challenge**: you need
+what the earlier step gave you. That is how `pivot_chain` already reasons -
+on capability, not on topology - so nothing is lost for a chain whose steps
+genuinely depend on each other.
+
+`nested_pivot_candidates` reports where an author's segmentation implies an
+ordering: a subnet walled off *only* from other walled-off subnets reads as
+"get into the outer one first". Those appear in the `pivot_access` report as
+`nested_candidates`, alongside `nested_supported: false`, and are logged at
+execute. The limitation is stated rather than discovered.
 
 `blocked_from` stays on the provider as the *audience*: the subnets the block
 shut out, plus the HITL link networks a participant sits on. Those are recorded
@@ -422,6 +442,30 @@ otherwise drop the packet on arrival.
 
 The toggle is **off by default**, so an existing scenario keeps the exact
 segmentation it was authored with.
+
+#### Check 8: can the participant reach the provider?
+
+The artifact validator's eighth check answers the question the whole feature
+rests on. A provider is the only way into its subnet, so a participant who
+cannot reach it cannot solve anything behind that boundary - which makes an
+unreachable provider a **failed** check, not a warning.
+
+It reads the rules rather than sending packets, because the participant's
+vantage point cannot be probed from: the HITL node is an RJ45 bound to a
+physical interface, not a namespace the checker can enter. Reading the rules
+also means it still runs with nothing plugged in, which is when an author is
+most likely to be looking at it.
+
+The participant network comes from the HITL link subnets, which are computed
+deterministically from the scenario and interface name, so the check knows them
+without asking the hardware. It probes from an address *on* that network rather
+than any particular one - the question is whether the network can get in, and
+pinning it to one address would make the check turn on a DHCP lease. With no
+HITL configured the question is still meaningful, so it is asked from an address
+outside the walled-off subnet instead.
+
+It fails when a provider has no node placed for it at all, and when no allow
+rule opens the provider's own entry port from the participant.
 
 #### Where the pivot shows up in the chain
 
