@@ -20,8 +20,11 @@ class SegmentationService(CoreService):
     # Resolve on both node kinds: a Docker node gets the file at the container
     # root, while a namespaced vnode only has it in its `.conf` directory (the
     # startup working directory). See TrafficService for the full explanation.
+    # The launcher is `sh` for the same reason it is in TrafficService: on a
+    # Docker node this runs inside the scenario's own image, which may not ship
+    # bash, and the body needs nothing bash provides.
     startup: list[str] = [
-        "/bin/bash -c 'f=runsegmentation.sh; [ -f \"$f\" ] || f=/runsegmentation.sh; exec bash \"$f\"' &"
+        "/bin/sh -c 'f=runsegmentation.sh; [ -f \"$f\" ] || f=/runsegmentation.sh; exec sh \"$f\"' &"
     ]
     # commands to run to validate this service
     validate: list[str] = []
@@ -47,7 +50,7 @@ class SegmentationService(CoreService):
         # syntax breaks: `${VAR:-default}` raises, a line starting with `%` is a
         # Mako control line, and a line starting with `##` is silently dropped.
         return """
-        #!/bin/bash
+        #!/bin/sh
         NODE_ID='${node.id}'
         NODE_NAME='${node.name}'
         <%text>

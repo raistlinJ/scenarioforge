@@ -26,8 +26,16 @@ class TrafficService(CoreService):
     # fails silently on vnodes, which is how traffic could be configured and
     # deployed yet never actually start. CORE's own services use the relative
     # form; try that first and fall back to the absolute Docker location.
+    #
+    # The launcher is `sh`, not `bash`. A Docker node's container IS the
+    # vulnerability image, so this command runs inside whatever the scenario
+    # author chose, and plenty of those images ship no bash. When it is missing
+    # the exec fails before the script's first line, so nothing runs and not
+    # even the script's own log is written -- the failure is invisible outside
+    # the core-daemon journal. Nothing here needs bash: the body below is POSIX
+    # shell and the agent is a static binary. Keep it that way.
     startup: list[str] = [
-        "/bin/bash -c 'f=runtraffic.sh; [ -f \"$f\" ] || f=/runtraffic.sh; exec bash \"$f\"' &"
+        "/bin/sh -c 'f=runtraffic.sh; [ -f \"$f\" ] || f=/runtraffic.sh; exec sh \"$f\"' &"
     ]
     # commands to run to validate this service
     validate: list[str] = []
@@ -53,7 +61,7 @@ class TrafficService(CoreService):
         # syntax breaks: `${VAR:-default}` raises, a line starting with `%` is a
         # Mako control line, and a line starting with `##` is silently dropped.
         return """
-        #!/bin/bash
+        #!/bin/sh
         NODE_ID='${node.id}'
         NODE_NAME='${node.name}'
         <%text>
