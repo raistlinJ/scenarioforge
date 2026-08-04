@@ -1296,6 +1296,23 @@ function reportPivotGrantsFor(node, assignment) {
   return out;
 }
 
+function reportPivotHintGroups(decision) {
+  // Server-computed: `hint_levels` on the decision. Recomputing the tier here
+  // would let the guide and the plan drift apart.
+  const src = (decision && typeof decision === 'object') ? decision : {};
+  const levels = (src.hint_levels && typeof src.hint_levels === 'object' && !Array.isArray(src.hint_levels))
+    ? src.hint_levels : null;
+  if (!levels) return [];
+  const groups = [];
+  REPORT_HINT_LEVEL_ORDER.forEach((level) => {
+    const raw = levels[level];
+    const values = (Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []))
+      .map((v) => String(v || '').trim()).filter(Boolean);
+    if (values.length) groups.push({ title: `Hint ${reportHintLevelTitle(level)}`, values });
+  });
+  return groups;
+}
+
 function reportOwnStepPivots(assignments) {
   const out = [];
   const seen = new Set();
@@ -1665,6 +1682,15 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
         lines.push('');
         lines.push('This pivot is not part of another challenge, so it counts as a step of its own.');
         lines.push('');
+        // Tiered by how discoverable the provider is: a challenge node the
+        // participant is scanning anyway earns a medium nudge, a bare SSH box
+        // the most explicit tier, since nothing about it says "this is the door".
+        reportPivotHintGroups(d).forEach((group) => {
+          lines.push(`**${group.title}**`);
+          lines.push('');
+          group.values.forEach((value) => lines.push(`- ${value}`));
+          lines.push('');
+        });
       });
     } catch (e) { }
     const nodeName = String((node && node.name) ? node.name : `Node ${step}`).trim();
