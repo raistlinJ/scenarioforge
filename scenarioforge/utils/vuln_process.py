@@ -5541,9 +5541,7 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					if _compose_requires_internal_networking(obj) and not allow_internal_networking:
 						logger.info(
 							'[vuln] using CORE-only networking for multi-service compose node=%s; '
-							'Docker-managed internal networking remains disabled. Set '
-							'CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 and CORETG_DOCKER_IFID_START=1 '
-							'only for labs that intentionally need Compose service networking.',
+							'Docker-managed internal networking remains disabled.',
 							node_name,
 						)
 						obj = _repair_apache_foreground_for_no_network(obj)

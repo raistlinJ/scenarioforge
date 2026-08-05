@@ -37,7 +37,7 @@ CHECK_ORDER: list[tuple[str, str]] = [
     ("ports", "Ports open"),
     ("injects", "Inject files placed"),
     ("segmentation", "Firewall/segmentation rules in place"),
-    ("traffic", "Traffic scripts running"),
+    ("traffic", "Traffic agents running"),
     ("reachability", "Nodes reachable (traffic source → destination)"),
     ("pivot_access", "Pivot providers reachable from the participant"),
 ]
@@ -792,6 +792,12 @@ def segmentation_probe_script(sudo_password: str | None = None,
     )
 
 
+# The agent writes stats every 10s (`-stats-interval`, traffic_agent/main.go).
+# Six missed writes is a generous margin for an emulated node under load while
+# still distinguishing a running agent from one that has stopped.
+_AGENT_STATS_FRESH_S = 60
+
+
 def traffic_probe_script(sudo_password: str | None = None,
                          session_id: Any = None,
                          traffic_dirs: list[str] | None = None) -> str:
@@ -806,9 +812,58 @@ def traffic_probe_script(sudo_password: str | None = None,
     """
     dirs = traffic_dirs or ["/tmp/traffic"]
     dirs_literal = json.dumps(dirs)
+    # Finding the agent must not depend on the node's image shipping procps.
+    # A Docker node's container IS the scenario's own image, and a minimal
+    # vulnerability image often has no `pgrep` or `ps` at all -- on such a node
+    # pgrep produced nothing, the node looked idle, and the check reported a
+    # sender with no traffic process while the agent was in fact running and
+    # moving megabytes. `/proc` is part of the kernel, not a package, so scan it
+    # when pgrep is unavailable or finds nothing.
+    #
+    # The scanner skips its own pid; its parent shell is filtered out below by
+    # the `pgrep` substring its command line necessarily contains.
+    proc_scan_sh = (
+        "pgrep -fa traffic_ 2>/dev/null || pgrep -af traffic_ 2>/dev/null || "
+        "{ self=$$; for d in /proc/[0-9]*; do p=${d#/proc/}; "
+        "[ \"$p\" = \"$self\" ] && continue; "
+        "[ -r \"$d/cmdline\" ] || continue; "
+        "c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null); "
+        "case \"$c\" in *traffic_*) echo \"$p $c\" ;; esac; done; }"
+    )
     return (
         _remote_preamble(sudo_password, session_id)
         + f"TRAFFIC_DIRS = {dirs_literal}\n"
+        + f"PROC_SCAN = {json.dumps(proc_scan_sh)}\n"
+        + f"AGENT_FRESH_S = {int(_AGENT_STATS_FRESH_S)}\n"
+        + "import datetime as _dt\n"
+        + "def _node_agent(kind, name):\n"
+        + "    # The agent's own stats file is the one liveness signal that needs no\n"
+        + "    # tooling in the image at all -- just a readable file -- and it proves\n"
+        + "    # progress rather than mere existence. Restricted to Docker nodes: a\n"
+        + "    # vnode shares the host's /tmp, so this glob would return every node's\n"
+        + "    # stats. Vnodes share the host filesystem and therefore always have\n"
+        + "    # pgrep, so they never reach for this fallback.\n"
+        + "    if kind != 'docker':\n"
+        + "        return {}\n"
+        + "    rc, out = _nexec(kind, name, ['sh','-lc',\n"
+        + "                     'cat /tmp/coretg_traffic/stats_*.json 2>/dev/null | head -c 8000'])\n"
+        + "    try:\n"
+        + "        s = json.loads(out[out.index('{'):out.rindex('}') + 1])\n"
+        + "    except Exception:\n"
+        + "        return {}\n"
+        + "    age = None\n"
+        + "    try:\n"
+        + "        seen = _dt.datetime.strptime(str(s.get('updated_at')), '%Y-%m-%dT%H:%M:%SZ')\n"
+        + "        seen = seen.replace(tzinfo=_dt.timezone.utc)\n"
+        + "        age = (_dt.datetime.now(_dt.timezone.utc) - seen).total_seconds()\n"
+        + "    except Exception:\n"
+        + "        age = None\n"
+        + "    return {'present': True, 'age_s': age,\n"
+        + "            'live': bool(age is not None and age <= AGENT_FRESH_S),\n"
+        + "            'bytes_sent': s.get('total_bytes_sent'),\n"
+        + "            'bytes_received': s.get('total_bytes_received'),\n"
+        + "            'errors': s.get('total_errors'),\n"
+        + "            'flows': len(s.get('flows') or [])}\n"
         + "def _ip(kind, name):\n"
         + "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1\"])\n"
         + "    ips = [l.strip() for l in out.splitlines() if l.strip()]\n"
@@ -877,9 +932,11 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "    alln = _all_nodes()\n"
         + "    nodes = {}\n"
         + "    for kind, name in alln:\n"
-        + "        rc, out = _nexec(kind, name, ['sh','-lc','pgrep -fa traffic_ 2>/dev/null || pgrep -af traffic_ 2>/dev/null'])\n"
-        + "        procs = [l.strip() for l in out.splitlines() if 'traffic_' in l and 'pgrep' not in l]\n"
-        + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': _ip(kind, name)}\n"
+        + "        rc, out = _nexec(kind, name, ['sh','-lc', PROC_SCAN])\n"
+        + "        procs = [l.strip() for l in out.splitlines()\n"
+        + "                 if 'traffic_' in l and 'pgrep' not in l and '/proc/[0-9]' not in l]\n"
+        + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': _ip(kind, name),\n"
+        + "                       'agent': _node_agent(kind, name)}\n"
         + "    # Reachability follows the configured traffic flows, and each flow is\n"
         + "    # tested on its own protocol and port rather than with ping. Under a\n"
         + "    # default-deny segmentation policy ICMP is normally not in the allow\n"
@@ -1058,7 +1115,27 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
     summary = probe.get("summary") if isinstance(probe.get("summary"), dict) else None
     flows = _as_list(summary.get("flows")) if isinstance(summary, dict) else []
     nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
-    nodes_with_procs = [n for n, info in nodes.items() if isinstance(info, dict) and _as_list(info.get("procs"))]
+    # "Is the agent running" has two independent witnesses, because neither is
+    # available on every image. A process listing needs procps, which a minimal
+    # vulnerability image may not ship; the agent's stats file needs only a
+    # readable file, but proves liveness solely while it keeps being updated.
+    # Either one counts, so a node is only reported idle when both are silent.
+    def _agent(info: Any) -> dict[str, Any]:
+        agent = info.get("agent") if isinstance(info, dict) else None
+        return agent if isinstance(agent, dict) else {}
+
+    nodes_with_procs = [
+        n for n, info in nodes.items()
+        if isinstance(info, dict) and (_as_list(info.get("procs")) or _agent(info).get("live"))
+    ]
+    # An agent that wrote stats and then stopped is a third state: neither
+    # healthy nor never-started, and the one worth naming in the output.
+    nodes_agent_stopped = sorted(
+        n for n, info in nodes.items()
+        if isinstance(info, dict)
+        and n not in nodes_with_procs
+        and _agent(info).get("present")
+    )
     items: list[dict[str, Any]] = []
 
     # The runtime traffic_summary.json is rewritten by every execute, so when it
@@ -1085,7 +1162,20 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
                       "detail": f"{len(traffic_files)} traffic script(s) generated"})
     for node in sorted(nodes_with_procs):
         count = len(_as_list(nodes[node].get("procs")))
-        items.append({"name": node, "status": "pass", "detail": f"{count} traffic process(es) running"})
+        agent = _agent(nodes[node])
+        if count:
+            detail = f"{count} traffic process(es) running"
+        else:
+            # Seen only through the stats file: say so, because the absence of a
+            # process listing on this node is itself worth knowing.
+            detail = "traffic agent active (no process listing available on this image)"
+        sent = agent.get("bytes_sent")
+        if isinstance(sent, (int, float)) and sent > 0:
+            detail += f"; {int(sent):,} bytes sent"
+        errors = agent.get("errors")
+        if isinstance(errors, (int, float)) and errors > 0:
+            detail += f"; {int(errors)} error(s)"
+        items.append({"name": node, "status": "pass", "detail": detail})
 
     # Nodes that a flow names as a sender but where no traffic process is running.
     expected_senders: set[str] = set()
@@ -1101,8 +1191,24 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
                 expected_senders.add(node)
     missing_senders = sorted(expected_senders - set(nodes_with_procs))
     for node in missing_senders:
+        agent = _agent(nodes.get(node))
+        if agent.get("present"):
+            age = agent.get("age_s")
+            when = f" (last update {int(age)}s ago)" if isinstance(age, (int, float)) else ""
+            detail = ("flow names this node as a traffic source; its agent ran but has "
+                      f"stopped updating stats{when}")
+        else:
+            detail = "flow names this node as a traffic source, but no traffic process is running"
+        items.append({"name": node, "status": "warn", "detail": detail})
+
+    # A receiver whose agent died is just as broken as a sender's, and nothing
+    # above would catch it: expected_senders only covers flow sources.
+    stopped_others = [n for n in nodes_agent_stopped if n not in set(missing_senders)]
+    for node in stopped_others:
+        age = _agent(nodes[node]).get("age_s")
+        when = f" (last update {int(age)}s ago)" if isinstance(age, (int, float)) else ""
         items.append({"name": node, "status": "warn",
-                      "detail": "flow names this node as a traffic source, but no traffic process is running"})
+                      "detail": f"traffic agent ran but has stopped updating stats{when}"})
 
     # The runtime traffic_summary.json is authoritative about whether traffic was
     # actually configured — the scenario XML's Traffic section can carry a
@@ -1116,6 +1222,10 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
         return _result("traffic", "warn",
                        f"{len(nodes_with_procs)} node(s) running traffic; {len(missing_senders)} "
                        "expected sender(s) have no traffic process.", items)
+    if stopped_others:
+        return _result("traffic", "warn",
+                       f"{len(nodes_with_procs)} node(s) running traffic; {len(stopped_others)} "
+                       "node(s) have a stopped traffic agent.", items)
     if traffic_configured:
         bits: list[str] = []
         if flows:
@@ -1183,9 +1293,18 @@ def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> d
     access = rules_summary.get("pivot_access") if isinstance(rules_summary, dict) else None
     providers = _as_list(access.get("providers")) if isinstance(access, dict) else []
     if not providers:
-        return _result("pivot_access", "skip",
-                       "No pivot providers in this scenario (accessible-by-pivot is off, or "
-                       "segmentation walled nothing off).")
+        # Two different features are called "pivot" and this check covers only
+        # one of them, so the skip has to say which. A scenario whose challenge
+        # chain is full of Pivot() steps can still legitimately skip here.
+        return _result(
+            "pivot_access", "skip",
+            "No pivot providers to check. This covers Segmentation's "
+            "\"accessible by pivot\", which places a reachable provider node in a "
+            "subnet segmentation walled off — it is off for this scenario, or it is "
+            "on and nothing was walled off. Pivot steps in the challenge chain "
+            "(a step producing Pivot(node)) are a separate feature and are not "
+            "measured here; turn on accessible_by_pivot in the Segmentation section "
+            "if you want walled-off subnets given an entrance.")
 
     allow_rules = _segmentation_allow_rules(segmentation)
     sources = participant_probe_sources(participant_subnets)

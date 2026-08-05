@@ -980,7 +980,7 @@ def test_pivot_access_without_hitl_asks_from_outside_the_subnet():
 def test_pivot_access_skips_when_the_scenario_has_no_providers():
     res = ac.pivot_access_result(_pivot_probe([]), [HITL_NET])
     assert res["status"] == "skip"
-    assert "accessible-by-pivot is off" in res["summary"]
+    assert "accessible by pivot" in res["summary"]
 
 
 def test_pivot_access_errors_when_the_probe_failed():
@@ -994,3 +994,140 @@ def test_participant_sources_are_addresses_on_each_network():
     # A single address is not a network and answers a different question.
     assert ac.participant_probe_sources(["10.254.200.3/32"]) == []
     assert ac.participant_probe_sources(["nonsense", None, ""]) == []
+
+
+def test_traffic_probe_finds_the_agent_without_procps():
+    """A Docker node's container is the scenario's own image, and a minimal
+    vulnerability image often ships no `pgrep`/`ps`. Detecting the agent with
+    pgrep alone made such a node look idle while its agent was running and
+    moving megabytes, so the check reported a sender with no traffic process.
+    /proc is kernel-provided, not a package, so it must be the fallback.
+    """
+    import json as _json
+    import re as _re
+    import subprocess as _subprocess
+
+    script = ac.traffic_probe_script('pw', 1)
+    scan = _json.loads(_re.search(r'^PROC_SCAN = (.*)$', script, _re.M).group(1))
+
+    # pgrep stays the fast path, but must not be the only one.
+    assert 'pgrep' in scan
+    assert '/proc/' in scan and 'cmdline' in scan
+    # The probe invokes the shared constant rather than an inline pgrep.
+    assert "['sh','-lc', PROC_SCAN]" in script
+
+    # The fallback runs in whatever shell the image has, which may only be sh.
+    proc = _subprocess.run(['/bin/sh', '-n', '-c', scan], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+    # The scanner must not count itself: its own command line contains the
+    # match string, which would report traffic on every node in the topology.
+    assert 'self=$$' in scan
+
+
+def test_traffic_probe_excludes_its_own_scanner_from_results():
+    # The parent shell's command line necessarily contains both `pgrep` and the
+    # /proc glob, so both have to be filtered or every node reports a process.
+    script = ac.traffic_probe_script('pw', 1)
+    assert "'pgrep' not in l" in script
+    assert "'/proc/[0-9]' not in l" in script
+
+
+def test_live_agent_stats_count_as_running_without_a_process_listing():
+    # The stats file needs only a readable file, so it is the one liveness
+    # signal available on an image with no procps at all.
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+             "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [],
+                                     "agent": {"present": True, "live": True, "age_s": 3,
+                                               "bytes_sent": 43220830, "errors": 0, "flows": 1}}},
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "pass"
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
+    assert "no process listing available" in detail
+    assert "43,220,830 bytes sent" in detail
+
+
+def test_stopped_agent_is_reported_differently_from_never_started():
+    # Three states, not two: an agent that ran and stopped is a distinct
+    # failure from one that never launched, and says so.
+    stopped = {"ok": True, "traffic_files": [],
+               "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+               "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [],
+                                       "agent": {"present": True, "live": False, "age_s": 900}}},
+               "ping": []}
+    res = ac.traffic_result(stopped, expected=True)
+    assert res["status"] == "warn"
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
+    assert "ran but has stopped" in detail and "900s ago" in detail
+
+    never = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+             "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [], "agent": {}}},
+             "ping": []}
+    res = ac.traffic_result(never, expected=True)
+    assert res["status"] == "warn"
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
+    assert "no traffic process is running" in detail
+
+
+def test_stopped_receiver_agent_is_caught_even_though_it_sends_nothing():
+    # expected_senders only covers flow sources, so a dead receiver would
+    # otherwise pass silently.
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+             "nodes": {"docker-21": {"kind": "docker", "ip": "10.0.0.5", "procs": ["1 traffic_x"],
+                                     "agent": {"present": True, "live": True}},
+                       "docker-24": {"kind": "docker", "ip": "10.0.0.9", "procs": [],
+                                     "agent": {"present": True, "live": False, "age_s": 400}}},
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "warn"
+    assert "stopped traffic agent" in res["summary"]
+    assert any("ran but has stopped" in i["detail"] for i in res["items"] if i["name"] == "docker-24")
+
+
+def test_agent_stats_fallback_is_docker_only():
+    # A vnode shares the host's /tmp, so globbing stats_*.json there returns
+    # every node's file. Vnodes share the host filesystem and always have
+    # pgrep, so they never need this path.
+    script = ac.traffic_probe_script('pw', 1)
+    assert "if kind != 'docker':" in script
+    assert "stats_*.json" in script
+    # utcnow() is deprecated and the CORE VM's python version is not pinned.
+    assert "utcnow" not in script
+
+
+def test_pivot_skip_distinguishes_the_two_meanings_of_pivot():
+    """Two features are called "pivot"; the skip must say which one it means.
+
+    Segmentation's `accessible_by_pivot` places a reachable provider node in a
+    walled-off subnet. A challenge chain's Pivot(node) step is a capability the
+    participant gains. A scenario can be full of the second and have none of the
+    first, which reads as the check wrongly skipping.
+    """
+    probe = {"ok": True, "rules_summary": {"rules": []}, "nodes": {}}
+    res = ac.pivot_access_result(probe, [])
+    assert res["status"] == "skip"
+    summary = res["summary"]
+    assert "accessible by pivot" in summary
+    assert "challenge chain" in summary and "Pivot(node)" in summary
+    assert "accessible_by_pivot" in summary, 'name the setting to turn on'
+
+
+def test_pivot_check_still_runs_when_providers_exist():
+    probe = {
+        "ok": True,
+        "rules_summary": {
+            "rules": [],
+            "pivot_access": {"providers": [
+                {"subnet": "10.9.5.0/24", "node_name": "docker-21",
+                 "address": "10.9.5.6", "entry": {"port": 2222}},
+            ]},
+        },
+        "nodes": {},
+    }
+    res = ac.pivot_access_result(probe, [])
+    assert res["status"] != "skip"
+    assert any("docker-21" in i["name"] for i in res["items"])

@@ -646,11 +646,24 @@ def flow_try_run_generator_remote(
         "        ok=False\n"
         "        err=f'Artifact verification failed: {v} does not exist on remote disk (checked: {checked})'\n"
         "        break\n"
+        # Keep the head as well as the tail. The runner prints its image-cache
+        # verdict ('[compose] ... using cached generator image' / '... not
+        # cached; will build now') before it runs anything, so a tail-only clip
+        # drops that line for any generator whose build output is long. The
+        # caller then classifies the run as neither cached nor built and it
+        # surfaces as a phantom 'pending' image in the Generate results -- a
+        # successful run reported as unaccounted-for work.
+        "def _clip(text, head=2000, tail=4000):\n"
+        "  text = text or ''\n"
+        "  if len(text) <= head + tail:\n"
+        "    return text\n"
+        "  cut = len(text) - head - tail\n"
+        "  return text[:head] + ('\\n...[%d characters omitted]...\\n' % cut) + text[-tail:]\n"
         "print(json.dumps({\n"
         "  'ok': ok,\n"
         "  'rc': int(p.returncode or 0),\n"
-        "  'stdout': (preflight + (p.stdout or ''))[-4000:],\n"
-        "  'stderr': (preflight + (p.stderr or ''))[-4000:],\n"
+        "  'stdout': _clip(preflight + (p.stdout or '')),\n"
+        "  'stderr': _clip(preflight + (p.stderr or '')),\n"
         "  'manifest': manifest if os.path.exists(manifest) else None,\n"
         "  'outputs': outputs,\n"
         "  'error': err,\n"

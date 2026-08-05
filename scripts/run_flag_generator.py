@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -10,6 +9,17 @@ import time
 import shutil
 from pathlib import Path
 from typing import Any
+
+# This script is invoked standalone by path, so the repo root is not on the
+# path by default. The image tag and its digest are shared with flow cleanup,
+# which has to decide whether an image still corresponds to installed source:
+# two implementations of the digest would mean cleanup deleting images the
+# runner would have reused, which is the bug this sharing exists to prevent.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scenarioforge.utils.generator_images import (  # noqa: E402
+    slugify,
+    source_cache_digest as _source_cache_digest,
+)
 
 
 _COMPOSE_RUN_SUPPORTS_NO_BUILD: bool | None = None
@@ -1060,49 +1070,6 @@ def _compose_run_supports_no_build(workdir: Path, env: dict[str, str]) -> bool:
     except Exception:
         _COMPOSE_RUN_SUPPORTS_NO_BUILD = False
     return _COMPOSE_RUN_SUPPORTS_NO_BUILD
-
-
-def slugify(value: str) -> str:
-    out = []
-    for ch in value.lower():
-        if ch.isalnum():
-            out.append(ch)
-        else:
-            out.append("-")
-    s = "".join(out)
-    while "--" in s:
-        s = s.replace("--", "-")
-    return s.strip("-") or "fg"
-
-
-def _source_cache_digest(source_dir: Path) -> str:
-    """Return a short digest for files that affect the generator image."""
-    root = source_dir.resolve()
-    digest = hashlib.sha256()
-    skip_dirs = {'.git', '.hg', '.svn', '__pycache__', '.pytest_cache'}
-    for path in sorted(root.rglob('*'), key=lambda p: str(p.relative_to(root))):
-        try:
-            rel = path.relative_to(root)
-        except Exception:
-            continue
-        parts = set(rel.parts)
-        if parts & skip_dirs:
-            continue
-        name = path.name
-        if name.startswith('docker-compose.hostnet.') and name.endswith(('.yml', '.yaml')):
-            continue
-        if name.endswith(('.pyc', '.pyo')):
-            continue
-        if not path.is_file() or path.is_symlink():
-            continue
-        try:
-            digest.update(str(rel).replace('\\', '/').encode('utf-8'))
-            digest.update(b'\0')
-            digest.update(path.read_bytes())
-            digest.update(b'\0')
-        except Exception:
-            continue
-    return digest.hexdigest()[:12]
 
 
 def run_compose(

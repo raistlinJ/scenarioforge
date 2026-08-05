@@ -261,6 +261,27 @@
             try { console.debug('[preview] message full-preview-ready'); } catch (e) { }
             previewExplicitReadyReceived = true;
             completePreviewLoading('postMessage', 'Preview ready.');
+          } else if (data && data.type === 'coretg-preview-execute-state') {
+            // The run lives in the preview iframe, but the button the user sees
+            // is this page's. Without this the Execute button stayed green and
+            // clickable for the whole run, inviting a second concurrent execute
+            // against the same scenario.
+            const previewFrame = document.getElementById('scenariosPreviewFrame');
+            if (!previewFrame || ev.source !== previewFrame.contentWindow) return;
+            const btn = document.getElementById('scenariosExecuteBtn');
+            if (!btn) return;
+            if (data.busy) {
+              if (!btn.dataset.idleLabel) { btn.dataset.idleLabel = (btn.textContent || 'Execute'); }
+              if (!btn.dataset.idleTitle) { btn.dataset.idleTitle = (btn.getAttribute('title') || ''); }
+              btn.disabled = true;
+              btn.textContent = 'Executing…';
+              btn.setAttribute('title', 'A scenario is currently executing. Wait for it to finish.');
+            } else {
+              btn.disabled = false;
+              if (btn.dataset.idleLabel) { btn.textContent = btn.dataset.idleLabel; }
+              if (btn.dataset.idleTitle) { btn.setAttribute('title', btn.dataset.idleTitle); }
+              else { btn.removeAttribute('title'); }
+            }
           } else if (data && data.type === 'coretg-preview-execution-complete') {
             const previewFrame = document.getElementById('scenariosPreviewFrame');
             if (!previewFrame || ev.source !== previewFrame.contentWindow) return;

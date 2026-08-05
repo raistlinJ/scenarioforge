@@ -647,6 +647,7 @@ def _apply_pivot_access(
     node_names: Optional[Dict[int, str]] = None,
     participant_subnets: Optional[Sequence[str]] = None,
     ssh_port: int = 22,
+    preferred_provider: object = None,
 ) -> None:
     """Guarantee each walled-off subnet keeps one reachable pivot provider.
 
@@ -690,6 +691,7 @@ def _apply_pivot_access(
         router_ids=router_ids,
         ssh_port=int(ssh_port),
         participant_subnets=participant_subnets,
+        preferred_provider=preferred_provider,
     )
     if not plan.providers:
         return
@@ -765,6 +767,7 @@ def plan_and_apply_segmentation(
     pivot_node_names: Optional[Dict[int, str]] = None,
     pivot_participant_subnets: Optional[Sequence[str]] = None,
     pivot_ssh_port: int = 22,
+    pivot_preferred_provider: object = None,
     planned_rules: Optional[Sequence[dict]] = None,
 ) -> Dict[str, object]:
     """
@@ -1561,6 +1564,7 @@ def plan_and_apply_segmentation(
                 node_names=pivot_node_names,
                 participant_subnets=pivot_participant_subnets,
                 ssh_port=pivot_ssh_port,
+                preferred_provider=pivot_preferred_provider,
             )
         except Exception as exc:
             logger.warning("Pivot access planning failed: %s", exc)

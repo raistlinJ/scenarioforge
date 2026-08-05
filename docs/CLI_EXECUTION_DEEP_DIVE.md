@@ -295,7 +295,7 @@ The XML column deliberately prefers a saved *source* scenario XML (one carrying 
 3. Service ports are open and reachable across the CORE network.
 4. Inject files are present in the right location on the nodes.
 5. Firewall/segmentation rules are in place.
-6. Traffic scripts are running where they should be.
+6. Traffic agents are running where they should be.
 7. Each traffic source can reach its destination, **on that flow's own protocol and port**. Never with ping: a default-deny segmentation policy drops ICMP on paths that are working perfectly.
 8. Every pivot provider is reachable from the participant, so the challenges behind a segmentation boundary stay solvable.
 
@@ -344,7 +344,7 @@ Output is a per-check table followed by a single machine-readable marker line, `
 ```text
 [PASS ] Containers running on correct nodes: All 22 expected containers present.
 [PASS ] Ports open: All 32 stable service port target(s) reachable (33 listening across 24 node(s)).
-[SKIP ] Traffic scripts running: No traffic configured for this scenario.
+[SKIP ] Traffic agents running: No traffic configured for this scenario.
 ------------------------------------------------------------------------
 Overall: pass — 4 pass, 3 skip
 CHECK_ARTIFACTS_SUMMARY_JSON: {"ok": true, "overall": "pass", ...}
@@ -457,11 +457,13 @@ Consequences for the command line:
 
 - The settings that shape segmentation are **plan-time** inputs. `--nat-mode`,
   `--seg-include-hosts`, `--dnat-prob`, `--allow-src-subnet-prob`,
-  `--allow-dst-subnet-prob` and `--seg-accessible-by-pivot` are applied when the
-  plan is computed, and each also has an attribute on the Segmentation section
-  (`nat_mode`, `include_hosts`, `dnat_probability`, `allow_src_subnet_prob`,
-  `allow_dst_subnet_prob`, `accessible_by_pivot`) so the setting travels with the
-  scenario.
+  `--allow-dst-subnet-prob`, `--seg-accessible-by-pivot` and
+  `--seg-pivot-provider` are applied when the plan is computed, and each also has
+  an attribute on the Segmentation section (`nat_mode`, `include_hosts`,
+  `dnat_probability`, `allow_src_subnet_prob`, `allow_dst_subnet_prob`,
+  `accessible_by_pivot`, `pivot_provider`) so the setting travels with the
+  scenario. Every plan-shaping setting has both forms; a test enforces that, so a
+  new one cannot arrive XML-only.
 - Passing one of them to `execute` against a plan built without it cannot be
   honoured. Execute says so, naming the settings it is ignoring and the values
   the plan holds, and uses the plan's. Regenerate the plan to change them.
@@ -474,9 +476,15 @@ Consequences for the command line:
 
 ## Pivot access from the command line
 
-When the Segmentation section sets `accessible_by_pivot="true"` (or you pass
+When the scenario turns on "accessible by pivot" (or you pass
 `--seg-accessible-by-pivot`), every subnet segmentation walls off is guaranteed
-one reachable **provider**. Provider nodes that have to be *added* are created
+one reachable **provider**. The editor writes that switch as `pivot_enabled` on a
+Segmentation **row**, not as a section attribute — a scenario-wide
+`accessible_by_pivot` on the section is honoured too and outranks the rows, but
+nothing in the UI produces it. Which kind of provider is tried first comes from
+the row's `pivot_provider` (or `--seg-pivot-provider`); it reorders the default
+preference rather than restricting it, so a subnet whose only way in is a
+vulnerability still gets one. Provider nodes that have to be *added* are created
 during the topology build, so they exist by `topo` — not at segmentation time.
 
 What to look for in an execute log:
