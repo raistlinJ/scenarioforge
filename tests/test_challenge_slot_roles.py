@@ -292,3 +292,65 @@ def test_slot_rows_count_as_container_capacity() -> None:
     assert ai_provider._count_docker_rows(payload) == 5
     assert ai_provider._count_node_role_rows(payload, VULNERABILITY_SLOT_ROLE) == 3
     assert ai_provider._count_node_role_rows(payload, FLAG_GEN_SLOT_ROLE) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Pivot-access providers are additive, never challenge capacity
+# --------------------------------------------------------------------------- #
+
+def _provider_host(**extra):
+    """A host as `_materialise_pivot_providers` leaves it in the plan."""
+    host = {
+        'node_id': 26,
+        'name': 'pivot-10-0-171-0',
+        'role': 'Docker',
+        'ip4': '10.0.171.5/24',
+        'metadata': {
+            'pivot_access_provider': {
+                'subnet': '10.0.171.0/24',
+                'image': 'lscr.io/linuxserver/openssh-server:latest',
+                'port': 2222, 'protocol': 'tcp', 'kind': 'ssh', 'label': 'SSH',
+                'consumes_slot': False,
+            },
+        },
+    }
+    host.update(extra)
+    return host
+
+
+def test_a_pivot_provider_never_accepts_a_challenge():
+    """The regression: Flow placed generators on added provider nodes.
+
+    A provider is a plain Docker host with no slot kind, so it looked like free
+    capacity. An *added* provider runs the SSH provider image, which has no
+    generator staging and no `/flow_injects`, so the run failed the injects
+    check with `MISSING_DIR:/flow_injects` on two nodes that could never have
+    held them. The planner already records `consumes_slot: false`.
+    """
+    from webapp import app_backend as ab
+
+    provider = _provider_host()
+    assert ab._flow_node_is_pivot_access_provider(provider) is True
+    for kind in ('flag-node-generator', 'vulnerability'):
+        assert ab._flow_node_accepts_challenge_kind(provider, kind) is False, kind
+    assert ab._flow_node_allows_flag_node_generator(provider) is False
+
+
+def test_excluding_providers_does_not_touch_real_capacity():
+    from webapp import app_backend as ab
+
+    plain = {'node_id': 6, 'name': 'docker-1', 'role': 'Docker'}
+    slot = {'node_id': 11, 'name': 'flaggenslot-6', 'role': 'FlagGenSlot'}
+    assert ab._flow_node_is_pivot_access_provider(plain) is False
+    assert ab._flow_node_accepts_challenge_kind(plain, 'flag-node-generator') is True
+    assert ab._flow_node_accepts_challenge_kind(slot, 'flag-node-generator') is True
+
+
+def test_a_host_without_the_marker_is_not_mistaken_for_a_provider():
+    # Name alone must not be the signal: an author may legitimately name a host
+    # "pivot-something". Only the planner's metadata marker counts.
+    from webapp import app_backend as ab
+
+    lookalike = {'node_id': 30, 'name': 'pivot-10-0-171-0', 'role': 'Docker', 'metadata': {}}
+    assert ab._flow_node_is_pivot_access_provider(lookalike) is False
+    assert ab._flow_node_accepts_challenge_kind(lookalike, 'flag-node-generator') is True

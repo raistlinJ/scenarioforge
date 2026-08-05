@@ -19330,6 +19330,16 @@ def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
         return False
 
 
+def _flow_node_is_pivot_access_provider(node: dict[str, Any] | None) -> bool:
+    """Whether this host exists only to keep a walled-off subnet reachable."""
+    try:
+        from scenarioforge.utils.pivot_access import is_pivot_provider_host
+
+        return bool(is_pivot_provider_host(node))
+    except Exception:
+        return False
+
+
 def _flow_node_accepts_challenge_kind(node: dict[str, Any] | None, kind: str) -> bool:
     """True when `node` may host a challenge of `kind`.
 
@@ -19337,6 +19347,15 @@ def _flow_node_accepts_challenge_kind(node: dict[str, Any] | None, kind: str) ->
     `kind` is 'vulnerability' or 'flag-node-generator'.
     """
     if not _flow_node_is_docker_role(node):
+        return False
+    # A pivot-access provider is additive capacity, not the author's. It is a
+    # Docker host with no slot kind, so it looked like a free node and Flow
+    # placed challenges on it -- and an *added* provider runs the SSH provider
+    # image, which has no generator staging and no `/flow_injects`, so the run
+    # then failed the injects check with MISSING_DIR on a node that could never
+    # have had them. The planner already records `consumes_slot: false`; this is
+    # where that promise is kept.
+    if _flow_node_is_pivot_access_provider(node):
         return False
     slot_kind = _flow_node_challenge_slot_kind(node)
     if not slot_kind:

@@ -41,12 +41,37 @@ def _supply_when_first_chain():
     return chain, assignments
 
 
+
+def _plugin_contracts(assignments):
+    """Self-contained plugin contracts for the steps under test.
+
+    The validator looks each generator id up in the *installed* catalog and
+    bails with "unknown plugin" before checking anything else. These
+    assignments carry real ids (138, 127), so on a developer machine with those
+    packs installed the lookup succeeded and the test measured what it meant to
+    -- and on a clean CI runner it failed, having never run the check at all.
+
+    `requires`/`produces` are the only fields the validator reads off a
+    contract, and fact-shaped entries are the only ones that participate in
+    ordering, so deriving them from the assignment keeps the test about the
+    thing it is named for.
+    """
+    return {
+        str(a['id']): {
+            'requires': [x for x in a.get('inputs', []) if '(' in str(x)],
+            'produces': [x for x in a.get('outputs', []) if '(' in str(x)],
+        }
+        for a in assignments
+    }
+
+
 def test_a_flow_supplied_input_is_not_reported_as_an_unmet_dependency():
     from webapp import app_backend as ab
 
     chain, assignments = _supply_when_first_chain()
     ok, errors = ab._flow_validate_chain_order_by_requires_produces(
-        chain, assignments, scenario_label='S')
+        chain, assignments, scenario_label='S',
+        plugins_by_id_override=_plugin_contracts(assignments))
     assert ok is True, errors
     assert errors == []
 
@@ -59,7 +84,8 @@ def test_a_genuinely_unproduced_requirement_is_still_reported():
     chain, assignments = _supply_when_first_chain()
     assignments[1]['inputs'] = list(assignments[1]['inputs']) + ['Nonexistent(thing)']
     ok, errors = ab._flow_validate_chain_order_by_requires_produces(
-        chain, assignments, scenario_label='S')
+        chain, assignments, scenario_label='S',
+        plugins_by_id_override=_plugin_contracts(assignments))
     assert ok is False
     assert any('Nonexistent(thing)' in str(e) for e in errors)
 
