@@ -80,6 +80,9 @@ def _backend_dependencies(backend: Any) -> Any:
         '_flow_compute_flag_assignments',
         '_pick_flow_nonvulnerability_docker_nodes',
         '_flow_apply_pivot_context_to_assignments',
+        '_flow_refresh_assignment_positions',
+        '_flow_fill_empty_vulnerability_slots',
+        '_get_flow_seed',
         '_flow_expand_chain_for_topology_requirements',
         '_flow_reorder_chain_by_generator_dag',
         '_flag_generators_from_enabled_sources',
@@ -95,6 +98,7 @@ def _backend_dependencies(backend: Any) -> Any:
         '_remote_path_join',
         '_flow_node_is_vuln',
         '_flow_node_is_docker_role',
+        '_flow_node_challenge_slot_kind',
         '_outputs_dir',
         '_local_timestamp_safe',
         '_enrich_flow_state_with_artifacts',
@@ -538,6 +542,7 @@ def _prepare_chain_and_assignments(
     flow_progress: Any | None = None,
 ) -> dict[str, Any]:
     warning: str | None = None
+    auto_selected_generic_node_ids: set[str] = set()
     def _progress(message: str) -> None:
         try:
             if callable(flow_progress):
@@ -636,6 +641,22 @@ def _prepare_chain_and_assignments(
                 length=nonvulnerability_target,
                 backend=backend,
             )
+            # These nodes were selected by Flow itself to supply ordinary
+            # Docker challenge capacity. When the topology also contains a
+            # specifically bound flag-node-generator, the graph marks every
+            # Docker node as topology-configured. Preserve exact bindings for
+            # those specific nodes, but let auto-selected generic Docker nodes
+            # draw from the enabled flag-node-generator catalog.
+            auto_selected_generic_node_ids = {
+                str(node.get('id') or '').strip()
+                for node in (chain_nodes or [])
+                if isinstance(node, dict)
+                and str(node.get('id') or '').strip()
+                and deps._flow_node_is_docker_role(node)
+                and not deps._flow_node_is_vuln(node)
+                and not str(node.get('flag_node_generator_id') or '').strip()
+                and not deps._flow_node_challenge_slot_kind(node)
+            }
             if len(chain_nodes) < 1 and nonvulnerability_target > 0:
                 return {
                     'response': (
@@ -672,13 +693,20 @@ def _prepare_chain_and_assignments(
             include_all_topology_vulns=True,
             pivot_context=pivot_context,
         )
+        if (
+            isinstance(_required_vuln_info, dict)
+            and _required_vuln_info.get('reordered_pivot_source_node_ids')
+            and not warning
+        ):
+            warning = 'Flow chain order was repaired to place pivot providers before their targets.'
+            _progress('Solve: repaired pivot provider ordering before assignment')
         chain_ids = [
             str(node.get('id') or '').strip()
             for node in (chain_nodes or [])
             if isinstance(node, dict) and str(node.get('id') or '').strip()
         ]
         _progress(f'Solve: required vulnerability nodes included count={len(chain_nodes or [])} ids={",".join(chain_ids or [])}')
-        approved_generic_node_ids: set[str] = set()
+        approved_generic_node_ids: set[str] = set(auto_selected_generic_node_ids)
         try:
             saved_expansion = flow_state_for_prepare.get('chain_expansion') if isinstance(flow_state_for_prepare, dict) else None
             if isinstance(saved_expansion, dict):
@@ -707,6 +735,21 @@ def _prepare_chain_and_assignments(
             _progress(
                 'Solve: restored explicitly approved Docker challenge nodes='
                 + ','.join(sorted(approved_generic_node_ids))
+            )
+
+        # Match the interactive sequence-preview path: VulnerabilitySlot nodes
+        # are deliberately empty during topology planning so they are optional.
+        # Once this concrete chain reaches one, fill it before assignment or it
+        # has no eligible generator pool and the whole CLI resolve fails.
+        drawn_slot_vulns = deps._flow_fill_empty_vulnerability_slots(
+            preview,
+            chain_nodes,
+            seed=deps._get_flow_seed(preview),
+        )
+        if drawn_slot_vulns:
+            _progress(
+                f'Solve: filled {len(drawn_slot_vulns)} vulnerability slot(s): '
+                + ','.join(drawn_slot_vulns)
             )
     except Exception as exc:
         current_app.logger.exception('[flow.prepare_preview_for_execute] internal error: %s', exc)
@@ -836,6 +879,17 @@ def _prepare_chain_and_assignments(
             scenario_label=(scenario_label or scenario_norm),
         )
         _progress('Solve: pivot context reapplied')
+    except Exception:
+        pass
+
+    try:
+        _progress('Solve: refreshing position-sensitive hints and supplied inputs')
+        flag_assignments = deps._flow_refresh_assignment_positions(
+            flag_assignments,
+            chain_nodes,
+            scenario_label=(scenario_label or scenario_norm),
+        )
+        _progress('Solve: position-sensitive assignment data refreshed')
     except Exception:
         pass
 

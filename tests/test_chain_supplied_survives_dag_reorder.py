@@ -134,3 +134,48 @@ def test_dag_reorder_never_passes_an_assignment_as_its_own_definition():
             f'line {call.lineno}: supply_on_start omitted, so only position 0 is '
             'treated as a branch start'
         )
+
+
+def test_position_refresh_promotes_disclosure_for_a_new_opening_step(monkeypatch):
+    gated = {
+        'id': 'ssh-gated',
+        'access_instructions': {
+            'steps': [{'instructions': 'Connect as {{USERNAME}} with {{PASSWORD}}.'}],
+        },
+        'inputs': [
+            {'name': 'Credential(user, password)', 'required': True,
+             'flow_supply_when_first': True},
+        ],
+        'hint_levels': {
+            'low': ['Use the assigned account.'],
+            'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
+            'high': ['Connect with {{USERNAME}} and {{PASSWORD}}.'],
+        },
+    }
+    stale_assignment = {
+        'node_id': 'docker-2',
+        'id': 'ssh-gated',
+        'inputs': ['Credential(user, password)'],
+        'requires': ['Credential(user, password)'],
+        'hint_level_templates': gated['hint_levels'],
+        'hint_levels': gated['hint_levels'],
+    }
+    monkeypatch.setattr(
+        backend,
+        '_flow_enabled_generator_defs_by_id',
+        lambda: {'ssh-gated': gated},
+    )
+
+    refreshed = backend._flow_refresh_assignment_positions(
+        [stale_assignment],
+        [{'id': 'docker-2', 'name': 'docker-2', 'ip4': '10.0.0.2'}],
+        scenario_label='S',
+    )
+
+    first = refreshed[0]
+    assert 'Credential: {{OUTPUT.Credential(user,password)}}' in first['hint_level_templates']['low']
+    assert first['promoted_first_step_hints']
+    assert backend._flow_first_step_undisclosed_secrets(
+        {**gated, 'hint_levels': first['hint_levels']}
+    ) == []
+    assert first['chain_supplied_inputs'] == ['Credential(user, password)']

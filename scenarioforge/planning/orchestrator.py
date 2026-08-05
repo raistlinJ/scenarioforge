@@ -233,7 +233,17 @@ def compute_full_plan(
     # --- Segmentation ---
     seg_density, seg_items = parse_segmentation_info(xml_path, scenario)
     segmentation_plan, seg_breakdown = compute_segmentation_plan(seg_density, seg_items, density_base)
-    seg_breakdown['raw_items_serialized'] = [{'selected': si.name, 'factor': si.factor} for si in seg_items]
+    # `abs_count` has to travel with the row. `build_full_preview` reads it back
+    # as `abs_count` to build the planner's service sequence; dropping it made
+    # every explicit count look like zero, so a row asking for "2 Firewall"
+    # became weighted random draws between the rows' kinds instead. A scenario
+    # that asked for firewall rules could then plan none at all -- and with no
+    # blocking rule nothing is walled off, so pivot access has no subnet to give
+    # an entrance to and the artifact check reports no providers.
+    seg_breakdown['raw_items_serialized'] = [
+        {'selected': si.name, 'factor': si.factor, 'abs_count': int(getattr(si, 'abs_count', 0) or 0)}
+        for si in seg_items
+    ]
     # The settings travel with the plan because execute enforces the plan rather
     # than planning again, so anything that shapes the policy has to be known
     # here. `accessible_by_pivot` additionally lets the preview -- and through it

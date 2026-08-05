@@ -83,6 +83,44 @@ def test_app_user_shim_skips_root_base(tmp_path):
     assert p.read_text(encoding='utf-8') == before
 
 
+def test_app_user_shim_uses_wrapper_config_when_buildkit_did_not_load_base_tag(tmp_path, caplog):
+    p = _write_compose(tmp_path)
+    calls = []
+    wrapper_config = {
+        # The wrapper deliberately runs as root for CORE docker-exec. Its
+        # embedded base_user metadata makes the shim drop privileges only when
+        # the original image requires it.
+        'User': '0',
+        'Entrypoint': ['/usr/local/bin/dumb-init', '--'],
+        'Cmd': ['/usr/local/bin/kibana-docker'],
+    }
+
+    def run(args, timeout=None):
+        call = [str(a) for a in args]
+        calls.append(call)
+        if call[-1] == 'vulhub/kibana:6.5.4':
+            return 1, 'Error response from daemon: No such image'
+        if call[-1] == 'coretg/scenario-node:iproute2':
+            return 0, json.dumps(wrapper_config)
+        return 0, ''
+
+    topology._apply_wrapper_app_user_entrypoints(
+        str(p), docker_cmd=['docker'], run=run, node_name='n1',
+    )
+
+    obj = yaml.safe_load(p.read_text(encoding='utf-8'))
+    svc = obj['services']['kibana']
+    assert svc['entrypoint'] == [
+        topology._CORETG_APP_USER_SHIM,
+        '/usr/local/bin/dumb-init',
+        '--',
+    ]
+    assert svc['command'] == ['/usr/local/bin/kibana-docker']
+    assert svc['user'] == '0:0'
+    assert any(call[-1] == 'coretg/scenario-node:iproute2' for call in calls)
+    assert 'base image inspect failed' not in caplog.text
+
+
 def test_app_user_shim_wraps_existing_entrypoint_and_is_idempotent(tmp_path):
     p = _write_compose(tmp_path, entrypoint='sh', command=['-lc', 'airflow initdb && airflow webserver'])
     run, _calls = _fake_run_factory({'User': 'airflow', 'Entrypoint': ['airflow'], 'Cmd': None})

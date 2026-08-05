@@ -12,8 +12,8 @@ def test_remote_repo_workspace_repairs_default_tmp_repo_ownership(monkeypatch):
 
     def fake_exec(_client, command, **_kwargs):
         calls.append(command)
-        if command.startswith('test -L '):
-            return 1, '', ''
+        if command.startswith('if test -L '):
+            return 0, 'not-symlink', ''
         return next(probe_results)
 
     sudo_calls = []
@@ -42,7 +42,11 @@ def test_remote_repo_workspace_does_not_chown_custom_path(monkeypatch):
     monkeypatch.setattr(
         backend,
         '_exec_ssh_command',
-        lambda _client, command, **_kwargs: (1, '', '' if command.startswith('test -L ') else 'Permission denied'),
+        lambda _client, command, **_kwargs: (
+            (0, 'not-symlink', '')
+            if command.startswith('if test -L ')
+            else (1, '', 'Permission denied')
+        ),
     )
     sudo_calls = []
     monkeypatch.setattr(
@@ -70,7 +74,11 @@ def test_remote_repo_workspace_rejects_symlink(monkeypatch):
     monkeypatch.setattr(
         backend,
         '_exec_ssh_command',
-        lambda *_args, **_kwargs: (0, '', ''),
+        lambda _client, command, **_kwargs: (
+            (0, 'symlink', '')
+            if command.startswith('if test -L ')
+            else (0, '', '')
+        ),
     )
 
     try:
@@ -79,6 +87,22 @@ def test_remote_repo_workspace_rejects_symlink(monkeypatch):
         assert 'must not be a symlink' in str(exc)
     else:
         raise AssertionError('expected a symlink safety error')
+
+
+def test_remote_repo_workspace_reports_symlink_inspection_failure(monkeypatch):
+    monkeypatch.setattr(
+        backend,
+        '_exec_ssh_command',
+        lambda *_args, **_kwargs: (2, '', 'inspection failed'),
+    )
+
+    try:
+        backend._ensure_remote_repo_workspace(object(), '/tmp/scenarioforge', {})
+    except RuntimeError as exc:
+        assert 'Unable to inspect remote repository path' in str(exc)
+        assert 'inspection failed' in str(exc)
+    else:
+        raise AssertionError('expected a symlink inspection error')
 
 
 def test_async_repo_finalize_records_hash_after_extract(monkeypatch):

@@ -1310,6 +1310,65 @@ def test_prepare_compose_inject_copy_uses_busybox_entrypoint_for_wrapper(tmp_pat
         assert "/usr/local/coretg/bin/busybox" in text
 
 
+def test_prepare_compose_keeps_selected_app_sticky_after_inject_sidecar(tmp_path, monkeypatch):
+    """An injected helper must not replace the selected app as the CORE node."""
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    compose_src = tmp_path / "base-compose.yml"
+    compose_src.write_text(
+        (
+            "services:\n"
+            "  kibana:\n"
+            "    image: vulhub/kibana:5.6.12\n"
+            "    depends_on: [elasticsearch]\n"
+            "    ports: ['5601:5601']\n"
+            "  elasticsearch:\n"
+            "    image: vulhub/elasticsearch:5.6.16\n"
+        ),
+        encoding="utf-8",
+    )
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "client_config.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setenv("CORETG_INJECT_FILES_MODE", "copy")
+    record = {
+        "Type": "docker-compose",
+        "Name": "kibana/CVE-2018-17246",
+        "Path": str(compose_src),
+        "ScenarioTag": "sticky-selection",
+        "InjectFiles": ["client_config.json"],
+        "InjectSourceDir": str(artifacts),
+        "EnableTrafficMount": "true",
+    }
+
+    created = prepare_compose_for_assignments({"docker-15": record}, out_base=str(tmp_path / "out"))
+    assert created
+    out_path = tmp_path / "out" / "docker-compose-docker-15.yml"
+    obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    services = (obj or {}).get("services") or {}
+    node_service = services.get("docker-15") or {}
+    labels = node_service.get("labels") or {}
+
+    assert str(node_service.get("image") or "").startswith("coretg/")
+    assert str(node_service.get("image") or "").endswith(":iproute2")
+    assert labels.get("coretg.wrapper_base_image") == "vulhub/kibana:5.6.12"
+    assert node_service.get("entrypoint") == [
+        "/usr/local/coretg/bin/busybox",
+        "setuidgid",
+        "kibana",
+    ]
+    assert node_service.get("command") == ["/usr/share/kibana/bin/kibana"]
+    assert labels.get("coretg.repaired_catalog_entrypoint") == "busybox-setuidgid-kibana"
+    assert (node_service.get("environment") or {}).get("CORETG_TRAFFIC_NODE") == "1"
+    assert "/tmp/traffic:/tmp/traffic:ro" in (node_service.get("volumes") or [])
+    inject_service = services.get("inject_copy") or {}
+    assert (inject_service.get("environment") or {}).get("CORETG_TRAFFIC_NODE") is None
+
+
 def test_prepare_compose_flow_injects_default_to_flow_injects_dir(tmp_path, monkeypatch):
     """Regression: flow inject specs without explicit dest should default to /flow_injects."""
     try:

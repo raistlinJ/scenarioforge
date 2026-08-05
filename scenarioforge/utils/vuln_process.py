@@ -408,6 +408,35 @@ def _repair_known_catalog_compose(obj: dict, rec: Dict[str, str], *, src_dir: st
 				except Exception:
 					pass
 			return obj
+		if identity == 'kibana/cve-2018-17246':
+			for svc_key, svc in services.items():
+				if not isinstance(svc, dict):
+					continue
+				image_text = str(svc.get('image') or '').strip().lower()
+				if image_text != 'vulhub/kibana:5.6.12':
+					continue
+				# This image's legacy entrypoint launches Kibana through an old
+				# amd64 Go build of gosu. On arm64 hosts, that binary can fail
+				# under emulation before Kibana starts (newosproc/errno=22). The
+				# iproute2 wrapper already supplies a native static BusyBox, so
+				# use its setuidgid applet to preserve the intended kibana user
+				# while bypassing only the incompatible helper.
+				svc['entrypoint'] = [
+					'/usr/local/coretg/bin/busybox',
+					'setuidgid',
+					'kibana',
+				]
+				svc['command'] = ['/usr/share/kibana/bin/kibana']
+				labs = svc.get('labels')
+				if not isinstance(labs, dict):
+					labs = {}
+				labs.setdefault('coretg.repaired_catalog_entrypoint', 'busybox-setuidgid-kibana')
+				svc['labels'] = labs
+				try:
+					logger.info('[vuln] repaired kibana catalog startup identity=%s service=%s image=%s', identity, svc_key, image_text)
+				except Exception:
+					pass
+			return obj
 		if identity != 'python/cve-2024-23334':
 			return obj
 		candidates: List[str] = []
@@ -5118,6 +5147,11 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 				modified_service_key = _select_service_key(obj, prefer_service=prefer)
 				if modified_service_key:
 					rec['compose_service_selected'] = str(modified_service_key)
+					# Keep targeting the same application service after helper
+					# services (for example inject_copy) are added. Re-running the
+					# heuristic against the expanded compose can otherwise wrap or
+					# mount traffic on the helper instead of the CORE node service.
+					prefer = str(modified_service_key)
 					logger.info("[vuln] compose selected service node=%s service=%s", node_name, modified_service_key)
 			except Exception:
 				modified_service_key = None
@@ -5541,7 +5575,9 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					if _compose_requires_internal_networking(obj) and not allow_internal_networking:
 						logger.info(
 							'[vuln] using CORE-only networking for multi-service compose node=%s; '
-							'Docker-managed internal networking remains disabled.',
+							'Docker-managed internal networking remains disabled. Set '
+							'CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 and CORETG_DOCKER_IFID_START=1 '
+							'only for labs that intentionally need Compose service networking.',
 							node_name,
 						)
 						obj = _repair_apache_foreground_for_no_network(obj)

@@ -1745,6 +1745,12 @@ def repair_explicit_chain_nodes(
                 is_docker = backend._flow_node_is_docker_role(node)
                 is_vuln = backend._flow_node_is_vuln(node)
 
+                # A reached VulnerabilitySlot is intentionally empty at this
+                # stage. Keep the caller's explicit choice; the CLI preparation
+                # path fills it immediately before generator assignment.
+                if backend._flow_node_challenge_slot_kind(node) == 'vulnerability':
+                    continue
+
                 # A non-vulnerability docker node can only host a
                 # flag-node-generator.
                 need_nonvuln_docker = bool(is_docker and (not is_vuln))

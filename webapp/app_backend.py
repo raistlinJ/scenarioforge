@@ -2440,13 +2440,19 @@ def _ensure_remote_repo_workspace(
     if not repo or repo in {'.', '/'} or not repo.startswith('/'):
         raise RuntimeError(f'Unsafe remote repository path: {remote_repo!r}')
     # Never recursively change ownership through a symlink, even in /tmp.
-    link_rc, _link_out, _link_err = _exec_ssh_command(
+    link_rc, link_out, link_err = _exec_ssh_command(
         client,
-        f"test -L {shlex.quote(repo)}",
+        (
+            f"if test -L {shlex.quote(repo)}; "
+            "then printf 'symlink'; else printf 'not-symlink'; fi"
+        ),
         timeout=15.0,
         check=False,
     )
-    if link_rc == 0:
+    if link_rc != 0:
+        detail = (link_err or link_out or f'Exit {link_rc}').strip()
+        raise RuntimeError(f'Unable to inspect remote repository path {repo}: {detail}')
+    if (link_out or '').strip() == 'symlink':
         raise RuntimeError(f'Remote repository path must not be a symlink: {repo}')
 
     def _probe() -> tuple[int, str, str]:
@@ -22077,6 +22083,135 @@ def _flow_apply_first_step_chain_supplied_inputs_to_assignments(
     return out
 
 
+def _flow_refresh_assignment_positions(
+    flag_assignments: list[dict[str, Any]],
+    chain_nodes: list[dict[str, Any]],
+    *,
+    scenario_label: str,
+) -> list[dict[str, Any]]:
+    """Refresh position-sensitive disclosures after reuse or DAG reordering.
+
+    Assignment hint levels are computed for their original positions.  A saved
+    Flow state or DAG repair can later move a credential-gated generator to the
+    opening step, where its disclosure must be promoted into ``low``.  The
+    inverse matters too: a former opening step moved later must lose that
+    promotion so the chain does not reveal a downstream secret early.
+    """
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return flag_assignments
+
+    try:
+        gen_defs_by_id = _flow_enabled_generator_defs_by_id()
+    except Exception:
+        gen_defs_by_id = {}
+
+    id_to_name: dict[str, str] = {}
+    id_to_ip: dict[str, str] = {}
+    for node in chain_nodes or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get('id') or node.get('node_id') or '').strip()
+        if not node_id:
+            continue
+        id_to_name[node_id] = str(node.get('name') or node.get('label') or node_id).strip() or node_id
+        id_to_ip[node_id] = str(node.get('ip4') or node.get('ipv4') or '').strip()
+
+    try:
+        start_positions = _flow_parallel_start_assignment_indexes(
+            flag_assignments,
+            gen_defs_by_id=gen_defs_by_id,
+        )
+    except Exception:
+        start_positions = {0}
+
+    refreshed: list[dict[str, Any]] = []
+    for index, assignment in enumerate(flag_assignments):
+        if not isinstance(assignment, dict):
+            refreshed.append(assignment)
+            continue
+        current = copy.deepcopy(assignment)
+        node_id = str(current.get('node_id') or '').strip()
+        next_id = ''
+        if (index + 1) < len(chain_nodes or []):
+            next_node = (chain_nodes or [])[index + 1]
+            if isinstance(next_node, dict):
+                next_id = str(next_node.get('id') or next_node.get('node_id') or '').strip()
+
+        gen_id = str(current.get('id') or current.get('generator_id') or '').strip()
+        gen_def = gen_defs_by_id.get(gen_id) if gen_id else None
+        if isinstance(gen_def, dict):
+            templates = _flow_hint_level_templates_from_generator(gen_def)
+        else:
+            raw_templates = current.get('hint_level_templates')
+            templates = {
+                str(level): [str(line) for line in (lines or [])]
+                for level, lines in (raw_templates or {}).items()
+            } if isinstance(raw_templates, dict) else {}
+
+        promoted: list[str] = []
+        promoted_templates: list[str] = []
+        if index == 0:
+            low_before = list(templates.get('low') or [])
+            templates, promoted = _flow_promote_first_step_hint_levels(
+                templates,
+                gen_def if isinstance(gen_def, dict) else current,
+            )
+            promoted_templates = [
+                line for line in (templates.get('low') or [])
+                if line not in low_before
+            ]
+
+        rendered_levels = _flow_render_hint_level_templates(
+            templates,
+            scenario_label=scenario_label,
+            id_to_name=id_to_name,
+            id_to_ip=id_to_ip,
+            this_id=node_id,
+            next_id=next_id,
+        )
+        low_templates = [str(line or '').strip() for line in (templates.get('low') or []) if str(line or '').strip()]
+        low_hints = [str(line or '').strip() for line in (rendered_levels.get('low') or []) if str(line or '').strip()]
+        current['hint_level_templates'] = templates
+        current['hint_levels'] = rendered_levels
+        current['promoted_first_step_hints'] = list(promoted)
+        current['promoted_first_step_hint_templates'] = promoted_templates
+        current['promoted_first_step_hint_lines'] = [
+            line for line in low_hints
+            if line not in list((_flow_render_hint_level_templates(
+                {'low': low_before if index == 0 else []},
+                scenario_label=scenario_label,
+                id_to_name=id_to_name,
+                id_to_ip=id_to_ip,
+                this_id=node_id,
+                next_id=next_id,
+            ).get('low') or []))
+        ] if index == 0 else []
+        current['hint_templates'] = low_templates
+        if low_templates:
+            current['hint_template'] = low_templates[0]
+        current['hints'] = list(low_hints)
+        if low_hints:
+            current['hint'] = low_hints[0]
+        current['next_node_id'] = next_id
+        current['next_node_name'] = id_to_name.get(next_id, '')
+
+        for hint_key in ('pivot_hints', 'chain_supplied_input_hints'):
+            for hint in current.get(hint_key) or []:
+                hint_text = str(hint or '').strip()
+                if hint_text and hint_text not in current['hints']:
+                    current['hints'].append(hint_text)
+
+        current = _flow_apply_first_step_chain_supplied_inputs(
+            current,
+            gen_def if isinstance(gen_def, dict) else None,
+            scenario_label=scenario_label,
+            position=index,
+            supply_on_start=(index in start_positions),
+        )
+        refreshed.append(current)
+    return refreshed
+
+
 def _flow_split_top_level_list(value: Any) -> list[str]:
     """Return strings from a list or comma text, ignoring commas inside facts."""
     if value is None:
@@ -22771,6 +22906,7 @@ def _flow_expand_chain_for_topology_requirements(
         'added_vuln_node_ids': [],
         'added_flag_node_generator_node_ids': [],
         'added_pivot_node_ids': [],
+        'reordered_pivot_source_node_ids': [],
         'effective_length': len(chain_nodes or []),
     }
     if not requested_vulns and not requested_pivots and not requested_node_generators:
@@ -22855,37 +22991,48 @@ def _flow_expand_chain_for_topology_requirements(
             if node_id and str(node.get('flag_node_generator_id') or '').strip():
                 _append_node(node_id, added_nodegen_ids)
 
+    # Pivot inclusion and pivot ordering are separate concerns.  The opt-in
+    # controls whether missing provider/target nodes are added to the chain,
+    # but whenever both endpoints are already present the provider must precede
+    # its target.  Assignment enrichment always adds Pivot(provider) as a hard
+    # requirement to that target; leaving an existing target-first chain alone
+    # therefore persists a Flow state that cannot pass dependency validation.
+    try:
+        pivot_rules = _flow_pivot_rules_for_chain(preview, expanded, pivot_context=pivot_context)
+    except Exception:
+        pivot_rules = []
+
     if requested_pivots:
-        try:
-            pivot_rules = _flow_pivot_rules_for_chain(preview, expanded, pivot_context=pivot_context)
-        except Exception:
-            pivot_rules = []
         for rule in pivot_rules or []:
             if not isinstance(rule, dict):
                 continue
             _append_node(str(rule.get('source_id') or ''), added_pivot_ids)
             _append_node(str(rule.get('target_id') or ''), added_pivot_ids)
-        for rule in pivot_rules or []:
-            if not isinstance(rule, dict):
-                continue
-            source_id = _resolve_id(rule.get('source_id'))
-            target_id = _resolve_id(rule.get('target_id'))
-            if not source_id or not target_id or source_id == target_id:
-                continue
-            try:
-                source_index = next(
-                    idx for idx, node in enumerate(expanded)
-                    if isinstance(node, dict) and _flow_pivot_node_id(node) == source_id
-                )
-                target_index = next(
-                    idx for idx, node in enumerate(expanded)
-                    if isinstance(node, dict) and _flow_pivot_node_id(node) == target_id
-                )
-            except StopIteration:
-                continue
-            if source_index > target_index:
-                source_node = expanded.pop(source_index)
-                expanded.insert(target_index, source_node)
+
+    for rule in pivot_rules or []:
+        if not isinstance(rule, dict):
+            continue
+        source_id = _resolve_id(rule.get('source_id'))
+        target_id = _resolve_id(rule.get('target_id'))
+        if not source_id or not target_id or source_id == target_id:
+            continue
+        try:
+            source_index = next(
+                idx for idx, node in enumerate(expanded)
+                if isinstance(node, dict) and _flow_pivot_node_id(node) == source_id
+            )
+            target_index = next(
+                idx for idx, node in enumerate(expanded)
+                if isinstance(node, dict) and _flow_pivot_node_id(node) == target_id
+            )
+        except StopIteration:
+            continue
+        if source_index > target_index:
+            source_node = expanded.pop(source_index)
+            expanded.insert(target_index, source_node)
+            reordered = info['reordered_pivot_source_node_ids']
+            if source_id not in reordered:
+                reordered.append(source_id)
 
     info['added_node_ids'] = added_ids
     info['added_vuln_node_ids'] = added_vuln_ids
@@ -24923,6 +25070,96 @@ def _flow_validate_chain_nodes_against_node_schema(
     return errors
 
 
+def _flow_assignments_in_chain_order(
+    chain_ids: list[str],
+    flag_assignments: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return one assignment per chain occurrence without collapsing duplicates.
+
+    Current Flow payloads keep assignments positionally aligned with the chain.
+    Older callers may provide assignments in node-id order instead, so retain an
+    ID-based fallback when every node ID is unique.  Reordering duplicate IDs is
+    ambiguous, however, and must fail explicitly instead of selecting one of the
+    occurrences arbitrarily.
+    """
+    positional_mismatches: list[str] = []
+    if len(flag_assignments) == len(chain_ids):
+        ordered: list[dict[str, Any]] = []
+        for index, (chain_id, assignment) in enumerate(zip(chain_ids, flag_assignments)):
+            if not isinstance(assignment, dict):
+                positional_mismatches.append(
+                    f"sequence {index + 1} expected node '{chain_id}' but has no assignment"
+                )
+                continue
+            assignment_node_id = str(assignment.get('node_id') or '').strip()
+            if assignment_node_id and assignment_node_id != chain_id:
+                positional_mismatches.append(
+                    f"sequence {index + 1} expected node '{chain_id}' "
+                    f"but assignment names node '{assignment_node_id}'"
+                )
+            ordered.append(assignment)
+        if not positional_mismatches and len(ordered) == len(chain_ids):
+            return ordered, []
+
+    assignment_ids: list[str] = []
+    invalid_assignment_positions: list[int] = []
+    for index, assignment in enumerate(flag_assignments):
+        if not isinstance(assignment, dict):
+            invalid_assignment_positions.append(index + 1)
+            assignment_ids.append('')
+            continue
+        assignment_node_id = str(assignment.get('node_id') or '').strip()
+        if not assignment_node_id:
+            invalid_assignment_positions.append(index + 1)
+        assignment_ids.append(assignment_node_id)
+
+    duplicate_chain_ids = sorted({node_id for node_id in chain_ids if chain_ids.count(node_id) > 1})
+    duplicate_assignment_ids = sorted({
+        node_id for node_id in assignment_ids
+        if node_id and assignment_ids.count(node_id) > 1
+    })
+    if duplicate_chain_ids or duplicate_assignment_ids:
+        details = [
+            'flag assignments are not positionally aligned with duplicate chain node occurrences',
+            f"chain_nodes={len(chain_ids)} flag_assignments={len(flag_assignments)}",
+        ]
+        if duplicate_chain_ids:
+            details.append(f"duplicate_chain_nodes={','.join(duplicate_chain_ids)}")
+        if duplicate_assignment_ids:
+            details.append(f"duplicate_assignment_nodes={','.join(duplicate_assignment_ids)}")
+        details.extend(positional_mismatches)
+        return [], details
+
+    if invalid_assignment_positions:
+        return [], [
+            'flag assignments cannot be aligned to the chain',
+            'assignment node_id missing or invalid at sequence(s)='
+            + ','.join(str(position) for position in invalid_assignment_positions),
+            *positional_mismatches,
+        ]
+
+    assignment_by_node = {
+        node_id: assignment
+        for node_id, assignment in zip(assignment_ids, flag_assignments)
+        if node_id and isinstance(assignment, dict)
+    }
+    missing_ids = [node_id for node_id in chain_ids if node_id not in assignment_by_node]
+    unexpected_ids = [node_id for node_id in assignment_ids if node_id not in set(chain_ids)]
+    if missing_ids or unexpected_ids or len(flag_assignments) != len(chain_ids):
+        details = [
+            'flag assignments cannot be aligned to the chain',
+            f"chain_nodes={len(chain_ids)} flag_assignments={len(flag_assignments)}",
+        ]
+        if missing_ids:
+            details.append(f"missing_assignment_nodes={','.join(missing_ids)}")
+        if unexpected_ids:
+            details.append(f"unexpected_assignment_nodes={','.join(unexpected_ids)}")
+        details.extend(positional_mismatches)
+        return [], details
+
+    return [assignment_by_node[node_id] for node_id in chain_ids], []
+
+
 def _flow_validate_chain_order_by_requires_produces(
     chain_nodes: list[dict[str, Any]],
     flag_assignments: list[dict[str, Any]],
@@ -24995,33 +25232,12 @@ def _flow_validate_chain_order_by_requires_produces(
     if node_schema_errors:
         errors.extend(node_schema_errors)
 
-    assign_by_node: dict[str, dict[str, Any]] = {}
-    for a in flag_assignments:
-        if not isinstance(a, dict):
-            continue
-        nid = str(a.get('node_id') or '').strip()
-        if nid:
-            assign_by_node[nid] = a
-
-    # If assignments are positionally aligned but missing node_id fields, map by position.
-    try:
-        if any(cid not in assign_by_node for cid in chain_ids):
-            if len(flag_assignments) == len(chain_ids):
-                for i, cid in enumerate(chain_ids):
-                    if cid in assign_by_node:
-                        continue
-                    a = flag_assignments[i]
-                    if isinstance(a, dict):
-                        assign_by_node[cid] = a
-    except Exception:
-        pass
-
-    missing_assignments = [cid for cid in chain_ids if cid not in assign_by_node]
-    if missing_assignments:
-        return False, [
-            'missing assignment for at least one chain node',
-            f"missing_assignment_nodes={','.join(missing_assignments)}",
-        ]
+    ordered_assignments, assignment_errors = _flow_assignments_in_chain_order(
+        chain_ids,
+        flag_assignments,
+    )
+    if assignment_errors:
+        return False, assignment_errors
 
     if isinstance(plugins_by_id_override, dict) and plugins_by_id_override:
         plugins_by_id = plugins_by_id_override
@@ -25042,7 +25258,6 @@ def _flow_validate_chain_order_by_requires_produces(
 
     available: set[str] = set(_flow_synthesized_inputs())
     try:
-        ordered_assignments = [assign_by_node.get(cid) or {} for cid in chain_ids]
         start_positions = _flow_parallel_start_assignment_indexes(ordered_assignments, gen_defs_by_id=gen_defs_by_id)
         for start_index in sorted(start_positions):
             if start_index < 0 or start_index >= len(ordered_assignments):
@@ -25097,8 +25312,7 @@ def _flow_validate_chain_order_by_requires_produces(
 
     require_metadata = _require_vuln_metadata_enabled()
 
-    for step_index, cid in enumerate(chain_ids):
-        a = assign_by_node.get(cid) or {}
+    for step_index, (cid, a) in enumerate(zip(chain_ids, ordered_assignments)):
         plugin_id = str(a.get('id') or '').strip()
         if not plugin_id:
             errors.append(f"{cid}: missing generator id")
@@ -40738,6 +40952,11 @@ def _skip_output_path_check(key, val) -> bool:
         if k.startswith('endpoint('):
             return True
         if k.startswith(('credential(', 'exposedsecret(', 'flagdelivery(', 'hostname(', 'portforward(', 'token(', 'version(')):
+            return True
+        # Fact-style outputs describe their value type in parentheses.  A '/'
+        # inside an encoded/token payload does not turn it into a filesystem
+        # artifact; only explicitly path/file-bearing facts should be checked.
+        if '(' in k and ')' in k and 'path' not in k and 'file' not in k:
             return True
         if not v:
             return False

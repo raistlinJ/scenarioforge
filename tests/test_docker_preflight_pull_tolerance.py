@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scenarioforge.builders import topology as topo
 
@@ -167,6 +168,47 @@ def test_no_pull_at_all_when_every_image_is_cached(compose_file, monkeypatch):
     assert _pull_calls(calls) == [], 'a cached run must issue no pull'
     inspects = [c for c in calls if c[:3] == ['docker', 'image', 'inspect']]
     assert any('alpine:3.19' in c for c in inspects), 'presence must be confirmed first'
+
+
+def test_arm64_manifest_mismatch_pins_failed_dependency_to_amd64(tmp_path, monkeypatch):
+    compose_path = tmp_path / 'docker-compose-docker-12.yml'
+    compose_path.write_text(
+        'services:\n'
+        '  mysql:\n'
+        '    image: mysql:5.5\n'
+        '  docker-12:\n'
+        '    build: .\n'
+        '    image: local-node:latest\n',
+        encoding='utf-8',
+    )
+    calls = []
+    pull_attempts = {'n': 0}
+
+    def fake_run(args, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        argv = list(args)
+        calls.append(argv)
+        if 'pull' in argv:
+            pull_attempts['n'] += 1
+            if pull_attempts['n'] == 1:
+                return _Proc(
+                    1,
+                    'Image mysql:5.5 Error no matching manifest for linux/arm64/v8 '
+                    'in the manifest list entries',
+                )
+            return _Proc(0, 'Image mysql:5.5 Pulled')
+        if argv[:3] == ['docker', 'image', 'inspect']:
+            return _Proc(1, 'Error: No such image')
+        if argv[:2] == ['docker', 'inspect']:
+            return _Proc(0, '123 running')
+        return _Proc(0, '')
+
+    _install(monkeypatch, fake_run)
+    _preflight(compose_path, node_name='docker-12')
+
+    compose = yaml.safe_load(compose_path.read_text(encoding='utf-8'))
+    assert compose['services']['mysql']['platform'] == 'linux/amd64'
+    assert 'platform' not in compose['services']['docker-12']
+    assert len(_pull_calls(calls)) == 2
 
 
 def test_pull_still_happens_when_an_image_is_absent(compose_file, monkeypatch):

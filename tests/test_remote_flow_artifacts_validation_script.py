@@ -127,6 +127,47 @@ def test_remote_validator_resolves_flag_file_below_service_directory(tmp_path):
     assert str(service_dir / 'customer_exports.sql') in (item.get('outputs_checked') or [])
 
 
+def test_remote_validator_does_not_treat_encoded_fact_value_as_path(tmp_path):
+    run_dir = tmp_path / 'flow-run'
+    artifacts_dir = run_dir / 'artifacts'
+    artifacts_dir.mkdir(parents=True)
+    artifact = artifacts_dir / 'dispatch.a85'
+    artifact.write_text('encoded payload', encoding='utf-8')
+    outputs_manifest = run_dir / 'outputs.json'
+    encoded_value = "BOPdhDe<TE7SH*<HXgP?2)o##2E,/%3&E?u1,`QM"
+    outputs_manifest.write_text(
+        json.dumps(
+            {
+                'outputs': {
+                    'File(path)': 'artifacts/dispatch.a85',
+                    'Encoded(value)': encoded_value,
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    payload = _run_validation_script(
+        [
+            {
+                'node_id': 'docker-15',
+                'generator_id': 'encoding_ascii85_dispatch',
+                'generator_type': 'flag-generator',
+                'run_dir': str(run_dir),
+                'artifacts_dir': str(run_dir),
+                'inject_source_dir': str(run_dir),
+                'outputs_manifest': str(outputs_manifest),
+                'inject_files': [],
+            }
+        ]
+    )
+
+    item = (payload.get('items') or [])[0]
+    assert item.get('outputs_missing') == []
+    assert item.get('outputs_checked') == [str(artifact)]
+    assert 'Encoded(value)' not in (item.get('outputs_resolved') or {})
+
+
 def test_listener_snapshot_script_includes_tcp_udp_and_ss_checks():
     script = backend._remote_docker_exec_listener_snapshot_script(
         containers=['docker-40'],

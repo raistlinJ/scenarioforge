@@ -271,6 +271,61 @@ def test_docker_compose_preflight_fails_on_wrapper_build_failure(tmp_path, monke
     assert not [call for call in calls if 'compose' in call], 'must not reach compose'
 
 
+def test_docker_compose_preflight_retries_transient_buildkit_wrapper_failure(tmp_path, monkeypatch):
+    compose_path = tmp_path / 'docker-compose.yml'
+    wrapper_ctx = tmp_path / 'wrapper'
+    wrapper_ctx.mkdir()
+    (wrapper_ctx / 'Dockerfile').write_text('FROM alpine:3.20\n', encoding='utf-8')
+    compose_path.write_text(
+        (
+            'services:\n'
+            '  docker-7:\n'
+            '    image: coretg/transient-docker-7:iproute2\n'
+            '    container_name: docker-7\n'
+            '    labels:\n'
+            f'      coretg.wrapper_build_context: {wrapper_ctx}\n'
+        ),
+        encoding='utf-8',
+    )
+
+    calls = []
+    build_attempts = {'count': 0}
+
+    def fake_run(args, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        argv = list(args)
+        calls.append(argv)
+        if argv[:2] == ['docker', 'build']:
+            build_attempts['count'] += 1
+            if build_attempts['count'] == 1:
+                return _Proc(
+                    1,
+                    'failed to receive status: rpc error: code = Unavailable '
+                    'desc = error reading from server: EOF',
+                )
+            return _Proc(0, '')
+        if argv[:3] == ['docker', 'compose', '-p']:
+            if argv[-2:] == ['pull', '--ignore-buildable']:
+                return _Proc(0, '')
+            if argv[-3:] == ['up', '--no-start', '--no-build']:
+                return _Proc(0, '')
+            if argv[-4:] == ['up', '-d', '--no-build', 'docker-7']:
+                return _Proc(0, '')
+        if argv[:3] == ['docker', 'inspect', '--format']:
+            if argv[3] == '{{.State.Pid}} {{.State.Status}}':
+                return _Proc(0, '123 running')
+        raise AssertionError(f'unexpected args: {argv}')
+
+    monkeypatch.setattr(topo, '_docker_compose_cmd', lambda: ['docker', 'compose'])
+    monkeypatch.setattr(topo, '_docker_cmd', lambda: ['docker'])
+    monkeypatch.setattr(topo.subprocess, 'run', fake_run)
+    monkeypatch.setattr(topo.time, 'sleep', lambda _seconds: None)
+    topo._PREFLIGHTED_DOCKER_NODE_COMPOSES.discard(str(Path(compose_path).resolve()))
+
+    topo._docker_compose_preflight(str(compose_path), node_name='docker-7')
+
+    assert build_attempts['count'] == 2
+
+
 def test_docker_compose_preflight_runs_inject_helpers_before_target_service(tmp_path, monkeypatch):
     compose_path = tmp_path / 'docker-compose.yml'
     compose_path.write_text(

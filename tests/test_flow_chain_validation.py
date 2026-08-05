@@ -140,6 +140,128 @@ def test_the_validator_and_the_sequencer_read_the_marker_the_same_way():
 
 
 # --------------------------------------------------------------------------- #
+# Duplicate node occurrences keep their own assignments
+# --------------------------------------------------------------------------- #
+
+def _duplicate_credential_chain():
+    credential = 'Credential(user, password)'
+    pivot = 'Pivot(docker-12)'
+    chain = [
+        {'id': '16', 'name': 'docker-12'},
+        {'id': '18', 'name': 'docker-14'},
+        {'id': '18', 'name': 'docker-14'},
+    ]
+    assignments = [
+        {
+            'node_id': '16', 'id': 'pivot-source',
+            'inputs': [], 'outputs': [pivot],
+        },
+        {
+            'node_id': '18', 'id': 'credential-step',
+            'inputs': [credential, pivot], 'outputs': [credential],
+            'chain_supplied_inputs': [credential],
+            'chain_supplied_parallel_start': True,
+            'chain_supplied_sequence_index': 2,
+        },
+        {
+            'node_id': '18', 'id': 'credential-step',
+            'inputs': [credential, pivot], 'outputs': [credential],
+        },
+    ]
+    plugins = {
+        'pivot-source': {
+            'requires': [],
+            'produces': [{'artifact': pivot}],
+        },
+        'credential-step': {
+            'requires': [credential, pivot],
+            'produces': [{'artifact': credential}],
+        },
+    }
+    return chain, assignments, plugins
+
+
+def test_duplicate_node_occurrences_use_positionally_aligned_assignments(monkeypatch):
+    from webapp import app_backend as ab
+
+    chain, assignments, plugins = _duplicate_credential_chain()
+    monkeypatch.setattr(ab, '_flow_enabled_generator_defs_by_id', lambda: {})
+
+    ok, errors = ab._flow_validate_chain_order_by_requires_produces(
+        chain,
+        assignments,
+        scenario_label='S',
+        plugins_by_id_override=plugins,
+    )
+
+    assert ok is True, errors
+    assert errors == []
+
+
+def test_duplicate_node_chain_without_a_valid_credential_supply_still_fails(monkeypatch):
+    from webapp import app_backend as ab
+
+    chain, assignments, plugins = _duplicate_credential_chain()
+    assignments[1].pop('chain_supplied_inputs')
+    monkeypatch.setattr(ab, '_flow_enabled_generator_defs_by_id', lambda: {})
+
+    ok, errors = ab._flow_validate_chain_order_by_requires_produces(
+        chain,
+        assignments,
+        scenario_label='S',
+        plugins_by_id_override=plugins,
+    )
+
+    assert ok is False
+    assert any('Credential(user, password)' in error for error in errors)
+    assert any('before they are produced' in error for error in errors)
+
+
+def test_unique_legacy_assignments_can_still_be_reordered_by_node_id(monkeypatch):
+    from webapp import app_backend as ab
+
+    chain = [{'id': 'producer'}, {'id': 'consumer'}]
+    assignments = [
+        {'node_id': 'consumer', 'id': 'consume', 'inputs': ['Token(service)'], 'outputs': []},
+        {'node_id': 'producer', 'id': 'produce', 'inputs': [], 'outputs': ['Token(service)']},
+    ]
+    plugins = {
+        'produce': {'requires': [], 'produces': [{'artifact': 'Token(service)'}]},
+        'consume': {'requires': ['Token(service)'], 'produces': []},
+    }
+    monkeypatch.setattr(ab, '_flow_enabled_generator_defs_by_id', lambda: {})
+
+    ok, errors = ab._flow_validate_chain_order_by_requires_produces(
+        chain,
+        assignments,
+        scenario_label='S',
+        plugins_by_id_override=plugins,
+    )
+
+    assert ok is True, errors
+
+
+def test_unordered_duplicate_assignments_fail_instead_of_collapsing_occurrences():
+    from webapp import app_backend as ab
+
+    chain, assignments, plugins = _duplicate_credential_chain()
+    assignments = [assignments[1], assignments[0], assignments[2]]
+
+    ok, errors = ab._flow_validate_chain_order_by_requires_produces(
+        chain,
+        assignments,
+        scenario_label='S',
+        plugins_by_id_override=plugins,
+    )
+
+    assert ok is False
+    assert errors[0] == (
+        'flag assignments are not positionally aligned with duplicate chain node occurrences'
+    )
+    assert any("sequence 1 expected node '16'" in error for error in errors)
+
+
+# --------------------------------------------------------------------------- #
 # The same two shapes, wherever per-input metadata is read
 # --------------------------------------------------------------------------- #
 

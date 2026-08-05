@@ -265,8 +265,86 @@ def test_prepare_chain_repairs_explicit_pivot_target_before_source(monkeypatch):
     assert "repaired" in str(result.get("warning") or "").lower()
     joined_progress = "\n".join(progress_messages)
     assert "Solve: building topology graph from preview plan" in joined_progress
-    assert "Solve: reordering chain by dependency DAG" in joined_progress
+    assert "Solve: repaired pivot provider ordering before assignment" in joined_progress
     assert "Solve complete:" in joined_progress
+
+
+def test_prepare_chain_marks_auto_selected_generic_docker_as_generator_capacity(monkeypatch):
+    preview = {
+        "seed": 17,
+        "routers": [],
+        "switches": [],
+        "switches_detail": [],
+        "host_router_map": {},
+        "r2r_links_preview": [],
+        "flag_node_generators_by_node": {"fixed": "fixed-generator"},
+        "hosts": [
+            {
+                "node_id": "fixed",
+                "name": "fixed-generator-node",
+                "role": "Docker",
+                "vulnerabilities": [],
+                "metadata": {"flag_node_generator_id": "fixed-generator"},
+            },
+            {
+                "node_id": "generic",
+                "name": "generic-docker",
+                "role": "Docker",
+                "vulnerabilities": [],
+            },
+        ],
+    }
+    generators = [
+        {
+            "id": "fixed-generator",
+            "name": "Fixed generator",
+            "inputs": [],
+            "outputs": [{"name": "Flag(flag_id)"}],
+        },
+        {
+            "id": "generic-generator",
+            "name": "Generic generator",
+            "inputs": [],
+            "outputs": [{"name": "Flag(flag_id)"}],
+        },
+    ]
+
+    def _pick(nodes, _adj, **_kwargs):
+        by_id = {str(node.get("id") or ""): node for node in nodes}
+        return [by_id["fixed"], by_id["generic"]]
+
+    monkeypatch.setattr(flow_prepare_preview_helpers, "pick_chain_nodes", _pick)
+    monkeypatch.setattr(app_backend, "_flag_generators_from_enabled_sources", lambda: ([], []))
+    monkeypatch.setattr(app_backend, "_flag_node_generators_from_enabled_sources", lambda: (generators, []))
+    monkeypatch.setattr(app_backend, "_flow_validate_chain_order_by_requires_produces", lambda *args, **kwargs: (True, []))
+
+    progress_messages = []
+    result = flow_prepare_preview_execute._prepare_chain_and_assignments(
+        app_backend,
+        backend=app_backend,
+        helpers=flow_prepare_preview_helpers,
+        j={},
+        preview=preview,
+        flow_state_for_prepare={},
+        scenario_label="auto-generic-docker",
+        scenario_norm="auto-generic-docker",
+        mode="preview",
+        best_effort=True,
+        allow_node_duplicates=True,
+        length=2,
+        requested_length=2,
+        dependency_level=3,
+        initial_facts_override=None,
+        goal_facts_override=None,
+        base_plan_path="",
+        flow_progress=progress_messages.append,
+    )
+
+    assert result.get("flow_valid") is True, result.get("flow_errors")
+    assignments = result.get("flag_assignments") or []
+    assert [assignment.get("node_id") for assignment in assignments] == ["fixed", "generic"]
+    assert assignments[0].get("id") == "fixed-generator"
+    assert "approved Docker challenge nodes=generic" in "\n".join(progress_messages)
 
 
 def test_flow_pivot_context_infers_simplified_planner_shortcut():
@@ -424,6 +502,46 @@ def test_flow_topology_inclusion_adds_pivot_source_before_target():
     assert [node.get("id") for node in expanded] == ["jump", "db"]
     assert info["effective_length"] == 2
     assert info["added_pivot_node_ids"] == ["jump"]
+
+
+def test_existing_pivot_source_is_ordered_before_target_without_inclusion_opt_in():
+    """An existing target-first chain must not persist an impossible pivot.
+
+    The inclusion option decides whether missing topology nodes are appended;
+    it must not decide whether an already-present Pivot(source) dependency is
+    respected.  Execute uses the normal path with inclusion disabled.
+    """
+    preview = _preview()
+    nodes = [
+        {"id": "jump", "name": "jump-web", "type": "docker", "is_vuln": True, "ip4": "10.0.0.10"},
+        {"id": "db", "name": "internal-db", "type": "docker", "is_vuln": False, "ip4": "10.0.1.20"},
+    ]
+    pivot_context = {
+        "metadata": {
+            "pivoting": {
+                "rules": [
+                    {
+                        "name": "RCE Pivot",
+                        "pivot_nodes": ["jump-web"],
+                        "target_node": "internal-db",
+                        "access_provider": "vulnerability",
+                    }
+                ]
+            }
+        }
+    }
+
+    expanded, info = app_backend._flow_expand_chain_for_topology_requirements(
+        nodes,
+        [nodes[1], nodes[0]],
+        preview,
+        include_all_topology_pivots=False,
+        pivot_context=pivot_context,
+    )
+
+    assert [node.get("id") for node in expanded] == ["jump", "db"]
+    assert info["added_pivot_node_ids"] == []
+    assert info["effective_length"] == 2
 
 
 def test_pivot_apply_skips_requires_when_source_not_in_chain():

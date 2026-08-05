@@ -13,6 +13,7 @@ import sys
 import select
 import os
 import json
+import re
 
 from ..utils.core_imports import quiet_import
 
@@ -844,32 +845,61 @@ def _apply_wrapper_app_user_entrypoints(
         if not base_image:
             continue
 
-        rc, tail = run(
-            docker_cmd + ['image', 'inspect', '--format', '{{json .Config}}', base_image],
-            timeout=60,
-        )
-        cfg = None
-        if rc == 0 and tail:
-            for line in reversed([ln.strip() for ln in str(tail).splitlines() if ln.strip()]):
+        def _config_from_inspect_tail(raw_tail: str) -> dict | None:
+            for line in reversed([ln.strip() for ln in str(raw_tail).splitlines() if ln.strip()]):
                 try:
                     cand = json.loads(line)
                 except Exception:
                     continue
                 if isinstance(cand, dict):
-                    cfg = cand
-                    break
+                    return cand
+            return None
+
+        rc, tail = run(
+            docker_cmd + ['image', 'inspect', '--format', '{{json .Config}}', base_image],
+            timeout=60,
+        )
+        cfg = _config_from_inspect_tail(tail) if rc == 0 and tail else None
+        force_shim = False
+        if not isinstance(cfg, dict):
+            # BuildKit can use an upstream image as a build base without loading
+            # that tag into the daemon's visible image store.  The completed
+            # wrapper is visible and inherits the base ENTRYPOINT/CMD, while its
+            # embedded /usr/local/coretg/base_user file tells the shim whether
+            # privilege dropping is actually needed.  Use that config and
+            # install the shim unconditionally; it safely no-ops for root bases.
+            wrapper_rc, wrapper_tail = run(
+                docker_cmd + ['image', 'inspect', '--format', '{{json .Config}}', image],
+                timeout=60,
+            )
+            cfg = (
+                _config_from_inspect_tail(wrapper_tail)
+                if wrapper_rc == 0 and wrapper_tail
+                else None
+            )
+            if isinstance(cfg, dict):
+                force_shim = True
+                try:
+                    logger.info(
+                        '[docker-node] app-user shim: base tag unavailable; '
+                        'using wrapper config node=%s service=%s base=%s wrapper=%s',
+                        node_name, svc_name, base_image, image,
+                    )
+                except Exception:
+                    pass
         if not isinstance(cfg, dict):
             try:
                 logger.warning(
-                    '[docker-node] app-user shim: base image inspect failed node=%s service=%s image=%s rc=%s',
-                    node_name, svc_name, base_image, rc,
+                    '[docker-node] app-user shim: base and wrapper image inspect failed '
+                    'node=%s service=%s base=%s base_rc=%s wrapper=%s wrapper_rc=%s',
+                    node_name, svc_name, base_image, rc, image, wrapper_rc,
                 )
             except Exception:
                 pass
             continue
 
         user = str(cfg.get('User') or '').strip()
-        if user.lower() in _ROOTLIKE_IMAGE_USERS:
+        if not force_shim and user.lower() in _ROOTLIKE_IMAGE_USERS:
             continue
 
         existing_ep = svc.get('entrypoint')
@@ -1201,6 +1231,81 @@ def _format_pull_failure(*, node_name: str, compose_path: str, args, rc: int, ta
     return '\n'.join(lines)
 
 
+def _apply_manifest_platform_fallback(
+    compose_path: str,
+    *,
+    pull_service_images: dict[str, str],
+    pull_output: str,
+) -> tuple[str, list[str]]:
+    """Pin mismatched pull-only services to an emulated image platform.
+
+    Legacy vulnerability stacks commonly pair an amd64-only database image
+    (for example mysql:5.5) with a primary service that ScenarioForge wraps.
+    On an arm64 CORE VM the wrapper build can use binfmt successfully while a
+    later plain ``docker compose pull`` still asks the registry for arm64 and
+    fails before CORE starts.  Persist the platform on only the images named by
+    Docker's manifest error so both preflight and core-daemon use the same
+    architecture.
+    """
+    text = str(pull_output or '')
+    host_match = re.search(
+        r'no matching manifest for (?P<platform>linux/[^\s:]+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not host_match:
+        return '', []
+    host_platform = str(host_match.group('platform') or '').lower()
+    if not host_platform.startswith(('linux/arm64', 'linux/arm/v8')):
+        return '', []
+
+    try:
+        fallback = str(os.getenv('CORETG_DOCKER_MANIFEST_FALLBACK_PLATFORM') or 'linux/amd64').strip()
+    except Exception:
+        fallback = 'linux/amd64'
+    if not fallback:
+        return '', []
+
+    failed_images = set(
+        re.findall(
+            r'Image\s+(\S+)\s+Error\s+no matching manifest',
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not failed_images:
+        return '', []
+
+    try:
+        import yaml  # type: ignore
+
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            compose_obj = yaml.safe_load(fh)
+        services = compose_obj.get('services') if isinstance(compose_obj, dict) else None
+        if not isinstance(services, dict):
+            return '', []
+
+        changed: list[str] = []
+        for service_name, image in pull_service_images.items():
+            image_name = str(image or '').strip()
+            service = services.get(service_name)
+            if image_name not in failed_images or not isinstance(service, dict):
+                continue
+            existing = str(service.get('platform') or '').strip()
+            if existing:
+                continue
+            service['platform'] = fallback
+            changed.append(str(service_name))
+        if not changed:
+            return '', []
+
+        with open(compose_path, 'w', encoding='utf-8') as fh:
+            yaml.safe_dump(compose_obj, fh, sort_keys=False)
+        return fallback, changed
+    except Exception:
+        return '', []
+
+
 def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     """Best-effort prepare docker-compose assets before CORE starts docker nodes.
 
@@ -1367,6 +1472,24 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
     # Track whether we successfully built anything.
     built_any = False
 
+    def _transient_buildkit_failure(output: str) -> bool:
+        """Return true for BuildKit transport failures worth retrying once.
+
+        These messages come from the Docker client/build-session connection,
+        not from a failed Dockerfile instruction. A retry is safe because the
+        wrapper tag is scenario scoped and Docker builds are idempotent.
+        """
+        detail = str(output or '').lower()
+        return any(
+            marker in detail
+            for marker in (
+                'failed to receive status',
+                'rpc error: code = unavailable',
+                'error reading from server: eof',
+                'unexpected eof',
+            )
+        )
+
     # Build wrapper images declared via labels (no `build:` stanza) first.
     # This ensures core-daemon will not attempt to build/pull when it later starts nodes.
     #
@@ -1393,6 +1516,17 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 args.append('--pull')
             args += ['-t', image, '-f', df_path, ctx_path]
             rc, tail = _run(args, timeout=1800)
+            if rc != 0 and _transient_buildkit_failure(tail):
+                try:
+                    logger.warning(
+                        '[docker-node] transient BuildKit failure; retrying wrapper build once '
+                        'node=%s service=%s image=%s',
+                        node_name, svc_name, image,
+                    )
+                except Exception:
+                    pass
+                time.sleep(1)
+                rc, tail = _run(args, timeout=1800)
             if rc == 0:
                 built_any = True
                 # Conflict resolution runs later in the same process and used to
@@ -1543,6 +1677,24 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         if not strict_pull:
             pull_args = compose_base + ['pull', '--ignore-pull-failures'] + pull_services
         rc, tail = _run(pull_args, timeout=600)
+        if strict_pull and rc != 0:
+            fallback_platform, fallback_services = _apply_manifest_platform_fallback(
+                compose_path,
+                pull_service_images=pull_service_images,
+                pull_output=tail,
+            )
+            if fallback_services:
+                try:
+                    logger.warning(
+                        '[docker-node] retrying manifest-mismatched pull node=%s '
+                        'platform=%s services=%s',
+                        node_name,
+                        fallback_platform,
+                        fallback_services,
+                    )
+                except Exception:
+                    pass
+                rc, tail = _run(pull_args, timeout=600)
         if strict_pull and rc != 0:
             # A pull is a prefetch, not the run itself. Registry hiccups and Hub
             # rate limits are transient and routinely hit a CORE VM mid-run, so
