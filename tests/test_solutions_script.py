@@ -385,3 +385,139 @@ def _assert_bash_syntax_ok(script):
         pytest.skip("bash not available")
     proc = subprocess.run([bash, "-n"], input=script, text=True, capture_output=True)
     assert proc.returncode == 0, proc.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Pivot steps: the way in has to work, or nothing behind it is solvable
+# --------------------------------------------------------------------------- #
+
+def _pivot_assignment(**overrides):
+    decision = {
+        'disposition': 'own_step', 'subnet': '172.21.240.0/24',
+        'provider_node': 'pivot-172-21-240-0', 'provider_address': '172.21.240.4',
+        'entry_kind': 'ssh', 'entry_port': 2222, 'insert_before': 0,
+        'instruction': 'Gain access over SSH on pivot-172-21-240-0:2222.',
+    }
+    decision.update(overrides)
+    return [{'node_id': 'n1', 'name': 'n1', 'pivot_decisions': [decision]}]
+
+
+def _chain():
+    return [{'id': 'n1', 'name': 'n1', 'ip4': '10.0.0.5'}]
+
+
+def test_an_own_step_pivot_becomes_a_check():
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert 'check_pivot P1' in script
+    assert '172.21.240.4' in script
+    assert '2222' in script
+    assert '1 pivot step(s)' in script
+
+
+def test_the_pivot_check_is_emitted_before_the_step_it_gates():
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment(insert_before=0))
+    assert script.index('check_pivot P1') < script.index('skip_step 1')
+
+
+def test_an_open_and_a_closed_port_are_told_apart():
+    # A bare `grep -q REACHABLE` matches UNREACHABLE, so every closed port
+    # reported as open. Found by running the generated script against a port
+    # nothing served; the answers must not be substrings of one another and the
+    # match is anchored.
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert 'PIVOT_OPEN' in script and 'PIVOT_SHUT' in script
+    assert 'grep -qx PIVOT_OPEN' in script
+    assert 'PIVOT_SHUT'.startswith('PIVOT_OPEN') is False
+    assert 'PIVOT_OPEN' not in 'PIVOT_SHUT'
+
+
+def test_an_absorbed_pivot_is_not_a_check():
+    # It is a consequence of a challenge already being checked.
+    from webapp.solutions_script import build_solutions_script, own_step_pivots
+
+    assignments = _pivot_assignment(disposition='absorbed')
+    assert own_step_pivots(assignments) == []
+    # The helper is always defined, like check_step and skip_step; what must be
+    # absent is any invocation of it.
+    assert 'check_pivot P' not in build_solutions_script('S', _chain(), assignments)
+
+
+def test_a_provider_with_no_address_yields_no_check():
+    # The plan reports such a provider as unresolved and execute warns about it;
+    # inventing a check would be a confident answer to an unanswerable question.
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment(provider_address=''))
+    assert 'check_pivot P' not in script
+
+
+def test_the_same_pivot_is_not_checked_twice():
+    from webapp.solutions_script import own_step_pivots
+
+    decision = _pivot_assignment()[0]['pivot_decisions'][0]
+    assignments = [{'node_id': 'a', 'pivot_decisions': [decision]},
+                   {'node_id': 'b', 'pivot_decisions': [dict(decision)]}]
+    assert len(own_step_pivots(assignments)) == 1
+
+
+def test_a_pivot_the_chain_never_orders_against_is_still_checked():
+    # insert_before is -1 when no chain step lives in that subnet. The way in
+    # still has to work.
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment(insert_before=-1))
+    assert 'check_pivot P1' in script
+
+
+def test_pivots_are_counted_in_the_summary_total():
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    # One chain step plus one pivot step.
+    assert '"2"' in script or ' "2"' in script
+
+
+# --------------------------------------------------------------------------- #
+# Where the checks run from: a CORE VM does not route to the emulated subnets
+# --------------------------------------------------------------------------- #
+
+def test_checks_can_run_inside_a_core_node():
+    # A stock CORE VM has no route into the emulation: `ip route get <node ip>`
+    # on the VM leaves via its default gateway, so a payload run on the VM
+    # itself reaches nothing in the scenario. Only a node's namespace can.
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert '--via-node' in script
+    assert 'node_wrap()' in script
+    # Docker nodes answer to docker exec, CORE vnodes to vcmd, and which a node
+    # is is not knowable from the script -- so it tries one, then the other.
+    assert 'docker exec $VIA_NODE' in script
+    assert 'vcmd -c /tmp/pycore.$SESSION_ID/$VIA_NODE' in script
+
+
+def test_entering_a_namespace_can_be_given_a_sudo_password():
+    # Entering a namespace needs root, and a CORE VM commonly requires a
+    # password for sudo -- without this the wrapper fails with "a terminal is
+    # required" and every check reports its target unreachable.
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert '--sudo-pass' in script
+    assert '--no-sudo' in script
+    assert '-S -p' in script
+
+
+def test_the_banner_says_where_the_checks_actually_ran():
+    from webapp.solutions_script import build_solutions_script
+
+    script = build_solutions_script('S', _chain(), _pivot_assignment())
+    assert 'Execution: inside CORE node $VIA_NODE' in script
+    # And tells a reader what to do when it cannot reach anything.
+    assert 'pass --via-node NODE' in script

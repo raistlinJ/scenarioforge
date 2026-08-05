@@ -205,6 +205,21 @@ Behavior:
 - Builds routers, switches, hosts, and Docker-backed nodes in CORE.
 - Stops before segmentation, traffic, report generation, and session start.
 
+The phase JSON includes a `pivot_access` block when the scenario enables
+"accessible by pivot": one entry per walled-off subnet naming the provider, its
+address, its entry (`ssh:2222`, `vulnerability:8080`, ...), whether a node was
+added for it and from which image, plus anything `unresolved` — a subnet with no
+way in at all — and any `nested_candidates`. Provider nodes are **created**
+during this phase: the container runs, on its pinned image, with its service
+listening. Their CORE interfaces are not addressed until the session starts, so
+`topo` shows you the node, the image and the planned address, while the address
+is only *on* the node after `execute`.
+
+`--plan-output` is best-effort. In VM mode the run is delegated to the CORE VM,
+so the path is resolved there — a directory from your own machine may not exist
+on it. The phase result is always on stdout, and a path that cannot be written
+is reported without failing a phase that otherwise succeeded.
+
 This phase does not assume the XML already contains a built topology. It computes the topology from the planning sections in the XML.
 
 ## Execute Phase
@@ -273,15 +288,33 @@ The XML column deliberately prefers a saved *source* scenario XML (one carrying 
 
 ## Check-Artifacts Phase
 
-`check-artifacts` validates a **running** session against what the scenario said it should be. It runs seven ordered checks:
+`check-artifacts` validates a **running** session against what the scenario said it should be. It runs eight ordered checks:
 
 1. Containers are running on the correct nodes.
 2. Services are running.
 3. Service ports are open and reachable across the CORE network.
 4. Inject files are present in the right location on the nodes.
 5. Firewall/segmentation rules are in place.
-6. Traffic scripts are running where they should be.
-7. Each traffic source can reach its destination (ping).
+6. Traffic agents are running where they should be.
+7. Each traffic source can reach its destination, **on that flow's own protocol and port**. Never with ping: a default-deny segmentation policy drops ICMP on paths that are working perfectly.
+8. Every pivot provider is reachable from the participant, so the challenges behind a segmentation boundary stay solvable.
+
+The list lives in `artifact_checks.CHECK_ORDER` and the CLI runs the same
+orchestrator the web UI does, so the two never drift.
+
+Checks 3 and 8 are the ones most often misread, and both are about a
+default-deny policy:
+
+- **Check 3** probes each listening port from a node that *should* reach it: the
+  source of the flow that uses that exact port, or a peer on the port's own
+  subnet when no flow does. A drop is reported as configured behaviour when a
+  segmentation rule explains it, or when the default-deny policy does and
+  nothing was supposed to open the path. It warns only when an allow rule opens
+  the path and the packets were dropped anyway — the case worth investigating.
+- **Check 8** reads the rules rather than sending packets, because the
+  participant's vantage point cannot be probed from: the HITL node is an RJ45
+  bound to a physical interface, not a namespace. It therefore still runs with
+  nothing plugged in.
 
 ```bash
 # Standalone against a running session
@@ -311,7 +344,7 @@ Output is a per-check table followed by a single machine-readable marker line, `
 ```text
 [PASS ] Containers running on correct nodes: All 22 expected containers present.
 [PASS ] Ports open: All 32 stable service port target(s) reachable (33 listening across 24 node(s)).
-[SKIP ] Traffic scripts running: No traffic configured for this scenario.
+[SKIP ] Traffic agents running: No traffic configured for this scenario.
 ------------------------------------------------------------------------
 Overall: pass — 4 pass, 3 skip
 CHECK_ARTIFACTS_SUMMARY_JSON: {"ok": true, "overall": "pass", ...}
@@ -400,6 +433,87 @@ uv run catalog-rest-batch-test --target all --scope all
 Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope aliases match the Web UI filters: `untested`, `failed`, and `all`. The command logs into the Web UI, starts the existing batch routes, polls progress, and exports JSON reports under `outputs/catalog-rest-batch-tests/`.
 
 See [Catalog Batch Testing](CATALOG_BATCH_TESTING.md) for full usage, CORE credential options, and exit codes.
+
+## The plan is what runs
+
+Execute does not re-derive anything the plan already decided. Segmentation and
+traffic are both planned at `preview-plan` time and **replayed** at execute:
+
+- Every planned segmentation rule carries its own policy script, so execute
+  writes that script and enables the recorded service rather than drawing a new
+  policy. You will see `Segmentation: enforcing the N rule(s) the saved plan
+  decided; not planning again` in the log.
+- The plan's traffic flows are written out directly: `Traffic: writing the N
+  flow(s) the saved plan decided; no new flows were drawn`.
+
+This matters because both planners draw from the global `random` module, so
+running either a second time produces a *different* plan, not the same one — a
+live run had the preview walling off three subnets and the same scenario walling
+off two others. Since the plan is what you review, what Flow builds its chain
+against, and what pivot access places provider nodes for, the plan's decisions
+are the ones that survive.
+
+Consequences for the command line:
+
+- The settings that shape segmentation are **plan-time** inputs. `--nat-mode`,
+  `--seg-include-hosts`, `--dnat-prob`, `--allow-src-subnet-prob`,
+  `--allow-dst-subnet-prob`, `--seg-accessible-by-pivot` and
+  `--seg-pivot-provider` are applied when the plan is computed, and each also has
+  an attribute on the Segmentation section (`nat_mode`, `include_hosts`,
+  `dnat_probability`, `allow_src_subnet_prob`, `allow_dst_subnet_prob`,
+  `accessible_by_pivot`, `pivot_provider`) so the setting travels with the
+  scenario. Every plan-shaping setting has both forms; a test enforces that, so a
+  new one cannot arrive XML-only.
+- Passing one of them to `execute` against a plan built without it cannot be
+  honoured. Execute says so, naming the settings it is ignoring and the values
+  the plan holds, and uses the plan's. Regenerate the plan to change them.
+- `--seg-allow-docker-ports` stays a run-time flag: it opens ports belonging to
+  containers, which do not exist until execute.
+- A plan saved before rules carried their scripts, or whose flow list was
+  truncated for payload size, is refused with a logged reason and the planner
+  runs as it used to. The run still succeeds; the mismatch is stated rather than
+  hidden.
+
+## Pivot access from the command line
+
+When the scenario turns on "accessible by pivot" (or you pass
+`--seg-accessible-by-pivot`), every subnet segmentation walls off is guaranteed
+one reachable **provider**. The editor writes that switch as `pivot_enabled` on a
+Segmentation **row**, not as a section attribute — a scenario-wide
+`accessible_by_pivot` on the section is honoured too and outranks the rows, but
+nothing in the UI produces it. Which kind of provider is tried first comes from
+the row's `pivot_provider` (or `--seg-pivot-provider`); it reorders the default
+preference rather than restricting it, so a subnet whose only way in is a
+vulnerability still gets one. Provider nodes that have to be *added* are created
+during the topology build, so they exist by `topo` — not at segmentation time.
+
+What to look for in an execute log:
+
+```
+Pivot provider images ready: lscr.io/linuxserver/openssh-server:latest=cached
+Pivot access: 1 provider(s) across 1 walled-off subnet(s) (0 reused, 0 need SSH, 1 to add)
+Pivot access: pivot-10-42-249-0 is reachable at 10.42.249.4 (ssh:2222) [node added for this], opening 10.42.249.0/24
+```
+
+A subnet that could not be given a provider is logged at WARNING, naming the
+subnet and the reason — that scenario has challenges nobody can start.
+
+Two things worth knowing:
+
+- The provider's port follows its **image**, and the default image is a rootless
+  sshd on **2222**, not 22. Override both together
+  (`CORETG_PIVOT_SSH_IMAGE` / `CORETG_PIVOT_SSH_PORT`) if you mirror your own.
+- Docker nodes never need the internet at execute: the image is resolved
+  present, then from a pre-seeded `docker save` tarball in
+  `CORETG_PIVOT_IMAGE_CACHE_DIR` (default `/opt/coretg/images`), then pulled
+  once. Images are resolved **before** the topology build, because CORE starts a
+  Docker node the moment it is added.
+
+Nested pivots — a provider you can only reach by working through another — are
+not supported. Every provider is opened to `0.0.0.0/0` on its entry port, so all
+of them are directly reachable and the ordering between them is carried by the
+challenges. Where a scenario's segmentation implies an ordering, it is reported
+as `nested_candidates` and logged.
 
 ## Configuration Resolution
 
@@ -494,3 +608,5 @@ This is intentional and mirrors the Web UI execute path.
 - `new` creates a starter XML but does not populate scenario rows for you.
 - `flag-sequencing` depends on an existing XML-embedded `PlanPreview`.
 - The CLI is designed for ScenarioForge planning XML, not for raw CORE session XML as a planning input.
+- Nested pivots are not supported: a provider behind another provider is flattened, and the ordering is carried by the challenges rather than the network.
+- Segmentation settings supplied only at execute cannot be honoured against a plan built without them; execute names them and uses the plan's values.

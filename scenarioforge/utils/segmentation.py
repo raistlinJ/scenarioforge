@@ -1,10 +1,12 @@
 from __future__ import annotations
+import hashlib
 import os
 import ipaddress
 import random
 import logging
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, Iterable, List, Tuple, Optional, Sequence, Set
 import shutil
+from ..constants import DEFAULT_IPV4_PREFIXLEN
 from ..types import NodeInfo, SegmentationInfo
 from .services import ensure_service
 from ..plugins import segmentation as seg_plugins
@@ -263,6 +265,12 @@ def _allow_rule_covers_flow(rule: dict, chain: str, proto: str, src_ip: str, dst
     return _selector_matches_ip(str(rule.get("src") or ""), src_ip) and _selector_matches_ip(str(rule.get("dst") or ""), dst_ip)
 
 
+from .segmentation_effects import (  # noqa: F401  (re-exported for callers)
+    EFFECT_NODE, EFFECT_TRANSIT, _empty_effect, effect_blocks, effect_from_iptables,
+    effect_of, rule_effect, selector_covers_ip,
+)
+
+
 def _flow_allowed_by_summary(
     existing_rules: List[dict],
     hosts: List[NodeInfo],
@@ -295,27 +303,19 @@ def _flow_allowed_by_summary(
         if flow_crosses_router and rule.get("default_deny") and chain == "FORWARD" and node_id is not None:
             required_forward_nodes.add(node_id)
 
-        if rule_type == "subnet_block":
-            src_sel = str(rule.get("src") or "")
-            dst_sel = str(rule.get("dst") or "")
-            if _selector_matches_ip(src_sel, src_ip) and _selector_matches_ip(dst_sel, dst_ip):
-                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
+        # What the rule denies, read from its recorded effect rather than
+        # re-derived from fields that mean different things per chain. The old
+        # reading required the destination to sit inside the subnet a
+        # `protect_internal` names, which is false for a host-enforced one -- so
+        # a flow it drops was judged fine, no allow was written for it, and the
+        # traffic silently never flowed.
+        effect = effect_of(rr, rule)
+        if effect_blocks(effect, src_ip, dst_ip):
+            if str(effect.get("scope") or "") == EFFECT_NODE:
+                if recv_node_id is not None and node_id == int(recv_node_id):
                     requires_input_allow = True
-                elif chain == "FORWARD" and node_id is not None:
-                    required_forward_nodes.add(node_id)
-        elif rule_type == "host_block":
-            if str(rule.get("src") or "") == src_ip and str(rule.get("dst") or "") == dst_ip:
-                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
-                    requires_input_allow = True
-                elif chain == "FORWARD" and node_id is not None:
-                    required_forward_nodes.add(node_id)
-        elif rule_type == "protect_internal":
-            internal = str(rule.get("subnet") or "")
-            if internal and (not _selector_matches_ip(internal, src_ip)) and _selector_matches_ip(internal, dst_ip):
-                if chain == "INPUT" and recv_node_id is not None and node_id == int(recv_node_id):
-                    requires_input_allow = True
-                elif chain == "FORWARD" and node_id is not None:
-                    required_forward_nodes.add(node_id)
+            elif node_id is not None:
+                required_forward_nodes.add(node_id)
 
     if requires_input_allow:
         input_allowed = any(
@@ -364,6 +364,223 @@ def _next_segmentation_script_path(
         next_count = max_existing + 1
     counters[key] = next_count + 1
     return os.path.join(out_dir, f"seg_{kind}_{int(node_id)}_{next_count}.py")
+
+
+# The helper body every generated policy script carries. Kept as one constant so
+# the planner and the replay emit byte-identical scripts -- a script that differs
+# between the two is a policy that differs between preview and the live scenario.
+_SCRIPT_PREAMBLE: Tuple[str, ...] = (
+    "#!/usr/bin/env python3",
+    "import subprocess, shlex",
+    "def run(cmd: str):",
+    "    try:",
+    "        subprocess.check_call(shlex.split(cmd))",
+    "    except Exception:",
+    "        pass",
+    "def build_check(cmd: str) -> str:",
+    "    tokens = shlex.split(cmd)",
+    "    out = []",
+    "    i = 0",
+    "    while i < len(tokens):",
+    "        t = tokens[i]",
+    "        if t == 'iptables':",
+    "            out.append(t)",
+    "        elif t == '-A' or t == '-I':",
+    "            out.append('-C')",
+    "            if i + 1 < len(tokens):",
+    "                out.append(tokens[i+1])",
+    "                i += 1",
+    "                if t == '-I' and i + 1 < len(tokens) and tokens[i+1].isdigit():",
+    "                    i += 1",
+    "        else:",
+    "            out.append(t)",
+    "        i += 1",
+    "    return ' '.join(out)",
+    "def ensure_rule(cmd: str):",
+    "    check_cmd = build_check(cmd)",
+    "    try:",
+    "        subprocess.check_call(shlex.split(check_cmd))",
+    "        return False",
+    "    except Exception:",
+    "        pass",
+    "    try:",
+    "        subprocess.check_call(shlex.split(cmd))",
+    "        return True",
+    "    except Exception:",
+    "        return False",
+)
+
+_CUSTOM_SCRIPT_TEMPLATE = """#!/usr/bin/env python3
+import subprocess, shlex
+cmds = [
+    "iptables -A {chain} -j LOG --log-prefix '[custom-seg]'",
+]
+for c in cmds:
+    try:
+        subprocess.check_call(shlex.split(c))
+    except Exception:
+        pass
+print('[segmentation] applied', len(cmds), 'commands')
+"""
+
+
+def segmentation_script_text(spec: Dict[str, object]) -> str:
+    """Render a policy script from the spec the planner recorded for a rule.
+
+    The spec is everything the script depends on, so a rule carries its own
+    enforcement with it. That is what lets execute apply the *planned* policy
+    instead of planning a new one: the segmentation planner draws from the global
+    `random` module at a dozen points, so re-running it can never reproduce an
+    earlier run's decisions, however carefully the seed is managed.
+    """
+    kind = str(spec.get("kind") or "firewall")
+    chain = str(spec.get("chain") or "FORWARD").upper()
+    if kind == "literal":
+        # A CUSTOM rule's script comes from a plugin, so there is nothing to
+        # rebuild it from but the text itself.
+        body = str(spec.get("body") or "")
+        return body if body.endswith("\n") else body + "\n"
+
+    lines = list(_SCRIPT_PREAMBLE)
+    comment = str(spec.get("comment") or "")
+    if comment:
+        lines.append(comment)
+    if chain in ("FORWARD", "INPUT"):
+        lines.append(f"run('iptables -P {chain} DROP')")
+        lines.append(
+            f"ensure_rule('iptables -A {chain} -m state --state ESTABLISHED,RELATED -j ACCEPT')"
+        )
+    for accept in spec.get("pre_accepts") or []:
+        lines.append(f"ensure_rule('{accept}')")
+    lines.append("rules = [")
+    for command in spec.get("commands") or []:
+        lines.append(f"    \"{command}\",")
+    lines += [
+        "]",
+        "applied = 0",
+        "for cmd in rules:",
+        "    if ensure_rule(cmd):",
+        "        applied += 1",
+        f"print('[{spec.get('tag') or 'segmentation'}] applied', applied, "
+        f"'new rules (idempotent), default {chain} policy set to DROP')",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_segmentation_script(script_path: str, spec: Dict[str, object]) -> bool:
+    """Write a rule's policy script. Returns whether it landed."""
+    try:
+        with open(script_path, "w", encoding="utf-8") as fh:
+            fh.write(segmentation_script_text(spec))
+        os.chmod(script_path, 0o755)
+        return True
+    except Exception as exc:
+        logger.debug("Failed to write policy script %s: %s", script_path, exc)
+        return False
+
+
+def flow_draw(flow: Dict[str, object], salt: str) -> float:
+    """A stable [0,1) draw for one flow, so a decision about it never wavers.
+
+    These decisions -- widen an allow rule to the whole subnet, port-forward this
+    flow -- used to come from `random.random()`, which meant the preview and the
+    live scenario answered differently for the same flow. Deriving the draw from
+    the flow's own identity keeps the probability semantics while making the
+    answer a property of the flow rather than of when it was asked.
+    """
+    key = "|".join((
+        str(salt),
+        str(flow.get("src_id")), str(flow.get("dst_id")),
+        str(flow.get("protocol")), str(flow.get("dst_port")),
+    ))
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / float(1 << 64)
+
+
+def replay_planned_rules(
+    *,
+    summary: Dict[str, object],
+    planned_rules: Sequence[dict],
+    out_dir: str,
+    session: object,
+    include_hosts: bool = False,
+    router_ids: Optional[Iterable[int]] = None,
+) -> int:
+    """Apply the rules a plan already decided, instead of deciding new ones.
+
+    Planning draws from the global `random` module at a dozen points, so a second
+    run of the planner cannot reproduce the first one's choices -- the preview
+    and the live scenario would wall off different subnets. Since the preview is
+    what the author reviews, what Flow builds its chain against, and what pivot
+    access placed provider nodes for, the preview's decisions are the ones that
+    have to survive.
+
+    Each rule carries its own enforcement in `script_spec`, so replaying is
+    writing that script and enabling the recorded service. Returns how many rules
+    were applied.
+    """
+    existing = summary.get("rules")
+    if not isinstance(existing, list):
+        return 0
+    routers = {int(r) for r in (router_ids or [])}
+
+    applied = 0
+    skipped_without_spec = 0
+    for entry in planned_rules or []:
+        if not isinstance(entry, dict):
+            continue
+        rule = entry.get("rule")
+        if not isinstance(rule, dict):
+            continue
+        try:
+            node_id = int(entry.get("node_id", rule.get("node")))
+        except Exception:
+            continue
+        spec = rule.get("script_spec")
+        if not isinstance(spec, dict):
+            # A plan from before rules carried their scripts, or one whose
+            # planner failed. Recording it unenforced would be worse than
+            # loudly leaving it out: the summary would claim a policy the
+            # scenario does not have.
+            skipped_without_spec += 1
+            continue
+
+        # The plan's path came from whichever machine previewed; only the file
+        # name carries over, because the run may well be on a different host.
+        script_name = os.path.basename(str(entry.get("script") or "")) or (
+            f"seg_{rule.get('type') or 'rule'}_{node_id}_{applied + 1}.py"
+        )
+        script_path = os.path.join(out_dir, script_name)
+        write_segmentation_script(script_path, spec)
+
+        service = str(entry.get("service") or "").strip()
+        on_router = node_id in routers if routers else True
+        if session is not None and service and service.upper() != "CUSTOM" and (on_router or include_hosts):
+            try:
+                if not ensure_service(session, node_id, service):
+                    logger.warning("Unable to add segmentation service %s on node %s", service, node_id)
+                else:
+                    logger.info("Segmentation: enabled %s on node %s", service, node_id)
+            except Exception as exc:
+                logger.warning("Error enabling segmentation service on node %s: %s", node_id, exc)
+
+        replayed = dict(entry)
+        replayed["rule"] = dict(rule)
+        replayed["script"] = script_path
+        existing.append(replayed)
+        applied += 1
+
+    if skipped_without_spec:
+        logger.warning(
+            "Segmentation: %d planned rule(s) carried no script and were not applied. "
+            "The plan predates rules carrying their own enforcement -- regenerate it "
+            "so the running scenario matches what the plan shows.",
+            skipped_without_spec,
+        )
+    logger.info(
+        "Segmentation: applied %d rule(s) from the plan; no new policy was drawn", applied
+    )
+    return applied
 
 
 def _write_idempotent_iptables_script(script_path: str, commands: List[str], label: str) -> None:
@@ -427,7 +644,10 @@ def _apply_pivot_access(
     session: object,
     lookup_node_name,
     entry_points: Optional[Dict[int, object]] = None,
+    node_names: Optional[Dict[int, str]] = None,
+    participant_subnets: Optional[Sequence[str]] = None,
     ssh_port: int = 22,
+    preferred_provider: object = None,
 ) -> None:
     """Guarantee each walled-off subnet keeps one reachable pivot provider.
 
@@ -441,14 +661,19 @@ def _apply_pivot_access(
     if not isinstance(existing, list):
         return
 
-    node_names: Dict[int, str] = {}
+    # Names come from the plan first. The live session cannot answer for them on
+    # the CORE builds this runs against, so a provider would otherwise be
+    # reported as "node-14" in the summary and in every guide built from it.
+    resolved_names: Dict[int, str] = {int(k): str(v) for k, v in (node_names or {}).items()}
     for node in list(hosts or []) + list(routers or []):
+        if int(node.node_id) in resolved_names:
+            continue
         try:
             name = lookup_node_name(int(node.node_id))
         except Exception:
             name = None
         if name:
-            node_names[int(node.node_id)] = str(name)
+            resolved_names[int(node.node_id)] = str(name)
 
     router_ids = []
     for router in routers or []:
@@ -460,11 +685,13 @@ def _apply_pivot_access(
     plan = plan_pivot_access(
         existing,
         hosts,
-        node_names=node_names,
+        node_names=resolved_names,
         entry_points=entry_points,
         routers=routers,
         router_ids=router_ids,
         ssh_port=int(ssh_port),
+        participant_subnets=participant_subnets,
+        preferred_provider=preferred_provider,
     )
     if not plan.providers:
         return
@@ -503,6 +730,17 @@ def _apply_pivot_access(
     for node_id, commands in commands_by_node.items():
         script_path = _next_segmentation_script_path(out_dir, int(node_id), "pivot", counters)
         _write_idempotent_iptables_script(script_path, commands, f"pivot-access:{node_id}")
+        # The scripts are run by the Segmentation service, which is enabled on
+        # routers only unless include_hosts is set. A provider is usually a
+        # host, so without this its INPUT allow is written and never applied --
+        # the FORWARD rules open the path across the routers and the packet is
+        # then dropped on arrival by the provider's own default-deny.
+        if session is not None:
+            try:
+                ensure_service(session, int(node_id), "Segmentation")
+            except Exception as exc:
+                logger.warning("Pivot access: could not enable Segmentation on node %s: %s",
+                               node_id, exc)
 
     summary["pivot_access"] = plan.as_dict()
     logger.info(
@@ -526,7 +764,11 @@ def plan_and_apply_segmentation(
     docker_nodes: Optional[Dict[str, Dict[str, object]]] = None,
     accessible_by_pivot: bool = False,
     pivot_entry_points: Optional[Dict[int, object]] = None,
+    pivot_node_names: Optional[Dict[int, str]] = None,
+    pivot_participant_subnets: Optional[Sequence[str]] = None,
     pivot_ssh_port: int = 22,
+    pivot_preferred_provider: object = None,
+    planned_rules: Optional[Sequence[dict]] = None,
 ) -> Dict[str, object]:
     """
     Create a number of segmentation "slots" based on density and assign selected services by factor.
@@ -540,6 +782,13 @@ def plan_and_apply_segmentation(
     it a subnet can end up with no way in at all, which makes any challenge
     inside it unsolvable. Providers never consume challenge-slot capacity; see
     `pivot_access`.
+
+    When `planned_rules` is given, those rules are applied verbatim and no new
+    policy is drawn. That is how execute enforces exactly the segmentation the
+    plan showed: planning is driven by the global `random` module, so running it
+    a second time walls off different subnets than the preview did -- and the
+    preview is what the author reviewed and what pivot access placed provider
+    nodes for.
 
     Returns a summary dictionary with planned rules per node.
     """
@@ -675,6 +924,20 @@ def plan_and_apply_segmentation(
     except Exception:
         pass
 
+    # Replaying a plan replaces planning entirely: the slot loop below is left
+    # with nothing to do, and everything after it -- pivot access, the summary,
+    # the artifacts -- runs against the rules the plan already decided.
+    replaying = bool(planned_rules)
+    if replaying:
+        replay_planned_rules(
+            summary=summary,
+            planned_rules=planned_rules or [],
+            out_dir=out_dir,
+            session=session,
+            include_hosts=include_hosts,
+            router_ids=[int(r.node_id) for r in (routers or [])],
+        )
+
     # Determine the scale for slots: use number of distinct subnets across hosts
     subnets = _group_hosts_by_subnet(hosts)
     base = max(1, len(subnets))
@@ -707,11 +970,11 @@ def plan_and_apply_segmentation(
             d = max(0.0, min(1.0, ds))
             density_slots = max(1, min(base, int(round(base * d))))
     # If no explicit counts and density <= 0, nothing to plan
-    if abs_slots_total <= 0 and density_slots <= 0:
+    if abs_slots_total <= 0 and density_slots <= 0 and not replaying:
         return summary
 
     # Total slots = count slots + density slots
-    slots = abs_slots_total + density_slots
+    slots = 0 if replaying else abs_slots_total + density_slots
     dens_for_log = max(0.0, min(1.0, float(density)))
 
     # Build a deterministic service plan honoring per-item abs_count first.
@@ -752,7 +1015,8 @@ def plan_and_apply_segmentation(
     })
 
     try:
-        logger.info("Segmentation: planning %d slots across %d subnets (density=%.2f)", slots, len(nets), float(dens_for_log))
+        if not replaying:
+            logger.info("Segmentation: planning %d slots across %d subnets (density=%.2f)", slots, len(nets), float(dens_for_log))
     except Exception:
         # Best-effort logging; avoid breaking execution due to logging issues
         pass
@@ -878,34 +1142,12 @@ def plan_and_apply_segmentation(
                     logger.warning("Custom segmentation plugin failed for node %s: %s", node.node_id, e)
                     # Fall back to a simple LOG rule so there is at least an artifact
                     chain = "FORWARD" if on_router else "INPUT"
-                    script_body = f"""#!/usr/bin/env python3
-import subprocess, shlex
-cmds = [
-    "iptables -A {chain} -j LOG --log-prefix '[custom-seg]'",
-]
-for c in cmds:
-    try:
-        subprocess.check_call(shlex.split(c))
-    except Exception:
-        pass
-print('[segmentation] applied', len(cmds), 'commands')
-"""
+                    script_body = _CUSTOM_SCRIPT_TEMPLATE.format(chain=chain)
                     rule = {"type": "custom", "svc": svc, "node": node.node_id, "fallback": True}
                     rtype = "custom"
             else:
                 chain = "FORWARD" if on_router else "INPUT"
-                script_body = f"""#!/usr/bin/env python3
-import subprocess, shlex
-cmds = [
-    "iptables -A {chain} -j LOG --log-prefix '[custom-seg]'",
-]
-for c in cmds:
-    try:
-        subprocess.check_call(shlex.split(c))
-    except Exception:
-        pass
-print('[segmentation] applied', len(cmds), 'commands')
-"""
+                script_body = _CUSTOM_SCRIPT_TEMPLATE.format(chain=chain)
                 rule = {"type": "custom", "svc": svc, "node": node.node_id, "fallback": True}
                 rtype = "custom"
             # Write the custom script
@@ -914,10 +1156,13 @@ print('[segmentation] applied', len(cmds), 'commands')
             counters[key] = cnt + 1
             script_name = f"seg_{rtype}_{node.node_id}_{cnt}.py"
             script_path = os.path.join(out_dir, script_name)
+            rule["script_spec"] = {"kind": "literal", "body": script_body}
+            # A CUSTOM script only logs, so it denies no path of its own.
+            rule["effect"] = _empty_effect(
+                EFFECT_TRANSIT if on_router else EFFECT_NODE, node.node_id, "",
+            )
             try:
-                with open(script_path, "w", encoding="utf-8") as f:
-                    f.write(script_body if script_body.endswith("\n") else script_body + "\n")
-                os.chmod(script_path, 0o755)
+                write_segmentation_script(script_path, rule["script_spec"])
                 logger.debug("Segmentation: wrote custom script %s for node %s", script_name, node.node_id)
             except Exception as e:
                 logger.debug("Failed to write custom policy script for node %s: %s", node.node_id, e)
@@ -1025,70 +1270,18 @@ print('[segmentation] applied', len(cmds), 'commands')
                             forward_allow = f"iptables -A FORWARD -s {internal} -d {ext} -j ACCEPT"
                     except Exception:
                         forward_allow = None
-                py_lines = [
-                    "#!/usr/bin/env python3",
-                    "import subprocess, shlex",
-                    "def run(cmd: str):",
-                    "    try:",
-                    "        subprocess.check_call(shlex.split(cmd))",
-                    "    except Exception:",
-                    "        pass",
-                    "def build_check(cmd: str) -> str:",
-                    "    tokens = shlex.split(cmd)",
-                    "    out = []",
-                    "    i = 0",
-                    "    while i < len(tokens):",
-                    "        t = tokens[i]",
-                    "        if t == 'iptables':",
-                    "            out.append(t)",
-                    "        elif t == '-A' or t == '-I':",
-                    "            out.append('-C')",
-                    "            if i + 1 < len(tokens):",
-                    "                out.append(tokens[i+1])",
-                    "                i += 1",
-                    "                if t == '-I' and i + 1 < len(tokens) and tokens[i+1].isdigit():",
-                    "                    i += 1",
-                    "        else:",
-                    "            out.append(t)",
-                    "        i += 1",
-                    "    return ' '.join(out)",
-                    "def ensure_rule(cmd: str):",
-                    "    check_cmd = build_check(cmd)",
-                    "    try:",
-                    "        subprocess.check_call(shlex.split(check_cmd))",
-                    "        return False",
-                    "    except Exception:",
-                    "        pass",
-                    "    try:",
-                    "        subprocess.check_call(shlex.split(cmd))",
-                    "        return True",
-                    "    except Exception:",
-                    "        return False",
-                    "# Enforce default deny on FORWARD and allow established/related",
-                    "run('iptables -P FORWARD DROP')",
-                    "ensure_rule('iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT')",
-                ]
-                if forward_allow:
-                    py_lines.append(f"ensure_rule('{forward_allow}')")
-                py_lines += [
-                    "rules = [",
-                ]
-                for c in cmd_list:
-                    py_lines.append(f"    \"{c}\",")
-                py_lines += [
-                    "]",
-                    "applied = 0",
-                    "for cmd in rules:",
-                    "    if ensure_rule(cmd):",
-                    "        applied += 1",
-                    "print('[segmentation-nat] applied', applied, 'new rules (idempotent), default FORWARD policy set to DROP')",
-                ]
-                try:
-                    with open(script_path, "w", encoding="utf-8") as f:
-                        f.write("\n".join(py_lines) + "\n")
-                    os.chmod(script_path, 0o755)
-                except Exception as e:
-                    logger.debug("Failed to write NAT policy script for node %s: %s", node.node_id, e)
+                # NAT denies nothing itself; its script sets -P FORWARD DROP,
+                # which is what the rest of the model needs to know about it.
+                rule["effect"] = _empty_effect(EFFECT_TRANSIT, node.node_id, "FORWARD")
+                rule["script_spec"] = {
+                    "kind": "nat",
+                    "chain": "FORWARD",
+                    "comment": "# Enforce default deny on FORWARD and allow established/related",
+                    "pre_accepts": [forward_allow] if forward_allow else [],
+                    "commands": list(cmd_list),
+                    "tag": "segmentation-nat",
+                }
+                write_segmentation_script(script_path, rule["script_spec"])
                 # Ensure service for NAT (maps to Firewall)
                 try:
                     to_enable = SERVICE_ENABLE_MAP.get(svc, svc)
@@ -1229,53 +1422,8 @@ print('[segmentation] applied', len(cmds), 'commands')
                 script_name = f"seg_{rtype}_{node.node_id}_{cnt}.py"
                 script_path = os.path.join(out_dir, script_name)
                 # Make firewall scripts idempotent and enforce default deny on relevant chain
-                py_lines = [
-                    "#!/usr/bin/env python3",
-                    "import subprocess, shlex",
-                    "def run(cmd: str):",
-                    "    try:",
-                    "        subprocess.check_call(shlex.split(cmd))",
-                    "    except Exception:",
-                    "        pass",
-                    "def build_check(cmd: str) -> str:",
-                    "    tokens = shlex.split(cmd)",
-                    "    out = []",
-                    "    i = 0",
-                    "    while i < len(tokens):",
-                    "        t = tokens[i]",
-                    "        if t == 'iptables':",
-                    "            out.append(t)",
-                    "        elif t == '-A' or t == '-I':",
-                    "            out.append('-C')",
-                    "            if i + 1 < len(tokens):",
-                    "                out.append(tokens[i+1])",
-                    "                i += 1",
-                    "                if t == '-I' and i + 1 < len(tokens) and tokens[i+1].isdigit():",
-                    "                    i += 1",
-                    "        else:",
-                    "            out.append(t)",
-                    "        i += 1",
-                    "    return ' '.join(out)",
-                    "def ensure_rule(cmd: str):",
-                    "    check_cmd = build_check(cmd)",
-                    "    try:",
-                    "        subprocess.check_call(shlex.split(check_cmd))",
-                    "        return False",
-                    "    except Exception:",
-                    "        pass",
-                    "    try:",
-                    "        subprocess.check_call(shlex.split(cmd))",
-                    "        return True",
-                    "    except Exception:",
-                    "        return False",
-                ]
-                # Set default deny and stateful accept for the chain in use
-                if chain_fw in ("FORWARD", "INPUT"):
-                    py_lines += [
-                        f"run('iptables -P {chain_fw} DROP')",
-                        f"ensure_rule('iptables -A {chain_fw} -m state --state ESTABLISHED,RELATED -j ACCEPT')",
-                    ]
                 # For host-level firewall rules, opportunistically open a few common service ports so internal nodes have reachable services.
+                pre_accepts: List[str] = []
                 allow_services: List[int] = []
                 docker_ports_opened: List[Tuple[str, int]] = []
                 docker_ports_seen: Set[Tuple[str, int]] = set()
@@ -1293,8 +1441,8 @@ print('[segmentation] applied', len(cmds), 'commands')
                     if key in inserted_accept_rules:
                         return False, key
                     inserted_accept_rules.add(key)
-                    py_lines.append(
-                        f"ensure_rule('iptables -I INPUT 1 -p {proto_norm} --dport {port_val} -j ACCEPT')"
+                    pre_accepts.append(
+                        f"iptables -I INPUT 1 -p {proto_norm} --dport {port_val} -j ACCEPT"
                     )
                     return True, key
 
@@ -1329,26 +1477,16 @@ print('[segmentation] applied', len(cmds), 'commands')
                         if target and target not in docker_ports_seen:
                             docker_ports_seen.add(target)
                             docker_ports_opened.append(target)
-                py_lines += [
-                    "rules = [",
-                ]
-                for c in cmd_list:
-                    py_lines.append(f"    \"{c}\",")
-                py_lines += [
-                    "]",
-                    "applied = 0",
-                    "for cmd in rules:",
-                    "    if ensure_rule(cmd):",
-                    "        applied += 1",
-                    f"print('[segmentation-{chain_fw.lower()}] applied', applied, 'new rules (idempotent), default {chain_fw} policy set to DROP')",
-                ]
-                try:
-                    with open(script_path, "w", encoding="utf-8") as f:
-                        f.write("\n".join(py_lines) + "\n")
-                    os.chmod(script_path, 0o755)
+                rule["effect"] = rule_effect(rule, chain=chain_fw, node=node)
+                rule["script_spec"] = {
+                    "kind": "firewall",
+                    "chain": chain_fw,
+                    "pre_accepts": list(pre_accepts),
+                    "commands": list(cmd_list),
+                    "tag": f"segmentation-{chain_fw.lower()}",
+                }
+                if write_segmentation_script(script_path, rule["script_spec"]):
                     logger.debug("Segmentation: wrote %s for node %s", script_name, node.node_id)
-                except Exception as e:
-                    logger.debug("Failed to write policy script for node %s: %s", node.node_id, e)
 
                 # Ensure the chosen service is enabled only on routers; hosts should not be assigned the Segmentation service
                 try:
@@ -1423,7 +1561,10 @@ print('[segmentation] applied', len(cmds), 'commands')
                 session=session,
                 lookup_node_name=_lookup_node_name,
                 entry_points=pivot_entry_points,
+                node_names=pivot_node_names,
+                participant_subnets=pivot_participant_subnets,
                 ssh_port=pivot_ssh_port,
+                preferred_provider=pivot_preferred_provider,
             )
         except Exception as exc:
             logger.warning("Pivot access planning failed: %s", exc)
@@ -1649,13 +1790,16 @@ def write_allow_rules_for_flows(
             os.chmod(script_path, 0o755)
         except Exception:
             pass
-        # Ensure Segmentation service is enabled on routers, and optionally hosts if include_hosts=True
-        try:
-            nid = int(node_id)
-            if nid in router_ids or (include_hosts and nid in host_ids):
-                ensure_service(session, nid, "Segmentation")
-        except Exception:
-            pass
+        # Ensure Segmentation service is enabled on routers, and optionally hosts if include_hosts=True.
+        # With no session there is nothing to enable: that is the prediction
+        # path, which works out the rules without touching any node.
+        if session is not None:
+            try:
+                nid = int(node_id)
+                if nid in router_ids or (include_hosts and nid in host_ids):
+                    ensure_service(session, nid, "Segmentation")
+            except Exception:
+                pass
         return script_path
 
     for flow in flows:
@@ -1672,9 +1816,10 @@ def write_allow_rules_for_flows(
             continue
         src_ip = ip_only(src_host.ip4)
 
-        # Randomly widen to subnet on src and/or dst
-        use_src_subnet = random.random() < max(0.0, min(1.0, float(src_subnet_prob)))
-        use_dst_subnet = random.random() < max(0.0, min(1.0, float(dst_subnet_prob)))
+        # Widen to subnet on src and/or dst. The draw is the flow's own, so the
+        # plan and the run reach the same answer for it.
+        use_src_subnet = flow_draw(flow, "allow-src") < max(0.0, min(1.0, float(src_subnet_prob)))
+        use_dst_subnet = flow_draw(flow, "allow-dst") < max(0.0, min(1.0, float(dst_subnet_prob)))
         src_sel = subnet_of(src_host) if use_src_subnet else src_ip
         dst_sel = subnet_of(dst_host) if use_dst_subnet else dst_ip
 
@@ -2259,7 +2404,7 @@ def write_dnat_for_flows(
 
     # For each flow, select and generate DNAT rules with some probability
     for flow in flows:
-        if random.random() > max(0.0, min(1.0, float(dnat_prob))):
+        if flow_draw(flow, "dnat") > max(0.0, min(1.0, float(dnat_prob))):
             continue
         proto = (flow.get("protocol") or "").lower()
         if proto not in ("tcp", "udp"):
@@ -2348,6 +2493,11 @@ def verify_flows_allowed(
     except Exception:
         rules = []
     blocked: List[dict] = []
+    # This pass sees the flows and the rules but never the topology, so hosts are
+    # reconstructed from the flow addresses. They exist only to work out whether
+    # a flow crosses a router; node identity comes from the flow's own dst_id.
+    # The prefix is the planner's, which `preview_validation` enforces on every
+    # subnet -- so this is an assumption the plan guarantees rather than a guess.
     synthetic_hosts: List[NodeInfo] = []
     synthetic_seen: Set[str] = set()
     next_node_id = 1
@@ -2362,7 +2512,9 @@ def verify_flows_allowed(
             if not ip or ip in synthetic_seen:
                 continue
             synthetic_seen.add(ip)
-            synthetic_hosts.append(NodeInfo(node_id=next_node_id, ip4=f"{ip}/24", role="Host"))
+            synthetic_hosts.append(
+                NodeInfo(node_id=next_node_id, ip4=f"{ip}/{DEFAULT_IPV4_PREFIXLEN}", role="Host")
+            )
             next_node_id += 1
         recv_node_id = fl.get('dst_id')
         try:
@@ -2381,46 +2533,54 @@ def verify_flows_allowed(
     return result
 
 
-def plan_preview_allow_rules(
-    segmentation_preview: dict,
-    traffic_plan: Optional[List[dict]],
-    host_ips: Dict[int, str],
-    seed: int = 0,
+def predict_allow_rules_for_flows(
+    *,
+    routers: List[NodeInfo],
+    hosts: List[NodeInfo],
+    traffic_summary_path: str,
+    segmentation_summary_path: str,
+    out_dir: str,
+    src_subnet_prob: float = 0.3,
+    dst_subnet_prob: float = 0.3,
+    include_hosts: bool = False,
 ) -> Dict[str, object]:
-    """Dry-run allow planning for preview display.
+    """The allow rules a run will write for these flows, without writing them.
 
-    We approximate which allow rules would be generated by simulating flows derived from traffic_plan items.
-    This is intentionally coarse: it produces pseudo flows (one per traffic item kind) from a sampled src->dst pair.
+    This is the same code the run uses, given the same flows and the same
+    policy, so the answer is the answer -- not an estimate of it. The preview
+    used to approximate this by sampling random host pairs and inventing a port
+    per traffic kind, which meant it displayed allow rules for flows the
+    scenario does not have and omitted the ones it does.
+
+    Both halves are now knowable at plan time: the flows are planned, and the
+    per-flow widen/port-forward decisions are drawn from each flow's identity
+    rather than from `random`. All that remains is to run it somewhere
+    harmless, which is what `out_dir` is for -- a scratch copy of the policy, so
+    the scripts and the summary rewrite land there instead of on the real
+    artifacts.
     """
-    if not traffic_plan:
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        if os.path.exists(segmentation_summary_path):
+            shutil.copy(
+                segmentation_summary_path, os.path.join(out_dir, "segmentation_summary.json")
+            )
+    except Exception as exc:
+        logger.debug("Allow-rule prediction: could not stage the policy: %s", exc)
+
+    try:
+        # No session: the prediction enables no services and touches no nodes.
+        result = write_allow_rules_for_flows(
+            None,
+            routers or [],
+            hosts or [],
+            traffic_summary_path,
+            out_dir=out_dir,
+            src_subnet_prob=src_subnet_prob,
+            dst_subnet_prob=dst_subnet_prob,
+            include_hosts=include_hosts,
+        )
+    except Exception as exc:
+        logger.debug("Allow-rule prediction failed: %s", exc)
         return {"predicted_allow_rules": []}
-    rnd = random.Random(seed + 1337)
-    host_ids = list(host_ips.keys())
-    if len(host_ids) < 2:
-        return {"predicted_allow_rules": []}
-    predicted: List[dict] = []
-    for it in traffic_plan:
-        try:
-            proto = (it.get('protocol') or 'tcp').lower() if isinstance(it, dict) else 'tcp'
-        except Exception:
-            proto = 'tcp'
-        if proto not in ('tcp','udp'):
-            proto = 'tcp'
-        a, b = rnd.sample(host_ids, 2)
-        dst_ip = host_ips.get(b)
-        if not dst_ip:
-            continue
-        # choose port deterministically per kind
-        try:
-            port = int(it.get('port')) if isinstance(it, dict) and it.get('port') else 8000 + (hash(it.get('kind','k')) % 1024)
-        except Exception:
-            port = 8000
-        predicted.append({
-            'src_id': a,
-            'dst_id': b,
-            'proto': proto,
-            'dst_ip': dst_ip,
-            'port': port,
-            'explanation': 'preview synthetic allow for traffic kind',
-        })
-    return {"predicted_allow_rules": predicted}
+    return {"predicted_allow_rules": list(result.get("rules") or [])}

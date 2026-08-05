@@ -519,6 +519,77 @@ def _build_node_check(seq: int, node: dict[str, Any], assignment: dict[str, Any]
 # Bash rendering
 # --------------------------------------------------------------------------- #
 
+class _PivotCheck:
+    """A pivot the participant has to perform before a step becomes reachable.
+
+    Verified by connecting to the provider's entry port, because that is the
+    thing the rest of the subnet depends on: if it does not answer, every
+    challenge behind that boundary is unreachable no matter how well it was
+    built. The script does not then tunnel through it -- solving the provider's
+    own challenge is the participant's work, and the steps behind it are checked
+    from the CORE VM, which reaches the node subnets directly.
+    """
+
+    __slots__ = ("seq", "label", "subnet", "provider", "ip", "port", "kind", "instruction")
+
+    def __init__(self, *, seq: str, subnet: str, provider: str, ip: str, port: str,
+                 kind: str, instruction: str):
+        self.seq = seq
+        self.label = f"pivot into {subnet}" if subnet else "pivot"
+        self.subnet = subnet
+        self.provider = provider
+        self.ip = ip
+        self.port = port
+        self.kind = kind
+        self.instruction = instruction
+
+
+def own_step_pivots(flag_assignments: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """The own_step pivot decisions carried on the assignments, deduplicated.
+
+    Mirrors what the guides render, so a facilitator reading the guide and one
+    running the script see the same pivots.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for assignment in (flag_assignments or []):
+        if not isinstance(assignment, dict):
+            continue
+        decisions = assignment.get("pivot_decisions")
+        if not isinstance(decisions, list):
+            continue
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+            if _clean(decision.get("disposition")) != "own_step":
+                continue
+            key = (_clean(decision.get("subnet")), _clean(decision.get("provider_node")))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(decision)
+    return out
+
+
+def _build_pivot_check(decision: dict[str, Any], seq: str) -> _PivotCheck | None:
+    ip = _valid_ipv4(decision.get("provider_address"))
+    port = _clean(decision.get("entry_port"))
+    if not ip or not port:
+        # Nothing to connect to. The plan reports such a provider as unresolved
+        # and execute warns about it; inventing a check here would be a
+        # confident answer to a question nobody can ask.
+        return None
+    return _PivotCheck(
+        seq=seq,
+        subnet=_clean(decision.get("subnet")),
+        provider=_clean(decision.get("provider_node")),
+        ip=ip,
+        port=port,
+        kind=_clean(decision.get("entry_kind")) or "entry",
+        instruction=_clean(decision.get("instruction")),
+    )
+
+
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
@@ -579,6 +650,23 @@ def build_solutions_script(scenario: str,
                     if text:
                         known_facts.setdefault(_canon(key), text)
 
+    # Pivots that are their own step gate a chain step; `insert_before` names
+    # which. Keyed by that index so each one is emitted just before the step it
+    # unlocks, which is where the guides put it too.
+    pivots_by_index: dict[int, list[_PivotCheck]] = {}
+    pivot_total = 0
+    for decision in own_step_pivots(flag_assignments):
+        try:
+            index = int(decision.get("insert_before"))
+        except Exception:
+            index = -1
+        pivot_total += 1
+        built = _build_pivot_check(decision, f"P{pivot_total}")
+        if built is None:
+            continue
+        pivots_by_index.setdefault(index, []).append(built)
+    pivot_checks = [c for group in pivots_by_index.values() for c in group]
+
     runnable = sum(1 for c in checks if not c.skip_reason)
 
     out: list[str] = []
@@ -589,13 +677,23 @@ def build_solutions_script(scenario: str,
     w(f"# ScenarioForge Solutions Script  (format v{tool_version})")
     w(f"# Scenario : {scenario_label}")
     w(f"# Steps    : {len(checks)} total, {runnable} auto-checkable (flag-node-generator only)")
+    if pivot_checks:
+        w(f"# Pivots   : {len(pivot_checks)} pivot step(s) verified by reaching the provider's entry port")
     w("#")
     w("# Verifies each challenge step by establishing the documented entry point")
     w("# and retrieving its flag. Run directly if this host routes to the CORE")
     w("# node subnet, or tunnel each command through the CORE VM with --ssh-host.")
     w("#")
     w("# Usage:")
-    w("#   ./solutions_<scenario>.sh [--ssh-host H] [--ssh-user U] [--ssh-key K] [--ssh-port P] [-v]")
+    w("#   ./solutions_<scenario>.sh [--ssh-host H] [--ssh-user U] [--ssh-key K] [--ssh-port P]")
+    w("#                              [--via-node NODE] [--session-id N]")
+    w("#                              [--sudo-pass P | --no-sudo] [-v]")
+    w("#")
+    w("# --via-node runs every check inside that CORE node's network namespace.")
+    w("# A CORE VM does not route to the emulated subnets, so without it the")
+    w("# checks reach nothing: pick any node that should be able to see the")
+    w("# targets, and combine it with --ssh-host to drive the whole thing from")
+    w("# your own machine.")
     w("#")
     w("# Requires: bash, grep, base64. Per strategy: sshpass+ssh (SSH steps),")
     w("#           curl (HTTP steps), nc (TCP steps).")
@@ -603,12 +701,17 @@ def build_solutions_script(scenario: str,
     w("set -u")
     w("")
     w('SSH_HOST=""; SSH_USER=""; SSH_KEY=""; SSH_PORT=""; VERBOSE=0')
+    w('VIA_NODE=""; SESSION_ID="1"; SUDO="sudo"; SUDO_PASS=""')
     w("while [ $# -gt 0 ]; do")
     w('  case "$1" in')
     w('    --ssh-host) SSH_HOST="$2"; shift 2;;')
     w('    --ssh-user) SSH_USER="$2"; shift 2;;')
     w('    --ssh-key) SSH_KEY="$2"; shift 2;;')
     w('    --ssh-port) SSH_PORT="$2"; shift 2;;')
+    w('    --via-node) VIA_NODE="$2"; shift 2;;')
+    w('    --session-id) SESSION_ID="$2"; shift 2;;')
+    w('    --sudo-pass) SUDO_PASS="$2"; shift 2;;')
+    w('    --no-sudo) SUDO=""; shift;;')
     w('    -v|--verbose) VERBOSE=1; shift;;')
     w('    -h|--help) grep -E "^# " "$0" | sed "s/^# \\{0,1\\}//"; exit 0;;')
     w('    *) echo "unknown argument: $1" >&2; exit 2;;')
@@ -620,8 +723,36 @@ def build_solutions_script(scenario: str,
     w("")
     w("# Run a base64-encoded bash payload either locally or, when --ssh-host is")
     w("# set, inside the CORE VM (which can reach the emulated node subnet).")
+    w("# Wrap a payload so it runs inside a CORE node's network namespace.")
+    w("# A CORE VM does not route to the emulated subnets: on a stock deployment")
+    w("# `ip route get <node ip>` on the VM leaves via the default gateway, so a")
+    w("# payload run on the VM itself reaches nothing in the scenario. Only a")
+    w("# node can. Docker nodes answer to `docker exec`, CORE vnodes to `vcmd`,")
+    w("# and which a node is is not knowable from here -- so try one, then the")
+    w("# other.")
+    w("node_wrap() {")
+    w('  local payload_b64="$1"')
+    w('  local inner="echo $payload_b64 | base64 -d | bash"')
+    w("  # Entering a namespace needs root. The password is inlined into the")
+    w("  # command rather than left in the environment so the same string works")
+    w("  # locally and over ssh; pass --no-sudo where the account is already root.")
+    w('  local pfx=""')
+    w("  if [ -n \"$SUDO\" ]; then pfx=\"printf '%s\\n' '$SUDO_PASS' | $SUDO -S -p '' \"; fi")
+    w("  echo \"if ${pfx}docker exec $VIA_NODE true >/dev/null 2>&1; then\"")
+    w("  echo \"  ${pfx}docker exec $VIA_NODE sh -c '$inner'\"")
+    w('  echo "else"')
+    w("  echo \"  ${pfx}vcmd -c /tmp/pycore.$SESSION_ID/$VIA_NODE -- sh -c '$inner'\"")
+    w('  echo "fi"')
+    w("}")
+    w("")
     w("run_payload() {")
     w('  local payload_b64="$1"')
+    w('  local script')
+    w('  if [ -n "$VIA_NODE" ]; then')
+    w('    script="$(node_wrap "$payload_b64")"')
+    w("  else")
+    w('    script="echo $payload_b64 | base64 -d | bash"')
+    w("  fi")
     w('  if [ -n "$SSH_HOST" ]; then')
     w('    local key_opt=""')
     w('    [ -n "$SSH_KEY" ] && key_opt="-i $SSH_KEY"')
@@ -630,9 +761,9 @@ def build_solutions_script(scenario: str,
     w('    local user="${SSH_USER:-$USER}"')
     w('    # shellcheck disable=SC2086')
     w('    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \\')
-    w('        $key_opt $port_opt "$user@$SSH_HOST" "echo $payload_b64 | base64 -d | bash" 2>&1')
+    w('        $key_opt $port_opt "$user@$SSH_HOST" "$script" 2>&1')
     w("  else")
-    w('    echo "$payload_b64" | base64 -d | bash 2>&1')
+    w('    bash -c "$script" 2>&1')
     w("  fi")
     w("}")
     w("")
@@ -673,6 +804,30 @@ def build_solutions_script(scenario: str,
     w("  fi")
     w("}")
     w("")
+    w("check_pivot() {")
+    w('  # args: seq label ip port kind')
+    w('  local seq="$1"; local label="$2"; local ip="$3"; local port="$4"; local kind="$5"')
+    w('  echo "----------------------------------------------------------------"')
+    w('  printf "Pivot %s — %s  (%s @ %s:%s)\\n" "$seq" "$label" "$kind" "$ip" "$port"')
+    w('  # A provider that does not answer makes every challenge behind that')
+    w('  # boundary unreachable, however well those challenges were built.')
+    w("  local payload")
+    w('  # The two answers must not be substrings of one another, and the match is')
+    w('  # anchored: a bare `grep -q REACHABLE` matches UNREACHABLE and calls every')
+    w('  # closed port open. Found by running this against a port nothing served.')
+    w('  payload="$(printf %s "timeout 6 bash -c \'</dev/tcp/'"$ip"'/'"$port"'\' >/dev/null 2>&1 && echo PIVOT_OPEN || echo PIVOT_SHUT" | base64 | tr -d "\\n")"')
+    w('  local out')
+    w('  out="$(run_payload "$payload")"')
+    w('  if [ "$VERBOSE" = "1" ]; then')
+    w('    printf "%s\\n" "$out" | sed "s/^/      | /"')
+    w("  fi")
+    w('  if printf "%s" "$out" | grep -qx PIVOT_OPEN; then')
+    w('    record "PASS" "$seq" "$label" "provider reachable at $ip:$port"')
+    w("  else")
+    w('    record "FAIL" "$seq" "$label" "provider unreachable at $ip:$port — everything behind this boundary is unsolvable"')
+    w("  fi")
+    w("}")
+    w("")
     w("skip_step() {")
     w('  local seq="$1"; local label="$2"; local reason="$3"')
     w('  echo "----------------------------------------------------------------"')
@@ -681,11 +836,34 @@ def build_solutions_script(scenario: str,
     w("")
     w('echo "================================================================"')
     w(f'echo "ScenarioForge Solutions Script — {scenario_label}"')
-    w('[ -n "$SSH_HOST" ] && echo "Execution: via CORE VM at $SSH_HOST" || echo "Execution: direct (this host must route to the node subnet)"')
+    w('if [ -n "$VIA_NODE" ]; then')
+    w('  echo "Execution: inside CORE node $VIA_NODE${SSH_HOST:+ (reached via $SSH_HOST)}"')
+    w('elif [ -n "$SSH_HOST" ]; then')
+    w('  echo "Execution: on the CORE VM at $SSH_HOST — pass --via-node NODE if it does not route to the node subnet"')
+    w("else")
+    w('  echo "Execution: direct — this host must route to the node subnet, else pass --via-node NODE"')
+    w("fi")
     w('echo "================================================================"')
     w("")
 
+    def _emit_pivots(index: int) -> None:
+        for pivot in pivots_by_index.get(index, []):
+            w(f"# --- Pivot {pivot.seq}: {pivot.label} ---")
+            if pivot.instruction:
+                w("# " + pivot.instruction.replace("\\", "\\\\"))
+            if pivot.provider:
+                w(f"# Provider: {pivot.provider}")
+            w("check_pivot {seq} {label} {ip} {port} {kind}".format(
+                seq=_bash_literal(pivot.seq),
+                label=_bash_literal(pivot.label),
+                ip=_bash_literal(pivot.ip),
+                port=_bash_literal(pivot.port),
+                kind=_bash_literal(pivot.kind),
+            ))
+            w("")
+
     for check in checks:
+        _emit_pivots(check.seq - 1)
         label_lit = _bash_literal(check.label)
         if check.human:
             w(f"# --- Step {check.seq}: {check.label} — documented steps ---")
@@ -704,9 +882,14 @@ def build_solutions_script(scenario: str,
             ))
         w("")
 
+    # A pivot whose subnet the chain never visits has nothing to be ordered
+    # against (insert_before is -1), but it is still a way in that has to work.
+    for index in sorted(k for k in pivots_by_index if k < 0 or k >= len(checks)):
+        _emit_pivots(index)
+
     w('echo "================================================================"')
     w('printf "Summary: %s passed, %s failed, %s inconclusive, %s skipped (of %s steps)\\n" \\')
-    w(f'  "$PASS" "$FAIL" "$INCONCLUSIVE" "$SKIP" "{len(checks)}"')
+    w(f'  "$PASS" "$FAIL" "$INCONCLUSIVE" "$SKIP" "{len(checks) + len(pivot_checks)}"')
     w('echo "================================================================"')
     w('if [ "$FAIL" -gt 0 ]; then exit 1; fi')
     w('exit 0')

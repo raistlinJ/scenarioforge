@@ -10,12 +10,13 @@ from webapp import artifact_checks as ac
 # Plan + validator-summary mapping (checks 1-4)
 # --------------------------------------------------------------------------- #
 
-def test_check_plan_has_seven_pending_steps_in_order():
+def test_check_plan_has_eight_pending_steps_in_order():
     plan = ac.check_plan()
     assert [c["key"] for c in plan] == ac.CHECK_KEYS
-    assert len(plan) == 7
-    # Traffic-script health and reachability are separate checks.
-    assert ac.CHECK_KEYS[-2:] == ["traffic", "reachability"]
+    assert len(plan) == 8
+    # Traffic-script health and reachability are separate checks, and pivot
+    # access comes last because it reads what segmentation produced.
+    assert ac.CHECK_KEYS[-3:] == ["traffic", "reachability", "pivot_access"]
     assert all(c["status"] == "pending" for c in plan)
 
 
@@ -493,14 +494,51 @@ def test_ports_drops_explained_by_a_block_rule_are_not_a_warning():
     assert all("172.21.240.0/24" in i["detail"] for i in segmented)
 
 
-def test_ports_drops_with_no_matching_rule_still_warn():
-    # Same drops, but the block rule covers a different source subnet.
+def test_ports_drops_with_no_rule_and_no_default_deny_still_warn():
+    # The block rule covers a different source subnet, and the policy is not
+    # default-deny, so nothing explains these drops.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "subnet_block", "src": "10.9.9.0/24", "dst": "172.21.240.0/24"}},
+    ]}}
     res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
-                          _cross_subnet_probe(),
-                          segmentation=_segmented_probe(src="10.9.9.0/24"))
+                          _cross_subnet_probe(), segmentation=seg)
     assert res["status"] == "warn"
     assert "3 blocked" in res["summary"]
     assert any("no segmentation rule covers this path" in i["detail"] for i in res["items"])
+
+
+def test_ports_drops_under_default_deny_are_configured_behaviour():
+    # Same drops, but the policy closes everything it does not open. A port no
+    # rule opens is meant to be unreachable, so reporting it as a fault would
+    # flag most of a segmented scenario.
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(),
+                          segmentation=_segmented_probe(src="10.9.9.0/24"))
+    assert res["status"] == "pass"
+    assert "3 closed by the default-deny policy" in res["summary"]
+    assert all("no segmentation rule covers this path" not in i["detail"] for i in res["items"])
+
+
+def test_ports_a_drop_on_a_path_an_allow_opens_is_still_a_fault():
+    # The one shape here worth investigating: the scenario arranged for this
+    # path, the allow was installed, and the packets were dropped anyway.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "subnet_block", "src": "10.0.140.0/24", "dst": "10.9.9.0/24",
+                  "default_deny": True, "chain": "FORWARD"}},
+        {"node_id": 26, "service": "Segmentation",
+         "rule": {"type": "allow", "chain": "INPUT", "proto": "tcp", "port": 16379,
+                  "src": "10.0.140.6", "dst": "172.21.240.7", "reason": "traffic"}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "warn"
+    opened = [i for i in res["items"] if "even though an allow rule opens this path" in i["detail"]]
+    assert len(opened) == 1
+    assert "172.21.240.7" in opened[0]["name"]
+    # The other two drops have no allow, so the policy explains them.
+    assert "2 closed by the default-deny policy" in res["summary"]
 
 
 def test_ports_without_segmentation_data_keeps_warning():
@@ -544,6 +582,80 @@ def test_ports_malformed_segmentation_rules_are_ignored_safely():
     res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
                           _cross_subnet_probe(), segmentation=seg)
     assert res["status"] == "warn"
+
+
+def _effect(scope, protects, blocks_from, *, invert=False, node_id=1):
+    return {"scope": scope, "enforced_by": node_id, "blocks": True,
+            "protects": protects, "blocks_from": blocks_from,
+            "invert_source": invert, "default_deny_chain": "FORWARD"}
+
+
+def test_ports_a_protect_internal_drop_is_explained_not_reported_as_a_fault():
+    # Previously invisible: the rule filter looked for "block" in the type name,
+    # so every protect_internal drop was reported as "no segmentation rule
+    # covers this path" -- a fault, for a scenario doing exactly what it was
+    # told to do.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "172.21.240.0/24",
+                  "chain": "FORWARD", "default_deny": True,
+                  "effect": _effect("transit", "172.21.240.0/24", "172.21.240.0/24", invert=True)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    assert res["status"] == "pass"
+    assert "3 blocked as configured by segmentation" in res["summary"]
+    assert not any("no segmentation rule covers this path" in i["detail"] for i in res["items"])
+
+
+def test_ports_a_protect_internal_does_not_excuse_traffic_from_inside_it():
+    # It shuts out everything *except* its own network, so a drop sourced from
+    # inside is not explained by it.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "10.0.140.0/24",
+                  "effect": _effect("transit", "10.0.140.0/24", "10.0.140.0/24", invert=True)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    # Not attributed to that rule; the default-deny policy explains it instead.
+    assert res["status"] == "pass"
+    assert all("blocked as configured" not in i["detail"] for i in res["items"])
+    assert "3 closed by the default-deny policy" in res["summary"]
+
+
+def test_ports_a_host_enforced_rule_only_excuses_drops_to_that_host():
+    # Read from the fields, this rule names 172.21.240.0/24 and would have
+    # excused all three drops. It is an INPUT rule on one node, so it shields
+    # only 172.21.240.7.
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 26, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "172.21.240.0/24",
+                  "chain": "INPUT",
+                  "effect": _effect("node", "172.21.240.7", "172.21.240.0/24",
+                                    invert=True, node_id=26)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    explained = [i for i in res["items"] if "blocked as configured" in i["detail"]]
+    assert len(explained) == 1
+    assert "172.21.240.7" in explained[0]["name"]
+    # Read from the fields this rule names 172.21.240.0/24 and would have
+    # claimed all three; the other two fall to the policy instead.
+    assert "2 closed by the default-deny policy" in res["summary"]
+
+
+def test_ports_the_explanation_describes_what_the_rule_actually_does():
+    seg = {"ok": True, "rules_summary": {"rules": [
+        {"node_id": 1, "service": "Segmentation",
+         "rule": {"type": "protect_internal", "subnet": "172.21.240.0/24",
+                  "effect": _effect("transit", "172.21.240.0/24", "172.21.240.0/24", invert=True)}},
+    ]}}
+    res = ac.ports_result({"ports_checked": [], "port_unreachable": []},
+                          _cross_subnet_probe(), segmentation=seg)
+    detail = next(i["detail"] for i in res["items"] if "blocked as configured" in i["detail"])
+    assert "everything outside 172.21.240.0/24" in detail
+    assert "172.21.240.0/24" in detail
 
 
 # --------------------------------------------------------------------------- #
@@ -787,3 +899,235 @@ def test_traffic_service_writes_per_node_stats_and_logs():
     # The copied binary is per-node too, so two nodes cannot race on the copy.
     assert 'traffic-agent-$NODE_ID' in svc
     assert '"$runtime_dir/stats.json"' not in svc
+
+
+# --------------------------------------------------------------------------- #
+# Check 8: the participant can reach each pivot provider
+# --------------------------------------------------------------------------- #
+
+def _pivot_probe(providers, allows=()):
+    rules = [{"node_id": 1, "service": "Segmentation", "rule": dict(a)} for a in allows]
+    return {"ok": True, "rules_summary": {
+        "rules": rules,
+        "pivot_access": {"providers": list(providers)},
+    }}
+
+
+def _provider(subnet="172.21.240.0/24", address="172.21.240.4", port=2222,
+              name="pivot-172-21-240-0"):
+    return {"subnet": subnet, "node_id": 14, "node_name": name, "address": address,
+            "entry": {"kind": "ssh", "port": port, "protocol": "tcp", "label": "SSH"},
+            "added": True}
+
+
+def _allow(src, dst="172.21.240.4", port=2222):
+    return {"type": "allow", "chain": "FORWARD", "proto": "tcp",
+            "port": port, "src": src, "dst": dst, "reason": "pivot-access"}
+
+
+HITL_NET = "10.254.200.0/24"
+
+
+def test_pivot_access_passes_when_the_provider_is_open_to_everyone():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [HITL_NET])
+    assert res["status"] == "pass"
+    assert "1 pivot provider(s) reachable" in res["summary"]
+
+
+def test_pivot_access_fails_when_the_participant_is_not_covered():
+    # The shape that used to ship: the allow was scoped to the subnet the block
+    # shut out, and the participant is on neither side of that rule.
+    seg = _pivot_probe([_provider()], [_allow("10.0.140.0/24")])
+    res = ac.pivot_access_result(seg, [HITL_NET])
+    assert res["status"] == "fail"
+    assert "unsolvable" in res["summary"]
+    assert any("no allow rule opens this provider" in i["detail"] for i in res["items"])
+
+
+def test_pivot_access_passes_when_the_allow_names_the_participant_subnet():
+    seg = _pivot_probe([_provider()], [_allow(HITL_NET)])
+    assert ac.pivot_access_result(seg, [HITL_NET])["status"] == "pass"
+
+
+def test_pivot_access_fails_when_no_node_was_placed():
+    # An added provider with no address means nothing was created for the
+    # subnet, so there is no way in at all.
+    provider = _provider(address="", name="pivot-172-21-240-0")
+    res = ac.pivot_access_result(_pivot_probe([provider]), [HITL_NET])
+    assert res["status"] == "fail"
+    assert any("no node was placed" in i["detail"] for i in res["items"])
+
+
+def test_pivot_access_checks_the_providers_own_port():
+    # An allow on a different port does not open the entry.
+    seg = _pivot_probe([_provider(port=2222)], [_allow("0.0.0.0/0", port=22)])
+    assert ac.pivot_access_result(seg, [HITL_NET])["status"] == "fail"
+
+
+def test_pivot_access_without_hitl_asks_from_outside_the_subnet():
+    # Still a meaningful question: the provider has to be reachable from
+    # somewhere outside the subnet it guards.
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [])
+    assert res["status"] == "pass"
+    assert any("outside the walled-off subnet" in i["detail"] for i in res["items"])
+
+    scoped = _pivot_probe([_provider()], [_allow("10.0.140.0/24")])
+    assert ac.pivot_access_result(scoped, [])["status"] == "fail"
+
+
+def test_pivot_access_skips_when_the_scenario_has_no_providers():
+    res = ac.pivot_access_result(_pivot_probe([]), [HITL_NET])
+    assert res["status"] == "skip"
+    assert "accessible by pivot" in res["summary"]
+
+
+def test_pivot_access_errors_when_the_probe_failed():
+    res = ac.pivot_access_result({"ok": False, "error": "ssh died"}, [HITL_NET])
+    assert res["status"] == "error"
+    assert "ssh died" in res["summary"]
+
+
+def test_participant_sources_are_addresses_on_each_network():
+    assert ac.participant_probe_sources(["10.254.200.0/24"]) == ["10.254.200.1"]
+    # A single address is not a network and answers a different question.
+    assert ac.participant_probe_sources(["10.254.200.3/32"]) == []
+    assert ac.participant_probe_sources(["nonsense", None, ""]) == []
+
+
+def test_traffic_probe_finds_the_agent_without_procps():
+    """A Docker node's container is the scenario's own image, and a minimal
+    vulnerability image often ships no `pgrep`/`ps`. Detecting the agent with
+    pgrep alone made such a node look idle while its agent was running and
+    moving megabytes, so the check reported a sender with no traffic process.
+    /proc is kernel-provided, not a package, so it must be the fallback.
+    """
+    import json as _json
+    import re as _re
+    import subprocess as _subprocess
+
+    script = ac.traffic_probe_script('pw', 1)
+    scan = _json.loads(_re.search(r'^PROC_SCAN = (.*)$', script, _re.M).group(1))
+
+    # pgrep stays the fast path, but must not be the only one.
+    assert 'pgrep' in scan
+    assert '/proc/' in scan and 'cmdline' in scan
+    # The probe invokes the shared constant rather than an inline pgrep.
+    assert "['sh','-lc', PROC_SCAN]" in script
+
+    # The fallback runs in whatever shell the image has, which may only be sh.
+    proc = _subprocess.run(['/bin/sh', '-n', '-c', scan], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+    # The scanner must not count itself: its own command line contains the
+    # match string, which would report traffic on every node in the topology.
+    assert 'self=$$' in scan
+
+
+def test_traffic_probe_excludes_its_own_scanner_from_results():
+    # The parent shell's command line necessarily contains both `pgrep` and the
+    # /proc glob, so both have to be filtered or every node reports a process.
+    script = ac.traffic_probe_script('pw', 1)
+    assert "'pgrep' not in l" in script
+    assert "'/proc/[0-9]' not in l" in script
+
+
+def test_live_agent_stats_count_as_running_without_a_process_listing():
+    # The stats file needs only a readable file, so it is the one liveness
+    # signal available on an image with no procps at all.
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+             "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [],
+                                     "agent": {"present": True, "live": True, "age_s": 3,
+                                               "bytes_sent": 43220830, "errors": 0, "flows": 1}}},
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "pass"
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
+    assert "no process listing available" in detail
+    assert "43,220,830 bytes sent" in detail
+
+
+def test_stopped_agent_is_reported_differently_from_never_started():
+    # Three states, not two: an agent that ran and stopped is a distinct
+    # failure from one that never launched, and says so.
+    stopped = {"ok": True, "traffic_files": [],
+               "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+               "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [],
+                                       "agent": {"present": True, "live": False, "age_s": 900}}},
+               "ping": []}
+    res = ac.traffic_result(stopped, expected=True)
+    assert res["status"] == "warn"
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
+    assert "ran but has stopped" in detail and "900s ago" in detail
+
+    never = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+             "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [], "agent": {}}},
+             "ping": []}
+    res = ac.traffic_result(never, expected=True)
+    assert res["status"] == "warn"
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
+    assert "no traffic process is running" in detail
+
+
+def test_stopped_receiver_agent_is_caught_even_though_it_sends_nothing():
+    # expected_senders only covers flow sources, so a dead receiver would
+    # otherwise pass silently.
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+             "nodes": {"docker-21": {"kind": "docker", "ip": "10.0.0.5", "procs": ["1 traffic_x"],
+                                     "agent": {"present": True, "live": True}},
+                       "docker-24": {"kind": "docker", "ip": "10.0.0.9", "procs": [],
+                                     "agent": {"present": True, "live": False, "age_s": 400}}},
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "warn"
+    assert "stopped traffic agent" in res["summary"]
+    assert any("ran but has stopped" in i["detail"] for i in res["items"] if i["name"] == "docker-24")
+
+
+def test_agent_stats_fallback_is_docker_only():
+    # A vnode shares the host's /tmp, so globbing stats_*.json there returns
+    # every node's file. Vnodes share the host filesystem and always have
+    # pgrep, so they never need this path.
+    script = ac.traffic_probe_script('pw', 1)
+    assert "if kind != 'docker':" in script
+    assert "stats_*.json" in script
+    # utcnow() is deprecated and the CORE VM's python version is not pinned.
+    assert "utcnow" not in script
+
+
+def test_pivot_skip_distinguishes_the_two_meanings_of_pivot():
+    """Two features are called "pivot"; the skip must say which one it means.
+
+    Segmentation's `accessible_by_pivot` places a reachable provider node in a
+    walled-off subnet. A challenge chain's Pivot(node) step is a capability the
+    participant gains. A scenario can be full of the second and have none of the
+    first, which reads as the check wrongly skipping.
+    """
+    probe = {"ok": True, "rules_summary": {"rules": []}, "nodes": {}}
+    res = ac.pivot_access_result(probe, [])
+    assert res["status"] == "skip"
+    summary = res["summary"]
+    assert "accessible by pivot" in summary
+    assert "challenge chain" in summary and "Pivot(node)" in summary
+    assert "accessible_by_pivot" in summary, 'name the setting to turn on'
+
+
+def test_pivot_check_still_runs_when_providers_exist():
+    probe = {
+        "ok": True,
+        "rules_summary": {
+            "rules": [],
+            "pivot_access": {"providers": [
+                {"subnet": "10.9.5.0/24", "node_name": "docker-21",
+                 "address": "10.9.5.6", "entry": {"port": 2222}},
+            ]},
+        },
+        "nodes": {},
+    }
+    res = ac.pivot_access_result(probe, [])
+    assert res["status"] != "skip"
+    assert any("docker-21" in i["name"] for i in res["items"])

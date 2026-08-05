@@ -18,19 +18,42 @@ Provider selection is hybrid, preferring what already exists:
    real challenge step);
 2. a node already offering a flag-node-generator;
 3. a node already running SSH;
-4. otherwise an existing **non-slot** host, which gets SSH enabled;
-5. otherwise the subnet's own router, which gets SSH enabled;
-6. otherwise a new node is added.
+4. otherwise a Docker SSH node is added.
 
-Step 5 matters more than it looks: a subnet whose hosts are all unfilled
-challenge slots still has a router by construction, and a router is not slot
-capacity. It makes the guarantee satisfiable without growing the topology in
-almost every real scenario.
+Tiers 1-3 are the *default* order. The Segmentation row's `pivot_provider` moves
+the author's choice to the front (`provider_preference_order`), which reorders
+rather than restricts: a subnet whose only offering is a vulnerability still uses
+it when the author asked for a flag-node-generator, since the alternative is a
+subnet with no entrance. Tier 4 is unaffected -- an added node always serves SSH,
+because that is what the image provides.
 
-Step 4 deliberately skips empty challenge slots. Consuming one would silently
+There is deliberately no "turn SSH on for whatever Docker node is already
+there" tier. Node images are built offline-safe with no package manager -- the
+wrapper only injects a busybox `ip` -- so a minimal image cannot grow an `sshd`,
+and enabling the CORE SSH service on it yields an open path to a closed port. A
+node that genuinely serves SSH is already covered by tier 3.
+
+**Only Docker-backed nodes are ever eligible.** CORE vnodes -- routers, PCs,
+servers, workstations -- get a network namespace but not a mount namespace, so
+they share the CORE VM's filesystem. Handing a participant SSH on one is a host
+escape, not a pivot. That rules out the routers too, which is why a subnet whose
+hosts are all unfilled challenge slots has to grow a node rather than borrow the
+router that is already sitting there.
+
+Selection deliberately skips empty challenge slots. Consuming one would silently
 spend capacity the scenario author allocated for challenges, so a provider never
 counts against the configured vulnerability or flag-node-generator slot counts.
 Anything placed for pivot access is additive.
+
+An added provider is a Docker node built from `PIVOT_SSH_IMAGE`, overridable
+with `CORETG_PIVOT_SSH_IMAGE`. The planner records the image and the port that
+image actually serves on the provider; `planning.full_preview` then allocates
+the node into the topology plan, and the builder creates it from that plan.
+
+Once a run has materialised such a node, later re-plans must recognise it
+rather than add a second one. That is what `provisioned_entry_points` is for:
+it reads the marker the materialiser left on the node and hands the planner an
+SSH entry for it, so the provider comes back as the same added node.
 
 This module is pure: it decides *what* should be reachable and returns the allow
 rules that express it. Writing iptables and mutating the session stays in
@@ -41,6 +64,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -55,15 +79,114 @@ ENTRY_SSH = "ssh"
 
 ENTRY_PREFERENCE: tuple[str, ...] = (ENTRY_VULNERABILITY, ENTRY_FLAG_GEN, ENTRY_SSH)
 
+# The Segmentation row's `pivot_provider` names which of these the author wants
+# tried first. The editor writes one of `vulnerability`, `flag-node-generator`
+# or `ssh-fallback` (it resolves `random` when the XML is saved), but hand-edited
+# scenarios use other spellings, so the aliases the web UI accepts are mirrored
+# here -- this module owns the kind vocabulary, and a preference it cannot map is
+# better ignored than silently treated as a different provider.
+_PROVIDER_ALIASES: Dict[str, str] = {
+    "vuln": ENTRY_VULNERABILITY,
+    "vulnerability": ENTRY_VULNERABILITY,
+    "flag-node": ENTRY_FLAG_GEN,
+    "flagnode": ENTRY_FLAG_GEN,
+    "flag-nodegen": ENTRY_FLAG_GEN,
+    "flag-node-generator": ENTRY_FLAG_GEN,
+    "ssh": ENTRY_SSH,
+    "ssh-server": ENTRY_SSH,
+    "ssh-fallback": ENTRY_SSH,
+    "fallback-ssh": ENTRY_SSH,
+}
+
+
+def preferred_provider_kind(raw: object) -> str:
+    """The provider kind an author asked for, or '' for "no preference".
+
+    `random`/`auto` mean the author did not choose; the editor resolves those to
+    a concrete provider when it saves, so reaching here means nothing was picked
+    and the default order applies.
+    """
+    text = str(raw or "").strip().lower().replace("_", "-")
+    if not text or text in ("random", "auto", "none", "manual"):
+        return ""
+    return _PROVIDER_ALIASES.get(text, "")
+
+
+def provider_preference_order(preferred: object = None) -> tuple[str, ...]:
+    """`ENTRY_PREFERENCE` with the author's choice moved to the front.
+
+    A preference reorders rather than restricts: a subnet whose only way in is a
+    vulnerability still gets one when the author asked for a flag-node-generator,
+    because the alternative is a walled-off subnet with no entrance at all.
+    """
+    kind = preferred_provider_kind(preferred)
+    if not kind:
+        return ENTRY_PREFERENCE
+    return (kind,) + tuple(k for k in ENTRY_PREFERENCE if k != kind)
+
 DEFAULT_SSH_PORT = 22
+
+# Image for an added SSH provider. Node images are built offline-safe with no
+# package manager, so a provider that must serve SSH has to come from an image
+# that already does. Overridable for sites that mirror their own.
+PIVOT_SSH_IMAGE = os.environ.get("CORETG_PIVOT_SSH_IMAGE", "lscr.io/linuxserver/openssh-server:latest")
+
+
+def _env_port(name: str, default: int) -> int:
+    try:
+        value = int(str(os.environ.get(name) or "").strip())
+    except Exception:
+        return default
+    return value if 0 < value < 65536 else default
+
+
+# The port `PIVOT_SSH_IMAGE` actually listens on, which is not 22: the default
+# image is a rootless sshd serving 2222. This is the port the allow rule opens
+# and the port the participant connects to, so it has to follow the image. A
+# site pointing `CORETG_PIVOT_SSH_IMAGE` at its own mirror sets this alongside.
+PIVOT_SSH_PORT = _env_port("CORETG_PIVOT_SSH_PORT", 2222)
+
+# Marker the materialiser leaves on a node it created, so a later plan reuses
+# that node instead of adding another one for the same subnet.
+PIVOT_PROVIDER_METADATA_KEY = "pivot_access_provider"
+
+# What a provider's entry port is opened to. See `allow_rules_for_provider`.
+ANY_SOURCE = "0.0.0.0/0"
+
+# Nested pivots -- a provider you can only reach by first working through
+# another provider -- are not supported. Every provider is opened to
+# `ANY_SOURCE`, so all of them are directly reachable and the ordering between
+# them is flattened.
+#
+# This is deliberate rather than an oversight, and turning it on is more than
+# flipping this flag. FORWARD allows go to *every* router by necessity (the
+# planner cannot know the route, and a live run showed the enforcing router
+# passing a SYN while an upstream router dropped it), so there is no hop at
+# which a later provider could be held back. Real support needs route-aware
+# per-hop allow placement, which the planner deliberately does not attempt.
+#
+# Until then, ordering between pivots is enforced by the *challenge* -- you need
+# what the earlier step gave you -- which is how `pivot_chain` already reasons:
+# on capability, not on topology. `nested_pivot_candidates` reports where an
+# author's segmentation implies an ordering, so the limitation is stated rather
+# than discovered.
+NESTED_PIVOTS_SUPPORTED = False
 
 # Roles that reserve challenge capacity. A provider is never taken from one of
 # these unless it already hosts a challenge, so the toggle cannot quietly eat a
 # slot the author meant for a vulnerability or flag-node-generator.
 CHALLENGE_SLOT_ROLES = {"VulnerabilitySlot", "FlagGenSlot"}
 
-# Blocking rule types this module understands.
-_BLOCK_TYPES = {"subnet_block", "host_block", "protect_internal"}
+# Rule types that isolate a segment, for a plan saved before rules carried their
+# effect. Kept only as a fallback; `_effect_of` prefers the recorded effect.
+#
+# `host_block` is deliberately excluded. It stops one host reaching one host,
+# which leaves the rest of the subnet reachable in both directions -- nothing is
+# walled off, so there is no accessibility problem to solve. Provisioning a
+# provider for it would also be self-defeating: the only node in a /32 is the
+# blocked host itself, so the "pivot" would be an SSH allow straight back into
+# the host the rule exists to block.
+_BLOCK_TYPES = {"subnet_block", "protect_internal"}
 
 
 @dataclass
@@ -74,6 +197,10 @@ class PivotEntry:
     port: int
     protocol: str = "tcp"
     label: str = ""
+    # True when this entry belongs to a node an earlier pivot-access plan added.
+    # Reusing it is still "added", not "reused": the node exists only because of
+    # this feature, and reporting it as pre-existing would hide that.
+    provisioned: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -98,6 +225,12 @@ class PivotProvider:
     needs_service: bool = False   # existing node, SSH must be enabled on it
     added: bool = False           # a node had to be created for this subnet
     role: str = ""
+    # Set when the provider must be built from an SSH-capable image, which the
+    # topology builder materialises.
+    image: str = ""
+    # The provider's address inside the walled-off subnet. Empty until the node
+    # exists, which is exactly when allow rules can first be written for it.
+    address: str = ""
 
     # A provider never consumes challenge-slot capacity. Kept explicit so the
     # invariant is visible in the plan itself rather than only in this docstring.
@@ -114,6 +247,8 @@ class PivotProvider:
             "reused": bool(self.reused),
             "needs_service": bool(self.needs_service),
             "added": bool(self.added),
+            "image": self.image or "",
+            "address": self.address or "",
             "consumes_slot": False,
         }
 
@@ -123,6 +258,12 @@ class PivotAccessPlan:
     providers: List[PivotProvider] = field(default_factory=list)
     allow_rules: List[dict] = field(default_factory=list)
     unresolved: List[dict] = field(default_factory=list)
+    # Every router the FORWARD allows have to be installed on, kept so a caller
+    # that materialises a provider afterwards opens the same set of hops.
+    router_ids: List[int] = field(default_factory=list)
+    # Subnets whose segmentation implies a pivot behind a pivot. Reported, not
+    # enforced -- see `NESTED_PIVOTS_SUPPORTED`.
+    nested_candidates: List[dict] = field(default_factory=list)
 
     @property
     def added_nodes(self) -> List[PivotProvider]:
@@ -140,6 +281,8 @@ class PivotAccessPlan:
             "provider_count": len(self.providers),
             "added_node_count": len(self.added_nodes),
             "reused_count": sum(1 for p in self.providers if p.reused),
+            "nested_supported": bool(NESTED_PIVOTS_SUPPORTED),
+            "nested_candidates": list(self.nested_candidates),
         }
 
 
@@ -166,6 +309,20 @@ def _host_network(node: NodeInfo) -> Optional[ipaddress._BaseNetwork]:
     return _network_of(raw)
 
 
+def _is_docker_backed(node: NodeInfo) -> bool:
+    """Only Docker-backed nodes can host a pivot.
+
+    A CORE vnode shares the CORE VM's filesystem, so SSH on one hands the
+    participant the host rather than a foothold in the scenario.
+    """
+    try:
+        from ..planning.node_plan import is_docker_backed_role
+        return bool(is_docker_backed_role(str(getattr(node, "role", "") or "")))
+    except Exception:
+        normalized = "".join(ch for ch in str(getattr(node, "role", "") or "").lower() if ch.isalnum())
+        return normalized in {"docker", "vulnerabilityslot", "flaggenslot"}
+
+
 def _is_slot_role(role: str) -> bool:
     normalized = "".join(ch for ch in str(role or "").lower() if ch.isalnum())
     return normalized in {r.lower() for r in CHALLENGE_SLOT_ROLES} or normalized in {
@@ -177,6 +334,18 @@ def _is_slot_role(role: str) -> bool:
 def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
     """Blocked destination subnets, their sources, and who enforces the block.
 
+    Reads each rule's recorded effect rather than its fields, because the fields
+    mean different things depending on the chain the rule landed on. Only a
+    *transit* block walls a subnet off: an INPUT rule shields the single node
+    running it, whatever subnet its `dst` or `subnet` field happens to name. A
+    live run placed a provider node in `192.168.67.0/24` for a rule that
+    protected one host in `192.168.12.0/24`.
+
+    A block that protects a single address is skipped for the same reason
+    `host_block` always was: the only node in a /32 is the blocked host itself,
+    so the "pivot" would be an allow straight back into the thing the rule
+    exists to block.
+
     The enforcing node ids matter: a FORWARD allow only has to be installed on
     the routers that actually carry a block for that path, not on every router
     in the topology.
@@ -184,6 +353,8 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
     Accepts the summary shape (`{"node_id", "service", "rule"}`) as well as bare
     rule dicts, because callers hold both.
     """
+    from .segmentation_effects import EFFECT_TRANSIT, effect_of
+
     found: Dict[str, dict] = {}
 
     def _slot(dst: str) -> dict:
@@ -195,35 +366,30 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
         rule = entry.get("rule") if isinstance(entry.get("rule"), dict) else entry
         if not isinstance(rule, dict):
             continue
-        rtype = str(rule.get("type") or "").strip().lower()
-        if rtype not in _BLOCK_TYPES:
+
+        effect = effect_of(entry, rule)
+        if not isinstance(effect, dict) or not effect.get("blocks"):
+            continue
+        if str(effect.get("scope") or "") != EFFECT_TRANSIT:
             continue
 
-        node_id = entry.get("node_id", rule.get("node"))
+        dst = _network_of(effect.get("protects"))
+        if dst is None or dst.num_addresses <= 1:
+            continue
+
         try:
+            node_id = effect.get("enforced_by", entry.get("node_id", rule.get("node")))
             enforcer = int(node_id) if node_id is not None else None
         except Exception:
             enforcer = None
 
-        if rtype == "protect_internal":
-            # Blocks every other subnet from reaching this one.
-            dst = _network_of(rule.get("subnet"))
-            if dst is None:
-                continue
-            slot = _slot(str(dst))
-            slot["sources"].add("*")
-            if enforcer is not None:
-                slot["enforced_by"].add(enforcer)
-            continue
-
-        dst = _network_of(rule.get("dst"))
-        src = _network_of(rule.get("src"))
-        if dst is None:
-            continue
-        # A host_block names single addresses; the subnet is what matters for
-        # deciding whether a whole segment lost its way in.
         slot = _slot(str(dst))
-        slot["sources"].add(str(src) if src is not None else "*")
+        if effect.get("invert_source"):
+            # Everything outside the protected network is shut out.
+            slot["sources"].add("*")
+        else:
+            src = _network_of(effect.get("blocks_from"))
+            slot["sources"].add(str(src) if src is not None else "*")
         if enforcer is not None:
             slot["enforced_by"].add(enforcer)
 
@@ -231,6 +397,38 @@ def walled_off_details(rules: Sequence[dict]) -> Dict[str, dict]:
         dst: {"sources": sorted(v["sources"]), "enforced_by": sorted(v["enforced_by"])}
         for dst, v in sorted(found.items())
     }
+
+
+def nested_pivot_candidates(blocked: Dict[str, dict]) -> List[dict]:
+    """Walled-off subnets whose only way in is itself behind another boundary.
+
+    A subnet blocked *only* from other walled-off subnets reads as an author
+    asking for a two-step chain: get into the outer subnet, then through it to
+    this one. That ordering is not enforced -- see `NESTED_PIVOTS_SUPPORTED` --
+    so it is reported instead, and both providers are directly reachable.
+
+    A subnet with any source that is not itself walled off has a direct way in
+    and is not nested.
+    """
+    walled = set(blocked or {})
+    out: List[dict] = []
+    for subnet, detail in sorted((blocked or {}).items()):
+        sources = [s for s in (detail.get("sources") or []) if s != "*"]
+        if not sources:
+            # Blocked from everything, so no particular subnet gates it.
+            continue
+        gating = [s for s in sources if s in walled]
+        if gating and len(gating) == len(sources):
+            out.append({
+                "subnet": subnet,
+                "reached_through": sorted(gating),
+                "note": (
+                    "reaching this subnet's provider would mean working through "
+                    "another walled-off subnet first; that ordering is not enforced, "
+                    "so both providers are directly reachable"
+                ),
+            })
+    return out
 
 
 def walled_off_subnets(rules: Sequence[dict]) -> Dict[str, List[str]]:
@@ -255,10 +453,13 @@ def _nodes_in(subnet: ipaddress._BaseNetwork, hosts: Iterable[NodeInfo]) -> List
 def _pick_existing(
     inside: Sequence[NodeInfo],
     entry_points: Dict[int, Sequence[PivotEntry]],
+    preference: Sequence[str] = ENTRY_PREFERENCE,
 ) -> tuple[Optional[NodeInfo], Optional[PivotEntry]]:
-    """The best node already offering a way in, following ENTRY_PREFERENCE."""
-    for kind in ENTRY_PREFERENCE:
+    """The best node already offering a way in, following the preference order."""
+    for kind in preference:
         for node in inside:
+            if not _is_docker_backed(node):
+                continue
             for entry in entry_points.get(int(node.node_id)) or []:
                 if str(entry.kind or "").strip().lower() == kind:
                     return node, entry
@@ -266,9 +467,9 @@ def _pick_existing(
 
 
 def _pick_non_slot(inside: Sequence[NodeInfo]) -> Optional[NodeInfo]:
-    """An existing node that can take SSH without spending challenge capacity."""
+    """A Docker node that can take SSH without spending challenge capacity."""
     for node in inside:
-        if not _is_slot_role(getattr(node, "role", "")):
+        if _is_docker_backed(node) and not _is_slot_role(getattr(node, "role", "")):
             return node
     return None
 
@@ -297,6 +498,116 @@ def _allow_rule(
     }
 
 
+def allow_rules_for_provider(
+    provider: PivotProvider,
+    *,
+    router_ids: Sequence[int],
+) -> List[dict]:
+    """The allow rules that make one provider reachable across the boundary.
+
+    Split out of `plan_pivot_access` because a provider whose node is created
+    later -- an added one -- gets its rules once the materialiser has given it
+    an address, and both paths must open exactly the same thing.
+
+    The source is `0.0.0.0/0`, not the subnets the block took access away from.
+    A provider is the subnet's entrance, and whoever has to walk through it is
+    not knowable from the rule that closed the subnet: the participant sits on a
+    HITL link subnet that exists in no segmentation rule at all, and what
+    actually stops them is the blanket `-P FORWARD DROP` rather than any
+    specific block. Scoping the allow to `blocked_from` locked the participant
+    out of the one node built to let them in -- and did so only for subnets
+    walled off by `subnet_block`, since `protect_internal` yields `*` and opened
+    it to everyone by accident. Exactly one port on one node becomes reachable;
+    the rest of the subnet stays walled off, which is the whole design.
+
+    Returns nothing while the provider has no address or no port: there is no
+    rule to write for a destination that does not exist yet, and a `--dport 0`
+    would be a rule that matches nothing while looking like the path is open.
+    """
+    dst_ip = str(provider.address or "").split("/")[0].strip()
+    port = int(provider.entry.port or 0)
+    if not dst_ip or port <= 0:
+        return []
+
+    out: List[dict] = []
+    # FORWARD on every router, so the packet survives the boundary; INPUT on
+    # the provider itself, which is where a default-deny policy would
+    # otherwise drop it.
+    for router_id in router_ids:
+        out.append(_allow_rule(
+            router_id, ANY_SOURCE, dst_ip,
+            port, provider.entry.protocol, "FORWARD",
+        ))
+    out.append(_allow_rule(
+        provider.node_id, ANY_SOURCE, dst_ip,
+        port, provider.entry.protocol, "INPUT",
+    ))
+    return out
+
+
+def provider_node_name(subnet: str) -> str:
+    """Deterministic name for a provider node added for `subnet`.
+
+    Derived from the subnet so the same plan always yields the same name, which
+    keeps the topology stable across re-previews and lets a report name the node
+    before it exists.
+    """
+    text = str(subnet or "").split("/")[0].strip()
+    slug = "".join(ch if ch.isalnum() else "-" for ch in text).strip("-") or "subnet"
+    return f"pivot-{slug}"
+
+
+def is_pivot_provider_host(host: object) -> bool:
+    """True for a node this feature added, in either preview or object form.
+
+    Callers use it to keep such a node out of counts that describe the scenario
+    the author configured -- challenge slots and plan-parity totals -- because
+    the node is additive and was never part of that configuration.
+    """
+    metadata = host.get("metadata") if isinstance(host, dict) else getattr(host, "metadata", None)
+    return isinstance(metadata, dict) and isinstance(
+        metadata.get(PIVOT_PROVIDER_METADATA_KEY), dict
+    )
+
+
+def provisioned_entry_points(hosts: Iterable[object]) -> Dict[int, List[PivotEntry]]:
+    """Entry points for provider nodes an earlier plan already added.
+
+    Without this, re-planning against a topology that already carries a provider
+    finds nothing it recognises in the subnet and adds a *second* one. Accepts
+    preview host payloads (dicts) and node objects alike, because the plan-time
+    and execute-time callers hold different shapes.
+    """
+    out: Dict[int, List[PivotEntry]] = {}
+    for host in hosts or []:
+        if not is_pivot_provider_host(host):
+            continue
+        if isinstance(host, dict):
+            node_id = host.get("node_id")
+            marker = host.get("metadata", {}).get(PIVOT_PROVIDER_METADATA_KEY)
+        else:
+            node_id = getattr(host, "node_id", None)
+            marker = getattr(host, "metadata", {}).get(PIVOT_PROVIDER_METADATA_KEY)
+        try:
+            key = int(node_id)
+        except Exception:
+            continue
+        try:
+            port = int(marker.get("port") or PIVOT_SSH_PORT)
+        except Exception:
+            port = PIVOT_SSH_PORT
+        if not 0 < port < 65536:
+            port = PIVOT_SSH_PORT
+        out.setdefault(key, []).append(PivotEntry(
+            kind=str(marker.get("kind") or ENTRY_SSH),
+            port=port,
+            protocol=str(marker.get("protocol") or "tcp"),
+            label=str(marker.get("label") or "SSH"),
+            provisioned=True,
+        ))
+    return out
+
+
 def plan_pivot_access(
     rules: Sequence[dict],
     hosts: Sequence[NodeInfo],
@@ -307,38 +618,97 @@ def plan_pivot_access(
     router_ids: Optional[Iterable[int]] = None,
     ssh_port: int = DEFAULT_SSH_PORT,
     allow_add_nodes: bool = True,
+    participant_subnets: Optional[Sequence[str]] = None,
+    preferred_provider: object = None,
 ) -> PivotAccessPlan:
     """Ensure every walled-off subnet has a reachable pivot provider.
 
     `entry_points` maps node_id to what that node already offers, so the planner
     can prefer a real challenge artifact over a plain SSH box. Callers supply
-    whatever they know; an empty map simply means every provider falls back to
-    SSH.
+    whatever they know; an empty map simply means every subnet needs a node
+    added, so callers that can resolve ports should.
+
+    `ssh_port` is the port callers use when registering an existing SSH node in
+    `entry_points`; it does not apply to an added provider, whose port follows
+    the image it runs (`PIVOT_SSH_PORT`).
+
+    `participant_subnets` are the networks a human sits on -- the HITL link
+    subnets -- recorded on each provider so reports and guides name the audience
+    the entrance was opened for. They are networks, never single addresses: a
+    participant who re-addresses within their own subnet is still the same
+    participant, and a rule pinned to one address would be defeated by a DHCP
+    lease change.
     """
     plan = PivotAccessPlan()
     node_names = node_names or {}
+    preference = provider_preference_order(preferred_provider)
     entry_points = {int(k): list(v or []) for k, v in (entry_points or {}).items()}
     routers = list(routers or [])
     derived_router_ids = {int(getattr(r, "node_id")) for r in routers if getattr(r, "node_id", None) is not None}
     router_id_list = sorted({int(r) for r in (router_ids or [])} | derived_router_ids)
 
+    # Networks only. A bare address arrives as a /32, which describes the
+    # audience wrongly: the participant who re-addresses inside their own subnet
+    # is the same participant. Widening it would mean guessing a prefix, so a
+    # single address is dropped and said out loud instead -- callers hand over
+    # the HITL link networks, which are already CIDRs.
+    participants: List[str] = []
+    for raw in participant_subnets or []:
+        net = _network_of(raw)
+        if net is None:
+            continue
+        if net.num_addresses <= 1:
+            logger.warning(
+                "Pivot access: ignoring participant source %s -- a single address, "
+                "not the network the participant sits on", raw,
+            )
+            continue
+        if str(net) not in participants:
+            participants.append(str(net))
+
     blocked = walled_off_details(rules)
     if not blocked:
         return plan
 
+    plan.nested_candidates = nested_pivot_candidates(blocked)
+    if plan.nested_candidates and not NESTED_PIVOTS_SUPPORTED:
+        logger.info(
+            "Pivot access: %d subnet(s) are walled off only from other walled-off subnets "
+            "(%s). Reaching their providers is not gated behind the outer pivot -- every "
+            "provider is directly reachable, and the ordering between them is carried by "
+            "the challenges rather than by the network.",
+            len(plan.nested_candidates),
+            ", ".join(c["subnet"] for c in plan.nested_candidates),
+        )
+
     for subnet_text, detail in blocked.items():
-        blocked_from = detail["sources"]
-        # Prefer the routers that actually enforce this block; fall back to every
-        # known router when the rule did not say who carries it.
-        enforcing = [n for n in detail["enforced_by"] if n in set(router_id_list)]
-        forward_nodes = enforcing or router_id_list
+        # The participant has to get in too, and is in no segmentation rule, so
+        # they are added to the audience rather than discovered from one.
+        blocked_from = list(detail["sources"])
+        subnet_net = _network_of(subnet_text)
+        for participant in participants:
+            if participant in blocked_from:
+                continue
+            # A participant already inside the walled-off subnet needs no way in.
+            participant_net = _network_of(participant)
+            if subnet_net is not None and participant_net is not None and participant_net.subnet_of(subnet_net):
+                continue
+            blocked_from.append(participant)
+        # Every router on the path, not just the one carrying the block.
+        #
+        # Narrowing this to the enforcing router looked tidier and was wrong: a
+        # live run showed the enforcer correctly passing the SYN while an
+        # upstream router dropped it, because segmentation leaves every router
+        # with `-P FORWARD DROP`. A packet has to survive each hop, and the
+        # planner cannot know the route, so the allow goes everywhere. The
+        # enforcing ids stay in `walled_off_details` for reporting.
+        forward_nodes = router_id_list
         subnet = _network_of(subnet_text)
         if subnet is None:
             continue
         inside = _nodes_in(subnet, hosts)
-        routers_inside = _nodes_in(subnet, routers)
 
-        node, entry = _pick_existing(inside, entry_points)
+        node, entry = _pick_existing(inside, entry_points, preference)
         provider: Optional[PivotProvider] = None
 
         if node is not None and entry is not None:
@@ -348,75 +718,54 @@ def plan_pivot_access(
                 node_name=node_names.get(int(node.node_id), "") or f"node-{node.node_id}",
                 entry=entry,
                 blocked_from=list(blocked_from),
-                reused=True,
+                # A node this feature added in an earlier pass stays "added":
+                # calling it reused would credit the scenario with a node it
+                # never asked for.
+                reused=not entry.provisioned,
+                added=bool(entry.provisioned),
                 role=str(getattr(node, "role", "") or ""),
+                image=PIVOT_SSH_IMAGE if entry.provisioned else "",
+                address=_host_ip(node),
             )
         else:
-            # A router in the subnet is never slot capacity, so it is a better
-            # last resort than growing the topology.
-            fallback = _pick_non_slot(inside) or (routers_inside[0] if routers_inside else None)
-            if fallback is not None:
-                provider = PivotProvider(
-                    subnet=subnet_text,
-                    node_id=int(fallback.node_id),
-                    node_name=node_names.get(int(fallback.node_id), "") or f"node-{fallback.node_id}",
-                    entry=PivotEntry(kind=ENTRY_SSH, port=int(ssh_port), protocol="tcp", label="SSH"),
-                    blocked_from=list(blocked_from),
-                    needs_service=True,
-                    role=str(getattr(fallback, "role", "") or ""),
-                )
-            elif allow_add_nodes:
+            if allow_add_nodes:
                 # Every node in the subnet is an unfilled challenge slot. Taking
                 # one would spend capacity the author reserved, so add a node.
                 provider = PivotProvider(
                     subnet=subnet_text,
                     node_id=None,
-                    node_name="",
-                    entry=PivotEntry(kind=ENTRY_SSH, port=int(ssh_port), protocol="tcp", label="SSH"),
+                    node_name=provider_node_name(subnet_text),
+                    entry=PivotEntry(
+                        kind=ENTRY_SSH, port=PIVOT_SSH_PORT, protocol="tcp",
+                        label="SSH", provisioned=True,
+                    ),
                     blocked_from=list(blocked_from),
                     added=True,
-                    role="Server",
+                    role="Docker",
+                    image=PIVOT_SSH_IMAGE,
                 )
             else:
                 plan.unresolved.append({
                     "subnet": subnet_text,
                     "blocked_from": list(blocked_from),
                     "reason": (
-                        "no eligible provider: every node in this subnet is an unfilled "
-                        "challenge slot, no router is attached to it, and adding nodes "
-                        "is disabled"
+                        "no eligible provider: nothing in this subnet serves a "
+                        "vulnerability, flag-node-generator or SSH, and adding nodes is "
+                        "disabled. Routers and other vnodes are never eligible because they "
+                        "share the CORE VM filesystem, and a minimal container image cannot "
+                        "grow an sshd"
                     ),
                 })
                 continue
 
         plan.providers.append(provider)
 
-        # A provider with no address yet cannot have rules written for it; the
-        # caller allocates the node first, then re-plans.
-        dst_ip = ""
-        if provider.node_id is not None:
-            for candidate in list(inside) + list(routers_inside):
-                if int(candidate.node_id) == int(provider.node_id):
-                    dst_ip = _host_ip(candidate)
-                    break
-        if not dst_ip:
-            continue
+        # A provider with no address yet cannot have rules written for it. That
+        # is the added case: `full_preview` allocates the node, fills in the
+        # address and appends the rules through `allow_rules_for_provider`.
+        plan.allow_rules.extend(allow_rules_for_provider(provider, router_ids=forward_nodes))
 
-        for src in provider.blocked_from:
-            selector = "0.0.0.0/0" if src == "*" else src
-            # FORWARD on every router that carries a block, so the packet
-            # survives the boundary; INPUT on the provider itself, which is
-            # where a default-deny policy would otherwise drop it.
-            for router_id in forward_nodes:
-                plan.allow_rules.append(_allow_rule(
-                    router_id, selector, dst_ip,
-                    provider.entry.port, provider.entry.protocol, "FORWARD",
-                ))
-            plan.allow_rules.append(_allow_rule(
-                provider.node_id, selector, dst_ip,
-                provider.entry.port, provider.entry.protocol, "INPUT",
-            ))
-
+    plan.router_ids = list(router_id_list)
     return plan
 
 

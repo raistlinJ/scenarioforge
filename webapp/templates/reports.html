@@ -749,6 +749,30 @@ function guideFigureDependencyTooltip(facts) {
   return tooltipFacts.join('\n');
 }
 
+function guideFigurePivotGatesByStep(assignments) {
+  // Own_step pivots are not chain nodes, so they have no card of their own in a
+  // dependency-staged layout. They gate a step, though, and `insert_before`
+  // names it -- so the gate is drawn on the step it gates.
+  const gates = new Map();
+  (Array.isArray(assignments) ? assignments : []).forEach((a) => {
+    const decisions = (a && typeof a === 'object') ? (a.pivot_decisions || a.pivotDecisions) : null;
+    if (!Array.isArray(decisions)) return;
+    decisions.forEach((d) => {
+      if (!d || typeof d !== 'object') return;
+      if (String(d.disposition || '') !== 'own_step') return;
+      const idx = Number(d.insert_before);
+      if (!Number.isFinite(idx) || idx < 0) return;
+      const list = gates.get(idx) || [];
+      const label = String(d.subnet || '').trim();
+      if (label && !list.some((g) => g.subnet === label)) {
+        list.push({ subnet: label, instruction: String(d.instruction || '').trim() });
+      }
+      gates.set(idx, list);
+    });
+  });
+  return gates;
+}
+
 function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
   const nodes = Array.isArray(chain) ? chain : [];
   if (!nodes.length) return '';
@@ -783,6 +807,7 @@ function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
         <text x="${x}" y="${marginY + 11}" font-size="12" font-weight="700" fill="#1e3a8a">${escapeHtml(stageLabel)} ${stageOrdinal + 1}</text>
       </g>`;
   }).join('\n');
+  const pivotGates = guideFigurePivotGatesByStep(assignmentList);
   const nodeGroups = [];
   stages.forEach((stageGroup, stageOrdinal) => {
     const indices = Array.isArray(stageGroup.indices) ? stageGroup.indices : [];
@@ -806,13 +831,24 @@ function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
       const generatorStartY = y + 54 + (Math.max(0, titleLines.length - 1) * 16);
       const generatorSpans = generatorLines.map((line, lineIndex) => `<tspan x="${x + 16}" dy="${lineIndex === 0 ? 0 : 15}">${escapeHtml(line)}</tspan>`).join('');
       const footerSpans = footerLines.map((line) => `<tspan x="${x + 16}" dy="0">${escapeHtml(line)}</tspan>`).join('');
-      nodeGroups.push(`<g class="guide-flow-node" data-step="${nodeIndex + 1}">
-        <rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4" />
+      const gates = pivotGates.get(nodeIndex) || [];
+      const gateTip = gates.map((g) => g.instruction || `Pivot into ${g.subnet} first.`).join(' ');
+      const gateBadge = gates.length
+        ? `<g class="guide-flow-pivot-gate">
+          <title>${escapeHtml(gateTip)}</title>
+          <circle cx="${x + cardWidth - 18}" cy="${y + 18}" r="11" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2" />
+          <text x="${x + cardWidth - 18}" y="${y + 22}" text-anchor="middle" font-size="11" fill="#0369a1">\u2605</text>
+        </g>
+        <text x="${x + 16}" y="${y + cardHeight - 2}" font-size="9" fill="#0369a1">${escapeHtml(guideFigureWrapText(`\u2605 pivot into ${gates.map((g) => g.subnet).join(', ')} first`, 40, 1)[0] || '')}</text>`
+        : '';
+      nodeGroups.push(`<g class="guide-flow-node" data-step="${nodeIndex + 1}"${gates.length ? ' data-pivot-gated="1"' : ''}>
+        <rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="8" fill="#ffffff" stroke="${gates.length ? '#0284c7' : '#94a3b8'}" stroke-width="1.4" />
         <circle cx="${x + 22}" cy="${y + 22}" r="12" fill="#dbeafe" stroke="#60a5fa" />
         <text x="${x + 22}" y="${y + 26}" text-anchor="middle" font-size="11" font-weight="700" fill="#1e3a8a">${nodeIndex + 1}</text>
         <text x="${x + 44}" y="${y + 23}" font-size="13" font-weight="700" fill="#0f172a">${titleSpans}</text>
         <text x="${x + 16}" y="${generatorStartY}" font-size="11" fill="#475569">${generatorSpans}</text>
         ${footerSpans ? `<text x="${x + 16}" y="${y + cardHeight - 15}" font-size="10" fill="#64748b">${footerSpans}</text>` : ''}
+        ${gateBadge}
       </g>`);
     });
   });
@@ -1271,6 +1307,66 @@ function applyReportGuideHintNodeIps(text, nameToIp) {
   return dedupeRenderedIps(out);
 }
 
+function reportPivotGrantsFor(node, assignment) {
+  const out = [];
+  const push = (value) => {
+    const text = String(value == null ? '' : value).trim();
+    if (text && !out.includes(text)) out.push(text);
+  };
+  const readFrom = (src) => {
+    if (!src || typeof src !== 'object') return;
+    ['pivot_grants', 'pivotGrants', 'pivot_opens', 'PivotGrants'].forEach((key) => {
+      const value = src[key];
+      if (Array.isArray(value)) value.forEach(push);
+      else if (typeof value === 'string') value.split(',').forEach(push);
+    });
+    const decisions = src.pivot_decisions || src.pivotDecisions;
+    if (Array.isArray(decisions)) {
+      decisions.forEach((d) => {
+        if (d && typeof d === 'object' && String(d.disposition || '') === 'absorbed') push(d.subnet);
+      });
+    }
+  };
+  readFrom(node);
+  readFrom(assignment);
+  return out;
+}
+
+function reportPivotHintGroups(decision) {
+  // Server-computed: `hint_levels` on the decision. Recomputing the tier here
+  // would let the guide and the plan drift apart.
+  const src = (decision && typeof decision === 'object') ? decision : {};
+  const levels = (src.hint_levels && typeof src.hint_levels === 'object' && !Array.isArray(src.hint_levels))
+    ? src.hint_levels : null;
+  if (!levels) return [];
+  const groups = [];
+  REPORT_HINT_LEVEL_ORDER.forEach((level) => {
+    const raw = levels[level];
+    const values = (Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []))
+      .map((v) => String(v || '').trim()).filter(Boolean);
+    if (values.length) groups.push({ title: `Hint ${reportHintLevelTitle(level)}`, values });
+  });
+  return groups;
+}
+
+function reportOwnStepPivots(assignments) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(assignments) ? assignments : []).forEach((a) => {
+    const decisions = (a && typeof a === 'object') ? (a.pivot_decisions || a.pivotDecisions) : null;
+    if (!Array.isArray(decisions)) return;
+    decisions.forEach((d) => {
+      if (!d || typeof d !== 'object') return;
+      if (String(d.disposition || '') !== 'own_step') return;
+      const key = String(d.subnet || '') + '|' + String(d.provider_node || '');
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(d);
+    });
+  });
+  return out;
+}
+
 function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const opts = (options && typeof options === 'object') ? options : {};
   const facilitatorMode = !!opts.facilitator;
@@ -1611,6 +1707,47 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   nodes.forEach((node, index) => {
     const step = index + 1;
     const assignment = (alignedAssignments[index] && typeof alignedAssignments[index] === 'object') ? alignedAssignments[index] : {};
+    // A pivot that is nobody else's challenge is its own step, and has to be
+    // performed before anything in the subnet it opens can be reached.
+    try {
+      reportOwnStepPivots(alignedAssignments).forEach((d) => {
+        if (Number(d.insert_before) !== index) return;
+        lines.push(`### \u2605 Pivot step: reach ${_cell(String(d.subnet || ''))}`);
+        lines.push('');
+        lines.push(String(d.instruction || d.reason || ''));
+        lines.push('');
+        lines.push('This pivot is not part of another challenge, so it counts as a step of its own.');
+        lines.push('');
+        // Tiered by how discoverable the provider is: a challenge node the
+        // participant is scanning anyway earns a medium nudge, a bare SSH box
+        // the most explicit tier, since nothing about it says "this is the door".
+        reportPivotHintGroups(d).forEach((group) => {
+          lines.push(`**${group.title}**`);
+          lines.push('');
+          group.values.forEach((value) => lines.push(`- ${value}`));
+          lines.push('');
+        });
+        // Facilitator-only: which node the pivot runs on and why it is there.
+        // A participant is meant to find the provider, so naming it and its
+        // address in their guide would hand over the step.
+        if (facilitatorMode) {
+          const rows = [];
+          if (d.provider_node) rows.push(['Provider node', String(d.provider_node)]);
+          if (d.entry_kind) rows.push(['Entry', `${d.entry_kind}${d.entry_port ? `:${d.entry_port}` : ''}`]);
+          if (d.reason) rows.push(['Why its own step', String(d.reason)]);
+          if (Array.isArray(d.granting_facts) && d.granting_facts.length) {
+            rows.push(['Facts it grants', d.granting_facts.join(', ')]);
+          }
+          if (d.hint_level) rows.push(['Hint tier', String(d.hint_level)]);
+          if (rows.length) {
+            lines.push('| Pivot detail | Value |');
+            lines.push('| --- | --- |');
+            rows.forEach(([k, v]) => lines.push(`| ${_cell(k)} | ${_cell(v)} |`));
+            lines.push('');
+          }
+        }
+      });
+    } catch (e) { }
     const nodeName = String((node && node.name) ? node.name : `Node ${step}`).trim();
     const nodeId = String((node && node.id) ? node.id : '').trim();
     const generatorId = String(assignment.id || assignment.generator_id || '').trim();
@@ -1679,8 +1816,14 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     lines.push('');
     lines.push('| Key | Value |');
     lines.push('| --- | --- |');
-    lines.push(`| Node | ${_cell(nodeName)} |`);
+    const pivotGrants = reportPivotGrantsFor(node, assignment);
+    lines.push(`| Node | ${_cell(nodeName)}${pivotGrants.length ? ' \u2605' : ''} |`);
     lines.push(`| IP Address | ${_cell(nodeIp)} |`);
+    // The pivot rides on this step rather than being a step of its own, so the
+    // guide has to say that solving it also buys network reach.
+    if (pivotGrants.length) {
+      lines.push(`| \u2605 Pivot | Solving this step also opens ${_cell(pivotGrants.join(', '))} \u2014 no separate step |`);
+    }
     if (nodeId) lines.push(`| Node ID | ${_cell(nodeId)} |`);
     // Facilitators only. Naming the generator that built a challenge tells a
     // participant how it was constructed, which is the same disclosure that
@@ -1752,9 +1895,13 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     if (pivotEntries.length) {
       lines.push('### Pivot Path');
       lines.push('');
-      lines.push('| Role | Source | Target | Facts | Provider |');
+      lines.push('| Role | Source | Targets | Facts | Provider |');
       lines.push('| --- | --- | --- | --- | --- |');
-      const pivotRows = pivotEntries.map((entry) => {
+      // One entry per (source, target) pair, so a source reaching twenty nodes
+      // produced twenty rows identical but for the target. The provider and the
+      // facts belong to the source, so group on those and list the targets.
+      const pivotGroups = new Map();
+      pivotEntries.forEach((entry) => {
         const role = String(entry.role || '').trim() || 'pivot';
         const source = String(entry.source || '').trim();
         const target = String(entry.target || '').trim();
@@ -1763,15 +1910,22 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
           ...normalizeChainFacts(entry.produces),
         ])).join(', ');
         const provider = String(entry.provider_label || entry.provider || '').trim();
-        return `| ${_cell(role)} | ${_cell(source)} | ${_cell(target)} | ${_cell(facts)} | ${_cell(provider)} |`;
+        const key = JSON.stringify([role, source, facts, provider]);
+        const group = pivotGroups.get(key) || { role, source, facts, provider, targets: [] };
+        if (target && !group.targets.includes(target)) group.targets.push(target);
+        pivotGroups.set(key, group);
       });
+      const pivotRows = Array.from(pivotGroups.values()).map((group) => (
+        `| ${_cell(group.role)} | ${_cell(group.source)} | ${_cell(group.targets.join(', '))} `
+        + `| ${_cell(group.facts)} | ${_cell(group.provider)} |`
+      ));
       lines.push(pivotRows[0]);
       if (pivotRows.length > 1) {
         lines.push('');
         lines.push('<details>');
         lines.push(`<summary>${pivotRows.length - 1} other pivot path${(pivotRows.length - 1) === 1 ? '' : 's'} exist (click to see)</summary>`);
         lines.push('');
-        lines.push('| Role | Source | Target | Facts | Provider |');
+        lines.push('| Role | Source | Targets | Facts | Provider |');
         lines.push('| --- | --- | --- | --- | --- |');
         pivotRows.slice(1).forEach((row) => lines.push(row));
         lines.push('');

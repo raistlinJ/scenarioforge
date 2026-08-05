@@ -143,7 +143,10 @@ maybe_install() {
 
 log "node id($NODE_ID) name($NODE_NAME) starting prereq check"
 
-# Ensure /bin/bash exists because other ScenarioForge CORE services use it.
+# Best-effort bash for whatever the scenario itself runs. No ScenarioForge
+# service may depend on this succeeding: every install below needs a package
+# manager and a network, and on an air-gapped host they all fail silently by
+# design. The Traffic and Segmentation services therefore launch with `sh`.
 if [ ! -x /bin/bash ]; then
   log "/bin/bash missing; attempting to install bash"
   maybe_install bash

@@ -234,3 +234,56 @@ def test_emitted_progress_line_matches_what_the_client_parses() -> None:
 
     assert client_re.match('[images] pulling=2 cached=5'), 'older remotes must still parse'
     assert not client_re.match('Running generator 6/17'), 'unrelated lines must pass through'
+
+
+def _remote_generator_script() -> str:
+    """Render the VM-side generator script with its interpolations stubbed."""
+    import ast
+
+    source = (REPO_ROOT / 'webapp' / 'flow_prepare_preview_helpers.py').read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == 'flow_try_run_generator_remote')
+    assign = next(n for n in ast.walk(fn)
+                  if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == 'script')
+    return ''.join(p.value if isinstance(p, ast.Constant) else 'None' for p in assign.value.values)
+
+
+def test_remote_generator_output_keeps_its_head_not_only_its_tail() -> None:
+    """The image verdict is printed before the build, so a tail-only clip loses it.
+
+    `run_compose` prints '[compose] ... using cached generator image' or
+    '... not cached; will build now' before it runs anything. Keeping only the
+    last 4000 characters dropped that line for any generator whose build output
+    is long, so the run classified as neither cached nor built and surfaced as a
+    phantom 'pending' image in the Generate results — a successful run reported
+    as unaccounted-for work.
+    """
+    script = _remote_generator_script()
+    compile(script, '<remote-generator-script>', 'exec')
+    assert "_clip(preflight + (p.stdout or ''))" in script
+    assert "_clip(preflight + (p.stderr or ''))" in script
+    assert "(preflight + (p.stdout or ''))[-4000:]" not in script, 'tail-only clip is the bug'
+
+    namespace: dict = {}
+    body = script[script.index('def _clip('):script.index('print(json.dumps({')]
+    exec(compile(body, '<clip>', 'exec'), namespace)
+
+    long_run = BUILD_LINE + '\n' + ('#5 transferring context\n' * 4000) + 'final line\n'
+    clipped = namespace['_clip'](long_run)
+    assert BUILD_LINE in clipped, 'the verdict must survive clipping'
+    assert 'final line' in clipped, 'the tail is where failures show up'
+    assert 'characters omitted' in clipped
+    assert len(clipped) < len(long_run)
+
+    # The whole point: the clipped text still classifies.
+    assert _classify_generator_image_use(clipped) == 'pulling'
+
+
+def test_short_generator_output_is_not_clipped_at_all() -> None:
+    script = _remote_generator_script()
+    namespace: dict = {}
+    body = script[script.index('def _clip('):script.index('print(json.dumps({')]
+    exec(compile(body, '<clip>', 'exec'), namespace)
+    short = CACHED_LINE + '\nall done\n'
+    assert namespace['_clip'](short) == short

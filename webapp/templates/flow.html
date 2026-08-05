@@ -2761,6 +2761,23 @@
     return true;
   }
 
+  // An input the assignment already resolves is not missing. `missing` means
+  // "nothing provides this", and a concrete value on the assignment -- a config
+  // default, a manual override, or a value Flow supplied for a branch start --
+  // is a provider. Deciding it from the required list alone made the badge flip
+  // between Missing and Config/default across a refresh, because the two paths
+  // classify an input required-or-optional differently while both resolve it.
+  function flowAssignmentResolvesInput(assignment, name) {
+    const a = (assignment && typeof assignment === 'object') ? assignment : {};
+    const key = String(name || '').trim();
+    if (!key) return false;
+    return ['config_overrides', 'resolved_inputs', 'chain_supplied_input_values'].some((source) => {
+      const bag = a[source];
+      if (!bag || typeof bag !== 'object' || Array.isArray(bag)) return false;
+      return hasMeaningfulFlowInputSourceValue(bag[key]);
+    });
+  }
+
   function flowInputSourceInfo(row) {
     const item = (row && typeof row === 'object') ? row : {};
     const sourceBadge = (item.sourceBadge && typeof item.sourceBadge === 'object') ? item.sourceBadge : null;
@@ -3621,7 +3638,8 @@
         const reqArtifactsEffective = reqArtifacts.filter(k => k && !optSet.has(k));
         const providedByChainArtifacts = reqArtifactsEffective.filter(k => k && haveArtifactsChain.has(k));
         const providedBySequencerArtifacts = reqArtifactsEffective.filter(k => k && haveArtifactsSequencer.has(k));
-        const missingArtifacts = reqArtifactsEffective.filter(k => k && !haveArtifacts.has(k));
+        const missingArtifacts = reqArtifactsEffective.filter(
+          k => k && !haveArtifacts.has(k) && !flowAssignmentResolvesInput(a, k));
 
         let displayFields = reqFields.slice();
         try {
@@ -3640,7 +3658,8 @@
 
         const providedByChainFields = displayFields.filter(k => k && haveFieldsChain.has(k));
         const providedBySequencerFields = displayFields.filter(k => k && haveFieldsSequencer.has(k));
-        const missingFields = reqFields.filter(k => k && !haveFields.has(k));
+        const missingFields = reqFields.filter(
+          k => k && !haveFields.has(k) && !flowAssignmentResolvesInput(a, k));
 
         const missing = missingArtifacts.concat(missingFields);
         out.push({
@@ -3657,7 +3676,8 @@
         const reqEffective = Array.isArray(a.inputs) ? a.inputs.map(String) : [];
         const providingChain = reqEffective.filter(k => k && (haveArtifactsChain.has(k) || haveFieldsChain.has(k)));
         const providingSequencer = reqEffective.filter(k => k && (haveArtifactsSequencer.has(k) || haveFieldsSequencer.has(k)));
-        const missing = reqEffective.filter(k => k && !haveEffective.has(k));
+        const missing = reqEffective.filter(
+          k => k && !haveEffective.has(k) && !flowAssignmentResolvesInput(a, k));
         out.push({
           ok: missing.length === 0,
           missing,
@@ -4340,6 +4360,76 @@
     const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
     addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the access instructions and resolved facts for this step.');
     addDefault('high', 'Work through the access instructions for this step in order.');
+    return out;
+  }
+
+  // Subnets a chain step opens by virtue of granting code execution on its
+  // node. Populated when the pivot is absorbed into this step; empty when the
+  // pivot is a chain entry of its own (which renders as a normal step).
+  function pivotGrantsFor(node, assignment) {
+    const out = [];
+    const push = (value) => {
+      const text = String(value == null ? '' : value).trim();
+      if (text && !out.includes(text)) out.push(text);
+    };
+    const readFrom = (src) => {
+      if (!src || typeof src !== 'object') return;
+      ['pivot_grants', 'pivotGrants', 'pivot_opens', 'PivotGrants'].forEach((key) => {
+        const value = src[key];
+        if (Array.isArray(value)) value.forEach(push);
+        else if (typeof value === 'string') value.split(',').forEach(push);
+      });
+      // The classifier's own shape, so a caller can hand the decision straight through.
+      const decisions = src.pivot_decisions || src.pivotDecisions;
+      if (Array.isArray(decisions)) {
+        decisions.forEach((d) => {
+          if (d && typeof d === 'object' && String(d.disposition || '') === 'absorbed') push(d.subnet);
+        });
+      }
+    };
+    readFrom(node);
+    readFrom(assignment);
+    return out;
+  }
+
+  // Pivots that are NOT absorbed into an existing challenge. They are real work
+  // for the participant but have no generator to run, so they are rendered as
+  // their own row without entering currentChain -- chain nodes and flag
+  // assignments are aligned by index everywhere downstream.
+  const PIVOT_HINT_LEVEL_ORDER = ['low', 'medium', 'high'];
+
+  function pivotHintGroupsFor(decision) {
+    const src = (decision && typeof decision === 'object') ? decision : {};
+    const levels = (src.hint_levels && typeof src.hint_levels === 'object' && !Array.isArray(src.hint_levels))
+      ? src.hint_levels : null;
+    if (!levels) return [];
+    const groups = [];
+    PIVOT_HINT_LEVEL_ORDER.forEach((level) => {
+      const raw = levels[level];
+      const values = (Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []))
+        .map((v) => String(v || '').trim()).filter(Boolean);
+      if (values.length) {
+        groups.push({ title: 'Hint ' + level.charAt(0).toUpperCase() + level.slice(1), values });
+      }
+    });
+    return groups;
+  }
+
+  function ownStepPivotsFor(assignments) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(assignments) ? assignments : []).forEach((a) => {
+      const decisions = (a && typeof a === 'object') ? (a.pivot_decisions || a.pivotDecisions) : null;
+      if (!Array.isArray(decisions)) return;
+      decisions.forEach((d) => {
+        if (!d || typeof d !== 'object') return;
+        if (String(d.disposition || '') !== 'own_step') return;
+        const key = String(d.subnet || '') + '|' + String(d.provider_node || '');
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(d);
+      });
+    });
     return out;
   }
 
@@ -5228,7 +5318,67 @@
       });
     } catch (e) { }
 
+    const ownStepPivots = ownStepPivotsFor(currentFlagAssignments);
+    function appendPivotStepRow(decision) {
+      const row = document.createElement('div');
+      row.className = 'list-group-item list-group-item-info';
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '84px 1fr 76px';
+      row.style.columnGap = '.5rem';
+      row.style.alignItems = 'start';
+      const seqCell = document.createElement('div');
+      seqCell.className = 'text-muted small fw-semibold';
+      seqCell.style.width = '84px';
+      seqCell.style.whiteSpace = 'nowrap';
+      seqCell.style.borderRight = '1px solid var(--bs-border-color, #dee2e6)';
+      seqCell.style.paddingRight = '.5rem';
+      seqCell.textContent = '\u2605';
+      const body = document.createElement('div');
+      body.className = 'd-flex flex-column';
+      body.style.minWidth = '0';
+      const head = document.createElement('div');
+      head.className = 'd-flex align-items-center gap-2';
+      const heading = document.createElement('div');
+      heading.className = 'fw-semibold';
+      heading.textContent = 'Pivot into ' + String(decision.subnet || '');
+      head.appendChild(heading);
+      const tag = document.createElement('span');
+      tag.className = 'badge text-bg-info fw-bold';
+      tag.textContent = '\u2605 Pivot step';
+      tag.title = 'This pivot is not part of another challenge, so it is a step of its own.';
+      head.appendChild(tag);
+      body.appendChild(head);
+      const detail = document.createElement('div');
+      detail.className = 'small text-muted';
+      detail.textContent = String(decision.instruction || decision.reason || '');
+      body.appendChild(detail);
+      // Tiered by how discoverable the provider is: a challenge node the
+      // participant is scanning anyway earns a medium nudge, a bare SSH box the
+      // most explicit tier, since nothing about it says "this is the door".
+      // Tier comes from the decision, never recomputed here, so the chain row
+      // and the guide cannot drift apart.
+      pivotHintGroupsFor(decision).forEach((group) => {
+        const line = document.createElement('div');
+        line.className = 'small';
+        const label = document.createElement('span');
+        label.className = 'fw-semibold';
+        label.textContent = group.title + ': ';
+        line.appendChild(label);
+        line.appendChild(document.createTextNode(group.values.join(' ')));
+        body.appendChild(line);
+      });
+      row.appendChild(seqCell);
+      row.appendChild(body);
+      row.appendChild(document.createElement('div'));
+      wrap.appendChild(row);
+    }
+
     currentChain.forEach((node, idx) => {
+      try {
+        ownStepPivots.forEach((d) => {
+          if (Number(d.insert_before) === idx) appendPivotStepRow(d);
+        });
+      } catch (e) { }
       const item = document.createElement('div');
       item.className = 'list-group-item';
       let isDupNode = false;
@@ -5372,6 +5522,22 @@
         badge.textContent = 'Duplicate flag' + sameAs;
         titleRow.appendChild(badge);
       }
+      // A step that also opens a segmented-off subnet carries the pivot here
+      // rather than as its own chain entry, so the row has to say so -- the
+      // participant earns network reach from this challenge, not just a flag.
+      try {
+        const fa2 = (Array.isArray(currentFlagAssignments) && currentFlagAssignments[idx]) ? currentFlagAssignments[idx] : null;
+        const grants = pivotGrantsFor(node, fa2);
+        if (grants.length) {
+          const badge = document.createElement('span');
+          badge.className = 'badge text-bg-info fw-bold';
+          badge.textContent = '\u2605 Pivot';
+          badge.title = 'Solving this challenge also opens the way into '
+            + grants.join(', ')
+            + '. The pivot is part of this step, so it is not a separate challenge.';
+          titleRow.appendChild(badge);
+        }
+      } catch (e) { }
 
       // Per-step actions (top-right).
       try {
@@ -5526,26 +5692,50 @@
         }
 
         if (pivotEntries.length) {
-          const pivotRows = [];
+          // One entry per (source, target) pair, so a source that reaches
+          // twenty nodes produced twenty rows differing only in the target --
+          // the provider and the facts are properties of the source, and
+          // repeating them per target buried the one line that says anything.
+          // Group on everything except the target and name the targets once.
+          const pivotGroups = new Map();
           pivotEntries.forEach((entry) => {
             const parts = [];
             const source = String(entry.source || '').trim();
             const target = String(entry.target || '').trim();
-            const pathText = source || target ? `${source || '?'} -> ${target || '?'}` : '';
-            parts.push(pathText ? `${roleLabel(entry.role)} ${pathText}` : roleLabel(entry.role));
+            parts.push({ key: 'role', value: roleLabel(entry.role) });
             const provider = String(entry.provider_label || entry.provider || '').trim();
-            if (provider) parts.push(`provider: ${provider}`);
+            if (provider) parts.push({ key: 'provider', value: provider });
             const produces = factsText(entry.produces);
-            if (produces) parts.push(`produces: ${produces}`);
+            if (produces) parts.push({ key: 'produces', value: produces });
             const requires = factsText(entry.requires);
-            if (requires) parts.push(`requires: ${requires}`);
+            if (requires) parts.push({ key: 'requires', value: requires });
             const ports = factsText(entry.target_ports);
-            if (ports) parts.push(`ports: ${ports}`);
+            if (ports) parts.push({ key: 'ports', value: ports });
             const protocols = factsText(entry.target_protocols);
-            if (protocols) parts.push(`protocols: ${protocols}`);
+            if (protocols) parts.push({ key: 'protocols', value: protocols });
             const exposure = String(entry.exposure || '').trim();
-            if (exposure) parts.push(`exposure: ${exposure}`);
-            const rowText = parts.filter(Boolean).join('; ');
+            if (exposure) parts.push({ key: 'exposure', value: exposure });
+            const signature = JSON.stringify([source, parts]);
+            const group = pivotGroups.get(signature) || { source, parts, targets: [] };
+            if (target && !group.targets.includes(target)) group.targets.push(target);
+            pivotGroups.set(signature, group);
+          });
+          const MAX_NAMED_TARGETS = 6;
+          const pivotRows = [];
+          pivotGroups.forEach((group) => {
+            const named = group.targets.slice(0, MAX_NAMED_TARGETS).join(', ');
+            const extra = group.targets.length - MAX_NAMED_TARGETS;
+            const targetText = group.targets.length
+              ? (extra > 0 ? `${named} and ${extra} more` : named)
+              : '';
+            const roleValue = (group.parts.find((p) => p.key === 'role') || {}).value || 'Pivot';
+            const head = group.source || targetText
+              ? `${roleValue} ${group.source || '?'} -> ${targetText || '?'}`
+              : roleValue;
+            const rest = group.parts
+              .filter((p) => p.key !== 'role')
+              .map((p) => `${p.key}: ${p.value}`);
+            const rowText = [head].concat(rest).filter(Boolean).join('; ');
             if (rowText) pivotRows.push(rowText);
           });
           appendPrimaryWithExpandableList(
@@ -12552,6 +12742,30 @@ ${out.join('\n')}
     return tooltipFacts.join('\n');
   }
 
+  function guideFigurePivotGatesByStep(assignments) {
+    // Own_step pivots are not chain nodes, so they have no card of their own in a
+    // dependency-staged layout. They gate a step, though, and `insert_before`
+    // names it -- so the gate is drawn on the step it gates.
+    const gates = new Map();
+    (Array.isArray(assignments) ? assignments : []).forEach((a) => {
+      const decisions = (a && typeof a === 'object') ? (a.pivot_decisions || a.pivotDecisions) : null;
+      if (!Array.isArray(decisions)) return;
+      decisions.forEach((d) => {
+        if (!d || typeof d !== 'object') return;
+        if (String(d.disposition || '') !== 'own_step') return;
+        const idx = Number(d.insert_before);
+        if (!Number.isFinite(idx) || idx < 0) return;
+        const list = gates.get(idx) || [];
+        const label = String(d.subnet || '').trim();
+        if (label && !list.some((g) => g.subnet === label)) {
+          list.push({ subnet: label, instruction: String(d.instruction || '').trim() });
+        }
+        gates.set(idx, list);
+      });
+    });
+    return gates;
+  }
+
   function buildGuideFlowVisualizerFigureHtml(scenarioName, chain, assignments) {
     const nodes = Array.isArray(chain) ? chain : [];
     if (!nodes.length) return '';
@@ -12586,6 +12800,7 @@ ${out.join('\n')}
         <text x="${x}" y="${marginY + 11}" font-size="12" font-weight="700" fill="#1e3a8a">${escapeHtml(stageLabel)} ${stageOrdinal + 1}</text>
       </g>`;
     }).join('\n');
+    const pivotGates = guideFigurePivotGatesByStep(assignmentList);
     const nodeGroups = [];
     stages.forEach((stageGroup, stageOrdinal) => {
       const indices = Array.isArray(stageGroup.indices) ? stageGroup.indices : [];
@@ -12609,13 +12824,24 @@ ${out.join('\n')}
         const generatorStartY = y + 54 + (Math.max(0, titleLines.length - 1) * 16);
         const generatorSpans = generatorLines.map((line, lineIndex) => `<tspan x="${x + 16}" dy="${lineIndex === 0 ? 0 : 15}">${escapeHtml(line)}</tspan>`).join('');
         const footerSpans = footerLines.map((line) => `<tspan x="${x + 16}" dy="0">${escapeHtml(line)}</tspan>`).join('');
-        nodeGroups.push(`<g class="guide-flow-node" data-step="${nodeIndex + 1}">
-        <rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4" />
+        const gates = pivotGates.get(nodeIndex) || [];
+      const gateTip = gates.map((g) => g.instruction || `Pivot into ${g.subnet} first.`).join(' ');
+      const gateBadge = gates.length
+        ? `<g class="guide-flow-pivot-gate">
+          <title>${escapeHtml(gateTip)}</title>
+          <circle cx="${x + cardWidth - 18}" cy="${y + 18}" r="11" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2" />
+          <text x="${x + cardWidth - 18}" y="${y + 22}" text-anchor="middle" font-size="11" fill="#0369a1">\u2605</text>
+        </g>
+        <text x="${x + 16}" y="${y + cardHeight - 2}" font-size="9" fill="#0369a1">${escapeHtml(guideFigureWrapText(`\u2605 pivot into ${gates.map((g) => g.subnet).join(', ')} first`, 40, 1)[0] || '')}</text>`
+        : '';
+      nodeGroups.push(`<g class="guide-flow-node" data-step="${nodeIndex + 1}"${gates.length ? ' data-pivot-gated="1"' : ''}>
+        <rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="8" fill="#ffffff" stroke="${gates.length ? '#0284c7' : '#94a3b8'}" stroke-width="1.4" />
         <circle cx="${x + 22}" cy="${y + 22}" r="12" fill="#dbeafe" stroke="#60a5fa" />
         <text x="${x + 22}" y="${y + 26}" text-anchor="middle" font-size="11" font-weight="700" fill="#1e3a8a">${nodeIndex + 1}</text>
         <text x="${x + 44}" y="${y + 23}" font-size="13" font-weight="700" fill="#0f172a">${titleSpans}</text>
         <text x="${x + 16}" y="${generatorStartY}" font-size="11" fill="#475569">${generatorSpans}</text>
         ${footerSpans ? `<text x="${x + 16}" y="${y + cardHeight - 15}" font-size="10" fill="#64748b">${footerSpans}</text>` : ''}
+        ${gateBadge}
       </g>`);
       });
     });

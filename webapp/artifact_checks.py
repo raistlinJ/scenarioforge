@@ -12,6 +12,8 @@ the live CORE session:
 7. reachability - each traffic flow reaches its destination, tested on the
                   flow's own protocol and port (never with ping, which a
                   default-deny segmentation policy legitimately drops)
+8. pivot access - every pivot provider is reachable from the participant, so
+                  the challenges behind a segmentation boundary stay solvable
 
 Checks 1-4 are derived from the existing post-execution validator
 (`_validate_session_nodes_and_injects`). Checks 5-7 are live probes executed on
@@ -35,8 +37,9 @@ CHECK_ORDER: list[tuple[str, str]] = [
     ("ports", "Ports open"),
     ("injects", "Inject files placed"),
     ("segmentation", "Firewall/segmentation rules in place"),
-    ("traffic", "Traffic scripts running"),
+    ("traffic", "Traffic agents running"),
     ("reachability", "Nodes reachable (traffic source → destination)"),
+    ("pivot_access", "Pivot providers reachable from the participant"),
 ]
 
 CHECK_KEYS = [key for key, _label in CHECK_ORDER]
@@ -139,45 +142,118 @@ def services_result(summary: dict[str, Any]) -> dict[str, Any]:
     return _result("services", "pass", f"All {len(running)} services running.", items)
 
 
-def _segmentation_block_rules(segmentation: Any) -> list[tuple[Any, Any, dict[str, Any]]]:
-    """Parsed (src_network, dst_network, rule) triples for subnet block rules.
+def _segmentation_block_rules(segmentation: Any) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """(effect, rule) pairs for every rule that denies a path.
 
     Read from the runtime `segmentation_summary.json` so a path that segmentation
     is deliberately blocking can be recognised as configured behaviour rather
     than reported as a fault.
+
+    Each rule's recorded effect says what it denies. Matching on the rule's own
+    fields instead used to miss two whole classes: `protect_internal` never
+    matched because its name has no "block" in it, and a host-enforced rule was
+    read as covering the subnet it names rather than the single node running it.
+    Both meant a legitimately blocked path was reported as a fault.
     """
     if not isinstance(segmentation, dict):
         return []
     rules_summary = segmentation.get("rules_summary")
     if not isinstance(rules_summary, dict):
         return []
-    out: list[tuple[Any, Any, dict[str, Any]]] = []
+    try:
+        from scenarioforge.utils.segmentation_effects import effect_of
+    except Exception:
+        return []
+    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for entry in _as_list(rules_summary.get("rules")):
+        if not isinstance(entry, dict):
+            continue
+        rule = entry.get("rule")
+        if not isinstance(rule, dict):
+            continue
+        effect = effect_of(entry, rule)
+        if isinstance(effect, dict) and effect.get("blocks"):
+            out.append((effect, rule))
+    return out
+
+
+def _blocking_rule_for(src_ip: str, dst_ip: str,
+                       rules: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any] | None:
+    """The configured rule that explains a dropped path, if any."""
+    try:
+        from scenarioforge.utils.segmentation_effects import effect_blocks
+    except Exception:
+        return None
+    for effect, rule in rules:
+        if effect_blocks(effect, _name(src_ip), _name(dst_ip)):
+            return rule
+    return None
+
+
+def _segmentation_allow_rules(segmentation: Any) -> list[dict[str, Any]]:
+    """Every allow rule the run installed, from the runtime summary."""
+    if not isinstance(segmentation, dict):
+        return []
+    rules_summary = segmentation.get("rules_summary")
+    if not isinstance(rules_summary, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in _as_list(rules_summary.get("rules")):
+        rule = entry.get("rule") if isinstance(entry, dict) else None
+        if isinstance(rule, dict) and _name(rule.get("type")).lower() == "allow":
+            out.append(rule)
+    return out
+
+
+def _segmentation_is_default_deny(segmentation: Any) -> bool:
+    """Whether the policy closes everything it does not explicitly open.
+
+    Under default-deny, a port that no rule opens is *meant* to be unreachable
+    from anywhere the scenario did not arrange for. Without knowing that, every
+    such port reads as a fault -- which for a segmented scenario is most of them.
+    """
+    if not isinstance(segmentation, dict):
+        return False
+    rules_summary = segmentation.get("rules_summary")
+    if not isinstance(rules_summary, dict):
+        return False
     for entry in _as_list(rules_summary.get("rules")):
         rule = entry.get("rule") if isinstance(entry, dict) else None
         if not isinstance(rule, dict):
             continue
-        if "block" not in _name(rule.get("type")).lower():
-            continue
-        try:
-            src = ipaddress.ip_network(_name(rule.get("src")), strict=False)
-            dst = ipaddress.ip_network(_name(rule.get("dst")), strict=False)
-        except Exception:
-            continue
-        out.append((src, dst, rule))
-    return out
+        if rule.get("default_deny"):
+            return True
+        effect = rule.get("effect")
+        if isinstance(effect, dict) and _name(effect.get("default_deny_chain")):
+            return True
+    return False
 
 
-def _blocking_rule_for(src_ip: str, dst_ip: str, rules: list[tuple[Any, Any, dict[str, Any]]]) -> dict[str, Any] | None:
-    """The configured rule that explains a dropped path, if any."""
+def _allow_rule_opening(src_ip: str, dst_ip: str, port: Any,
+                        allow_rules: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The allow rule that was supposed to open this path, if there is one."""
     try:
-        source = ipaddress.ip_address(_name(src_ip))
-        target = ipaddress.ip_address(_name(dst_ip))
+        from scenarioforge.utils.segmentation_effects import allow_covers
     except Exception:
         return None
-    for src_net, dst_net, rule in rules:
-        if source in src_net and target in dst_net:
+    for rule in allow_rules:
+        if allow_covers(rule, _name(src_ip), _name(dst_ip), port):
             return rule
     return None
+
+
+def _blocking_rule_detail(rule: dict[str, Any]) -> str:
+    """How a rule is described when it explains a dropped path."""
+    effect = rule.get("effect") if isinstance(rule.get("effect"), dict) else {}
+    protects = _name(effect.get("protects")) or _name(rule.get("dst")) or _name(rule.get("subnet"))
+    blocks_from = _name(effect.get("blocks_from")) or _name(rule.get("src"))
+    kind = _name(rule.get("type")) or "segmentation"
+    if effect.get("invert_source") and blocks_from:
+        source = f"everything outside {blocks_from}"
+    else:
+        source = blocks_from or "any source"
+    where = " on this node" if _name(effect.get("scope")) == "node" else ""
+    return f"{kind}: {source} to {protects or 'it'}{where}"
 
 
 def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any = None) -> dict[str, Any]:
@@ -214,8 +290,11 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
     net_unreachable: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []       # dropped packets with no rule to explain them
     segmented: list[dict[str, Any]] = []     # dropped packets a segmentation rule explains
+    by_policy: list[dict[str, Any]] = []     # dropped because nothing opens the path
     transient: list[dict[str, Any]] = []     # refused: port closed since enumeration
     block_rules = _segmentation_block_rules(segmentation)
+    allow_rules = _segmentation_allow_rules(segmentation)
+    default_deny = _segmentation_is_default_deny(segmentation)
     prober_ip = ""
     if probe_ok:
         nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
@@ -263,7 +342,31 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
                         "name": label,
                         "status": "pass",
                         "detail": (f"blocked as configured by segmentation "
-                                   f"({rule.get('type')} {rule.get('src')} → {rule.get('dst')})"),
+                                   f"({_blocking_rule_detail(rule)})"),
+                    })
+                    continue
+                # A path the scenario arranged for is a different matter: an
+                # allow was installed and the packets were dropped anyway, which
+                # is the one shape here worth investigating.
+                opened = _allow_rule_opening(src_ip, _name(row.get("ip")), row.get("port"), allow_rules)
+                if opened is not None:
+                    blocked.append(row)
+                    items.append({
+                        "name": label,
+                        "status": "warn",
+                        "detail": (f"packets dropped ({error}) even though an allow rule opens this "
+                                   f"path ({opened.get('chain')} {opened.get('src')} -> "
+                                   f"{opened.get('dst')}:{opened.get('port')})." + via_note + repro),
+                    })
+                    continue
+                if default_deny:
+                    by_policy.append(row)
+                    items.append({
+                        "name": label,
+                        "status": "pass",
+                        "detail": ("closed by the default-deny segmentation policy: no rule opens "
+                                   "this path, and nothing in the scenario asks for it to be open."
+                                   + via_note),
                     })
                     continue
                 blocked.append(row)
@@ -282,7 +385,7 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
                                "(short-lived service port), not a reachability failure." + repro),
                 })
 
-    net_unreachable = blocked + segmented + transient
+    net_unreachable = blocked + segmented + by_policy + transient
     published_bad = len(unreachable) + len(topo_unreachable)
     probed = len(net_checks)
     reachable_ok = probed - len(net_unreachable)
@@ -291,11 +394,6 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
         return _result("ports", "skip", "No open service ports found to check.", items)
     if published_bad:
         return _result("ports", "fail", f"{published_bad} published port target(s) unreachable.", items)
-    if blocked:
-        return _result("ports", "warn",
-                       f"{reachable_ok} of {probed} probed service port(s) reachable across the CORE "
-                       f"network; {len(blocked)} blocked (dropped packets, with no segmentation "
-                       f"rule to explain them).", items)
     node_count = sum(1 for v in (probe.get("nodes") or {}).values() if isinstance(v, dict) and v.get("listening"))
     total_ok = len(checked) + reachable_ok
     notes = []
@@ -305,9 +403,18 @@ def ports_result(summary: dict[str, Any], probe: Any = None, segmentation: Any =
         notes.append(f"{from_traffic} probed from their traffic source")
     if segmented:
         notes.append(f"{len(segmented)} blocked as configured by segmentation")
+    if by_policy:
+        notes.append(f"{len(by_policy)} closed by the default-deny policy")
     if transient:
         notes.append(f"{len(transient)} short-lived port(s) closed during probe")
     tail = f" ({'; '.join(notes)}.)" if notes else ""
+    # The warning carries the same tail: a reader deciding whether one dropped
+    # path matters needs to know how much of the run was closed on purpose.
+    if blocked:
+        return _result("ports", "warn",
+                       f"{reachable_ok} of {probed} probed service port(s) reachable across the CORE "
+                       f"network; {len(blocked)} blocked (dropped packets that no segmentation rule "
+                       f"or policy explains).{tail}", items)
     return _result("ports", "pass",
                    f"All {total_ok} stable service port target(s) reachable "
                    f"({net_listening} listening across {node_count} node(s)).{tail}",
@@ -551,18 +658,31 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + "        ip = nodes.get(name, {}).get('ip') or ''\n"
         + "        if ip and ip not in by_ip:\n"
         + "            by_ip[ip] = name\n"
-        + "    # Destination IP -> the traffic source that talks to it.\n"
+        + "    # (destination, port) -> the source of the flow that uses THAT port.\n"
+        + "    # Keyed by port because a node commonly receives several flows from\n"
+        + "    # different senders: the allow rules are per flow, so the source of one\n"
+        + "    # flow is the wrong vantage point for another flow's port, and for a\n"
+        + "    # service port that is no flow's at all.\n"
         + "    flow_src = {}\n"
         + "    for flow in _traffic_flows():\n"
+        + "        if str(flow.get('protocol') or '').strip().upper() != 'TCP':\n"
+        + "            continue\n"
         + "        s_ip = str(flow.get('src_ip') or '').strip()\n"
         + "        d_ip = str(flow.get('dst_ip') or '').strip()\n"
-        + "        if s_ip and d_ip and d_ip not in flow_src:\n"
-        + "            flow_src[d_ip] = s_ip\n"
-        + "    def _prober_for(tname, tip):\n"
-        + "        s_ip = flow_src.get(tip)\n"
+        + "        try:\n"
+        + "            d_port = int(flow.get('dst_port'))\n"
+        + "        except Exception:\n"
+        + "            continue\n"
+        + "        if s_ip and d_ip and (d_ip, d_port) not in flow_src:\n"
+        + "            flow_src[(d_ip, d_port)] = s_ip\n"
+        + "    def _prober_for(tname, tip, tport):\n"
+        + "        s_ip = flow_src.get((tip, int(tport)))\n"
         + "        cand = by_ip.get(s_ip) if s_ip else None\n"
         + "        if cand and cand != tname:\n"
         + "            return cand, 'traffic source'\n"
+        + "        # No flow uses this port, so the meaningful question is whether the\n"
+        + "        # service answers at all -- which a peer on its own subnet can ask\n"
+        + "        # without crossing a segmentation boundary.\n"
         + "        tnet = nodes.get(tname, {}).get('net') or ''\n"
         + "        if tnet:\n"
         + "            for kind, name in alln:\n"
@@ -584,7 +704,7 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + "        for port in info.get('listening', []):\n"
         + "            if total >= MAX_TARGETS:\n"
         + "                break\n"
-        + "            pname, why = _prober_for(name, ip)\n"
+        + "            pname, why = _prober_for(name, ip, port)\n"
         + "            if not pname:\n"
         + "                continue\n"
         + "            plan.setdefault(pname, []).append([name, ip, port, why])\n"
@@ -672,6 +792,12 @@ def segmentation_probe_script(sudo_password: str | None = None,
     )
 
 
+# The agent writes stats every 10s (`-stats-interval`, traffic_agent/main.go).
+# Six missed writes is a generous margin for an emulated node under load while
+# still distinguishing a running agent from one that has stopped.
+_AGENT_STATS_FRESH_S = 60
+
+
 def traffic_probe_script(sudo_password: str | None = None,
                          session_id: Any = None,
                          traffic_dirs: list[str] | None = None) -> str:
@@ -686,9 +812,58 @@ def traffic_probe_script(sudo_password: str | None = None,
     """
     dirs = traffic_dirs or ["/tmp/traffic"]
     dirs_literal = json.dumps(dirs)
+    # Finding the agent must not depend on the node's image shipping procps.
+    # A Docker node's container IS the scenario's own image, and a minimal
+    # vulnerability image often has no `pgrep` or `ps` at all -- on such a node
+    # pgrep produced nothing, the node looked idle, and the check reported a
+    # sender with no traffic process while the agent was in fact running and
+    # moving megabytes. `/proc` is part of the kernel, not a package, so scan it
+    # when pgrep is unavailable or finds nothing.
+    #
+    # The scanner skips its own pid; its parent shell is filtered out below by
+    # the `pgrep` substring its command line necessarily contains.
+    proc_scan_sh = (
+        "pgrep -fa traffic_ 2>/dev/null || pgrep -af traffic_ 2>/dev/null || "
+        "{ self=$$; for d in /proc/[0-9]*; do p=${d#/proc/}; "
+        "[ \"$p\" = \"$self\" ] && continue; "
+        "[ -r \"$d/cmdline\" ] || continue; "
+        "c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null); "
+        "case \"$c\" in *traffic_*) echo \"$p $c\" ;; esac; done; }"
+    )
     return (
         _remote_preamble(sudo_password, session_id)
         + f"TRAFFIC_DIRS = {dirs_literal}\n"
+        + f"PROC_SCAN = {json.dumps(proc_scan_sh)}\n"
+        + f"AGENT_FRESH_S = {int(_AGENT_STATS_FRESH_S)}\n"
+        + "import datetime as _dt\n"
+        + "def _node_agent(kind, name):\n"
+        + "    # The agent's own stats file is the one liveness signal that needs no\n"
+        + "    # tooling in the image at all -- just a readable file -- and it proves\n"
+        + "    # progress rather than mere existence. Restricted to Docker nodes: a\n"
+        + "    # vnode shares the host's /tmp, so this glob would return every node's\n"
+        + "    # stats. Vnodes share the host filesystem and therefore always have\n"
+        + "    # pgrep, so they never reach for this fallback.\n"
+        + "    if kind != 'docker':\n"
+        + "        return {}\n"
+        + "    rc, out = _nexec(kind, name, ['sh','-lc',\n"
+        + "                     'cat /tmp/coretg_traffic/stats_*.json 2>/dev/null | head -c 8000'])\n"
+        + "    try:\n"
+        + "        s = json.loads(out[out.index('{'):out.rindex('}') + 1])\n"
+        + "    except Exception:\n"
+        + "        return {}\n"
+        + "    age = None\n"
+        + "    try:\n"
+        + "        seen = _dt.datetime.strptime(str(s.get('updated_at')), '%Y-%m-%dT%H:%M:%SZ')\n"
+        + "        seen = seen.replace(tzinfo=_dt.timezone.utc)\n"
+        + "        age = (_dt.datetime.now(_dt.timezone.utc) - seen).total_seconds()\n"
+        + "    except Exception:\n"
+        + "        age = None\n"
+        + "    return {'present': True, 'age_s': age,\n"
+        + "            'live': bool(age is not None and age <= AGENT_FRESH_S),\n"
+        + "            'bytes_sent': s.get('total_bytes_sent'),\n"
+        + "            'bytes_received': s.get('total_bytes_received'),\n"
+        + "            'errors': s.get('total_errors'),\n"
+        + "            'flows': len(s.get('flows') or [])}\n"
         + "def _ip(kind, name):\n"
         + "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1\"])\n"
         + "    ips = [l.strip() for l in out.splitlines() if l.strip()]\n"
@@ -757,9 +932,11 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "    alln = _all_nodes()\n"
         + "    nodes = {}\n"
         + "    for kind, name in alln:\n"
-        + "        rc, out = _nexec(kind, name, ['sh','-lc','pgrep -fa traffic_ 2>/dev/null || pgrep -af traffic_ 2>/dev/null'])\n"
-        + "        procs = [l.strip() for l in out.splitlines() if 'traffic_' in l and 'pgrep' not in l]\n"
-        + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': _ip(kind, name)}\n"
+        + "        rc, out = _nexec(kind, name, ['sh','-lc', PROC_SCAN])\n"
+        + "        procs = [l.strip() for l in out.splitlines()\n"
+        + "                 if 'traffic_' in l and 'pgrep' not in l and '/proc/[0-9]' not in l]\n"
+        + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': _ip(kind, name),\n"
+        + "                       'agent': _node_agent(kind, name)}\n"
         + "    # Reachability follows the configured traffic flows, and each flow is\n"
         + "    # tested on its own protocol and port rather than with ping. Under a\n"
         + "    # default-deny segmentation policy ICMP is normally not in the allow\n"
@@ -938,7 +1115,27 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
     summary = probe.get("summary") if isinstance(probe.get("summary"), dict) else None
     flows = _as_list(summary.get("flows")) if isinstance(summary, dict) else []
     nodes = probe.get("nodes") if isinstance(probe.get("nodes"), dict) else {}
-    nodes_with_procs = [n for n, info in nodes.items() if isinstance(info, dict) and _as_list(info.get("procs"))]
+    # "Is the agent running" has two independent witnesses, because neither is
+    # available on every image. A process listing needs procps, which a minimal
+    # vulnerability image may not ship; the agent's stats file needs only a
+    # readable file, but proves liveness solely while it keeps being updated.
+    # Either one counts, so a node is only reported idle when both are silent.
+    def _agent(info: Any) -> dict[str, Any]:
+        agent = info.get("agent") if isinstance(info, dict) else None
+        return agent if isinstance(agent, dict) else {}
+
+    nodes_with_procs = [
+        n for n, info in nodes.items()
+        if isinstance(info, dict) and (_as_list(info.get("procs")) or _agent(info).get("live"))
+    ]
+    # An agent that wrote stats and then stopped is a third state: neither
+    # healthy nor never-started, and the one worth naming in the output.
+    nodes_agent_stopped = sorted(
+        n for n, info in nodes.items()
+        if isinstance(info, dict)
+        and n not in nodes_with_procs
+        and _agent(info).get("present")
+    )
     items: list[dict[str, Any]] = []
 
     # The runtime traffic_summary.json is rewritten by every execute, so when it
@@ -965,7 +1162,20 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
                       "detail": f"{len(traffic_files)} traffic script(s) generated"})
     for node in sorted(nodes_with_procs):
         count = len(_as_list(nodes[node].get("procs")))
-        items.append({"name": node, "status": "pass", "detail": f"{count} traffic process(es) running"})
+        agent = _agent(nodes[node])
+        if count:
+            detail = f"{count} traffic process(es) running"
+        else:
+            # Seen only through the stats file: say so, because the absence of a
+            # process listing on this node is itself worth knowing.
+            detail = "traffic agent active (no process listing available on this image)"
+        sent = agent.get("bytes_sent")
+        if isinstance(sent, (int, float)) and sent > 0:
+            detail += f"; {int(sent):,} bytes sent"
+        errors = agent.get("errors")
+        if isinstance(errors, (int, float)) and errors > 0:
+            detail += f"; {int(errors)} error(s)"
+        items.append({"name": node, "status": "pass", "detail": detail})
 
     # Nodes that a flow names as a sender but where no traffic process is running.
     expected_senders: set[str] = set()
@@ -981,8 +1191,24 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
                 expected_senders.add(node)
     missing_senders = sorted(expected_senders - set(nodes_with_procs))
     for node in missing_senders:
+        agent = _agent(nodes.get(node))
+        if agent.get("present"):
+            age = agent.get("age_s")
+            when = f" (last update {int(age)}s ago)" if isinstance(age, (int, float)) else ""
+            detail = ("flow names this node as a traffic source; its agent ran but has "
+                      f"stopped updating stats{when}")
+        else:
+            detail = "flow names this node as a traffic source, but no traffic process is running"
+        items.append({"name": node, "status": "warn", "detail": detail})
+
+    # A receiver whose agent died is just as broken as a sender's, and nothing
+    # above would catch it: expected_senders only covers flow sources.
+    stopped_others = [n for n in nodes_agent_stopped if n not in set(missing_senders)]
+    for node in stopped_others:
+        age = _agent(nodes[node]).get("age_s")
+        when = f" (last update {int(age)}s ago)" if isinstance(age, (int, float)) else ""
         items.append({"name": node, "status": "warn",
-                      "detail": "flow names this node as a traffic source, but no traffic process is running"})
+                      "detail": f"traffic agent ran but has stopped updating stats{when}"})
 
     # The runtime traffic_summary.json is authoritative about whether traffic was
     # actually configured — the scenario XML's Traffic section can carry a
@@ -996,6 +1222,10 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
         return _result("traffic", "warn",
                        f"{len(nodes_with_procs)} node(s) running traffic; {len(missing_senders)} "
                        "expected sender(s) have no traffic process.", items)
+    if stopped_others:
+        return _result("traffic", "warn",
+                       f"{len(nodes_with_procs)} node(s) running traffic; {len(stopped_others)} "
+                       "node(s) have a stopped traffic agent.", items)
     if traffic_configured:
         bits: list[str] = []
         if flows:
@@ -1010,6 +1240,142 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
                        "The scenario declares traffic, but no runtime traffic_summary.json was found. "
                        "Confirm traffic generation ran during execute.", items)
     return _result("traffic", "skip", "No traffic configured for this scenario.", items)
+
+
+def participant_probe_sources(participant_subnets: Any) -> list[str]:
+    """One representative address per participant network.
+
+    The participant's own address is not knowable and does not matter: what is
+    checked is whether their *network* can reach the provider, so any address on
+    it answers the question. Pinning the check to one address would make it pass
+    or fail on a DHCP lease.
+    """
+    out: list[str] = []
+    for raw in _as_list(participant_subnets):
+        text = _name(raw)
+        if not text:
+            continue
+        try:
+            net = ipaddress.ip_network(text, strict=False)
+        except Exception:
+            continue
+        if net.num_addresses <= 1:
+            continue
+        try:
+            out.append(str(next(net.hosts())))
+        except StopIteration:
+            continue
+    return out
+
+
+def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> dict[str, Any]:
+    """Check 8: can the participant reach each pivot provider?
+
+    A provider is the only way into a subnet segmentation walled off, so a
+    participant who cannot reach it cannot solve anything behind that boundary.
+    That makes an unreachable provider a broken scenario, not a warning.
+
+    This reads the rules rather than sending packets, because the participant's
+    vantage point is not available to probe from: the HITL node is an RJ45 bound
+    to a physical interface, not a namespace the check can enter. Reading the
+    rules also means the check still runs with nothing plugged in, which is when
+    an author is most likely to be looking at it.
+
+    When no HITL network is configured, the question is still meaningful -- can
+    anything outside the subnet reach the provider -- so it is asked from an
+    address outside the walled-off subnet instead.
+    """
+    if not isinstance(segmentation, dict) or not segmentation.get("ok"):
+        detail = _name(segmentation.get("error")) if isinstance(segmentation, dict) else ""
+        return _result("pivot_access", "error", detail or "segmentation probe failed")
+
+    rules_summary = segmentation.get("rules_summary")
+    access = rules_summary.get("pivot_access") if isinstance(rules_summary, dict) else None
+    providers = _as_list(access.get("providers")) if isinstance(access, dict) else []
+    if not providers:
+        # Two different features are called "pivot" and this check covers only
+        # one of them, so the skip has to say which. A scenario whose challenge
+        # chain is full of Pivot() steps can still legitimately skip here.
+        return _result(
+            "pivot_access", "skip",
+            "No pivot providers to check. This covers Segmentation's "
+            "\"accessible by pivot\", which places a reachable provider node in a "
+            "subnet segmentation walled off — it is off for this scenario, or it is "
+            "on and nothing was walled off. Pivot steps in the challenge chain "
+            "(a step producing Pivot(node)) are a separate feature and are not "
+            "measured here; turn on accessible_by_pivot in the Segmentation section "
+            "if you want walled-off subnets given an entrance.")
+
+    allow_rules = _segmentation_allow_rules(segmentation)
+    sources = participant_probe_sources(participant_subnets)
+    items: list[dict[str, Any]] = []
+    unreachable = 0
+    unplaced = 0
+
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        subnet = _name(provider.get("subnet"))
+        name = _name(provider.get("node_name")) or f"provider for {subnet}"
+        address = _name(provider.get("address"))
+        entry = provider.get("entry") if isinstance(provider.get("entry"), dict) else {}
+        port = entry.get("port")
+        label = f"{name} ({address or 'no address'}:{port or '?'}) for {subnet}"
+
+        if not address or not port:
+            unplaced += 1
+            items.append({"name": label, "status": "fail",
+                          "detail": ("no node was placed for this subnet, so nothing behind the "
+                                     "boundary can be reached")})
+            continue
+
+        # Ask from the participant's network where there is one, and from an
+        # address outside the walled-off subnet otherwise.
+        probes = list(sources)
+        origin = "the participant network"
+        if not probes:
+            probes = [_outside_address(subnet)]
+            origin = "outside the walled-off subnet"
+        probes = [p for p in probes if p]
+        if not probes:
+            continue
+
+        missing = [src for src in probes
+                   if _allow_rule_opening(src, address, port, allow_rules) is None]
+        if missing:
+            unreachable += 1
+            items.append({"name": label, "status": "fail",
+                          "detail": (f"no allow rule opens this provider from {origin} "
+                                     f"({', '.join(missing)}), so the challenges behind "
+                                     f"{subnet} cannot be started")})
+        else:
+            items.append({"name": label, "status": "pass",
+                          "detail": f"reachable from {origin} on port {port}"})
+
+    if unplaced or unreachable:
+        broken = unplaced + unreachable
+        return _result("pivot_access", "fail",
+                       f"{broken} of {len(providers)} pivot provider(s) cannot be reached by the "
+                       f"participant; the challenges behind those boundaries are unsolvable.", items)
+    return _result("pivot_access", "pass",
+                   f"All {len(providers)} pivot provider(s) reachable from the participant.", items)
+
+
+def _outside_address(subnet: str) -> str:
+    """An address that is definitely not inside `subnet`.
+
+    Used when no participant network is configured: the provider still has to be
+    reachable from somewhere outside the subnet it guards, and that is the same
+    question with a stand-in for the participant.
+    """
+    try:
+        net = ipaddress.ip_network(_name(subnet), strict=False)
+    except Exception:
+        return "203.0.113.1"
+    for candidate in ("203.0.113.1", "198.51.100.1", "192.0.2.1"):
+        if ipaddress.ip_address(candidate) not in net:
+            return candidate
+    return "203.0.113.1"
 
 
 def reachability_result(probe: Any) -> dict[str, Any]:

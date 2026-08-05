@@ -17,7 +17,9 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Tuple, Any, Optional, Set
 import ipaddress
 import random
+import hashlib
 import os
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 import math
@@ -37,6 +39,7 @@ from .node_plan import (  # internal normalization helper
     is_docker_backed_role,
 )
 from .preview_validation import validate_full_preview
+from ..utils.pivot_access import PIVOT_PROVIDER_METADATA_KEY, allow_rules_for_provider
 
 
 @dataclass
@@ -355,6 +358,165 @@ def _derive_r2s_policy_from_items(routing_items: Optional[List[Any]]) -> Optiona
     return None
 
 
+def _materialise_pivot_providers(
+    plan: Any,
+    *,
+    host_nodes: List[PreviewNode],
+    host_map: Dict[int, PreviewNode],
+    host_router_map: Dict[int, int],
+    switches_detail: List[Dict[str, Any]],
+    switch_nodes: List[PreviewNode],
+    router_nodes: List[PreviewNode],
+    assigned_ips: Set[str],
+) -> List[PreviewNode]:
+    """Create the nodes a pivot-access plan says have to be added.
+
+    A provider the planner marked `added` is a requirement, not a node: it has
+    no id, no address and nothing to run. This turns each one into a real
+    Docker host in the plan -- addressed inside the walled-off subnet, hung off
+    that subnet's switch, and carrying the image it must boot -- then writes the
+    allow rules that were impossible before it had an address.
+
+    The node is appended with an id above every existing one on purpose. Slot
+    numbering downstream is positional over the sorted host list, so an id in
+    the middle would shift every later host's slot and hand a challenge to the
+    wrong node.
+
+    Returns the nodes created. A provider whose subnet has no switch to attach
+    to is left alone and reported in `plan.unresolved`, which is what the
+    execute-time warning then picks up.
+    """
+    added = [p for p in getattr(plan, 'providers', []) if getattr(p, 'added', False) and p.node_id is None]
+    if not added:
+        return []
+
+    used_ids: Set[int] = set()
+    for group in (host_nodes, router_nodes, switch_nodes):
+        for node in group or []:
+            try:
+                used_ids.add(int(node.node_id))
+            except Exception:
+                continue
+    used_names = {str(node.name) for group in (host_nodes, router_nodes, switch_nodes) for node in group or []}
+
+    def _switch_for(subnet: str) -> Optional[Dict[str, Any]]:
+        try:
+            wanted = ipaddress.ip_network(str(subnet), strict=False)
+        except Exception:
+            return None
+        for detail in switches_detail or []:
+            if not isinstance(detail, dict):
+                continue
+            try:
+                lan = ipaddress.ip_network(str(detail.get('lan_subnet') or ''), strict=False)
+            except Exception:
+                continue
+            if lan == wanted:
+                return detail
+        return None
+
+    def _free_address(detail: Dict[str, Any], net: Any) -> Optional[str]:
+        taken: Set[str] = set()
+        for key in ('router_ip', 'switch_ip'):
+            raw = str(detail.get(key) or '').split('/')[0].strip()
+            if raw:
+                taken.add(raw)
+        host_if_ips = detail.get('host_if_ips')
+        if isinstance(host_if_ips, dict):
+            for value in host_if_ips.values():
+                raw = str(value or '').split('/')[0].strip()
+                if raw:
+                    taken.add(raw)
+        taken |= {str(ip) for ip in assigned_ips}
+        for candidate in net.hosts():
+            if str(candidate) not in taken:
+                return f"{candidate}/{net.prefixlen}"
+        return None
+
+    created: List[PreviewNode] = []
+    for provider in added:
+        detail = _switch_for(provider.subnet)
+        if detail is None:
+            plan.unresolved.append({
+                'subnet': provider.subnet,
+                'blocked_from': list(provider.blocked_from),
+                'reason': (
+                    'no switch serves this subnet in the planned topology, so a provider '
+                    'node has nowhere to attach'
+                ),
+            })
+            continue
+        try:
+            net = ipaddress.ip_network(str(detail.get('lan_subnet')), strict=False)
+        except Exception:
+            continue
+        address = _free_address(detail, net)
+        if not address:
+            plan.unresolved.append({
+                'subnet': provider.subnet,
+                'blocked_from': list(provider.blocked_from),
+                'reason': 'no free address left in this subnet for a provider node',
+            })
+            continue
+
+        node_id = (max(used_ids) + 1) if used_ids else 1
+        used_ids.add(node_id)
+        name = provider.node_name or f"pivot-{node_id}"
+        while name in used_names:
+            name = f"{name}-{node_id}"
+        used_names.add(name)
+
+        node = PreviewNode(
+            node_id=node_id,
+            name=name,
+            role='Docker',
+            kind='host',
+            ip4=address,
+            metadata={
+                # Read back by `provisioned_entry_points`, so a later plan over
+                # this topology reuses this node instead of adding another, and
+                # by the builder, which pins the container to this image.
+                PIVOT_PROVIDER_METADATA_KEY: {
+                    'subnet': provider.subnet,
+                    'image': provider.image,
+                    'port': int(provider.entry.port),
+                    'protocol': provider.entry.protocol,
+                    'kind': provider.entry.kind,
+                    'label': provider.entry.label or 'SSH',
+                    # Additive by construction: this node is created on top of
+                    # the plan, never taken from a configured slot.
+                    'consumes_slot': False,
+                },
+            },
+        )
+        host_nodes.append(node)
+        host_map[node_id] = node
+        created.append(node)
+        assigned_ips.add(address.split('/')[0])
+
+        router_id = detail.get('router_id')
+        if router_id is not None:
+            try:
+                host_router_map[node_id] = int(router_id)
+            except Exception:
+                pass
+        hosts_list = detail.setdefault('hosts', [])
+        if isinstance(hosts_list, list):
+            hosts_list.append(node_id)
+        host_if_ips = detail.setdefault('host_if_ips', {})
+        if isinstance(host_if_ips, dict):
+            host_if_ips[node_id] = address
+
+        provider.node_id = node_id
+        provider.node_name = name
+        provider.address = address.split('/')[0]
+        plan.allow_rules.extend(
+            allow_rules_for_provider(provider, router_ids=plan.router_ids)
+        )
+
+    return created
+
+
 def build_full_preview(
     role_counts: Dict[str, int],
     routers_planned: int,
@@ -377,6 +539,8 @@ def build_full_preview(
     base_scenario: Optional[Dict[str, Any]] = None,
     reserved_ipv4_addrs: Optional[Iterable[str]] = None,
     reserved_ipv4_networks: Optional[Iterable[str]] = None,
+    segmentation_accessible_by_pivot: bool = False,
+    segmentation_settings: Optional[Dict[str, Any]] = None,
 ):
     """Return a topology preview dictionary.
 
@@ -1271,7 +1435,27 @@ def build_full_preview(
             traffic_summary = {'error': str(_e)}
 
     # ---- Segmentation Preview (lightweight) ----
-    seg_preview: Dict[str, Any] = {"density": segmentation_density or 0.0, "planned": [], "rules": [], 'source': 'runtime_planner'}
+    # Carried into the preview so Flow can decide pivot steps without the
+    # scenario XML in hand: Flow runs before execute, so the runtime
+    # segmentation_summary.json that would otherwise carry it does not exist yet.
+    # The settings that shape the policy travel with the plan, because execute
+    # enforces the plan rather than planning again: a setting it learned about
+    # only at run time would arrive after the decisions it was meant to
+    # influence. Recorded here so execute can also tell when it was handed a
+    # plan built under different settings than the ones it now has.
+    from ..parsers.segmentation import SEGMENTATION_SETTING_DEFAULTS as _SEG_DEFAULTS
+    seg_settings: Dict[str, Any] = dict(_SEG_DEFAULTS)
+    seg_settings.update({k: v for k, v in (segmentation_settings or {}).items() if k in seg_settings})
+    if segmentation_accessible_by_pivot:
+        seg_settings['accessible_by_pivot'] = True
+    segmentation_accessible_by_pivot = bool(seg_settings['accessible_by_pivot'])
+
+    seg_preview: Dict[str, Any] = {
+        "density": segmentation_density or 0.0, "planned": [], "rules": [],
+        'source': 'runtime_planner',
+        'accessible_by_pivot': bool(segmentation_accessible_by_pivot),
+        'settings': dict(seg_settings),
+    }
     segmentation_rules_preview: List[Dict[str, Any]] = []
     deep_segmentation_error: Optional[str] = None
     if segmentation_density and segmentation_density > 0 and segmentation_items:
@@ -1329,9 +1513,9 @@ def build_full_preview(
                 hosts=host_infos,
                 density=float(segmentation_density or 0.0),
                 items=seg_objs,
-                nat_mode='SNAT',
+                nat_mode=str(seg_settings['nat_mode']),
                 out_dir=seg_tmp,
-                include_hosts=False,
+                include_hosts=bool(seg_settings['include_hosts']),
             )
             # Extract rules
             for rr in summary.get('rules', []):
@@ -1383,7 +1567,7 @@ def build_full_preview(
         try:
             from ..types import TrafficInfo, NodeInfo  # type: ignore
             from ..utils.traffic import generate_traffic_scripts  # type: ignore
-            from ..utils.segmentation import plan_preview_allow_rules  # type: ignore
+            from ..utils.segmentation import predict_allow_rules_for_flows  # type: ignore
             # Heuristic density: average of factors capped at 1.0
             factors = [float(it.get('factor') or 0.0) for it in traffic_plan]
             density_est = 0.0
@@ -1420,16 +1604,36 @@ def build_full_preview(
                 flows_with_scripts = _preview_summary.get('flows') or []
                 if flows_with_scripts:
                     traffic_scripts_preview['preview_flows'] = flows_with_scripts[:250]
+                    # Execute writes these flows rather than drawing its own, so
+                    # it has to know when the list it was handed is only part of
+                    # the plan -- replaying a truncated list would quietly build
+                    # a scenario with less traffic than the plan shows.
+                    traffic_scripts_preview['preview_flows_total'] = len(flows_with_scripts)
+                    traffic_scripts_preview['preview_flows_truncated'] = len(flows_with_scripts) > 250
                     traffic_summary = {
                         'flows': flows_with_scripts,
                         'count': len(flows_with_scripts)
                     }
             except Exception:
                 pass
-            # Predicted allow rules (dry-run) for preview purposes
-            host_ip_map = {h.node_id: h.ip4.split('/')[0] for h in host_nodes if h.ip4}
+            # The allow rules this scenario will actually get. Run against the
+            # planned flows and the planned policy, in a scratch directory so
+            # the prediction writes nothing the run would read.
             try:
-                predicted = plan_preview_allow_rules(seg_preview or {}, traffic_plan, host_ip_map, seed=seed)
+                _allow_dir = os.path.join(tempfile.gettempdir(), f"scenarioforge-preview-allow-{seed}")
+                shutil.rmtree(_allow_dir, ignore_errors=True)
+                predicted = predict_allow_rules_for_flows(
+                    routers=[NodeInfo(node_id=r.node_id, ip4=r.ip4 or '', role=r.role)
+                             for r in router_nodes if r.ip4],
+                    hosts=ninfos,
+                    traffic_summary_path=os.path.join(preview_dir, 'traffic_summary.json'),
+                    segmentation_summary_path=os.path.join(
+                        str(seg_preview.get('out_dir') or ''), 'segmentation_summary.json'),
+                    out_dir=_allow_dir,
+                    src_subnet_prob=float(seg_settings['allow_src_subnet_prob']),
+                    dst_subnet_prob=float(seg_settings['allow_dst_subnet_prob']),
+                    include_hosts=bool(seg_settings['include_hosts']),
+                )
                 traffic_scripts_preview['predicted_allow_rules'] = predicted.get('predicted_allow_rules')
             except Exception as _pae:
                 traffic_scripts_preview['predicted_allow_rules_error'] = str(_pae)
@@ -1438,7 +1642,6 @@ def build_full_preview(
 
     # ---- Unify Preview -> Runtime Scripts + Hashing (Segmentation & Traffic) ----
     try:
-        import hashlib, shutil
         # Segmentation scripts
         seg_prev_dir = seg_preview.get('out_dir') if isinstance(seg_preview, dict) else None
         if seg_prev_dir and os.path.isdir(seg_prev_dir):
@@ -1530,6 +1733,74 @@ def build_full_preview(
         clean_stale_preview_dirs(protect=protect_dirs)
     except Exception:
         pass
+
+    # Pivot access is decided here, not at execute time, because the topology is
+    # built long before segmentation runs -- a provider that has to be *added*
+    # must be known while nodes are still being planned. Reported on the preview
+    # so the requirement is visible before anything is created.
+    if segmentation_accessible_by_pivot:
+        try:
+            from ..types import NodeInfo as _NodeInfo
+            from ..utils.pivot_access import plan_pivot_access as _plan_pivot
+
+            def _as_nodeinfo(nodes):
+                out = []
+                for n in nodes or []:
+                    ip = str(getattr(n, 'ip4', '') or '').strip()
+                    if not ip:
+                        continue
+                    out.append(_NodeInfo(node_id=int(getattr(n, 'node_id')),
+                                         ip4=ip,
+                                         role=str(getattr(n, 'role', '') or '')))
+                return out
+
+            _names = {int(getattr(n, 'node_id')): str(getattr(n, 'name', '') or '')
+                      for n in list(host_nodes or []) + list(router_nodes or [])
+                      if getattr(n, 'node_id', None) is not None}
+            # Without this the planner sees no offerings at all and every
+            # walled-off subnet needs a node added -- including the ones whose
+            # challenge is already reachable. Adding a container per subnet that
+            # did not need one is the expensive way to get that wrong.
+            from .pivot_entry_points import entry_points_for_plan as _pivot_entries
+            _entry_points = _pivot_entries(
+                vulnerabilities_by_node={n.node_id: n.vulnerabilities
+                                         for n in host_nodes if n.vulnerabilities},
+                flag_generators_by_node=nodegen_assignments,
+                hosts=host_nodes,
+            )
+            _pivot_plan = _plan_pivot(
+                seg_preview.get('rules') or [],
+                _as_nodeinfo(host_nodes),
+                routers=_as_nodeinfo(router_nodes),
+                node_names=_names,
+                entry_points=_entry_points,
+                # The HITL link networks, which is where a participant sits.
+                # Reserved here already, and always networks rather than the
+                # single addresses on them.
+                participant_subnets=[str(net) for net in reserved_networks],
+                # The author's provider choice has to apply here too. This is
+                # the call that decides which node gets a provider -- and, for
+                # an added one, creates it -- so a preference honoured only at
+                # execute would place the node here and open the port on a
+                # different one there.
+                preferred_provider=seg_settings.get('pivot_provider'),
+            )
+            # A provider that has to be added is created here, while nodes are
+            # still being planned. After this it is an ordinary host in the
+            # payload and the builder creates it like any other.
+            _materialise_pivot_providers(
+                _pivot_plan,
+                host_nodes=host_nodes,
+                host_map=host_map,
+                host_router_map=host_router_map,
+                switches_detail=switches_detail,
+                switch_nodes=switch_nodes,
+                router_nodes=router_nodes,
+                assigned_ips=assigned_ips,
+            )
+            seg_preview['pivot_access'] = _pivot_plan.as_dict()
+        except Exception as _exc:
+            seg_preview['pivot_access'] = {'error': str(_exc)}
 
     routers_payload = [r.__dict__ for r in router_nodes]
     hosts_payload = [h.__dict__ for h in host_nodes]

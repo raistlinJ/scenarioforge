@@ -55,6 +55,30 @@
     </xs:restriction>
   </xs:simpleType>
 
+  <xs:simpleType name="NatModeType">
+    <xs:annotation>
+      <xs:documentation>
+        Segmentation NAT mode. Anything else falls back to SNAT at parse time.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="SNAT"/>
+      <xs:enumeration value="MASQUERADE"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="ProbabilityType">
+    <xs:annotation>
+      <xs:documentation>
+        A probability in [0,1]. Out-of-range values are clamped at parse time.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:decimal">
+      <xs:minInclusive value="0"/>
+      <xs:maxInclusive value="1"/>
+    </xs:restriction>
+  </xs:simpleType>
+
   <!-- Boolean-ish attribute token. The writer emits "true"/"false"; the parser also
        accepts 1/0/yes/no/on/off. -->
   <xs:simpleType name="BoolTokenType">
@@ -320,6 +344,10 @@
     <!-- Segmentation pivot metadata -->
     <xs:attribute name="pivot_enabled" type="BoolTokenType" use="optional"/>
     <xs:attribute name="pivot_provider" type="xs:string" use="optional"/>
+    <!-- Alias spellings accepted for the row switch and provider. -->
+    <xs:attribute name="pivot_required" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="pivot" type="xs:string" use="optional"/>
+    <xs:attribute name="access_provider" type="xs:string" use="optional"/>
     <xs:attribute name="requires" type="xs:string" use="optional"/>
     <xs:attribute name="produces" type="xs:string" use="optional"/>
     <xs:attribute name="pivot_node" type="xs:string" use="optional"/>
@@ -367,6 +395,44 @@
     <xs:attribute name="explicit_count" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="derived_count" type="xs:nonNegativeInteger" use="optional"/>
     <xs:attribute name="total_planned" type="xs:nonNegativeInteger" use="optional"/>
+    <!--
+      Segmentation plan-shaping settings. These live on the section because
+      execute enforces the plan rather than planning again: a setting supplied
+      only at execute would arrive after the decisions it was meant to
+      influence. The writer emits the canonical spelling and only when the value
+      differs from the default; the alias spellings are accepted on read.
+
+      `accessible_by_pivot` here is the scenario-wide form and outranks the
+      per-row `pivot_enabled` switch, but the editor writes only the row form.
+      `allow_docker_ports` is deliberately absent: it opens ports belonging to
+      containers, which do not exist until execute, so it is a run-time flag
+      rather than a plan-time input.
+    -->
+    <xs:attribute name="nat_mode" type="NatModeType" use="optional"/>
+    <xs:attribute name="natMode" type="NatModeType" use="optional"/>
+    <xs:attribute name="include_hosts" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="includeHosts" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="seg_include_hosts" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="dnat_probability" type="ProbabilityType" use="optional"/>
+    <xs:attribute name="dnatProbability" type="ProbabilityType" use="optional"/>
+    <xs:attribute name="dnat_prob" type="ProbabilityType" use="optional"/>
+    <xs:attribute name="allow_src_subnet_prob" type="ProbabilityType" use="optional"/>
+    <xs:attribute name="allowSrcSubnetProb" type="ProbabilityType" use="optional"/>
+    <xs:attribute name="allow_dst_subnet_prob" type="ProbabilityType" use="optional"/>
+    <xs:attribute name="allowDstSubnetProb" type="ProbabilityType" use="optional"/>
+    <xs:attribute name="accessible_by_pivot" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="accessibleByPivot" type="BoolTokenType" use="optional"/>
+    <xs:attribute name="pivot_access" type="BoolTokenType" use="optional"/>
+    <!--
+      Which provider kind to try first. Left as a string rather than an
+      enumeration because the planner normalises aliases (`vuln`, `ssh`,
+      `ssh-fallback`, ...) and treats anything it cannot map as "no preference";
+      an enumeration here would reject files the parser reads correctly.
+      The editor writes vulnerability | flag-node-generator | ssh-fallback.
+    -->
+    <xs:attribute name="pivot_provider" type="xs:string" use="optional"/>
+    <xs:attribute name="accessible_by_pivot_provider" type="xs:string" use="optional"/>
+    <xs:attribute name="pivot_access_provider" type="xs:string" use="optional"/>
     <!-- Per-section node count clamp bounds -->
     <xs:attribute name="node_count_min_enabled" type="BoolTokenType" use="optional"/>
     <xs:attribute name="node_count_min" type="xs:nonNegativeInteger" use="optional"/>

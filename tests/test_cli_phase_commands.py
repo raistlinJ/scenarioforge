@@ -610,7 +610,12 @@ def test_cli_flag_sequencing_cleanup_runs_default_remove_actions(monkeypatch, ca
     assert removed_roots == ['scenario-one']
     assert ['docker', 'container', 'prune', '-f'] in docker_calls
     assert ['docker', 'image', 'prune', '-f'] in docker_calls
-    assert any(cmd[:2] == ['sh', '-lc'] and 'coretg-gen-' in cmd[2] for cmd in local_calls)
+    # Generator images are selected by digest, not swept by pattern: an image
+    # whose digest still matches installed source is what the next Generate
+    # reuses, so cleanup lists images and removes only the orphans. A blanket
+    # `grep coretg-gen- | xargs docker rmi` emptied the cache on every run.
+    assert not any(cmd[:2] == ['sh', '-lc'] and 'coretg-gen-' in cmd[2] for cmd in local_calls)
+    assert ['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'] in local_calls
     assert any(cmd[:2] == ['sh', '-lc'] and '_wrapper' in cmd[2] for cmd in local_calls)
 
 

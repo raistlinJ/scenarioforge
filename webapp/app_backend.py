@@ -997,6 +997,26 @@ def _run_artifact_checks_job(
 
         _step(7, _ac.CHECK_LABELS['reachability'])
         _apply(_ac.reachability_result(traffic_probe))
+        _step(7, _ac.CHECK_LABELS['reachability'])
+
+        # Check 8: the participant can reach each pivot provider. Read from the
+        # rules rather than probed: the HITL node is an RJ45 bound to a physical
+        # interface, not a namespace this check could enter.
+        _step(8, _ac.CHECK_LABELS['pivot_access'])
+        participant_subnets: list[str] = []
+        try:
+            from scenarioforge.parsers.hitl import parse_hitl_info
+            from scenarioforge.utils.hitl import collect_hitl_preview_ip_reservations
+
+            hitl_cfg = parse_hitl_info(xml_path, scenario_label or None) or {}
+            if not hitl_cfg.get('scenario_key'):
+                hitl_cfg['scenario_key'] = scenario_label or '__default__'
+            participant_subnets = sorted(
+                collect_hitl_preview_ip_reservations(hitl_cfg).get('network_cidrs') or []
+            )
+        except Exception as exc:
+            log.debug('[check_artifacts] participant subnets unavailable: %s', exc)
+        _apply(_ac.pivot_access_result(seg_probe, participant_subnets))
 
         results = [dict(c) for c in checks]
         _update_artifact_check_progress(
@@ -21451,6 +21471,25 @@ def _flow_truthy_flag(value: Any) -> bool:
     return False
 
 
+def _flow_input_defs_with_metadata(source: Any) -> list[dict[str, Any]]:
+    """The input definitions carrying per-input metadata, from either shape.
+
+    A generator manifest keeps its input dicts under `inputs`. An *assignment*
+    keeps plain fact names there and the dicts under `input_defs`. Reading
+    `inputs` whenever it is a list therefore yielded a list of strings for an
+    assignment, every entry got skipped as "not a dict", and the metadata came
+    back empty -- which silently cost a Flow-supplied input its declared type,
+    and made its supply marker invisible.
+    """
+    if not isinstance(source, dict):
+        return []
+    for key in ('inputs', 'input_defs'):
+        value = source.get(key)
+        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
 def _flow_input_supply_when_first(input_item: dict[str, Any]) -> bool:
     if not isinstance(input_item, dict):
         return False
@@ -21483,9 +21522,7 @@ def _flow_first_step_chain_supplied_input_names(gen_or_assignment: dict[str, Any
     if not isinstance(gen_or_assignment, dict):
         return []
 
-    input_defs = gen_or_assignment.get('inputs')
-    if not isinstance(input_defs, list):
-        input_defs = gen_or_assignment.get('input_defs')
+    input_defs = _flow_input_defs_with_metadata(gen_or_assignment)
     names_from_defs: list[str] = []
     if isinstance(input_defs, list):
         for item in input_defs:
@@ -21862,14 +21899,14 @@ def _flow_apply_first_step_chain_supplied_inputs(
     supplied_values: dict[str, Any] = {}
     input_meta_by_name: dict[str, dict[str, Any]] = {}
     try:
-        raw_input_defs = source.get('inputs') if isinstance(source.get('inputs'), list) else source.get('input_defs')
-        if isinstance(raw_input_defs, list):
-            for item in raw_input_defs:
-                if not isinstance(item, dict):
-                    continue
-                input_name = str(item.get('name') or '').strip()
-                if input_name:
-                    input_meta_by_name[input_name] = item
+        # Falls back to the assignment when there is no manifest, so the
+        # metadata has to be found in either shape -- without it every supplied
+        # value is typed as a string, and a numeric or boolean input reaches the
+        # generator as text.
+        for item in _flow_input_defs_with_metadata(source) or _flow_input_defs_with_metadata(assignment):
+            input_name = str(item.get('name') or '').strip()
+            if input_name:
+                input_meta_by_name[input_name] = item
     except Exception:
         input_meta_by_name = {}
     for name in names:
@@ -22842,6 +22879,11 @@ def _flow_add_assignment_hint(assignment: dict[str, Any], hint_text: str) -> Non
         assignment['hint'] = text
 
 
+# How many pivot targets a hint names before it just counts the rest. The Pivot
+# Path rows carry the full list, so the hint optimises for being readable.
+_PIVOT_HINT_NAMED_TARGETS = 6
+
+
 def _flow_apply_pivot_context_to_assignments(
     flag_assignments: list[dict[str, Any]],
     chain_nodes: list[dict[str, Any]],
@@ -23046,6 +23088,11 @@ def _flow_apply_pivot_context_to_assignments(
         # Collect target-side hint parts so all pivot sources for this node are
         # consolidated into a single hint instead of one hint per source rule.
         _pivot_target_hint_parts: list[tuple[str, list[str], str]] = []  # (source_name, requires, port_text)
+        # And the same on the source side. The target side was already
+        # consolidated; this one emitted a hint per rule, so a node that
+        # unlocks twenty-three targets produced twenty-three hints identical
+        # but for the target name -- burying every other hint the step had.
+        _pivot_source_hint_parts: dict[tuple[str, str], list[str]] = {}  # (provider_label, produces) -> targets
 
         for rule in rules:
             source_id = str(rule.get('source_id') or '').strip()
@@ -23056,12 +23103,14 @@ def _flow_apply_pivot_context_to_assignments(
                 _flow_append_unique_values(a2, 'outputs', produces)
                 source_targets = str(rule.get('target_name') or rule.get('target_id') or '').strip()
                 provider_label = str(rule.get('provider_label') or _flow_pivot_provider_label(rule.get('provider')))
-                hint = (
-                    f"Pivot source: establish access on {node_name or source_id} "
-                    f"using {provider_label} to unlock pivot-only target {source_targets}. "
-                    f"Produces: {', '.join(produces)}."
+                # The work is the same whatever it unlocks: get access on this
+                # node with this provider. Only the target differs, so group on
+                # everything else and name the targets once.
+                bucket = _pivot_source_hint_parts.setdefault(
+                    (provider_label, ', '.join(produces)), []
                 )
-                _flow_add_assignment_hint(a2, hint)
+                if source_targets and source_targets not in bucket:
+                    bucket.append(source_targets)
                 pivot_entries.append({
                     'role': 'source',
                     'provider': rule.get('provider'),
@@ -23112,6 +23161,21 @@ def _flow_apply_pivot_context_to_assignments(
                 })
 
         # Emit a single consolidated "Pivot required" hint for this assignment.
+        for (_provider_label, _produces_text), _targets in _pivot_source_hint_parts.items():
+            _target_label = 'target' if len(_targets) == 1 else 'targets'
+            # A hint is meant to be read, so name a few and count the rest. The
+            # Pivot Path rows carry the full list for anyone who needs it.
+            _named = ', '.join(_targets[:_PIVOT_HINT_NAMED_TARGETS])
+            _extra = len(_targets) - _PIVOT_HINT_NAMED_TARGETS
+            _target_text = f"{_named} and {_extra} more" if _extra > 0 else _named
+            _flow_add_assignment_hint(
+                a2,
+                f"Pivot source: establish access on {node_name or node_id} "
+                f"using {_provider_label} to unlock {len(_targets)} pivot-only "
+                f"{_target_label} ({_target_text}). "
+                f"Produces: {_produces_text}."
+            )
+
         if _pivot_target_hint_parts:
             if len(_pivot_target_hint_parts) == 1:
                 s_name, s_requires, s_port_text = _pivot_target_hint_parts[0]
@@ -23160,7 +23224,412 @@ def _flow_apply_pivot_context_to_assignments(
             a2['pivot_inputs'] = sorted(set(_flow_split_top_level_list(a2.get('requires'))) & {fact for rule in rules for fact in _flow_split_top_level_list(rule.get('target_requires'))})
             a2['pivot_outputs'] = sorted(set(_flow_split_top_level_list(a2.get('produces'))) & {fact for rule in rules for fact in _flow_split_top_level_list(rule.get('produces'))})
         out.append(a2)
+    # Segmentation-driven pivots are separate from the authored pivot rules
+    # above: they come from what segmentation walled off, not from node
+    # attributes, so they are stamped after the authored ones are settled.
+    return _flow_stamp_pivot_grants(out, chain_nodes, preview)
+
+
+def _flow_preview_nodeinfo(preview: Any) -> tuple[list, list, dict[int, str]]:
+    """NodeInfo lists plus id->name, built from a full preview.
+
+    Pivot access is decided from the *preview* topology because Flow runs before
+    execute, so the runtime segmentation_summary.json does not exist yet.
+    """
+    from scenarioforge.types import NodeInfo
+
+    hosts: list = []
+    routers: list = []
+    names: dict[int, str] = {}
+    if not isinstance(preview, dict):
+        return hosts, routers, names
+    for key, bucket in (('hosts', hosts), ('routers', routers)):
+        for entry in (preview.get(key) or []):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                node_id = int(entry.get('node_id'))
+            except Exception:
+                continue
+            ip4 = str(entry.get('ip4') or entry.get('ipv4') or entry.get('ip') or '').strip()
+            if not ip4:
+                continue
+            role = str(entry.get('role') or ('Router' if key == 'routers' else 'PC')).strip()
+            bucket.append(NodeInfo(node_id=node_id, ip4=ip4, role=role))
+            name = str(entry.get('name') or '').strip()
+            if name:
+                names[node_id] = name
+    return hosts, routers, names
+
+
+def _flow_preview_segmentation_rules(preview: Any) -> list[dict[str, Any]]:
+    if not isinstance(preview, dict):
+        return []
+    seg = preview.get('segmentation_preview')
+    if isinstance(seg, dict) and isinstance(seg.get('rules'), list):
+        return [r for r in seg['rules'] if isinstance(r, dict)]
+    rules = preview.get('segmentation_rules_preview')
+    return [r for r in rules if isinstance(r, dict)] if isinstance(rules, list) else []
+
+
+def _read_segmentation_settings_attrs(section: Any, entry: dict) -> None:
+    """Lift the Segmentation section's plan-shaping settings into the UI model.
+
+    Only the ones actually present are lifted, so a scenario that never set them
+    round-trips unchanged instead of growing attributes it never had.
+    """
+    from scenarioforge.parsers.segmentation import (
+        SEGMENTATION_SETTING_DEFAULTS, coerce_bool, coerce_nat_mode, coerce_probability,
+    )
+
+    for key, default in SEGMENTATION_SETTING_DEFAULTS.items():
+        if key == 'accessible_by_pivot':
+            continue  # handled by the caller, which accepts more spellings
+        raw = section.get(key)
+        if raw is None or not str(raw).strip():
+            continue
+        if key == 'nat_mode':
+            entry[key] = coerce_nat_mode(raw, default)
+        elif isinstance(default, bool):
+            entry[key] = coerce_bool(raw, default)
+        else:
+            entry[key] = coerce_probability(raw, default)
+
+
+def _write_segmentation_settings_attrs(section_el: Any, sec: dict) -> None:
+    """Persist the plan-shaping settings that differ from their defaults."""
+    from scenarioforge.parsers.segmentation import (
+        SEGMENTATION_SETTING_DEFAULTS, coerce_bool, coerce_nat_mode, coerce_probability,
+    )
+
+    for key, default in SEGMENTATION_SETTING_DEFAULTS.items():
+        if key == 'accessible_by_pivot':
+            continue
+        if key not in sec or sec.get(key) is None:
+            continue
+        if key == 'nat_mode':
+            value = coerce_nat_mode(sec.get(key), default)
+        elif isinstance(default, bool):
+            value = coerce_bool(sec.get(key), default)
+        else:
+            value = coerce_probability(sec.get(key), default)
+        if value == default:
+            continue
+        section_el.set(key, 'true' if value is True else ('false' if value is False else str(value)))
+
+
+def _flow_pivot_access_enabled(preview: Any) -> bool:
+    """Whether the scenario asked for pivot access.
+
+    Read from the preview so Flow does not need the scenario XML in hand. Absent
+    means off, matching the toggle's default.
+    """
+    for source in (preview if isinstance(preview, dict) else {},
+                   (preview or {}).get('metadata') if isinstance(preview, dict) else {}):
+        if not isinstance(source, dict):
+            continue
+        for key in ('accessible_by_pivot', 'segmentation_accessible_by_pivot', 'pivot_access_enabled'):
+            if key in source:
+                return bool(_coerce_bool(source.get(key)))
+        seg = source.get('segmentation_preview')
+        if isinstance(seg, dict) and 'accessible_by_pivot' in seg:
+            return bool(_coerce_bool(seg.get('accessible_by_pivot')))
+    return False
+
+
+def _flow_preview_pivot_provider(preview: Any) -> str:
+    """The provider kind the scenario asked for, read from the preview.
+
+    Flow stamps pivot steps onto the chain from its own `plan_pivot_access`
+    call, so it has to select providers the same way the segmentation planner
+    does. Reading a different preference -- or none -- would name one node in the
+    participant's guide and open the port on another.
+    """
+    from scenarioforge.utils.pivot_access import preferred_provider_kind
+
+    for source in (preview if isinstance(preview, dict) else {},
+                   (preview or {}).get('metadata') if isinstance(preview, dict) else {}):
+        if not isinstance(source, dict):
+            continue
+        for key in ('pivot_provider', 'segmentation_pivot_provider'):
+            kind = preferred_provider_kind(source.get(key))
+            if kind:
+                return kind
+        seg = source.get('segmentation_preview')
+        if isinstance(seg, dict):
+            kind = preferred_provider_kind(seg.get('pivot_provider'))
+            if kind:
+                return kind
+            settings = seg.get('settings')
+            if isinstance(settings, dict):
+                kind = preferred_provider_kind(settings.get('pivot_provider'))
+                if kind:
+                    return kind
+    return ''
+
+
+def _flow_preview_entry_points(preview: Any) -> dict[int, list]:
+    """What each preview node already offers, for pivot provider selection.
+
+    The preview records vulnerability and flag-generator *names* per node but no
+    ports, so ports are resolved from the catalog by name. An offering whose
+    port cannot be resolved is left out rather than guessed: the entry port is
+    what the allow rule opens, and opening the wrong one would be worse than
+    falling through to a provider that has to be added.
+    """
+    from scenarioforge.utils.pivot_access import (
+        ENTRY_FLAG_GEN, ENTRY_VULNERABILITY, PivotEntry,
+    )
+
+    if not isinstance(preview, dict):
+        return {}
+
+    def _names_by_node(*keys: str) -> dict[int, list[str]]:
+        out: dict[int, list[str]] = {}
+        for key in keys:
+            raw = preview.get(key)
+            if not isinstance(raw, dict):
+                continue
+            for node_id, names in raw.items():
+                try:
+                    nid = int(node_id)
+                except Exception:
+                    continue
+                values = names if isinstance(names, list) else [names]
+                for name in values:
+                    text = str(name or '').strip()
+                    if text and text not in out.setdefault(nid, []):
+                        out[nid].append(text)
+        return out
+
+    entries: dict[int, list] = {}
+
+    def _add(node_id: int, kind: str, name: str) -> None:
+        for port in _flow_ports_for_offering(name):
+            entries.setdefault(int(node_id), []).append(
+                PivotEntry(kind=kind, port=int(port), protocol='tcp', label=name)
+            )
+
+    for node_id, names in _names_by_node('vulnerabilities_by_node', 'vulnerabilities_preview').items():
+        for name in names:
+            _add(node_id, ENTRY_VULNERABILITY, name)
+    for node_id, names in _names_by_node('flag_node_generators_by_node', 'flag_generators_preview').items():
+        for name in names:
+            _add(node_id, ENTRY_FLAG_GEN, name)
+
+    # Provider nodes the plan already added are entry points too. Without them
+    # Flow re-decides the subnet as needing a node, and the chain row loses the
+    # provider it should be naming.
+    from scenarioforge.utils.pivot_access import provisioned_entry_points
+
+    for node_id, provisioned in provisioned_entry_points(preview.get('hosts') or []).items():
+        entries.setdefault(int(node_id), []).extend(provisioned)
+    return entries
+
+
+def _flow_ports_for_offering(name: str) -> list[int]:
+    """TCP ports a named vulnerability or generator exposes, best effort.
+
+    Returns empty when the catalog cannot answer, which keeps a guessed port out
+    of a firewall rule.
+    """
+    label = str(name or '').strip()
+    if not label:
+        return []
+    try:
+        record = _vuln_catalog_record_for_name(label)
+    except Exception:
+        record = None
+    if not isinstance(record, dict):
+        return []
+    ports: list[int] = []
+    try:
+        from scenarioforge.utils.vuln_process import extract_compose_ports
+        for entry in extract_compose_ports(record, out_base='/tmp/vulns') or []:
+            try:
+                value = int(entry.get('port'))
+            except Exception:
+                continue
+            if 0 < value < 65536 and value not in ports:
+                ports.append(value)
+    except Exception:
+        return []
+    return ports
+
+
+def _vuln_catalog_record_for_name(name: str) -> dict[str, Any] | None:
+    """Look a catalog entry up by the name the preview recorded."""
+    wanted = str(name or '').strip().lower()
+    if not wanted:
+        return None
+    try:
+        items = _load_backend_vuln_catalog_items(selectable_only=False)
+    except Exception:
+        return None
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in ('Name', 'name', 'label', 'id', 'Path'):
+            if str(item.get(key) or '').strip().lower() == wanted:
+                return item
+    return None
+
+
+def _flow_stamp_pivot_grants(
+    flag_assignments: list[dict[str, Any]],
+    chain_nodes: list[dict[str, Any]],
+    preview: Any,
+) -> list[dict[str, Any]]:
+    """Mark chain steps whose challenge also opens a segmented-off subnet.
+
+    A pivot that folds into an existing challenge never becomes its own chain
+    entry, so without this the step is indistinguishable from any other flag
+    step. `pivot_grants` is what the Flow chain rows and the guides read to draw
+    the star; `pivot_decisions` carries the full classification, including the
+    `own_step` cases this function deliberately does not stamp.
+    """
+    if not isinstance(flag_assignments, list) or not flag_assignments:
+        return flag_assignments
+    if not _flow_pivot_access_enabled(preview):
+        return flag_assignments
+    try:
+        from scenarioforge.utils.pivot_access import plan_pivot_access
+        from scenarioforge.utils.pivot_chain import ABSORBED, classify_pivot_access
+    except Exception:
+        return flag_assignments
+
+    try:
+        rules = _flow_preview_segmentation_rules(preview)
+        if not rules:
+            return flag_assignments
+        hosts, routers, names = _flow_preview_nodeinfo(preview)
+        if not hosts and not routers:
+            return flag_assignments
+        plan = plan_pivot_access(
+            rules, hosts, routers=routers, node_names=names,
+            entry_points=_flow_preview_entry_points(preview),
+            preferred_provider=_flow_preview_pivot_provider(preview),
+        )
+        if not plan.providers:
+            return flag_assignments
+        decisions = classify_pivot_access(plan.as_dict(), chain_nodes or [])
+    except Exception as exc:
+        log.debug('[flow] pivot grant stamping skipped: %s', exc)
+        return flag_assignments
+
+    # An own_step pivot is real work for the participant but has no generator to
+    # run, so it is never injected into the executable chain -- chain nodes and
+    # flag assignments are aligned by index everywhere downstream, and a step
+    # with nothing to resolve would break execute. It is positioned here and
+    # rendered as a presentation step instead.
+    _position_pivot_steps(decisions, chain_nodes, preview)
+
+    grants_by_node: dict[str, list[str]] = {}
+    for decision in decisions:
+        if decision.disposition != ABSORBED:
+            continue
+        key = str(decision.provider_node or '').strip().lower()
+        if not key or not decision.subnet:
+            continue
+        bucket = grants_by_node.setdefault(key, [])
+        if decision.subnet not in bucket:
+            bucket.append(decision.subnet)
+    payload = [d.as_dict() for d in decisions]
+
+    def _keys_for(value: Any) -> set[str]:
+        out: set[str] = set()
+        if isinstance(value, dict):
+            for key in ('name', 'node', 'node_name', 'hostname', 'host_name',
+                        'docker_name', 'container_name', 'id', 'node_id'):
+                text = str(value.get(key) or '').strip().lower()
+                if text:
+                    out.add(text)
+        return out
+
+    out: list[dict[str, Any]] = []
+    for index, assignment in enumerate(flag_assignments):
+        if not isinstance(assignment, dict):
+            out.append(assignment)
+            continue
+        a2 = dict(assignment)
+        keys = _keys_for(a2)
+        if index < len(chain_nodes or []):
+            keys |= _keys_for(chain_nodes[index])
+        grants: list[str] = []
+        for key in keys:
+            for subnet in grants_by_node.get(key, []):
+                if subnet not in grants:
+                    grants.append(subnet)
+        if grants:
+            a2['pivot_grants'] = grants
+        # Carried on every assignment so a caller can explain the own_step
+        # decisions too, not only the ones that drew a star.
+        if payload:
+            a2['pivot_decisions'] = payload
+        out.append(a2)
     return out
+
+
+def _position_pivot_steps(decisions: Any, chain_nodes: Any, preview: Any) -> None:
+    """Place each own_step pivot before the first chain step it unlocks.
+
+    The pivot has to be performed before the participant can reach anything in
+    the walled-off subnet, so it belongs immediately before the first chain step
+    that lives there. Sets `insert_before` on the decision (an index into the
+    chain); -1 when no chain step is inside that subnet, meaning the pivot opens
+    a subnet the chain never visits and there is nothing to order it against.
+    """
+    import ipaddress
+
+    if not decisions:
+        return
+
+    # Chain position -> address, from the chain node itself or the preview.
+    ip_by_name: dict[str, str] = {}
+    if isinstance(preview, dict):
+        for key in ('hosts', 'routers'):
+            for entry in (preview.get(key) or []):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name') or '').strip().lower()
+                ip = str(entry.get('ip4') or entry.get('ipv4') or entry.get('ip') or '').split('/')[0].strip()
+                if name and ip:
+                    ip_by_name.setdefault(name, ip)
+
+    chain_ips: list[str] = []
+    for node in (chain_nodes or []):
+        ip = ''
+        if isinstance(node, dict):
+            ip = str(node.get('ip4') or node.get('ipv4') or node.get('ip') or '').split('/')[0].strip()
+            if not ip:
+                for key in ('name', 'node_name', 'id'):
+                    candidate = str(node.get(key) or '').strip().lower()
+                    if candidate and candidate in ip_by_name:
+                        ip = ip_by_name[candidate]
+                        break
+        chain_ips.append(ip)
+
+    for decision in decisions:
+        if getattr(decision, 'disposition', '') != 'own_step':
+            continue
+        try:
+            network = ipaddress.ip_network(str(decision.subnet or ''), strict=False)
+        except Exception:
+            decision.insert_before = -1
+            continue
+        position = -1
+        for index, ip in enumerate(chain_ips):
+            if not ip:
+                continue
+            try:
+                if ipaddress.ip_address(ip) in network:
+                    position = index
+                    break
+            except Exception:
+                continue
+        decision.insert_before = position
 
 
 def _flow_normalize_dependency_level(raw: Any) -> int:
@@ -24682,6 +25151,21 @@ def _flow_validate_chain_order_by_requires_produces(
         if opt_set:
             base_requires = {r for r in base_requires if r not in opt_set}
             inferred_requires = {r for r in inferred_requires if r not in opt_set}
+
+        # An input the generator marks for Flow to supply is not a chain
+        # dependency. The sequencer already excludes these when it decides a
+        # step can be placed, so a validator that counts them reports a chain
+        # Flow itself built -- and resolved, with a real value -- as unsolvable.
+        # The same helper is used deliberately: two readings of one marker is
+        # how the two disagreed in the first place.
+        supplied_by_flow = {
+            str(name).strip()
+            for name in _flow_first_step_chain_supplied_input_names(a)
+            if str(name or '').strip()
+        }
+        if supplied_by_flow:
+            base_requires -= supplied_by_flow
+            inferred_requires = {r for r in inferred_requires if r not in supplied_by_flow}
 
         requires = set(_flow_prune_unavailable_or_self_pivot_facts(
             sorted(base_requires | inferred_requires),
@@ -36656,6 +37140,7 @@ def _parse_scenario_editor(se):
                 if raw_pivot:
                     break
             entry["accessible_by_pivot"] = raw_pivot.lower() in ("1", "true", "yes", "on")
+            _read_segmentation_settings_attrs(sec, entry)
         for item in sec.findall("item"):
             d = {
                 "selected": item.get("selected", "Random"),
@@ -37127,10 +37612,12 @@ def _build_scenarios_xml(data_dict: dict) -> ET.ElementTree:
             if name == "Vulnerabilities":
                 sec_el.set("flag_type", str(sec.get("flag_type") or "text"))
             if name == "Segmentation":
-                # Only written when on, so a scenario that never used the toggle
-                # keeps the exact section markup it had before.
+                # Only written when set to something other than the default, so a
+                # scenario that never touched these keeps the exact section markup
+                # it had before.
                 if _coerce_bool(sec.get("accessible_by_pivot")):
                     sec_el.set("accessible_by_pivot", "true")
+                _write_segmentation_settings_attrs(sec_el, sec)
             weight_rows = [it for it in items_list if (it.get('v_metric') or (it.get('selected')=='Specific' and name in {'Vulnerabilities', 'Flag Node Generators'}) or 'Weight') == 'Weight']
             count_rows = [it for it in items_list if (it.get('v_metric') == 'Count') or (name in {'Vulnerabilities', 'Flag Node Generators'} and it.get('selected') == 'Specific')]
             weight_sum = sum(float(it.get('factor', 0) or 0) for it in weight_rows) if weight_rows else 0.0
@@ -39428,6 +39915,12 @@ def _build_full_preview_from_plan(plan: dict, seed, r2s_hosts_min_list=None, r2s
         base_scenario=plan.get('base_scenario'),
         reserved_ipv4_addrs=sorted(hitl_reservations.get('ip_addresses') or []),
         reserved_ipv4_networks=sorted(hitl_reservations.get('network_cidrs') or []),
+        segmentation_accessible_by_pivot=_coerce_bool(
+            plan.get('breakdowns', {}).get('segmentation', {}).get('accessible_by_pivot')
+        ),
+        # Everything that shapes the policy is decided here, because execute
+        # enforces this plan rather than planning its own.
+        segmentation_settings=plan.get('breakdowns', {}).get('segmentation', {}).get('settings'),
     )
     fp['router_plan'] = plan.get('breakdowns', {}).get('router', {})
     try:

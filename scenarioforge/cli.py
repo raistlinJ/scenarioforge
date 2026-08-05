@@ -834,6 +834,18 @@ def _remove_local_flow_scenario_roots(scenario_norm: str) -> list[str]:
     return removed
 
 
+def _generator_images_source() -> str:
+    """The `generator_images` module as text, for embedding in a remote script.
+
+    The CORE VM runs the cleanup as a bare Python snippet with no package
+    context, so the module travels with it instead of being imported there.
+    """
+    from .utils import generator_images
+
+    with open(generator_images.__file__, 'r', encoding='utf-8') as handle:
+        return handle.read()
+
+
 def _best_effort_cli_flag_sequencing_cleanup(
     args: Any,
     *,
@@ -870,6 +882,11 @@ def _best_effort_cli_flag_sequencing_cleanup(
             "import glob, json, os, re, shutil, subprocess\n"
             f"SCEN={json.dumps(str(scenario_norm or ''))}\n"
             f"SUDO_PW={json.dumps(str(sudo_pw or ''))}\n"
+            # Shipped as source rather than reimplemented, so the cleanup's idea
+            # of a generator image tag cannot drift from the runner's. It is
+            # exec'd as its own module so its `from __future__` import stays the
+            # first statement of the unit it belongs to.
+            f"GEN_IMAGES_SRC={json.dumps(_generator_images_source())}\n"
             "scenario_safe=re.sub(r'[^a-zA-Z0-9_-]', '_', SCEN)\n"
             "removed=[]\n"
             "for subdir in ('flag_generators_runs','flag_node_generators_runs'):\n"
@@ -899,6 +916,17 @@ def _best_effort_cli_flag_sequencing_cleanup(
             "  return {'cmd': full, 'rc': int(p.returncode or 0), 'out': (p.stdout or '')[-800:], 'err': (p.stderr or '')[-800:]}\n"
             "def _run_shell(text):\n"
             "  return _run(['sh','-lc',text])\n"
+            # `_run` clips output to the last 800 characters for logging, which
+            # would silently drop most of an image list and make images look
+            # absent -- i.e. stale. Listing needs the whole thing.
+            "def _capture(cmd):\n"
+            "  full=list(cmd)\n"
+            "  stdin=None\n"
+            "  if SUDO_PW:\n"
+            "    full=['sudo','-E','-S','-p','','-k'] + full\n"
+            "    stdin=SUDO_PW + '\\n'\n"
+            "  p=subprocess.run(full, check=False, capture_output=True, text=True, input=stdin, timeout=120)\n"
+            "  return (p.stdout or '') if int(p.returncode or 0) == 0 else ''\n"
             "docker_ok=shutil.which('docker') is not None or os.path.exists('/usr/bin/docker')\n"
             "results=[]\n"
             "if docker_ok:\n"
@@ -906,9 +934,25 @@ def _best_effort_cli_flag_sequencing_cleanup(
             "  results.append(_run(['docker','image','prune','-f']))\n"
             "  results.append(_run(['docker','network','prune','-f']))\n"
             "  results.append(_run(['docker','volume','prune','-f']))\n"
-            "  results.append(_run_shell(\"docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f\"))\n"
+            # Only generator images with no installed source behind them. The
+            # tag carries a digest of the generator's own source, so an image
+            # whose digest still matches something installed is exactly what the
+            # next Generate would reuse -- deleting it forces a rebuild that
+            # needs the base image, which an air-gapped host may not have.
+            # Removing them wholesale is why 'Using: 0 cached' was permanent.
+            "  _gi={}\n"
+            "  exec(compile(GEN_IMAGES_SRC, 'generator_images.py', 'exec'), _gi)\n"
+            "  _tags=[t.strip() for t in _capture(['docker','images','--format','{{.Repository}}:{{.Tag}}']).splitlines() if t.strip()]\n"
+            "  _stale=_gi['stale_images'](_tags)\n"
+            "  kept=[t for t in _tags if t.startswith(_gi['IMAGE_PREFIX']) and t not in set(_stale)]\n"
+            "  if _stale:\n"
+            "    results.append(_run(['docker','rmi','-f']+_stale))\n"
+            "  results.append({'cmd':['generator-images'],'rc':0,"
+            "'out':'stale=%d kept=%d' % (len(_stale), len(kept)),'err':''})\n"
             "  results.append(_run_shell(\"docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f\"))\n"
-            "print(json.dumps({'removed': removed, 'results': results, 'docker_ok': docker_ok}))\n"
+            "print(json.dumps({'removed': removed, 'results': results, 'docker_ok': docker_ok, "
+            "'generator_images_stale': _stale if docker_ok else [], "
+            "'generator_images_kept': kept if docker_ok else []}))\n"
         )
         try:
             payload = backend._run_remote_python_json(
@@ -919,7 +963,14 @@ def _best_effort_cli_flag_sequencing_cleanup(
                 timeout=180.0,
             )
             removed = payload.get('removed') if isinstance(payload, dict) and isinstance(payload.get('removed'), list) else []
-            logging.info('Flow cleanup: remote preclean complete (removed=%d)', len(removed))
+            stale = payload.get('generator_images_stale') if isinstance(payload, dict) else None
+            kept = payload.get('generator_images_kept') if isinstance(payload, dict) else None
+            logging.info(
+                'Flow cleanup: remote preclean complete (removed=%d, generator images removed=%d kept=%d)',
+                len(removed),
+                len(stale) if isinstance(stale, list) else 0,
+                len(kept) if isinstance(kept, list) else 0,
+            )
         except Exception as exc:
             logging.warning('Flow cleanup: remote cleanup failed: %s', exc)
         return
@@ -950,8 +1001,29 @@ def _best_effort_cli_flag_sequencing_cleanup(
                 logging.warning('Flow cleanup: %s exited %s: %s', ' '.join(cmd), proc.returncode, (proc.stdout or '').strip()[-1200:])
         except Exception as exc:
             logging.warning('Flow cleanup: %s failed: %s', ' '.join(cmd), exc)
+    # Generator images are removed by digest, not by pattern: an image whose
+    # digest still matches installed source is exactly what the next Generate
+    # reuses, and rebuilding it needs a base image an air-gapped host may not
+    # have. See the remote branch above for the same rule.
+    try:
+        from .utils.generator_images import stale_images
+
+        listed = _run_local_cmd(
+            ['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'],
+            timeout_s=120.0, allow_sudo_retry=True,
+        )
+        tags = [t.strip() for t in (listed.stdout or '').splitlines() if t.strip()]
+        stale = stale_images(tags) if listed.returncode == 0 else []
+        if stale:
+            _run_local_cmd(['docker', 'rmi', '-f'] + stale, timeout_s=120.0, allow_sudo_retry=True)
+        kept = len([t for t in tags if t.startswith('coretg-gen-')]) - len(stale)
+        logging.info(
+            'Flow cleanup: generator images removed=%d kept=%d', len(stale), max(0, kept)
+        )
+    except Exception as exc:
+        logging.warning('Flow cleanup: generator image cleanup failed: %s', exc)
+
     for script_text, label in (
-        ("docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f", 'old generator images'),
         ("docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f", 'wrapper images'),
     ):
         try:
@@ -1742,6 +1814,210 @@ def _flow_state_from_xml(xml_path: str, scenario_name: str | None) -> dict[str, 
         return None
 
 
+def _pivot_image_cache_dir() -> str:
+    """Where a pre-seeded pivot image tarball may be dropped.
+
+    Lets a site avoid the network entirely: `docker save` the image to
+    `<dir>/<safe-name>.tar` and it is loaded instead of pulled.
+    """
+    return str(os.getenv('CORETG_PIVOT_IMAGE_CACHE_DIR') or '/opt/coretg/images').strip() or '/opt/coretg/images'
+
+
+def _pivot_image_tar_name(image: str) -> str:
+    return ''.join(ch if ch.isalnum() or ch in '.-_' else '_' for ch in str(image or '')) + '.tar'
+
+
+def _wrapper_base_image() -> str:
+    """The image every Docker node's iproute2 wrapper is built `FROM`.
+
+    Needed for *any* Docker node, not just a pivot provider: without it no
+    wrapper builds, and CORE gets a node with no `ip` command.
+    """
+    try:
+        from .builders.topology import _BUSYBOX_REPAIR_IMAGE
+        return str(_BUSYBOX_REPAIR_IMAGE or '').strip()
+    except Exception:
+        return 'busybox:1.36.1-musl'
+
+
+def _framework_prerequisite_images() -> list[str]:
+    """Images ScenarioForge needs regardless of what the scenario contains.
+
+    An operator seeds the vulnerabilities and generators their lab uses. They
+    should not also have to discover that a busybox builds the wrapper, an
+    ubuntu backs the standard node, an alpine copies inject files in and a
+    python backs the shipped generator templates. Those are kept and prepared
+    by default so only the scenario's own content is left to seed.
+    """
+    try:
+        from .utils.prerequisite_images import prerequisite_images
+        return list(prerequisite_images())
+    except Exception as exc:
+        logging.debug('Prerequisite images unavailable: %s', exc)
+        base = _wrapper_base_image()
+        return [base] if base else []
+
+
+def _ensure_docker_images_available(images: Any) -> dict[str, str]:
+    """Make each image available locally, pulling at most once.
+
+    Docker nodes must not need the internet at execute time. An image already
+    present is never re-pulled, so only the very first run for a given image
+    touches the network -- and a site that pre-seeds a `docker save` tarball
+    never does. Once present an image is kept forever: it is in the persistent
+    keep set so execute-time cleanup cannot reclaim it and force another
+    download.
+
+    Returns image -> outcome, for logging.
+    """
+    results: dict[str, str] = {}
+    wanted: list[str] = []
+    for raw in images or []:
+        image = str(raw or '').strip()
+        if image and image not in wanted:
+            wanted.append(image)
+    if not wanted:
+        return results
+    images = wanted
+
+    try:
+        from .builders.topology import _docker_cmd, _docker_sudo_password
+    except Exception:
+        return results
+    docker = _docker_cmd()
+
+    def _run(args: list[str], timeout: int = 900) -> tuple[int, str]:
+        try:
+            pw = _docker_sudo_password()
+            use_stdin = bool(pw) and args and args[0] == 'sudo' and '-S' in args
+            proc = subprocess.run(
+                args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                timeout=timeout, input=(pw + '\n') if use_stdin else None,
+            )
+            return int(proc.returncode or 0), (proc.stdout or '').strip()
+        except Exception as exc:
+            return 1, str(exc)
+
+    for image in images:
+        rc, _out = _run(docker + ['image', 'inspect', image], timeout=60)
+        if rc == 0:
+            results[image] = 'cached'
+            logging.info('Image already present, not pulling: %s', image)
+            continue
+
+        tar = os.path.join(_pivot_image_cache_dir(), _pivot_image_tar_name(image))
+        if os.path.isfile(tar):
+            rc, out = _run(docker + ['load', '-i', tar], timeout=900)
+            if rc == 0:
+                results[image] = 'loaded-from-tarball'
+                logging.info('Image loaded from %s (no network used)', tar)
+                continue
+            logging.warning('Image tarball %s failed to load: %s', tar, out[-300:])
+
+        rc, out = _run(docker + ['pull', image], timeout=900)
+        if rc == 0:
+            results[image] = 'pulled'
+            logging.info('Image pulled once and now cached locally: %s', image)
+        else:
+            results[image] = 'unavailable'
+            logging.warning(
+                'Image %s is not present and could not be pulled, so any node that '
+                'needs it will have nothing to run. Error: %s',
+                image, out[-300:],
+            )
+
+    missing = sorted(image for image, outcome in results.items() if outcome == 'unavailable')
+    if missing:
+        cache_dir = _pivot_image_cache_dir()
+        # One actionable block rather than a warning per image: an air-gapped
+        # host is missing all of them at once, and the operator needs the list
+        # and the commands together to fix it in one pass.
+        logging.warning(
+            'Air-gapped hosts need these %d image(s) staged before a run. On a machine '
+            'with network access:\n%s\nCopy the resulting tarballs to %s on this host; '
+            'they are loaded from there instead of pulled.',
+            len(missing),
+            '\n'.join(
+                f'  docker pull {image} && docker save {image} '
+                f'-o {os.path.join(cache_dir, _pivot_image_tar_name(image))}'
+                for image in missing
+            ),
+            cache_dir,
+        )
+    return results
+
+
+def _pivot_provider_images(summary: Any) -> list[str]:
+    """The images the plan's pivot providers need to boot."""
+    images: list[str] = []
+    if not isinstance(summary, dict):
+        return images
+    access = summary.get('pivot_access')
+    if not isinstance(access, dict):
+        return images
+    for provider in access.get('providers') or []:
+        if isinstance(provider, dict):
+            image = str(provider.get('image') or '').strip()
+            if image and image not in images:
+                images.append(image)
+    return images
+
+
+def _ensure_pivot_provider_images(summary: Any) -> dict[str, str]:
+    """Make each pivot provider image available locally."""
+    return _ensure_docker_images_available(_pivot_provider_images(summary))
+
+
+def _ensure_runtime_docker_images(summary: Any) -> dict[str, str]:
+    """Everything this run needs pulled before a single node is created.
+
+    The scenario's pivot provider images, plus every framework prerequisite. A
+    live run lost the wrapper base and then could not build a single Docker node
+    on a host whose daemon had no DNS: the provider image was pinned and
+    survived, the image it is built on top of was not covered at all. Anything
+    the framework needs to stand a node up is now treated like a provider image
+    -- kept, and prepared here through the same ladder.
+    """
+    return _ensure_docker_images_available(
+        _pivot_provider_images(summary) + _framework_prerequisite_images()
+    )
+
+
+def _warn_unmaterialised_pivot_providers(summary: Any) -> list[str]:
+    """Warn about walled-off subnets left with no usable pivot.
+
+    A provider marked `added` normally has a node behind it: the plan allocates
+    one into the topology. When it does not -- no switch serves the subnet, or
+    the subnet has no address left -- the subnet is reachable only if something
+    else in it happens to serve a port. Silence here would mean an unsolvable
+    challenge discovered by a participant, so it is logged at WARNING, which the
+    run's latest.errors artifact also captures.
+
+    Returns the affected subnets, for callers that want to report them.
+    """
+    providers = []
+    if isinstance(summary, dict):
+        access = summary.get('pivot_access')
+        if isinstance(access, dict):
+            providers = access.get('providers') or []
+    stranded = [
+        str(p.get('subnet') or '')
+        for p in providers
+        if isinstance(p, dict) and p.get('added') and not p.get('node_id')
+    ]
+    stranded = [s for s in stranded if s]
+    if stranded:
+        logging.warning(
+            'Pivot access: %d subnet(s) have no usable pivot because a provider node '
+            'could not be placed in them (%s). Nothing in those subnets serves a '
+            'vulnerability, flag-node-generator or SSH, so a participant cannot get '
+            'in. Give one of their nodes a reachable service, or disable '
+            'accessible_by_pivot for this scenario.',
+            len(stranded), ', '.join(stranded),
+        )
+    return stranded
+
+
 def _persistent_images_to_keep() -> list[str]:
     """Images the operator pinned as `persistent`, published by the web UI.
 
@@ -1754,14 +2030,28 @@ def _persistent_images_to_keep() -> list[str]:
         from scenarioforge.utils.env_payload import read_env_payload
 
         raw = read_env_payload('CORETG_PERSISTENT_IMAGES_JSON')
-        if not raw:
-            return []
-        data = json.loads(raw)
+        data = json.loads(raw) if raw else []
         if not isinstance(data, list):
-            return []
-        return [str(x).strip() for x in data if str(x or '').strip()]
+            data = []
+        keep = [str(x).strip() for x in data if str(x or '').strip()]
     except Exception:
-        return []
+        keep = []
+    # Pivot provider images are cached forever by design: reclaiming one would
+    # force another download on the next execute, which is exactly what the
+    # offline requirement forbids.
+    try:
+        from .utils.pivot_access import PIVOT_SSH_IMAGE
+        if PIVOT_SSH_IMAGE and PIVOT_SSH_IMAGE not in keep:
+            keep.append(PIVOT_SSH_IMAGE)
+    except Exception:
+        pass
+    # Framework prerequisites are hard dependencies of standing any node up.
+    # Reclaiming one costs a download the offline requirement forbids, exactly
+    # like a provider image.
+    for image in _framework_prerequisite_images():
+        if image and image not in keep:
+            keep.append(image)
+    return keep
 
 
 def _export_flow_assignments_to_env(xml_path: str, scenario_name: str | None) -> None:
@@ -2000,12 +2290,32 @@ def _validate_flow_state_for_cli_execute(
     return True, None, []
 
 
+def _pivot_provider_hosts(full_prev: Any) -> list[dict[str, Any]]:
+    """Preview hosts that exist only because pivot access needed a provider.
+
+    They are excluded from every count that describes the author's plan. The
+    parity check compares a saved preview against one rebuilt from the XML, and
+    the XML says nothing about a node this feature decided to add -- counting it
+    would make every pivot-enabled scenario fail preflight as "does not match".
+    """
+    if not isinstance(full_prev, dict):
+        return []
+    try:
+        from .utils.pivot_access import is_pivot_provider_host
+    except Exception:
+        return []
+    hosts = full_prev.get('hosts')
+    if not isinstance(hosts, list):
+        return []
+    return [h for h in hosts if isinstance(h, dict) and is_pivot_provider_host(h)]
+
+
 def _plan_summary_from_full_preview(full_prev: dict[str, Any]) -> dict[str, Any]:
     try:
         role_counts = full_prev.get('role_counts') or {}
     except Exception:
         role_counts = {}
-    hosts_total = len(full_prev.get('hosts') or [])
+    hosts_total = len(full_prev.get('hosts') or []) - len(_pivot_provider_hosts(full_prev))
     routers_planned = len(full_prev.get('routers') or [])
     switches = full_prev.get('switches_detail') or []
     services_plan = full_prev.get('services_plan') or full_prev.get('services_preview') or {}
@@ -2158,6 +2468,7 @@ def _current_plan_summary_for_execute(
     ip_mode: str,
     ip_region: str,
     hitl_preview_reservations: dict[str, Any] | None,
+    segmentation_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     full_prev = build_full_preview(
         role_counts=orchestrated_plan.get('role_counts_raw') or orchestrated_plan.get('role_counts') or {},
@@ -2172,6 +2483,7 @@ def _current_plan_summary_for_execute(
         segmentation_density=segmentation_density,
         segmentation_items=segmentation_items,
         traffic_plan=traffic_plan,
+        segmentation_settings=segmentation_settings,
         seed=seed,
         ip4_prefix=ip4_prefix,
         ip_mode=ip_mode,
@@ -3481,6 +3793,67 @@ def _flow_copy_error_is_startup_pending(error_text: str) -> bool:
 RUNTIME_ARTIFACT_DIRS: tuple[str, ...] = ('/tmp/traffic', '/tmp/segmentation')
 
 
+# Which CLI flag supplies each plan-shaping segmentation setting. Each flag
+# defaults to None so "not passed" stays distinguishable from "passed the same
+# value the default happens to be" -- without that, a flag could not sensibly
+# override a scenario that sets the attribute itself.
+_SEG_SETTING_FLAGS: dict[str, str] = {
+    'nat_mode': 'nat_mode',
+    'include_hosts': 'seg_include_hosts',
+    'dnat_probability': 'dnat_prob',
+    'allow_src_subnet_prob': 'allow_src_subnet_prob',
+    'allow_dst_subnet_prob': 'allow_dst_subnet_prob',
+    'accessible_by_pivot': 'seg_accessible_by_pivot',
+    'pivot_provider': 'seg_pivot_provider',
+}
+
+
+def _seg_settings(args: Any, xml_path: str | None = None, scenario: Any = None) -> dict[str, Any]:
+    """The segmentation settings this run plans with.
+
+    The scenario's own attributes are the base, so a setting travels with the
+    scenario; a flag that was actually passed overrides it for this run. Both
+    are read here, at plan time, because execute enforces the plan rather than
+    planning again -- a setting supplied only at execute would arrive too late
+    to affect anything it names.
+    """
+    from .parsers.segmentation import (
+        SEGMENTATION_SETTING_DEFAULTS, coerce_bool, coerce_nat_mode,
+        coerce_probability, parse_segmentation_settings,
+    )
+
+    path = str(xml_path if xml_path is not None else getattr(args, 'xml', '') or '').strip()
+    scenario_name = scenario if scenario is not None else getattr(args, 'scenario', None)
+    if path:
+        settings = parse_segmentation_settings(os.path.abspath(path), scenario_name)
+    else:
+        settings = dict(SEGMENTATION_SETTING_DEFAULTS)
+
+    for key, flag in _SEG_SETTING_FLAGS.items():
+        value = getattr(args, flag, None)
+        if value is None:
+            continue
+        if key == 'nat_mode':
+            settings[key] = coerce_nat_mode(value, settings[key])
+        elif key in ('include_hosts', 'accessible_by_pivot'):
+            # A store_true flag only ever turns something on; leaving it off is
+            # not an instruction to override a scenario that turns it on.
+            if coerce_bool(value, False):
+                settings[key] = True
+        elif key == 'pivot_provider':
+            # Normalised through the planner's own vocabulary, so the flag and
+            # the XML attribute cannot mean different things. An unmappable
+            # value leaves the scenario's choice alone rather than clearing it.
+            from .utils.pivot_access import preferred_provider_kind
+
+            kind = preferred_provider_kind(value)
+            if kind:
+                settings[key] = kind
+        else:
+            settings[key] = coerce_probability(value, settings[key])
+    return settings
+
+
 def _seg_accessible_by_pivot(args: Any) -> bool:
     """Whether pivot access is on, from the CLI flag or the scenario XML.
 
@@ -3502,24 +3875,246 @@ def _seg_accessible_by_pivot(args: Any) -> bool:
         return False
 
 
+def _preview_host_names(preview_hosts: Any) -> dict[int, str]:
+    """node_id -> name straight from the plan.
+
+    The plan is the only reliable source for this. `core.api.grpc.wrappers.Session`
+    has no `get_node` on the CORE builds this runs against, so asking the live
+    session for node names yields nothing at all -- which silently emptied every
+    lookup keyed on them.
+    """
+    out: dict[int, str] = {}
+    for host in preview_hosts or []:
+        if not isinstance(host, dict):
+            continue
+        try:
+            node_id = int(host.get('node_id'))
+        except Exception:
+            continue
+        name = str(host.get('name') or '').strip()
+        if name:
+            out[node_id] = name
+    return out
+
+
+def _pivot_access_summary(source: Any) -> dict[str, Any] | None:
+    """A compact account of pivot access, for the CLI's phase JSON.
+
+    The full plan block is verbose -- every allow rule on every router -- and a
+    CLI reader wants the answer, not the rules: which subnets needed a way in,
+    what the way in is, and whether anything was left without one. Accepts a
+    saved preview or a runtime segmentation summary, since the topo phase has
+    the first and execute has the second.
+    """
+    access = None
+    if isinstance(source, dict):
+        if isinstance(source.get('pivot_access'), dict):
+            access = source['pivot_access']
+        else:
+            seg = source.get('segmentation_preview')
+            if isinstance(seg, dict) and isinstance(seg.get('pivot_access'), dict):
+                access = seg['pivot_access']
+    if not isinstance(access, dict):
+        return None
+
+    providers = [p for p in (access.get('providers') or []) if isinstance(p, dict)]
+    summary: dict[str, Any] = {
+        'provider_count': len(providers),
+        'added_node_count': sum(1 for p in providers if p.get('added')),
+        'reused_count': sum(1 for p in providers if p.get('reused')),
+        'providers': [
+            {
+                'subnet': p.get('subnet'),
+                'node': p.get('node_name'),
+                'address': p.get('address'),
+                'entry': f"{(p.get('entry') or {}).get('kind')}:{(p.get('entry') or {}).get('port')}",
+                'added': bool(p.get('added')),
+                'image': p.get('image') or '',
+                # Who the entrance was opened for, which is not the same as who
+                # the block shut out -- the participant is in neither.
+                'opened_for': list(p.get('blocked_from') or []),
+            }
+            for p in providers
+        ],
+        # A subnet the planner could not place a provider in has no way in at
+        # all, so it is the first thing a reader needs to see.
+        'unresolved': list(access.get('unresolved') or []),
+        'nested_supported': bool(access.get('nested_supported')),
+        'nested_candidates': list(access.get('nested_candidates') or []),
+    }
+    return summary
+
+
+def _log_pivot_access_summary(source: Any) -> None:
+    """Name each pivot provider in the run log.
+
+    A walled-off subnet's way in is the thing most likely to be wrong and the
+    thing least visible: it is one line in a summary file nobody opens until a
+    participant is already stuck.
+    """
+    summary = _pivot_access_summary(source)
+    if not summary or not summary.get('providers'):
+        return
+    for provider in summary['providers']:
+        logging.info(
+            "Pivot access: %s is reachable at %s (%s)%s, opening %s",
+            provider.get('node') or '?', provider.get('address') or '?',
+            provider.get('entry') or '?',
+            ' [node added for this]' if provider.get('added') else '',
+            provider.get('subnet') or '?',
+        )
+    for entry in summary.get('unresolved') or []:
+        logging.warning(
+            "Pivot access: %s has no way in -- %s",
+            entry.get('subnet') or '?', entry.get('reason') or 'no provider could be placed',
+        )
+    if summary.get('nested_candidates') and not summary.get('nested_supported'):
+        logging.info(
+            "Pivot access: %d subnet(s) imply a pivot behind a pivot; that ordering is carried "
+            "by the challenges, not by the network (nested pivots are not supported yet)",
+            len(summary['nested_candidates']),
+        )
+
+
+def _plan_segmentation_settings(preview_full: Any) -> dict[str, Any]:
+    """The settings the saved plan was built with, filled out with defaults.
+
+    Execute uses these rather than its own, so the passes that run after the
+    plan -- traffic allow rules, DNAT -- act on the same settings that shaped
+    the policy they are extending.
+    """
+    from .parsers.segmentation import SEGMENTATION_SETTING_DEFAULTS
+
+    settings = dict(SEGMENTATION_SETTING_DEFAULTS)
+    if isinstance(preview_full, dict):
+        seg = preview_full.get('segmentation_preview')
+        if isinstance(seg, dict) and isinstance(seg.get('settings'), dict):
+            settings.update({k: v for k, v in seg['settings'].items() if k in settings})
+    return settings
+
+
+def _segmentation_settings_conflicts(plan_settings: Any, current: Any) -> list[str]:
+    """Settings the run asks for that the saved plan was not built with.
+
+    A setting reaching execute too late to be honoured has to be said out loud.
+    Silently ignoring it would let someone pass `--nat-mode MASQUERADE` and get
+    SNAT with no indication of why.
+    """
+    if not isinstance(plan_settings, dict) or not isinstance(current, dict):
+        return []
+    out: list[str] = []
+    for key in sorted(set(plan_settings) & set(current)):
+        planned, wanted = plan_settings[key], current[key]
+        if isinstance(planned, float) or isinstance(wanted, float):
+            try:
+                if abs(float(planned) - float(wanted)) < 1e-9:
+                    continue
+            except Exception:
+                pass
+        elif planned == wanted:
+            continue
+        if planned != wanted:
+            out.append(f'{key}: plan={planned!r} requested={wanted!r}')
+    return out
+
+
+def _planned_segmentation_rules(preview_full: Any) -> list[dict[str, Any]]:
+    """The segmentation rules the saved plan decided, for execute to enforce.
+
+    Execute must not plan segmentation again. The planner draws from the global
+    `random` module at a dozen points, so a second run walls off different
+    subnets than the preview did -- and the preview is what the author reviewed,
+    what Flow built its chain against, and what pivot access placed provider
+    nodes for. A live run showed the preview blocking three subnets and the same
+    scenario blocking two others.
+
+    Empty when the plan carries no usable rules, which leaves the planner to run
+    as before rather than silently producing a scenario with no segmentation.
+    """
+    if not isinstance(preview_full, dict):
+        return []
+    seg = preview_full.get('segmentation_preview')
+    if not isinstance(seg, dict):
+        return []
+    rules = seg.get('rules')
+    if not isinstance(rules, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in rules:
+        if not isinstance(entry, dict):
+            continue
+        rule = entry.get('rule')
+        if not isinstance(rule, dict) or not rule.get('script_spec'):
+            continue
+        out.append(entry)
+    if rules and not out:
+        logging.warning(
+            'Segmentation: the saved plan has %d rule(s) but none carry their script, so '
+            'the policy has to be planned again and will not match what the plan shows. '
+            'Regenerate the plan to keep them in step.',
+            len(rules),
+        )
+    return out
+
+
+def _planned_traffic_flows(preview_full: Any) -> list[dict[str, Any]]:
+    """The traffic flows the saved plan decided, for execute to write out.
+
+    Same reason as `_planned_segmentation_rules`: flow selection shuffles hosts
+    and picks targets from the global `random` module, so generating a second
+    time gives the scenario different traffic than the plan showed.
+
+    Empty when the plan holds no flows, or holds only part of them -- replaying
+    a truncated list would build a scenario with less traffic than planned,
+    which is worse than planning afresh and saying so.
+    """
+    if not isinstance(preview_full, dict):
+        return []
+    preview = preview_full.get('traffic_scripts_preview')
+    if not isinstance(preview, dict):
+        return []
+    flows = preview.get('preview_flows')
+    if not isinstance(flows, list) or not flows:
+        return []
+    if preview.get('preview_flows_truncated'):
+        logging.warning(
+            'Traffic: the saved plan holds only %d of its %s flows, so traffic has to be '
+            'generated again and will not match what the plan shows.',
+            len(flows), preview.get('preview_flows_total') or '?',
+        )
+        return []
+    return [flow for flow in flows if isinstance(flow, dict)]
+
+
 def _seg_pivot_entry_points(
     docker_by_name: Any,
     hosts: Any,
     session: Any = None,
+    preview_hosts: Any = None,
 ) -> dict[int, list]:
     """What each node already offers that a participant could pivot through.
 
-    Lets the planner prefer a real challenge artifact over a plain SSH box. Best
-    effort: anything that cannot be resolved simply leaves that node out, and
-    the planner falls back to SSH.
+    Lets the planner prefer a real challenge artifact over a plain SSH box, and
+    lets it recognise a provider node an earlier plan already added instead of
+    adding a second one. Best effort: anything that cannot be resolved simply
+    leaves that node out, and the planner falls back to SSH.
     """
     from .utils.pivot_access import (
         PivotEntry, ENTRY_VULNERABILITY, ENTRY_FLAG_GEN, ENTRY_SSH,
+        provisioned_entry_points,
     )
     from .planning.node_plan import challenge_slot_kind
 
     out: dict[int, list] = {}
-    name_to_id: dict[str, int] = {}
+    # A node the plan added is recognised from the plan itself, with no name
+    # resolution in the way: it is the one entry point that must never be lost,
+    # because losing it means adding another provider for a subnet that has one.
+    for node_id, entries in provisioned_entry_points(preview_hosts or []).items():
+        out.setdefault(int(node_id), []).extend(entries)
+
+    name_to_id: dict[str, int] = {
+        name: node_id for node_id, name in _preview_host_names(preview_hosts).items()
+    }
     for host in hosts or []:
         try:
             node_id = int(getattr(host, 'node_id'))
@@ -3552,6 +4147,17 @@ def _seg_pivot_entry_points(
         except Exception:
             ports = []
         if not ports:
+            continue
+        # A node this feature added serves SSH and nothing else. Left to the
+        # rule below it would be reported as a vulnerability the scenario never
+        # contains, and the report would read as though the subnet was already
+        # solvable rather than made so.
+        if str(record.get('PivotAccessProvider') or '').strip():
+            out.setdefault(node_id, []).extend(
+                PivotEntry(kind=ENTRY_SSH, port=port, protocol='tcp',
+                           label='SSH', provisioned=True)
+                for port in sorted(set(ports))
+            )
             continue
         # A slot's role says which kind of challenge it holds; a plain Docker
         # node running a compose stack is treated as a vulnerability entry.
@@ -3764,8 +4370,12 @@ def _run_cli_artifact_checks(
     strict: bool = False,
     stream: Any = None,
 ) -> bool:
-    """Run the six/seven artifact checks against a live CORE session and print
-    a CLI summary plus a machine-readable marker line."""
+    """Run the ordered artifact checks against a live CORE session and print a
+    CLI summary plus a machine-readable marker line.
+
+    The checks themselves come from `artifact_checks.CHECK_ORDER` via the shared
+    orchestrator, so the CLI never has its own list to fall behind.
+    """
     target = stream if stream is not None else sys.stdout
     scenario_name = str(getattr(args, 'scenario', '') or '').strip() or None
     xml_path = os.path.abspath(str(getattr(args, 'xml', '') or '').strip()) if getattr(args, 'xml', '') else ''
@@ -4613,13 +5223,34 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
 
 
 def _emit_phase_json(payload: Any, *, output_path: str | None = None, stream: Any = None) -> None:
+    """Print a phase's result, and copy it to `--plan-output` when asked.
+
+    The copy is best-effort on purpose. In VM mode the run is delegated to the
+    CORE VM, so `--plan-output` names a directory that exists on the machine the
+    command was typed on and quite possibly not on the one running it. Letting
+    that raise turned a topology that built correctly into a phase reporting
+    failure, which is a worse lie than a missing side file -- the result is on
+    stdout either way.
+    """
     text = json.dumps(_json_ready(payload), indent=2, sort_keys=True, ensure_ascii=False)
     target = stream if stream is not None else sys.stdout
     print(text, file=target)
-    if output_path:
+    if not output_path:
+        return
+    try:
+        parent = os.path.dirname(os.path.abspath(output_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as handle:
             handle.write(text)
             handle.write('\n')
+    except Exception as exc:
+        print(
+            f'[phase] could not write --plan-output {output_path}: {exc}. '
+            f'The phase result above is complete; in VM mode the run happens on '
+            f'the CORE VM, so a path from your own machine may not exist there.',
+            file=sys.stderr,
+        )
 
 
 def _response_payload_and_status(response: Any) -> tuple[int, Any]:
@@ -6019,36 +6650,61 @@ def _add_cli_execute_topo_args(container: Any) -> None:
     container.add_argument(
         '--allow-src-subnet-prob',
         type=float,
-        default=0.3,
-        help='Probability [0..1] to widen firewall allow rules to the source subnet',
+        default=None,
+        help=(
+            'Probability [0..1] to widen firewall allow rules to the source subnet. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's allow_src_subnet_prob attribute"
+        ),
     )
     container.add_argument(
         '--allow-dst-subnet-prob',
         type=float,
-        default=0.3,
-        help='Probability [0..1] to widen firewall allow rules to the destination subnet',
+        default=None,
+        help=(
+            'Probability [0..1] to widen firewall allow rules to the destination subnet. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's allow_dst_subnet_prob attribute"
+        ),
     )
     container.add_argument(
         '--nat-mode',
         choices=['SNAT', 'MASQUERADE'],
-        default='SNAT',
-        help='NAT mode when segmentation selects NAT (routers): SNAT or MASQUERADE',
+        default=None,
+        help=(
+            'NAT mode when segmentation selects NAT (routers): SNAT or MASQUERADE. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's nat_mode attribute"
+        ),
     )
     container.add_argument(
         '--dnat-prob',
         type=float,
-        default=0.0,
-        help='Probability [0..1] to create DNAT (port-forward) on routers for generated flows',
+        default=None,
+        help=(
+            'Probability [0..1] to create DNAT (port-forward) on routers for generated flows. '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's dnat_probability attribute"
+        ),
     )
     container.add_argument(
         '--seg-include-hosts',
         action='store_true',
-        help='Include host nodes as candidates for segmentation placement (default: routers only)',
+        default=None,
+        help=(
+            'Include host nodes as candidates for segmentation placement (default: routers only). '
+            'Applied when the plan is computed; also settable per scenario via the '
+            "Segmentation section's include_hosts attribute"
+        ),
     )
     container.add_argument(
         '--seg-allow-docker-ports',
         action='store_true',
-        help='Allow docker-compose container ports through host INPUT chains when segmentation enforces default-deny',
+        help=(
+            'Allow docker-compose container ports through host INPUT chains when segmentation '
+            'enforces default-deny. Stays a run-time flag: the ports belong to containers, which '
+            'do not exist until execute, so it cannot be decided when the plan is made'
+        ),
     )
     container.add_argument(
         '--seg-accessible-by-pivot',
@@ -6057,7 +6713,20 @@ def _add_cli_execute_topo_args(container: Any) -> None:
             'Guarantee every subnet segmentation walls off keeps one reachable "provider" node '
             '(a vulnerability, flag-node-generator, or SSH) so challenges behind the boundary stay '
             'solvable. Providers never consume challenge-slot capacity. '
-            'Also settable per scenario via the Segmentation section\'s accessible_by_pivot attribute'
+            'Also settable per scenario: the editor writes pivot_enabled on a Segmentation row, '
+            'and a scenario-wide accessible_by_pivot attribute on the section is honoured too'
+        ),
+    )
+    container.add_argument(
+        '--seg-pivot-provider',
+        choices=['vulnerability', 'flag-node-generator', 'ssh-fallback'],
+        default=None,
+        help=(
+            'Which provider kind to try first for pivot access. Reorders the default preference '
+            '(vulnerability, then flag-node-generator, then SSH) rather than restricting it: a '
+            'subnet whose only way in is a vulnerability still gets one. Also settable per scenario '
+            'via a Segmentation row\'s pivot_provider attribute; with several rows the first '
+            'concrete choice wins'
         ),
     )
     container.add_argument(
@@ -6484,7 +7153,16 @@ def main():
             hosts_preview = preview_full.get('hosts') or []
             if isinstance(hosts_preview, list):
                 preview_role_counts: Dict[str, int] = {}
+                # A pivot provider is left out so it never widens the challenge
+                # slot range: slots are numbered positionally over this count,
+                # and a vulnerability landing on the provider's slot would
+                # replace the SSH image the subnet's only way in depends on.
+                pivot_provider_ids = {
+                    h.get('node_id') for h in _pivot_provider_hosts(preview_full)
+                }
                 for h in hosts_preview:
+                    if isinstance(h, dict) and h.get('node_id') in pivot_provider_ids:
+                        continue
                     role = (h.get('role') if isinstance(h, dict) else None) or 'Host'
                     preview_role_counts[role] = preview_role_counts.get(role, 0) + 1
                 if preview_role_counts:
@@ -6612,6 +7290,7 @@ def main():
                 ip_mode=args.ip_mode,
                 ip_region=args.ip_region,
                 hitl_preview_reservations=hitl_preview_reservations,
+                segmentation_settings=_seg_settings(args),
             )
             diffs = _diff_plan_summaries(preview_summary, current_summary)
             if diffs:
@@ -6645,6 +7324,7 @@ def main():
                 segmentation_density=seg_density_plan,
                 segmentation_items=seg_items_serialized,
                 traffic_plan=traffic_plan_preview,
+                segmentation_settings=_seg_settings(args),
                 seed=args.seed,
                 ip4_prefix=args.prefix,
                 ip_mode=args.ip_mode,
@@ -6749,6 +7429,7 @@ def main():
                             routing_plan=routing_plan,
                             segmentation_density=orchestrated_plan.get('breakdowns', {}).get('segmentation', {}).get('density'),
                             segmentation_items=orchestrated_plan.get('breakdowns', {}).get('segmentation', {}).get('raw_items_serialized'),
+                            segmentation_settings=_seg_settings(args),
                             seed=args.seed,
                             ip4_prefix=args.prefix,
                             ip_mode=args.ip_mode,
@@ -7143,6 +7824,21 @@ def main():
         except Exception as _stale_exc:
             logging.debug('Leftover container cleanup skipped: %s', _stale_exc)
 
+    # A pivot provider node is created by the topology build, and CORE starts a
+    # Docker node the moment it is added -- so its image has to be on this host
+    # before the build, not when segmentation gets around to reporting it. The
+    # plan carries the providers because that is where they were decided.
+    try:
+        if isinstance(preview_full, dict):
+            _pivot_images = _ensure_runtime_docker_images(preview_full.get('segmentation_preview'))
+            if _pivot_images:
+                logging.info(
+                    "Docker images ready: %s",
+                    ', '.join(f'{image}={outcome}' for image, outcome in sorted(_pivot_images.items())),
+                )
+    except Exception as exc_img:
+        logging.warning("Docker image preparation failed: %s", exc_img)
+
     # Always build directly from current scenario plan (phased path removed)
     logging.info("PHASE: Building topology")
     routers = []
@@ -7308,6 +8004,7 @@ def main():
             'preview_attached': bool(preview_full),
             'preview_realized': bool(generation_meta.get('preview_realized')),
             'pivoting': generation_meta.get('pivoting'),
+            'pivot_access': _pivot_access_summary(preview_full),
             'hitl_attachment': generation_meta.get('hitl_attachment'),
         }
         _emit_phase_json(topo_summary, output_path=args.plan_output)
@@ -7320,6 +8017,9 @@ def main():
 
     # Parse segmentation config OR fallback to preview segmentation if available
     seg_summary = None
+    # Set before the phase so the traffic passes below still have it if
+    # segmentation fails; they extend the same policy and need the same settings.
+    seg_settings = _plan_segmentation_settings(preview_full) if _planned_segmentation_rules(preview_full) else _seg_settings(args)
     try:
         logging.info("PHASE: Segmentation")
         seg_density = orchestrated_plan.get('breakdowns', {}).get('segmentation', {}).get('density')
@@ -7327,7 +8027,27 @@ def main():
         if seg_density is None:
             seg_density, seg_items = parse_segmentation_info(args.xml, args.scenario)
         logging.info("Segmentation config: density=%.3f, items=%d", float(seg_density or 0.0), len(seg_items or []))
-        if seg_density and seg_density > 0 and seg_items:
+        seg_planned_rules = _planned_segmentation_rules(preview_full)
+        # The settings the plan was built with, not the ones this invocation
+        # happens to carry: every pass below extends a policy those settings
+        # already shaped.
+        seg_settings = _plan_segmentation_settings(preview_full)
+        if seg_planned_rules:
+            logging.info(
+                "Segmentation: enforcing the %d rule(s) the saved plan decided; not planning again",
+                len(seg_planned_rules),
+            )
+            conflicts = _segmentation_settings_conflicts(seg_settings, _seg_settings(args))
+            if conflicts:
+                logging.warning(
+                    'Segmentation: %d setting(s) cannot be applied to a plan that was built '
+                    'without them, so the plan\'s values are used: %s. Set them on the '
+                    'Segmentation section and regenerate the plan to change them.',
+                    len(conflicts), '; '.join(conflicts),
+                )
+        else:
+            seg_settings = _seg_settings(args)
+        if (seg_density and seg_density > 0 and seg_items) or seg_planned_rules:
             try:
                 from .utils.segmentation import plan_and_apply_segmentation
                 seg_summary = plan_and_apply_segmentation(
@@ -7336,18 +8056,40 @@ def main():
                     hosts,
                     seg_density,
                     seg_items,
-                    nat_mode=str(getattr(args, 'nat_mode', 'SNAT')).upper(),
-                    include_hosts=bool(getattr(args, 'seg_include_hosts', False)),
+                    nat_mode=str(seg_settings['nat_mode']),
+                    include_hosts=bool(seg_settings['include_hosts']),
                     allow_docker_ports=bool(getattr(args, 'seg_allow_docker_ports', False)),
                     docker_nodes=docker_by_name if isinstance(docker_by_name, dict) else None,
-                    accessible_by_pivot=_seg_accessible_by_pivot(args),
+                    accessible_by_pivot=bool(seg_settings['accessible_by_pivot']),
                     pivot_entry_points=_seg_pivot_entry_points(
                         docker_by_name if isinstance(docker_by_name, dict) else None,
                         hosts,
                         session,
+                        preview_hosts=(preview_full or {}).get('hosts'),
                     ),
+                    pivot_node_names=_preview_host_names((preview_full or {}).get('hosts')),
+                    pivot_participant_subnets=sorted(
+                        (hitl_preview_reservations or {}).get('network_cidrs') or []
+                    ),
+                    pivot_preferred_provider=seg_settings.get('pivot_provider'),
+                    planned_rules=seg_planned_rules,
                 )
                 logging.info("Applied segmentation rules: %d", len(seg_summary.get("rules", [])))
+                try:
+                    _ensure_pivot_provider_images(seg_summary)
+                except Exception as exc_img:
+                    logging.warning("Docker image preparation failed: %s", exc_img)
+                try:
+                    _warn_unmaterialised_pivot_providers(seg_summary)
+                except Exception:
+                    pass
+                # What a participant can actually walk through, named in the log
+                # so a CLI-only run does not have to read the summary JSON to
+                # find out whether its walled-off subnets have a way in.
+                try:
+                    _log_pivot_access_summary(seg_summary)
+                except Exception:
+                    pass
             except Exception as e:
                 logging.warning("Failed applying segmentation: %s", e)
         else:
@@ -7366,7 +8108,13 @@ def main():
     )
     traffic_out_dir = "/tmp/traffic"
     traffic_map = {}
-    if traffic_density and traffic_density > 0:
+    traffic_planned_flows = _planned_traffic_flows(preview_full)
+    if traffic_planned_flows:
+        logging.info(
+            "Traffic: writing the %d flow(s) the saved plan decided; not generating again",
+            len(traffic_planned_flows),
+        )
+    if (traffic_density and traffic_density > 0) or traffic_planned_flows:
         try:
             # apply CLI overrides, if provided
             if traffic_items:
@@ -7382,7 +8130,10 @@ def main():
                         ti.jitter_pct = max(0.0, min(100.0, float(args.traffic_jitter)))
                     if args.traffic_content:
                         ti.content_type = args.traffic_content
-            traffic_map = generate_traffic_scripts(hosts, traffic_density, traffic_items, out_dir=traffic_out_dir)
+            traffic_map = generate_traffic_scripts(
+                hosts, traffic_density, traffic_items, out_dir=traffic_out_dir,
+                planned_flows=traffic_planned_flows,
+            )
             if not traffic_map:
                 logging.info("No hosts selected for traffic after generation (density too low or no eligible hosts)")
             # Enable 'Traffic' service on all nodes that have traffic (additive)
@@ -7413,9 +8164,9 @@ def main():
                     hosts,
                     os.path.join(traffic_out_dir, "traffic_summary.json"),
                     out_dir="/tmp/segmentation",
-                    src_subnet_prob=max(0.0, min(1.0, float(getattr(args, 'allow_src_subnet_prob', 0.3)))),
-                    dst_subnet_prob=max(0.0, min(1.0, float(getattr(args, 'allow_dst_subnet_prob', 0.3)))),
-                    include_hosts=bool(getattr(args, 'seg_include_hosts', False)),
+                    src_subnet_prob=float(seg_settings['allow_src_subnet_prob']),
+                    dst_subnet_prob=float(seg_settings['allow_dst_subnet_prob']),
+                    include_hosts=bool(seg_settings['include_hosts']),
                 )
                 logging.info("Inserted allow rules for generated traffic")
                 # Flow verification artifact
@@ -7433,7 +8184,7 @@ def main():
                 except Exception as e_vf:
                     logging.warning("Flow verification failed: %s", e_vf)
                 # Optional DNAT port-forwarding
-                dnat_p = max(0.0, min(1.0, float(getattr(args, 'dnat_prob', 0.0))))
+                dnat_p = float(seg_settings['dnat_probability'])
                 if dnat_p > 0:
                     write_dnat_for_flows(
                         session,
@@ -7505,7 +8256,10 @@ def main():
                         jitter_pct=ti.jitter_pct,
                         content_type=ti.content_type,
                     ))
-                traffic_map = generate_traffic_scripts(hosts, traffic_density, safe_items, out_dir=traffic_out_dir)
+                traffic_map = generate_traffic_scripts(
+                    hosts, traffic_density, safe_items, out_dir=traffic_out_dir,
+                    planned_flows=traffic_planned_flows,
+                )
                 logging.warning("Traffic generation succeeded after fallback to safe kinds (unknown kinds -> TCP)")
             except Exception as e2:
                 logging.warning("Fallback traffic generation also failed: %s", e2)
