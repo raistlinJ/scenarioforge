@@ -1,4 +1,7 @@
-from scenarioforge.builders.topology import _canonicalize_routing_items
+from scenarioforge.builders.topology import (
+    _canonicalize_routing_items,
+    _ensure_operational_router_protocols,
+)
 from scenarioforge.parsers.routing import parse_routing_info
 from scenarioforge.planning.orchestrator import compute_full_plan
 from scenarioforge.types import RoutingInfo
@@ -78,3 +81,30 @@ def test_routing_parser_treats_legacy_selected_routing_as_unset(tmp_path):
     assert len(items) == 1
     assert items[0].abs_count == 2
     assert items[0].protocol == ""
+
+
+def test_count_only_multi_router_topology_gets_operational_default():
+    protocols = {1: [], 2: [], 3: []}
+
+    changed = _ensure_operational_router_protocols(protocols, [1, 2, 3])
+
+    assert changed is True
+    assert protocols == {1: ["OSPFv2"], 2: ["OSPFv2"], 3: ["OSPFv2"]}
+
+
+def test_operational_default_does_not_replace_explicit_protocols():
+    protocols = {1: ["BGP"], 2: []}
+
+    changed = _ensure_operational_router_protocols(protocols, [1, 2])
+
+    assert changed is False
+    assert protocols == {1: ["BGP"], 2: []}
+
+
+def test_single_router_does_not_need_operational_default():
+    protocols = {1: []}
+
+    changed = _ensure_operational_router_protocols(protocols, [1])
+
+    assert changed is False
+    assert protocols == {1: []}

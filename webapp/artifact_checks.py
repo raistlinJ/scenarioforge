@@ -542,7 +542,12 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "    return keep, stale\n"
         "def _containers():\n"
         "    rc, out = _run(['docker','ps','--format','{{.Names}}'])\n"
-        "    return [l.strip() for l in out.splitlines() if l.strip() and 'inject_copy' not in l] if rc == 0 else []\n"
+        "    if rc != 0:\n"
+        "        return []\n"
+        "    nested_prefix = ('core-' + SESSION_ID + '-') if SESSION_ID else ''\n"
+        "    return [l.strip() for l in out.splitlines()\n"
+        "            if l.strip() and 'inject_copy' not in l\n"
+        "            and not (nested_prefix and l.strip().startswith(nested_prefix))]\n"
         "def _vnodes():\n"
         "    if not PYCORE or not os.path.isdir(PYCORE):\n"
         "        return []\n"
@@ -560,6 +565,24 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "    if kind == 'docker':\n"
         "        return _run(['docker','exec',name]+list(argv), timeout=timeout)\n"
         "    return _run(['vcmd','-c',os.path.join(PYCORE, name),'--']+list(argv), timeout=timeout)\n"
+        "def _node_addr(kind, name):\n"
+        "    def _cidrs(output):\n"
+        "        return [line.strip() for line in output.splitlines()\n"
+        "                if '/' in line.strip() and line.strip().split('/', 1)[0].count('.') == 3]\n"
+        "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}'\"])\n"
+        "    cidrs = _cidrs(out) if rc == 0 else []\n"
+        "    # Minimal workload images may omit iproute2. Inspect the container's\n"
+        "    # network namespace from the CORE VM instead of losing its identity.\n"
+        "    if not cidrs and kind == 'docker':\n"
+        "        rc, pid = _run(['docker','inspect','-f','{{.State.Pid}}',name])\n"
+        "        pid = pid.strip()\n"
+        "        if rc == 0 and pid.isdigit() and int(pid) > 0:\n"
+        "            rc, out = _run(['nsenter','-t',pid,'-n','ip','-4','-o','addr','show','scope','global'])\n"
+        "            if rc == 0:\n"
+        "                cidrs = _cidrs('\\n'.join(line.split()[3] if len(line.split()) > 3 else '' for line in out.splitlines()))\n"
+        "    if not cidrs:\n"
+        "        return '', ''\n"
+        "    return cidrs[0].split('/', 1)[0], cidrs[0]\n"
     )
 
 
@@ -618,11 +641,7 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + f"MAX_TARGETS = {int(max_targets)}\n"
         + f"TRAFFIC_DIRS = {dirs_literal}\n"
         + "def _addr(kind, name):\n"
-        + "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}'\"])\n"
-        + "    cidrs = [l.strip() for l in out.splitlines() if l.strip()]\n"
-        + "    if not cidrs:\n"
-        + "        return '', ''\n"
-        + "    return cidrs[0].split('/')[0], cidrs[0]\n"
+        + "    return _node_addr(kind, name)\n"
         + "def _net(cidr):\n"
         + "    try:\n"
         + "        return str(ipaddress.ip_network(cidr, strict=False))\n"
@@ -865,9 +884,7 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "            'errors': s.get('total_errors'),\n"
         + "            'flows': len(s.get('flows') or [])}\n"
         + "def _ip(kind, name):\n"
-        + "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1\"])\n"
-        + "    ips = [l.strip() for l in out.splitlines() if l.strip()]\n"
-        + "    return ips[0] if ips else ''\n"
+        + "    return _node_addr(kind, name)[0]\n"
         + "FLOW_PY = " + '"import json, socket, errno\\ndef one(ip, port, proto):\\n    if proto == \'TCP\' and port:\\n        try:\\n            s = socket.create_connection((ip, int(port)), 3.0); s.close()\\n            return [True, \'tcp-handshake\', \'\']\\n        except socket.timeout:\\n            return [False, \'tcp-handshake\', \'timeout\']\\n        except OSError as e:\\n            c = getattr(e, \'errno\', None)\\n            if c == errno.ECONNREFUSED:\\n                return [True, \'tcp-handshake\', \'refused\']\\n            if c in (errno.EHOSTUNREACH, errno.ENETUNREACH):\\n                return [False, \'tcp-handshake\', \'no-route\']\\n            return [False, \'tcp-handshake\', \'error\']\\n    if proto == \'UDP\' and port:\\n        try:\\n            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2.0)\\n            s.connect((ip, int(port))); s.send(b\'\\\\x00\' * 32)\\n            try:\\n                s.recv(1)\\n            except socket.timeout:\\n                pass\\n            except OSError as e2:\\n                c2 = getattr(e2, \'errno\', None)\\n                if c2 == errno.ECONNREFUSED:\\n                    s.close(); return [True, \'udp-send\', \'icmp-port-unreachable\']\\n                if c2 in (errno.EHOSTUNREACH, errno.ENETUNREACH):\\n                    s.close(); return [False, \'udp-send\', \'no-route\']\\n            s.close(); return [None, \'udp-send\', \'sent\']\\n        except OSError as e:\\n            c = getattr(e, \'errno\', None)\\n            if c in (errno.EHOSTUNREACH, errno.ENETUNREACH):\\n                return [False, \'udp-send\', \'no-route\']\\n            return [None, \'udp-send\', \'error\']\\n    return [None, \'none\', \'flow has no protocol/port to test\']\\nR = []\\nfor ip, port, proto, dname in ROWS:\\n    ok, method, err = one(ip, port, (proto or \'\').upper())\\n    R.append([ip, port, proto, dname, ok, method, err])\\nprint(json.dumps(R))\\n"' + "\n"
         + "def _agent_stats(kind, name, node_id):\n"
         + "    if node_id is None:\n"
@@ -1179,11 +1196,20 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
 
     # Nodes that a flow names as a sender but where no traffic process is running.
     expected_senders: set[str] = set()
-    ip_to_node = {
-        _name(info.get("ip")): node
-        for node, info in nodes.items()
-        if isinstance(info, dict) and _name(info.get("ip"))
-    }
+    ip_to_node: dict[str, str] = {}
+    live_nodes = set(nodes_with_procs)
+    for node, info in nodes.items():
+        if not isinstance(info, dict):
+            continue
+        ip = _name(info.get("ip"))
+        if not ip:
+            continue
+        current = ip_to_node.get(ip)
+        # Old probe payloads may include an internal Compose child that shares
+        # its CORE parent's address. Prefer the node with the live traffic
+        # agent instead of allowing dictionary order to choose the child.
+        if current is None or (node in live_nodes and current not in live_nodes):
+            ip_to_node[ip] = node
     for flow in flows:
         if isinstance(flow, dict):
             node = ip_to_node.get(_name(flow.get("src_ip")))

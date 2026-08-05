@@ -132,6 +132,23 @@ def test_router_only_count_items_realize_routers_without_hosts(monkeypatch):
     assert len(routers) == 3
 
 
+def test_count_only_routers_receive_operational_routing_services(monkeypatch):
+    routing_items = [RoutingInfo(protocol="", factor=0.0, abs_count=3)]
+
+    session, routers, proto_map = _build(
+        {"workstation": 3},
+        routing_density=0.0,
+        routing_items=routing_items,
+        mesh_style="tree",
+        monkeypatch=monkeypatch,
+    )
+
+    assert len(routers) == 3
+    for router in routers:
+        assert proto_map[router.node_id] == ["OSPFv2"]
+        assert "OSPFv2" in session.services._map[router.node_id]
+
+
 def test_report_vulnerability_summary(monkeypatch, tmp_path):
     # Directly call write_report to ensure summary line present
     from scenarioforge.utils.report import write_report

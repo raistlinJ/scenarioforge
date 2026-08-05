@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List, Optional, Tuple, Set, Any
+from typing import Dict, Iterable, List, Optional, Tuple, Set, Any
 from types import SimpleNamespace
 from collections import defaultdict
 import math
@@ -4256,6 +4256,40 @@ def _canonicalize_routing_items(routing_items: List[RoutingInfo] | None) -> List
     return list(routing_items or [])
 
 
+_DEFAULT_OPERATIONAL_ROUTING_PROTOCOL = "OSPFv2"
+
+
+def _ensure_operational_router_protocols(
+    router_protocols: Dict[int, List[str]],
+    router_ids: Iterable[int],
+) -> bool:
+    """Give a protocol-less multi-router topology a usable routing plane.
+
+    A count-only Routing section intentionally has no user-selected protocol,
+    but two or more routers still need to exchange routes for their attached
+    LANs to communicate. Keep explicit assignments untouched and apply the
+    conservative CORE default only when the whole topology is otherwise
+    protocol-less. Returns whether the fallback was applied.
+    """
+    ids = [int(router_id) for router_id in router_ids]
+    if len(ids) <= 1:
+        return False
+    if any(
+        str(protocol or '').strip()
+        for protocols in router_protocols.values()
+        for protocol in (protocols or [])
+    ):
+        return False
+    for router_id in ids:
+        router_protocols[router_id] = [_DEFAULT_OPERATIONAL_ROUTING_PROTOCOL]
+    logger.info(
+        "No routing protocol was selected for %d routers; using %s so attached LANs remain reachable",
+        len(ids),
+        _DEFAULT_OPERATIONAL_ROUTING_PROTOCOL,
+    )
+    return True
+
+
 def build_star_from_roles(core,
                           role_counts: Dict[str, int],
                           services: Optional[List[ServiceInfo]] = None,
@@ -5602,6 +5636,8 @@ def _try_build_segmented_topology_from_preview(
         proto = _canonicalize_routing_protocol(entry.get('protocol'))
         if rid and proto:
             router_protocols[rid].append(proto)
+
+    _ensure_operational_router_protocols(router_protocols, router_nodes.keys())
 
     r2r_links_preview = preview_plan.get('r2r_links_preview') or []
     if not r2r_links_preview:
@@ -7195,6 +7231,24 @@ def build_segmented_topology(core,
                 set_node_services(session, rid, proto_list, node_obj=rnode)
                 try:
                     setattr(rnode, "routing_protocol", proto)
+                except Exception:
+                    pass
+
+        if _ensure_operational_router_protocols(
+            router_protocols,
+            (rnode.id for rnode in router_objs),
+        ):
+            for rnode in router_objs:
+                rid = rnode.id
+                protos = router_protocols[rid]
+                set_node_services(
+                    session,
+                    rid,
+                    ["IPForward", "zebra", *protos],
+                    node_obj=rnode,
+                )
+                try:
+                    setattr(rnode, "routing_protocol", protos[-1])
                 except Exception:
                     pass
         # After assigning protocols, optionally enrich R2R links for protocol groups.

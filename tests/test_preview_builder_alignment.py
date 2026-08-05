@@ -100,3 +100,43 @@ def test_preview_switch_without_hosts_preserved(monkeypatch):
     assert result is not None
     sess, *_ = result
     assert 10 in sess.nodes, "Switches declared in preview should be preserved"
+
+
+def test_protocol_less_multi_router_preview_gets_operational_routing(monkeypatch):
+    session = FakeSession()
+    _patch_safe_create_session(monkeypatch, session)
+    preview = {
+        "routers": [
+            {"node_id": 1, "name": "r1"},
+            {"node_id": 2, "name": "r2"},
+        ],
+        "hosts": [],
+        "r2s_grouping_preview": [
+            {"router_id": 1, "protocol": ""},
+            {"router_id": 2, "protocol": ""},
+        ],
+        "r2r_links_preview": [{
+            "routers": [
+                {"id": 1, "ip": "10.1.0.1/30"},
+                {"id": 2, "ip": "10.1.0.2/30"},
+            ],
+            "subnet": "10.1.0.0/30",
+        }],
+    }
+
+    result = topo_mod._try_build_segmented_topology_from_preview(
+        DummyClient(),
+        services=None,
+        routing_items=[],
+        ip4_prefix="10.0.0.0/16",
+        ip_mode="private",
+        ip_region="all",
+        layout_density="normal",
+        preview_plan=preview,
+    )
+
+    assert result is not None
+    _, routers, _, _, protocols, _ = result
+    assert protocols == {router.node_id: ["OSPFv2"] for router in routers}
+    for router in routers:
+        assert "OSPFv2" in session.services._map[router.node_id]

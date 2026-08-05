@@ -172,7 +172,7 @@ Important behavior:
 - If remote CORE execution is configured, Flow generator runs use that remote context by default unless you explicitly pass `--flow-run-local`.
 - In generator-running modes, remote-capable CLI runs now fail fast on remote sync/SSH/runtime problems instead of silently falling back to local generator execution.
 - Success payloads include `generator_execution_requested` and `generator_execution_mode` so you can verify whether the generator runtime was `remote` or `local`.
-- Legacy embedded previews that contain `Routing` as a protocol/service placeholder are repaired to an unset protocol before topology creation; ScenarioForge does not invent a protocol unless the input explicitly requests one.
+- Legacy embedded previews that contain `Routing` as a protocol/service placeholder are repaired to an unset protocol before topology creation. If a realized topology has multiple routers and no protocol was selected anywhere, the topology builder applies OSPFv2 as an operational default so attached LANs can exchange routes; explicit protocol assignments are never replaced.
 
 Useful flags:
 

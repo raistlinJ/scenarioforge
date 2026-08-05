@@ -200,6 +200,21 @@ def test_probe_scripts_cover_vnodes_via_vcmd():
         assert "_all_nodes" in script      # docker + vnode enumeration
 
 
+def test_probe_scripts_exclude_nested_core_compose_containers():
+    for script in (ac.ports_probe_script("pw", 3), ac.traffic_probe_script("pw", 3)):
+        ast.parse(script)
+        assert "nested_prefix = ('core-' + SESSION_ID + '-')" in script
+        assert "startswith(nested_prefix)" in script
+
+
+def test_probe_scripts_discover_docker_ip_from_host_namespace_as_fallback():
+    for script in (ac.ports_probe_script("pw", 3), ac.traffic_probe_script("pw", 3)):
+        ast.parse(script)
+        assert "docker','inspect','-f','{{.State.Pid}}'" in script
+        assert "'nsenter','-t',pid,'-n','ip'" in script
+        assert "_node_addr(kind, name)" in script
+
+
 def test_traffic_probe_excludes_pgrep_self_match():
     # pgrep -fa traffic_ matches its own command line; the probe must filter it.
     assert "'pgrep' not in l" in ac.traffic_probe_script("pw", 1)
@@ -263,6 +278,36 @@ def test_traffic_warns_when_a_flow_source_has_no_process():
     res = ac.traffic_result(probe, expected=True)
     assert res["status"] == "warn"
     assert any("no traffic process is running" in i["detail"] for i in res["items"])
+
+
+def test_traffic_duplicate_ip_prefers_node_with_live_agent():
+    probe = {
+        "ok": True,
+        "traffic_files": [],
+        "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.7"}]},
+        "nodes": {
+            "docker-15": {
+                "procs": ["1 traffic_15.py"],
+                "ip": "10.0.0.5",
+                "agent": {"present": True, "live": True},
+            },
+            "core-1-18-docker-15-elasticsearch-1": {
+                "procs": [],
+                "ip": "10.0.0.5",
+                "agent": {},
+            },
+        },
+        "ping": [],
+    }
+
+    result = ac.traffic_result(probe, expected=True)
+
+    assert result["status"] == "pass"
+    assert not any(
+        item["name"] == "core-1-18-docker-15-elasticsearch-1"
+        and item["status"] == "warn"
+        for item in result["items"]
+    )
 
 
 def test_probes_ignore_preview_directories():
