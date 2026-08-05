@@ -350,3 +350,89 @@ def test_details_expose_who_enforces_each_block():
     detail = pa.walled_off_details(rules)["10.0.2.0/24"]
     assert detail["sources"] == ["10.0.1.0/24", "10.0.3.0/24"]
     assert detail["enforced_by"] == [1, 4]
+
+
+# --------------------------------------------------------------------------- #
+# The author's provider choice (Segmentation row's `pivot_provider`)
+# --------------------------------------------------------------------------- #
+
+def _all_three_offered():
+    return {
+        5: [pa.PivotEntry(kind=pa.ENTRY_VULNERABILITY, port=8080, label="CVE-x")],
+        2: [pa.PivotEntry(kind=pa.ENTRY_FLAG_GEN, port=5011)],
+        6: [pa.PivotEntry(kind=pa.ENTRY_SSH, port=22)],
+    }
+
+
+def test_the_authors_choice_changes_which_node_is_the_provider():
+    """The regression: `pivot_provider` was read by the web UI and nobody else.
+
+    With all three kinds available the default order picks the vulnerability on
+    node 5. Asking for a flag-node-generator must pick node 2 instead -- and the
+    same selection has to happen at plan time and at execute, or the guide names
+    one node while the port opens on another.
+    """
+    entries = _all_three_offered()
+    default = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points=entries)
+    assert default.providers[0].node_id == 5
+
+    chosen = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points=entries,
+                                  preferred_provider="flag-node-generator")
+    assert chosen.providers[0].node_id == 2
+    assert chosen.providers[0].entry.kind == pa.ENTRY_FLAG_GEN
+
+    ssh = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points=entries,
+                               preferred_provider="ssh-fallback")
+    assert ssh.providers[0].node_id == 6
+    assert ssh.providers[0].entry.kind == pa.ENTRY_SSH
+
+
+def test_a_preference_reorders_but_never_leaves_a_subnet_shut():
+    # Only a vulnerability is on offer. Asking for a flag-node-generator must
+    # still yield the vulnerability: the alternative is a walled-off subnet with
+    # no entrance, which is the whole failure this feature exists to prevent.
+    entries = {5: [pa.PivotEntry(kind=pa.ENTRY_VULNERABILITY, port=8080)]}
+    plan = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points=entries,
+                                preferred_provider="flag-node-generator")
+    assert plan.providers[0].node_id == 5
+    assert plan.providers[0].entry.kind == pa.ENTRY_VULNERABILITY
+
+
+def test_no_preference_keeps_the_default_order():
+    entries = _all_three_offered()
+    for raw in (None, "", "random", "auto", "nonsense"):
+        plan = pa.plan_pivot_access([_block()], _subnet_nodes(), entry_points=entries,
+                                    preferred_provider=raw)
+        assert plan.providers[0].node_id == 5, raw
+
+
+def test_provider_preference_order_is_a_permutation():
+    # Dropping a kind would silently make a subnet unreachable when its only
+    # offering is the dropped one.
+    for raw in ("vulnerability", "flag-node-generator", "ssh", "ssh-fallback", "vuln", ""):
+        order = pa.provider_preference_order(raw)
+        assert sorted(order) == sorted(pa.ENTRY_PREFERENCE), raw
+
+
+def test_preferred_provider_kind_maps_the_uis_vocabulary():
+    # `_PIVOT_PROVIDER_OPTIONS` in app_backend is what the editor writes.
+    assert pa.preferred_provider_kind("vulnerability") == pa.ENTRY_VULNERABILITY
+    assert pa.preferred_provider_kind("flag-node-generator") == pa.ENTRY_FLAG_GEN
+    assert pa.preferred_provider_kind("ssh-fallback") == pa.ENTRY_SSH
+    # Underscores and case are tolerated; unknown text is "no preference"
+    # rather than a guess at a different provider.
+    assert pa.preferred_provider_kind("Flag_Node_Generator") == pa.ENTRY_FLAG_GEN
+    assert pa.preferred_provider_kind("something-else") == ""
+
+
+def test_the_editors_options_are_all_mappable():
+    """Every value the editor can write must resolve to a planner kind."""
+    import re
+    from pathlib import Path
+
+    source = Path("webapp/app_backend.py").read_text(encoding="utf-8")
+    raw = re.search(r"_PIVOT_PROVIDER_OPTIONS: List\[str\] = \[(.*?)\]", source).group(1)
+    options = [v.strip().strip("'\"") for v in raw.split(",") if v.strip()]
+    assert options, "could not read the editor's provider options"
+    for option in options:
+        assert pa.preferred_provider_kind(option) != "", option

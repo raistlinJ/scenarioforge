@@ -127,6 +127,18 @@ What this means in practice:
 - Generator images are reused when their source digest is unchanged; the
   Generate and Execute progress modals report the split as
   `Pulling: x images / Using: y cached / Pending: z`.
+- **"Kept" means selected by digest, never by pattern.** Flow cleanup removes a
+  `coretg-gen-*` image only when no installed generator source still produces
+  that tag, computed with the same digest the runner uses
+  (`scenarioforge/utils/generator_images.py`, shared with
+  `scripts/run_flag_generator.py` so the two cannot drift). A blanket
+  `grep coretg-gen- | xargs docker rmi` emptied the cache on every run, which
+  made `Using: 0 cached` permanent and, on an air-gapped host, meant a rebuild
+  that could not fetch its base image. If `cached` is 0 on a second identical
+  Generate, something is deleting images rather than the digest changing.
+- `Pending` counts runs that reported neither outcome. It should normally be 0:
+  a non-zero value means a generator's output did not carry its
+  `[compose] … cached` / `… will build now` line, not that work is outstanding.
 - A cached generator image still produces different flags, filenames and injects
   every run: the image holds the generator's code, while the values come from the
   per-run configuration (seed, node name, scenario).

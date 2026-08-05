@@ -20,6 +20,13 @@ Provider selection is hybrid, preferring what already exists:
 3. a node already running SSH;
 4. otherwise a Docker SSH node is added.
 
+Tiers 1-3 are the *default* order. The Segmentation row's `pivot_provider` moves
+the author's choice to the front (`provider_preference_order`), which reorders
+rather than restricts: a subnet whose only offering is a vulnerability still uses
+it when the author asked for a flag-node-generator, since the alternative is a
+subnet with no entrance. Tier 4 is unaffected -- an added node always serves SSH,
+because that is what the image provides.
+
 There is deliberately no "turn SSH on for whatever Docker node is already
 there" tier. Node images are built offline-safe with no package manager -- the
 wrapper only injects a busybox `ip` -- so a minimal image cannot grow an `sshd`,
@@ -71,6 +78,51 @@ ENTRY_FLAG_GEN = "flag-node-generator"
 ENTRY_SSH = "ssh"
 
 ENTRY_PREFERENCE: tuple[str, ...] = (ENTRY_VULNERABILITY, ENTRY_FLAG_GEN, ENTRY_SSH)
+
+# The Segmentation row's `pivot_provider` names which of these the author wants
+# tried first. The editor writes one of `vulnerability`, `flag-node-generator`
+# or `ssh-fallback` (it resolves `random` when the XML is saved), but hand-edited
+# scenarios use other spellings, so the aliases the web UI accepts are mirrored
+# here -- this module owns the kind vocabulary, and a preference it cannot map is
+# better ignored than silently treated as a different provider.
+_PROVIDER_ALIASES: Dict[str, str] = {
+    "vuln": ENTRY_VULNERABILITY,
+    "vulnerability": ENTRY_VULNERABILITY,
+    "flag-node": ENTRY_FLAG_GEN,
+    "flagnode": ENTRY_FLAG_GEN,
+    "flag-nodegen": ENTRY_FLAG_GEN,
+    "flag-node-generator": ENTRY_FLAG_GEN,
+    "ssh": ENTRY_SSH,
+    "ssh-server": ENTRY_SSH,
+    "ssh-fallback": ENTRY_SSH,
+    "fallback-ssh": ENTRY_SSH,
+}
+
+
+def preferred_provider_kind(raw: object) -> str:
+    """The provider kind an author asked for, or '' for "no preference".
+
+    `random`/`auto` mean the author did not choose; the editor resolves those to
+    a concrete provider when it saves, so reaching here means nothing was picked
+    and the default order applies.
+    """
+    text = str(raw or "").strip().lower().replace("_", "-")
+    if not text or text in ("random", "auto", "none", "manual"):
+        return ""
+    return _PROVIDER_ALIASES.get(text, "")
+
+
+def provider_preference_order(preferred: object = None) -> tuple[str, ...]:
+    """`ENTRY_PREFERENCE` with the author's choice moved to the front.
+
+    A preference reorders rather than restricts: a subnet whose only way in is a
+    vulnerability still gets one when the author asked for a flag-node-generator,
+    because the alternative is a walled-off subnet with no entrance at all.
+    """
+    kind = preferred_provider_kind(preferred)
+    if not kind:
+        return ENTRY_PREFERENCE
+    return (kind,) + tuple(k for k in ENTRY_PREFERENCE if k != kind)
 
 DEFAULT_SSH_PORT = 22
 
@@ -401,9 +453,10 @@ def _nodes_in(subnet: ipaddress._BaseNetwork, hosts: Iterable[NodeInfo]) -> List
 def _pick_existing(
     inside: Sequence[NodeInfo],
     entry_points: Dict[int, Sequence[PivotEntry]],
+    preference: Sequence[str] = ENTRY_PREFERENCE,
 ) -> tuple[Optional[NodeInfo], Optional[PivotEntry]]:
-    """The best node already offering a way in, following ENTRY_PREFERENCE."""
-    for kind in ENTRY_PREFERENCE:
+    """The best node already offering a way in, following the preference order."""
+    for kind in preference:
         for node in inside:
             if not _is_docker_backed(node):
                 continue
@@ -566,6 +619,7 @@ def plan_pivot_access(
     ssh_port: int = DEFAULT_SSH_PORT,
     allow_add_nodes: bool = True,
     participant_subnets: Optional[Sequence[str]] = None,
+    preferred_provider: object = None,
 ) -> PivotAccessPlan:
     """Ensure every walled-off subnet has a reachable pivot provider.
 
@@ -587,6 +641,7 @@ def plan_pivot_access(
     """
     plan = PivotAccessPlan()
     node_names = node_names or {}
+    preference = provider_preference_order(preferred_provider)
     entry_points = {int(k): list(v or []) for k, v in (entry_points or {}).items()}
     routers = list(routers or [])
     derived_router_ids = {int(getattr(r, "node_id")) for r in routers if getattr(r, "node_id", None) is not None}
@@ -653,7 +708,7 @@ def plan_pivot_access(
             continue
         inside = _nodes_in(subnet, hosts)
 
-        node, entry = _pick_existing(inside, entry_points)
+        node, entry = _pick_existing(inside, entry_points, preference)
         provider: Optional[PivotProvider] = None
 
         if node is not None and entry is not None:

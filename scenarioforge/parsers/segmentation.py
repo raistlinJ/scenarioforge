@@ -63,6 +63,65 @@ def parse_segmentation_info(xml_path: str, scenario_name: Optional[str]) -> Tupl
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
 
+# The editor's "accessible by pivot" switch is per Segmentation row, and it
+# writes `pivot_enabled` on the <item>. The section-level attribute below is the
+# scenario-wide form. Both have to be read here: the web UI consumed the item
+# attribute while this parser looked only at the section, so a scenario authored
+# with the switch on planned no pivot providers at all -- walled-off subnets got
+# no entrance, and the artifact check reported "no pivot providers" on a
+# scenario whose editor plainly showed pivoting enabled.
+_SECTION_PIVOT_ATTRS = ("accessible_by_pivot", "accessibleByPivot", "pivot_access")
+_ITEM_PIVOT_ATTRS = ("pivot_enabled", "pivot_required", "pivot")
+# Spellings the web UI already accepts for the item attribute, kept identical to
+# `app_backend` so the two cannot disagree about what "on" means.
+_ITEM_PIVOT_TRUTHY = _TRUTHY | {"pivot", "pivot-only", "required"}
+
+
+def _section_pivot_provider(section) -> str:
+    """Which provider kind the Segmentation section asks for, '' if none.
+
+    Read from the same row that carries the switch, because that is where the
+    editor writes it. Rows are scanned in order and the first concrete choice
+    wins: the planner takes one preference for the scenario, so a second row
+    disagreeing cannot be honoured and quietly picking the last one would be
+    just as arbitrary as picking the first while looking deliberate.
+    """
+    if section is None:
+        return ""
+    from ..utils.pivot_access import preferred_provider_kind
+
+    for attr in ("pivot_provider", "accessible_by_pivot_provider", "pivot_access_provider"):
+        kind = preferred_provider_kind(section.get(attr))
+        if kind:
+            return kind
+    for item in section.findall("item"):
+        for attr in ("pivot_provider", "access_provider"):
+            kind = preferred_provider_kind(item.get(attr))
+            if kind:
+                return kind
+    return ""
+
+
+def _section_enables_pivot_access(section) -> bool:
+    """Whether this Segmentation section turns on accessible-by-pivot.
+
+    Section attribute first, because it is the scenario-wide statement; then any
+    row that switches it on, because one pivot-enabled row is enough to mean the
+    scenario wants pivot access.
+    """
+    if section is None:
+        return False
+    for attr in _SECTION_PIVOT_ATTRS:
+        raw = (section.get(attr) or "").strip().lower()
+        if raw:
+            return raw in _TRUTHY
+    for item in section.findall("item"):
+        for attr in _ITEM_PIVOT_ATTRS:
+            raw = (item.get(attr) or "").strip().lower()
+            if raw and raw in _ITEM_PIVOT_TRUTHY:
+                return True
+    return False
+
 # Everything about segmentation that shapes the plan, and what it is when the
 # scenario does not say. These live on the Segmentation section rather than on
 # the command line because execute enforces the plan rather than planning again:
@@ -79,6 +138,10 @@ SEGMENTATION_SETTING_DEFAULTS: dict = {
     "allow_src_subnet_prob": 0.3,
     "allow_dst_subnet_prob": 0.3,
     "accessible_by_pivot": False,
+    # Which provider kind the author wants tried first. '' means no preference,
+    # so the planner's own order applies. Normalised to a planner kind on read,
+    # since `pivot_access` owns that vocabulary.
+    "pivot_provider": "",
 }
 
 # Attribute spellings accepted for each setting, first match wins.
@@ -141,9 +204,8 @@ def parse_segmentation_settings(xml_path: str, scenario_name: Optional[str]) -> 
 
     settings["nat_mode"] = coerce_nat_mode(_raw("nat_mode"), settings["nat_mode"])
     settings["include_hosts"] = coerce_bool(_raw("include_hosts"), settings["include_hosts"])
-    settings["accessible_by_pivot"] = coerce_bool(
-        _raw("accessible_by_pivot"), settings["accessible_by_pivot"]
-    )
+    settings["accessible_by_pivot"] = _section_enables_pivot_access(section)
+    settings["pivot_provider"] = _section_pivot_provider(section)
     for key in ("dnat_probability", "allow_src_subnet_prob", "allow_dst_subnet_prob"):
         settings[key] = coerce_probability(_raw(key), settings[key])
     return settings
@@ -165,11 +227,4 @@ def parse_segmentation_accessible_by_pivot(xml_path: str, scenario_name: Optiona
     scenario = find_scenario(root, scenario_name)
     if scenario is None:
         return False
-    section = scenario.find(".//section[@name='Segmentation']")
-    if section is None:
-        return False
-    for attr in ("accessible_by_pivot", "accessibleByPivot", "pivot_access"):
-        raw = (section.get(attr) or "").strip().lower()
-        if raw:
-            return raw in _TRUTHY
-    return False
+    return _section_enables_pivot_access(scenario.find(".//section[@name='Segmentation']"))

@@ -834,6 +834,18 @@ def _remove_local_flow_scenario_roots(scenario_norm: str) -> list[str]:
     return removed
 
 
+def _generator_images_source() -> str:
+    """The `generator_images` module as text, for embedding in a remote script.
+
+    The CORE VM runs the cleanup as a bare Python snippet with no package
+    context, so the module travels with it instead of being imported there.
+    """
+    from .utils import generator_images
+
+    with open(generator_images.__file__, 'r', encoding='utf-8') as handle:
+        return handle.read()
+
+
 def _best_effort_cli_flag_sequencing_cleanup(
     args: Any,
     *,
@@ -870,6 +882,11 @@ def _best_effort_cli_flag_sequencing_cleanup(
             "import glob, json, os, re, shutil, subprocess\n"
             f"SCEN={json.dumps(str(scenario_norm or ''))}\n"
             f"SUDO_PW={json.dumps(str(sudo_pw or ''))}\n"
+            # Shipped as source rather than reimplemented, so the cleanup's idea
+            # of a generator image tag cannot drift from the runner's. It is
+            # exec'd as its own module so its `from __future__` import stays the
+            # first statement of the unit it belongs to.
+            f"GEN_IMAGES_SRC={json.dumps(_generator_images_source())}\n"
             "scenario_safe=re.sub(r'[^a-zA-Z0-9_-]', '_', SCEN)\n"
             "removed=[]\n"
             "for subdir in ('flag_generators_runs','flag_node_generators_runs'):\n"
@@ -899,6 +916,17 @@ def _best_effort_cli_flag_sequencing_cleanup(
             "  return {'cmd': full, 'rc': int(p.returncode or 0), 'out': (p.stdout or '')[-800:], 'err': (p.stderr or '')[-800:]}\n"
             "def _run_shell(text):\n"
             "  return _run(['sh','-lc',text])\n"
+            # `_run` clips output to the last 800 characters for logging, which
+            # would silently drop most of an image list and make images look
+            # absent -- i.e. stale. Listing needs the whole thing.
+            "def _capture(cmd):\n"
+            "  full=list(cmd)\n"
+            "  stdin=None\n"
+            "  if SUDO_PW:\n"
+            "    full=['sudo','-E','-S','-p','','-k'] + full\n"
+            "    stdin=SUDO_PW + '\\n'\n"
+            "  p=subprocess.run(full, check=False, capture_output=True, text=True, input=stdin, timeout=120)\n"
+            "  return (p.stdout or '') if int(p.returncode or 0) == 0 else ''\n"
             "docker_ok=shutil.which('docker') is not None or os.path.exists('/usr/bin/docker')\n"
             "results=[]\n"
             "if docker_ok:\n"
@@ -906,9 +934,25 @@ def _best_effort_cli_flag_sequencing_cleanup(
             "  results.append(_run(['docker','image','prune','-f']))\n"
             "  results.append(_run(['docker','network','prune','-f']))\n"
             "  results.append(_run(['docker','volume','prune','-f']))\n"
-            "  results.append(_run_shell(\"docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f\"))\n"
+            # Only generator images with no installed source behind them. The
+            # tag carries a digest of the generator's own source, so an image
+            # whose digest still matches something installed is exactly what the
+            # next Generate would reuse -- deleting it forces a rebuild that
+            # needs the base image, which an air-gapped host may not have.
+            # Removing them wholesale is why 'Using: 0 cached' was permanent.
+            "  _gi={}\n"
+            "  exec(compile(GEN_IMAGES_SRC, 'generator_images.py', 'exec'), _gi)\n"
+            "  _tags=[t.strip() for t in _capture(['docker','images','--format','{{.Repository}}:{{.Tag}}']).splitlines() if t.strip()]\n"
+            "  _stale=_gi['stale_images'](_tags)\n"
+            "  kept=[t for t in _tags if t.startswith(_gi['IMAGE_PREFIX']) and t not in set(_stale)]\n"
+            "  if _stale:\n"
+            "    results.append(_run(['docker','rmi','-f']+_stale))\n"
+            "  results.append({'cmd':['generator-images'],'rc':0,"
+            "'out':'stale=%d kept=%d' % (len(_stale), len(kept)),'err':''})\n"
             "  results.append(_run_shell(\"docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f\"))\n"
-            "print(json.dumps({'removed': removed, 'results': results, 'docker_ok': docker_ok}))\n"
+            "print(json.dumps({'removed': removed, 'results': results, 'docker_ok': docker_ok, "
+            "'generator_images_stale': _stale if docker_ok else [], "
+            "'generator_images_kept': kept if docker_ok else []}))\n"
         )
         try:
             payload = backend._run_remote_python_json(
@@ -919,7 +963,14 @@ def _best_effort_cli_flag_sequencing_cleanup(
                 timeout=180.0,
             )
             removed = payload.get('removed') if isinstance(payload, dict) and isinstance(payload.get('removed'), list) else []
-            logging.info('Flow cleanup: remote preclean complete (removed=%d)', len(removed))
+            stale = payload.get('generator_images_stale') if isinstance(payload, dict) else None
+            kept = payload.get('generator_images_kept') if isinstance(payload, dict) else None
+            logging.info(
+                'Flow cleanup: remote preclean complete (removed=%d, generator images removed=%d kept=%d)',
+                len(removed),
+                len(stale) if isinstance(stale, list) else 0,
+                len(kept) if isinstance(kept, list) else 0,
+            )
         except Exception as exc:
             logging.warning('Flow cleanup: remote cleanup failed: %s', exc)
         return
@@ -950,8 +1001,29 @@ def _best_effort_cli_flag_sequencing_cleanup(
                 logging.warning('Flow cleanup: %s exited %s: %s', ' '.join(cmd), proc.returncode, (proc.stdout or '').strip()[-1200:])
         except Exception as exc:
             logging.warning('Flow cleanup: %s failed: %s', ' '.join(cmd), exc)
+    # Generator images are removed by digest, not by pattern: an image whose
+    # digest still matches installed source is exactly what the next Generate
+    # reuses, and rebuilding it needs a base image an air-gapped host may not
+    # have. See the remote branch above for the same rule.
+    try:
+        from .utils.generator_images import stale_images
+
+        listed = _run_local_cmd(
+            ['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'],
+            timeout_s=120.0, allow_sudo_retry=True,
+        )
+        tags = [t.strip() for t in (listed.stdout or '').splitlines() if t.strip()]
+        stale = stale_images(tags) if listed.returncode == 0 else []
+        if stale:
+            _run_local_cmd(['docker', 'rmi', '-f'] + stale, timeout_s=120.0, allow_sudo_retry=True)
+        kept = len([t for t in tags if t.startswith('coretg-gen-')]) - len(stale)
+        logging.info(
+            'Flow cleanup: generator images removed=%d kept=%d', len(stale), max(0, kept)
+        )
+    except Exception as exc:
+        logging.warning('Flow cleanup: generator image cleanup failed: %s', exc)
+
     for script_text, label in (
-        ("docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^coretg-gen-[^:]+:' | xargs -r docker rmi -f", 'old generator images'),
         ("docker images --format '{{.Repository}}:{{.Tag}}' | grep '_wrapper' | xargs -r docker rmi -f", 'wrapper images'),
     ):
         try:
@@ -3732,6 +3804,7 @@ _SEG_SETTING_FLAGS: dict[str, str] = {
     'allow_src_subnet_prob': 'allow_src_subnet_prob',
     'allow_dst_subnet_prob': 'allow_dst_subnet_prob',
     'accessible_by_pivot': 'seg_accessible_by_pivot',
+    'pivot_provider': 'seg_pivot_provider',
 }
 
 
@@ -3767,6 +3840,15 @@ def _seg_settings(args: Any, xml_path: str | None = None, scenario: Any = None) 
             # not an instruction to override a scenario that turns it on.
             if coerce_bool(value, False):
                 settings[key] = True
+        elif key == 'pivot_provider':
+            # Normalised through the planner's own vocabulary, so the flag and
+            # the XML attribute cannot mean different things. An unmappable
+            # value leaves the scenario's choice alone rather than clearing it.
+            from .utils.pivot_access import preferred_provider_kind
+
+            kind = preferred_provider_kind(value)
+            if kind:
+                settings[key] = kind
         else:
             settings[key] = coerce_probability(value, settings[key])
     return settings
@@ -6631,7 +6713,20 @@ def _add_cli_execute_topo_args(container: Any) -> None:
             'Guarantee every subnet segmentation walls off keeps one reachable "provider" node '
             '(a vulnerability, flag-node-generator, or SSH) so challenges behind the boundary stay '
             'solvable. Providers never consume challenge-slot capacity. '
-            'Also settable per scenario via the Segmentation section\'s accessible_by_pivot attribute'
+            'Also settable per scenario: the editor writes pivot_enabled on a Segmentation row, '
+            'and a scenario-wide accessible_by_pivot attribute on the section is honoured too'
+        ),
+    )
+    container.add_argument(
+        '--seg-pivot-provider',
+        choices=['vulnerability', 'flag-node-generator', 'ssh-fallback'],
+        default=None,
+        help=(
+            'Which provider kind to try first for pivot access. Reorders the default preference '
+            '(vulnerability, then flag-node-generator, then SSH) rather than restricting it: a '
+            'subnet whose only way in is a vulnerability still gets one. Also settable per scenario '
+            'via a Segmentation row\'s pivot_provider attribute; with several rows the first '
+            'concrete choice wins'
         ),
     )
     container.add_argument(
@@ -7976,6 +8071,7 @@ def main():
                     pivot_participant_subnets=sorted(
                         (hitl_preview_reservations or {}).get('network_cidrs') or []
                     ),
+                    pivot_preferred_provider=seg_settings.get('pivot_provider'),
                     planned_rules=seg_planned_rules,
                 )
                 logging.info("Applied segmentation rules: %d", len(seg_summary.get("rules", [])))

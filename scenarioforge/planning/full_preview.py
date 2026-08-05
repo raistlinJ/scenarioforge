@@ -1778,6 +1778,12 @@ def build_full_preview(
                 # Reserved here already, and always networks rather than the
                 # single addresses on them.
                 participant_subnets=[str(net) for net in reserved_networks],
+                # The author's provider choice has to apply here too. This is
+                # the call that decides which node gets a provider -- and, for
+                # an added one, creates it -- so a preference honoured only at
+                # execute would place the node here and open the port on a
+                # different one there.
+                preferred_provider=seg_settings.get('pivot_provider'),
             )
             # A provider that has to be added is created here, while nodes are
             # still being planned. After this it is an ordinary host in the

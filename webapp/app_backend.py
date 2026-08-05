@@ -23337,6 +23337,37 @@ def _flow_pivot_access_enabled(preview: Any) -> bool:
     return False
 
 
+def _flow_preview_pivot_provider(preview: Any) -> str:
+    """The provider kind the scenario asked for, read from the preview.
+
+    Flow stamps pivot steps onto the chain from its own `plan_pivot_access`
+    call, so it has to select providers the same way the segmentation planner
+    does. Reading a different preference -- or none -- would name one node in the
+    participant's guide and open the port on another.
+    """
+    from scenarioforge.utils.pivot_access import preferred_provider_kind
+
+    for source in (preview if isinstance(preview, dict) else {},
+                   (preview or {}).get('metadata') if isinstance(preview, dict) else {}):
+        if not isinstance(source, dict):
+            continue
+        for key in ('pivot_provider', 'segmentation_pivot_provider'):
+            kind = preferred_provider_kind(source.get(key))
+            if kind:
+                return kind
+        seg = source.get('segmentation_preview')
+        if isinstance(seg, dict):
+            kind = preferred_provider_kind(seg.get('pivot_provider'))
+            if kind:
+                return kind
+            settings = seg.get('settings')
+            if isinstance(settings, dict):
+                kind = preferred_provider_kind(settings.get('pivot_provider'))
+                if kind:
+                    return kind
+    return ''
+
+
 def _flow_preview_entry_points(preview: Any) -> dict[int, list]:
     """What each preview node already offers, for pivot provider selection.
 
@@ -23479,6 +23510,7 @@ def _flow_stamp_pivot_grants(
         plan = plan_pivot_access(
             rules, hosts, routers=routers, node_names=names,
             entry_points=_flow_preview_entry_points(preview),
+            preferred_provider=_flow_preview_pivot_provider(preview),
         )
         if not plan.providers:
             return flag_assignments

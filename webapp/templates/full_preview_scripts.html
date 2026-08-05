@@ -3293,6 +3293,38 @@
       return executeProgressModalInst;
     }
 
+    // The Execute button's enabled state follows one fact -- whether a run is
+    // in flight -- instead of being toggled at each place a run can end. Those
+    // exits are spread across two polling loops and several early returns, so
+    // releasing at each is how one gets missed; a missed release leaves the
+    // button dead until reload, which is worse than the bug being fixed here.
+    //
+    // In embedded mode the visible button belongs to the parent Scenarios page
+    // while this document owns the run, so the state is mirrored upward.
+    function setExecuteButtonBusy(busy) {
+      const btn = document.getElementById('executeRunBtn');
+      if (btn) {
+        if (busy) {
+          if (!btn.dataset.idleLabel) { btn.dataset.idleLabel = (btn.textContent || 'Execute'); }
+          btn.dataset.executing = '1';
+          btn.disabled = true;
+          btn.textContent = 'Executing…';
+        } else {
+          delete btn.dataset.executing;
+          btn.disabled = false;
+          if (btn.dataset.idleLabel) { btn.textContent = btn.dataset.idleLabel; }
+        }
+      }
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(
+            { type: 'coretg-preview-execute-state', busy: !!busy },
+            window.location.origin
+          );
+        }
+      } catch (e) { }
+    }
+
     function setExecuteProgressUI(opts) {
       const { status, meta, barText, animate, percent } = opts || {};
       const statusEl = document.getElementById('executeProgressStatus');
@@ -3310,6 +3342,12 @@
         if (animate === true) { bar.classList.add('progress-bar-animated', 'progress-bar-striped'); }
         else if (animate === false) { bar.classList.remove('progress-bar-animated', 'progress-bar-striped'); }
       }
+      // `animate` already means "work is still in flight" at every call site --
+      // true while running or generating the summary, false at every terminal
+      // state including the early failure returns. Reuse it rather than adding
+      // a second notion of busy that could disagree with the progress bar.
+      if (animate === true) { setExecuteButtonBusy(true); }
+      else if (animate === false) { setExecuteButtonBusy(false); }
     }
 
     function openExecuteProgress(title) {
@@ -3677,6 +3715,10 @@
     }
 
     function presentExecuteSummary(runStatus, reportsHref) {
+      // The run is over by the time a summary exists. This is the one terminal
+      // path that leaves the progress bar animating (it reads "Generating
+      // Execution Summary"), so it has to release the button itself.
+      setExecuteButtonBusy(false);
       const modalEl = document.getElementById('executeSummaryModal');
       const listEl = document.getElementById('executeSummaryList');
       if (!modalEl || !listEl || !window.bootstrap) {
@@ -3774,25 +3816,22 @@
     const executeRunBtn = document.getElementById('executeRunBtn');
     if (executeRunBtn && !executeRunBtn.dataset.boundExecute) {
       executeRunBtn.dataset.boundExecute = '1';
-      let executing = false;
       let dockerRetryAttempted = false;
-      const originalLabel = executeRunBtn.textContent;
       executeRunBtn.addEventListener('click', async () => {
-        if (executing) return;
+        // The in-flight flag lives on the element, not in this closure, so that
+        // the progress UI -- which is what learns the run has ended -- can clear
+        // it too. Two copies of "is a run happening" is how the button came to
+        // be re-enabled while execute was still going.
+        if (executeRunBtn.dataset.executing === '1') return;
         // Claim the button before anything that yields. The saved-XML
         // confirmation below is awaited, and while it is pending the event loop
         // is free: leaving the button live there lets a second click start a
         // concurrent execute against the same scenario.
-        executing = true;
-        executeRunBtn.disabled = true;
+        setExecuteButtonBusy(true);
 
         // Release the button when the user backs out, so a cancelled run can be
         // retried without reloading the page.
-        const releaseExecuteButton = () => {
-          executing = false;
-          executeRunBtn.disabled = false;
-          if (originalLabel) { executeRunBtn.textContent = originalLabel; }
-        };
+        const releaseExecuteButton = () => { setExecuteButtonBusy(false); };
 
         // Preview is an execution surface in its own right.  Keeping the run
         // here lets a cancelled or failed execution remain on Preview for an
@@ -3813,7 +3852,6 @@
         const confirmMsg = 'Execute scenario now? This will invoke the CLI and start a CORE session.';
         if (!window.confirm(confirmMsg)) { releaseExecuteButton(); return; }
         dockerRetryAttempted = false;
-        if (originalLabel) { executeRunBtn.textContent = 'Executing…'; }
         try {
           openExecuteProgress('Executing scenario…');
           appendExecuteProgressLog('Submitting run for {{ xml_path }}');
@@ -4072,11 +4110,11 @@
           setExecuteProgressUI({ status: 'Exception starting run', meta: '', barText: 'Error', animate: false });
           cleanupExecuteProgress();
         }
-        finally {
-          executeRunBtn.disabled = false;
-          if (originalLabel) { executeRunBtn.textContent = originalLabel; }
-          executing = false;
-        }
+        // Deliberately no `finally` release. The run continues in the polling
+        // loop started above, which is not awaited, so a release here fires
+        // while execute is still going -- the button turned green and clickable
+        // mid-run. The release now happens where the run actually ends, via
+        // setExecuteProgressUI({ animate: false }).
       });
 
       // The parent Preview page owns the visible Execute button while this
