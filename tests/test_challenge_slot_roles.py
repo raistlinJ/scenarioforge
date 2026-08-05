@@ -354,3 +354,54 @@ def test_a_host_without_the_marker_is_not_mistaken_for_a_provider():
     lookalike = {'node_id': 30, 'name': 'pivot-10-0-171-0', 'role': 'Docker', 'metadata': {}}
     assert ab._flow_node_is_pivot_access_provider(lookalike) is False
     assert ab._flow_node_accepts_challenge_kind(lookalike, 'flag-node-generator') is True
+
+
+def test_the_marker_survives_into_the_topology_graph():
+    """The chain picker works on graph nodes, not on plan hosts.
+
+    `_build_topology_graph_from_preview_plan` copies a fixed set of host keys
+    and flattens them onto the graph node. `pivot_access_provider` was in that
+    copy list but read from the host's *top level*, while the planner writes it
+    under `metadata` -- so the graph node arrived looking like an ordinary free
+    Docker host and Flow kept chaining providers even after the eligibility gate
+    learned to reject them.
+    """
+    from webapp import app_backend as ab
+
+    preview = {
+        'hosts': [
+            {'node_id': 6, 'name': 'docker-1', 'role': 'Docker', 'ip4': '10.0.0.6/24'},
+            {'node_id': 26, 'name': 'pivot-10-0-88-0', 'role': 'Docker', 'ip4': '10.0.88.5/24',
+             'metadata': {'pivot_access_provider': {
+                 'subnet': '10.0.88.0/24', 'kind': 'ssh', 'port': 2222,
+                 'consumes_slot': False}}},
+        ],
+    }
+    nodes, _links, adj = ab._build_topology_graph_from_preview_plan(preview)
+    by_name = {str(n.get('name')): n for n in nodes}
+
+    provider = by_name['pivot-10-0-88-0']
+    assert 'pivot_access_provider' in provider, 'the marker must reach the graph node'
+    assert ab._flow_node_is_pivot_access_provider(provider) is True
+    assert ab._flow_node_accepts_challenge_kind(provider, 'flag-node-generator') is False
+
+    plain = by_name['docker-1']
+    assert ab._flow_node_is_pivot_access_provider(plain) is False
+    assert ab._flow_node_accepts_challenge_kind(plain, 'flag-node-generator') is True
+
+    # And the picker that actually builds the chain skips it.
+    picked = ab._pick_flow_nonvulnerability_docker_nodes(nodes, adj, length=2)
+    assert [str(p.get('name')) for p in picked] == ['docker-1']
+
+
+def test_provider_detection_accepts_both_host_shapes():
+    """A plan host nests the marker; a graph node flattens it."""
+    from webapp import app_backend as ab
+
+    nested = {'node_id': 26, 'role': 'Docker',
+              'metadata': {'pivot_access_provider': {'kind': 'ssh'}}}
+    flattened = {'id': '26', 'type': 'docker', 'pivot_access_provider': {'kind': 'ssh'}}
+    assert ab._flow_node_is_pivot_access_provider(nested) is True
+    assert ab._flow_node_is_pivot_access_provider(flattened) is True
+    # A truthy non-dict must not be mistaken for the marker.
+    assert ab._flow_node_is_pivot_access_provider({'pivot_access_provider': 'yes'}) is False

@@ -19331,7 +19331,18 @@ def _flow_node_is_docker_role(node: dict[str, Any] | None) -> bool:
 
 
 def _flow_node_is_pivot_access_provider(node: dict[str, Any] | None) -> bool:
-    """Whether this host exists only to keep a walled-off subnet reachable."""
+    """Whether this host exists only to keep a walled-off subnet reachable.
+
+    Two shapes reach here and both have to be recognised: a plan host carries
+    the marker under `metadata`, while `_build_topology_graph_from_preview_plan`
+    flattens host attributes onto the graph node. Checking only the nested form
+    left the chain picker -- which works on graph nodes -- unable to tell a
+    provider from free capacity.
+    """
+    if not isinstance(node, dict):
+        return False
+    if isinstance(node.get('pivot_access_provider'), dict):
+        return True
     try:
         from scenarioforge.utils.pivot_access import is_pivot_provider_host
 
@@ -19797,7 +19808,13 @@ def _build_topology_graph_from_preview_plan(preview: Dict[str, Any]) -> Tuple[li
                 continue
         try:
             host_metadata = h.get('metadata') if isinstance(h.get('metadata'), dict) else {}
-            for key in ('flag_node_generator_id', 'flag_node_generator_name'):
+            # `pivot_access_provider` is in the top-level copy list above, but the
+            # planner writes it under `metadata`, so that loop never found it and
+            # the graph node arrived looking like an ordinary free Docker host --
+            # which is how Flow kept placing challenges on provider nodes even
+            # after the eligibility gate learned to reject them.
+            for key in ('flag_node_generator_id', 'flag_node_generator_name',
+                        'pivot_access_provider'):
                 if host_metadata.get(key) not in (None, '', []):
                     extra[key] = host_metadata.get(key)
         except Exception:
