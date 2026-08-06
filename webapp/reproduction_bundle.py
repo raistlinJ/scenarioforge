@@ -197,6 +197,10 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
 
         extraction_root = upload_root / f"reproduction-{uuid.uuid4().hex}"
         extraction_root.mkdir(parents=True, exist_ok=False)
+        try:
+            extraction_root.chmod(0o700)
+        except OSError:
+            pass
         sources = manifest.get("artifact_sources")
         sources = sources if isinstance(sources, list) else []
         path_map: dict[str, str] = {}
@@ -211,6 +215,10 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
                 files = source.get("files") if isinstance(source.get("files"), list) else []
                 target_root = extraction_root / Path(*PurePosixPath(archive_root).parts)
                 target_root.mkdir(parents=True, exist_ok=True)
+                try:
+                    target_root.chmod(0o700)
+                except OSError:
+                    pass
                 for file_record in files:
                     if not isinstance(file_record, dict):
                         raise ValueError("bundle contains an invalid artifact file record")
@@ -250,8 +258,16 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
             )
             xml_path = _unique_path(upload_root, _safe_xml_name(upload_path, manifest))
             xml_path.write_bytes(rewritten_xml)
+            try:
+                xml_path.chmod(0o600)
+            except OSError:
+                pass
             manifest_path = extraction_root / MANIFEST_NAME
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            try:
+                manifest_path.chmod(0o600)
+            except OSError:
+                pass
         except Exception:
             shutil.rmtree(extraction_root, ignore_errors=True)
             raise

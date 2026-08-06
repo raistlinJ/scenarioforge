@@ -62,6 +62,10 @@ def register(
         os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
         file.save(filepath)
         try:
+            os.chmod(filepath, 0o600)
+        except OSError:
+            pass
+        try:
             imported = import_scenario_file(filepath, app.config['UPLOAD_FOLDER'])
             filepath = imported.xml_path
             payload = parse_scenarios_xml(filepath)

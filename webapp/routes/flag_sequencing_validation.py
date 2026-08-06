@@ -135,7 +135,15 @@ def register(app, *, backend_module: Any) -> None:
                     local_file = backend.os.path.join(directory, filename)
                     if backend.os.path.islink(local_file) or not backend.os.path.isfile(local_file):
                         continue
-                    sftp.put(local_file, backend._remote_path_join(remote_dir, filename))
+                    remote_file = backend._remote_path_join(remote_dir, filename)
+                    sftp.put(local_file, remote_file)
+                    try:
+                        sftp.chmod(
+                            remote_file,
+                            backend.stat.S_IMODE(backend.os.stat(local_file).st_mode),
+                        )
+                    except Exception:
+                        pass
                     copied_files += 1
             restored += 1
             try:
