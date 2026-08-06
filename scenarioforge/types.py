@@ -69,3 +69,7 @@ class PivotInfo:
     produces: str = ""
     requires: str = ""
     abs_count: int = 0
+    # Segmentation pivot rows are consumed by the dedicated pivot-access
+    # planner. Keeping their origin prevents the runtime's generic Pivoting
+    # pass from trying to apply the same request a second time.
+    origin: str = "pivoting"

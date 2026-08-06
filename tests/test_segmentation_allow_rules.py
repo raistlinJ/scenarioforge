@@ -132,6 +132,133 @@ def test_segmentation_allow_rules_are_idempotent_and_unblock_traffic(tmp_path):
     assert verification.get("blocked_count") == 0
 
 
+def test_runtime_allow_scripts_do_not_overwrite_preview_scripts(tmp_path):
+    out_dir = tmp_path / "segmentation"
+    out_dir.mkdir()
+    existing = out_dir / "seg_allow_2_1.py"
+    existing.write_text("# preview allow\n", encoding="utf-8")
+    (out_dir / "segmentation_summary.json").write_text(
+        json.dumps({
+            "rules": [{
+                "node_id": 2,
+                "rule": {"type": "none", "default_deny": True, "chain": "INPUT"},
+            }]
+        }),
+        encoding="utf-8",
+    )
+    traffic_path = tmp_path / "traffic_summary.json"
+    traffic_path.write_text(
+        json.dumps({
+            "flows": [{
+                "src_id": 1,
+                "dst_id": 2,
+                "src_ip": "10.0.0.10",
+                "dst_ip": "10.0.1.10",
+                "dst_port": 8080,
+                "protocol": "tcp",
+            }]
+        }),
+        encoding="utf-8",
+    )
+
+    write_allow_rules_for_flows(
+        session=None,
+        routers=[],
+        hosts=[
+            NodeInfo(node_id=1, ip4="10.0.0.10/24", role="Workstation"),
+            NodeInfo(node_id=2, ip4="10.0.1.10/24", role="Workstation"),
+        ],
+        traffic_summary_path=str(traffic_path),
+        out_dir=str(out_dir),
+        src_subnet_prob=0.0,
+        dst_subnet_prob=0.0,
+        include_hosts=True,
+    )
+
+    assert existing.read_text(encoding="utf-8") == "# preview allow\n"
+    assert (out_dir / "seg_allow_2_2.py").exists()
+
+
+def test_allow_rules_accept_postrouting_source_after_masquerade(tmp_path):
+    routers = [
+        NodeInfo(node_id=100, ip4="10.0.0.1/24", role="Router"),
+        NodeInfo(node_id=101, ip4="10.0.2.1/24", role="Router"),
+    ]
+    hosts = [
+        NodeInfo(node_id=1, ip4="10.0.0.10/24", role="Workstation"),
+        NodeInfo(node_id=2, ip4="10.0.2.10/24", role="Workstation"),
+    ]
+    out_dir = tmp_path / "segmentation"
+    out_dir.mkdir()
+    (out_dir / "segmentation_summary.json").write_text(
+        json.dumps({
+            "rules": [
+                {
+                    "node_id": 100,
+                    "rule": {
+                        "type": "nat",
+                        "internal": "10.0.0.0/24",
+                        "external": "10.0.2.0/24",
+                        "mode": "MASQUERADE",
+                        "default_deny": True,
+                        "chain": "FORWARD",
+                    },
+                },
+                {
+                    "node_id": 101,
+                    "rule": {"type": "none", "default_deny": True, "chain": "FORWARD"},
+                },
+                {
+                    "node_id": 2,
+                    "rule": {"type": "none", "default_deny": True, "chain": "INPUT"},
+                },
+            ]
+        }),
+        encoding="utf-8",
+    )
+    traffic_path = tmp_path / "traffic_summary.json"
+    traffic_path.write_text(
+        json.dumps({
+            "flows": [{
+                "src_id": 1,
+                "dst_id": 2,
+                "src_ip": "10.0.0.10",
+                "dst_ip": "10.0.2.10",
+                "dst_port": 5009,
+                "protocol": "tcp",
+            }]
+        }),
+        encoding="utf-8",
+    )
+
+    result = write_allow_rules_for_flows(
+        session=None,
+        routers=routers,
+        hosts=hosts,
+        traffic_summary_path=str(traffic_path),
+        out_dir=str(out_dir),
+        src_subnet_prob=0.0,
+        dst_subnet_prob=0.0,
+    )
+
+    observed = {
+        (entry["node_id"], entry["rule"]["chain"], entry["rule"]["src"])
+        for entry in result["rules"]
+    }
+    assert (2, "INPUT", "0.0.0.0/0") in observed
+    assert (100, "FORWARD", "10.0.0.10") in observed
+    assert (101, "FORWARD", "0.0.0.0/0") in observed
+    assert (1, "OUTPUT", "10.0.0.10") in observed
+
+    downstream_script = "\n".join(
+        path.read_text("utf-8") for path in out_dir.glob("seg_allow_101_*.py")
+    )
+    assert (
+        "iptables -I FORWARD 1 -p tcp -s 0.0.0.0/0 "
+        "-d 10.0.2.10 --dport 5009 -j ACCEPT"
+    ) in downstream_script
+
+
 def test_compose_ports_for_vulns_and_flag_node_generators_are_allowed_idempotently(tmp_path):
     vuln_compose = tmp_path / "vuln-compose.yml"
     vuln_compose.write_text(

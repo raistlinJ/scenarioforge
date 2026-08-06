@@ -42,7 +42,7 @@ if _core_grpc_ok:
 else:  # pragma: no cover - fallback path executed in CI without CORE
     client = None  # type: ignore
     CORE_GRPC_AVAILABLE = False
-from .types import NodeInfo
+from .types import NodeInfo, PivotInfo
 from .planning.node_plan import (
     ALLOWED_HOST_ROLES,
     HOST_ROLE_DISPLAY_ORDER,
@@ -548,8 +548,10 @@ class _CaptureTextStream(_AutoFlushTextStream):
         return self._captured
 
 
-# Image references this application produces. Everything else on the host --
-# base images, vulhub pulls, unrelated projects -- is left alone.
+# Image references this application produces. This selector deliberately does
+# not decide retention for pulled scenario bases; scoped conflict cleanup does
+# that using the persistent/prerequisite keep set. Unrelated host images remain
+# outside both cleanup paths.
 #   coretg/<slug>:iproute2      current iproute2 wrapper images
 #   coretg-gen-<name>:<tag>     legacy generator images
 #   <...>_wrapper<...>          legacy wrapper naming
@@ -1698,6 +1700,108 @@ def _wait_for_core_runtime(core: Any, session_id: int, *, timeout_s: float = 30.
     return False, last_state
 
 
+_ROUTING_CONFIG_STANZAS = {
+    'ospfv2': 'router ospf',
+    'ospf': 'router ospf',
+    'ospfv3': 'router ospf6',
+    'ospfv3mdr': 'router ospf6',
+    'rip': 'router rip',
+    'ripng': 'router ripng',
+    'bgp': 'router bgp',
+    'babel': 'router babel',
+}
+
+
+def _ensure_router_control_planes(
+    session: Any,
+    session_id: int,
+    router_protocols: Any,
+    *,
+    attempts: int = 5,
+    retry_delay_s: float = 0.5,
+) -> dict[str, Any]:
+    """Reapply and verify Quagga/FRR configs after CORE reaches runtime.
+
+    CORE's generated ``quaggaboot.sh`` starts routing daemons and immediately
+    runs ``vtysh -b``. On a busy VM the daemon socket may not be ready yet; the
+    daemon remains alive but has no ``router ...`` stanza, permanently isolating
+    that router. Reapplying the saved config is idempotent and closes that race.
+    """
+    configured: list[str] = []
+    missing: list[str] = []
+    details: dict[str, Any] = {}
+    if not isinstance(router_protocols, dict):
+        return {'ok': True, 'configured': configured, 'missing': missing, 'details': details}
+
+    pending: dict[int, tuple[str, set[str]]] = {}
+    for raw_node_id, raw_protocols in router_protocols.items():
+        try:
+            node_id = int(raw_node_id)
+        except (TypeError, ValueError):
+            continue
+        protocols = raw_protocols if isinstance(raw_protocols, (list, tuple, set)) else [raw_protocols]
+        expected = {
+            _ROUTING_CONFIG_STANZAS.get(str(protocol or '').strip().lower(), '')
+            for protocol in protocols
+        }
+        expected.discard('')
+        if not expected:
+            continue
+        try:
+            node = session.get_node(node_id)
+        except Exception:
+            node = None
+        node_name = str(
+            getattr(node, 'name', None)
+            or getattr(node, 'label', None)
+            or f'router-{node_id}'
+        ).strip()
+        pending[node_id] = (node_name, expected)
+
+    max_attempts = max(1, int(attempts or 1))
+    for attempt in range(1, max_attempts + 1):
+        for node_id, (node_name, expected) in list(pending.items()):
+            node_dir = f'/tmp/pycore.{int(session_id)}/{node_name}'
+            apply_result = _run_local_cmd(
+                ['vcmd', '-c', node_dir, '--', 'vtysh', '-b'],
+                timeout_s=15.0,
+                allow_sudo_retry=True,
+            )
+            inspect_result = _run_local_cmd(
+                ['vcmd', '-c', node_dir, '--', 'vtysh', '-c', 'show running-config'],
+                timeout_s=15.0,
+                allow_sudo_retry=True,
+            )
+            running_lines = {
+                line.strip().lower()
+                for line in str(inspect_result.stdout or '').splitlines()
+                if line.strip()
+            }
+            absent = sorted(stanza for stanza in expected if stanza not in running_lines)
+            details[node_name] = {
+                'attempt': attempt,
+                'apply_exit': int(getattr(apply_result, 'returncode', 1)),
+                'inspect_exit': int(getattr(inspect_result, 'returncode', 1)),
+                'expected': sorted(expected),
+                'missing': absent,
+            }
+            if not absent:
+                configured.append(node_name)
+                pending.pop(node_id, None)
+        if not pending:
+            break
+        if attempt < max_attempts:
+            time.sleep(max(0.0, float(retry_delay_s or 0.0)))
+
+    missing = [node_name for node_name, _expected in pending.values()]
+    return {
+        'ok': not missing,
+        'configured': sorted(set(configured)),
+        'missing': sorted(set(missing)),
+        'details': details,
+    }
+
+
 def _docker_compose_node_names(docker_by_name: Any) -> list[str]:
     names: list[str] = []
     try:
@@ -2555,23 +2659,122 @@ def _pivot_ssh_compose_record() -> Dict[str, Any]:
     }
 
 
+def _flow_pivot_items_from_state(flow_state: Any) -> list[PivotInfo]:
+    """Convert persisted Flow pivot targets into the runtime pivot model.
+
+    Flow stores each relationship on both its source and target assignments.  The
+    target copy is authoritative for exposure metadata and avoids applying the
+    same source-to-target relationship twice.
+    """
+    if not isinstance(flow_state, dict) or flow_state.get("flow_enabled") is False:
+        return []
+    assignments = flow_state.get("flag_assignments")
+    if not isinstance(assignments, list):
+        return []
+
+    def _joined(value: Any) -> str:
+        return ",".join(_csv_values(value))
+
+    items: list[PivotInfo] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        relationships = assignment.get("pivot")
+        if not isinstance(relationships, list):
+            continue
+        for relationship in relationships:
+            if not isinstance(relationship, dict):
+                continue
+            role = str(relationship.get("role") or "").strip().lower()
+            if role and role != "target":
+                continue
+            source = str(
+                relationship.get("source")
+                or relationship.get("pivot_node")
+                or relationship.get("source_node")
+                or ""
+            ).strip()
+            target = str(
+                relationship.get("target")
+                or relationship.get("target_node")
+                or assignment.get("node_name")
+                or ""
+            ).strip()
+            if not source or not target or source == target:
+                continue
+            ports = _joined(relationship.get("target_ports"))
+            protocols = _joined(relationship.get("target_protocols"))
+            exposure = str(relationship.get("exposure") or "pivot-only").strip() or "pivot-only"
+            provider = str(
+                relationship.get("provider")
+                or relationship.get("access_provider")
+                or "random"
+            ).strip() or "random"
+            key = (source, target, ports, protocols, exposure)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(
+                PivotInfo(
+                    name=str(assignment.get("name") or "Flow pivot"),
+                    pivot_node=source,
+                    target_node=target,
+                    target_ports=ports,
+                    target_protocols=protocols,
+                    exposure=exposure,
+                    access_provider=provider,
+                    produces=_joined(relationship.get("produces")),
+                    requires=_joined(relationship.get("requires")),
+                    origin="flow",
+                )
+            )
+    return items
+
+
+def _runtime_pivot_items(
+    pivot_items: Any,
+    flow_state: Any,
+) -> list[PivotInfo]:
+    """Return pivot relationships owned by the generic runtime metadata pass.
+
+    Segmentation rows with ``pivot_enabled`` are represented as ``PivotInfo``
+    for reports and plan breakdowns, but their providers are already selected
+    and materialised by the dedicated ``accessible_by_pivot`` planner. Applying
+    those rows again here produces a misleading "no pivot source" warning when
+    the generated segmentation policy did not wall off a transit subnet, and
+    can conflict with the provider the plan already chose when it did.
+    """
+    explicit_items = [
+        item
+        for item in (pivot_items or [])
+        if str(getattr(item, "origin", "pivoting") or "pivoting") != "segmentation"
+    ]
+    return explicit_items + _flow_pivot_items_from_state(flow_state)
+
+
 def _apply_pivoting_to_docker_nodes(
     *,
     session: object,
     hosts: list[NodeInfo],
     docker_nodes: Dict[str, Dict[str, Any]],
     pivot_items: list[Any],
+    node_names_by_id: Dict[int, str] | None = None,
 ) -> Dict[str, Any]:
     import fnmatch
 
     node_by_name: Dict[str, NodeInfo] = {}
     for host in hosts or []:
-        node_name = ""
         try:
-            node_obj = session.get_node(host.node_id) if session is not None and hasattr(session, "get_node") else None
-            node_name = str(getattr(node_obj, "name", None) or getattr(node_obj, "label", None) or "").strip()
+            node_name = str((node_names_by_id or {}).get(int(host.node_id)) or "").strip()
         except Exception:
             node_name = ""
+        try:
+            if not node_name:
+                node_obj = session.get_node(host.node_id) if session is not None and hasattr(session, "get_node") else None
+                node_name = str(getattr(node_obj, "name", None) or getattr(node_obj, "label", None) or "").strip()
+        except Exception:
+            pass
         if not node_name:
             node_name = f"node-{host.node_id}"
         node_by_name[node_name] = host
@@ -4446,14 +4649,37 @@ def _run_cli_artifact_checks(
     check_id = f'cli-{uuid.uuid4().hex[:12]}'
     backend._init_artifact_check_progress(check_id, session_id=resolved_sid, scenario=scenario_name or '')
     print(f'[check-artifacts] Running checks against session {resolved_sid}...', file=target, flush=True)
-    backend._run_artifact_checks_job(
+    backend._schedule_artifact_checks(
         check_id,
         core_cfg=core_cfg,
         session_id=resolved_sid,
         xml_path=xml_path,
         scenario_label=scenario_name,
     )
-    payload = backend._get_artifact_check_progress(check_id) or {}
+    payload: dict[str, Any] = {}
+    last_progress: tuple[int, int, str] | None = None
+    while True:
+        payload = backend._get_artifact_check_progress(check_id) or {}
+        if not payload:
+            break
+        status = str(payload.get('status') or '').strip().lower()
+        try:
+            step = int(payload.get('step') or 0)
+        except Exception:
+            step = 0
+        try:
+            total = int(payload.get('total') or 0)
+        except Exception:
+            total = 0
+        label = str(payload.get('label') or '').strip()
+        progress = (step, total, label)
+        if status == 'running' and step > 0 and progress != last_progress:
+            count = f'{step}/{total}' if total > 0 else str(step)
+            print(f'[check-artifacts] Step {count}: {label or "Running"}', file=target, flush=True)
+            last_progress = progress
+        if status in {'complete', 'error'}:
+            break
+        time.sleep(0.1)
     if not payload:
         payload = {
             'status': 'error', 'overall': 'fail', 'overall_summary': 'checks produced no result',
@@ -7942,17 +8168,25 @@ def main():
         pass
 
     try:
-        if pivot_items and docker_by_name:
+        flow_pivot_items = _flow_pivot_items_from_state(flow_state)
+        runtime_pivot_items = _runtime_pivot_items(pivot_items, flow_state)
+        if runtime_pivot_items and docker_by_name:
             pivot_summary = _apply_pivoting_to_docker_nodes(
                 session=session,
                 hosts=hosts,
                 docker_nodes=docker_by_name,
-                pivot_items=pivot_items,
+                pivot_items=runtime_pivot_items,
+                node_names_by_id=_preview_host_names((preview_full or {}).get('hosts')),
             )
             generation_meta['pivoting'] = pivot_summary
             applied_count = len(pivot_summary.get('rules') or []) if isinstance(pivot_summary, dict) else 0
             warning_count = len(pivot_summary.get('warnings') or []) if isinstance(pivot_summary, dict) else 0
-            logging.info("Applied pivot exposure metadata: targets=%d warnings=%d", applied_count, warning_count)
+            logging.info(
+                "Applied pivot exposure metadata: targets=%d flow_targets=%d warnings=%d",
+                applied_count,
+                len(flow_pivot_items),
+                warning_count,
+            )
             for warning in (pivot_summary.get('warnings') or [])[:10]:
                 logging.warning("Pivoting: %s", warning)
     except Exception as e_pivot:
@@ -8712,6 +8946,7 @@ def main():
                             hosts,
                             all_docker_nodes,
                             out_dir="/tmp/segmentation",
+                            node_names_by_id=_preview_host_names((preview_full or {}).get('hosts')),
                         )
                         compose_allow_count = len(compose_allow.get('rules', []) if isinstance(compose_allow, dict) else [])
                         generation_meta['compose_port_allow_rules'] = compose_allow_count
@@ -8868,6 +9103,7 @@ def main():
     core_daemon_journal_tail: str | None = None
     core_daemon_boot_error: str | None = None
     core_daemon_runtime_hint: str | None = None
+    routing_control_plane: dict[str, Any] | None = None
 
     # Timeouts: allow overrides for slow CORE startups / slow docker pulls.
     try:
@@ -8962,24 +9198,54 @@ def main():
                     c_cont = conflicts.get('containers') or []
                     c_imgs = conflicts.get('images') or []
                     if c_cont or c_imgs:
-                        # Emit a machine-readable marker for web frontends to parse.
-                        try:
-                            print(f"DOCKER_CONFLICTS_JSON: {json.dumps({'containers': list(c_cont), 'images': list(c_imgs)})}", flush=True)
-                        except Exception:
-                            pass
-                        logging.warning(
-                            "Detected potential Docker conflicts: containers=%d images=%d",
-                            len(c_cont),
-                            len(c_imgs),
-                        )
                         if getattr(args, 'docker_remove_conflicts', False):
                             rr = remove_docker_conflicts(conflicts, keep_images=_persistent_images_to_keep())
-                            logging.info(
-                                "Removed Docker conflicts (best-effort): containers=%d images=%d",
-                                len(rr.get('removed_containers') or []),
-                                len(rr.get('removed_images') or []),
-                            )
+                            container_errors = rr.get('container_errors') or {}
+                            image_errors = rr.get('image_errors') or {}
+                            if container_errors or image_errors:
+                                # Only unresolved conflicts need a warning and
+                                # the frontend marker. The normal execute path
+                                # sees containers created while building this
+                                # very topology and cached base images; those
+                                # are recycled/retained successfully and are
+                                # not an operator-actionable warning.
+                                try:
+                                    print(
+                                        "DOCKER_CONFLICTS_JSON: "
+                                        + json.dumps({
+                                            'containers': list(container_errors),
+                                            'images': list(image_errors),
+                                        }),
+                                        flush=True,
+                                    )
+                                except Exception:
+                                    pass
+                                logging.warning(
+                                    "Docker preflight cleanup incomplete: containers=%d images=%d",
+                                    len(container_errors),
+                                    len(image_errors),
+                                )
+                            else:
+                                logging.info(
+                                    "Docker preflight resolved automatically: "
+                                    "recycled_containers=%d removed_images=%d retained_images=%d current_run_images=%d",
+                                    len(rr.get('removed_containers') or []),
+                                    len(rr.get('removed_images') or []),
+                                    len(rr.get('kept_images') or []),
+                                    len(rr.get('active_images') or []),
+                                )
                         else:
+                            # Emit a machine-readable marker for web frontends
+                            # only when the conflicts still require a decision.
+                            try:
+                                print(f"DOCKER_CONFLICTS_JSON: {json.dumps({'containers': list(c_cont), 'images': list(c_imgs)})}", flush=True)
+                            except Exception:
+                                pass
+                            logging.warning(
+                                "Detected unresolved Docker conflicts: containers=%d images=%d",
+                                len(c_cont),
+                                len(c_imgs),
+                            )
                             import sys as _sys
                             if _sys.stdin.isatty():
                                 try:
@@ -9239,6 +9505,33 @@ def main():
                     else:
                         start_error = 'CORE session stayed in "configuration"'
 
+        # CORE's Quagga bootstrap can race the daemon control sockets: ospfd (or
+        # another protocol daemon) is alive, but the one-shot `vtysh -b` applied
+        # no router stanza. Reapply and verify before declaring startup valid.
+        if start_ok and session_id is not None:
+            routing_control_plane = _ensure_router_control_planes(
+                session,
+                int(session_id),
+                locals().get('router_protocols')
+                if isinstance(locals().get('router_protocols'), dict)
+                else {},
+            )
+            if routing_control_plane.get('ok'):
+                configured_routers = routing_control_plane.get('configured') or []
+                if configured_routers:
+                    logging.info(
+                        'Routing control plane configured on: %s',
+                        ', '.join(str(name) for name in configured_routers),
+                    )
+            else:
+                missing_routers = routing_control_plane.get('missing') or []
+                start_ok = False
+                start_error = (
+                    'Routing control-plane configuration did not load on: '
+                    + ', '.join(str(name) for name in missing_routers)
+                )
+                logging.error('%s', start_error)
+
         # CORE can swallow per-node boot exceptions from its thread pool while the
         # session or Docker containers still appear to be running. Inspect only the
         # journal entries emitted after this start_session() request so CLI and WebUI
@@ -9292,6 +9585,8 @@ def main():
             if docker_runtime is not None:
                 generation_meta['docker_nodes_runtime'] = docker_runtime
             generation_meta['docker_nodes_runtime_timeout_s'] = docker_wait_s
+            if routing_control_plane is not None:
+                generation_meta['routing_control_plane'] = routing_control_plane
             if core_daemon_journal_tail:
                 generation_meta['core_daemon_journal_tail'] = core_daemon_journal_tail
             if core_daemon_boot_error:

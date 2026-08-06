@@ -45,6 +45,17 @@ def test_fail_and_error_always_fail():
         assert cli._artifact_check_exit_ok(payload, strict=True) is False
 
 
+def test_required_connectivity_failure_is_never_relaxed_by_non_strict_mode():
+    payload = _payload("pass", "fail", overall="fail")
+    payload["checks"][1].update({
+        "key": "reachability",
+        "label": "Required traffic reaches its destination",
+        "summary": "one required flow is not delivering",
+    })
+    assert cli._artifact_check_exit_ok(payload, strict=False) is False
+    assert cli._artifact_check_exit_ok(payload, strict=True) is False
+
+
 def test_job_level_error_fails():
     payload = {"status": "error", "overall": "fail", "checks": [], "error": "ssh down"}
     assert cli._artifact_check_exit_ok(payload, strict=False) is False

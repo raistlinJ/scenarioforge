@@ -1,6 +1,10 @@
 import json
 
-from scenarioforge.cli import _apply_pivoting_to_docker_nodes
+from scenarioforge.cli import (
+    _apply_pivoting_to_docker_nodes,
+    _flow_pivot_items_from_state,
+    _runtime_pivot_items,
+)
 from scenarioforge.parsers.pivoting import parse_pivoting_info
 from scenarioforge.sequencer.chain import validate_chain_doc, validate_linear_chain
 from scenarioforge.sequencer.dag import build_dag
@@ -103,6 +107,7 @@ def test_parse_pivoting_info_accepts_pivot_contract(tmp_path):
     assert items[0].target_protocols == "tcp"
     assert items[0].exposure == "pivot-only"
     assert items[0].produces == "Shell(jump-web),Pivot(jump-web)"
+    assert items[0].origin == "pivoting"
 
 
 def test_parse_pivoting_info_synthesizes_segmentation_shortcut(tmp_path):
@@ -131,6 +136,38 @@ def test_parse_pivoting_info_synthesizes_segmentation_shortcut(tmp_path):
     assert items[0].target_node == ""
     assert items[0].target_ports == ""
     assert items[0].access_provider == "random"
+    assert items[0].origin == "segmentation"
+
+
+def test_runtime_pivot_items_leave_segmentation_to_pivot_access():
+    explicit = PivotInfo(
+        name="Explicit pivot",
+        pivot_node="jump-web",
+        target_node="internal-db",
+    )
+    segmentation = PivotInfo(
+        name="Firewall Pivot",
+        access_provider="ssh-fallback",
+        origin="segmentation",
+    )
+    flow_state = {
+        "flow_enabled": True,
+        "flag_assignments": [{
+            "name": "Flow target",
+            "node_name": "internal-api",
+            "pivot": [{
+                "role": "target",
+                "source": "jump-web",
+                "target": "internal-api",
+                "provider": "vulnerability",
+            }],
+        }],
+    }
+
+    items = _runtime_pivot_items([segmentation, explicit], flow_state)
+
+    assert [item.name for item in items] == ["Explicit pivot", "Flow target"]
+    assert all(item.origin != "segmentation" for item in items)
 
 
 def test_apply_pivoting_to_docker_nodes_marks_target_exposure():
@@ -174,6 +211,174 @@ def test_apply_pivoting_to_docker_nodes_marks_target_exposure():
     assert docker_nodes["internal-db"]["SegmentationProtocols"] == ["tcp"]
     assert docker_nodes["internal-db"]["PivotRequires"] == ["Pivot(jump-web)"]
     assert summary["rules"][0]["target_requires"] == ["Pivot(jump-web)"]
+
+
+def test_flow_pivot_targets_feed_runtime_exposure_metadata():
+    flow_state = {
+        "flow_enabled": True,
+        "flag_assignments": [
+            {
+                "node_name": "jump-web",
+                "pivot": [
+                    {
+                        "role": "source",
+                        "source": "jump-web",
+                        "target": "internal-db",
+                        "provider": "vulnerability",
+                    }
+                ],
+            },
+            {
+                "name": "Internal database challenge",
+                "node_name": "internal-db",
+                "pivot": [
+                    {
+                        "role": "target",
+                        "source": "jump-web",
+                        "target": "internal-db",
+                        "provider": "vulnerability",
+                        "requires": ["Pivot(jump-web)"],
+                        "target_ports": [],
+                        "target_protocols": [],
+                        "exposure": "pivot-only",
+                    }
+                ],
+            },
+        ],
+    }
+
+    pivot_items = _flow_pivot_items_from_state(flow_state)
+
+    assert len(pivot_items) == 1
+    assert pivot_items[0].pivot_node == "jump-web"
+    assert pivot_items[0].target_node == "internal-db"
+    assert pivot_items[0].target_ports == ""
+
+    session = _DummySession([
+        _DummyNode(1, "jump-web"),
+        _DummyNode(2, "internal-db"),
+    ])
+    hosts = [
+        NodeInfo(node_id=1, ip4="10.0.0.10/24", role="Docker"),
+        NodeInfo(node_id=2, ip4="10.0.1.20/24", role="Docker"),
+    ]
+    docker_nodes = {
+        "jump-web": {
+            "Name": "Existing vulnerability",
+            "Type": "docker-compose",
+            "Path": "/tmp/jump-web.yml",
+            "Vector": "vulnerability",
+        },
+        "internal-db": {
+            "Name": "Internal DB",
+            "Type": "docker-compose",
+            "Path": "/tmp/internal-db.yml",
+        },
+    }
+
+    summary = _apply_pivoting_to_docker_nodes(
+        session=session,
+        hosts=hosts,
+        docker_nodes=docker_nodes,
+        pivot_items=pivot_items,
+    )
+
+    assert summary["warnings"] == []
+    assert docker_nodes["internal-db"]["SegmentationExposure"] == "pivot-only"
+    assert docker_nodes["internal-db"]["SegmentationSources"] == ["10.0.0.10"]
+    assert docker_nodes["internal-db"]["PivotRequires"] == ["Pivot(jump-web)"]
+
+
+def test_flow_pivot_uses_preview_names_when_live_session_has_no_node_lookup():
+    class _SessionWithoutNodeNames:
+        def get_node(self, _node_id):
+            return None
+
+    hosts = [
+        NodeInfo(node_id=16, ip4="10.0.0.10/24", role="Docker"),
+        NodeInfo(node_id=18, ip4="10.0.1.20/24", role="Docker"),
+    ]
+    docker_nodes = {
+        "docker-13": {
+            "Name": "Existing flag generator",
+            "Type": "docker-compose",
+            "Path": "/tmp/docker-13.yml",
+            "Vector": "flag-nodegen",
+        },
+        "flaggenslot-15": {
+            "Name": "Pivot target",
+            "Type": "docker-compose",
+            "Path": "/tmp/flaggenslot-15.yml",
+        },
+    }
+
+    summary = _apply_pivoting_to_docker_nodes(
+        session=_SessionWithoutNodeNames(),
+        hosts=hosts,
+        docker_nodes=docker_nodes,
+        pivot_items=[
+            PivotInfo(
+                name="Flow pivot",
+                pivot_node="docker-13",
+                target_node="flaggenslot-15",
+                exposure="pivot-only",
+                access_provider="ssh-fallback",
+            )
+        ],
+        node_names_by_id={16: "docker-13", 18: "flaggenslot-15"},
+    )
+
+    assert summary["nodes"] == ["flaggenslot-15"]
+    assert docker_nodes["flaggenslot-15"]["SegmentationSources"] == ["10.0.0.10"]
+
+
+def test_compose_allow_uses_preview_names_when_live_session_has_no_node_lookup(tmp_path):
+    class _SessionWithoutNodeNames:
+        def get_node(self, _node_id):
+            return None
+
+    compose_path = tmp_path / "target-compose.yml"
+    compose_path.write_text(
+        "services:\n  node:\n    image: alpine:3.19\n    expose:\n      - '8080/tcp'\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "segmentation"
+    out_dir.mkdir()
+    (out_dir / "segmentation_summary.json").write_text(
+        json.dumps({
+            "rules": [{
+                "node_id": 100,
+                "service": "Segmentation",
+                "rule": {"type": "nat", "default_deny": True, "chain": "FORWARD"},
+                "script": str(out_dir / "seg_nat_100_1.py"),
+            }]
+        }),
+        encoding="utf-8",
+    )
+    result = write_allow_rules_for_compose_ports(
+        session=_SessionWithoutNodeNames(),
+        routers=[NodeInfo(node_id=100, ip4="10.0.0.1/24", role="Router")],
+        hosts=[
+            NodeInfo(node_id=16, ip4="10.0.0.10/24", role="Docker"),
+            NodeInfo(node_id=18, ip4="10.0.1.20/24", role="Docker"),
+        ],
+        docker_nodes={
+            "flaggenslot-15": {
+                "Name": "Pivot target",
+                "Path": str(compose_path),
+                "SegmentationExposure": "pivot-only",
+                "SegmentationSources": ["10.0.0.10"],
+            }
+        },
+        out_dir=str(out_dir),
+        node_names_by_id={16: "docker-13", 18: "flaggenslot-15"},
+    )
+
+    rules = [entry.get("rule") or {} for entry in (result.get("rules") or [])]
+    assert len(rules) == 1
+    assert rules[0]["src"] == "10.0.0.10"
+    assert rules[0]["dst"] == "10.0.1.20"
+    assert rules[0]["port"] == 8080
 
 
 def test_apply_pivoting_ssh_fallback_assigns_docker_ssh_container():
@@ -440,3 +645,77 @@ services:
     assert "iptables -I FORWARD 1 -p tcp -s 10.0.0.10 -d 10.0.1.20 --dport 5432 -j ACCEPT" in script_text
     assert "0.0.0.0/0" not in script_text
     assert "--dport 8080" not in script_text
+
+
+def test_pivot_compose_allow_widens_source_after_masquerade(tmp_path):
+    compose_path = tmp_path / "mongo-compose.yml"
+    compose_path.write_text(
+        "services:\n  db:\n    image: mongo:latest\n    expose:\n      - '17017/tcp'\n",
+        encoding="utf-8",
+    )
+    routers = [
+        NodeInfo(node_id=100, ip4="10.0.0.1/24", role="Router"),
+        NodeInfo(node_id=101, ip4="192.168.1.1/24", role="Router"),
+    ]
+    hosts = [
+        NodeInfo(node_id=1, ip4="10.0.0.10/24", role="Docker"),
+        NodeInfo(node_id=2, ip4="192.168.1.20/24", role="Docker"),
+    ]
+    session = _DummySession([
+        _DummyNode(100, "router-1"), _DummyNode(101, "router-2"),
+        _DummyNode(1, "jump"), _DummyNode(2, "db"),
+    ])
+    out_dir = tmp_path / "segmentation"
+    out_dir.mkdir()
+    summary = {
+        "rules": [
+            {
+                "node_id": 100,
+                "service": "Segmentation",
+                "rule": {
+                    "type": "nat", "default_deny": True, "chain": "FORWARD",
+                    "internal": "10.0.0.0/24", "external": "192.168.1.0/24",
+                },
+                "script": str(out_dir / "seg_nat_100_1.py"),
+            },
+            {
+                "node_id": 101,
+                "service": "Segmentation",
+                "rule": {"type": "nat", "default_deny": True, "chain": "FORWARD"},
+                "script": str(out_dir / "seg_nat_101_1.py"),
+            },
+            {
+                "node_id": 2,
+                "service": "Segmentation",
+                "rule": {"type": "none", "default_deny": True, "chain": "INPUT"},
+                "script": str(out_dir / "seg_none_2_1.py"),
+            },
+        ]
+    }
+    (out_dir / "segmentation_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    docker_nodes = {
+        "db": {
+            "Name": "Mongo Export",
+            "Type": "docker-compose",
+            "Path": str(compose_path),
+            "SegmentationExposure": "pivot-only",
+            "SegmentationSources": ["10.0.0.10"],
+            "SegmentationPorts": ["17017"],
+        }
+    }
+
+    result = write_allow_rules_for_compose_ports(
+        session=session,
+        routers=routers,
+        hosts=hosts,
+        docker_nodes=docker_nodes,
+        out_dir=str(out_dir),
+    )
+
+    observed = {
+        (entry["node_id"], entry["rule"]["chain"], entry["rule"]["src"])
+        for entry in result["rules"]
+    }
+    assert (100, "FORWARD", "10.0.0.10") in observed
+    assert (101, "FORWARD", "0.0.0.0/0") in observed
+    assert (2, "INPUT", "0.0.0.0/0") in observed

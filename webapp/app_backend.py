@@ -858,7 +858,7 @@ def _run_artifact_checks_job(
     preview_plan_path: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
 ) -> None:
-    """Run the six ordered artifact checks against a live CORE session, updating
+    """Run the ordered artifact checks against a live CORE session, updating
     the polled progress store after each step."""
     from webapp import artifact_checks as _ac
     log = logger or getattr(app, 'logger', logging.getLogger(__name__))
@@ -916,6 +916,7 @@ def _run_artifact_checks_job(
             log.warning('[check_artifacts] session XML export failed: %s', exc)
 
         flow_enabled = True
+        flow_state = None
         try:
             flow_state = _flow_state_from_xml_path(xml_path, scenario_label)
             if isinstance(flow_state, dict):
@@ -999,10 +1000,30 @@ def _run_artifact_checks_job(
         _apply(_ac.reachability_result(traffic_probe))
         _step(7, _ac.CHECK_LABELS['reachability'])
 
-        # Check 8: the participant can reach each pivot provider. Read from the
+        # Check 8: every Pivot(source) dependency in Flow's generated challenge
+        # chain is traversable from that exact source node to its target.
+        _step(8, _ac.CHECK_LABELS['flow_pivot'])
+        flow_pivots = _ac.flow_pivot_relationships(flow_state)
+        if flow_pivots:
+            try:
+                flow_pivot_probe = _run_remote_python_json(
+                    core_cfg,
+                    _ac.flow_pivot_probe_script(sudo_pw, session_id, flow_pivots),
+                    logger=log,
+                    label='check_artifacts.flow_pivot',
+                    timeout=150.0,
+                )
+            except Exception as exc:
+                flow_pivot_probe = {'ok': False, 'error': str(exc)}
+        else:
+            flow_pivot_probe = {'ok': True, 'pivots': [], 'checks': []}
+        _apply(_ac.flow_pivot_result(flow_pivot_probe))
+        _step(8, _ac.CHECK_LABELS['flow_pivot'])
+
+        # Check 9: the participant can reach each pivot provider. Read from the
         # rules rather than probed: the HITL node is an RJ45 bound to a physical
         # interface, not a namespace this check could enter.
-        _step(8, _ac.CHECK_LABELS['pivot_access'])
+        _step(9, _ac.CHECK_LABELS['pivot_access'])
         participant_subnets: list[str] = []
         try:
             from scenarioforge.parsers.hitl import parse_hitl_info
@@ -1017,6 +1038,7 @@ def _run_artifact_checks_job(
         except Exception as exc:
             log.debug('[check_artifacts] participant subnets unavailable: %s', exc)
         _apply(_ac.pivot_access_result(seg_probe, participant_subnets))
+        _step(9, _ac.CHECK_LABELS['pivot_access'])
 
         results = [dict(c) for c in checks]
         _update_artifact_check_progress(
@@ -2012,8 +2034,12 @@ def _persistent_images_skipped_warning(*, count: int, size_bytes: int, limit: in
 
 def _persistent_image_keep_set(*, client: Any | None = None) -> set[str]:
     """Return the set of docker image references that must never be removed by any
-    ScenarioForge cleanup routine, because they belong to a vuln-catalog or
-    flag-generator/flag-node-generator item currently marked `persistent`.
+    ScenarioForge cleanup routine.
+
+    This includes images belonging to a vuln-catalog or generator item currently
+    marked `persistent`, plus the framework prerequisite images ScenarioForge
+    itself requires (BusyBox, inject-copy, pivot provider, and shipped runtime
+    templates). Ordinary scenario images are deliberately not retained.
 
     Recomputed fresh on every call (never cached), so an item toggled persistent a
     moment ago is protected on the very next cleanup pass. When `client` (an open
@@ -2025,6 +2051,13 @@ def _persistent_image_keep_set(*, client: Any | None = None) -> set[str]:
 
     keep: set[str] = set()
     local_compose_paths: list[str] = []
+
+    try:
+        from scenarioforge.utils.prerequisite_images import prerequisite_images
+
+        keep.update(str(image).strip() for image in prerequisite_images() if str(image or '').strip())
+    except Exception:
+        pass
 
     try:
         state = _load_vuln_catalogs_state()

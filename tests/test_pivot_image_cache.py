@@ -355,6 +355,20 @@ def test_every_prerequisite_is_pinned_against_cleanup():
         assert image in keep, image
 
 
+def test_web_cleanup_keep_set_also_includes_every_prerequisite(monkeypatch):
+    """Web-side cleanup must use the same prerequisite exceptions as the CLI."""
+    from scenarioforge.utils.prerequisite_images import prerequisite_images
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(backend, '_load_vuln_catalogs_state', lambda: {})
+    monkeypatch.setattr(backend, '_flag_generators_from_all_installed_sources', lambda: ([], []))
+    monkeypatch.setattr(backend, '_flag_node_generators_from_all_installed_sources', lambda: ([], []))
+
+    keep = backend._persistent_image_keep_set()
+    for image in prerequisite_images():
+        assert image in keep, image
+
+
 def test_every_prerequisite_is_prepared_before_the_build(monkeypatch):
     from scenarioforge import cli
     from scenarioforge.utils.prerequisite_images import prerequisite_images

@@ -80,6 +80,8 @@ def test_execute_modal_carries_the_indicator() -> None:
 def test_execute_log_feeds_the_indicator() -> None:
     scripts = (REPO_ROOT / 'webapp' / 'templates' / 'full_preview_scripts.html').read_text(encoding='utf-8')
     assert 'function applyExecuteImageCounts' in scripts
+    assert 'Fetching missing bases for: ' in scripts
+    assert 'Bases cached: ' in scripts
     body = scripts[scripts.find('function appendExecuteProgressLog'):]
     body = body[:body.find('\n    }')]
     assert 'applyExecuteImageCounts(text)' in body, 'execute lines must reach the indicator'
@@ -131,7 +133,7 @@ def test_progress_line_is_parsed_into_the_indicator(template: str) -> None:
     start = template.find('function _applyFlowImageCounts')
     assert start != -1, 'the parser is missing'
     body = template[start:template.find('function clearFlowImageCounts')]
-    assert 'Pulling: ' in body and 'Using: ' in body and 'cached' in body
+    assert 'Building: ' in body and 'Reusing: ' in body and 'already built' in body
 
 
 def test_the_counter_line_is_not_echoed_into_the_details_log(template: str) -> None:
@@ -224,7 +226,7 @@ def test_emitted_progress_line_matches_what_the_client_parses() -> None:
     client_re = re.compile(literal.group(1).replace('\\/', '/'))
 
     # And the exact strings the two servers emit.
-    generate = "[images] pulling=2 cached=5 pending=10"
+    generate = "[images] building=2 cached=5 pending=10"
     execute = "[images] pulling=1 cached=0 pending=17"
     for line in (generate, execute):
         match = client_re.match(line)

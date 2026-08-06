@@ -170,6 +170,50 @@ def test_no_pull_at_all_when_every_image_is_cached(compose_file, monkeypatch):
     assert any('alpine:3.19' in c for c in inspects), 'presence must be confirmed first'
 
 
+def test_mixed_cache_pulls_only_the_missing_base_service(tmp_path, monkeypatch):
+    """One cold base must not refresh every cached base on the same node."""
+    compose_path = tmp_path / 'docker-compose-docker-4.yml'
+    compose_path.write_text(
+        'services:\n'
+        '  cached_db:\n'
+        '    image: postgres:16-alpine\n'
+        '  cold_app:\n'
+        '    image: example/app:1.0\n'
+        '  cached_helper:\n'
+        '    image: alpine:3.19\n',
+        encoding='utf-8',
+    )
+    calls = []
+
+    def fake_run(args, stdout=None, stderr=None, text=None, timeout=None, input=None):
+        argv = list(args)
+        calls.append(argv)
+        if argv[:3] == ['docker', 'image', 'inspect']:
+            image = argv[-1]
+            if image == 'example/app:1.0':
+                return _Proc(1, f'Error: No such image: {image}')
+            return _Proc(0, 'sha256:cached')
+        if argv[:2] == ['docker', 'inspect']:
+            return _Proc(0, '123 running')
+        return _Proc(0, '')
+
+    _install(monkeypatch, fake_run)
+    topo.IMAGES_REQUIRED_THIS_RUN.clear()
+    try:
+        _preflight(compose_path, node_name='docker-4')
+
+        pulls = _pull_calls(calls)
+        assert len(pulls) == 1
+        assert pulls[0][-1] == 'cold_app'
+        assert 'cached_db' not in pulls[0]
+        assert 'cached_helper' not in pulls[0]
+        assert topo.IMAGES_REQUIRED_THIS_RUN == {
+            'postgres:16-alpine', 'example/app:1.0', 'alpine:3.19',
+        }
+    finally:
+        topo.IMAGES_REQUIRED_THIS_RUN.clear()
+
+
 def test_arm64_manifest_mismatch_pins_failed_dependency_to_amd64(tmp_path, monkeypatch):
     compose_path = tmp_path / 'docker-compose-docker-12.yml'
     compose_path.write_text(

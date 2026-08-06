@@ -54,12 +54,46 @@ class SegmentationService(CoreService):
         NODE_ID='${node.id}'
         NODE_NAME='${node.name}'
         <%text>
-        # NAT starter
-        cp /tmp/segmentation/seg_*_*"$NODE_ID"_*.py .
-        for file in seg_*_*"$NODE_ID"_*.py; do
+        # Apply base policy/NAT scripts first and explicit permits last. Running
+        # every script in the background allowed default-deny and ACCEPT rules
+        # to race, so live iptables order could disagree with the summary.
+        # The old substring glob was not an exact node-id match: node 2 also
+        # matched seg_subnet_block_12_1.py.  Parse the two
+        # numeric suffix fields instead so a router never executes another
+        # node's policy script (which can, for example, block OSPF).
+        for source in /tmp/segmentation/seg_*.py; do
+           [ -f "$source" ] || continue
+           file=${source##*/}
+           stem=${file%.py}
+           without_count=${stem%_*}
+           file_node_id=${without_count##*_}
+           [ "$file_node_id" = "$NODE_ID" ] || continue
+           cp "$source" .
+        done
+        for file in seg_*.py; do
+           [ -f "$file" ] || continue
+           stem=${file%.py}
+           without_count=${stem%_*}
+           file_node_id=${without_count##*_}
+           [ "$file_node_id" = "$NODE_ID" ] || continue
+           case "$file" in
+             seg_allow_*|seg_compose_allow_*) continue ;;
+           esac
            echo "running: python3 $file" >> output.txt
-           python3 "$file" &
+           python3 "$file"
+        done
+        for file in seg_*.py; do
+           [ -f "$file" ] || continue
+           stem=${file%.py}
+           without_count=${stem%_*}
+           file_node_id=${without_count##*_}
+           [ "$file_node_id" = "$NODE_ID" ] || continue
+           case "$file" in
+             seg_allow_*|seg_compose_allow_*) ;;
+             *) continue ;;
+           esac
+           echo "running last: python3 $file" >> output.txt
+           python3 "$file"
         done
         </%text>
         """
-

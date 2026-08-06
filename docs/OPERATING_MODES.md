@@ -102,46 +102,44 @@ docker compose up -d --build
 
 ## Image Retention And Offline Runs
 
-A repeat run on unchanged content should not need a registry. Three kinds of
-image live on the CORE VM and they are treated differently, because only some of
-them can be restored without the network.
+Image retention is explicit. Scenario content survives cleanup only when its
+catalog or generator entry is marked `persistent`; ScenarioForge's own
+prerequisite images are the sole automatic exception.
 
 | Kind | Example | Keyed by | On cleanup |
 | --- | --- | --- | --- |
-| Upstream base image | `alpine:3.19`, `vulhub/solr:8.11.0` | registry digest | **kept** — only a pull could restore it |
-| Generator image | `coretg-gen-<pack>-<service>-<source-digest>` | digest of the generator source | **kept** — a source edit yields a new tag |
-| Wrapper image | `coretg/scenarios-<scenario>-<node>-<hash>:iproute2` | hash of the wrapper identity | **kept** — preflight rebuilds it each run anyway |
+| Scenario base image | `vulhub/solr:8.11.0` | registry digest | **removed unless persistent** |
+| Framework prerequisite | `busybox:1.36.1-musl`, inject-copy/pivot images | framework inventory | **kept automatically** |
+| Generator image | `coretg-gen-<pack>-<service>-<source-digest>` | digest of the generator source | **removed unless persistent** |
+| Wrapper image | `coretg/scenarios-<scenario>-<node>-<hash>:iproute2` | hash of the wrapper identity | **removed unless persistent** |
 | CORE session build | `core-<session>-<node>-<name>-<service>` | project name only | **always removed** before the topology build |
 
-That last row is the one that must not survive. CORE builds it with
+The last row must be removed before the next topology build. CORE builds it with
 `docker compose up -d`, which builds only when the tag is absent, and session and
 node ids repeat between runs — so a retained image silently runs a previous
-run's code.
+run's code. Generator and wrapper images are also disposable, but their tags do
+not carry that same stale-session risk.
 
 What this means in practice:
 
-- Preflight skips `docker compose pull` entirely when every pull-only image for a
-  node is already present, so a cached run contacts no registry.
-- Cleanup deletes locally built images that are not pinned, and never deletes an
-  image carrying a repo digest.
-- Generator images are reused when their source digest is unchanged; the
-  Generate and Execute progress modals report the split as
-  `Pulling: x images / Using: y cached / Pending: z`.
-- **"Kept" means selected by digest, never by pattern.** Flow cleanup removes a
-  `coretg-gen-*` image only when no installed generator source still produces
-  that tag, computed with the same digest the runner uses
-  (`scenarioforge/utils/generator_images.py`, shared with
-  `scripts/run_flag_generator.py` so the two cannot drift). A blanket
-  `grep coretg-gen- | xargs docker rmi` emptied the cache on every run, which
-  made `Using: 0 cached` permanent and, on an air-gapped host, meant a rebuild
-  that could not fetch its base image. If `cached` is 0 on a second identical
-  Generate, something is deleting images rather than the digest changing.
+- Preflight skips `docker compose pull` for each base image already present and
+  asks Compose for only the services whose bases are missing. A mixed node no
+  longer refreshes all of its cached bases because one service is cold.
+- Cleanup deletes locally built generator, wrapper, and session images that are
+  not pinned. An ordinary pulled image is also removable: a repo digest records
+  provenance but does not imply persistence.
+- Framework prerequisites are always added to the keep set. This includes
+  BusyBox, inject-copy, pivot-provider, and shipped-template runtime images,
+  including environment-configured mirror replacements.
+- Generator images can still be reused by later assignments in the same
+  generation pass. The Generate progress modal calls the cold outcome
+  `Building`, not `Pulling`, because it is a local build from a cached base.
 - `Pending` counts runs that reported neither outcome. It should normally be 0:
   a non-zero value means a generator's output did not carry its
   `[compose] … cached` / `… will build now` line, not that work is outstanding.
-- A cached generator image still produces different flags, filenames and injects
-  every run: the image holds the generator's code, while the values come from the
-  per-run configuration (seed, node name, scenario).
+- Rebuilding a generator image still produces different flags, filenames and
+  injects every run: the image holds the generator's code, while the values come
+  from the per-run configuration (seed, node name, scenario).
 
 ### Pinning An Image As Persistent
 
@@ -152,9 +150,9 @@ it. If the list ever grows past what can be passed safely, it is dropped for tha
 run with a warning explaining how to reduce it — the run still succeeds, but
 pinned images may be removed and pulled again next time.
 
-Pinning is not required for ordinary caching: base images and content-addressed
-builds already survive. Pin an item when you want its images kept even though
-they are locally built and unpinned images of that kind are cleared.
+Pin an item when its scenario images must remain available between runs. Without
+that flag, ordinary pulled bases and locally built outputs are eligible for
+cleanup; only framework prerequisites are retained automatically.
 
 ## CLI Mode
 

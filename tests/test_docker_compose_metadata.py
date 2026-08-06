@@ -1369,6 +1369,57 @@ def test_prepare_compose_keeps_selected_app_sticky_after_inject_sidecar(tmp_path
     assert (inject_service.get("environment") or {}).get("CORETG_TRAFFIC_NODE") is None
 
 
+def test_prepare_compose_repairs_joomla_mysql55_gosu_on_emulated_arm(tmp_path, monkeypatch):
+    """The Joomla database sidecar must not die in its legacy gosu helper."""
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return
+
+    compose_src = tmp_path / "base-compose.yml"
+    compose_src.write_text(
+        (
+            "services:\n"
+            "  web:\n"
+            "    image: vulhub/joomla:3.4.5\n"
+            "    depends_on: [mysql]\n"
+            "    environment:\n"
+            "      JOOMLA_DB_HOST: mysql\n"
+            "    ports: ['8080:80']\n"
+            "  mysql:\n"
+            "    image: mysql:5.5\n"
+            "    environment:\n"
+            "      MYSQL_ROOT_PASSWORD: vulhub\n"
+        ),
+        encoding="utf-8",
+    )
+
+    record = {
+        "Type": "docker-compose",
+        "Name": "joomla/CVE-2015-8562",
+        "Path": str(compose_src),
+        "ScenarioTag": "joomla-mysql55-gosu",
+    }
+
+    created = prepare_compose_for_assignments(
+        {"docker-14": record},
+        out_base=str(tmp_path / "out"),
+    )
+
+    assert created
+    out_path = tmp_path / "out" / "docker-compose-docker-14.yml"
+    obj = yaml.safe_load(out_path.read_text("utf-8", errors="ignore"))
+    services = (obj or {}).get("services") or {}
+    mysql = services.get("mysql") or {}
+
+    assert mysql.get("image") == "mysql:5.5"
+    assert mysql.get("user") == "mysql"
+    assert (mysql.get("labels") or {}).get("coretg.repaired_catalog_user") == (
+        "mysql-gosu-emulation-bypass"
+    )
+    assert mysql.get("network_mode") == "none"
+
+
 def test_prepare_compose_flow_injects_default_to_flow_injects_dir(tmp_path, monkeypatch):
     """Regression: flow inject specs without explicit dest should default to /flow_injects."""
     try:

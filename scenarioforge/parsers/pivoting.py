@@ -42,7 +42,13 @@ def _factor_and_abs_count(element: ET.Element, default_factor: float = 1.0) -> t
     return factor, abs_count
 
 
-def _pivot_info_from_element(element: ET.Element, *, default_name: str, default_factor: float = 1.0) -> PivotInfo:
+def _pivot_info_from_element(
+    element: ET.Element,
+    *,
+    default_name: str,
+    default_factor: float = 1.0,
+    origin: str = "pivoting",
+) -> PivotInfo:
     factor, abs_count = _factor_and_abs_count(element, default_factor=default_factor)
     name = (element.get("selected") or element.get("name") or default_name).strip() or default_name
     return PivotInfo(
@@ -61,6 +67,7 @@ def _pivot_info_from_element(element: ET.Element, *, default_name: str, default_
         produces=_first_attr(element, "produces", "produces_artifacts"),
         requires=_first_attr(element, "requires", "requires_artifacts"),
         abs_count=abs_count,
+        origin=origin,
     )
 
 
@@ -109,6 +116,7 @@ def parse_pivoting_info(xml_path: str, scenario_name: Optional[str]) -> Tuple[fl
                 element,
                 default_name=f"{selected} Pivot",
                 default_factor=1.0,
+                origin="segmentation",
             )
             if info.factor > 0 or info.abs_count > 0:
                 items.append(info)

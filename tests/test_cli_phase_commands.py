@@ -1,4 +1,5 @@
 import io
+import inspect
 import json
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
@@ -9,6 +10,15 @@ from flask import Flask, jsonify, request
 import scenarioforge.cli as cli
 import scenarioforge.planning.orchestrator as orchestrator
 from webapp import flow_prepare_preview_execute
+
+
+def test_successful_docker_preflight_cleanup_is_not_reported_as_a_conflict_warning():
+    source = inspect.getsource(cli.main)
+
+    assert "Detected potential Docker conflicts" not in source
+    assert "Docker preflight resolved automatically" in source
+    assert "Docker preflight cleanup incomplete" in source
+    assert "Detected unresolved Docker conflicts" in source
 
 
 class _FakeCoreClient:

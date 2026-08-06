@@ -846,6 +846,43 @@ def build_full_preview(
             return None
         return sorted(edges)
 
+    def _connected_regular_edges(node_ids: List[int], degree: int) -> Optional[List[Tuple[int, int]]]:
+        """Build a connected simple regular graph when one is feasible.
+
+        Havel-Hakimi can realize a valid degree sequence as multiple disconnected
+        components (for example, degree 1 on four routers becomes two pairs).
+        Uniform R2R is an operational backbone, so use a shuffled circulant graph:
+        the first neighbour step is a ring and therefore guarantees connectivity.
+        """
+        count = len(node_ids)
+        if count <= 1:
+            return [] if degree == 0 else None
+        if degree < 1 or degree >= count or (count * degree) % 2:
+            return None
+        if degree == 1:
+            if count != 2:
+                return None
+            return [tuple(sorted((node_ids[0], node_ids[1])))]
+
+        ordered = list(node_ids)
+        rng_edges.shuffle(ordered)
+        edges: Set[Tuple[int, int]] = set()
+        for offset in range(1, (degree // 2) + 1):
+            for index, node_id in enumerate(ordered):
+                peer_id = ordered[(index + offset) % count]
+                edges.add(tuple(sorted((node_id, peer_id))))
+        if degree % 2:
+            # Odd regular degree requires an even node count. Add the opposite
+            # perfect matching after the even-degree ring links.
+            if count % 2:
+                return None
+            half = count // 2
+            for index in range(half):
+                edges.add(tuple(sorted((ordered[index], ordered[index + half]))))
+        if len(edges) != (count * degree) // 2:
+            return None
+        return sorted(edges)
+
     def _degree_counts(node_ids: List[int], edges: List[Tuple[int, int]]) -> Dict[int, int]:
         counts: Dict[int, int] = {nid: 0 for nid in node_ids}
         for a, b in edges:
@@ -935,10 +972,26 @@ def build_full_preview(
         if mode_rr == 'min':
             r2r_edges = _chain_edges(node_ids)
         elif mode_rr == 'uniform':
-            allowed_degrees = [d for d in range(1, len(node_ids)) if (len(node_ids) * d) % 2 == 0]
+            # A 1-regular graph is connected only for two routers. For larger
+            # topologies Uniform must have degree >= 2 or the preview can inject
+            # isolated router components into the runtime topology.
+            allowed_degrees = [
+                d for d in range(1, len(node_ids))
+                if (len(node_ids) * d) % 2 == 0
+                and (len(node_ids) == 2 or d >= 2)
+            ]
             if allowed_degrees:
-                chosen_degree = rng_edges.choice(allowed_degrees)
-                candidate = _edges_from_degree_sequence(node_ids, [chosen_degree] * len(node_ids))
+                requested_degree = int(
+                    r2r_preview.get('target_degree')
+                    or r2r_preview.get('target_per_router')
+                    or 0
+                )
+                chosen_degree = (
+                    min(allowed_degrees, key=lambda value: (abs(value - requested_degree), value))
+                    if requested_degree > 0
+                    else rng_edges.choice(allowed_degrees)
+                )
+                candidate = _connected_regular_edges(node_ids, chosen_degree)
                 if candidate is not None:
                     r2r_edges = candidate
                     r2r_preview['target_degree'] = chosen_degree

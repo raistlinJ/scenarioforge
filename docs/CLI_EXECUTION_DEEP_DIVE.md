@@ -242,7 +242,7 @@ python -m scenarioforge.cli execute \
 Behavior:
 
 - Parses the scenario XML.
-- Removes the Docker images this application built — iproute2 wrappers (`coretg/<slug>:iproute2`), generator-pack builds (`p_<stamp>__<n>-generator`), CORE's per-node compose builds (`docker-27conf-docker-27`, `docker-11-node`), and per-session `core-<session>-<node>-*` images — and prunes the entire Docker build cache. Images an operator marked **persistent** are never removed, matching either the exact `repo:tag` or the repository. Base images, vulhub pulls, and anything else on the host are left alone, because re-pulling them needs a registry the CORE host may not be able to reach. Removal is not forced, so an image still referenced by a container (a session that is still up) is skipped rather than pulled out from under it. Expect the first run after a cleanup to rebuild wrapper and generator images.
+- Removes the Docker images this application built — iproute2 wrappers (`coretg/<slug>:iproute2`), generator-pack builds (`p_<stamp>__<n>-generator`), CORE's per-node compose builds (`docker-27conf-docker-27`, `docker-11-node`), and per-session `core-<session>-<node>-*` images — and prunes the entire Docker build cache. Conflict cleanup also removes ordinary scenario images even when they came from a registry; a repo digest is not a retention flag. Images from catalog/generator items marked **persistent** are never removed, and framework prerequisites such as BusyBox, inject-copy, pivot-provider, and shipped-template images are automatically protected. Unrelated host images remain outside ScenarioForge's cleanup scope. Removal is not forced, so an image still referenced by a container (a session that is still up) is skipped rather than pulled out from under it. Expect unpinned scenario content to be pulled or rebuilt again after cleanup.
 - Empties the shared runtime scratch directories (`/tmp/traffic`, `/tmp/segmentation`), so a scenario with no traffic or no segmentation does not inherit the previous scenario's artifacts. These directories are bind-mounted read-only into nodes and hold only the current run's live scripts and summaries, so their contents are removed wholesale; the directories themselves are kept (and created when absent) because compose bind-mounts reference the paths. `topo` does not do this, because it generates neither. Treat these directories as scratch owned by the newest run — do not park anything there you want to keep.
 - Computes planning and preview alignment.
 - Validates embedded Flow runtime values when Flow is active.
@@ -288,7 +288,7 @@ The XML column deliberately prefers a saved *source* scenario XML (one carrying 
 
 ## Check-Artifacts Phase
 
-`check-artifacts` validates a **running** session against what the scenario said it should be. It runs eight ordered checks:
+`check-artifacts` validates a **running** session against what the scenario said it should be. It runs nine ordered checks:
 
 1. Containers are running on the correct nodes.
 2. Services are running.
@@ -297,13 +297,20 @@ The XML column deliberately prefers a saved *source* scenario XML (one carrying 
 5. Firewall/segmentation rules are in place.
 6. Traffic agents are running where they should be.
 7. Each traffic source can reach its destination, **on that flow's own protocol and port**. Never with ping: a default-deny segmentation policy drops ICMP on paths that are working perfectly.
-8. Every pivot provider is reachable from the participant, so the challenges behind a segmentation boundary stay solvable.
+8. Each Flow `Pivot(source)` relationship required by the generated challenge chain is traversable from that source node to its target at runtime.
+9. Every pivot provider is reachable from the participant, so the challenges behind a segmentation boundary stay solvable.
+
+Configured traffic and Flow pivot paths are hard requirements. A required
+endpoint with no live agent, a missing runtime probe result, a TCP refusal, an
+unreachable path, or UDP without destination-side delivery evidence is a
+`fail` in both normal and strict mode. The live probes make three bounded
+attempts and match every IPv4 address on multi-homed nodes before declaring a
+path broken.
 
 The list lives in `artifact_checks.CHECK_ORDER` and the CLI runs the same
 orchestrator the web UI does, so the two never drift.
 
-Checks 3 and 8 are the ones most often misread, and both are about a
-default-deny policy:
+Checks 3, 8, and 9 are the ones most often misread:
 
 - **Check 3** probes each listening port from a node that *should* reach it: the
   source of the flow that uses that exact port, or a peer on the port's own
@@ -311,7 +318,12 @@ default-deny policy:
   segmentation rule explains it, or when the default-deny policy does and
   nothing was supposed to open the path. It warns only when an allow rule opens
   the path and the packets were dropped anyway — the case worth investigating.
-- **Check 8** reads the rules rather than sending packets, because the
+- **Check 8** enters each Flow pivot source's Docker or CORE namespace and
+  connects to its required chain target. It uses Flow's declared target port
+  when present, otherwise a non-loopback TCP listener discovered on the target;
+  a closed-port RST also proves the path works in both directions. This is the
+  runtime counterpart to Flow's logical `Pivot(node)` dependency validation.
+- **Check 9** reads the rules rather than sending packets, because the
   participant's vantage point cannot be probed from: the HITL node is an RJ45
   bound to a physical interface, not a namespace. It therefore still runs with
   nothing plugged in.
@@ -334,17 +346,22 @@ Behavior and options:
 
 - `--session-id` is optional. When omitted, the most recent session recorded for the scenario in `outputs/core_sessions.json` is used. The session is confirmed to be live before any checks run, so a stale or wrong id fails immediately instead of silently validating a different session.
 - `--check-artifacts-delay SECONDS` waits before probing. Use it whenever routing needs to converge or slow containers are still starting.
-- `--strict` promotes warnings to failures. By default only `fail` and `error` checks exit nonzero; `warn` exits `0`.
+- `--strict` promotes advisory warnings to failures. Required traffic and pivot
+  connectivity already use `fail`, so they exit nonzero in both modes. Warnings
+  are reserved for non-required observations such as stale extra traffic agents
+  or unrelated service-port anomalies.
 - The XML you pass may be either a saved source scenario XML or the deployed session XML; the CLI recovers the real source XML from the session store when needed.
 
-Checks 1-4 reuse the same validator as `--post-execution-validation`. Checks 5-7 are live probes executed on the CORE VM over SSH, reaching Docker-backed nodes with `docker exec` and namespaced CORE vnodes (routers/PCs) with `vcmd`.
+Checks 1-4 reuse the same validator as `--post-execution-validation`. Checks
+5-8 include live probes executed on the CORE VM over SSH, reaching Docker-backed
+nodes with `docker exec` and namespaced CORE vnodes (routers/PCs) with `vcmd`.
 
 Output is a per-check table followed by a single machine-readable marker line, `CHECK_ARTIFACTS_SUMMARY_JSON: {...}`, matching the `VALIDATION_SUMMARY_JSON` convention:
 
 ```text
 [PASS ] Containers running on correct nodes: All 22 expected containers present.
 [PASS ] Ports open: All 32 stable service port target(s) reachable (33 listening across 24 node(s)).
-[SKIP ] Traffic agents running: No traffic configured for this scenario.
+[SKIP ] Required traffic agents running: No traffic configured for this scenario.
 ------------------------------------------------------------------------
 Overall: pass — 4 pass, 3 skip
 CHECK_ARTIFACTS_SUMMARY_JSON: {"ok": true, "overall": "pass", ...}

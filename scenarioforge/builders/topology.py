@@ -91,6 +91,11 @@ _PREFLIGHTED_DOCKER_NODE_COMPOSES: Set[str] = set()
 # node whose image existed seconds earlier.
 IMAGES_BUILT_THIS_RUN: Set[str] = set()
 
+# Pull-only images the current topology needs at runtime. These are protected
+# only until the active run is torn down; they are not part of the persistent
+# cache policy.
+IMAGES_REQUIRED_THIS_RUN: Set[str] = set()
+
 # Per-node tally of whether images had to be fetched or were already cached.
 # Printed for the execute UI, which otherwise gives no sign of why one run takes
 # minutes and the next seconds.
@@ -441,6 +446,11 @@ def _reset_docker_compose_prepare_caches(context: str = '') -> None:
         pass
     try:
         _PREFLIGHTED_DOCKER_NODE_COMPOSES.clear()
+    except Exception:
+        pass
+    try:
+        IMAGES_BUILT_THIS_RUN.clear()
+        IMAGES_REQUIRED_THIS_RUN.clear()
     except Exception:
         pass
     try:
@@ -1176,6 +1186,42 @@ def _all_images_present_locally(images, *, docker_cmd, run) -> bool:
     return True
 
 
+def _services_requiring_pull(
+    services: Iterable[str],
+    service_images: Dict[str, str],
+    *,
+    docker_cmd,
+    run,
+) -> List[str]:
+    """Return only pull-only services whose base image is not confirmed local.
+
+    Compose accepts service names rather than image references.  Checking each
+    distinct image first prevents one cold service from making Compose contact
+    the registry for every already-cached service on the same node.  An inspect
+    error is deliberately treated as needing a pull: only a positive local
+    image result is sufficient to suppress network access.
+    """
+    image_is_local: Dict[str, bool] = {}
+    required: List[str] = []
+    for raw_service in services:
+        service = str(raw_service or '').strip()
+        image = str(service_images.get(service) or '').strip()
+        if not service or not image:
+            continue
+        if image not in image_is_local:
+            try:
+                rc, _tail = run(
+                    docker_cmd + ['image', 'inspect', '--format', '{{.Id}}', image],
+                    timeout=60,
+                )
+                image_is_local[image] = rc == 0
+            except Exception:
+                image_is_local[image] = False
+        if not image_is_local[image]:
+            required.append(service)
+    return required
+
+
 def _images_missing_locally(images, *, docker_cmd, run) -> list[str]:
     """Return the images confirmed absent from the local daemon.
 
@@ -1469,6 +1515,18 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         pull_services = []
         pull_service_images = {}
 
+    # Conflict resolution runs after preflight but before CORE starts the
+    # session. Runtime service images must survive that narrow window even when
+    # they are not persistent; teardown cleanup may reclaim them afterwards.
+    try:
+        IMAGES_REQUIRED_THIS_RUN.update(
+            str(image).strip()
+            for image in pull_service_images.values()
+            if str(image or '').strip()
+        )
+    except Exception:
+        pass
+
     # Track whether we successfully built anything.
     built_any = False
 
@@ -1653,12 +1711,13 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         _run(build_args, timeout=1200)
 
     # Pull only non-build services (if any). This avoids pulling scenario-scoped build targets.
-    cached_pull_services = bool(pull_services) and _all_images_present_locally(
-        [pull_service_images.get(svc, '') for svc in pull_services],
+    services_to_pull = _services_requiring_pull(
+        pull_services,
+        pull_service_images,
         docker_cmd=docker_cmd,
         run=_run,
     )
-    if cached_pull_services:
+    if pull_services and not services_to_pull:
         # Every pull-only image is already on this host, so the run needs no
         # registry at all. Pulling anyway made a fully cached scenario depend on
         # the internet for nothing.
@@ -1670,12 +1729,22 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         except Exception:
             pass
         _report_image_use('cached')
-    elif pull_services:
+    elif services_to_pull:
         _report_image_use('pulling')
+        try:
+            logger.info(
+                '[docker-node] preflight pulling only uncached base image services '
+                'node=%s services=%s images=%s',
+                node_name,
+                services_to_pull,
+                sorted({pull_service_images.get(svc, '') for svc in services_to_pull}),
+            )
+        except Exception:
+            pass
         # In strict mode, any pull failure should abort the run.
-        pull_args = compose_base + ['pull'] + pull_services
+        pull_args = compose_base + ['pull'] + services_to_pull
         if not strict_pull:
-            pull_args = compose_base + ['pull', '--ignore-pull-failures'] + pull_services
+            pull_args = compose_base + ['pull', '--ignore-pull-failures'] + services_to_pull
         rc, tail = _run(pull_args, timeout=600)
         if strict_pull and rc != 0:
             fallback_platform, fallback_services = _apply_manifest_platform_fallback(
@@ -1703,7 +1772,7 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             rc, tail = _run(pull_args, timeout=600)
         if strict_pull and rc != 0:
             missing = _images_missing_locally(
-                [pull_service_images.get(svc, '') for svc in pull_services],
+                [pull_service_images.get(svc, '') for svc in services_to_pull],
                 docker_cmd=docker_cmd,
                 run=_run,
             )

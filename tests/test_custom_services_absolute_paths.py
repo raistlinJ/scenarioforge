@@ -95,6 +95,26 @@ def test_segmentation_service_declares_absolute_file_and_dual_path_startup() -> 
     assert "f=/runsegmentation.sh" in txt
 
 
+def test_segmentation_applies_allow_scripts_last_without_racing() -> None:
+    txt = Path("on_core_machine/custom_services/Segmentation.py").read_text("utf-8", errors="ignore")
+
+    assert 'case "$file" in' in txt
+    assert 'seg_allow_*|seg_compose_allow_*) continue' in txt
+    assert 'seg_allow_*|seg_compose_allow_*) ;;' in txt
+    assert 'python3 "$file" &' not in txt
+
+
+def test_segmentation_matches_node_ids_as_complete_filename_fields() -> None:
+    txt = Path("on_core_machine/custom_services/Segmentation.py").read_text("utf-8", errors="ignore")
+
+    # A substring glob made node 2 execute node 12's INPUT-drop policy, which
+    # blocked OSPF on router 2 and removed every cross-subnet route.
+    assert 'seg_*_*"$NODE_ID"_*.py' not in txt
+    assert 'without_count=${stem%_*}' in txt
+    assert 'file_node_id=${without_count##*_}' in txt
+    assert '[ "$file_node_id" = "$NODE_ID" ] || continue' in txt
+
+
 def test_every_script_service_startup_resolves_on_both_node_kinds() -> None:
     """A vnode only has the script in its `.conf` working directory.
 

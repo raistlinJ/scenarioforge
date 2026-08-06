@@ -10,13 +10,13 @@ from webapp import artifact_checks as ac
 # Plan + validator-summary mapping (checks 1-4)
 # --------------------------------------------------------------------------- #
 
-def test_check_plan_has_eight_pending_steps_in_order():
+def test_check_plan_has_nine_pending_steps_in_order():
     plan = ac.check_plan()
     assert [c["key"] for c in plan] == ac.CHECK_KEYS
-    assert len(plan) == 8
-    # Traffic-script health and reachability are separate checks, and pivot
-    # access comes last because it reads what segmentation produced.
-    assert ac.CHECK_KEYS[-3:] == ["traffic", "reachability", "pivot_access"]
+    assert len(plan) == 9
+    # Flow's source-to-target pivots and Segmentation's participant entry
+    # providers are separate checks.
+    assert ac.CHECK_KEYS[-4:] == ["traffic", "reachability", "flow_pivot", "pivot_access"]
     assert all(c["status"] == "pending" for c in plan)
 
 
@@ -58,8 +58,10 @@ def test_ports_probe_script_is_valid_and_uses_proc_net_tcp():
     ast.parse(script)
     assert "/proc/net/tcp" in script          # listening-port discovery
     assert "socket.create_connection" in script  # cross-node reachability
-    assert "python3" in script
+    assert "sys.executable" in script
     assert "vcmd" in script                    # vnodes covered too
+    assert "_nexec_python" in script
+    assert "nsenter" in script                 # minimal Docker images need no Python
 
 
 def test_ports_result_core_network_probe_pass():
@@ -265,18 +267,20 @@ def test_traffic_result_ignores_reachability():
     # unreachable ping must not turn the traffic-script check into a warning.
     probe = {"ok": True, "traffic_files": ["/tmp/traffic/traffic_1_s0.py"],
              "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.7"}]},
-             "nodes": {"h": {"procs": ["x traffic_1_s0.py"], "ip": "10.0.0.5"}},
+             "nodes": {"h": {"procs": ["x traffic_1_s0.py"], "ip": "10.0.0.5"},
+                       "z": {"procs": ["x traffic_2_r0.py"], "ip": "10.0.0.7"}},
              "ping": [{"src": "h", "dst": "z", "ip": "10.0.0.7", "reachable": False}]}
     assert ac.traffic_result(probe, expected=True)["status"] == "pass"
 
 
-def test_traffic_warns_when_a_flow_source_has_no_process():
+def test_traffic_fails_when_a_required_flow_source_has_no_process():
     probe = {"ok": True, "traffic_files": [],
              "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.7"}]},
-             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"}},
+             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"},
+                       "z": {"procs": ["x traffic_2_r0.py"], "ip": "10.0.0.7"}},
              "ping": []}
     res = ac.traffic_result(probe, expected=True)
-    assert res["status"] == "warn"
+    assert res["status"] == "fail"
     assert any("no traffic process is running" in i["detail"] for i in res["items"])
 
 
@@ -296,6 +300,11 @@ def test_traffic_duplicate_ip_prefers_node_with_live_agent():
                 "ip": "10.0.0.5",
                 "agent": {},
             },
+            "receiver": {
+                "procs": ["2 traffic_18.py"],
+                "ip": "10.0.0.7",
+                "agent": {"present": True, "live": True},
+            },
         },
         "ping": [],
     }
@@ -308,6 +317,27 @@ def test_traffic_duplicate_ip_prefers_node_with_live_agent():
         and item["status"] == "warn"
         for item in result["items"]
     )
+
+
+def test_traffic_matches_required_endpoints_on_secondary_node_addresses():
+    probe = {
+        "ok": True, "traffic_files": [],
+        "summary": {"flows": [{"src_ip": "10.2.0.5", "dst_ip": "10.3.0.9"}]},
+        "nodes": {
+            "sender": {"ip": "10.1.0.5", "ips": ["10.1.0.5", "10.2.0.5"],
+                       "procs": ["1 traffic_tx"], "agent": {"live": True}},
+            "receiver": {"ip": "10.1.0.9", "ips": ["10.1.0.9", "10.3.0.9"],
+                         "procs": ["2 traffic_rx"], "agent": {"live": True}},
+        }, "ping": [],
+    }
+    assert ac.traffic_result(probe, expected=True)["status"] == "pass"
+
+
+def test_declared_traffic_without_runtime_summary_is_a_failure():
+    probe = {"ok": True, "traffic_files": [], "summary": None, "nodes": {}, "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "fail"
+    assert "cannot be verified" in res["summary"]
 
 
 def test_probes_ignore_preview_directories():
@@ -374,21 +404,21 @@ def test_reachability_skips_when_no_flows():
 def test_reachability_passes_along_flow_paths():
     probe = {"ok": True, "ping": [
         {"src": "h1", "dst": "h2", "ip": "10.0.0.7", "reachable": True, "port": 9000,
-         "protocol": "UDP", "method": "udp-send", "error": "icmp-port-unreachable"}]}
+         "protocol": "TCP", "method": "tcp-handshake", "error": ""}]}
     res = ac.reachability_result(probe)
     assert res["status"] == "pass"
-    assert "All 1 testable traffic flow(s) reach their destination" in res["summary"]
-    assert any("UDP:9000" in i["name"] for i in res["items"])
+    assert "All 1 required traffic flow(s) reach their destination" in res["summary"]
+    assert any("TCP:9000" in i["name"] for i in res["items"])
 
 
-def test_reachability_warns_with_repro_when_destination_unreachable():
+def test_reachability_fails_with_repro_when_destination_unreachable():
     probe = {"ok": True, "ping": [
         {"src": "h1", "dst": "h2", "ip": "10.0.0.7", "reachable": False,
          "protocol": "TCP", "port": 9000, "method": "tcp-handshake", "error": "timeout",
          "cmd": "sudo vcmd -c /tmp/pycore.1/h1 -- ping -c3 -W2 10.0.0.7"}]}
     res = ac.reachability_result(probe)
-    assert res["status"] == "warn"
-    assert "cannot reach their destination" in res["summary"]
+    assert res["status"] == "fail"
+    assert "required flow(s) are not delivering" in res["summary"]
     assert any("vcmd -c /tmp/pycore.1/h1" in i["detail"] for i in res["items"])
 
 
@@ -396,17 +426,26 @@ def test_reachability_error_on_probe_failure():
     assert ac.reachability_result({"ok": False, "error": "ssh down"})["status"] == "error"
 
 
+def test_reachability_fails_when_configured_flows_produce_no_probe_rows():
+    probe = {"ok": True, "summary": {"flows": [{"src_ip": "10.0.0.1",
+                                                   "dst_ip": "10.0.0.2"}]},
+             "ping": []}
+    res = ac.reachability_result(probe)
+    assert res["status"] == "fail"
+    assert "No runtime results" in res["summary"]
+
+
 def test_traffic_skip_when_not_declared_and_no_flows():
     probe = {"ok": True, "traffic_files": [], "summary": {"flows": []}, "nodes": {}, "ping": []}
     assert ac.traffic_result(probe, expected=False)["status"] == "skip"
 
 
-def test_traffic_uses_summary_flows_as_evidence():
+def test_traffic_requires_summary_flow_endpoints_to_exist_and_run():
     probe = {"ok": True, "traffic_files": [], "summary": {"flows": [{"src": "a", "dst": "b"}]},
              "nodes": {}, "ping": []}
     res = ac.traffic_result(probe, expected=True)
-    assert res["status"] == "pass"
-    assert "1 traffic flow" in res["summary"]
+    assert res["status"] == "fail"
+    assert "2 required traffic endpoint(s)" in res["summary"]
 
 
 # --------------------------------------------------------------------------- #
@@ -780,6 +819,9 @@ def test_traffic_probe_tests_each_flow_on_its_own_protocol_and_port():
     assert "tcp-handshake" in script
     assert "udp-send" in script
     assert "socket.create_connection" in script
+    assert "ATTEMPTS=3" in script
+    assert "time.sleep(0.5)" in script
+    assert "'ips': ips" in script
     # Ping survives only as a diagnostic once a flow has already failed.
     assert "separates" in script
 
@@ -798,15 +840,15 @@ def test_reachability_tcp_handshake_proves_both_directions():
     assert "SYN-ACK" in item["detail"]
 
 
-def test_reachability_tcp_rst_still_proves_the_path():
-    # RST means the packet reached the host and the reply returned; the service
-    # simply is not listening. That is a service problem, not a path problem.
+def test_reachability_tcp_rst_fails_required_delivery():
+    # RST proves a route but also proves the required receiver is not listening.
+    # Required traffic needs the service, not merely a round trip to the host.
     probe = {"ok": True, "ping": [
         {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 80, "protocol": "TCP",
          "method": "tcp-handshake", "error": "refused", "reachable": True}]}
     res = ac.reachability_result(probe)
-    assert res["status"] == "pass"
-    assert "nothing is listening" in res["items"][0]["detail"]
+    assert res["status"] == "fail"
+    assert "destination service is not listening" in res["items"][0]["detail"]
 
 
 def test_reachability_distinguishes_filtered_port_from_dead_path():
@@ -815,7 +857,7 @@ def test_reachability_distinguishes_filtered_port_from_dead_path():
         {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 80, "protocol": "TCP",
          "method": "tcp-handshake", "error": "timeout", "reachable": False, "icmp": True}]}
     res = ac.reachability_result(filtered)
-    assert res["status"] == "warn"
+    assert res["status"] == "fail"
     assert "port is filtered or closed" in res["items"][0]["detail"]
 
     # Nothing answers at all -> the whole path is down.
@@ -843,16 +885,16 @@ def test_reachability_icmp_only_block_no_longer_warns():
     assert res["status"] == "pass"
 
 
-def test_reachability_udp_is_reported_as_unconfirmable():
-    # UDP has no handshake, so a sent datagram is not proof of delivery.
+def test_reachability_unconfirmed_udp_is_a_required_delivery_failure():
+    # UDP has no handshake, so destination counters are required evidence.
     probe = {"ok": True, "ping": [
         {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 53, "protocol": "UDP",
          "method": "udp-send", "error": "sent", "reachable": None}]}
     res = ac.reachability_result(probe)
-    assert res["status"] == "pass"
-    assert "1 UDP flow(s) sent but not confirmable" in res["summary"]
-    assert res["items"][0]["status"] == "skip"
-    assert "cannot be confirmed" in res["items"][0]["detail"]
+    assert res["status"] == "fail"
+    assert "required flow(s) are not delivering" in res["summary"]
+    assert res["items"][0]["status"] == "fail"
+    assert "not confirmed" in res["items"][0]["detail"]
 
 
 # --------------------------------------------------------------------------- #
@@ -886,29 +928,29 @@ def test_udp_flow_confirmed_by_bytes_at_the_destination():
     assert "253.1 kbps" in item["detail"]
 
 
-def test_udp_sent_but_nothing_arriving_is_a_warning():
+def test_udp_sent_but_nothing_arriving_is_a_failure():
     # The failure mode UDP hides: the sender writes happily into a black hole.
     probe = {"ok": True, "ping": [
         {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 6007, "protocol": "UDP",
          "method": "udp-send", "error": "sent", "reachable": None,
          "bytes_sent": 900000, "bytes_received": 0}]}
     res = ac.reachability_result(probe)
-    assert res["status"] == "warn"
-    assert "cannot reach their destination" in res["summary"]
+    assert res["status"] == "fail"
+    assert "required flow(s) are not delivering" in res["summary"]
     detail = res["items"][0]["detail"]
     assert "900,000 bytes" in detail
     assert "dropped in flight" in detail
     assert "segmentation rule covering this port" in detail
 
 
-def test_udp_without_counters_stays_unconfirmable():
+def test_udp_without_counters_fails_required_delivery():
     probe = {"ok": True, "ping": [
         {"src": "a", "dst": "b", "ip": "10.0.0.2", "port": 6007, "protocol": "UDP",
          "method": "udp-send", "error": "sent", "reachable": None}]}
     res = ac.reachability_result(probe)
-    assert res["status"] == "pass"
-    assert res["items"][0]["status"] == "skip"
-    assert "No agent counters were readable" in res["items"][0]["detail"]
+    assert res["status"] == "fail"
+    assert res["items"][0]["status"] == "fail"
+    assert "no receiving-agent counters" in res["items"][0]["detail"]
 
 
 def test_udp_sender_not_started_is_reported_distinctly():
@@ -917,9 +959,8 @@ def test_udp_sender_not_started_is_reported_distinctly():
          "method": "udp-send", "error": "sent", "reachable": None,
          "bytes_sent": 0, "bytes_received": 0}]}
     res = ac.reachability_result(probe)
-    # Nothing sent means nothing could arrive; that is not a dropped-traffic fault.
-    assert res["status"] == "pass"
-    assert "written no bytes yet" in res["items"][0]["detail"]
+    assert res["status"] == "fail"
+    assert "sending agent has written no bytes" in res["items"][0]["detail"]
 
 
 def test_tcp_pass_reports_measured_bytes_when_available():
@@ -947,7 +988,162 @@ def test_traffic_service_writes_per_node_stats_and_logs():
 
 
 # --------------------------------------------------------------------------- #
-# Check 8: the participant can reach each pivot provider
+# Check 8: Flow Pivot(source) relationships work from source to target
+# --------------------------------------------------------------------------- #
+
+def _flow_state(*assignments):
+    return {"flow_enabled": True, "flag_assignments": list(assignments)}
+
+
+def _flow_pivot(role, source, target, **extra):
+    item = {"role": role, "source": source, "target": target,
+            "provider": "ssh-fallback", "provider_label": "Docker SSH"}
+    item.update(extra)
+    return item
+
+
+def test_flow_pivot_relationships_use_chain_targets_not_broad_source_unlocks():
+    state = _flow_state(
+        {"node_id": 1, "pivot": [
+            _flow_pivot("source", "jump", "db"),
+            _flow_pivot("source", "jump", "unrelated"),
+        ]},
+        {"node_id": 2, "pivot": [
+            _flow_pivot("target", "jump", "db", target_ports=[5432],
+                        target_protocols=["tcp"], exposure="pivot-only"),
+        ]},
+    )
+    relationships = ac.flow_pivot_relationships(state)
+    assert [(r["source"], r["target"]) for r in relationships] == [("jump", "db")]
+    assert relationships[0]["target_ports"] == [5432]
+    assert relationships[0]["target_protocols"] == ["TCP"]
+
+
+def test_flow_pivot_relationships_deduplicate_duplicate_chain_occurrences():
+    # Duplicate target nodes can carry distinct assignment objects. The path is
+    # checked once, while metadata from both occurrences remains represented.
+    state = _flow_state(
+        {"node_id": 18, "pivot": [
+            _flow_pivot("target", "jump", "db", target_ports=[5432]),
+        ]},
+        {"node_id": 18, "pivot": [
+            _flow_pivot("target", "jump", "db", target_ports="6432",
+                        target_protocols="tcp"),
+        ]},
+    )
+    relationships = ac.flow_pivot_relationships(state)
+    assert len(relationships) == 1
+    assert relationships[0]["assignment_indexes"] == [0, 1]
+    assert relationships[0]["target_ports"] == [5432, 6432]
+
+
+def test_flow_pivot_relationships_do_not_infer_ports_from_overwritten_assignments():
+    state = _flow_state(
+        {
+            "node_id": 16,
+            "resolved_inputs": {"service_port": 2110},
+            "pivot": [_flow_pivot("target", "jump", "db")],
+        },
+        {
+            "node_id": 16,
+            "resolved_inputs": {"service_port": 17017},
+            "pivot": [_flow_pivot("target", "jump", "db")],
+        },
+    )
+
+    relationships = ac.flow_pivot_relationships(state)
+
+    assert len(relationships) == 1
+    assert relationships[0]["assignment_indexes"] == [0, 1]
+    # Duplicate assignments can replace the compose runtime, and an external
+    # PortForward need not equal the port inside the final container. Leaving
+    # this empty makes the live probe discover the actual listening ports.
+    assert relationships[0]["target_ports"] == []
+
+
+def test_flow_pivot_relationships_fall_back_to_legacy_source_records():
+    state = _flow_state({"node_id": 1, "pivot": [
+        _flow_pivot("source", "jump", "db"),
+        _flow_pivot("source", "jump", "web"),
+    ]})
+    assert [(r["source"], r["target"]) for r in ac.flow_pivot_relationships(state)] == [
+        ("jump", "db"), ("jump", "web")]
+
+
+def test_flow_pivot_relationships_retain_malformed_required_edge_for_reporting():
+    relationships = ac.flow_pivot_relationships(_flow_state(
+        {"node_id": 2, "pivot": [_flow_pivot("target", "jump", "")]},
+    ))
+    assert len(relationships) == 1
+    assert "missing target" in relationships[0]["metadata_error"]
+
+
+def test_flow_pivot_probe_script_is_valid_and_enters_the_exact_source_node():
+    relationships = [{"source": "docker-12", "target": "docker-14",
+                      "target_ports": [], "target_protocols": []}]
+    script = ac.flow_pivot_probe_script("pw", 7, relationships)
+    ast.parse(script)
+    assert "/proc/net/tcp" in script
+    assert "socket.create_connection" in script
+    assert "_nexec_python(nodes[source]['kind'],source" in script
+    assert "closed-port route probe" in script
+    assert "ATTEMPTS=3" in script
+    assert "for ip in ips" in script
+    assert '"source":"docker-12"' in script
+
+
+def test_flow_pivot_result_passes_a_live_source_to_target_handshake():
+    probe = {"ok": True,
+             "pivots": [{"source": "jump", "target": "db"}],
+             "checks": [{"index": 0, "source": "jump", "target": "db",
+                         "ip": "10.0.0.8", "port": 5432,
+                         "basis": "target listening port", "method": "tcp-handshake",
+                         "reachable": True, "error": ""}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "pass"
+    assert "1 Flow pivot path(s) traversable" in res["summary"]
+    assert "both directions" in res["items"][0]["detail"]
+
+
+def test_flow_pivot_result_accepts_target_rst_as_bidirectional_path_proof():
+    probe = {"ok": True,
+             "pivots": [{"source": "jump", "target": "db"}],
+             "checks": [{"index": 0, "source": "jump", "target": "db",
+                         "ip": "10.0.0.8", "port": 9, "basis": "closed-port route probe",
+                         "method": "tcp-rst", "reachable": True, "error": "refused"}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "pass"
+    assert "reply reached the pivot source" in res["items"][0]["detail"]
+
+
+def test_flow_pivot_result_fails_an_unreachable_required_chain_path():
+    probe = {"ok": True,
+             "pivots": [{"source": "jump", "target": "db"}],
+             "checks": [{"index": 0, "source": "jump", "target": "db",
+                         "ip": "10.0.0.8", "port": 5432, "method": "tcp-connect",
+                         "reachable": False, "error": "timeout",
+                         "cmd": "sudo docker exec jump python3 -c ..."}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "fail"
+    assert "challenge chain is unsolvable" in res["summary"]
+    assert "Reproduce:" in res["items"][0]["detail"]
+
+
+def test_flow_pivot_result_fails_missing_endpoint_or_probe_row_and_skips_no_edges():
+    missing_node = {"ok": True,
+                    "pivots": [{"source": "jump", "target": "db"}],
+                    "checks": [{"index": 0, "source": "jump", "target": "db",
+                                "method": "node-lookup", "reachable": False,
+                                "error": "target node not found in running CORE session"}]}
+    assert ac.flow_pivot_result(missing_node)["status"] == "fail"
+    assert ac.flow_pivot_result({"ok": True, "pivots": [], "checks": []})["status"] == "skip"
+    assert ac.flow_pivot_result({"ok": True,
+                                 "pivots": [{"source": "jump", "target": "db"}],
+                                 "checks": []})["status"] == "fail"
+
+
+# --------------------------------------------------------------------------- #
+# Check 9: the participant can reach each pivot provider
 # --------------------------------------------------------------------------- #
 
 def _pivot_probe(providers, allows=()):
@@ -1084,8 +1280,11 @@ def test_live_agent_stats_count_as_running_without_a_process_listing():
     probe = {"ok": True, "traffic_files": [],
              "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
              "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [],
-                                     "agent": {"present": True, "live": True, "age_s": 3,
-                                               "bytes_sent": 43220830, "errors": 0, "flows": 1}}},
+                                      "agent": {"present": True, "live": True, "age_s": 3,
+                                                "bytes_sent": 43220830, "errors": 0, "flows": 1}},
+                       "docker-23": {"kind": "docker", "ip": "10.0.0.9",
+                                     "procs": ["2 traffic_rx"],
+                                     "agent": {"present": True, "live": True}}},
              "ping": []}
     res = ac.traffic_result(probe, expected=True)
     assert res["status"] == "pass"
@@ -1095,31 +1294,36 @@ def test_live_agent_stats_count_as_running_without_a_process_listing():
 
 
 def test_stopped_agent_is_reported_differently_from_never_started():
-    # Three states, not two: an agent that ran and stopped is a distinct
+    # Three states, not two: an agent that ran and stopped is a distinct hard
     # failure from one that never launched, and says so.
     stopped = {"ok": True, "traffic_files": [],
                "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
                "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [],
-                                       "agent": {"present": True, "live": False, "age_s": 900}}},
+                                        "agent": {"present": True, "live": False, "age_s": 900}},
+                         "docker-23": {"kind": "docker", "ip": "10.0.0.9",
+                                       "procs": ["2 traffic_rx"],
+                                       "agent": {"present": True, "live": True}}},
                "ping": []}
     res = ac.traffic_result(stopped, expected=True)
-    assert res["status"] == "warn"
+    assert res["status"] == "fail"
     detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
     assert "ran but has stopped" in detail and "900s ago" in detail
 
     never = {"ok": True, "traffic_files": [],
              "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
-             "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [], "agent": {}}},
+             "nodes": {"docker-22": {"kind": "docker", "ip": "10.0.0.5", "procs": [], "agent": {}},
+                       "docker-23": {"kind": "docker", "ip": "10.0.0.9",
+                                     "procs": ["2 traffic_rx"],
+                                     "agent": {"present": True, "live": True}}},
              "ping": []}
     res = ac.traffic_result(never, expected=True)
-    assert res["status"] == "warn"
+    assert res["status"] == "fail"
     detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-22")
     assert "no traffic process is running" in detail
 
 
 def test_stopped_receiver_agent_is_caught_even_though_it_sends_nothing():
-    # expected_senders only covers flow sources, so a dead receiver would
-    # otherwise pass silently.
+    # A dead required receiver is the same hard failure as a dead sender.
     probe = {"ok": True, "traffic_files": [],
              "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
              "nodes": {"docker-21": {"kind": "docker", "ip": "10.0.0.5", "procs": ["1 traffic_x"],
@@ -1128,9 +1332,25 @@ def test_stopped_receiver_agent_is_caught_even_though_it_sends_nothing():
                                      "agent": {"present": True, "live": False, "age_s": 400}}},
              "ping": []}
     res = ac.traffic_result(probe, expected=True)
-    assert res["status"] == "warn"
-    assert "stopped traffic agent" in res["summary"]
+    assert res["status"] == "fail"
+    assert "required traffic endpoint" in res["summary"]
     assert any("ran but has stopped" in i["detail"] for i in res["items"] if i["name"] == "docker-24")
+
+
+def test_stopped_agent_outside_required_flows_remains_advisory():
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.9"}]},
+             "nodes": {
+                 "sender": {"ip": "10.0.0.5", "procs": ["1 traffic_tx"],
+                            "agent": {"present": True, "live": True}},
+                 "receiver": {"ip": "10.0.0.9", "procs": ["2 traffic_rx"],
+                              "agent": {"present": True, "live": True}},
+                 "stale-extra": {"ip": "10.0.0.20", "procs": [],
+                                 "agent": {"present": True, "live": False, "age_s": 400}},
+             }, "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    assert res["status"] == "warn"
+    assert "extra node" in res["summary"]
 
 
 def test_agent_stats_fallback_is_docker_only():

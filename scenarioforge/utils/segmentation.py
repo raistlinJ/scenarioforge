@@ -1725,6 +1725,38 @@ def write_allow_rules_for_flows(
             ip = ip_only(node.ip4)
             return f"{ip}/32" if ip else ""
 
+    def _matching_source_nat_nodes(src_ip: str, dst_ip: str) -> Set[int]:
+        """Return NAT nodes that rewrite this flow's source address.
+
+        A MASQUERADE rule runs in POSTROUTING, after the NAT router's FORWARD
+        chain.  Downstream routers and the receiver therefore see the NAT
+        router's egress address, not ``src_ip``.  The topology summary does not
+        retain that route-selected egress address, so their permits must accept
+        any translated IPv4 source while remaining constrained by destination,
+        protocol, and port.
+        """
+        matched: Set[int] = set()
+        try:
+            source_address = ipaddress.ip_address(src_ip)
+            destination_address = ipaddress.ip_address(dst_ip)
+        except Exception:
+            return matched
+        for entry in existing_rules:
+            rule = entry.get("rule") or {}
+            if str(rule.get("type") or "").lower() != "nat":
+                continue
+            try:
+                internal = ipaddress.ip_network(str(rule.get("internal") or ""), strict=False)
+                external = ipaddress.ip_network(
+                    str(rule.get("external") or "0.0.0.0/0"), strict=False
+                )
+                node_id = int(entry.get("node_id"))
+            except Exception:
+                continue
+            if source_address in internal and destination_address in external:
+                matched.add(node_id)
+        return matched
+
     rules_out: List[dict] = []
     counters: Dict[Tuple[int, str], int] = {}
 
@@ -1732,11 +1764,10 @@ def write_allow_rules_for_flows(
     host_ids = {int(h.node_id) for h in (hosts or [])}
 
     def _write_script(node_id: int, commands: List[str]) -> str:
-        key = (node_id, "allow")
-        cnt = counters.get(key, 1)
-        counters[key] = cnt + 1
-        script_name = f"seg_allow_{node_id}_{cnt}.py"
-        script_path = os.path.join(out_dir, script_name)
+        # Preview replay may already have written allow scripts into this shared
+        # runtime directory. Continue after the highest existing suffix so the
+        # realized traffic pass cannot overwrite one while the service starts.
+        script_path = _next_segmentation_script_path(out_dir, int(node_id), "allow", counters)
         py_lines = [
             "#!/usr/bin/env python3",
             "import subprocess, shlex",
@@ -1822,30 +1853,36 @@ def write_allow_rules_for_flows(
         use_dst_subnet = flow_draw(flow, "allow-dst") < max(0.0, min(1.0, float(dst_subnet_prob)))
         src_sel = subnet_of(src_host) if use_src_subnet else src_ip
         dst_sel = subnet_of(dst_host) if use_dst_subnet else dst_ip
+        source_nat_nodes = _matching_source_nat_nodes(src_ip, dst_ip)
+        received_src_sel = "0.0.0.0/0" if source_nat_nodes else src_sel
 
         # Only add allow rules if currently blocked by segmentation policies
         if not _flow_allowed_by_summary(existing_rules, hosts, src_ip, dst_ip, proto, int(dst_port), int(dst_host.node_id)):
             # Receiver INPUT allow
-            recv_key = (int(dst_host.node_id), 'INPUT', proto, src_sel, dst_sel, int(dst_port))
-            covering = _covering_pair(int(dst_host.node_id), 'INPUT', proto, int(dst_port), src_sel, dst_sel)
+            recv_key = (int(dst_host.node_id), 'INPUT', proto, received_src_sel, dst_sel, int(dst_port))
+            covering = _covering_pair(
+                int(dst_host.node_id), 'INPUT', proto, int(dst_port), received_src_sel, dst_sel
+            )
             if recv_key not in seen_allow and covering is None:
                 recv_cmds = [
-                    f"iptables -I INPUT 1 -p {proto} -s {src_sel} --dport {dst_port} -j ACCEPT",
+                    f"iptables -I INPUT 1 -p {proto} -s {received_src_sel} --dport {dst_port} -j ACCEPT",
                 ]
                 recv_script = _write_script(dst_host.node_id, recv_cmds)
                 rules_out.append({
                     "node_id": dst_host.node_id,
                     "service": "Segmentation",
-                    "rule": {"type": "allow", "src": src_sel, "dst": dst_sel, "proto": proto, "port": dst_port, "chain": "INPUT"},
+                    "rule": {"type": "allow", "src": received_src_sel, "dst": dst_sel, "proto": proto, "port": dst_port, "chain": "INPUT"},
                     "script": recv_script,
                 })
                 seen_allow.add(recv_key)
-                coverage_index[(int(dst_host.node_id), 'INPUT', proto, int(dst_port))].append((src_sel, dst_sel))
+                coverage_index[(int(dst_host.node_id), 'INPUT', proto, int(dst_port))].append(
+                    (received_src_sel, dst_sel)
+                )
             elif covering is not None:
                 try:
                     logger.debug(
                         "Allow skip (covered): node=%s chain=INPUT proto=%s port=%s src=%s dst=%s by src=%s dst=%s",
-                        int(dst_host.node_id), proto, int(dst_port), src_sel, dst_sel, covering[0], covering[1]
+                        int(dst_host.node_id), proto, int(dst_port), received_src_sel, dst_sel, covering[0], covering[1]
                     )
                 except Exception:
                     pass
@@ -1877,22 +1914,31 @@ def write_allow_rules_for_flows(
 
             # Routers FORWARD allow (insert at top for precedence)
             for r in (routers or []):
-                fwd_key = (int(r.node_id), 'FORWARD', proto, src_sel, dst_sel, int(dst_port))
-                covering = _covering_pair(int(r.node_id), 'FORWARD', proto, int(dst_port), src_sel, dst_sel)
+                # The NAT router's FORWARD chain sees the original source; any
+                # downstream router sees the POSTROUTING-translated source.
+                fwd_src_sel = (
+                    src_sel if int(r.node_id) in source_nat_nodes else received_src_sel
+                )
+                fwd_key = (int(r.node_id), 'FORWARD', proto, fwd_src_sel, dst_sel, int(dst_port))
+                covering = _covering_pair(
+                    int(r.node_id), 'FORWARD', proto, int(dst_port), fwd_src_sel, dst_sel
+                )
                 if fwd_key in seen_allow or covering is not None:
                     continue
                 fwd_cmds = [
-                    f"iptables -I FORWARD 1 -p {proto} -s {src_sel} -d {dst_sel} --dport {dst_port} -j ACCEPT",
+                    f"iptables -I FORWARD 1 -p {proto} -s {fwd_src_sel} -d {dst_sel} --dport {dst_port} -j ACCEPT",
                 ]
                 fwd_script = _write_script(r.node_id, fwd_cmds)
                 rules_out.append({
                     "node_id": r.node_id,
                     "service": "Segmentation",
-                    "rule": {"type": "allow", "src": src_sel, "dst": dst_sel, "proto": proto, "port": dst_port, "chain": "FORWARD"},
+                    "rule": {"type": "allow", "src": fwd_src_sel, "dst": dst_sel, "proto": proto, "port": dst_port, "chain": "FORWARD"},
                     "script": fwd_script,
                 })
                 seen_allow.add(fwd_key)
-                coverage_index[(int(r.node_id), 'FORWARD', proto, int(dst_port))].append((src_sel, dst_sel))
+                coverage_index[(int(r.node_id), 'FORWARD', proto, int(dst_port))].append(
+                    (fwd_src_sel, dst_sel)
+                )
 
     # Summary logging before writing
     try:
@@ -1929,6 +1975,7 @@ def write_allow_rules_for_compose_ports(
     hosts: List[NodeInfo],
     docker_nodes: Dict[str, Dict[str, object]],
     out_dir: str = "/tmp/segmentation",
+    node_names_by_id: Optional[Dict[int, str]] = None,
 ) -> Dict[str, object]:
     """Allow exposed docker-compose service ports through generated segmentation firewalls.
 
@@ -1963,13 +2010,16 @@ def write_allow_rules_for_compose_ports(
     host_ids = {int(h.node_id) for h in (hosts or [])}
     node_by_name: Dict[str, NodeInfo] = {}
     for host in hosts or []:
-        node_name = ""
         try:
-            if session is not None and hasattr(session, "get_node"):
+            node_name = str((node_names_by_id or {}).get(int(host.node_id)) or "").strip()
+        except Exception:
+            node_name = ""
+        try:
+            if not node_name and session is not None and hasattr(session, "get_node"):
                 node_obj = session.get_node(host.node_id)
                 node_name = str(getattr(node_obj, "name", None) or getattr(node_obj, "label", None) or "").strip()
         except Exception:
-            node_name = ""
+            pass
         if node_name:
             node_by_name[node_name] = host
 
@@ -2176,6 +2226,40 @@ def write_allow_rules_for_compose_ports(
             return selectors
         return selectors or ["0.0.0.0/0"]
 
+    def _matching_source_nat_nodes(src_selector: str, dst_ip: str) -> Set[int]:
+        """NAT routers that can rewrite this compose-port flow's source.
+
+        Their own FORWARD chain sees the original pivot source, but every
+        downstream router sees the POSTROUTING address.  The traffic allow-rule
+        writer already accounts for this; compose/pivot exposure must do the
+        same or a correct rule on the source router is followed by a drop on the
+        destination router.
+        """
+        matched: Set[int] = set()
+        source_net = _to_network(src_selector)
+        try:
+            destination = ipaddress.ip_address(dst_ip)
+        except Exception:
+            return matched
+        if source_net is None:
+            return matched
+        for entry in existing_rules:
+            rule = entry.get("rule") or {}
+            if str(rule.get("type") or "").lower() != "nat":
+                continue
+            try:
+                internal = ipaddress.ip_network(str(rule.get("internal") or ""), strict=False)
+                external = ipaddress.ip_network(
+                    str(rule.get("external") or "0.0.0.0/0"), strict=False
+                )
+                node_id = int(entry.get("node_id"))
+            except Exception:
+                continue
+            source_overlaps_internal = source_net.overlaps(internal)
+            if source_overlaps_internal and destination in external:
+                matched.add(node_id)
+        return matched
+
     for node_name, record in sorted((docker_nodes or {}).items(), key=lambda item: str(item[0])):
         if not isinstance(record, dict):
             continue
@@ -2204,10 +2288,12 @@ def write_allow_rules_for_compose_ports(
                 if not src_sel:
                     continue
                 exposure = str(record.get("SegmentationExposure") or record.get("segmentation_exposure") or "public").strip() or "public"
+                source_nat_nodes = _matching_source_nat_nodes(src_sel, dst_ip)
+                received_src_sel = "0.0.0.0/0" if source_nat_nodes else src_sel
                 if int(host.node_id) in input_firewall_nodes:
                     chain = "INPUT"
-                    if not _allow_covered(int(host.node_id), chain, proto, src_sel, dst_sel, port):
-                        cmd = f"iptables -I INPUT 1 -p {proto} -s {src_sel} --dport {port} -j ACCEPT"
+                    if not _allow_covered(int(host.node_id), chain, proto, received_src_sel, dst_sel, port):
+                        cmd = f"iptables -I INPUT 1 -p {proto} -s {received_src_sel} --dport {port} -j ACCEPT"
                         script = _write_script(int(host.node_id), [cmd])
                         rule = {
                             "type": "allow",
@@ -2216,22 +2302,25 @@ def write_allow_rules_for_compose_ports(
                             "node_name": str(node_name),
                             "compose_name": str(record.get("Name") or record.get("name") or ""),
                             "compose_service": service_name,
-                            "src": src_sel,
+                            "src": received_src_sel,
                             "dst": dst_sel,
                             "proto": proto,
                             "port": port,
                             "chain": chain,
                         }
                         rules_out.append({"node_id": int(host.node_id), "service": "Segmentation", "rule": rule, "script": script})
-                        seen_allow.add((int(host.node_id), chain, proto, src_sel, dst_sel, int(port)))
+                        seen_allow.add((int(host.node_id), chain, proto, received_src_sel, dst_sel, int(port)))
                 for router in routers or []:
                     router_id = int(router.node_id)
                     if router_id not in forward_firewall_nodes:
                         continue
                     chain = "FORWARD"
-                    if _allow_covered(router_id, chain, proto, src_sel, dst_sel, port):
+                    # The NAT router sees the original source in FORWARD; a
+                    # downstream router sees the translated source address.
+                    fwd_src_sel = src_sel if router_id in source_nat_nodes else received_src_sel
+                    if _allow_covered(router_id, chain, proto, fwd_src_sel, dst_sel, port):
                         continue
-                    cmd = f"iptables -I FORWARD 1 -p {proto} -s {src_sel} -d {dst_sel} --dport {port} -j ACCEPT"
+                    cmd = f"iptables -I FORWARD 1 -p {proto} -s {fwd_src_sel} -d {dst_sel} --dport {port} -j ACCEPT"
                     script = _write_script(router_id, [cmd])
                     rule = {
                         "type": "allow",
@@ -2240,14 +2329,14 @@ def write_allow_rules_for_compose_ports(
                         "node_name": str(node_name),
                         "compose_name": str(record.get("Name") or record.get("name") or ""),
                         "compose_service": service_name,
-                        "src": src_sel,
+                        "src": fwd_src_sel,
                         "dst": dst_sel,
                         "proto": proto,
                         "port": port,
                         "chain": chain,
                     }
                     rules_out.append({"node_id": router_id, "service": "Segmentation", "rule": rule, "script": script})
-                    seen_allow.add((router_id, chain, proto, src_sel, dst_sel, int(port)))
+                    seen_allow.add((router_id, chain, proto, fwd_src_sel, dst_sel, int(port)))
 
     try:
         nodes_set = {rule.get("node_id") for rule in rules_out}

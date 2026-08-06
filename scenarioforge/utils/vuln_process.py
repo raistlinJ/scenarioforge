@@ -408,6 +408,35 @@ def _repair_known_catalog_compose(obj: dict, rec: Dict[str, str], *, src_dir: st
 				except Exception:
 					pass
 			return obj
+		if identity == 'joomla/cve-2015-8562':
+			for svc_key, svc in services.items():
+				if not isinstance(svc, dict):
+					continue
+				image_text = str(svc.get('image') or '').strip().lower()
+				if image_text != 'mysql:5.5':
+					continue
+				# mysql:5.5 ships gosu 1.7, an old amd64 Go binary that can
+				# abort under arm64 emulation with ``fatal error: newosproc``.
+				# Starting the container as its existing mysql user makes the
+				# stock entrypoint skip only that root-to-mysql gosu hop while
+				# retaining database initialization and the normal mysqld start.
+				svc['user'] = 'mysql'
+				labs = svc.get('labels')
+				if not isinstance(labs, dict):
+					labs = {}
+				labs.setdefault('coretg.repaired_catalog_user', 'mysql-gosu-emulation-bypass')
+				svc['labels'] = labs
+				try:
+					logger.info(
+						'[vuln] repaired joomla mysql sidecar startup '
+						'identity=%s service=%s image=%s user=mysql',
+						identity,
+						svc_key,
+						image_text,
+					)
+				except Exception:
+					pass
+			return obj
 		if identity == 'kibana/cve-2018-17246':
 			for svc_key, svc in services.items():
 				if not isinstance(svc, dict):
@@ -1114,16 +1143,21 @@ def remove_stale_scenarioforge_containers(*, include_running: bool = True) -> di
 def remove_docker_conflicts(conflicts: dict, *, keep_images: Optional[Iterable[str]] = None) -> dict:
 	"""Best-effort removal of conflicting Docker containers/images.
 
-	`keep_images` are never deleted. It must cover two groups:
+	`keep_images` are never deleted. The retention set covers two groups:
 
 	- images belonging to catalog or generator items marked `persistent`, which
-	  the operator has pinned so repeat runs need no registry
-	- images this run already built, because conflict resolution runs after
-	  preflight; deleting one strands CORE with "No such image" on a node whose
-	  image existed seconds earlier
+	  the operator has explicitly pinned
+	- framework prerequisite images (BusyBox, inject-copy, pivot provider, and
+	  other plumbing named by `prerequisite_images`)
 
-	Everything else that is cached but unpinned is still cleared, so a stale
-	image cannot outlive the run that produced it.
+	Images built or required by the active run are deferred separately because
+	conflict resolution runs after preflight; deleting one there strands CORE
+	with "No such image" before the session starts. They are not retained cache
+	entries and remain eligible for teardown cleanup.
+
+	Everything else, including an ordinary image pulled from a registry, is
+	cleared when it is in the conflict set. A registry digest is provenance, not
+	a retention policy; only an explicit pin or framework prerequisite keeps it.
 
 	Returns a dict with removal results.
 	"""
@@ -1131,6 +1165,7 @@ def remove_docker_conflicts(conflicts: dict, *, keep_images: Optional[Iterable[s
 		'removed_containers': [],
 		'removed_images': [],
 		'kept_images': [],
+		'active_images': [],
 		'container_errors': {},
 		'image_errors': {},
 	}
@@ -1159,32 +1194,23 @@ def remove_docker_conflicts(conflicts: dict, *, keep_images: Optional[Iterable[s
 
 		keep = {str(x or '').strip() for x in (keep_images or []) if str(x or '').strip()}
 		try:
-			from scenarioforge.builders.topology import IMAGES_BUILT_THIS_RUN
+			from scenarioforge.utils.prerequisite_images import prerequisite_images
 
-			keep |= {str(x or '').strip() for x in IMAGES_BUILT_THIS_RUN if str(x or '').strip()}
+			keep |= {
+				str(x or '').strip()
+				for x in prerequisite_images()
+				if str(x or '').strip()
+			}
 		except Exception:
 			pass
+		active: set[str] = set()
+		try:
+			from scenarioforge.builders.topology import IMAGES_BUILT_THIS_RUN, IMAGES_REQUIRED_THIS_RUN
 
-		def _came_from_a_registry(ref: str) -> bool:
-			"""True when this image was pulled rather than built here.
-
-			Deleting it can only be undone over the network, so it is exactly
-			what must survive for a cached run to work offline. A locally built
-			image has no repo digest and can be rebuilt from cached layers.
-			"""
-			try:
-				probe = subprocess.run(
-					['docker', 'image', 'inspect', '--format', '{{len .RepoDigests}}', ref],
-					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60,
-				)
-			except Exception:
-				return True  # unknown: err towards keeping it
-			if probe.returncode != 0:
-				return True
-			try:
-				return int((probe.stdout or '0').strip() or 0) > 0
-			except Exception:
-				return True
+			active |= {str(x or '').strip() for x in IMAGES_BUILT_THIS_RUN if str(x or '').strip()}
+			active |= {str(x or '').strip() for x in IMAGES_REQUIRED_THIS_RUN if str(x or '').strip()}
+		except Exception:
+			pass
 
 		for img in images:
 			name = str(img or '').strip()
@@ -1193,12 +1219,8 @@ def remove_docker_conflicts(conflicts: dict, *, keep_images: Optional[Iterable[s
 			if name in keep:
 				result['kept_images'].append(name)
 				continue
-			if _came_from_a_registry(name):
-				# Re-fetching it needs a registry, and a run whose images are all
-				# cached must not need one. alpine:3.19 was deleted here every
-				# run and re-pulled by CORE, which failed outright the moment
-				# DNS was unavailable.
-				result['kept_images'].append(name)
+			if name in active:
+				result['active_images'].append(name)
 				continue
 			try:
 				p = subprocess.run(
@@ -1815,6 +1837,63 @@ def _strip_network_conflicts_from_secondary_services(compose_obj: dict, node_nam
 					primary_svc['expose'] = merged
 			for key in CONTAINER_NETWORK_MODE_CONFLICTING_KEYS:
 				svc.pop(key, None)
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
+def _ensure_primary_service_hostname(compose_obj: dict, node_name: str) -> dict:
+	"""Give the CORE-owned container a hostname it can resolve locally.
+
+	CORE runs the primary compose service with ``network_mode: none`` and later
+	attaches its interface. Compose dependency wiring can leave that container's
+	``/etc/hosts`` with helper-service aliases but without its own generated
+	container hostname. Applications that call ``gethostname()`` followed by a
+	lookup (Metabase/Quartz is one example) then exit and restart forever. Each
+	restart also loses the interface CORE attached to the old network namespace.
+
+	Use the stable node name unless the compose service explicitly chose another
+	hostname, and add a loopback mapping without replacing an existing mapping.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		node_key = str(node_name or '').strip()
+		service = services.get(node_key) if node_key else None
+		if not isinstance(service, dict):
+			return compose_obj
+
+		hostname = str(service.get('hostname') or node_key).strip()
+		if not hostname:
+			return compose_obj
+		service['hostname'] = hostname
+
+		extra_hosts = service.get('extra_hosts')
+		if isinstance(extra_hosts, dict):
+			extra_hosts.setdefault(hostname, '127.0.0.1')
+			return compose_obj
+
+		if isinstance(extra_hosts, (list, tuple)):
+			entries = list(extra_hosts)
+		elif isinstance(extra_hosts, str) and extra_hosts.strip():
+			entries = [extra_hosts]
+		else:
+			entries = []
+
+		def _entry_host(value: object) -> str:
+			text = str(value or '').strip()
+			if '=' in text:
+				return text.split('=', 1)[0].strip()
+			if ':' in text:
+				return text.split(':', 1)[0].strip()
+			return text
+
+		if not any(_entry_host(entry) == hostname for entry in entries):
+			entries.append(f'{hostname}:127.0.0.1')
+		service['extra_hosts'] = entries
 		return compose_obj
 	except Exception:
 		return compose_obj
@@ -5605,6 +5684,10 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					try:
 						if _compose_force_no_network_enabled():
 							obj = _strip_network_conflicts_from_secondary_services(obj, node_name)
+					except Exception:
+						pass
+					try:
+						obj = _ensure_primary_service_hostname(obj, node_name)
 					except Exception:
 						pass
 					try:

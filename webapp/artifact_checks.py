@@ -1,6 +1,6 @@
 """Pure, Flask-free helpers for the CORE "Check Artifacts" feature.
 
-The Check Artifacts button on a running session runs seven ordered checks against
+The Check Artifacts button on a running session runs nine ordered checks against
 the live CORE session:
 
 1. containers   - the expected containers are running on the correct nodes
@@ -12,11 +12,13 @@ the live CORE session:
 7. reachability - each traffic flow reaches its destination, tested on the
                   flow's own protocol and port (never with ping, which a
                   default-deny segmentation policy legitimately drops)
-8. pivot access - every pivot provider is reachable from the participant, so
+8. flow pivot   - every Pivot(node) dependency in the challenge chain is
+                  traversable from that source node to its target
+9. pivot access - every pivot provider is reachable from the participant, so
                   the challenges behind a segmentation boundary stay solvable
 
 Checks 1-4 are derived from the existing post-execution validator
-(`_validate_session_nodes_and_injects`). Checks 5-7 are live probes executed on
+(`_validate_session_nodes_and_injects`). Checks 5-8 are live probes executed on
 the CORE VM over SSH. This module keeps the probe-script text, the
 validator-summary mapping, and the result shaping side-effect-free so they can
 be unit-tested without a live CORE VM. The orchestration/threading and SSH calls
@@ -30,15 +32,16 @@ import json
 from typing import Any
 
 
-# Ordered (key, label) for the six checks. The order is the progress order.
+# Ordered (key, label) checks. The order is the progress order.
 CHECK_ORDER: list[tuple[str, str]] = [
     ("containers", "Containers running on correct nodes"),
     ("services", "Services running"),
     ("ports", "Ports open"),
     ("injects", "Inject files placed"),
     ("segmentation", "Firewall/segmentation rules in place"),
-    ("traffic", "Traffic agents running"),
-    ("reachability", "Nodes reachable (traffic source → destination)"),
+    ("traffic", "Required traffic agents running"),
+    ("reachability", "Required traffic reaches its destination"),
+    ("flow_pivot", "Flow pivot paths traversable (source → target)"),
     ("pivot_access", "Pivot providers reachable from the participant"),
 ]
 
@@ -497,7 +500,7 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
     sudo_password_literal = json.dumps(str(sudo_password) if sudo_password else "")
     session_literal = json.dumps(str(session_id) if session_id not in (None, "") else "")
     return (
-        "import json, subprocess, glob, os, stat\n"
+        "import json, subprocess, glob, os, stat, sys\n"
         f"SUDO_PASSWORD = {sudo_password_literal}\n"
         f"SESSION_ID = {session_literal}\n"
         "PYCORE = ('/tmp/pycore.' + SESSION_ID) if SESSION_ID else ''\n"
@@ -565,7 +568,18 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "    if kind == 'docker':\n"
         "        return _run(['docker','exec',name]+list(argv), timeout=timeout)\n"
         "    return _run(['vcmd','-c',os.path.join(PYCORE, name),'--']+list(argv), timeout=timeout)\n"
-        "def _node_addr(kind, name):\n"
+        "def _nexec_python(kind, name, program, timeout=25):\n"
+        "    # Challenge images are intentionally minimal and may omit Python.\n"
+        "    # Enter only their network namespace and run the CORE VM interpreter,\n"
+        "    # so connectivity probes never depend on workload packages.\n"
+        "    if kind == 'docker':\n"
+        "        rc, pid = _run(['docker','inspect','-f','{{.State.Pid}}',name])\n"
+        "        pid = pid.strip()\n"
+        "        if rc != 0 or not pid.isdigit() or int(pid) <= 0:\n"
+        "            return 127, 'docker network namespace unavailable'\n"
+        "        return _run(['nsenter','-t',pid,'-n',sys.executable,'-c',program], timeout=timeout)\n"
+        "    return _nexec(kind, name, [sys.executable,'-c',program], timeout=timeout)\n"
+        "def _node_cidrs(kind, name):\n"
         "    def _cidrs(output):\n"
         "        return [line.strip() for line in output.splitlines()\n"
         "                if '/' in line.strip() and line.strip().split('/', 1)[0].count('.') == 3]\n"
@@ -580,6 +594,11 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "            rc, out = _run(['nsenter','-t',pid,'-n','ip','-4','-o','addr','show','scope','global'])\n"
         "            if rc == 0:\n"
         "                cidrs = _cidrs('\\n'.join(line.split()[3] if len(line.split()) > 3 else '' for line in out.splitlines()))\n"
+        "    if not cidrs:\n"
+        "        return []\n"
+        "    return list(dict.fromkeys(cidrs))\n"
+        "def _node_addr(kind, name):\n"
+        "    cidrs = _node_cidrs(kind, name)\n"
         "    if not cidrs:\n"
         "        return '', ''\n"
         "    return cidrs[0].split('/', 1)[0], cidrs[0]\n"
@@ -648,7 +667,7 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + "    except Exception:\n"
         + "        return ''\n"
         + "def _listening(kind, name):\n"
-        + "    rc, out = _nexec(kind, name, ['python3','-c', LISTEN_PY])\n"
+        + "    rc, out = _nexec_python(kind, name, LISTEN_PY)\n"
         + "    try:\n"
         + "        d = json.loads(out.strip().splitlines()[-1])\n"
         + "        return [int(x) for x in d.get('listening') or []], [int(x) for x in d.get('loopback') or []]\n"
@@ -740,7 +759,7 @@ def ports_probe_script(sudo_password: str | None = None, session_id: Any = None,
         + "        conn += '  c=getattr(e,\"errno\",None)\\n'\n"
         + "        conn += '  R.append([n,ip,port,why,False,\"refused\" if c==errno.ECONNREFUSED else (\"no-route\" if c in (errno.EHOSTUNREACH,errno.ENETUNREACH) else \"error\")])\\n'\n"
         + "        conn += 'print(json.dumps(R))\\n'\n"
-        + "        rc, out = _nexec(kind_of.get(pname), pname, ['python3','-c', conn], timeout=120)\n"
+        + "        rc, out = _nexec_python(kind_of.get(pname), pname, conn, timeout=120)\n"
         + "        src_ip = nodes.get(pname, {}).get('ip') or ''\n"
         + "        try:\n"
         + "            rows = json.loads(out.strip().splitlines()[-1])\n"
@@ -849,6 +868,51 @@ def traffic_probe_script(sudo_password: str | None = None,
         "c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null); "
         "case \"$c\" in *traffic_*) echo \"$p $c\" ;; esac; done; }"
     )
+    # Required flows get a few bounded attempts. Routing daemons and freshly
+    # launched listeners can converge just after the artifact check starts;
+    # one connect attempt made a hard required-path failure unnecessarily
+    # timing-sensitive. A refusal remains a failure here: unlike the Flow pivot
+    # path check, required traffic needs the destination service, not merely a
+    # round trip to the host.
+    flow_py = (
+        "import json,socket,errno,time\n"
+        "ATTEMPTS=3\n"
+        "def one(ip,port,proto):\n"
+        " proto=(proto or '').upper();last='';method='none'\n"
+        " if proto not in ('TCP','UDP') or not port:return [False,'none','flow has no protocol/port to test',0]\n"
+        " for attempt in range(1,ATTEMPTS+1):\n"
+        "  if proto=='TCP':\n"
+        "   method='tcp-handshake'\n"
+        "   try:\n"
+        "    s=socket.create_connection((ip,int(port)),1.5);s.close();return [True,method,'',attempt]\n"
+        "   except socket.timeout:last='timeout'\n"
+        "   except OSError as e:\n"
+        "    c=getattr(e,'errno',None)\n"
+        "    if c==errno.ECONNREFUSED:last='refused'\n"
+        "    elif c in (errno.EHOSTUNREACH,errno.ENETUNREACH):last='no-route'\n"
+        "    else:last='error'\n"
+        "  else:\n"
+        "   method='udp-send'\n"
+        "   try:\n"
+        "    s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(0.75);s.connect((ip,int(port)));s.send(b'\\x00'*32)\n"
+        "    try:s.recv(1)\n"
+        "    except socket.timeout:last='sent'\n"
+        "    except OSError as e2:\n"
+        "     c2=getattr(e2,'errno',None)\n"
+        "     if c2==errno.ECONNREFUSED:last='icmp-port-unreachable'\n"
+        "     elif c2 in (errno.EHOSTUNREACH,errno.ENETUNREACH):last='no-route'\n"
+        "     else:last='error'\n"
+        "    s.close()\n"
+        "   except OSError as e:\n"
+        "    c=getattr(e,'errno',None);last='no-route' if c in (errno.EHOSTUNREACH,errno.ENETUNREACH) else 'error'\n"
+        "  if attempt<ATTEMPTS:time.sleep(0.5)\n"
+        " return [None if proto=='UDP' and last=='sent' else False,method,last,ATTEMPTS]\n"
+        "R=[]\n"
+        "for ip,port,proto,dname in ROWS:\n"
+        " ok,method,err,attempts=one(ip,port,proto)\n"
+        " R.append([ip,port,proto,dname,ok,method,err,attempts])\n"
+        "print(json.dumps(R))\n"
+    )
     return (
         _remote_preamble(sudo_password, session_id)
         + f"TRAFFIC_DIRS = {dirs_literal}\n"
@@ -885,7 +949,7 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "            'flows': len(s.get('flows') or [])}\n"
         + "def _ip(kind, name):\n"
         + "    return _node_addr(kind, name)[0]\n"
-        + "FLOW_PY = " + '"import json, socket, errno\\ndef one(ip, port, proto):\\n    if proto == \'TCP\' and port:\\n        try:\\n            s = socket.create_connection((ip, int(port)), 3.0); s.close()\\n            return [True, \'tcp-handshake\', \'\']\\n        except socket.timeout:\\n            return [False, \'tcp-handshake\', \'timeout\']\\n        except OSError as e:\\n            c = getattr(e, \'errno\', None)\\n            if c == errno.ECONNREFUSED:\\n                return [True, \'tcp-handshake\', \'refused\']\\n            if c in (errno.EHOSTUNREACH, errno.ENETUNREACH):\\n                return [False, \'tcp-handshake\', \'no-route\']\\n            return [False, \'tcp-handshake\', \'error\']\\n    if proto == \'UDP\' and port:\\n        try:\\n            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2.0)\\n            s.connect((ip, int(port))); s.send(b\'\\\\x00\' * 32)\\n            try:\\n                s.recv(1)\\n            except socket.timeout:\\n                pass\\n            except OSError as e2:\\n                c2 = getattr(e2, \'errno\', None)\\n                if c2 == errno.ECONNREFUSED:\\n                    s.close(); return [True, \'udp-send\', \'icmp-port-unreachable\']\\n                if c2 in (errno.EHOSTUNREACH, errno.ENETUNREACH):\\n                    s.close(); return [False, \'udp-send\', \'no-route\']\\n            s.close(); return [None, \'udp-send\', \'sent\']\\n        except OSError as e:\\n            c = getattr(e, \'errno\', None)\\n            if c in (errno.EHOSTUNREACH, errno.ENETUNREACH):\\n                return [False, \'udp-send\', \'no-route\']\\n            return [None, \'udp-send\', \'error\']\\n    return [None, \'none\', \'flow has no protocol/port to test\']\\nR = []\\nfor ip, port, proto, dname in ROWS:\\n    ok, method, err = one(ip, port, (proto or \'\').upper())\\n    R.append([ip, port, proto, dname, ok, method, err])\\nprint(json.dumps(R))\\n"' + "\n"
+        + f"FLOW_PY = {json.dumps(flow_py)}\n"
         + "def _agent_stats(kind, name, node_id):\n"
         + "    if node_id is None:\n"
         + "        return None\n"
@@ -917,13 +981,13 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "        out['achieved_kbps'] = rx.get('achieved_kbps')\n"
         + "    return out\n"
         + "def _repro_flow(kind, name, ip, port, proto):\n"
-        + "    if str(proto or '').upper() == 'TCP' and port:\n"
-        + "        inner = 'python3 -c \\'import socket; socket.create_connection((\\\"' + str(ip) + '\\\", ' + str(port) + '), 3)\\''\n"
-        + "    else:\n"
-        + "        inner = 'ping -c3 -W2 ' + str(ip)\n"
         + "    if kind == 'docker':\n"
-        + "        return 'sudo docker exec ' + name + ' ' + inner\n"
-        + "    return 'sudo vcmd -c ' + os.path.join(PYCORE, name) + ' -- ' + inner\n"
+        + "        prefix = \"sudo nsenter -t $(sudo docker inspect -f '{{.State.Pid}}' \" + name + ') -n '\n"
+        + "    else:\n"
+        + "        prefix = 'sudo vcmd -c ' + os.path.join(PYCORE, name) + ' -- '\n"
+        + "    if str(proto or '').upper() == 'TCP' and port:\n"
+        + "        return prefix + sys.executable + ' -c \\'import socket; socket.create_connection((\\\"' + str(ip) + '\\\", ' + str(port) + '), 3)\\''\n"
+        + "    return prefix + 'ping -c3 -W2 ' + str(ip)\n"
         + "def _repro(kind, name, ip):\n"
         + "    if kind == 'docker':\n"
         + "        return 'sudo docker exec ' + name + ' ping -c3 -W2 ' + ip\n"
@@ -952,8 +1016,10 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "        rc, out = _nexec(kind, name, ['sh','-lc', PROC_SCAN])\n"
         + "        procs = [l.strip() for l in out.splitlines()\n"
         + "                 if 'traffic_' in l and 'pgrep' not in l and '/proc/[0-9]' not in l]\n"
-        + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': _ip(kind, name),\n"
-        + "                       'agent': _node_agent(kind, name)}\n"
+        + "        cidrs = _node_cidrs(kind, name)\n"
+        + "        ips = [c.split('/',1)[0] for c in cidrs]\n"
+        + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': (ips[0] if ips else ''),\n"
+        + "                       'ips': ips, 'cidrs': cidrs, 'agent': _node_agent(kind, name)}\n"
         + "    # Reachability follows the configured traffic flows, and each flow is\n"
         + "    # tested on its own protocol and port rather than with ping. Under a\n"
         + "    # default-deny segmentation policy ICMP is normally not in the allow\n"
@@ -965,9 +1031,9 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "    # rule or asymmetric route cannot produce a successful connect.\n"
         + "    by_ip = {}\n"
         + "    for kind, name in alln:\n"
-        + "        ip = nodes.get(name, {}).get('ip') or ''\n"
-        + "        if ip and ip not in by_ip:\n"
-        + "            by_ip[ip] = (kind, name)\n"
+        + "        for ip in (nodes.get(name, {}).get('ips') or []):\n"
+        + "            if ip and ip not in by_ip:\n"
+        + "                by_ip[ip] = (kind, name)\n"
         + "    ping = []\n"
         + "    seen = set()\n"
         + "    plan = {}\n"
@@ -980,9 +1046,15 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "        proto = str(flow.get('protocol') or '').strip().upper()\n"
         + "        port = flow.get('dst_port')\n"
         + "        key = (s_ip, d_ip, proto, str(port))\n"
-        + "        if not s_ip or not d_ip or key in seen:\n"
+        + "        if key in seen:\n"
         + "            continue\n"
         + "        seen.add(key)\n"
+        + "        if not s_ip or not d_ip:\n"
+        + "            ping.append({'src': s_ip or 'missing source', 'dst': d_ip or 'missing destination',\n"
+        + "                         'ip': d_ip, 'reachable': None, 'cmd': '', 'port': port,\n"
+        + "                         'protocol': proto, 'method': 'metadata',\n"
+        + "                         'why': 'configured traffic flow is missing its source or destination address'})\n"
+        + "            continue\n"
         + "        dst_name = (by_ip.get(d_ip) or (None, d_ip))[1]\n"
         + "        src = by_ip.get(s_ip)\n"
         + "        if not src:\n"
@@ -998,20 +1070,32 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "    for sn, rows in plan.items():\n"
         + "        sk = kind_of.get(sn)\n"
         + "        prog = 'ROWS = ' + json.dumps(rows) + '\\n' + FLOW_PY\n"
-        + "        rc, out = _nexec(sk, sn, ['python3','-c', prog], timeout=90)\n"
+        + "        rc, out = _nexec_python(sk, sn, prog, timeout=120)\n"
         + "        try:\n"
         + "            results = json.loads(out.strip().splitlines()[-1])\n"
         + "        except Exception:\n"
         + "            results = []\n"
-        + "        for d_ip, port, proto, dst_name, ok, method, err in results:\n"
+        + "        returned = set()\n"
+        + "        for d_ip, port, proto, dst_name, ok, method, err, attempts in results:\n"
+        + "            returned.add((d_ip, str(port), proto))\n"
         + "            row = {'src': sn, 'dst': dst_name, 'ip': d_ip, 'port': port,\n"
         + "                   'protocol': proto, 'reachable': ok, 'method': method, 'error': err,\n"
-        + "                   'cmd': _repro_flow(sk, sn, d_ip, port, proto)}\n"
+        + "                   'attempts': attempts, 'cmd': _repro_flow(sk, sn, d_ip, port, proto)}\n"
         + "            if ok is False:\n"
         + "                # Only now is ping worth running: it separates \"no route at\n"
         + "                # all\" from \"route fine, this port filtered\".\n"
         + "                rc2, out2 = _nexec(sk, sn, ['sh','-lc','ping -c1 -W1 '+d_ip+' >/dev/null 2>&1 && echo OK || echo NO'])\n"
         + "                row['icmp'] = ('OK' in out2)\n"
+        + "            meta = flow_meta.get((d_ip, str(port), proto)) or {}\n"
+        + "            row.update(_arrival(meta, port, proto, kind_of))\n"
+        + "            ping.append(row)\n"
+        + "        for d_ip, port, proto, dst_name in rows:\n"
+        + "            if (d_ip, str(port), proto) in returned:\n"
+        + "                continue\n"
+        + "            row = {'src': sn, 'dst': dst_name, 'ip': d_ip, 'port': port,\n"
+        + "                   'protocol': proto, 'reachable': None, 'method': 'probe-execution',\n"
+        + "                   'error': '', 'cmd': _repro_flow(sk, sn, d_ip, port, proto),\n"
+        + "                   'why': 'required traffic probe produced no result'}\n"
         + "            meta = flow_meta.get((d_ip, str(port), proto)) or {}\n"
         + "            row.update(_arrival(meta, port, proto, kind_of))\n"
         + "            ping.append(row)\n"
@@ -1194,47 +1278,76 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
             detail += f"; {int(errors)} error(s)"
         items.append({"name": node, "status": "pass", "detail": detail})
 
-    # Nodes that a flow names as a sender but where no traffic process is running.
+    # Every configured flow endpoint needs a live traffic agent. A missing
+    # sender cannot emit the required traffic; a missing receiver makes UDP
+    # delivery unmeasurable and leaves TCP dependent on a listener that the
+    # scenario explicitly expected the agent to provide.
     expected_senders: set[str] = set()
+    expected_receivers: set[str] = set()
+    unresolved_endpoints: list[tuple[str, str]] = []
     ip_to_node: dict[str, str] = {}
     live_nodes = set(nodes_with_procs)
     for node, info in nodes.items():
         if not isinstance(info, dict):
             continue
-        ip = _name(info.get("ip"))
-        if not ip:
-            continue
-        current = ip_to_node.get(ip)
-        # Old probe payloads may include an internal Compose child that shares
-        # its CORE parent's address. Prefer the node with the live traffic
-        # agent instead of allowing dictionary order to choose the child.
-        if current is None or (node in live_nodes and current not in live_nodes):
-            ip_to_node[ip] = node
+        addresses = [_name(value) for value in _as_list(info.get("ips")) if _name(value)]
+        if not addresses and _name(info.get("ip")):
+            addresses = [_name(info.get("ip"))]
+        for ip in addresses:
+            current = ip_to_node.get(ip)
+            # Old probe payloads may include an internal Compose child that shares
+            # its CORE parent's address. Prefer the node with the live traffic
+            # agent instead of allowing dictionary order to choose the child.
+            if current is None or (node in live_nodes and current not in live_nodes):
+                ip_to_node[ip] = node
     for flow in flows:
-        if isinstance(flow, dict):
-            node = ip_to_node.get(_name(flow.get("src_ip")))
+        if not isinstance(flow, dict):
+            continue
+        for role, bucket in (("src", expected_senders), ("dst", expected_receivers)):
+            declared_name = _name(flow.get(f"{role}_name"))
+            address = _name(flow.get(f"{role}_ip"))
+            node = declared_name if declared_name in nodes else ip_to_node.get(address)
             if node:
-                expected_senders.add(node)
-    missing_senders = sorted(expected_senders - set(nodes_with_procs))
-    for node in missing_senders:
+                bucket.add(node)
+            else:
+                unresolved_endpoints.append(("source" if role == "src" else "destination",
+                                             declared_name or address or "missing address"))
+
+    required_agents = expected_senders | expected_receivers
+    missing_required = sorted(required_agents - set(nodes_with_procs))
+    for node in missing_required:
         agent = _agent(nodes.get(node))
+        roles = []
+        if node in expected_senders:
+            roles.append("source")
+        if node in expected_receivers:
+            roles.append("destination")
+        role_text = "/".join(roles) or "endpoint"
         if agent.get("present"):
             age = agent.get("age_s")
             when = f" (last update {int(age)}s ago)" if isinstance(age, (int, float)) else ""
-            detail = ("flow names this node as a traffic source; its agent ran but has "
+            detail = (f"required traffic names this node as a {role_text}; its agent ran but has "
                       f"stopped updating stats{when}")
         else:
-            detail = "flow names this node as a traffic source, but no traffic process is running"
-        items.append({"name": node, "status": "warn", "detail": detail})
+            detail = (f"required traffic names this node as a {role_text}, but no traffic "
+                      "process is running")
+        items.append({"name": node, "status": "fail", "detail": detail})
 
-    # A receiver whose agent died is just as broken as a sender's, and nothing
-    # above would catch it: expected_senders only covers flow sources.
-    stopped_others = [n for n in nodes_agent_stopped if n not in set(missing_senders)]
-    for node in stopped_others:
+    for role, endpoint in unresolved_endpoints:
+        items.append({
+            "name": endpoint,
+            "status": "fail",
+            "detail": f"configured traffic {role} was not found in the running CORE session",
+        })
+
+    # A stopped agent outside every configured flow is advisory stale state; it
+    # does not weaken the hard required-connectivity guarantee.
+    stopped_extras = [n for n in nodes_agent_stopped if n not in required_agents]
+    for node in stopped_extras:
         age = _agent(nodes[node]).get("age_s")
         when = f" (last update {int(age)}s ago)" if isinstance(age, (int, float)) else ""
         items.append({"name": node, "status": "warn",
-                      "detail": f"traffic agent ran but has stopped updating stats{when}"})
+                      "detail": f"extra traffic agent ran but has stopped updating stats{when}"})
 
     # The runtime traffic_summary.json is authoritative about whether traffic was
     # actually configured — the scenario XML's Traffic section can carry a
@@ -1244,14 +1357,14 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
     traffic_configured = bool(flows or traffic_files or nodes_with_procs)
     summary_missing = summary is None and not traffic_files and not nodes_with_procs
 
-    if missing_senders:
+    if missing_required or unresolved_endpoints:
+        broken = len(missing_required) + len(unresolved_endpoints)
+        return _result("traffic", "fail",
+                       f"{broken} required traffic endpoint(s) cannot run or be identified.", items)
+    if stopped_extras:
         return _result("traffic", "warn",
-                       f"{len(nodes_with_procs)} node(s) running traffic; {len(missing_senders)} "
-                       "expected sender(s) have no traffic process.", items)
-    if stopped_others:
-        return _result("traffic", "warn",
-                       f"{len(nodes_with_procs)} node(s) running traffic; {len(stopped_others)} "
-                       "node(s) have a stopped traffic agent.", items)
+                       f"{len(nodes_with_procs)} node(s) running required traffic; "
+                       f"{len(stopped_extras)} extra node(s) have a stopped traffic agent.", items)
     if traffic_configured:
         bits: list[str] = []
         if flows:
@@ -1262,10 +1375,340 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
             bits.append(f"{len(nodes_with_procs)} node(s) running traffic")
         return _result("traffic", "pass", "; ".join(bits), items)
     if summary_missing and expected:
-        return _result("traffic", "warn",
+        return _result("traffic", "fail",
                        "The scenario declares traffic, but no runtime traffic_summary.json was found. "
-                       "Confirm traffic generation ran during execute.", items)
+                       "Required traffic cannot be verified; confirm traffic generation ran during execute.",
+                       items)
     return _result("traffic", "skip", "No traffic configured for this scenario.", items)
+
+
+def flow_pivot_relationships(flow_state: Any) -> list[dict[str, Any]]:
+    """Return the distinct source -> target paths required by Flow's chain.
+
+    Flow records a broad list of nodes unlocked by a pivot on the assignment
+    that *produces* ``Pivot(source)`` and a specific relationship on every
+    chain assignment that *requires* it.  The latter is authoritative for this
+    check: probing every broad source-side relationship would test nodes that
+    are not part of the generated challenge chain.
+
+    Older saved FlowState payloads may have only source-side records.  Those
+    remain usable as a fallback, but target-side and source-side records are
+    never mixed.  Repeated assignments and duplicate chain nodes can repeat an
+    edge, so edges are deduplicated by both endpoint names rather than by node
+    id or assignment identity.
+    """
+    if not isinstance(flow_state, dict):
+        return []
+    assignments = flow_state.get("flag_assignments")
+    if not isinstance(assignments, list):
+        assignments = flow_state.get("assignments")
+    if not isinstance(assignments, list):
+        return []
+
+    target_entries: list[tuple[int, dict[str, Any]]] = []
+    source_entries: list[tuple[int, dict[str, Any]]] = []
+    for assignment_index, assignment in enumerate(assignments):
+        if not isinstance(assignment, dict):
+            continue
+        for entry in _as_list(assignment.get("pivot")):
+            if not isinstance(entry, dict):
+                continue
+            role = _name(entry.get("role")).lower()
+            if not role:
+                requires = " ".join(_name(v) for v in _as_list(entry.get("requires")))
+                produces = " ".join(_name(v) for v in _as_list(entry.get("produces")))
+                if "Pivot(" in requires:
+                    role = "target"
+                elif "Pivot(" in produces:
+                    role = "source"
+            if role == "target":
+                target_entries.append((assignment_index, entry))
+            elif role == "source":
+                source_entries.append((assignment_index, entry))
+
+    selected = target_entries if target_entries else source_entries
+    relationships: list[dict[str, Any]] = []
+    by_edge: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _ports(value: Any) -> list[int]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        out: list[int] = []
+        for raw in values:
+            if isinstance(raw, str) and "," in raw:
+                out.extend(_ports([part.strip() for part in raw.split(",")]))
+                continue
+            try:
+                port = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535 and port not in out:
+                out.append(port)
+        return out
+
+    def _protocols(value: Any) -> list[str]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        out: list[str] = []
+        for raw in values:
+            for part in _name(raw).replace(",", " ").split():
+                protocol = part.upper()
+                if protocol and protocol not in out:
+                    out.append(protocol)
+        return out
+
+    for assignment_index, entry in selected:
+        source = _name(entry.get("source"))
+        target = _name(entry.get("target"))
+        # Retain malformed target-side metadata so the live check reports a
+        # clear failure instead of silently skipping a required pivot.
+        edge = (source, target)
+        if not source or not target:
+            edge = (source or f"<missing-source-{assignment_index}>",
+                    target or f"<missing-target-{assignment_index}>")
+        current = by_edge.get(edge)
+        if current is None:
+            current = {
+                "source": source,
+                "target": target,
+                "provider": _name(entry.get("provider")),
+                "provider_label": _name(entry.get("provider_label")),
+                "exposure": _name(entry.get("exposure")),
+                "target_ports": [],
+                "target_protocols": [],
+                "assignment_indexes": [],
+            }
+            if not source or not target:
+                current["metadata_error"] = (
+                    f"Flow pivot metadata on assignment {assignment_index + 1} is missing "
+                    f"{'source and target' if not source and not target else 'source' if not source else 'target'}"
+                )
+            by_edge[edge] = current
+            relationships.append(current)
+        current["assignment_indexes"].append(assignment_index)
+        for port in _ports(entry.get("target_ports")):
+            if port not in current["target_ports"]:
+                current["target_ports"].append(port)
+        for protocol in _protocols(entry.get("target_protocols")):
+            if protocol not in current["target_protocols"]:
+                current["target_protocols"].append(protocol)
+        for field in ("provider", "provider_label", "exposure"):
+            if not current.get(field) and _name(entry.get(field)):
+                current[field] = _name(entry.get(field))
+
+    return relationships
+
+
+def flow_pivot_probe_script(sudo_password: str | None = None,
+                            session_id: Any = None,
+                            relationships: Any = None,
+                            max_ports_per_target: int = 12) -> str:
+    """VM-side probe for Flow's actual ``Pivot(source)`` chain edges.
+
+    The check enters the source node's Docker/CORE namespace and makes a TCP
+    connection to the target.  Explicit target ports from Flow metadata win;
+    otherwise the target's non-loopback listeners are discovered from
+    ``/proc/net/tcp*``.  If the target has no listener, a closed TCP route-probe
+    port is used: a returned RST still proves that packets reached the target
+    and the reply reached the pivot source.
+    """
+    pivots = [dict(item) for item in _as_list(relationships) if isinstance(item, dict)]
+    pivots_literal = json.dumps(pivots, separators=(",", ":"))
+    listen_py = (
+        "import json\n"
+        "def _loop(a,f):\n"
+        " a=a.upper()\n"
+        " if f==4:return a.endswith('7F')\n"
+        " if a=='00000000000000000000000001000000':return True\n"
+        " if a.startswith('0000000000000000FFFF0000'):return a.endswith('7F')\n"
+        " return False\n"
+        "pub=set()\n"
+        "for path,fam in (('/proc/net/tcp',4),('/proc/net/tcp6',6)):\n"
+        " try:\n"
+        "  f=open(path);f.readline()\n"
+        "  for line in f:\n"
+        "   p=line.split()\n"
+        "   if len(p)<4 or p[3]!='0A':continue\n"
+        "   addr,port=p[1].rsplit(':',1)\n"
+        "   if not _loop(addr,fam):pub.add(int(port,16))\n"
+        "  f.close()\n"
+        " except Exception:pass\n"
+        f"print(json.dumps(sorted(pub)[:{int(max_ports_per_target)}]))\n"
+    )
+    path_py = (
+        "import json,socket,errno,time\n"
+        "ATTEMPTS=3\n"
+        "R=[]\n"
+        "for idx,target,ips,ports,basis in ROWS:\n"
+        " ok=False;method='tcp-connect';err='no ports attempted';used=None;used_ip=(ips[0] if ips else '');attempts=0\n"
+        " for attempt in range(1,ATTEMPTS+1):\n"
+        "  attempts=attempt\n"
+        "  for ip in ips:\n"
+        "   used_ip=ip\n"
+        "   for port in ports:\n"
+        "    used=int(port)\n"
+        "    try:\n"
+        "     s=socket.create_connection((ip,used),1.5);s.close();ok=True;method='tcp-handshake';err='';break\n"
+        "    except socket.timeout:\n"
+        "     err='timeout'\n"
+        "    except OSError as e:\n"
+        "     c=getattr(e,'errno',None)\n"
+        "     if c==errno.ECONNREFUSED:ok=True;method='tcp-rst';err='refused';break\n"
+        "     if c in (errno.EHOSTUNREACH,errno.ENETUNREACH):err='no-route'\n"
+        "     else:err='error'+((':'+str(c)) if c is not None else '')\n"
+        "   if ok:break\n"
+        "  if ok:break\n"
+        "  if attempt<ATTEMPTS:time.sleep(0.5)\n"
+        " R.append([idx,target,used_ip,used,basis,ok,method,err,attempts])\n"
+        "print(json.dumps(R))\n"
+    )
+    return (
+        _remote_preamble(sudo_password, session_id)
+        + f"PIVOTS = {pivots_literal}\n"
+        + f"LISTEN_PY = {json.dumps(listen_py)}\n"
+        + f"PATH_PY = {json.dumps(path_py)}\n"
+        + "def _listening(kind,name):\n"
+        + " rc,out=_nexec_python(kind,name,LISTEN_PY)\n"
+        + " try:return [int(x) for x in json.loads(out.strip().splitlines()[-1])]\n"
+        + " except Exception:return []\n"
+        + "def _repro(kind,name,ip,port):\n"
+        + " inner='python3 -c \\'import socket; socket.create_connection((\\\"'+str(ip)+'\\\", '+str(port)+'), 3)\\\''\n"
+        + " if kind=='docker':return \"sudo nsenter -t $(sudo docker inspect -f '{{.State.Pid}}' \"+name+') -n '+inner\n"
+        + " return 'sudo vcmd -c '+os.path.join(PYCORE,name)+' -- '+inner\n"
+        + "def main():\n"
+        + " runtime={}\n"
+        + " for kind,name in _all_nodes():runtime.setdefault(name,kind)\n"
+        + " needed=set()\n"
+        + " for rel in PIVOTS:\n"
+        + "  if rel.get('source'):needed.add(str(rel.get('source')))\n"
+        + "  if rel.get('target'):needed.add(str(rel.get('target')))\n"
+        + " nodes={}\n"
+        + " target_names=set(str(r.get('target')) for r in PIVOTS if r.get('target'))\n"
+        + " for name in sorted(needed):\n"
+        + "  kind=runtime.get(name)\n"
+        + "  if not kind:continue\n"
+        + "  cidrs=_node_cidrs(kind,name);ips=[c.split('/',1)[0] for c in cidrs]\n"
+        + "  nodes[name]={'kind':kind,'ip':(ips[0] if ips else ''),'ips':ips,'cidrs':cidrs,'listening':(_listening(kind,name) if name in target_names else [])}\n"
+        + " checks=[];plan={}\n"
+        + " for idx,rel in enumerate(PIVOTS):\n"
+        + "  source=str(rel.get('source') or '');target=str(rel.get('target') or '')\n"
+        + "  base={'index':idx,'source':source,'target':target}\n"
+        + "  if rel.get('metadata_error') or not source or not target:\n"
+        + "   base.update({'reachable':False,'error':str(rel.get('metadata_error') or 'missing Flow pivot source or target'),'method':'metadata','cmd':''});checks.append(base);continue\n"
+        + "  if source not in nodes:\n"
+        + "   base.update({'reachable':False,'error':'source node not found in running CORE session','method':'node-lookup','cmd':''});checks.append(base);continue\n"
+        + "  if target not in nodes:\n"
+        + "   base.update({'reachable':False,'error':'target node not found in running CORE session','method':'node-lookup','cmd':''});checks.append(base);continue\n"
+        + "  ips=[str(x) for x in (nodes[target].get('ips') or []) if str(x)]\n"
+        + "  if not ips:\n"
+        + "   base.update({'reachable':False,'error':'target node has no usable IPv4 address','method':'node-lookup','cmd':''});checks.append(base);continue\n"
+        + "  explicit=[]\n"
+        + "  protocols=[str(x).upper() for x in (rel.get('target_protocols') or [])]\n"
+        + "  if not protocols or 'TCP' in protocols:\n"
+        + "   for value in (rel.get('target_ports') or []):\n"
+        + "    try:\n"
+        + "     port=int(value)\n"
+        + "     if 1<=port<=65535 and port not in explicit:explicit.append(port)\n"
+        + "    except Exception:pass\n"
+        + "  ports=explicit or list(nodes[target].get('listening') or [])\n"
+        + "  basis='Flow target port' if explicit else ('target listening port' if ports else 'closed-port route probe')\n"
+        + "  if not ports:ports=[9]\n"
+        + "  base.update({'ip':ips[0],'candidate_ips':ips,'candidate_ports':ports,'basis':basis,'cmd':_repro(nodes[source]['kind'],source,ips[0],ports[0])})\n"
+        + "  plan.setdefault(source,[]).append([idx,target,ips,ports,basis])\n"
+        + "  checks.append(base)\n"
+        + " for source,rows in plan.items():\n"
+        + "  prog='ROWS = '+json.dumps(rows)+'\\n'+PATH_PY\n"
+        + "  rc,out=_nexec_python(nodes[source]['kind'],source,prog,timeout=120)\n"
+        + "  try:results=json.loads(out.strip().splitlines()[-1])\n"
+        + "  except Exception:results=[]\n"
+        + "  returned={}\n"
+        + "  for row in results:\n"
+        + "   if isinstance(row,list) and len(row)>=8:returned[int(row[0])]=row\n"
+        + "  for row in rows:\n"
+        + "   idx=int(row[0]);result=returned.get(idx);check=checks[idx]\n"
+        + "   if not result:\n"
+        + "    check.update({'reachable':False,'method':'probe-execution','error':('probe produced no result: '+str(out or '')[-240:])})\n"
+        + "   else:\n"
+        + "    check.update({'ip':result[2],'port':result[3],'basis':result[4],'reachable':bool(result[5]),'method':result[6],'error':result[7],'attempts':(result[8] if len(result)>8 else 1)})\n"
+        + " print(json.dumps({'ok':True,'pivots':PIVOTS,'nodes':nodes,'checks':checks}))\n"
+        + "main()\n"
+    )
+
+
+def flow_pivot_result(probe: Any) -> dict[str, Any]:
+    """Shape the live source -> target Flow pivot probe into check 8."""
+    if not isinstance(probe, dict) or not probe.get("ok"):
+        detail = _name(probe.get("error") or probe.get("raw")) if isinstance(probe, dict) else ""
+        return _result("flow_pivot", "error", detail or "Flow pivot path probe failed")
+
+    pivots = [p for p in _as_list(probe.get("pivots")) if isinstance(p, dict)]
+    if not pivots:
+        return _result(
+            "flow_pivot", "skip",
+            "No Flow challenge-chain Pivot(node) relationships to check."
+        )
+
+    checks_by_index = {
+        int(row.get("index")): row
+        for row in _as_list(probe.get("checks"))
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
+    items: list[dict[str, Any]] = []
+    failures = 0
+    for index, pivot in enumerate(pivots):
+        source = _name(pivot.get("source")) or "missing source"
+        target = _name(pivot.get("target")) or "missing target"
+        row = checks_by_index.get(index)
+        label = f"{source} → {target}"
+        if not isinstance(row, dict):
+            failures += 1
+            items.append({"name": label, "status": "fail",
+                          "detail": "the runtime probe returned no result for this required Flow pivot path"})
+            continue
+        ip = _name(row.get("ip"))
+        port = row.get("port")
+        endpoint = f" ({ip}{':' + str(port) if port else ''})" if ip else ""
+        method = _name(row.get("method"))
+        error = _name(row.get("error"))
+        basis = _name(row.get("basis"))
+        cmd = _name(row.get("cmd"))
+        attempts = row.get("attempts")
+        attempts_note = (f" after {attempts} attempts"
+                         if isinstance(attempts, int) and attempts > 1 else "")
+        if row.get("reachable") is True:
+            if method == "tcp-handshake":
+                detail = f"TCP handshake completed on {basis or 'target port'}; the path works in both directions"
+            elif method == "tcp-rst":
+                detail = (f"target returned TCP RST on {basis or 'the probed port'}; packets reached the "
+                          "target and its reply reached the pivot source")
+            else:
+                detail = "runtime path probe reached the target"
+            items.append({"name": label + endpoint, "status": "pass", "detail": detail})
+            continue
+        failures += 1
+        if method == "node-lookup" or method == "metadata":
+            detail = error or "Flow pivot endpoint metadata is incomplete"
+        elif error == "no-route":
+            detail = f"the pivot source has no route to the target{attempts_note}"
+        elif error == "timeout":
+            detail = (f"the target did not answer from the pivot source{attempts_note}; "
+                      "routing or segmentation is blocking the path")
+        else:
+            detail = error or "the source-to-target runtime probe failed"
+        if cmd:
+            detail += f". Reproduce: {cmd}"
+        items.append({"name": label + endpoint, "status": "fail", "detail": detail})
+
+    if failures:
+        return _result(
+            "flow_pivot", "fail",
+            f"{failures} of {len(pivots)} Flow pivot path(s) cannot reach their target; "
+            "the challenge chain is unsolvable.",
+            items,
+        )
+    return _result(
+        "flow_pivot", "pass",
+        f"All {len(pivots)} Flow pivot path(s) traversable from their source nodes.",
+        items,
+    )
 
 
 def participant_probe_sources(participant_subnets: Any) -> list[str]:
@@ -1295,7 +1738,7 @@ def participant_probe_sources(participant_subnets: Any) -> list[str]:
 
 
 def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> dict[str, Any]:
-    """Check 8: can the participant reach each pivot provider?
+    """Check 9: can the participant reach each pivot provider?
 
     A provider is the only way into a subnet segmentation walled off, so a
     participant who cannot reach it cannot solve anything behind that boundary.
@@ -1328,8 +1771,9 @@ def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> d
             "\"accessible by pivot\", which places a reachable provider node in a "
             "subnet segmentation walled off — it is off for this scenario, or it is "
             "on and nothing was walled off. Pivot steps in the challenge chain "
-            "(a step producing Pivot(node)) are a separate feature and are not "
-            "measured here; turn on accessible_by_pivot in the Segmentation section "
+            "(a step producing Pivot(node)) are a separate feature measured by "
+            "the preceding Flow pivot-path check; turn on accessible_by_pivot in "
+            "the Segmentation section "
             "if you want walled-off subnets given an entrance.")
 
     allow_rules = _segmentation_allow_rules(segmentation)
@@ -1427,10 +1871,9 @@ def reachability_result(probe: Any) -> dict[str, Any]:
         return _result("reachability", "error", detail or "reachability probe failed")
     ping = _as_list(probe.get("ping"))
     items: list[dict[str, Any]] = []
-    unreachable: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     reachable_count = 0
     tcp_verified = 0
-    unconfirmed = 0
     arrival_confirmed = 0
 
     for row in ping:
@@ -1442,6 +1885,9 @@ def reachability_result(probe: Any) -> dict[str, Any]:
         proto = _name(row.get("protocol")).upper()
         method = _name(row.get("method"))
         err = _name(row.get("error"))
+        attempts = row.get("attempts")
+        attempts_note = (f" after {attempts} attempts"
+                         if isinstance(attempts, int) and attempts > 1 else "")
         flow_desc = f" [{proto or 'flow'}{':' + str(port) if port else ''}]"
         label = f"{row.get('src')} → {row.get('dst')} ({row.get('ip') or 'no ip'}){flow_desc}"
 
@@ -1467,13 +1913,31 @@ def reachability_result(probe: Any) -> dict[str, Any]:
             continue
         # Sending with nothing arriving is a silent failure the sender cannot see.
         if sending and isinstance(received, int) and received == 0:
-            unreachable.append(row)
-            items.append({"name": label, "status": "warn",
+            failures.append(row)
+            items.append({"name": label, "status": "fail",
                           "detail": (f"the sender has written {sent:,} bytes but the receiving "
                                      "agent has counted none, so this traffic is being dropped in "
                                      "flight. For UDP nothing reports this back to the sender — "
                                      "check for a segmentation rule covering this port, or a "
                                      "receiver that is not listening")})
+            continue
+
+        # Old probe payloads reported RST/ICMP-port-unreachable as proof of the
+        # network path. That is useful for a route-only diagnostic, but required
+        # traffic needs a listening receiver. Reject it even if an older probe
+        # marked the host response reachable.
+        if err in ("refused", "icmp-port-unreachable"):
+            failures.append(row)
+            status = "fail"
+            if err == "refused":
+                detail = (f"the target host replied{attempts_note}, but refused the required TCP connection; "
+                          "the destination service is not listening")
+            else:
+                detail = (f"the target host returned ICMP port-unreachable{attempts_note}; no UDP receiver is "
+                          "listening for this required flow")
+            if cmd:
+                detail += f". Reproduce: {cmd}"
+            items.append({"name": label, "status": status, "detail": detail})
             continue
 
         if reachable is True:
@@ -1485,67 +1949,70 @@ def reachability_result(probe: Any) -> dict[str, Any]:
                           "(the destination's SYN-ACK came back)")
                 if arrived:
                     detail += f"; the receiving agent has counted {received:,} bytes"
-                if err == "refused":
-                    detail = ("host replied (RST), so the path works in both directions, but "
-                              "nothing is listening on this port right now")
-            elif err == "icmp-port-unreachable":
-                detail = "datagram arrived (destination replied ICMP port-unreachable)"
             else:
                 detail = "reachable"
         elif reachable is False:
-            unreachable.append(row)
-            status = "warn"
+            failures.append(row)
+            status = "fail"
             icmp = row.get("icmp")
             if err == "no-route":
-                detail = ("no route to the destination — the source cannot reach that network at all")
+                detail = (f"no route to the destination{attempts_note} — the source cannot reach that network at all")
             elif icmp is True:
-                detail = (f"the host answers ping but the {proto or 'flow'} port is filtered or closed, "
+                detail = (f"the host answers ping but the {proto or 'flow'} port is filtered or closed"
+                          f"{attempts_note}, "
                           "so this flow cannot carry data. Look for a segmentation rule covering "
                           "this port")
             else:
-                detail = (f"the {proto or 'flow'} flow cannot reach its destination and the host does "
+                detail = (f"the {proto or 'flow'} flow cannot reach its destination{attempts_note} and the host does "
                           "not answer ping either, so the whole path is blocked")
             if cmd:
                 detail += f". Reproduce: {cmd}"
         else:
-            status = "skip"
-            unconfirmed += 1
+            status = "fail"
+            failures.append(row)
             why = _name(row.get("why"))
             if why:
                 detail = why
             elif method == "udp-send":
-                detail = ("UDP datagram sent with no routing error; UDP is connectionless so "
-                          "delivery cannot be confirmed from the sender")
+                detail = ("required UDP delivery was not confirmed at the destination")
                 if not has_counters:
-                    detail += (". No agent counters were readable for this flow, so arrival "
-                               "could not be confirmed at the destination either")
+                    detail += (": no receiving-agent counters were readable for this flow")
                 elif not sending:
-                    detail += (". The sending agent has written no bytes yet, so there is "
-                               "nothing for the destination to receive")
+                    detail += (": the sending agent has written no bytes")
+                else:
+                    detail += (": sender counters exist, but no receiving byte count is available")
             else:
-                detail = "flow has no protocol/port to test"
+                detail = err or "required flow has no successful protocol/port probe"
+            if cmd:
+                detail += f". Reproduce: {cmd}"
         items.append({"name": label, "status": status, "detail": detail})
 
     if not ping:
+        summary = probe.get("summary") if isinstance(probe.get("summary"), dict) else {}
+        configured = [f for f in _as_list(summary.get("flows")) if isinstance(f, dict)]
+        if configured:
+            return _result(
+                "reachability", "fail",
+                f"No runtime results were produced for {len(configured)} configured traffic flow(s).",
+                items,
+            )
         return _result("reachability", "skip",
                        "No traffic flows configured, so there are no source → destination pairs to verify.",
                        items)
-    if unreachable:
-        first_cmd = _name(unreachable[0].get("cmd"))
+    if failures:
+        first_cmd = _name(failures[0].get("cmd"))
         tail = f" First: {first_cmd}" if first_cmd else ""
-        return _result("reachability", "warn",
+        return _result("reachability", "fail",
                        f"{reachable_count} of {len(ping)} traffic flow(s) confirmed; "
-                       f"{len(unreachable)} cannot reach their destination.{tail}", items)
+                       f"{len(failures)} required flow(s) are not delivering.{tail}", items)
     notes = []
     if tcp_verified:
         notes.append(f"{tcp_verified} TCP flow(s) verified in both directions")
     if arrival_confirmed:
         notes.append(f"{arrival_confirmed} confirmed by bytes counted at the destination")
-    if unconfirmed:
-        notes.append(f"{unconfirmed} UDP flow(s) sent but not confirmable")
     note = f" ({'; '.join(notes)}.)" if notes else ""
     return _result("reachability", "pass",
-                   f"All {reachable_count} testable traffic flow(s) reach their destination.{note}",
+                   f"All {reachable_count} required traffic flow(s) reach their destination.{note}",
                    items)
 
 

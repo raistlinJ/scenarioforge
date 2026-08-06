@@ -3374,7 +3374,7 @@
     function applyExecuteImageCounts(line) {
       const match = /^\[images\]\s+pulling=(\d+)\s+cached=(\d+)(?:\s+pending=(\d+))?$/.exec(String(line || '').trim());
       if (!match) return false;
-      const text = 'Pulling: ' + match[1] + ' images / Using: ' + match[2] + ' cached'
+      const text = 'Fetching missing bases for: ' + match[1] + ' nodes / Bases cached: ' + match[2] + ' nodes'
         + (match[3] === undefined ? '' : ' / Pending: ' + match[3]);
       EXECUTE_IMAGE_COUNT_ELEMENT_IDS.forEach((id) => {
         try {

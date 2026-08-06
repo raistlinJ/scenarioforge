@@ -12,11 +12,11 @@ from typing import Any, Dict
 
 
 def _classify_generator_image_use(run_stdout: Any) -> str:
-    """Return 'cached', 'pulling', or '' for a generator run's output.
+    """Return the legacy tally bucket for a generator run's image outcome.
 
-    The runner prints exactly one of these per run. A cached hit is reported
-    last-wins because the "not cached" line is also emitted when a build is
-    about to start, and a later run of the same image reports the hit.
+    The ``pulling`` bucket name is retained in the response schema for older
+    clients, but this outcome is a local generator-image build.  It must not be
+    presented as a registry pull.
     """
     text = run_stdout if isinstance(run_stdout, str) else ''
     if not text:
@@ -1472,7 +1472,7 @@ def _execute_or_prepare_assignments(
                                     - image_counts['cached'],
                                 )
                                 flow_progress(
-                                    f"[images] pulling={image_counts['pulling']} "
+                                    f"[images] building={image_counts['pulling']} "
                                     f"cached={image_counts['cached']} pending={pending}"
                                 )
                         except Exception:

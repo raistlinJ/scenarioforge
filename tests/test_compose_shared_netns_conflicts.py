@@ -60,6 +60,44 @@ def test_the_node_named_service_keeps_its_networking():
     assert '1445' in [str(p) for p in primary['expose']]
 
 
+def test_primary_service_gets_a_stable_self_resolving_hostname():
+    obj = {
+        'services': {
+            'inject_copy': {'image': 'alpine:3.19'},
+            'docker-17': {
+                'image': 'metabase:0.40.4',
+                'network_mode': 'none',
+                'extra_hosts': ['inject_copy:127.0.0.1'],
+            },
+        },
+    }
+
+    out = vuln_process._ensure_primary_service_hostname(obj, 'docker-17')
+    primary = out['services']['docker-17']
+
+    assert primary['hostname'] == 'docker-17'
+    assert primary['extra_hosts'] == [
+        'inject_copy:127.0.0.1',
+        'docker-17:127.0.0.1',
+    ]
+
+
+def test_primary_service_preserves_explicit_hostname_and_mapping():
+    obj = {
+        'services': {
+            'node': {
+                'hostname': 'metabase-lab',
+                'extra_hosts': {'metabase-lab': '127.0.1.1'},
+            },
+        },
+    }
+
+    out = vuln_process._ensure_primary_service_hostname(obj, 'node')
+
+    assert out['services']['node']['hostname'] == 'metabase-lab'
+    assert out['services']['node']['extra_hosts'] == {'metabase-lab': '127.0.1.1'}
+
+
 def test_hostname_and_port_exposing_are_both_covered():
     """The two conflicts observed in the field, in that order."""
     keys = vuln_process.CONTAINER_NETWORK_MODE_CONFLICTING_KEYS
@@ -88,6 +126,19 @@ def test_strip_runs_after_the_node_alias_exists():
     strip = [i for i, l in enumerate(source) if '_strip_network_conflicts_from_secondary_services(obj, node_name)' in l]
     assert alias and strip, 'compose post-processing wiring changed'
     assert min(strip) > min(alias), 'the strip must follow the node alias step'
+
+
+def test_self_resolving_hostname_is_applied_after_the_node_alias_exists():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / 'scenarioforge' / 'utils' / 'vuln_process.py').read_text(
+        encoding='utf-8', errors='ignore'
+    ).splitlines()
+    alias = [i for i, line in enumerate(source) if '_ensure_service_named_as_node(obj, node_name' in line]
+    hostname = [i for i, line in enumerate(source) if '_ensure_primary_service_hostname(obj, node_name)' in line]
+
+    assert alias and hostname, 'compose post-processing wiring changed'
+    assert min(hostname) > min(alias), 'the primary service does not exist before the alias step'
 
 
 def test_port_intent_moves_to_the_node_service_rather_than_vanishing():
