@@ -18,34 +18,44 @@
               </div>
 
               <div class="row g-2 align-items-end">
-                <form id="packFolderUploadForm" class="col-md-6" action="{{ url_for('generator_packs_upload') }}" method="post" enctype="multipart/form-data">
-                  <label class="form-label small" for="packFolderInput">Downloaded repository folder</label>
-                  <div class="input-group">
-                    <input id="packFolderInput" class="form-control" type="file" name="repo_files" webkitdirectory directory multiple required>
-                    <button class="btn btn-primary" type="submit">Import Folder</button>
-                  </div>
-                </form>
-
-                <form id="packUploadForm" class="col-md-6" action="{{ url_for('generator_packs_upload') }}" method="post" enctype="multipart/form-data">
-                  <label class="form-label small" for="packZipInput">Repository or generator-pack ZIP</label>
-                  <div class="input-group">
-                    <input id="packZipInput" class="form-control" type="file" name="zip_file" accept="application/zip,.zip" required>
-                    <button class="btn btn-outline-primary" type="submit">Upload ZIP</button>
-                  </div>
-                </form>
-              </div>
-
-              <form id="packImportUrlForm" class="row g-2 mt-2 align-items-center" action="{{ url_for('generator_packs_import_url') }}" method="post">
-                <div class="col-md-6">
-                  <input id="packImportUrlInput" class="form-control" type="url" name="zip_url" placeholder="Direct URL to a repository or generator-pack ZIP" required>
+                <div class="col-md-3 col-lg-2">
+                  <label class="form-label small" for="packImportMethod">Import from</label>
+                  <select class="form-select" id="packImportMethod">
+                    <option value="folder">Repository folder</option>
+                    <option value="zip">ZIP file</option>
+                    <option value="url">ZIP URL</option>
+                  </select>
                 </div>
+
+                <div class="col-md-6 col-lg-7">
+                  <div data-pack-import-method="folder">
+                    <form id="packFolderUploadForm" action="{{ url_for('generator_packs_upload') }}" method="post" enctype="multipart/form-data">
+                      <label class="visually-hidden" for="packFolderInput">Downloaded repository folder</label>
+                      <input id="packFolderInput" class="form-control" type="file" name="repo_files" webkitdirectory directory multiple required>
+                    </form>
+                  </div>
+                  <div class="d-none" data-pack-import-method="zip">
+                    <form id="packUploadForm" action="{{ url_for('generator_packs_upload') }}" method="post" enctype="multipart/form-data">
+                      <label class="visually-hidden" for="packZipInput">Repository or generator-pack ZIP</label>
+                      <input id="packZipInput" class="form-control" type="file" name="zip_file" accept="application/zip,.zip" required disabled>
+                    </form>
+                  </div>
+                  <div class="d-none" data-pack-import-method="url">
+                    <form id="packImportUrlForm" action="{{ url_for('generator_packs_import_url') }}" method="post">
+                      <label class="visually-hidden" for="packImportUrlInput">Repository or generator-pack ZIP URL</label>
+                      <input id="packImportUrlInput" class="form-control" type="url" name="zip_url" placeholder="Direct URL to a repository or generator-pack ZIP" required disabled>
+                    </form>
+                  </div>
+                </div>
+
                 <div class="col-auto">
-                  <button class="btn btn-outline-primary" type="submit">Import ZIP URL</button>
+                  <button class="btn btn-primary" id="packImportSubmit" type="button">Import</button>
                 </div>
                 <div class="col-auto ms-md-auto">
                   <a class="btn btn-outline-secondary" id="downloadEntireFlagCatalogBtn" href="{{ url_for('generator_packs_export_all') }}" onclick="return startEntireCatalogDownload(event, 'Flag Catalog', this);">Download Entire Catalog</a>
                 </div>
-              </form>
+              </div>
+              <div class="small text-muted mt-2" id="packImportMethodHelp">Select the repository folder containing generator manifests.</div>
               <div class="alert alert-success alert-dismissible fade d-none mt-3 mb-0" id="packInstallSuccessAlert" role="alert">
                 <div class="fw-semibold" id="packInstallSuccessText">Generator pack added to catalog.</div>
                 <div class="small mb-0" id="packInstallSuccessMeta"></div>
@@ -162,7 +172,7 @@
                       <th>Outputs</th>
                       <th>Injects</th>
                       <th style="width: 140px;">Validated</th>
-                      <th>From Source</th>
+                      <th>Category / Source</th>
                       <th style="width: 130px;">Image Cache</th>
                       <th style="width: 82px;">Notes</th>
                       <th style="width: 160px;">Actions</th>
@@ -218,7 +228,7 @@
                       <th>Outputs</th>
                       <th>Injects</th>
                       <th style="width: 140px;">Validated</th>
-                      <th>From Source</th>
+                      <th>Category / Source</th>
                       <th style="width: 130px;">Image Cache</th>
                       <th style="width: 82px;">Notes</th>
                       <th style="width: 160px;">Actions</th>
@@ -1609,6 +1619,11 @@
       const isDuplicateConflict = !!(g && typeof g === 'object' && g._duplicate_conflict);
       const packId = String((g && g._pack_id) || '').trim();
       const packLabel = String((g && g._pack_label) || '').trim();
+      const category = String((g && g._category) || '').trim();
+      const sourceLabel = category || String(g._source_name || '').trim();
+      const sourceDetail = category && packLabel && packLabel !== category
+        ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(packLabel)}</div>`
+        : '';
       const rowSelectable = isInstalled && !isDuplicateConflict;
       const rowSelected = !!(genState.selectedIds && genState.selectedIds.has(String(g.id || '')));
       const missingRequiredFiles = Array.isArray(g.missing_required_files)
@@ -1657,7 +1672,7 @@
         <td class="small" title="${escapeHtml(outTypes)}">${outHtml}</td>
         <td class="small" style="max-width: 520px; word-break: break-all;">${escapeHtml(injected)}</td>
         <td class="small">${validatedHtml}</td>
-        <td class="small">${escapeHtml(g._source_name || '')}</td>
+        <td class="small">${escapeHtml(sourceLabel)}${sourceDetail}</td>
         <td class="small">
           ${hasCompose
             ? (g._cached === true
@@ -1826,6 +1841,11 @@
       const isDuplicateConflict = !!(g && typeof g === 'object' && g._duplicate_conflict);
       const packId = String((g && g._pack_id) || '').trim();
       const packLabel = String((g && g._pack_label) || '').trim();
+      const category = String((g && g._category) || '').trim();
+      const sourceLabel = category || String(g._source_name || '').trim();
+      const sourceDetail = category && packLabel && packLabel !== category
+        ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(packLabel)}</div>`
+        : '';
       const rowSelectable = isInstalled && !isDuplicateConflict;
       const rowSelected = !!(nodeGenState.selectedIds && nodeGenState.selectedIds.has(String(g.id || '')));
       const missingRequiredFiles = Array.isArray(g.missing_required_files)
@@ -1874,7 +1894,7 @@
         <td class="small" title="${escapeHtml(outTypes)}">${outHtml}</td>
         <td class="small" style="max-width: 520px; word-break: break-all;">${escapeHtml(injected)}</td>
         <td class="small">${validatedHtml}</td>
-        <td class="small">${escapeHtml(g._source_name || '')}</td>
+        <td class="small">${escapeHtml(sourceLabel)}${sourceDetail}</td>
         <td class="small">
           ${hasCompose
             ? (g._cached === true
@@ -4176,7 +4196,7 @@
     { key: 'outputs', label: 'Outputs' },
     { key: 'injects', label: 'Injects' },
     { key: null, label: 'Validated' },
-    { key: 'source', label: 'From Source' },
+    { key: 'source', label: 'Category / Source' },
     { key: null, label: 'Actions' },
   ], renderGenerators);
 
@@ -4189,7 +4209,7 @@
     { key: 'outputs', label: 'Outputs' },
     { key: 'injects', label: 'Injects' },
     { key: null, label: 'Validated' },
-    { key: 'source', label: 'From Source' },
+    { key: 'source', label: 'Category / Source' },
     { key: null, label: 'Actions' },
   ], renderNodeGenerators);
 
@@ -4369,6 +4389,47 @@
     el.addEventListener('hidden.bs.modal', () => {
       try { clearCleanupLog(); } catch (e) {}
     });
+  })();
+
+  (function attachGeneratorImportMethodSelector() {
+    const methodSelect = document.getElementById('packImportMethod');
+    const submitButton = document.getElementById('packImportSubmit');
+    const help = document.getElementById('packImportMethodHelp');
+    const methods = {
+      folder: {
+        form: document.getElementById('packFolderUploadForm'),
+        help: 'Select the repository folder containing generator manifests.',
+      },
+      zip: {
+        form: document.getElementById('packUploadForm'),
+        help: 'Select a downloaded repository ZIP or generator-pack ZIP.',
+      },
+      url: {
+        form: document.getElementById('packImportUrlForm'),
+        help: 'Enter a direct URL to a repository ZIP or generator-pack ZIP.',
+      },
+    };
+    if (!methodSelect || !submitButton) return;
+
+    function syncImportMethod() {
+      const selected = methods[methodSelect.value] ? methodSelect.value : 'folder';
+      document.querySelectorAll('[data-pack-import-method]').forEach((container) => {
+        const active = container.getAttribute('data-pack-import-method') === selected;
+        container.classList.toggle('d-none', !active);
+        container.querySelectorAll('input, select, textarea').forEach((field) => {
+          field.disabled = !active;
+        });
+      });
+      if (help) help.textContent = methods[selected].help;
+    }
+
+    methodSelect.addEventListener('change', syncImportMethod);
+    submitButton.addEventListener('click', () => {
+      const selected = methods[methodSelect.value] ? methodSelect.value : 'folder';
+      const form = methods[selected].form;
+      if (form) form.requestSubmit();
+    });
+    syncImportMethod();
   })();
 
   (function attachGeneratorPackUploadProgress() {

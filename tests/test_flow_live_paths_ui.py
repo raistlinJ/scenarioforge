@@ -1040,6 +1040,22 @@ def test_flow_generate_button_and_options_are_wired() -> None:
     assert not missing, "Missing direct generate/options wiring in flow template: " + "; ".join(missing)
 
 
+def test_flow_materialize_replays_saved_assignments_without_generate() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        'id="flowMaterializeBtn"',
+        "if (materializeBtnEl) materializeBtnEl.addEventListener('click'",
+        "'/api/flag-sequencing/regenerate_flow_artifacts'",
+        "flag_assignments: Array.isArray(currentFlagAssignments) ? currentFlagAssignments : []",
+        "The chain and resolved values will not be regenerated.",
+        "if (materializeBtnEl) materializeBtnEl.click();",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing saved-flow materialization wiring: " + "; ".join(missing)
+
+
 def test_flow_non_json_error_classifier_does_not_call_all_html_login() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

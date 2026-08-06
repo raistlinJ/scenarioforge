@@ -712,6 +712,94 @@ def test_generator_pack_export_all_without_installed_packs_is_empty_bundle(tmp_p
     assert set(outer.namelist()) == set()
 
 
+def test_generator_import_and_export_preserve_original_categories(tmp_path, monkeypatch):
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+
+    def manifest(generator_id: str, kind: str) -> str:
+        return f"""manifest_version: 1
+id: {generator_id}
+kind: {kind}
+name: {generator_id}
+runtime: {{type: docker-compose, compose_file: docker-compose.yml, service: generator}}
+artifacts: {{produces: [Flag(flag_id)]}}
+"""
+
+    compose = """services:
+  generator:
+    image: python:3.11-slim
+"""
+    archive = _make_zip({
+        'download-main/flag_generators/encoding/text_demo/manifest.yaml': manifest('text_demo', 'flag-generator'),
+        'download-main/flag_generators/encoding/text_demo/docker-compose.yml': compose,
+        'download-main/flag_node_generators/network/http/http_demo/manifest.yaml': manifest('http_demo', 'flag-node-generator'),
+        'download-main/flag_node_generators/network/http/http_demo/docker-compose.yml': compose,
+    })
+
+    client = app.test_client()
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (200, 302)
+    response = client.post(
+        '/generator_packs/upload',
+        data={'zip_file': (io.BytesIO(archive), 'download-main.zip')},
+        content_type='multipart/form-data',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+    assert response.status_code == 200
+
+    state = app_backend._load_installed_generator_packs_state()
+    pack = (state.get('packs') or [])[0]
+    installed = {app_backend._installed_generator_marker_source_id(item): item for item in pack['installed']}
+    assert installed['text_demo']['category'] == 'encoding'
+    assert installed['http_demo']['category'] == 'network/http'
+    assert Path(installed['text_demo']['path']).parent == install_root / 'flag_generators' / 'encoding'
+    assert Path(installed['http_demo']['path']).parent == install_root / 'flag_node_generators' / 'network' / 'http'
+
+    generator_payload = client.get('/flag_generators_data').get_json() or {}
+    generator_view = next(item for item in generator_payload.get('generators') or [] if item.get('id') == 'text_demo')
+    assert generator_view['_category'] == 'encoding'
+    assert generator_view['_source_name'] == 'encoding'
+    node_payload = client.get('/flag_node_generators_data').get_json() or {}
+    node_view = next(item for item in node_payload.get('generators') or [] if item.get('id') == 'http_demo')
+    assert node_view['_category'] == 'network/http'
+    assert node_view['_source_name'] == 'network/http'
+
+    exported = app_backend._pack_to_zip_bytes(pack)
+    with zipfile.ZipFile(io.BytesIO(exported), 'r') as exported_zip:
+        names = set(exported_zip.namelist())
+        metadata = __import__('json').loads(exported_zip.read('pack.json').decode('utf-8'))
+    assert any(name.startswith('flag_generators/encoding/') and name.endswith('/manifest.yaml') for name in names)
+    assert any(name.startswith('flag_node_generators/network/http/') and name.endswith('/manifest.yaml') for name in names)
+    exported_categories = {item.get('category') for item in metadata.get('installed') or []}
+    assert exported_categories == {'encoding', 'network/http'}
+
+
+def test_repo_local_category_export_does_not_duplicate_category_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(tmp_path / 'installed_generators'))
+    category_dir = tmp_path / 'source' / 'flag_generators' / 'archives'
+    generator_dir = category_dir / 'archive_demo'
+    generator_dir.mkdir(parents=True)
+    (generator_dir / 'manifest.yaml').write_text('manifest_version: 1\nid: archive_demo\n', encoding='utf-8')
+
+    archive = app_backend._pack_to_zip_bytes({
+        'id': 'repo-local:flag_generators:archives',
+        'label': 'Archives',
+        'repo_local': True,
+        'installed': [{
+            'id': 'archive_demo',
+            'kind': 'flag-generator',
+            'category': 'archives',
+            'path': str(category_dir),
+            'repo_local': True,
+        }],
+    })
+
+    with zipfile.ZipFile(io.BytesIO(archive), 'r') as exported_zip:
+        names = set(exported_zip.namelist())
+    assert 'flag_generators/archives/archive_demo/manifest.yaml' in names
+    assert not any(name.startswith('flag_generators/archives/archives/') for name in names)
+
+
 def test_generator_pack_bundle_import_preserves_nested_pack_categories(tmp_path, monkeypatch):
     install_root = tmp_path / "installed_generators"
     monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))

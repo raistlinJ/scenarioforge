@@ -41,6 +41,11 @@ def test_vuln_catalog_page_renders_active_catalog(monkeypatch):
     assert 'Filter Results By Status' in page
     assert 'Sort Results' in page
     assert 'Clear' in page
+    assert 'id="vulnPackImportMethod"' in page
+    assert 'id="vulnPackImportSubmit"' in page
+    assert 'data-vuln-pack-import-method="zip"' in page
+    assert 'data-vuln-pack-import-method="url"' in page
+    assert 'function syncVulnPackImportMethod()' in page
 
 
 def test_vuln_catalog_filters_include_compose_dependency_metadata() -> None:

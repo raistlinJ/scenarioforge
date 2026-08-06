@@ -2,6 +2,13 @@
 
 Generate reproducible CORE network topologies from scenario XML files using a rich Web GUI or a command-line interface.
 
+The scenario Import action detects both ordinary XML and ScenarioForge reproduction
+bundles by file content. Bundle imports validate their manifest and SHA-256 hashes,
+restore any included artifact sources, rewrite the saved Flow paths to the restored
+locations, and otherwise retain the saved resolved inputs for deterministic artifact
+regeneration. Supported bundle filenames may use `.zip` or `.scenarioforge` in
+addition to the existing `.xml` import.
+
 ## Table of contents
 - [Highlights](#highlights)
 - [Screenshots](docs/screenshots.md)
@@ -194,7 +201,7 @@ See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with loca
 - Flag Sequencing (Flow) endpoints and Attack Flow Builder `.afb` export are documented in [docs/reference/API.md](docs/reference/API.md) and the OpenAPI spec at [`docs/openapi.yaml`](docs/openapi.yaml).
 - Participant UI selection behavior is deterministic: incoming `?scenario=...` selection is prioritized, then remembered last selection, then the first listed scenario.
 - Generator authoring (flag-generators and flag-node-generators) is documented in [docs/GENERATOR_AUTHORING.md](docs/GENERATOR_AUTHORING.md).
-	- Generator catalogs are imported as ZIP packs from the Flag Catalog page and installed under `outputs/installed_generators/`.
+	- Generator catalogs are imported as ZIP packs from the Flag Catalog page and installed under `outputs/installed_generators/`; category paths below `flag_generators/` and `flag_node_generators/` are retained on import and export.
 	- This repo does not ship a starter generator catalog; use [generator_templates](generator_templates) when authoring new packs.
 - AI prompt templates for generator authoring (copy/paste) are in [docs/AI_PROMPT_TEMPLATES.md](docs/AI_PROMPT_TEMPLATES.md).
 - The reusable generator prompt context lives at [docs/prompts/prompt_sample_context_generator.txt](docs/prompts/prompt_sample_context_generator.txt).

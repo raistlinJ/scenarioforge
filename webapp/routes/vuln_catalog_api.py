@@ -59,6 +59,7 @@ def register(
                     items.append(
                         {
                             'Name': _display_name(item),
+                            'Category': str(item.get('category') or '').strip(),
                             'Path': os_module.path.abspath(abs_compose),
                             'Type': 'docker-compose',
                             'Vector': '',

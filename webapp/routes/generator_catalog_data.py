@@ -305,6 +305,7 @@ def register(
                     continue
                 if str(item.get('kind') or '').strip() != kind:
                     continue
+                category = str(item.get('category') or '').replace('\\', '/').strip().strip('/')
                 item_path = str(item.get('path') or '').strip()
                 if not item_path:
                     continue
@@ -351,10 +352,11 @@ def register(
                         'subpath': '',
                         'entry': '',
                     },
-                    '_source_name': pack_label or 'installed',
+                    '_source_name': category or pack_label or 'installed',
                     '_source_path': manifest_path,
                     '_pack_id': pack_id,
                     '_pack_label': pack_label,
+                    '_category': category or None,
                     '_installed': True,
                     '_disabled': pack_disabled or bool(item.get('disabled') is True),
                     '_disabled_due_to_missing_files': bool(item.get('disabled_due_to_missing_files') is True),

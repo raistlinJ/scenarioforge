@@ -61,8 +61,9 @@ def test_vuln_catalog_returns_pack_backed_items(monkeypatch):
     assert payload['vectors'] == []
     assert payload['items'] == [
         {
-            'Name': 'web/auth',
-            'Path': '/abs/cat-1/10/docker-compose.yml',
+                'Name': 'web/auth',
+                'Category': '',
+                'Path': '/abs/cat-1/10/docker-compose.yml',
             'Type': 'docker-compose',
             'Vector': '',
             'Startup': '',
@@ -81,8 +82,9 @@ def test_vuln_catalog_returns_pack_backed_items(monkeypatch):
             'cache_checked_at': '2026-03-19 11:00:00',
         },
         {
-            'Name': 'web/blocked',
-            'Path': '/abs/cat-1/12/docker-compose.yml',
+                'Name': 'web/blocked',
+                'Category': '',
+                'Path': '/abs/cat-1/12/docker-compose.yml',
             'Type': 'docker-compose',
             'Vector': '',
             'Startup': '',

@@ -203,3 +203,54 @@ def test_vuln_catalog_pack_import_url_installs_downloaded_zip(monkeypatch):
         'label': 'demo.zip',
         'origin': 'https://example.com/packs/demo.zip',
     }
+
+
+def test_vulnerability_import_and_export_preserve_original_categories(tmp_path, monkeypatch):
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(tmp_path / 'outputs'))
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(tmp_path))
+
+    source_zip = tmp_path / 'vulnerability-source.zip'
+    source_zip.write_bytes(_make_zip({
+        'download-main/web/auth/login-demo/docker-compose.yml': (
+            'services:\n'
+            '  web:\n'
+            '    image: nginx:alpine\n'
+        ),
+    }))
+    entry = backend._install_vuln_catalog_zip_file(
+        zip_file_path=str(source_zip),
+        label='vulnerability-source.zip',
+        origin='upload',
+    )
+
+    item = (entry.get('compose_items') or [])[0]
+    assert item['category'] == 'download-main/web/auth'
+    assert item['compose_rel'] == 'download-main/web/auth/login-demo/docker-compose.yml'
+
+    client = app.test_client()
+    _login(client)
+    response = client.get(f"/vuln_catalog_packs/download/{entry['id']}")
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.data), 'r') as exported_zip:
+        names = set(exported_zip.namelist())
+        layout = json.loads(exported_zip.read('.scenarioforge/catalog_layout.json').decode('utf-8'))
+    assert 'download-main/web/auth/login-demo/docker-compose.yml' in names
+    assert layout['items'] == [{
+        'category': 'download-main/web/auth',
+        'compose_rel': 'download-main/web/auth/login-demo/docker-compose.yml',
+    }]
+
+    roundtrip_zip = tmp_path / 'vulnerability-roundtrip.zip'
+    roundtrip_zip.write_bytes(response.data)
+    restored = backend._install_vuln_catalog_zip_file(
+        zip_file_path=str(roundtrip_zip),
+        label='vulnerability-roundtrip.zip',
+        origin='upload',
+    )
+    restored_item = (restored.get('compose_items') or [])[0]
+    assert restored_item['category'] == 'download-main/web/auth'
+
+    items_response = client.get('/vuln_catalog_items_data')
+    assert items_response.status_code == 200
+    items_payload = items_response.get_json() or {}
+    assert (items_payload.get('items') or [])[0]['category'] == 'download-main/web/auth'

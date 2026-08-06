@@ -364,6 +364,18 @@ def register(app, *, backend_module: Any) -> None:
             if not isinstance(flow_meta, dict):
                 return [], ''
             assignments = flow_meta.get('flag_assignments') if isinstance(flow_meta.get('flag_assignments'), list) else []
+            # The current Web UI does not generate new duplicate-node chains,
+            # but imported/evaluator XML may contain an already-resolved chain
+            # that explicitly allowed duplicates. `prefer_flow` means the
+            # caller is restoring/exporting that authoritative saved state, so
+            # preserve it instead of silently synthesizing a different chain.
+            try:
+                saved_duplicates_allowed = bool(
+                    prefer_flow
+                    and backend._flow_state_allows_node_duplicates(flow_meta)
+                )
+            except Exception:
+                saved_duplicates_allowed = False
             structurally_valid: list[tuple[list[dict[str, Any]], str]] = []
             for source, ids_in in _saved_flow_candidate_ids(flow_meta):
                 ids = list(ids_in or [])
@@ -371,7 +383,7 @@ def register(app, *, backend_module: Any) -> None:
                     ids = ids[:max(0, int(max_length or 0))]
                 if not ids:
                     continue
-                if (not allow_node_duplicates) and (len(set(ids)) != len(ids)):
+                if (not allow_node_duplicates) and (not saved_duplicates_allowed) and (len(set(ids)) != len(ids)):
                     continue
                 candidate_nodes = [id_map_for_saved_flow[cid] for cid in ids if cid in id_map_for_saved_flow]
                 if len(candidate_nodes) != len(ids):
@@ -525,16 +537,30 @@ def register(app, *, backend_module: Any) -> None:
                     if isinstance(node, dict) and str(node.get('id') or '').strip()
                 ]
                 if isinstance(fas, list) and fas and active_ids:
-                    saved_by_node_id = {
-                        str(assignment.get('node_id') or '').strip(): assignment
+                    saved_assignment_ids = [
+                        str(assignment.get('node_id') or '').strip()
                         for assignment in fas
-                        if isinstance(assignment, dict) and str(assignment.get('node_id') or '').strip()
-                    }
-                    # Never restore a saved subset over the active chain.  This
-                    # is especially important now that vulnerability nodes are
-                    # mandatory and may have been appended to an older chain.
-                    if all(node_id in saved_by_node_id for node_id in active_ids):
-                        flag_assignments = [dict(saved_by_node_id[node_id]) for node_id in active_ids]
+                        if isinstance(assignment, dict)
+                    ]
+                    # Duplicate node occurrences are position-sensitive: a
+                    # node can run a different generator at each chain step.
+                    # Preserve exact positional assignments when the saved
+                    # sequence already aligns with the restored chain.
+                    if len(fas) >= len(active_ids) and saved_assignment_ids[:len(active_ids)] == active_ids:
+                        flag_assignments = [dict(fas[idx]) for idx in range(len(active_ids))]
+                    else:
+                        saved_by_node_id = {
+                            str(assignment.get('node_id') or '').strip(): assignment
+                            for assignment in fas
+                            if isinstance(assignment, dict) and str(assignment.get('node_id') or '').strip()
+                        }
+                        # Never restore a saved subset over the active chain.
+                        # This is especially important now that vulnerability
+                        # nodes are mandatory and may have been appended to an
+                        # older chain.
+                        if all(node_id in saved_by_node_id for node_id in active_ids):
+                            flag_assignments = [dict(saved_by_node_id[node_id]) for node_id in active_ids]
+                    if flag_assignments:
                         try:
                             flag_assignments = backend._flow_enrich_saved_flag_assignments(
                                 flag_assignments,

@@ -91,6 +91,62 @@ def register(app, *, backend_module: Any) -> None:
             'unsafe_regeneration_assignments': unsafe,
         }
 
+    def _restore_bundled_artifacts(client: Any, sftp: Any, flow_state: Any, log_handle: Any) -> int:
+        """Copy integrity-checked imported payloads to their stable CORE VM paths."""
+        if not isinstance(flow_state, dict):
+            return 0
+        records = flow_state.get('reproduction_artifact_sources')
+        if not isinstance(records, list):
+            return 0
+        upload_root = backend.os.path.realpath(app.config.get('UPLOAD_FOLDER') or '')
+        if not upload_root:
+            return 0
+        allowed_remote_roots = (
+            '/tmp/vulns/flag_generators_runs/',
+            '/tmp/vulns/flag_node_generators_runs/',
+        )
+        restored = 0
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            local_root = backend.os.path.realpath(str(record.get('restored_path') or ''))
+            remote_root = str(record.get('target_path') or '').replace('\\', '/').rstrip('/')
+            try:
+                inside_uploads = backend.os.path.commonpath([upload_root, local_root]) == upload_root
+            except (OSError, ValueError):
+                inside_uploads = False
+            if not inside_uploads or not backend.os.path.isdir(local_root):
+                continue
+            if not any(remote_root.startswith(prefix) for prefix in allowed_remote_roots):
+                continue
+            backend._remote_mkdirs(client, remote_root)
+            copied_files = 0
+            for directory, child_dirs, files in backend.os.walk(local_root):
+                child_dirs[:] = [
+                    name for name in child_dirs
+                    if not backend.os.path.islink(backend.os.path.join(directory, name))
+                ]
+                relative_dir = backend.os.path.relpath(directory, local_root)
+                remote_dir = remote_root if relative_dir in ('', '.') else backend._remote_path_join(
+                    remote_root, relative_dir.replace('\\', '/')
+                )
+                backend._remote_mkdirs(client, remote_dir)
+                for filename in files:
+                    local_file = backend.os.path.join(directory, filename)
+                    if backend.os.path.islink(local_file) or not backend.os.path.isfile(local_file):
+                        continue
+                    sftp.put(local_file, backend._remote_path_join(remote_dir, filename))
+                    copied_files += 1
+            restored += 1
+            try:
+                log_handle.write(
+                    f'[remote] reproduction artifact restore source={local_root} '
+                    f'target={remote_root} files={copied_files}\n'
+                )
+            except Exception:
+                pass
+        return restored
+
     def _flow_has_resolved_outputs(assignments: Any) -> bool:
         try:
             array = assignments if isinstance(assignments, list) else []
@@ -160,10 +216,31 @@ def register(app, *, backend_module: Any) -> None:
             return {'ok': False, 'error': 'No FlowState artifacts to validate. Run Generate and Save XML first.'}, 400
 
         flow_core_cfg = backend._core_config_from_xml_path(xml_path, scenario_norm, include_password=True)
+        try:
+            page_core_cfg = backend._select_core_config_for_page(
+                scenario_norm,
+                include_password=True,
+            )
+        except Exception:
+            page_core_cfg = None
+        if isinstance(page_core_cfg, dict) and page_core_cfg:
+            if isinstance(flow_core_cfg, dict) and flow_core_cfg:
+                try:
+                    flow_core_cfg = backend._merge_core_configs(
+                        page_core_cfg,
+                        flow_core_cfg,
+                        include_password=True,
+                    )
+                except Exception:
+                    merged_cfg = dict(page_core_cfg)
+                    merged_cfg.update(flow_core_cfg)
+                    flow_core_cfg = merged_cfg
+            else:
+                flow_core_cfg = page_core_cfg
         if isinstance(flow_core_cfg, dict):
             flow_core_cfg = backend._apply_core_secret_to_config(flow_core_cfg, scenario_norm)
         if not isinstance(flow_core_cfg, dict):
-            return {'ok': False, 'error': 'No CoreConnection configured in XML for this scenario.'}, 404
+            return {'ok': False, 'error': 'No CORE VM connection is configured for this scenario.'}, 404
         try:
             flow_core_cfg = backend._require_core_ssh_credentials(flow_core_cfg)
         except Exception as exc:
@@ -477,6 +554,7 @@ def register(app, *, backend_module: Any) -> None:
             client = backend._open_ssh_client(ctx.get('flow_core_cfg'))
             sftp = client.open_sftp()
             remote_repo = backend._remote_static_repo_dir(sftp)
+            _restore_bundled_artifacts(client, sftp, ctx.get('flow_state'), log_handle)
             missing_indices: list[int] = []
             for index, assignment in enumerate(assigns):
                 if isinstance(assignment, dict) and backend._flow_assignment_missing_remote_paths(sftp, assignment):

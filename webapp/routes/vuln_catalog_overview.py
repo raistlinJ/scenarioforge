@@ -218,6 +218,7 @@ def register(
             out_items.append({
                 'id': int(item.get('id') or 0),
                 'name': _display_name(item),
+                'category': str(item.get('category') or '').strip() or None,
                 'type': 'docker-compose',
                 'from_source': from_source,
                 'disabled': bool(item.get('disabled', False)),

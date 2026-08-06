@@ -44,26 +44,38 @@
                 The active catalog is used by the Web UI and CLI when listing/selecting vulnerabilities.
               </div>
 
-              <form class="row g-2 align-items-center" action="{{ url_for('vuln_catalog_packs_upload') }}" method="post" enctype="multipart/form-data">
-                <div class="col-auto">
-                  <input class="form-control" type="file" name="zip_file" accept="application/zip,.zip" required>
+              <div class="row g-2 align-items-end">
+                <div class="col-md-3 col-lg-2">
+                  <label class="form-label small" for="vulnPackImportMethod">Import from</label>
+                  <select class="form-select" id="vulnPackImportMethod">
+                    <option value="zip">ZIP file</option>
+                    <option value="url">ZIP URL</option>
+                  </select>
                 </div>
-                <div class="col-auto">
-                  <button class="btn btn-primary" type="submit">Upload ZIP</button>
-                </div>
-              </form>
 
-              <form id="vulnPackImportUrlForm" class="row g-2 mt-2 align-items-center" action="{{ url_for('vuln_catalog_packs_import_url') }}" method="post">
-                <div class="col-md-6">
-                  <input class="form-control" type="url" name="zip_url" placeholder="https://example.com/vuln-catalog.zip" required>
+                <div class="col-md-6 col-lg-7">
+                  <div data-vuln-pack-import-method="zip">
+                    <form id="vulnPackUploadForm" action="{{ url_for('vuln_catalog_packs_upload') }}" method="post" enctype="multipart/form-data">
+                      <label class="visually-hidden" for="vulnPackZipInput">Vulnerability catalog ZIP</label>
+                      <input id="vulnPackZipInput" class="form-control" type="file" name="zip_file" accept="application/zip,.zip" required>
+                    </form>
+                  </div>
+                  <div class="d-none" data-vuln-pack-import-method="url">
+                    <form id="vulnPackImportUrlForm" action="{{ url_for('vuln_catalog_packs_import_url') }}" method="post">
+                      <label class="visually-hidden" for="vulnPackImportUrlInput">Vulnerability catalog ZIP URL</label>
+                      <input id="vulnPackImportUrlInput" class="form-control" type="url" name="zip_url" placeholder="https://example.com/vuln-catalog.zip" required disabled>
+                    </form>
+                  </div>
                 </div>
+
                 <div class="col-auto">
-                  <button class="btn btn-outline-primary" type="submit">Import from URL</button>
+                  <button class="btn btn-primary" id="vulnPackImportSubmit" type="button">Import</button>
                 </div>
                 <div class="col-auto ms-md-auto">
                   <a class="btn btn-outline-secondary" id="downloadEntireVulnCatalogBtn" href="{{ url_for('vuln_catalog_packs_export_all') }}" onclick="return startEntireCatalogDownload(event, 'Vulnerability Catalog', this);">Download Entire Catalog</a>
                 </div>
-              </form>
+              </div>
+              <div class="small text-muted mt-2" id="vulnPackImportMethodHelp">Select a vulnerability catalog ZIP.</div>
             </div>
           </div>
 
@@ -166,7 +178,7 @@
                       <th>Name</th>
                       <th>Description</th>
                       <th style="width: 140px;">Validated</th>
-                      <th>From Source</th>
+                      <th>Category / Source</th>
                       <th style="width: 130px;">Image Cache</th>
                       <th style="width: 82px;">Notes</th>
                       <th style="width: 160px;">Actions</th>
@@ -1136,6 +1148,7 @@
       item.note || '',
       item.log_download_url ? 'Log' : '',
       item.validated_at || '',
+      item.category || '',
       item.from_source || '',
       'Test',
       item.disabled ? 'Enable' : 'Disable',
@@ -1164,7 +1177,7 @@
     const sorted = stableSorted(rows, (it) => {
       if (!it || typeof it !== 'object') return '';
       if (sortKey === 'name') return it.name || '';
-      if (sortKey === 'from_source') return it.from_source || '';
+      if (sortKey === 'from_source') return it.category || it.from_source || '';
       if (sortKey === 'id') return String(it.id || '');
       return it[sortKey] || '';
     }, sortDir);
@@ -1219,7 +1232,10 @@
                 ? `<span class="badge text-bg-danger">Failed</span>${logLink}${it.validated_at ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(it.validated_at)}</div>` : ''}`
                 : '<span class="text-muted">—</span>'))}
         </td>
-        <td class="small">${escapeHtml(it.from_source || '')}</td>
+        <td class="small">
+          ${escapeHtml(it.category || it.from_source || '')}
+          ${it.category && it.from_source && it.category !== it.from_source ? `<div class="text-muted" style="font-size:11px;">${escapeHtml(it.from_source)}</div>` : ''}
+        </td>
         <td class="small">
           ${it.cached === true
             ? '<span class="badge text-bg-success">Cached</span>'
@@ -1407,6 +1423,7 @@
       return [
         item.id,
         item.name,
+        item.category,
         item.from_source,
         item.rel_dir,
         item.dir_rel,
@@ -2494,10 +2511,46 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     // Vulnerability Pack ZIP upload progress
-    const packsPane = document.getElementById('vulnPacks');
-    const uploadForm = packsPane ? packsPane.querySelector('form[action$="/vuln_catalog_packs/upload"]') : null;
+    const importMethodSelect = document.getElementById('vulnPackImportMethod');
+    const importSubmitButton = document.getElementById('vulnPackImportSubmit');
+    const importMethodHelp = document.getElementById('vulnPackImportMethodHelp');
+    const importMethods = {
+      zip: {
+        form: document.getElementById('vulnPackUploadForm'),
+        help: 'Select a vulnerability catalog ZIP.',
+      },
+      url: {
+        form: document.getElementById('vulnPackImportUrlForm'),
+        help: 'Enter a direct URL to a vulnerability catalog ZIP.',
+      },
+    };
+    const uploadForm = importMethods.zip.form;
     const uploadModalEl = document.getElementById('vulnPackUploadProgressModal');
     const uploadModal = uploadModalEl ? new bootstrap.Modal(uploadModalEl) : null;
+
+    function syncVulnPackImportMethod() {
+      if (!importMethodSelect) return;
+      const selected = importMethods[importMethodSelect.value] ? importMethodSelect.value : 'zip';
+      document.querySelectorAll('[data-vuln-pack-import-method]').forEach((container) => {
+        const active = container.getAttribute('data-vuln-pack-import-method') === selected;
+        container.classList.toggle('d-none', !active);
+        container.querySelectorAll('input, select, textarea').forEach((field) => {
+          field.disabled = !active;
+        });
+      });
+      if (importMethodHelp) importMethodHelp.textContent = importMethods[selected].help;
+    }
+
+    if (importMethodSelect) importMethodSelect.addEventListener('change', syncVulnPackImportMethod);
+    if (importSubmitButton) {
+      importSubmitButton.addEventListener('click', () => {
+        if (!importMethodSelect) return;
+        const selected = importMethods[importMethodSelect.value] ? importMethodSelect.value : 'zip';
+        const form = importMethods[selected].form;
+        if (form) form.requestSubmit();
+      });
+    }
+    syncVulnPackImportMethod();
 
     async function runVulnPackUploadWithProgress(form) {
       if (!form || !uploadModal) return;
@@ -2630,7 +2683,7 @@
       { label: 'Name', key: 'name' },
       { label: 'Description', key: null },
       { label: 'Validated', key: null },
-      { label: 'From Source', key: 'from_source' },
+      { label: 'Category / Source', key: 'from_source' },
       { label: 'Actions', key: null },
     ], _renderVulnCatalogTable);
     const tab = _qs('vulnCatalogTab');

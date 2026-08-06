@@ -1049,6 +1049,79 @@ def test_attackflow_preview_ignores_saved_duplicate_xml_flow_when_duplicates_dis
         shutil.rmtree(plan_dir, ignore_errors=True)
 
 
+def test_attackflow_preview_prefer_flow_restores_explicit_saved_duplicate_chain(tmp_path, monkeypatch):
+    app_backend.app.config['TESTING'] = True
+    client = app_backend.app.test_client()
+
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (302, 303)
+
+    scenario = f'FlowDuplicateImported-{uuid.uuid4().hex[:8]}'
+    full_preview = {
+        'seed': 123,
+        'routers': [],
+        'switches': [],
+        'switches_detail': [],
+        'hosts': [
+            {'node_id': 'h1', 'name': 'docker-1', 'role': 'Docker', 'vulnerabilities': []},
+            {'node_id': 'h2', 'name': 'docker-2', 'role': 'Docker', 'vulnerabilities': ['v1']},
+        ],
+        'host_router_map': {},
+        'r2r_links_preview': [],
+    }
+    plan_path, plan_dir = _seed_xml_plan(scenario, full_preview)
+
+    try:
+        saved_assignments = [
+            {'node_id': 'h1', 'id': 'node-gen-a', 'type': 'flag-node-generator', 'generator_catalog': 'flag_node_generators'},
+            {'node_id': 'h1', 'id': 'node-gen-b', 'type': 'flag-node-generator', 'generator_catalog': 'flag_node_generators'},
+            {'node_id': 'h2', 'id': 'flag-gen-c', 'type': 'flag-generator', 'generator_catalog': 'flag_generators'},
+        ]
+        write_flow_state_unvalidated(
+            str(plan_path),
+            scenario,
+            {
+                'scenario': scenario,
+                'chain_ids': ['h1', 'h1', 'h2'],
+                'chain': [{'id': 'h1'}, {'id': 'h1'}, {'id': 'h2'}],
+                'length': 3,
+                'allow_node_duplicates': True,
+                'flag_assignments': saved_assignments,
+            },
+        )
+
+        monkeypatch.setattr(app_backend, '_flow_validate_state_against_preview', lambda *_args, **_kwargs: (True, ''))
+        monkeypatch.setattr(app_backend, '_flow_validate_chain_order_by_requires_produces', lambda *_args, **_kwargs: (True, []))
+        monkeypatch.setattr(
+            app_backend,
+            '_flag_generators_from_enabled_sources',
+            lambda: ([{'id': 'flag-gen-c'}], []),
+        )
+        monkeypatch.setattr(
+            app_backend,
+            '_flag_node_generators_from_enabled_sources',
+            lambda: ([{'id': 'node-gen-a'}, {'id': 'node-gen-b'}], []),
+        )
+
+        resp = client.get('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario,
+            'length': 3,
+            'preview_plan': str(plan_path),
+            'prefer_flow': '1',
+        })
+
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json() or {}
+        assert [item.get('id') for item in (data.get('chain') or [])] == ['h1', 'h1', 'h2']
+        assert [item.get('id') for item in (data.get('flag_assignments') or [])] == [
+            'node-gen-a',
+            'node-gen-b',
+            'flag-gen-c',
+        ]
+    finally:
+        shutil.rmtree(plan_dir, ignore_errors=True)
+
+
 def test_attackflow_preview_passes_dependency_level_to_assignment_picker(tmp_path, monkeypatch):
     app_backend.app.config['TESTING'] = True
     client = app_backend.app.test_client()

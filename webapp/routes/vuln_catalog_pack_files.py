@@ -33,14 +33,21 @@ def register(
         content untouched while allowing an import to restore the annotations.
         """
         notes: list[dict[str, str]] = []
+        layout_items: list[dict[str, str]] = []
         for item in normalize_vuln_catalog_items(catalog):
             if not isinstance(item, dict):
                 continue
+            compose_rel = str(item.get('compose_rel') or '').replace('\\', '/').strip()
+            category = str(item.get('category') or '').replace('\\', '/').strip().strip('/')
+            if compose_rel:
+                layout_items.append({
+                    'compose_rel': compose_rel,
+                    'category': category,
+                })
             note = str(item.get('note') or '').strip()
             color = str(item.get('note_color') or '').strip().lower()
             if not note and color not in {'red', 'yellow', 'green'}:
                 continue
-            compose_rel = str(item.get('compose_rel') or '').replace('\\', '/').strip()
             if not compose_rel:
                 continue
             notes.append({
@@ -52,12 +59,19 @@ def register(
         mem = io.BytesIO()
         with zipfile.ZipFile(zip_path, 'r') as source, zipfile.ZipFile(mem, 'w', zipfile.ZIP_DEFLATED) as output:
             for info in source.infolist():
-                if info.filename.replace('\\', '/') == '.scenarioforge/catalog_notes.json':
+                if info.filename.replace('\\', '/') in {
+                    '.scenarioforge/catalog_notes.json',
+                    '.scenarioforge/catalog_layout.json',
+                }:
                     continue
                 output.writestr(info, source.read(info.filename))
             output.writestr(
                 '.scenarioforge/catalog_notes.json',
                 json.dumps({'version': 1, 'notes': notes}, indent=2, sort_keys=True) + '\n',
+            )
+            output.writestr(
+                '.scenarioforge/catalog_layout.json',
+                json.dumps({'version': 1, 'items': layout_items}, indent=2, sort_keys=True) + '\n',
             )
         return mem.getvalue()
 
@@ -111,6 +125,11 @@ def register(
                         'origin': str(catalog.get('origin') or '').strip(),
                         'installed_at': str(catalog.get('installed_at') or '').strip(),
                         'compose_count': catalog.get('compose_count'),
+                        'categories': sorted({
+                            str(item.get('category') or '').strip()
+                            for item in normalize_vuln_catalog_items(catalog)
+                            if isinstance(item, dict) and str(item.get('category') or '').strip()
+                        }),
                         'archive': arcname,
                     })
                 except Exception:

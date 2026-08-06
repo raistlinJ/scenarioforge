@@ -47155,6 +47155,7 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
             info_obj = {
                 'pack_id': pid,
                 'pack_label': pack_label,
+                'category': _normalize_generator_category_path(it.get('category')),
                 'pack_disabled': pack_disabled,
                 'pack_uninstalled': pack_uninstalled,
                 'uninstalled': pack_uninstalled or item_uninstalled,
@@ -47264,6 +47265,9 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
         if info:
             g['_pack_id'] = info.get('pack_id')
             g['_pack_label'] = info.get('pack_label')
+            g['_category'] = info.get('category')
+            if info.get('category'):
+                g['_source_name'] = info.get('category')
             g['_pack_disabled'] = bool(info.get('pack_disabled'))
             g['_pack_uninstalled'] = bool(info.get('pack_uninstalled'))
             g['_disabled'] = bool(info.get('disabled'))
@@ -47288,6 +47292,7 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_requires_build_network'] = bool(info.get('requires_build_network', False))
             g['_build_network_notes'] = info.get('build_network_notes') if isinstance(info.get('build_network_notes'), list) else []
         else:
+            g['_category'] = None
             g['_disabled'] = False
             g['_disabled_due_to_missing_files'] = False
             g['_uninstalled'] = False
@@ -47791,6 +47796,28 @@ def _pick_vuln_csv_from_zip(zf: zipfile.ZipFile) -> str | None:
     return None
 
 
+def _normalize_vuln_category_path(value: Any) -> str:
+    parts = [
+        part.strip()
+        for part in str(value or '').replace('\\', '/').split('/')
+        if part.strip() not in ('', '.')
+    ]
+    if not parts or any(part == '..' for part in parts):
+        return ''
+    return '/'.join(parts)
+
+
+def _vuln_category_from_rel_dir(value: Any) -> str:
+    parts = [
+        part
+        for part in str(value or '').replace('\\', '/').strip('/').split('/')
+        if part not in ('', '.')
+    ]
+    if len(parts) < 2 or any(part == '..' for part in parts):
+        return ''
+    return _normalize_vuln_category_path('/'.join(parts[:-1]))
+
+
 def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, origin: str) -> dict:
     os.makedirs(_installed_vuln_catalogs_root(), exist_ok=True)
     catalog_id = _local_timestamp_safe() + '-' + secrets.token_hex(3)
@@ -47803,6 +47830,7 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
     csv_rel_paths: list[str] = []
     compose_items: list[dict[str, Any]] = []
     imported_notes_by_compose_rel: dict[str, dict[str, str]] = {}
+    imported_categories_by_compose_rel: dict[str, str] = {}
     try:
         # Extract the entire ZIP directory tree so compose directories (and their
         # support files) are preserved.
@@ -47832,6 +47860,23 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             pass
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ValueError(f'Invalid ScenarioForge catalog notes metadata: {exc}') from exc
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                raw_layout = archive.read('.scenarioforge/catalog_layout.json').decode('utf-8', errors='ignore')
+            layout_doc = json.loads(raw_layout or '{}')
+            layout_entries = layout_doc.get('items') if isinstance(layout_doc, dict) else []
+            if isinstance(layout_entries, list):
+                for raw_entry in layout_entries:
+                    if not isinstance(raw_entry, dict):
+                        continue
+                    compose_rel = str(raw_entry.get('compose_rel') or '').replace('\\', '/').strip().lstrip('/')
+                    category = _normalize_vuln_category_path(raw_entry.get('category'))
+                    if compose_rel and '..' not in compose_rel.split('/') and category:
+                        imported_categories_by_compose_rel[compose_rel] = category
+        except KeyError:
+            pass
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f'Invalid ScenarioForge catalog layout metadata: {exc}') from exc
         try:
             from scenarioforge.compose_dependencies import missing_dependency_paths, scan_compose_dependencies
         except Exception:
@@ -47888,6 +47933,8 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             item = {
                 'id': idx,
                 'name': display_name,
+                'category': imported_categories_by_compose_rel.get(compose_rel)
+                or _vuln_category_from_rel_dir(rel_dir),
                 'rel_dir': rel_dir,
                 'dir_rel': dir_rel,
                 'compose_rel': compose_rel,
@@ -48191,6 +48238,9 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['rel_dir'] = str(it.get('rel_dir') or '').strip()
         it['dir_rel'] = str(it.get('dir_rel') or '').strip()
         it['compose_rel'] = str(it.get('compose_rel') or '').strip()
+        it['category'] = _normalize_vuln_category_path(it.get('category')) or _vuln_category_from_rel_dir(
+            it.get('rel_dir') or it.get('dir_rel')
+        )
         it['persistent'] = bool(it.get('persistent', False))
         it['note'] = str(it.get('note') or '').strip()
         raw_note_color = str(it.get('note_color') or '').strip().lower()
@@ -49252,6 +49302,21 @@ def _safe_extract_zip_to_dir(zip_path: str, dest_dir: str) -> None:
                 pass
 
 
+def _normalize_generator_category_path(value: Any) -> str:
+    """Return a safe, portable relative category path for catalog generators."""
+    raw_parts = [
+        part.strip()
+        for part in str(value or '').replace('\\', '/').split('/')
+        if part.strip() not in ('', '.')
+    ]
+    if not raw_parts or any(part == '..' for part in raw_parts):
+        return ''
+    safe_parts = [secure_filename(part) for part in raw_parts]
+    if any(not part for part in safe_parts):
+        return ''
+    return '/'.join(safe_parts)
+
+
 def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate generator pack contents.
 
@@ -49413,6 +49478,22 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             pass
         return manifest_dir
 
+    def _category_from_manifest_path(manifest_path: Any, kind: str) -> str:
+        """Infer the source category between the kind root and generator dir."""
+        base_name = 'flag_node_generators' if kind == 'flag-node-generator' else 'flag_generators'
+        try:
+            rel_parts = Path(manifest_path).resolve().relative_to(root.resolve()).parts
+        except Exception:
+            return ''
+        anchor = -1
+        for index, part in enumerate(rel_parts[:-1]):
+            if part == base_name:
+                anchor = index
+        # base/category[/subcategory]/generator/manifest.yaml
+        if anchor < 0 or len(rel_parts) - anchor < 4:
+            return ''
+        return _normalize_generator_category_path('/'.join(rel_parts[anchor + 1:-2]))
+
     for mp in manifests:
         try:
             doc = yaml.safe_load(mp.read_text('utf-8', errors='ignore'))
@@ -49432,6 +49513,7 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
         # If this generator was exported from an installed pack, it may carry a
         # marker with the original stable source id. Prefer that over the
         # (numeric) installed manifest id so export/import roundtrips preserve ids.
+        marker_source_category = ''
         try:
             marker_path = mp.parent / '.coretg_pack.json'
             if marker_path.exists() and marker_path.is_file():
@@ -49440,6 +49522,9 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
                     marker_source_id = str(marker.get('source_generator_id') or '').strip()
                     if marker_source_id and len(marker_source_id) <= 256:
                         source_id = marker_source_id
+                    marker_source_category = _normalize_generator_category_path(
+                        marker.get('source_category') or marker.get('category')
+                    )
         except Exception:
             pass
 
@@ -49551,6 +49636,7 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
         items.append({
             'id': gen_id,
             'kind': kind,
+            'category': marker_source_category or _category_from_manifest_path(mp, kind),
             'path': str(gen_dir),
             'runtime_source_path': str(runtime_dir) if str(runtime_dir) != str(gen_dir) else '',
             'source_id': source_id,
@@ -49663,6 +49749,7 @@ def _install_generator_pack_payload(
         installed: list[dict[str, Any]] = []
         for it in items:
             kind = str(it.get('kind') or '')
+            category = _normalize_generator_category_path(it.get('category'))
             src_dir = str(it.get('path') or '')
             runtime_src_dir = str(it.get('runtime_source_path') or '')
             source_gid = str(it.get('source_id') or it.get('id') or '')
@@ -49673,6 +49760,8 @@ def _install_generator_pack_payload(
                 dest_base = os.path.join(root, 'flag_node_generators')
             else:
                 dest_base = os.path.join(root, 'flag_generators')
+            if category:
+                dest_base = os.path.join(dest_base, *category.split('/'))
             os.makedirs(dest_base, exist_ok=True)
 
             dir_name = secure_filename(f"p_{pack_id}__{assigned_gid}") or f"p_{pack_id}__generator"
@@ -49732,13 +49821,19 @@ def _install_generator_pack_payload(
                     'generator_id': assigned_gid,
                     'kind': kind,
                     'source_generator_id': source_gid,
+                    'source_category': category,
                 }
                 with open(os.path.join(dest_dir, '.coretg_pack.json'), 'w', encoding='utf-8') as fh:
                     json.dump(marker, fh, indent=2)
             except Exception:
                 pass
 
-            installed_item: dict[str, Any] = {'id': assigned_gid, 'kind': kind, 'path': dest_dir}
+            installed_item: dict[str, Any] = {
+                'id': assigned_gid,
+                'kind': kind,
+                'category': category,
+                'path': dest_dir,
+            }
             imported_note = imported_note_map.get((kind, source_gid))
             if imported_note:
                 installed_item['note'] = str(imported_note.get('note') or '').strip()
@@ -50102,6 +50197,7 @@ def _flag_catalog_packs_for_export() -> list[dict[str, Any]]:
             pack['installed'].append({
                 'id': gid,
                 'kind': kind,
+                'category': pack_name,
                 'path': pack_path,
                 'manifest_path': str(generator.get('_source_path') or ''),
                 'repo_local': True,
@@ -50403,18 +50499,26 @@ def _pack_to_zip_bytes(pack: dict) -> bytes:
                 base = 'flag_node_generators'
 
             root_name = os.path.basename(src.rstrip('/')) or 'generator'
+            category = _normalize_generator_category_path(it.get('category'))
+            # Repo-local state points at the category directory itself, while
+            # imported state points at one generator directory. Avoid writing
+            # a duplicated category/category prefix for the repo-local case.
+            archive_parts = [base]
+            if category and not bool(it.get('repo_local')):
+                archive_parts.extend(category.split('/'))
+            archive_parts.append(root_name)
             if os.path.isdir(src):
                 for dirpath, _dirnames, filenames in os.walk(src):
                     for fn in filenames:
                         abs_p = os.path.join(dirpath, fn)
                         rel_p = os.path.relpath(abs_p, src)
-                        arc = '/'.join([base, root_name, rel_p.replace('\\', '/')])
+                        arc = '/'.join([*archive_parts, rel_p.replace('\\', '/')])
                         try:
                             z.write(abs_p, arcname=arc)
                         except Exception:
                             continue
             else:
-                arc = '/'.join([base, root_name])
+                arc = '/'.join(archive_parts)
                 try:
                     z.write(src, arcname=arc)
                 except Exception:

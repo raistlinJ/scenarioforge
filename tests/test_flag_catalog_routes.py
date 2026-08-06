@@ -52,11 +52,17 @@ def test_flag_catalog_page_groups_installed_ids_by_kind(monkeypatch):
     assert 'id="flagBatchScope"' in page
     assert 'Unvalidated / Incomplete' in page
     assert 'packInstallSuccessAlert' in page
+    assert 'id="packImportMethod"' in page
+    assert 'id="packImportSubmit"' in page
+    assert 'data-pack-import-method="folder"' in page
+    assert 'data-pack-import-method="zip"' in page
+    assert 'data-pack-import-method="url"' in page
     assert 'packImportUrlForm' in page
     assert 'packFolderUploadForm' in page
     assert 'webkitdirectory' in page
     assert 'repo_paths' in page
     assert 'packUploadProgressTitle' in page
+    assert 'function syncImportMethod()' in page
 
 
 def test_flag_catalog_batch_status_discovers_active_run_without_saved_id() -> None:

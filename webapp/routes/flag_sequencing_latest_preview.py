@@ -87,6 +87,44 @@ def register(app, *, backend_module: Any) -> None:
             except Exception:
                 flow_core_cfg = None
 
+        # In VM mode the runtime environment is the connection source of truth.
+        # `_core_config_from_xml_path` intentionally strips the transport saved
+        # in XML so an old scenario cannot redirect a deployment to a stale VM.
+        # Resolve the same page/runtime defaults used by execution before
+        # deciding that CORE access is unavailable.
+        try:
+            runtime_mode = str(
+                getattr(backend, '_webui_runtime_mode', lambda: 'native')() or 'native'
+            ).strip().lower()
+        except Exception:
+            runtime_mode = 'native'
+        if runtime_mode == 'vm':
+            try:
+                runtime_core_cfg = backend._select_core_config_for_page(
+                    scenario_norm,
+                    include_password=True,
+                )
+            except Exception:
+                runtime_core_cfg = None
+            if isinstance(runtime_core_cfg, dict) and runtime_core_cfg:
+                if isinstance(flow_core_cfg, dict) and flow_core_cfg:
+                    try:
+                        flow_core_cfg = backend._merge_core_configs(
+                            runtime_core_cfg,
+                            flow_core_cfg,
+                            include_password=True,
+                        )
+                    except Exception:
+                        merged_core_cfg = dict(runtime_core_cfg)
+                        merged_core_cfg.update(flow_core_cfg)
+                        flow_core_cfg = merged_core_cfg
+                else:
+                    flow_core_cfg = runtime_core_cfg
+                try:
+                    flow_core_cfg = backend._apply_core_secret_to_config(flow_core_cfg, scenario_norm)
+                except Exception:
+                    pass
+
         core_validated = False
         try:
             if isinstance(flow_core_cfg, dict):
@@ -134,10 +172,6 @@ def register(app, *, backend_module: Any) -> None:
                         if secret_record and str(secret_record.get('identifier') or '').strip():
                             core_validated = True
                 if not core_validated:
-                    try:
-                        runtime_mode = getattr(backend, '_webui_runtime_mode', lambda: 'native')()
-                    except Exception:
-                        runtime_mode = 'native'
                     if runtime_mode == 'vm':
                         core_host = str(flow_core_cfg.get('grpc_host') or flow_core_cfg.get('host') or '').strip()
                         ssh_host = str(flow_core_cfg.get('ssh_host') or core_host or '').strip()

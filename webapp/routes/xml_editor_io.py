@@ -50,19 +50,20 @@ def register(
 
     @app.route('/load_xml', methods=['POST'])
     def load_xml():
+        from webapp.reproduction_bundle import import_scenario_file
+
         user = current_user_getter()
         file = request.files.get('scenarios_xml')
         if not file or file.filename == '':
             flash('No file selected.')
             return redirect(url_for('index'))
-        if not allowed_file_func(file.filename):
-            flash('Invalid file type. Only XML allowed.')
-            return redirect(url_for('index'))
-        filename = secure_filename(file.filename)
+        filename = secure_filename(file.filename) or f'scenario-upload-{os.getpid()}'
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
         file.save(filepath)
         try:
+            imported = import_scenario_file(filepath, app.config['UPLOAD_FOLDER'])
+            filepath = imported.xml_path
             payload = parse_scenarios_xml(filepath)
             if 'core' not in payload:
                 payload['core'] = default_core_dict()
@@ -86,9 +87,27 @@ def register(
             snapshot = load_editor_state_snapshot(user)
             if snapshot:
                 payload['editor_snapshot'] = snapshot
+            if imported.kind == 'reproduction-bundle':
+                payload['reproduction_import'] = {
+                    'fidelity': imported.fidelity,
+                    'manifest_path': imported.manifest_path,
+                    'bundled_artifact_sources': imported.bundled_artifact_sources,
+                    'total_artifact_sources': imported.total_artifact_sources,
+                }
+                if imported.bundled_artifact_sources:
+                    flash(
+                        'Imported ScenarioForge reproduction bundle '
+                        f'({imported.fidelity}; {imported.bundled_artifact_sources}/'
+                        f'{imported.total_artifact_sources} artifact sources restored).'
+                    )
+                else:
+                    flash(
+                        'Imported ScenarioForge replay package. Artifacts will be '
+                        'recreated from the saved flow when materialized.'
+                    )
             return render_template('index.html', payload=payload, logs='', xml_preview=xml_text, ui_build_id=ui_build_id)
         except Exception as e:
-            flash(f'Failed to parse XML: {e}')
+            flash(f'Failed to import scenario file: {e}')
             return redirect(url_for('index'))
 
     @app.route('/save_xml', methods=['POST'])
