@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from flask import flash, jsonify, redirect, request, send_file, url_for
@@ -33,6 +34,42 @@ def register(
 ) -> None:
     if not begin_route_registration(app, 'generator_pack_routes'):
         return
+
+    def _folder_upload_path(raw_path: str) -> str:
+        normalized = str(raw_path or '').replace('\\', '/').strip()
+        if not normalized or '\x00' in normalized:
+            raise ValueError('Repository upload contains an empty file path.')
+        if normalized.startswith('/') or re.match(r'^[A-Za-z]:/', normalized):
+            raise ValueError(f'Repository upload contains an absolute path: {normalized}')
+        parts = [part for part in normalized.split('/') if part not in ('', '.')]
+        if not parts or any(part == '..' for part in parts):
+            raise ValueError(f'Repository upload contains an unsafe path: {normalized}')
+        return '/'.join(parts)
+
+    def _repository_folder_to_zip(repo_files: list[Any], repo_paths: list[str], zip_path: str) -> None:
+        if not repo_files:
+            raise ValueError('No repository folder selected.')
+        if len(repo_files) > 10000:
+            raise ValueError('Repository folder contains more than 10,000 files; upload a ZIP instead.')
+        if len(repo_paths) != len(repo_files):
+            raise ValueError(
+                'The browser did not provide repository-relative paths. '
+                'Try a current Chrome, Edge, Firefox, or Safari browser, or upload a ZIP instead.'
+            )
+
+        normalized_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for raw_path in repo_paths:
+            normalized = _folder_upload_path(raw_path)
+            if normalized in seen_paths:
+                raise ValueError(f'Repository upload contains a duplicate path: {normalized}')
+            seen_paths.add(normalized)
+            normalized_paths.append(normalized)
+
+        with zipfile_module.ZipFile(zip_path, 'w', zipfile_module.ZIP_DEFLATED) as archive:
+            for file_obj, relative_path in zip(repo_files, normalized_paths):
+                with archive.open(relative_path, 'w') as destination:
+                    shutil_module.copyfileobj(file_obj.stream, destination, length=1024 * 1024)
 
     def _latest_pack_success_payload(note: str) -> dict[str, Any]:
         warnings: list[dict[str, Any]] = []
@@ -119,24 +156,51 @@ def register(
     def generator_packs_upload():
         is_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
         file_obj = request.files.get('zip_file')
-        if not file_obj or file_obj.filename == '':
+        repo_files = [
+            item for item in request.files.getlist('repo_files')
+            if item and str(item.filename or '').strip()
+        ]
+        if (not file_obj or file_obj.filename == '') and not repo_files:
             if is_xhr:
-                return jsonify({'ok': False, 'error': 'No zip selected.'}), 400
-            flash('No zip selected.')
+                return jsonify({'ok': False, 'error': 'No repository folder or ZIP selected.'}), 400
+            flash('No repository folder or ZIP selected.')
             return redirect(url_for('flag_catalog_page'))
-        filename = secure_filename(file_obj.filename)
-        if not filename.lower().endswith('.zip'):
+        if file_obj and file_obj.filename and repo_files:
             if is_xhr:
-                return jsonify({'ok': False, 'error': 'Only .zip allowed.'}), 400
-            flash('Only .zip allowed.')
+                return jsonify({'ok': False, 'error': 'Select either a repository folder or a ZIP, not both.'}), 400
+            flash('Select either a repository folder or a ZIP, not both.')
             return redirect(url_for('flag_catalog_page'))
 
-        fd, tmp_path = tempfile_module.mkstemp(prefix='coretg_pack_', suffix='-' + filename)
+        if repo_files:
+            raw_label = str(request.form.get('repo_label') or 'repository').strip()
+            filename = secure_filename(raw_label) or 'repository'
+            suffix = '-' + filename + '.zip'
+            label = filename
+            pack_origin = 'folder-upload'
+        else:
+            filename = secure_filename(file_obj.filename)
+            if not filename.lower().endswith('.zip'):
+                if is_xhr:
+                    return jsonify({'ok': False, 'error': 'Only .zip files are accepted for ZIP upload.'}), 400
+                flash('Only .zip files are accepted for ZIP upload.')
+                return redirect(url_for('flag_catalog_page'))
+            suffix = '-' + filename
+            label = filename[:-4]
+            pack_origin = 'upload'
+
+        fd, tmp_path = tempfile_module.mkstemp(prefix='coretg_pack_', suffix=suffix)
         os_module.close(fd)
         try:
-            file_obj.save(tmp_path)
-            label = filename[:-4] if filename.lower().endswith('.zip') else filename
-            ok, note = install_generator_pack_or_bundle(zip_path=tmp_path, pack_label=label, pack_origin='upload')
+            if repo_files:
+                repo_paths = [str(path or '') for path in request.form.getlist('repo_paths')]
+                _repository_folder_to_zip(repo_files, repo_paths, tmp_path)
+            else:
+                file_obj.save(tmp_path)
+            ok, note = install_generator_pack_or_bundle(
+                zip_path=tmp_path,
+                pack_label=label,
+                pack_origin=pack_origin,
+            )
             if is_xhr:
                 if ok:
                     return jsonify(_latest_pack_success_payload(note)), 200
@@ -146,6 +210,10 @@ def register(
                 flash(f"{payload.get('confirmation_text') or note} {payload.get('confirmation_detail') or ''}".strip())
             else:
                 flash(f'Pack install failed: {note}')
+        except ValueError as exc:
+            if is_xhr:
+                return jsonify({'ok': False, 'error': str(exc)}), 400
+            flash(str(exc))
         finally:
             try:
                 os_module.remove(tmp_path)

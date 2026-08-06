@@ -53,6 +53,9 @@ def test_flag_catalog_page_groups_installed_ids_by_kind(monkeypatch):
     assert 'Unvalidated / Incomplete' in page
     assert 'packInstallSuccessAlert' in page
     assert 'packImportUrlForm' in page
+    assert 'packFolderUploadForm' in page
+    assert 'webkitdirectory' in page
+    assert 'repo_paths' in page
     assert 'packUploadProgressTitle' in page
 
 

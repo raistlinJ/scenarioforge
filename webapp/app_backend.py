@@ -49296,7 +49296,7 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
     # De-dupe
     manifests = sorted({m.resolve() for m in manifests})
     if not manifests:
-        return False, 'No manifest.yaml found in zip', [], []
+        return False, 'No generator manifest.yaml found in repository or ZIP', [], []
 
     items: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -49391,11 +49391,24 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             return manifest_dir
         try:
             if os.path.isabs(raw):
-                candidate = Path(raw).resolve()
+                candidates = [Path(raw).resolve()]
             else:
-                candidate = (root / Path(*parts)).resolve()
-            if candidate.exists() and candidate.is_dir() and os.path.commonpath([str(root.resolve()), str(candidate)]) == str(root.resolve()):
-                return candidate
+                candidates = [(root / Path(*parts)).resolve()]
+                # GitHub and similar repository downloads wrap all content in a
+                # directory such as project-main/. Folder uploads preserve that
+                # selected top-level directory too. Resolve repo-root-relative
+                # source paths inside the wrapper as well as at archive root.
+                try:
+                    relative_manifest_dir = Path(manifest_dir).resolve().relative_to(root.resolve())
+                    if relative_manifest_dir.parts:
+                        candidates.append(
+                            (root / relative_manifest_dir.parts[0] / Path(*parts)).resolve()
+                        )
+                except Exception:
+                    pass
+            for candidate in candidates:
+                if candidate.exists() and candidate.is_dir() and os.path.commonpath([str(root.resolve()), str(candidate)]) == str(root.resolve()):
+                    return candidate
         except Exception:
             pass
         return manifest_dir
@@ -49820,9 +49833,19 @@ def _read_generator_pack_zip_metadata(zip_path: str) -> dict[str, Any]:
         import zipfile
 
         with zipfile.ZipFile(zip_path, 'r') as archive:
-            if 'pack.json' not in archive.namelist():
+            names_by_normalized = {
+                str(name or '').replace('\\', '/'): str(name or '')
+                for name in archive.namelist()
+            }
+            normalized_names = list(names_by_normalized)
+            candidates = [
+                name for name in normalized_names
+                if name == 'pack.json' or name.endswith('/pack.json')
+            ]
+            if not candidates:
                 return {}
-            raw = archive.read('pack.json').decode('utf-8', errors='ignore')
+            metadata_path = 'pack.json' if 'pack.json' in candidates else sorted(candidates, key=lambda name: (name.count('/'), name))[0]
+            raw = archive.read(names_by_normalized[metadata_path]).decode('utf-8', errors='ignore')
         data = json.loads(raw or '{}')
         return data if isinstance(data, dict) else {}
     except Exception:
@@ -49844,7 +49867,12 @@ def _install_generator_pack_or_bundle(*, zip_path: str, pack_label: str, pack_or
             names = [str(n or '') for n in z.namelist()]
 
             normalized_names = [n.replace('\\', '/') for n in names]
-            has_manifest = any(n.endswith('/manifest.yaml') or n.endswith('/manifest.yml') for n in normalized_names)
+            has_manifest = any(
+                n in {'manifest.yaml', 'manifest.yml'}
+                or n.endswith('/manifest.yaml')
+                or n.endswith('/manifest.yml')
+                for n in normalized_names
+            )
             nested_all = [
                 n for n in normalized_names
                 if n and (not n.endswith('/')) and n.lower().endswith('.zip') and (not n.startswith('__MACOSX/'))

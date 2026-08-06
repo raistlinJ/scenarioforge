@@ -9,29 +9,38 @@
 
       <div class="tab-content mt-3">
         <div class="tab-pane fade show active" id="flagGenSources" role="tabpanel">
-          <h5 class="mb-2">Generator Packs (ZIP)</h5>
+          <h5 class="mb-2">Import Generator Repository or ZIP</h5>
           <div class="card mb-3">
             <div class="card-body">
               <div class="small text-muted mb-2">
-                Upload a ZIP (or import from a URL) containing generator directories with <code>manifest.yaml</code>.
+                Select a downloaded repository folder, upload a repository or generator-pack ZIP, or import a ZIP from a URL. Generator manifests are discovered recursively, including inside a repository's top-level folder.
                 Packs are validated (YAML syntax, compose service, Python syntax) and installed under <code>outputs/installed_generators/</code>.
               </div>
 
-              <form id="packUploadForm" class="row g-2 align-items-center" action="{{ url_for('generator_packs_upload') }}" method="post" enctype="multipart/form-data">
-                <div class="col-auto">
-                  <input id="packZipInput" class="form-control" type="file" name="zip_file" accept="application/zip,.zip" required>
-                </div>
-                <div class="col-auto">
-                  <button class="btn btn-primary" type="submit">Upload ZIP</button>
-                </div>
-              </form>
+              <div class="row g-2 align-items-end">
+                <form id="packFolderUploadForm" class="col-md-6" action="{{ url_for('generator_packs_upload') }}" method="post" enctype="multipart/form-data">
+                  <label class="form-label small" for="packFolderInput">Downloaded repository folder</label>
+                  <div class="input-group">
+                    <input id="packFolderInput" class="form-control" type="file" name="repo_files" webkitdirectory directory multiple required>
+                    <button class="btn btn-primary" type="submit">Import Folder</button>
+                  </div>
+                </form>
+
+                <form id="packUploadForm" class="col-md-6" action="{{ url_for('generator_packs_upload') }}" method="post" enctype="multipart/form-data">
+                  <label class="form-label small" for="packZipInput">Repository or generator-pack ZIP</label>
+                  <div class="input-group">
+                    <input id="packZipInput" class="form-control" type="file" name="zip_file" accept="application/zip,.zip" required>
+                    <button class="btn btn-outline-primary" type="submit">Upload ZIP</button>
+                  </div>
+                </form>
+              </div>
 
               <form id="packImportUrlForm" class="row g-2 mt-2 align-items-center" action="{{ url_for('generator_packs_import_url') }}" method="post">
                 <div class="col-md-6">
-                  <input id="packImportUrlInput" class="form-control" type="url" name="zip_url" placeholder="https://example.com/generator-pack.zip" required>
+                  <input id="packImportUrlInput" class="form-control" type="url" name="zip_url" placeholder="Direct URL to a repository or generator-pack ZIP" required>
                 </div>
                 <div class="col-auto">
-                  <button class="btn btn-outline-primary" type="submit">Import from URL</button>
+                  <button class="btn btn-outline-primary" type="submit">Import ZIP URL</button>
                 </div>
                 <div class="col-auto ms-md-auto">
                   <a class="btn btn-outline-secondary" id="downloadEntireFlagCatalogBtn" href="{{ url_for('generator_packs_export_all') }}" onclick="return startEntireCatalogDownload(event, 'Flag Catalog', this);">Download Entire Catalog</a>
@@ -4364,8 +4373,10 @@
 
   (function attachGeneratorPackUploadProgress() {
     const form = document.getElementById('packUploadForm');
+    const folderForm = document.getElementById('packFolderUploadForm');
     const importForm = document.getElementById('packImportUrlForm');
     const fileInput = document.getElementById('packZipInput');
+    const folderInput = document.getElementById('packFolderInput');
     const importUrlInput = document.getElementById('packImportUrlInput');
     const modalEl = document.getElementById('packUploadProgressModal');
     const titleEl = document.getElementById('packUploadProgressTitle');
@@ -4379,7 +4390,7 @@
     const successTextEl = document.getElementById('packInstallSuccessText');
     const successMetaEl = document.getElementById('packInstallSuccessMeta');
 
-    if (!form || !fileInput || !importForm || !importUrlInput || !modalEl || !barEl || !textEl || !bytesEl || !cancelBtn || !resultEl || !closeBtn) return;
+    if (!form || !fileInput || !folderForm || !folderInput || !importForm || !importUrlInput || !modalEl || !barEl || !textEl || !bytesEl || !cancelBtn || !resultEl || !closeBtn) return;
 
     function fmtBytes(n) {
       const num = Number(n) || 0;
@@ -4595,6 +4606,136 @@
         xhr.send(data);
       } catch (e) {
         // Fall back to normal form submit
+      }
+    });
+
+    folderForm.addEventListener('submit', (ev) => {
+      const files = Array.from(folderInput.files || []);
+      if (!files.length) return; // let browser validation handle it
+      ev.preventDefault();
+
+      try {
+        const relativePaths = files.map((file) => String(file.webkitRelativePath || '').replace(/\\/g, '/'));
+        if (relativePaths.some((path) => !path || path.indexOf('/') < 0)) {
+          folderInput.setCustomValidity('This browser did not provide folder-relative paths. Use a current browser or upload a ZIP instead.');
+          folderInput.reportValidity();
+          return;
+        }
+        folderInput.setCustomValidity('');
+
+        const repositoryLabel = relativePaths[0].split('/')[0] || 'repository';
+        const totalSize = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
+        if (titleEl) titleEl.textContent = 'Uploading Generator Repository…';
+        textEl.textContent = `Uploading ${repositoryLabel} (${files.length} files)…`;
+        showResult('');
+        setBarStyle('working');
+        setProgress(0, 0, totalSize);
+        cancelBtn.disabled = false;
+        cancelBtn.style.display = '';
+        closeBtn.style.display = 'none';
+        modal.show();
+
+        const xhr = new XMLHttpRequest();
+        let cancelled = false;
+        let finished = false;
+
+        const onCancel = () => {
+          if (finished) return;
+          cancelled = true;
+          try { xhr.abort(); } catch (e) {}
+          textEl.textContent = 'Upload cancelled.';
+          setBarStyle('cancel');
+          showResult('Request aborted by user.');
+          enterTerminalState();
+        };
+        cancelBtn.addEventListener('click', onCancel, { once: true });
+
+        xhr.upload.onprogress = (e) => {
+          if (!e) return;
+          const total = e.total || totalSize || 0;
+          const loaded = e.loaded || 0;
+          const pct = total ? (loaded / total) * 100 : 0;
+          setProgress(pct, loaded, total);
+        };
+
+        xhr.onload = () => {
+          try {
+            if (cancelled) return;
+            finished = true;
+            const status = xhr.status || 0;
+            const respText = xhr.responseText || '';
+            const contentType = (xhr.getResponseHeader && xhr.getResponseHeader('Content-Type')) ? (xhr.getResponseHeader('Content-Type') || '') : '';
+            let payload = null;
+            try { payload = respText ? JSON.parse(respText) : null; } catch (e) { payload = null; }
+
+            setProgress(100, totalSize, totalSize);
+            if (status >= 200 && status < 300) {
+              if (contentType && contentType.indexOf('application/json') === -1) {
+                setBarStyle('error');
+                textEl.textContent = 'Upload failed (unexpected response).';
+                showResult(respText || 'Expected JSON response but got something else.');
+                enterTerminalState();
+                return;
+              }
+              setBarStyle('success');
+              textEl.textContent = 'Installed.';
+              showResult(resultTextFromPayload(payload || {}));
+              enterTerminalState();
+              window.setTimeout(() => {
+                if (typeof window.CORETG_NAVIGATE_PAGE_DETAILS === 'function') {
+                  window.CORETG_NAVIGATE_PAGE_DETAILS('{{ url_for('flag_catalog_page') }}');
+                } else {
+                  window.location.href = '{{ url_for('flag_catalog_page') }}';
+                }
+              }, 1200);
+              return;
+            }
+
+            setBarStyle('error');
+            textEl.textContent = `Upload failed (HTTP ${status || 'error'}).`;
+            const err = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : respText;
+            showResult(err || 'Repository upload failed.');
+            enterTerminalState();
+          } catch (e) {
+            setBarStyle('error');
+            textEl.textContent = 'Upload failed (unexpected error).';
+            showResult(String(e || 'Unexpected error'));
+            enterTerminalState();
+          }
+        };
+
+        xhr.onerror = () => {
+          if (cancelled) return;
+          finished = true;
+          textEl.textContent = 'Upload failed (network error).';
+          setBarStyle('error');
+          showResult('Network error while uploading. Check the Web UI server logs and your browser console.');
+          enterTerminalState();
+        };
+
+        xhr.onabort = () => {
+          if (cancelled) return;
+          finished = true;
+          setBarStyle('error');
+          textEl.textContent = 'Upload aborted.';
+          showResult('Upload was aborted (not by user). If this repeats, check server logs and browser console.');
+          enterTerminalState();
+        };
+
+        const data = new FormData();
+        data.append('repo_label', repositoryLabel);
+        files.forEach((file, index) => {
+          data.append('repo_files', file, file.name);
+          data.append('repo_paths', relativePaths[index]);
+        });
+        xhr.open('POST', folderForm.action, true);
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.send(data);
+      } catch (e) {
+        folderInput.setCustomValidity(String(e || 'Unable to prepare repository folder upload.'));
+        folderInput.reportValidity();
       }
     });
 

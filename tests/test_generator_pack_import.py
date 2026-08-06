@@ -5,6 +5,7 @@ from pathlib import Path
 
 from webapp.app_backend import app
 import webapp.app_backend as app_backend
+from werkzeug.datastructures import MultiDict
 from werkzeug.utils import secure_filename
 
 
@@ -177,6 +178,123 @@ services:
     assert payload.get("installed_as", {}).get("grouped") == [
         {"kind": "flag-generator", "count": 1, "ids": [gen_id]}
     ]
+
+
+def test_generator_repository_folder_upload_installs_recursively(tmp_path, monkeypatch):
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+
+    gen_id = 'folder_repo_generator'
+    manifest = f"""manifest_version: 1
+id: {gen_id}
+kind: flag-generator
+name: Folder Repository Generator
+source_path: runtime/generator
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+artifacts:
+  produces: [File(path)]
+"""
+    compose = """services:
+  generator:
+    image: python:3.11-slim
+"""
+    upload = MultiDict([
+        ('repo_label', 'downloaded-generator-repo'),
+        ('repo_paths', 'downloaded-generator-repo/catalog/generator/manifest.yaml'),
+        ('repo_paths', 'downloaded-generator-repo/runtime/generator/docker-compose.yml'),
+        ('repo_paths', 'downloaded-generator-repo/runtime/generator/generator.py'),
+        ('repo_files', (io.BytesIO(manifest.encode()), 'manifest.yaml')),
+        ('repo_files', (io.BytesIO(compose.encode()), 'docker-compose.yml')),
+        ('repo_files', (io.BytesIO(b'print("ok")\n'), 'generator.py')),
+    ])
+
+    client = app.test_client()
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (200, 302)
+    response = client.post(
+        '/generator_packs/upload',
+        data=upload,
+        content_type='multipart/form-data',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json() or {}
+    assert payload.get('confirmation_text') == f'Added to catalog as {gen_id}.'
+    assert payload.get('installed_as', {}).get('pack_label') == 'downloaded-generator-repo'
+    assert payload.get('installed_as', {}).get('origin') == 'folder-upload'
+    installed_manifest = next(install_root.rglob('manifest.yaml'))
+    assert (installed_manifest.parent / 'docker-compose.yml').is_file()
+    assert (installed_manifest.parent / 'generator.py').is_file()
+
+
+def test_generator_repository_zip_resolves_repo_root_source_path(tmp_path, monkeypatch):
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+
+    gen_id = 'github_zip_generator'
+    manifest = f"""manifest_version: 1
+id: {gen_id}
+kind: flag-generator
+name: GitHub ZIP Generator
+source_path: runtime/generator
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+artifacts:
+  produces: [File(path)]
+"""
+    compose = """services:
+  generator:
+    image: python:3.11-slim
+"""
+    zip_bytes = _make_zip({
+        'generator-repo-main/catalog/generator/manifest.yaml': manifest,
+        'generator-repo-main/runtime/generator/docker-compose.yml': compose,
+        'generator-repo-main/runtime/generator/generator.py': 'print("ok")\n',
+    })
+
+    client = app.test_client()
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (200, 302)
+    response = client.post(
+        '/generator_packs/upload',
+        data={'zip_file': (io.BytesIO(zip_bytes), 'generator-repo-main.zip')},
+        content_type='multipart/form-data',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()['confirmation_text'] == f'Added to catalog as {gen_id}.'
+    installed_manifest = next(install_root.rglob('manifest.yaml'))
+    assert (installed_manifest.parent / 'docker-compose.yml').is_file()
+
+
+def test_generator_repository_folder_upload_rejects_unsafe_relative_path(tmp_path, monkeypatch):
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+
+    client = app.test_client()
+    login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    assert login_resp.status_code in (200, 302)
+    response = client.post(
+        '/generator_packs/upload',
+        data=MultiDict([
+            ('repo_label', 'unsafe-repo'),
+            ('repo_paths', 'unsafe-repo/../manifest.yaml'),
+            ('repo_files', (io.BytesIO(b'manifest_version: 1\n'), 'manifest.yaml')),
+        ]),
+        content_type='multipart/form-data',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+
+    assert response.status_code == 400
+    assert 'unsafe path' in response.get_json()['error']
+    assert not list(install_root.rglob('manifest.yaml'))
 
 
 def test_generator_pack_import_url_xhr_returns_confirmation_payload(tmp_path, monkeypatch):
