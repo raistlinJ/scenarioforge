@@ -67,6 +67,7 @@ def test_mismatch_names_both_architectures_and_the_image(dockerfile):
 
 def test_mismatch_suggests_installing_emulation_for_the_right_arch(dockerfile):
     note = _note(dockerfile, image_arch=ARCH_BY_IMAGE, host_arch='arm64')
+    assert 'qemu/binfmt' in note
     assert 'binfmt --install amd64' in note
 
 
@@ -115,6 +116,7 @@ def test_registry_manifest_answers_when_nothing_is_pulled(dockerfile):
         manifest='{"manifests": [{"platform": {"architecture": "amd64"}}]}',
     )
     assert 'publishes no arm64 build' in note
+    assert 'qemu/binfmt' in note
     assert 'binfmt --install amd64' in note
 
 

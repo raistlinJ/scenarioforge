@@ -131,12 +131,26 @@
               </div>
               <div class="col-md-4">
                 <div class="d-flex gap-2 flex-wrap align-items-end">
-                  <div>
-                    <button id="flowGenerateBtn" class="btn btn-primary text-nowrap" type="button">Generate</button>
-                  </div>
-                  <div>
-                    <button id="flowMaterializeBtn" class="btn btn-outline-primary text-nowrap" type="button" disabled
-                      title="Recreate missing CORE VM artifacts from the saved chain, assignments, seed, and resolved values without generating a new flow.">Materialize</button>
+                  <div class="btn-group">
+                    <button id="flowActionDropdownBtn" class="btn btn-primary dropdown-toggle text-nowrap" type="button"
+                      data-bs-toggle="dropdown" aria-expanded="false"
+                      title="Choose an action: generate a new flow or materialize saved artifacts.">
+                      Flow Action
+                    </button>
+                    <ul class="dropdown-menu">
+                      <li>
+                        <button class="dropdown-item" id="flowGenerateBtn" type="button"
+                          title="Generate a new flow from the latest preview plan. This will clear the current saved chain and create a new one.">
+                          Generate
+                        </button>
+                      </li>
+                      <li>
+                        <button class="dropdown-item" id="flowMaterializeBtn" type="button" disabled
+                          title="Recreate missing CORE VM artifacts from the saved chain, assignments, seed, and resolved values without generating a new flow.">
+                          Materialize
+                        </button>
+                      </li>
+                    </ul>
                   </div>
                   <div>
                     <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="collapse"
@@ -596,7 +610,21 @@
     }
     if (materializeBtnEl) {
       const hasChain = Array.isArray(currentChain) && currentChain.length > 0;
-      materializeBtnEl.disabled = (!!generateInFlight || !flowEnabled || !flowEligible || dirty || !hasChain);
+      const canMaterialize = !!(!generateInFlight && flowEnabled && flowEligible && !dirty && hasChain);
+      materializeBtnEl.disabled = !canMaterialize;
+      if (canMaterialize) {
+        materializeBtnEl.title = 'Recreate missing CORE VM artifacts from the saved chain, assignments, seed, and resolved values without generating a new flow.';
+      } else if (!hasChain) {
+        materializeBtnEl.title = 'A saved chain is required to materialize artifacts.';
+      } else if (dirty) {
+        materializeBtnEl.title = 'Re-run Generate after topology changes before materializing.';
+      } else if (!flowEnabled) {
+        materializeBtnEl.title = 'Enable flow sequencing to materialize saved artifacts.';
+      } else if (!flowEligible) {
+        materializeBtnEl.title = 'Flow is not eligible for materialization.';
+      } else {
+        materializeBtnEl.title = 'Materialize is not available right now.';
+      }
     }
     if (flowDownloadDropdownEl) {
       flowDownloadDropdownEl.disabled = dirty;
@@ -14267,8 +14295,18 @@ ${out.join('\n')}
     updateDependencyLevelUi();
   }
 
-  if (btnEl) btnEl.addEventListener('click', (e) => {
+  if (btnEl) btnEl.addEventListener('click', async (e) => {
     try { e.preventDefault(); } catch (_) { }
+    const hasChain = Array.isArray(currentChain) && currentChain.length > 0;
+    const canMaterialize = hasChain && !topologyDirty && flowEnabled && flowEligible && !generateInFlight;
+    if (canMaterialize) {
+      const confirmed = await confirmFlowAction(
+        'Generate New Flow',
+        'A saved flow is available and materialize may be possible. Generating a new flow will clear the current saved chain and create a new one. Continue?',
+        'Generate'
+      );
+      if (!confirmed) return;
+    }
     allowNodeDuplicates = false;
     generate(true, { savePreviewResolve: true, allow_node_duplicates: false, resolveOnGenerate: true });
   });

@@ -1148,8 +1148,9 @@ def _wrapper_base_platform_note(dockerfile_path: str, *, docker_cmd, run) -> str
                 continue
             return (
                 f"{base} publishes no {host_arch} build, so nothing from it can run on this host. "
-                f"Install emulation on the CORE VM "
-                f"(docker run --privileged --rm tonistiigi/binfmt --install amd64) "
+                f"Install emulation on the CORE VM via qemu/binfmt "
+                f"(`sudo apt-get install qemu-user-static binfmt-support` or "
+                f"docker run --privileged --rm tonistiigi/binfmt --install amd64) "
                 f"or choose a vulnerability whose image publishes a {host_arch} build."
             )
         if image_arch == host_arch:
@@ -1157,8 +1158,9 @@ def _wrapper_base_platform_note(dockerfile_path: str, *, docker_cmd, run) -> str
         return (
             f"base image {base} is built for {image_arch} but this host runs {host_arch}, "
             f"so every RUN against it fails with an exec format error. "
-            f"Install emulation on the CORE VM "
-            f"(docker run --privileged --rm tonistiigi/binfmt --install {image_arch}) "
+            f"Install emulation on the CORE VM via qemu/binfmt "
+            f"(`sudo apt-get install qemu-user-static binfmt-support` or "
+            f"docker run --privileged --rm tonistiigi/binfmt --install {image_arch}) "
             f"or choose a vulnerability whose image publishes a {host_arch} build."
         )
     return ''
