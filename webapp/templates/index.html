@@ -489,6 +489,100 @@
                 enctype="multipart/form-data">
                 <input type="file" name="scenarios_xml" id="hiddenLoadInput" accept=".xml,.zip,.scenarioforge">
             </form>
+            <div class="modal fade" id="scenarioImportProgressModal" tabindex="-1" aria-hidden="true"
+                data-bs-backdrop="static" data-bs-keyboard="false">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">Importing scenario</h5>
+                        </div>
+                        <div class="modal-body">
+                            <div class="d-flex align-items-center gap-2 mb-2">
+                                <div class="spinner-border spinner-border-sm text-primary" id="scenarioImportSpinner"
+                                    role="status" aria-hidden="true"></div>
+                                <strong id="scenarioImportProgressStatus">Preparing upload…</strong>
+                                <span class="ms-auto small text-muted" id="scenarioImportProgressPercent">0%</span>
+                            </div>
+                            <div class="small text-muted mb-2" id="scenarioImportProgressDetail"></div>
+                            <div class="progress mb-3" role="progressbar" aria-label="Scenario import progress"
+                                aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                                id="scenarioImportProgressTrack">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated"
+                                    id="scenarioImportProgressBar" style="width: 0%"></div>
+                            </div>
+                            <div class="alert alert-info d-none mb-3" id="scenarioImportCredentialPrompt">
+                                <div class="fw-semibold mb-1">Destination connection required</div>
+                                <div class="small mb-2" id="scenarioImportCredentialDetail"></div>
+                                <div class="small text-muted mb-2 d-none" id="scenarioImportProfileDetail"></div>
+                                <div class="row g-2 mb-2">
+                                    <div class="col-sm-8" data-import-connection-field="core_host">
+                                        <label class="form-label small mb-1" for="scenarioImportCoreHost">CORE host</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                            id="scenarioImportCoreHost" autocomplete="off">
+                                    </div>
+                                    <div class="col-sm-4" data-import-connection-field="core_port">
+                                        <label class="form-label small mb-1" for="scenarioImportCorePort">CORE port</label>
+                                        <input type="number" min="1" max="65535" class="form-control form-control-sm"
+                                            id="scenarioImportCorePort" autocomplete="off">
+                                    </div>
+                                    <div class="col-sm-8" data-import-connection-field="ssh_host">
+                                        <label class="form-label small mb-1" for="scenarioImportSshHost">SSH host</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                            id="scenarioImportSshHost" autocomplete="off">
+                                    </div>
+                                    <div class="col-sm-4" data-import-connection-field="ssh_port">
+                                        <label class="form-label small mb-1" for="scenarioImportSshPort">SSH port</label>
+                                        <input type="number" min="1" max="65535" class="form-control form-control-sm"
+                                            id="scenarioImportSshPort" autocomplete="off">
+                                    </div>
+                                    <div class="col-sm-6" data-import-connection-field="ssh_username">
+                                        <label class="form-label small mb-1" for="scenarioImportSshUsername">SSH username</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                            id="scenarioImportSshUsername" autocomplete="off">
+                                    </div>
+                                    <div class="col-sm-6" data-import-connection-field="ssh_password">
+                                        <label class="form-label small mb-1" for="scenarioImportCredentialPassword">SSH password</label>
+                                        <input type="password" class="form-control form-control-sm"
+                                            id="scenarioImportCredentialPassword" autocomplete="off">
+                                    </div>
+                                    <div class="col-12" data-import-connection-field="venv_bin">
+                                        <label class="form-label small mb-1" for="scenarioImportCoreVenvBin">Remote venv path</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                            id="scenarioImportCoreVenvBin" autocomplete="off">
+                                    </div>
+                                </div>
+                                <div class="small text-danger d-none mb-2" id="scenarioImportCredentialError">
+                                    Complete the highlighted destination fields to continue.
+                                </div>
+                                <div class="form-check mb-2 d-none" id="scenarioImportSaveProfileWrap">
+                                    <input class="form-check-input" type="checkbox" value="1"
+                                        id="scenarioImportSaveProfile" checked>
+                                    <label class="form-check-label small" for="scenarioImportSaveProfile">
+                                        Save encrypted destination access profile for later Generate/Run
+                                    </label>
+                                </div>
+                                <div class="d-flex justify-content-end gap-2">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        id="scenarioImportCredentialCancel">Cancel</button>
+                                    <button type="button" class="btn btn-sm btn-primary"
+                                        id="scenarioImportCredentialContinue">Test connection &amp; continue</button>
+                                </div>
+                                <div class="small text-muted mt-2">
+                                    Never stored in the bundle, XML, or progress log. If selected above, the
+                                    password is encrypted in ScenarioForge's destination secret store.
+                                </div>
+                            </div>
+                            <div class="list-group list-group-flush border rounded small"
+                                id="scenarioImportProgressSteps" style="max-height: 260px; overflow-y: auto;"></div>
+                        </div>
+                        <div class="modal-footer d-none" id="scenarioImportProgressFooter">
+                            <button type="button" class="btn btn-secondary" id="scenarioImportProgressClose">
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     <div class="col-md-9">
@@ -13990,7 +14084,376 @@
             };
         }
         if (importBtn) importBtn.onclick = (e) => { e.preventDefault(); logInfo('Import scenarios clicked'); hiddenLoadInput.click(); };
-        if (hiddenLoadInput) hiddenLoadInput.onchange = () => { if (hiddenLoadInput.files && hiddenLoadInput.files.length > 0) { saveScrollBeforeNav(); hiddenLoadForm.submit(); } };
+        if (hiddenLoadInput) hiddenLoadInput.onchange = () => {
+            if (!hiddenLoadInput.files || hiddenLoadInput.files.length < 1 || !hiddenLoadForm) return;
+            saveScrollBeforeNav();
+            const modalEl = document.getElementById('scenarioImportProgressModal');
+            const statusEl = document.getElementById('scenarioImportProgressStatus');
+            const detailEl = document.getElementById('scenarioImportProgressDetail');
+            const percentEl = document.getElementById('scenarioImportProgressPercent');
+            const trackEl = document.getElementById('scenarioImportProgressTrack');
+            const barEl = document.getElementById('scenarioImportProgressBar');
+            const stepsEl = document.getElementById('scenarioImportProgressSteps');
+            const spinnerEl = document.getElementById('scenarioImportSpinner');
+            const footerEl = document.getElementById('scenarioImportProgressFooter');
+            const closeEl = document.getElementById('scenarioImportProgressClose');
+            const credentialPromptEl = document.getElementById('scenarioImportCredentialPrompt');
+            const credentialDetailEl = document.getElementById('scenarioImportCredentialDetail');
+            const credentialPasswordEl = document.getElementById('scenarioImportCredentialPassword');
+            const credentialErrorEl = document.getElementById('scenarioImportCredentialError');
+            const credentialContinueEl = document.getElementById('scenarioImportCredentialContinue');
+            const credentialCancelEl = document.getElementById('scenarioImportCredentialCancel');
+            const profileDetailEl = document.getElementById('scenarioImportProfileDetail');
+            const saveProfileWrapEl = document.getElementById('scenarioImportSaveProfileWrap');
+            const saveProfileEl = document.getElementById('scenarioImportSaveProfile');
+            const connectionInputs = {
+                core_host: document.getElementById('scenarioImportCoreHost'),
+                core_port: document.getElementById('scenarioImportCorePort'),
+                ssh_host: document.getElementById('scenarioImportSshHost'),
+                ssh_port: document.getElementById('scenarioImportSshPort'),
+                ssh_username: document.getElementById('scenarioImportSshUsername'),
+                ssh_password: credentialPasswordEl,
+                venv_bin: document.getElementById('scenarioImportCoreVenvBin'),
+            };
+            const connectionFieldContainers = Array.from(
+                document.querySelectorAll('[data-import-connection-field]')
+            );
+            const progressId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+                ? window.crypto.randomUUID().replaceAll('-', '')
+                : `import_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const modal = (window.bootstrap && modalEl)
+                ? window.bootstrap.Modal.getOrCreateInstance(modalEl)
+                : null;
+            let lastEventSignature = '';
+            let pollTimer = null;
+            let activeRequirements = null;
+            let activeConnection = {};
+            const clientProgressEvents = [];
+
+            const setProgress = (percent, step, detail, status) => {
+                const bounded = Math.max(0, Math.min(100, Number(percent) || 0));
+                if (statusEl && step) statusEl.textContent = step;
+                if (detailEl) detailEl.textContent = detail || '';
+                if (percentEl) percentEl.textContent = `${Math.round(bounded)}%`;
+                if (trackEl) trackEl.setAttribute('aria-valuenow', String(Math.round(bounded)));
+                if (barEl) {
+                    barEl.style.width = `${bounded}%`;
+                    barEl.classList.toggle('bg-danger', status === 'failed');
+                    barEl.classList.toggle('bg-success', status === 'complete');
+                    barEl.classList.toggle('progress-bar-animated', !['failed', 'complete'].includes(status));
+                }
+                if (spinnerEl) spinnerEl.classList.toggle('d-none', ['failed', 'complete'].includes(status));
+            };
+
+            const renderProgressEvents = (events) => {
+                const signature = JSON.stringify(events.map((event) => [
+                    event.step, event.detail, event.percent, event.status,
+                ]));
+                if (stepsEl && signature !== lastEventSignature) {
+                    stepsEl.replaceChildren();
+                    events.forEach((event) => {
+                        const row = document.createElement('div');
+                        row.className = 'list-group-item py-2';
+                        const heading = document.createElement('div');
+                        heading.className = 'd-flex justify-content-between gap-2';
+                        const label = document.createElement('span');
+                        label.className = event.status === 'failed' ? 'text-danger fw-semibold' : 'fw-semibold';
+                        label.textContent = event.step || 'Importing';
+                        const pct = document.createElement('span');
+                        pct.className = 'text-muted';
+                        pct.textContent = `${Math.round(Number(event.percent) || 0)}%`;
+                        heading.append(label, pct);
+                        row.appendChild(heading);
+                        if (event.detail) {
+                            const detail = document.createElement('div');
+                            detail.className = 'text-muted mt-1';
+                            detail.textContent = event.detail;
+                            row.appendChild(detail);
+                        }
+                        stepsEl.appendChild(row);
+                    });
+                    stepsEl.scrollTop = stepsEl.scrollHeight;
+                    lastEventSignature = signature;
+                }
+            };
+
+            const appendClientProgress = (step, detail = '', percent = 0) => {
+                clientProgressEvents.push({ step, detail, percent, status: 'running' });
+                renderProgressEvents(clientProgressEvents);
+            };
+
+            const renderServerProgress = (payload) => {
+                if (!payload || payload.ok === false) return;
+                // Preserve browser upload progress until the server has received the request.
+                if (payload.status === 'waiting') return;
+                setProgress(payload.percent, payload.step, payload.detail, payload.status);
+                const events = Array.isArray(payload.events) ? payload.events : [];
+                renderProgressEvents([...clientProgressEvents, ...events]);
+            };
+
+            const pollProgress = async () => {
+                try {
+                    const response = await fetch(`/api/scenario-import-progress/${encodeURIComponent(progressId)}`, {
+                        cache: 'no-store',
+                    });
+                    if (response.ok) renderServerProgress(await response.json());
+                } catch (_) { }
+            };
+
+            if (stepsEl) stepsEl.replaceChildren();
+            if (footerEl) footerEl.classList.add('d-none');
+            if (credentialPromptEl) credentialPromptEl.classList.add('d-none');
+            if (saveProfileWrapEl) saveProfileWrapEl.classList.add('d-none');
+            if (saveProfileEl) saveProfileEl.checked = true;
+            if (credentialErrorEl) credentialErrorEl.classList.add('d-none');
+            if (credentialPasswordEl) credentialPasswordEl.value = '';
+            setProgress(0, 'Checking import destination', hiddenLoadInput.files[0].name, 'running');
+            appendClientProgress('Checking import destination', hiddenLoadInput.files[0].name, 0);
+            if (modal) modal.show();
+            if (importBtn) importBtn.disabled = true;
+            if (closeEl) closeEl.onclick = () => {
+                if (pollTimer) window.clearInterval(pollTimer);
+                if (modal) modal.hide();
+                hiddenLoadInput.value = '';
+                if (importBtn) importBtn.disabled = false;
+            };
+
+            const failBeforeUpload = (detail) => {
+                setProgress(100, 'Import cannot start', detail, 'failed');
+                if (footerEl) footerEl.classList.remove('d-none');
+                if (importBtn) importBtn.disabled = false;
+            };
+
+            const startUpload = (connection = {}) => {
+                if (credentialPromptEl) credentialPromptEl.classList.add('d-none');
+                if (credentialErrorEl) credentialErrorEl.classList.add('d-none');
+                setProgress(0, 'Uploading scenario file', hiddenLoadInput.files[0].name, 'running');
+                pollTimer = window.setInterval(pollProgress, 350);
+
+                const formData = new FormData(hiddenLoadForm);
+                formData.set('import_progress_id', progressId);
+                const formFields = {
+                    core_host: 'import_core_host',
+                    core_port: 'import_core_port',
+                    ssh_host: 'import_ssh_host',
+                    ssh_port: 'import_ssh_port',
+                    ssh_username: 'import_ssh_username',
+                    ssh_password: 'core_ssh_password',
+                    venv_bin: 'import_core_venv_bin',
+                    profile_id: 'import_core_profile_id',
+                };
+                Object.entries(formFields).forEach(([key, formKey]) => {
+                    const value = connection[key];
+                    if (value !== undefined && value !== null && String(value) !== '') {
+                        formData.set(formKey, String(value));
+                    }
+                });
+                if (credentialPasswordEl) credentialPasswordEl.value = '';
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', hiddenLoadForm.action, true);
+                xhr.upload.onprogress = (event) => {
+                    if (!event.lengthComputable) return;
+                    const uploadPercent = Math.max(1, Math.min(7, (event.loaded / event.total) * 7));
+                    setProgress(uploadPercent, 'Uploading scenario file', `${Math.round(event.loaded / 1024)} / ${Math.round(event.total / 1024)} KiB`, 'running');
+                };
+                xhr.onerror = () => {
+                    if (pollTimer) window.clearInterval(pollTimer);
+                    setProgress(100, 'Import failed', 'The upload request could not reach ScenarioForge.', 'failed');
+                    if (footerEl) footerEl.classList.remove('d-none');
+                    if (importBtn) importBtn.disabled = false;
+                };
+                xhr.onload = async () => {
+                    if (pollTimer) window.clearInterval(pollTimer);
+                    await pollProgress();
+                    if (xhr.status < 200 || xhr.status >= 400) {
+                        setProgress(100, 'Import failed', `ScenarioForge returned HTTP ${xhr.status}.`, 'failed');
+                        if (footerEl) footerEl.classList.remove('d-none');
+                        if (importBtn) importBtn.disabled = false;
+                        return;
+                    }
+                    window.setTimeout(() => {
+                        try { window.history.replaceState({}, '', '/'); } catch (_) { }
+                        document.open();
+                        document.write(xhr.responseText);
+                        document.close();
+                    }, 250);
+                };
+                xhr.send(formData);
+            };
+
+            const fillConnectionFields = (connection) => {
+                activeConnection = { ...(connection || {}) };
+                Object.entries(connectionInputs).forEach(([key, input]) => {
+                    if (!input) return;
+                    input.value = key === 'ssh_password' ? '' : (activeConnection[key] ?? '');
+                    input.classList.remove('is-invalid');
+                });
+            };
+
+            const collectConnectionFields = () => {
+                const collected = { ...activeConnection };
+                Object.entries(connectionInputs).forEach(([key, input]) => {
+                    if (!input) return;
+                    const value = input.value;
+                    if (value !== '' || key === 'ssh_password') collected[key] = value;
+                });
+                return collected;
+            };
+
+            const showConnectionPrompt = (requirements, { revealAll = false, error = '' } = {}) => {
+                activeRequirements = requirements || activeRequirements || {};
+                const missingFields = new Set(
+                    (activeRequirements.missing_configuration || [])
+                        .map((item) => typeof item === 'string' ? item : item?.field)
+                        .filter(Boolean)
+                );
+                if (revealAll) {
+                    ['core_host', 'core_port', 'ssh_host', 'ssh_port', 'ssh_username', 'ssh_password', 'venv_bin']
+                        .forEach((field) => missingFields.add(field));
+                }
+                connectionFieldContainers.forEach((container) => {
+                    const field = container.dataset.importConnectionField;
+                    container.classList.toggle('d-none', !missingFields.has(field));
+                });
+                const profile = activeRequirements.profile || {};
+                if (profileDetailEl) {
+                    const profileText = profile.id
+                        ? `Validated destination profile: ${profile.label || profile.id}`
+                        : 'No validated destination VM/Access profile was selected.';
+                    profileDetailEl.textContent = profileText;
+                    profileDetailEl.classList.remove('d-none');
+                }
+                const offerProfileSave = Boolean(
+                    activeRequirements.can_save_profile && (!profile.id || revealAll)
+                );
+                if (saveProfileWrapEl) saveProfileWrapEl.classList.toggle('d-none', !offerProfileSave);
+                if (saveProfileEl) saveProfileEl.checked = offerProfileSave;
+                const destination = activeRequirements.destination_label || 'remote CORE host';
+                if (credentialDetailEl) {
+                    credentialDetailEl.textContent = error
+                        ? `Connection test failed: ${error}`
+                        : `Enter the missing ${destination} connection information.`;
+                }
+                if (credentialErrorEl) credentialErrorEl.classList.add('d-none');
+                if (credentialPromptEl) credentialPromptEl.classList.remove('d-none');
+                if (spinnerEl) spinnerEl.classList.add('d-none');
+                const firstField = connectionFieldContainers
+                    .filter((container) => !container.classList.contains('d-none'))
+                    .map((container) => connectionInputs[container.dataset.importConnectionField])
+                    .find(Boolean);
+                if (firstField) window.setTimeout(() => firstField.focus(), 50);
+            };
+
+            const validateCollectedConnection = (connection) => {
+                const required = ['core_host', 'core_port', 'ssh_host', 'ssh_port', 'ssh_username'];
+                if (activeRequirements?.password_required) required.push('ssh_password');
+                let valid = true;
+                required.forEach((field) => {
+                    const input = connectionInputs[field];
+                    const missing = connection[field] === undefined || connection[field] === null || String(connection[field]).trim() === '';
+                    if (input) input.classList.toggle('is-invalid', missing);
+                    if (missing) valid = false;
+                });
+                if (credentialErrorEl) credentialErrorEl.classList.toggle('d-none', valid);
+                return valid;
+            };
+
+            const testConnectionAndStart = async (connection) => {
+                if (credentialPromptEl) credentialPromptEl.classList.add('d-none');
+                if (credentialContinueEl) credentialContinueEl.disabled = true;
+                setProgress(0, 'Testing destination connection', 'Validating SSH and SFTP access before upload…', 'running');
+                appendClientProgress('Testing destination connection', 'Validating SSH and SFTP access', 0);
+                try {
+                    const response = await fetch('/api/scenario-import-connection/test', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            connection,
+                            save_profile: Boolean(
+                                saveProfileEl
+                                && saveProfileEl.checked
+                                && saveProfileWrapEl
+                                && !saveProfileWrapEl.classList.contains('d-none')
+                            ),
+                        }),
+                    });
+                    const result = await response.json();
+                    if (!response.ok || !result.ok) {
+                        showConnectionPrompt(activeRequirements, {
+                            revealAll: true,
+                            error: result.error || `ScenarioForge returned HTTP ${response.status}.`,
+                        });
+                        return;
+                    }
+                    if (result.profile?.id) connection.profile_id = result.profile.id;
+                    if (result.profile_saved) delete connection.ssh_password;
+                    appendClientProgress('Destination connection validated', result.message || '', 0);
+                    startUpload(connection);
+                } catch (_) {
+                    showConnectionPrompt(activeRequirements, {
+                        revealAll: true,
+                        error: 'The destination connection test could not reach ScenarioForge.',
+                    });
+                } finally {
+                    if (credentialContinueEl) credentialContinueEl.disabled = false;
+                }
+            };
+
+            const requestImportRequirements = async () => {
+                try {
+                    const response = await fetch('/api/scenario-import-requirements', { cache: 'no-store' });
+                    const requirements = await response.json();
+                    if (!response.ok || !requirements.ok) {
+                        failBeforeUpload(requirements.error || `ScenarioForge returned HTTP ${response.status}.`);
+                        return;
+                    }
+                    activeRequirements = requirements;
+                    fillConnectionFields(requirements.connection || {});
+                    if (requirements.transport === 'local') {
+                        appendClientProgress(
+                            'Native local destination selected',
+                            'No VM/Access credentials are required',
+                            0,
+                        );
+                        startUpload(activeConnection);
+                        return;
+                    }
+                    const missing = Array.isArray(requirements.missing_configuration)
+                        ? requirements.missing_configuration.filter(Boolean)
+                        : [];
+                    if (missing.length) {
+                        appendClientProgress(
+                            'Collecting destination connection',
+                            'Waiting for missing VM/Access fields',
+                            0,
+                        );
+                        showConnectionPrompt(requirements);
+                    }
+                    else await testConnectionAndStart(activeConnection);
+                } catch (_) {
+                    failBeforeUpload('Could not determine the destination credential requirements.');
+                }
+            };
+
+            if (credentialContinueEl) credentialContinueEl.onclick = () => {
+                const connection = collectConnectionFields();
+                if (!validateCollectedConnection(connection)) return;
+                testConnectionAndStart(connection);
+            };
+            if (credentialCancelEl) credentialCancelEl.onclick = () => {
+                if (credentialPasswordEl) credentialPasswordEl.value = '';
+                if (modal) modal.hide();
+                hiddenLoadInput.value = '';
+                if (importBtn) importBtn.disabled = false;
+            };
+            if (credentialPasswordEl) credentialPasswordEl.onkeydown = (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    if (credentialContinueEl) credentialContinueEl.click();
+                }
+            };
+            requestImportRequirements();
+        };
         if (exportBtn) exportBtn.onclick = (e) => {
             e.preventDefault();
             logInfo('Export clicked');

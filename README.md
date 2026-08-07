@@ -9,6 +9,28 @@ locations, and otherwise retain the saved resolved inputs for deterministic arti
 regeneration. Supported bundle filenames may use `.zip` or `.scenarioforge` in
 addition to the existing `.xml` import.
 
+Import displays live upload, validation, extraction, mode-selection,
+materialization, verification, and editor-loading steps. When a bundle contains
+artifact payloads, native mode with local CORE restores them directly under the
+guarded `/tmp/vulns/` artifact roots without credentials. Native mode with a
+remote CORE target and VM mode both connect over SSH using ScenarioForge's
+current runtime `CORE_*` configuration or a destination-owned validated
+VM/Access profile. Credentials in the imported XML or bundle are deliberately
+ignored for automatic materialization and are never displayed in the progress
+log. Import collects only missing CORE host/port and SSH host/port/username/
+password fields, validates SSH and SFTP before upload, and then replaces source
+connection metadata in the imported XML with the destination's non-secret
+connection and profile metadata. A password entered during import is used only
+by that request unless the user selects **Save encrypted destination access
+profile for later Generate/Run**. With that explicit option, it is encrypted in
+ScenarioForge's existing destination secret store and the XML receives only the
+profile identifier; it is never written to the bundle, XML, or progress state.
+If preflight validation fails, upload waits and the
+connection form remains available for correction. If CORE becomes unavailable
+after validation, the scenario still imports and Flag Sequencing's
+**Materialize** action remains available for retry.
+Replay-only packages and plain XML do not run generators during import.
+
 ## Table of contents
 - [Highlights](#highlights)
 - [Screenshots](docs/screenshots.md)

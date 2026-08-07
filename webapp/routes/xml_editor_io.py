@@ -3,6 +3,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
+import threading
+import time
 import xml.etree.ElementTree as ET
 from typing import Any, Callable
 
@@ -13,6 +16,63 @@ try:
     from lxml import etree as LET  # type: ignore
 except Exception:  # pragma: no cover
     LET = None  # type: ignore
+
+
+_IMPORT_PROGRESS_LOCK = threading.Lock()
+_IMPORT_PROGRESS: dict[str, dict[str, Any]] = {}
+_IMPORT_PROGRESS_TTL_SECONDS = 15 * 60
+_IMPORT_PROGRESS_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+
+
+def _expire_import_progress() -> None:
+    cutoff = time.time() - _IMPORT_PROGRESS_TTL_SECONDS
+    with _IMPORT_PROGRESS_LOCK:
+        for progress_id in list(_IMPORT_PROGRESS):
+            if float(_IMPORT_PROGRESS[progress_id].get('updated_at') or 0) < cutoff:
+                _IMPORT_PROGRESS.pop(progress_id, None)
+
+
+def _update_import_progress(
+    progress_id: str,
+    step: str,
+    percent: int,
+    detail: str = '',
+    *,
+    status: str = 'running',
+) -> None:
+    if not progress_id or not _IMPORT_PROGRESS_ID_RE.fullmatch(progress_id):
+        return
+    now = time.time()
+    event = {
+        'step': str(step or 'Importing scenario'),
+        'detail': str(detail or ''),
+        'percent': max(0, min(100, int(percent))),
+        'status': status,
+        'timestamp': now,
+    }
+    with _IMPORT_PROGRESS_LOCK:
+        state = _IMPORT_PROGRESS.setdefault(
+            progress_id,
+            {'id': progress_id, 'status': 'running', 'percent': 0, 'events': [], 'updated_at': now},
+        )
+        events = state.setdefault('events', [])
+        if not events or any(events[-1].get(key) != event.get(key) for key in ('step', 'detail', 'status')):
+            events.append(event)
+            del events[:-60]
+        state.update({
+            'status': status,
+            'step': event['step'],
+            'detail': event['detail'],
+            'percent': event['percent'],
+            'updated_at': now,
+        })
+
+
+def _import_progress_snapshot(progress_id: str) -> dict[str, Any] | None:
+    _expire_import_progress()
+    with _IMPORT_PROGRESS_LOCK:
+        state = _IMPORT_PROGRESS.get(progress_id)
+        return copy.deepcopy(state) if isinstance(state, dict) else None
 
 
 def register(
@@ -48,27 +108,641 @@ def register(
 
         return backend._concretize_scenarios_for_save(scenarios_payload, seed=seed)
 
+    def _import_connection_overrides(raw: Any) -> dict[str, Any]:
+        source = raw if isinstance(raw, dict) else {}
+        mapping = {
+            'core_host': 'host',
+            'core_port': 'port',
+            'ssh_host': 'ssh_host',
+            'ssh_port': 'ssh_port',
+            'ssh_username': 'ssh_username',
+            'ssh_password': 'ssh_password',
+            'venv_bin': 'venv_bin',
+        }
+        overrides: dict[str, Any] = {}
+        for source_key, target_key in mapping.items():
+            value = source.get(source_key)
+            if value in (None, ''):
+                continue
+            if target_key in {'port', 'ssh_port'}:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f'{source_key.replace("_", " ")} must be a number') from exc
+                if parsed < 1 or parsed > 65535:
+                    raise ValueError(f'{source_key.replace("_", " ")} must be between 1 and 65535')
+                overrides[target_key] = parsed
+            else:
+                overrides[target_key] = str(value).strip()
+        if 'host' in overrides:
+            overrides['grpc_host'] = overrides['host']
+        if 'port' in overrides:
+            overrides['grpc_port'] = overrides['port']
+        overrides['ssh_enabled'] = True
+        return overrides
+
+    def _core_secret_record_config(record: Any, *, include_password: bool) -> dict[str, Any]:
+        if not isinstance(record, dict):
+            return {}
+        cfg = {
+            'host': record.get('host') or record.get('grpc_host'),
+            'grpc_host': record.get('grpc_host') or record.get('host'),
+            'port': record.get('port') or record.get('grpc_port'),
+            'grpc_port': record.get('grpc_port') or record.get('port'),
+            'ssh_host': record.get('ssh_host') or record.get('host') or record.get('grpc_host'),
+            'ssh_port': record.get('ssh_port') or 22,
+            'ssh_username': record.get('ssh_username'),
+            'ssh_enabled': True,
+            'venv_bin': record.get('venv_bin'),
+            'core_secret_id': record.get('identifier'),
+            'vm_key': record.get('vm_key'),
+            'vm_name': record.get('vm_name'),
+            'vm_node': record.get('vm_node'),
+            'vmid': record.get('vmid'),
+            'proxmox_secret_id': record.get('proxmox_secret_id'),
+            'proxmox_target': record.get('proxmox_target'),
+            'validated': True,
+        }
+        if include_password:
+            cfg['ssh_password'] = (
+                record.get('ssh_password_plain') or record.get('password_plain') or ''
+            )
+        return {key: value for key, value in cfg.items() if value not in (None, '')}
+
+    def _import_materialization_destination(
+        *,
+        connection_overrides: Any = None,
+        profile_id: str = '',
+        include_password: bool = False,
+        scenario_norm: str = '',
+    ) -> dict[str, Any]:
+        """Resolve local/remote transport and a destination-owned CORE configuration."""
+        from webapp import app_backend as backend
+
+        runtime_mode = backend._webui_runtime_mode()
+        runtime_cfg = backend._core_backend_defaults(include_password=include_password)
+        overrides = _import_connection_overrides(connection_overrides)
+
+        def is_native_local(cfg: dict[str, Any]) -> bool:
+            if runtime_mode != 'native':
+                return False
+            grpc_host = str(cfg.get('grpc_host') or cfg.get('host') or '').strip().lower()
+            ssh_host = str(cfg.get('ssh_host') or grpc_host or '').strip().lower()
+            local_names = {'localhost', '127.0.0.1', '::1'}
+            return not bool(backend._webui_running_in_docker()) and (
+                bool(backend._webui_local_mode())
+                or (grpc_host in local_names and ssh_host in local_names)
+            )
+
+        initial_cfg = dict(runtime_cfg)
+        initial_cfg.update(overrides)
+        initially_local = is_native_local(initial_cfg)
+        resolved_profile = None
+        requested_profile_id = str(profile_id or '').strip()
+        if requested_profile_id:
+            resolved_profile = backend._load_core_credentials(requested_profile_id)
+            if not resolved_profile:
+                raise ValueError('The selected destination VM/Access profile is no longer available.')
+        else:
+            runtime_required = (
+                initial_cfg.get('host') or initial_cfg.get('grpc_host'),
+                initial_cfg.get('port') or initial_cfg.get('grpc_port'),
+                initial_cfg.get('ssh_host') or initial_cfg.get('host'),
+                initial_cfg.get('ssh_port'),
+                initial_cfg.get('ssh_username'),
+            )
+            runtime_has_password = bool(str(initial_cfg.get('ssh_password') or '')) if include_password else True
+            if not initially_local and (not all(runtime_required) or not runtime_has_password):
+                resolved_profile = backend._select_latest_core_secret_record(scenario_norm or None)
+
+        combined = dict(runtime_cfg)
+        profile_cfg = _core_secret_record_config(resolved_profile, include_password=include_password)
+        combined.update(profile_cfg)
+        profile_conflict = False
+        if profile_cfg and overrides:
+            for field in ('host', 'port', 'ssh_host', 'ssh_port', 'ssh_username'):
+                if field not in overrides:
+                    continue
+                if str(overrides.get(field) or '') != str(profile_cfg.get(field) or ''):
+                    profile_conflict = True
+                    break
+            if str(overrides.get('ssh_password') or ''):
+                profile_conflict = True
+        combined.update(overrides)
+        if profile_conflict:
+            for metadata_key in (
+                'core_secret_id', 'vm_key', 'vm_name', 'vm_node', 'vmid',
+                'proxmox_secret_id', 'proxmox_target', 'validated',
+            ):
+                combined.pop(metadata_key, None)
+        public_core_cfg = backend._normalize_core_config(combined, include_password=include_password)
+        for metadata_key in (
+            'core_secret_id', 'vm_key', 'vm_name', 'vm_node', 'vmid',
+            'proxmox_secret_id', 'proxmox_target', 'validated',
+        ):
+            if combined.get(metadata_key) not in (None, ''):
+                public_core_cfg[metadata_key] = combined.get(metadata_key)
+        local_materialization = is_native_local(public_core_cfg)
+        return {
+            'runtime_mode': runtime_mode,
+            'local_materialization': local_materialization,
+            'public_core_cfg': public_core_cfg,
+            'profile': {
+                'id': str(public_core_cfg.get('core_secret_id') or ''),
+                'label': str(
+                    public_core_cfg.get('vm_name')
+                    or public_core_cfg.get('vm_key')
+                    or public_core_cfg.get('ssh_host')
+                    or ''
+                ),
+                'validated': bool(public_core_cfg.get('validated')),
+            },
+        }
+
+    def _auto_materialize_imported_bundle(
+        imported: Any,
+        parsed_payload: Any,
+        progress: Callable[[str, int, str], None] | None = None,
+        connection_overrides: Any = None,
+        profile_id: str = '',
+    ) -> dict[str, Any]:
+        from webapp import app_backend as backend
+        from webapp.reproduction_bundle import (
+            _safe_materialization_target,
+            restore_bundled_artifacts_locally,
+            restore_bundled_artifacts_to_core,
+        )
+
+        if imported.kind != 'reproduction-bundle' or imported.bundled_artifact_sources < 1:
+            return {'attempted': False, 'ok': True, 'restored_sources': 0, 'missing': []}
+        flow_state = backend._flow_state_from_xml_path(imported.xml_path, None)
+        if not isinstance(flow_state, dict):
+            return {
+                'attempted': True,
+                'ok': False,
+                'restored_sources': 0,
+                'missing': [],
+                'error': 'The imported bundle does not contain a readable saved FlowState.',
+            }
+        scenario_label = str(flow_state.get('scenario') or '').strip()
+        if not scenario_label and isinstance(parsed_payload, dict):
+            scenarios = parsed_payload.get('scenarios')
+            if isinstance(scenarios, list) and scenarios and isinstance(scenarios[0], dict):
+                scenario_label = str(scenarios[0].get('name') or '').strip()
+        scenario_norm = backend._normalize_scenario_label(scenario_label)
+        destination = _import_materialization_destination(
+            connection_overrides=connection_overrides,
+            profile_id=profile_id,
+            include_password=False,
+            scenario_norm=scenario_norm,
+        )
+        if not destination.get('local_materialization'):
+            destination = _import_materialization_destination(
+                connection_overrides=connection_overrides,
+                profile_id=profile_id,
+                include_password=True,
+                scenario_norm=scenario_norm,
+            )
+        runtime_mode = str(destination.get('runtime_mode') or 'native')
+        local_materialization = bool(destination.get('local_materialization'))
+        if progress:
+            if local_materialization:
+                mode_detail = 'Native local CORE: guarded local filesystem, no SSH credentials'
+            elif runtime_mode == 'native':
+                mode_detail = 'Native remote CORE: runtime-managed SSH credentials'
+            else:
+                mode_detail = 'VM mode: runtime-managed CORE SSH credentials'
+            progress(
+                "Selecting materialization mode",
+                58,
+                mode_detail,
+            )
+        records = flow_state.get('reproduction_artifact_sources')
+        records = records if isinstance(records, list) else []
+        remote_records = [
+            record
+            for record in records
+            if isinstance(record, dict)
+            and _safe_materialization_target(record.get('target_path'))
+        ]
+        local_ready = sum(
+            1
+            for record in records
+            if isinstance(record, dict)
+            and str(record.get('target_path') or '') == str(record.get('restored_path') or '')
+            and os.path.isdir(str(record.get('restored_path') or ''))
+        )
+        if not remote_records:
+            return {
+                'attempted': True,
+                'ok': local_ready == imported.bundled_artifact_sources,
+                'restored_sources': local_ready,
+                'missing': [],
+                'runtime_mode': runtime_mode,
+                'credential_source': 'none',
+            }
+
+        log_handle = backend.io.StringIO()
+        if local_materialization:
+            try:
+                restored_native = restore_bundled_artifacts_locally(
+                    flow_state=flow_state,
+                    upload_root=app.config['UPLOAD_FOLDER'],
+                    log_handle=log_handle,
+                    progress=progress,
+                )
+                restored_sources = local_ready + restored_native
+                if progress:
+                    progress(
+                        "Verifying native artifact paths",
+                        90,
+                        f"Restored {restored_sources}/{imported.bundled_artifact_sources} artifact sources",
+                    )
+                return {
+                    'attempted': True,
+                    'ok': restored_sources == imported.bundled_artifact_sources,
+                    'restored_sources': restored_sources,
+                    'missing': [],
+                    'runtime_mode': runtime_mode,
+                    'materialization_transport': 'local',
+                    'credential_source': 'none',
+                    'log': log_handle.getvalue()[-4000:],
+                }
+            except Exception as exc:
+                return {
+                    'attempted': True,
+                    'ok': False,
+                    'restored_sources': local_ready,
+                    'missing': [],
+                    'runtime_mode': runtime_mode,
+                    'materialization_transport': 'local',
+                    'credential_source': 'none',
+                    'error': str(exc),
+                    'log': log_handle.getvalue()[-4000:],
+                }
+
+        client = None
+        sftp = None
+        remote_label = 'CORE VM' if runtime_mode == 'vm' else 'remote CORE host'
+        override_cfg = connection_overrides if isinstance(connection_overrides, dict) else {}
+        credential_source = (
+            'prompt'
+            if str(override_cfg.get('ssh_password') or '')
+            else ('profile' if str((destination.get('profile') or {}).get('id') or '') else 'runtime')
+        )
+        try:
+            if progress:
+                progress(
+                    f"Resolving {remote_label} credentials",
+                    62,
+                    "Using destination runtime configuration or the one-time import password; "
+                    "imported credentials are ignored",
+                )
+            core_cfg = dict(destination.get('public_core_cfg') or {})
+            core_cfg = backend._require_core_ssh_credentials(core_cfg)
+            if progress:
+                progress(
+                    f"Connecting to {remote_label}",
+                    66,
+                    f"SSH target {core_cfg.get('ssh_host') or core_cfg.get('host') or '(configured host)'}",
+                )
+            client = backend._open_ssh_client(core_cfg)
+            sftp = client.open_sftp()
+            restored_remote = restore_bundled_artifacts_to_core(
+                backend=backend,
+                client=client,
+                sftp=sftp,
+                flow_state=flow_state,
+                upload_root=app.config['UPLOAD_FOLDER'],
+                log_handle=log_handle,
+                progress=progress,
+                destination_label=remote_label,
+            )
+            assignments = flow_state.get('flag_assignments')
+            assignments = assignments if isinstance(assignments, list) else []
+            missing: list[str] = []
+            for assignment in assignments:
+                if not isinstance(assignment, dict):
+                    continue
+                missing.extend(
+                    str(path)
+                    for path in backend._flow_assignment_missing_remote_paths(sftp, assignment)
+                    if str(path).strip()
+                )
+            restored_sources = local_ready + restored_remote
+            if progress:
+                progress(
+                    f"Verifying {remote_label} artifact paths",
+                    90,
+                    f"Restored {restored_sources}/{imported.bundled_artifact_sources}; missing paths {len(set(missing))}",
+                )
+            return {
+                'attempted': True,
+                'ok': restored_sources == imported.bundled_artifact_sources and not missing,
+                'restored_sources': restored_sources,
+                'missing': sorted(set(missing)),
+                'runtime_mode': runtime_mode,
+                'materialization_transport': 'ssh',
+                'credential_source': credential_source,
+                'log': log_handle.getvalue()[-4000:],
+            }
+        except Exception as exc:
+            return {
+                'attempted': True,
+                'ok': False,
+                'restored_sources': local_ready,
+                'missing': [],
+                'runtime_mode': runtime_mode,
+                'materialization_transport': 'ssh',
+                'credential_source': credential_source,
+                'error': str(exc),
+                'log': log_handle.getvalue()[-4000:],
+            }
+        finally:
+            try:
+                if sftp:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+    @app.get('/api/scenario-import-progress/<progress_id>')
+    def scenario_import_progress(progress_id: str):
+        if not _IMPORT_PROGRESS_ID_RE.fullmatch(str(progress_id or '')):
+            return jsonify({'ok': False, 'error': 'Invalid import progress id.'}), 400
+        snapshot = _import_progress_snapshot(progress_id)
+        if snapshot is None:
+            return jsonify({'ok': True, 'status': 'waiting', 'percent': 0, 'events': []})
+        return jsonify({'ok': True, **snapshot})
+
+    @app.get('/api/scenario-import-requirements')
+    def scenario_import_requirements():
+        current_user = current_user_getter() or {}
+        can_save_profile = str(current_user.get('role') or '').strip().lower() == 'admin'
+        destination = _import_materialization_destination(include_password=False)
+        if not destination.get('local_materialization'):
+            destination = _import_materialization_destination(include_password=True)
+        runtime_mode = str(destination.get('runtime_mode') or 'native')
+        core_cfg = destination.get('public_core_cfg') or {}
+        connection = {
+            'core_host': str(core_cfg.get('grpc_host') or core_cfg.get('host') or ''),
+            'core_port': core_cfg.get('grpc_port') or core_cfg.get('port') or '',
+            'ssh_host': str(core_cfg.get('ssh_host') or ''),
+            'ssh_port': core_cfg.get('ssh_port') or '',
+            'ssh_username': str(core_cfg.get('ssh_username') or ''),
+            'venv_bin': str(core_cfg.get('venv_bin') or ''),
+            'profile_id': str((destination.get('profile') or {}).get('id') or ''),
+        }
+        if destination.get('local_materialization'):
+            return jsonify({
+                'ok': True,
+                'runtime_mode': runtime_mode,
+                'transport': 'local',
+                'password_required': False,
+                'missing_configuration': [],
+                'connection': connection,
+                'profile': destination.get('profile') or {},
+                'can_save_profile': can_save_profile,
+            })
+
+        required_fields = {
+            'core_host': 'CORE host',
+            'core_port': 'CORE port',
+            'ssh_host': 'SSH host',
+            'ssh_port': 'SSH port',
+            'ssh_username': 'SSH username',
+        }
+        missing_configuration = [
+            {'field': field, 'label': label}
+            for field, label in required_fields.items()
+            if connection.get(field) in (None, '')
+        ]
+        ssh_password = str(core_cfg.get('ssh_password') or '')
+        if not ssh_password:
+            missing_configuration.append({'field': 'ssh_password', 'label': 'SSH password'})
+        return jsonify({
+            'ok': True,
+            'runtime_mode': runtime_mode,
+            'transport': 'ssh',
+            'destination_label': 'CORE VM' if runtime_mode == 'vm' else 'remote CORE host',
+            'password_required': not bool(ssh_password),
+            'missing_configuration': missing_configuration,
+            'connection': connection,
+            'profile': destination.get('profile') or {},
+            'can_save_profile': can_save_profile,
+        })
+
+    @app.post('/api/scenario-import-connection/test')
+    def scenario_import_connection_test():
+        from webapp import app_backend as backend
+
+        payload = request.get_json(silent=True) or {}
+        connection = payload.get('connection') if isinstance(payload.get('connection'), dict) else {}
+        profile_id = str(connection.get('profile_id') or '').strip()
+        try:
+            destination = _import_materialization_destination(
+                connection_overrides=connection,
+                profile_id=profile_id,
+                include_password=False,
+            )
+            if destination.get('local_materialization'):
+                return jsonify({
+                    'ok': True,
+                    'transport': 'local',
+                    'message': 'Native local CORE uses the local filesystem; SSH validation is not required.',
+                    'connection': connection,
+                    'profile': destination.get('profile') or {},
+                })
+            destination = _import_materialization_destination(
+                connection_overrides=connection,
+                profile_id=profile_id,
+                include_password=True,
+            )
+            core_cfg = backend._require_core_ssh_credentials(
+                dict(destination.get('public_core_cfg') or {})
+            )
+            client = None
+            sftp = None
+            try:
+                client = backend._open_ssh_client(core_cfg)
+                sftp = client.open_sftp()
+            finally:
+                try:
+                    if sftp:
+                        sftp.close()
+                except Exception:
+                    pass
+                try:
+                    if client:
+                        client.close()
+                except Exception:
+                    pass
+            profile = destination.get('profile') or {}
+            save_profile = bool(payload.get('save_profile'))
+            current_user = current_user_getter() or {}
+            if save_profile and str(current_user.get('role') or '').strip().lower() != 'admin':
+                return jsonify({'ok': False, 'error': 'Admin privileges are required to save an access profile.'}), 403
+            if save_profile:
+                stored_meta = backend._save_core_credentials({
+                    'scenario_name': 'Imported scenarios',
+                    'grpc_host': core_cfg.get('grpc_host') or core_cfg.get('host'),
+                    'grpc_port': core_cfg.get('grpc_port') or core_cfg.get('port'),
+                    'ssh_host': core_cfg.get('ssh_host'),
+                    'ssh_port': core_cfg.get('ssh_port'),
+                    'ssh_username': core_cfg.get('ssh_username'),
+                    'ssh_password': core_cfg.get('ssh_password'),
+                    'ssh_enabled': True,
+                    'venv_bin': core_cfg.get('venv_bin'),
+                    'vm_key': core_cfg.get('vm_key'),
+                    'vm_name': core_cfg.get('vm_name'),
+                    'vm_node': core_cfg.get('vm_node'),
+                    'vmid': core_cfg.get('vmid'),
+                    'proxmox_secret_id': core_cfg.get('proxmox_secret_id'),
+                    'proxmox_target': core_cfg.get('proxmox_target'),
+                })
+                profile = {
+                    'id': str(stored_meta.get('identifier') or ''),
+                    'label': str(
+                        stored_meta.get('vm_name')
+                        or stored_meta.get('vm_key')
+                        or stored_meta.get('ssh_host')
+                        or ''
+                    ),
+                    'validated': True,
+                }
+            return jsonify({
+                'ok': True,
+                'transport': 'ssh',
+                'message': 'SSH and SFTP access validated.',
+                'destination_label': (
+                    'CORE VM'
+                    if destination.get('runtime_mode') == 'vm'
+                    else 'remote CORE host'
+                ),
+                'profile': profile,
+                'profile_saved': bool(save_profile),
+            })
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
+
     @app.route('/load_xml', methods=['POST'])
     def load_xml():
+        from webapp import app_backend as backend
         from webapp.reproduction_bundle import import_scenario_file
 
+        progress_id = str(request.form.get('import_progress_id') or '').strip()
+        profile_id = str(request.form.get('import_core_profile_id') or '').strip()
+        connection_overrides = {
+            'core_host': request.form.get('import_core_host'),
+            'core_port': request.form.get('import_core_port'),
+            'ssh_host': request.form.get('import_ssh_host'),
+            'ssh_port': request.form.get('import_ssh_port'),
+            'ssh_username': request.form.get('import_ssh_username'),
+            'ssh_password': request.form.get('core_ssh_password'),
+            'venv_bin': request.form.get('import_core_venv_bin'),
+        }
+        transient_ssh_password = str(connection_overrides.get('ssh_password') or '')
+        if len(transient_ssh_password) > 4096:
+            _update_import_progress(
+                progress_id,
+                'Import failed',
+                100,
+                'The supplied SSH password is too long.',
+                status='failed',
+            )
+            flash('Failed to import scenario file: the supplied SSH password is too long.')
+            return redirect(url_for('index'))
+
+        def report_progress(step: str, percent: int, detail: str = '') -> None:
+            _update_import_progress(progress_id, step, percent, detail)
+
+        report_progress('Receiving scenario file', 8, 'Upload received by ScenarioForge')
         user = current_user_getter()
         file = request.files.get('scenarios_xml')
         if not file or file.filename == '':
+            _update_import_progress(progress_id, 'Import failed', 100, 'No file selected.', status='failed')
             flash('No file selected.')
             return redirect(url_for('index'))
         filename = secure_filename(file.filename) or f'scenario-upload-{os.getpid()}'
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        report_progress('Saving uploaded file', 11, filename)
         file.save(filepath)
         try:
             os.chmod(filepath, 0o600)
         except OSError:
             pass
         try:
-            imported = import_scenario_file(filepath, app.config['UPLOAD_FOLDER'])
+            imported = import_scenario_file(
+                filepath,
+                app.config['UPLOAD_FOLDER'],
+                progress=report_progress,
+            )
             filepath = imported.xml_path
+            report_progress('Parsing imported scenario', 55, os.path.basename(filepath))
             payload = parse_scenarios_xml(filepath)
+            scenario_label = ''
+            scenarios = payload.get('scenarios') if isinstance(payload, dict) else None
+            scenario_labels: list[str] = []
+            if isinstance(scenarios, list):
+                scenario_labels = [
+                    str(item.get('name') or '').strip()
+                    for item in scenarios
+                    if isinstance(item, dict) and str(item.get('name') or '').strip()
+                ]
+            if isinstance(scenarios, list) and scenarios and isinstance(scenarios[0], dict):
+                scenario_label = str(scenarios[0].get('name') or '').strip()
+            destination = _import_materialization_destination(
+                connection_overrides=connection_overrides,
+                profile_id=profile_id,
+                include_password=False,
+                scenario_norm=backend._normalize_scenario_label(scenario_label),
+            )
+            destination_core_cfg = dict(destination.get('public_core_cfg') or {})
+            destination_core_cfg.pop('ssh_password', None)
+            if destination_core_cfg:
+                report_progress(
+                    'Binding destination CORE connection',
+                    57,
+                    'Replacing source connection metadata with this installation’s destination settings',
+                )
+                for destination_scenario in (scenario_labels or [None]):
+                    rebound, rebound_message = backend._update_core_config_in_xml(
+                        filepath,
+                        destination_scenario,
+                        destination_core_cfg,
+                    )
+                    if not rebound:
+                        raise ValueError(
+                            f'Unable to bind destination CORE connection: {rebound_message}'
+                        )
+                payload = parse_scenarios_xml(filepath)
+            auto_materialization = _auto_materialize_imported_bundle(
+                imported,
+                payload,
+                progress=report_progress,
+                connection_overrides=connection_overrides,
+                profile_id=profile_id,
+            )
+            if auto_materialization.get('attempted') and not auto_materialization.get('ok'):
+                materialization_detail = str(auto_materialization.get('error') or '').strip()
+                if not materialization_detail:
+                    restored_count = int(auto_materialization.get('restored_sources') or 0)
+                    missing_count = len(auto_materialization.get('missing') or [])
+                    materialization_detail = (
+                        f'Restored {restored_count}/{imported.bundled_artifact_sources} artifact sources; '
+                        f'{missing_count} expected paths missing. Import will continue.'
+                    )
+                report_progress(
+                    'Artifact materialization needs attention',
+                    92,
+                    materialization_detail,
+                )
+            report_progress('Loading scenario into editor', 94, 'Preparing imported scenario state')
             if 'core' not in payload:
                 payload['core'] = default_core_dict()
             payload['result_path'] = filepath
@@ -97,20 +771,47 @@ def register(
                     'manifest_path': imported.manifest_path,
                     'bundled_artifact_sources': imported.bundled_artifact_sources,
                     'total_artifact_sources': imported.total_artifact_sources,
+                    'auto_materialization': auto_materialization,
                 }
-                if imported.bundled_artifact_sources:
+                if imported.bundled_artifact_sources and auto_materialization.get('ok'):
                     flash(
                         'Imported ScenarioForge reproduction bundle '
                         f'({imported.fidelity}; {imported.bundled_artifact_sources}/'
-                        f'{imported.total_artifact_sources} artifact sources restored).'
+                        f'{imported.total_artifact_sources} artifact sources automatically materialized).'
+                    )
+                elif imported.bundled_artifact_sources:
+                    restored = int(auto_materialization.get('restored_sources') or 0)
+                    missing = len(auto_materialization.get('missing') or [])
+                    error = str(auto_materialization.get('error') or '').strip()
+                    detail = f' {missing} expected path(s) are still missing.' if missing else ''
+                    if error:
+                        detail += f' Automatic materialization error: {error}'
+                    flash(
+                        'Imported ScenarioForge reproduction bundle, but automatic '
+                        f'materialization restored {restored}/{imported.bundled_artifact_sources} '
+                        f'artifact sources.{detail} Use Materialize in Flag Sequencing to retry.'
                     )
                 else:
                     flash(
                         'Imported ScenarioForge replay package. Artifacts will be '
                         'recreated from the saved flow when materialized.'
                     )
+            _update_import_progress(
+                progress_id,
+                'Import complete',
+                100,
+                'Scenario is ready.',
+                status='complete',
+            )
             return render_template('index.html', payload=payload, logs='', xml_preview=xml_text, ui_build_id=ui_build_id)
         except Exception as e:
+            _update_import_progress(
+                progress_id,
+                'Import failed',
+                100,
+                str(e),
+                status='failed',
+            )
             flash(f'Failed to import scenario file: {e}')
             return redirect(url_for('index'))
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -13,7 +14,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 
 BUNDLE_FORMAT = "scenarioforge-reproduction"
@@ -21,6 +22,10 @@ MANIFEST_NAME = "scenarioforge-reproduction.json"
 MAX_MEMBERS = 10_000
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
+MATERIALIZATION_ROOTS = (
+    "/tmp/vulns/flag_generators_runs",
+    "/tmp/vulns/flag_node_generators_runs",
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,172 @@ class ScenarioImport:
     manifest_path: str = ""
     bundled_artifact_sources: int = 0
     total_artifact_sources: int = 0
+
+
+def _safe_materialization_target(value: Any) -> str:
+    """Return a normalized artifact target, or empty when it escapes guarded roots."""
+    raw = str(value or "").replace("\\", "/").rstrip("/")
+    normalized = posixpath.normpath(raw)
+    if not raw or raw != normalized:
+        return ""
+    for root in MATERIALIZATION_ROOTS:
+        if normalized.startswith(root + "/"):
+            return normalized
+    return ""
+
+
+def restore_bundled_artifacts_to_core(
+    *,
+    backend: Any,
+    client: Any,
+    sftp: Any,
+    flow_state: Any,
+    upload_root: str,
+    log_handle: Any,
+    progress: Callable[[str, int, str], None] | None = None,
+    destination_label: str = "CORE VM",
+) -> int:
+    """Copy integrity-checked imported payloads to their stable CORE VM paths."""
+    if not isinstance(flow_state, dict):
+        return 0
+    records = flow_state.get("reproduction_artifact_sources")
+    if not isinstance(records, list):
+        return 0
+    allowed_root = os.path.realpath(upload_root or "")
+    if not allowed_root:
+        return 0
+    restored = 0
+    remote_records = [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and _safe_materialization_target(record.get("target_path"))
+    ]
+    for record_index, record in enumerate(remote_records, start=1):
+        if not isinstance(record, dict):
+            continue
+        local_root = os.path.realpath(str(record.get("restored_path") or ""))
+        remote_root = _safe_materialization_target(record.get("target_path"))
+        try:
+            inside_uploads = os.path.commonpath([allowed_root, local_root]) == allowed_root
+        except (OSError, ValueError):
+            inside_uploads = False
+        if not inside_uploads or not os.path.isdir(local_root):
+            continue
+        if not remote_root:
+            continue
+        if progress:
+            progress(
+                f"Materializing bundled artifacts on {destination_label}",
+                68 + int((record_index / max(1, len(remote_records))) * 17),
+                f"Artifact source {record_index}/{len(remote_records)}: {remote_root}",
+            )
+        backend._remote_mkdirs(client, remote_root)
+        copied_files = 0
+        for directory, child_dirs, files in os.walk(local_root):
+            child_dirs[:] = [
+                name
+                for name in child_dirs
+                if not os.path.islink(os.path.join(directory, name))
+            ]
+            relative_dir = os.path.relpath(directory, local_root)
+            remote_dir = (
+                remote_root
+                if relative_dir in ("", ".")
+                else backend._remote_path_join(remote_root, relative_dir.replace("\\", "/"))
+            )
+            backend._remote_mkdirs(client, remote_dir)
+            for filename in files:
+                local_file = os.path.join(directory, filename)
+                if os.path.islink(local_file) or not os.path.isfile(local_file):
+                    continue
+                remote_file = backend._remote_path_join(remote_dir, filename)
+                sftp.put(local_file, remote_file)
+                try:
+                    sftp.chmod(remote_file, stat.S_IMODE(os.stat(local_file).st_mode))
+                except Exception:
+                    pass
+                copied_files += 1
+        restored += 1
+        try:
+            log_handle.write(
+                f"[remote] reproduction artifact restore source={local_root} "
+                f"target={remote_root} files={copied_files}\n"
+            )
+        except Exception:
+            pass
+    return restored
+
+
+def restore_bundled_artifacts_locally(
+    *,
+    flow_state: Any,
+    upload_root: str,
+    log_handle: Any,
+    progress: Callable[[str, int, str], None] | None = None,
+) -> int:
+    """Materialize imported payloads directly for native/local CORE mode."""
+    if not isinstance(flow_state, dict):
+        return 0
+    records = flow_state.get("reproduction_artifact_sources")
+    records = records if isinstance(records, list) else []
+    allowed_upload_root = os.path.realpath(upload_root or "")
+    eligible = [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and _safe_materialization_target(record.get("target_path"))
+    ]
+    restored = 0
+    for record_index, record in enumerate(eligible, start=1):
+        source_root = os.path.realpath(str(record.get("restored_path") or ""))
+        target_root = _safe_materialization_target(record.get("target_path"))
+        try:
+            source_is_safe = (
+                allowed_upload_root
+                and os.path.commonpath([allowed_upload_root, source_root]) == allowed_upload_root
+            )
+        except (OSError, ValueError):
+            source_is_safe = False
+        if not source_is_safe or not os.path.isdir(source_root):
+            continue
+        if not target_root:
+            continue
+        if progress:
+            progress(
+                "Materializing bundled artifacts locally",
+                68 + int((record_index / max(1, len(eligible))) * 17),
+                f"Artifact source {record_index}/{len(eligible)}: {target_root}",
+            )
+        os.makedirs(target_root, mode=0o700, exist_ok=True)
+        for directory, child_dirs, files in os.walk(source_root):
+            child_dirs[:] = [
+                name
+                for name in child_dirs
+                if not os.path.islink(os.path.join(directory, name))
+            ]
+            relative_dir = os.path.relpath(directory, source_root)
+            local_target_dir = (
+                target_root
+                if relative_dir in ("", ".")
+                else os.path.join(target_root, relative_dir)
+            )
+            os.makedirs(local_target_dir, mode=0o700, exist_ok=True)
+            for filename in files:
+                source_file = os.path.join(directory, filename)
+                if os.path.islink(source_file) or not os.path.isfile(source_file):
+                    continue
+                target_file = os.path.join(local_target_dir, filename)
+                shutil.copy2(source_file, target_file)
+        restored += 1
+        try:
+            log_handle.write(
+                f"[native] reproduction artifact restore source={source_root} "
+                f"target={target_root}\n"
+            )
+        except Exception:
+            pass
+    return restored
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -102,13 +273,15 @@ def _rewrite_xml_artifact_paths(
     path_map: dict[str, str],
     reproduction_sources: list[dict[str, str]] | None = None,
 ) -> bytes:
-    if not path_map and not reproduction_sources:
-        return xml_bytes
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as exc:
         raise ValueError(f"bundle scenario XML is invalid: {exc}") from exc
     for element in root.iter():
+        if str(element.tag).rsplit("}", 1)[-1] == "CoreConnection":
+            # Reproduction packages are portable inputs, never credential carriers.
+            element.attrib.pop("ssh_password", None)
+            element.attrib.pop("password", None)
         for key, value in list(element.attrib.items()):
             element.attrib[key] = _replace_path(value, path_map)
         text = element.text or ""
@@ -164,8 +337,16 @@ def _unique_path(directory: Path, filename: str) -> Path:
     raise ValueError("unable to choose a unique imported scenario filename")
 
 
-def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
+def _extract_bundle(
+    upload_path: Path,
+    upload_root: Path,
+    progress: Callable[[str, int, str], None] | None = None,
+) -> ScenarioImport:
+    if progress:
+        progress("Opening reproduction package", 18, upload_path.name)
     with zipfile.ZipFile(upload_path, "r") as archive:
+        if progress:
+            progress("Validating archive structure", 23, "Checking paths, sizes, and links")
         infos = _validate_infos(archive)
         manifest_info = infos.get(MANIFEST_NAME)
         if manifest_info is None:
@@ -180,6 +361,8 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
             raise ValueError("ZIP does not contain a supported ScenarioForge reproduction manifest")
         if manifest.get("version") != 1:
             raise ValueError(f"unsupported ScenarioForge reproduction bundle version: {manifest.get('version')}")
+        if progress:
+            progress("Validating reproduction manifest", 30, "Manifest format and version accepted")
 
         scenario = manifest.get("scenario") if isinstance(manifest.get("scenario"), dict) else {}
         scenario_member = _safe_member_name(str(scenario.get("path") or "scenario.xml"))
@@ -194,6 +377,8 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
             ET.fromstring(xml_bytes)
         except ET.ParseError as exc:
             raise ValueError(f"bundle scenario XML is invalid: {exc}") from exc
+        if progress:
+            progress("Verifying scenario XML", 36, "Scenario XML hash and structure verified")
 
         extraction_root = upload_root / f"reproduction-{uuid.uuid4().hex}"
         extraction_root.mkdir(parents=True, exist_ok=False)
@@ -207,9 +392,18 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
         reproduction_sources: list[dict[str, str]] = []
         bundled_count = 0
         try:
-            for source in sources:
+            bundled_sources = [
+                source for source in sources if isinstance(source, dict) and source.get("bundled")
+            ]
+            for source_index, source in enumerate(bundled_sources, start=1):
                 if not isinstance(source, dict) or not source.get("bundled"):
                     continue
+                if progress:
+                    progress(
+                        "Extracting bundled artifacts",
+                        36 + int((source_index / max(1, len(bundled_sources))) * 14),
+                        f"Artifact source {source_index}/{len(bundled_sources)}",
+                    )
                 source_path = str(source.get("source_path") or "").strip()
                 archive_root = _safe_member_name(str(source.get("archive_path") or ""))
                 files = source.get("files") if isinstance(source.get("files"), list) else []
@@ -268,6 +462,8 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
                 manifest_path.chmod(0o600)
             except OSError:
                 pass
+            if progress:
+                progress("Preparing imported scenario", 52, "Artifact paths rewritten for this host")
         except Exception:
             shutil.rmtree(extraction_root, ignore_errors=True)
             raise
@@ -282,15 +478,23 @@ def _extract_bundle(upload_path: Path, upload_root: Path) -> ScenarioImport:
     )
 
 
-def import_scenario_file(upload_path: str, upload_root: str) -> ScenarioImport:
+def import_scenario_file(
+    upload_path: str,
+    upload_root: str,
+    progress: Callable[[str, int, str], None] | None = None,
+) -> ScenarioImport:
     """Detect XML versus reproduction ZIP by content and import accordingly."""
     source = Path(upload_path).resolve()
     destination_root = Path(upload_root).resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
+    if progress:
+        progress("Detecting scenario file type", 15, source.name)
     if zipfile.is_zipfile(source):
-        return _extract_bundle(source, destination_root)
+        return _extract_bundle(source, destination_root, progress=progress)
     try:
         ET.parse(source)
     except (OSError, ET.ParseError) as exc:
         raise ValueError("Unsupported scenario file; choose XML or a ScenarioForge reproduction bundle") from exc
+    if progress:
+        progress("Validated scenario XML", 52, "Plain XML import; no bundled artifacts")
     return ScenarioImport(xml_path=str(source), kind="xml", fidelity="definition")

@@ -91,70 +91,6 @@ def register(app, *, backend_module: Any) -> None:
             'unsafe_regeneration_assignments': unsafe,
         }
 
-    def _restore_bundled_artifacts(client: Any, sftp: Any, flow_state: Any, log_handle: Any) -> int:
-        """Copy integrity-checked imported payloads to their stable CORE VM paths."""
-        if not isinstance(flow_state, dict):
-            return 0
-        records = flow_state.get('reproduction_artifact_sources')
-        if not isinstance(records, list):
-            return 0
-        upload_root = backend.os.path.realpath(app.config.get('UPLOAD_FOLDER') or '')
-        if not upload_root:
-            return 0
-        allowed_remote_roots = (
-            '/tmp/vulns/flag_generators_runs/',
-            '/tmp/vulns/flag_node_generators_runs/',
-        )
-        restored = 0
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            local_root = backend.os.path.realpath(str(record.get('restored_path') or ''))
-            remote_root = str(record.get('target_path') or '').replace('\\', '/').rstrip('/')
-            try:
-                inside_uploads = backend.os.path.commonpath([upload_root, local_root]) == upload_root
-            except (OSError, ValueError):
-                inside_uploads = False
-            if not inside_uploads or not backend.os.path.isdir(local_root):
-                continue
-            if not any(remote_root.startswith(prefix) for prefix in allowed_remote_roots):
-                continue
-            backend._remote_mkdirs(client, remote_root)
-            copied_files = 0
-            for directory, child_dirs, files in backend.os.walk(local_root):
-                child_dirs[:] = [
-                    name for name in child_dirs
-                    if not backend.os.path.islink(backend.os.path.join(directory, name))
-                ]
-                relative_dir = backend.os.path.relpath(directory, local_root)
-                remote_dir = remote_root if relative_dir in ('', '.') else backend._remote_path_join(
-                    remote_root, relative_dir.replace('\\', '/')
-                )
-                backend._remote_mkdirs(client, remote_dir)
-                for filename in files:
-                    local_file = backend.os.path.join(directory, filename)
-                    if backend.os.path.islink(local_file) or not backend.os.path.isfile(local_file):
-                        continue
-                    remote_file = backend._remote_path_join(remote_dir, filename)
-                    sftp.put(local_file, remote_file)
-                    try:
-                        sftp.chmod(
-                            remote_file,
-                            backend.stat.S_IMODE(backend.os.stat(local_file).st_mode),
-                        )
-                    except Exception:
-                        pass
-                    copied_files += 1
-            restored += 1
-            try:
-                log_handle.write(
-                    f'[remote] reproduction artifact restore source={local_root} '
-                    f'target={remote_root} files={copied_files}\n'
-                )
-            except Exception:
-                pass
-        return restored
-
     def _flow_has_resolved_outputs(assignments: Any) -> bool:
         try:
             array = assignments if isinstance(assignments, list) else []
@@ -562,7 +498,16 @@ def register(app, *, backend_module: Any) -> None:
             client = backend._open_ssh_client(ctx.get('flow_core_cfg'))
             sftp = client.open_sftp()
             remote_repo = backend._remote_static_repo_dir(sftp)
-            _restore_bundled_artifacts(client, sftp, ctx.get('flow_state'), log_handle)
+            from webapp.reproduction_bundle import restore_bundled_artifacts_to_core
+
+            restore_bundled_artifacts_to_core(
+                backend=backend,
+                client=client,
+                sftp=sftp,
+                flow_state=ctx.get('flow_state'),
+                upload_root=app.config.get('UPLOAD_FOLDER') or '',
+                log_handle=log_handle,
+            )
             missing_indices: list[int] = []
             for index, assignment in enumerate(assigns):
                 if isinstance(assignment, dict) and backend._flow_assignment_missing_remote_paths(sftp, assignment):
