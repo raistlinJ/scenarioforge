@@ -83,8 +83,22 @@ class TrafficService(CoreService):
         stats="$runtime_dir/stats_$NODE_ID.json"
         config=/tmp/traffic/traffic_"$NODE_ID".json
 
+        # Wait for the config rather than checking once. Services start as the
+        # session comes up, and the traffic artifacts are staged into the shared
+        # /tmp/traffic around the same moment; a node that looked once, found
+        # nothing and exited stayed silent for the entire run even though its
+        # config appeared a second later.
+        #
+        # ~60s, as thirty two-second ticks. The tick list is a literal because
+        # this runs in whatever image the scenario author chose, and neither
+        # `seq` nor `expr` is guaranteed to be in it.
+        for _tick in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+            [ -f "$config" ] && break
+            sleep 2
+        done
+
         if [ ! -f "$config" ]; then
-            echo "no traffic config at $config; nothing to run" >> "$log"
+            echo "no traffic config at $config after ~60s; nothing to run" >> "$log"
             exit 0
         fi
 
@@ -121,8 +135,26 @@ class TrafficService(CoreService):
         run_agent="${runtime_dir_agent:-$runtime_dir/traffic-agent-$NODE_ID}"
 
         echo "running: $run_agent -config $config" >> "$log"
-        "$run_agent" -config "$config" \\
-            -stats "$stats" >> "$log" 2>&1 &
+        # Supervise the agent instead of launching it once. The agent itself
+        # retries every dial and every listen for the life of the run, so a
+        # flow survives a network that has not converged yet; this loop covers
+        # the one case it cannot -- the process going away entirely -- so a
+        # node cannot end up permanently silent while the scenario runs.
+        #
+        # A signalled exit (128+N) is session teardown, not a fault: restarting
+        # there would fight CORE's own cleanup and leave orphan processes.
+        (
+            while :; do
+                "$run_agent" -config "$config" -stats "$stats" >> "$log" 2>&1
+                rc=$?
+                if [ "$rc" -ge 128 ] || [ ! -f "$config" ]; then
+                    echo "agent exited rc=$rc; not restarting" >> "$log"
+                    break
+                fi
+                echo "agent exited rc=$rc; restarting in 5s" >> "$log"
+                sleep 5
+            done
+        ) &
         </%text>
         """
 

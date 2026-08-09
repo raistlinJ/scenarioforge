@@ -39,7 +39,9 @@ def test_cleanup_remote_test_runtime_removes_container_images(monkeypatch, tmp_p
     })
 
     assert any(cmd.startswith("docker inspect -f '{{.Image}}' docker-5") for cmd in calls)
-    assert any(cmd == 'docker rm -f docker-5 >/dev/null 2>&1 || true' for cmd in calls)
+    # -v reclaims the container's anonymous volumes; without it a database-backed
+    # vulnerability stack orphans its data volume on every teardown.
+    assert any(cmd == 'docker rm -f -v docker-5 >/dev/null 2>&1 || true' for cmd in calls)
     assert any(cmd == 'docker rmi -f sha256:testimage >/dev/null 2>&1 || true' for cmd in calls)
     assert any(cmd == 'docker container prune -f' for cmd in calls)
     assert any(cmd == 'docker image prune -f' for cmd in calls)

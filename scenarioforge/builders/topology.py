@@ -927,11 +927,21 @@ def _apply_wrapper_app_user_entrypoints(
             base_ep = cfg.get('Entrypoint') or []
             if not isinstance(base_ep, list):
                 base_ep = [str(base_ep)]
-            svc['entrypoint'] = [_CORETG_APP_USER_SHIM] + [str(x) for x in base_ep]
-            if svc.get('command') is None:
-                base_cmd = cfg.get('Cmd') or []
-                if isinstance(base_cmd, list) and base_cmd:
-                    svc['command'] = [str(x) for x in base_cmd]
+            base_ep = [str(x) for x in base_ep]
+            base_cmd = cfg.get('Cmd') or []
+            if not isinstance(base_cmd, list):
+                base_cmd = [str(base_cmd)] if base_cmd else []
+            base_cmd = [str(x) for x in base_cmd]
+            # The shim execs its arguments; with none it exits 0 and the
+            # container "succeeds" while running nothing. Setting entrypoint to
+            # the shim alone does exactly that whenever the image carries no
+            # ENTRYPOINT and supplies no command here, so leave such a service
+            # alone rather than replacing its startup with a no-op.
+            if not base_ep and svc.get('command') is None and not base_cmd:
+                continue
+            svc['entrypoint'] = [_CORETG_APP_USER_SHIM] + base_ep
+            if svc.get('command') is None and base_cmd:
+                svc['command'] = base_cmd
         changed = True
         try:
             logger.info(
@@ -3065,6 +3075,47 @@ def _ensure_default_route_for_docker(session: object, node_obj: object) -> None:
             pass
 
 
+def _report_unaddressed_hosts(session: object, hosts_info: List[NodeInfo], *, context: str) -> List[int]:
+    """Fail loudly when a build leaves hosts with no IPv4 address.
+
+    A host that finishes the build unaddressed is not a degraded scenario, it is
+    a dead one: the node runs, but it has no route to anything, so every flow,
+    challenge and pivot that touches it silently cannot work. This shipped once
+    already -- a single-switch star plan records ``router_id: None``, the host
+    attachment loop required a router, and all fifteen nodes came up running,
+    unlinked and unaddressed -- and nothing said so until the traffic
+    reachability check failed much later, pointing at traffic rather than at the
+    topology.
+
+    Records the node ids on the session's ``topo_stats`` so the run metadata and
+    the scenario report carry the same finding as the log.
+    """
+    unaddressed = sorted(
+        int(getattr(info, 'node_id'))
+        for info in (hosts_info or [])
+        if not str(getattr(info, 'ip4', '') or '').strip()
+    )
+    if not unaddressed:
+        return []
+    logger.error(
+        "[%s] %d of %d host(s) finished the build with no IPv4 address: %s. "
+        "These nodes are running but unreachable -- they have no route to anything, "
+        "so any traffic, challenge or pivot involving them cannot work.",
+        context, len(unaddressed), len(hosts_info or []),
+        ', '.join(str(nid) for nid in unaddressed),
+    )
+    try:
+        stats = getattr(session, 'topo_stats', None)
+        if not isinstance(stats, dict):
+            stats = {}
+            setattr(session, 'topo_stats', stats)
+        stats['hosts_unaddressed'] = unaddressed
+        stats['hosts_unaddressed_total'] = len(unaddressed)
+    except Exception:
+        pass
+    return unaddressed
+
+
 def _enforce_default_route_on_docker_nodes(session: object, node_objs: List[object], *, context: str) -> None:
     """Re-apply DefaultRoute to every Docker node at the end of a build.
 
@@ -4641,6 +4692,7 @@ def build_star_from_roles(core,
         switch_ids = [getattr(switch, 'id')]
     except Exception:
         switch_ids = []
+    _report_unaddressed_hosts(session, node_infos, context="star")
     return session, switch_ids, node_infos, service_assignments, docker_by_name
 
 
@@ -4916,6 +4968,7 @@ def build_multi_switch_topology(core,
         if int(os.getenv('CORETG_LINK_FAIL_HARD','0') not in ('0','false','False','')) and link_counters['success']==0:
             logger.error('[diag.summary.multi] No links created; failing hard due to CORETG_LINK_FAIL_HARD')
             raise RuntimeError('No links created in multi-switch topology')
+    _report_unaddressed_hosts(session, node_infos, context="multi-switch")
     return session, switch_ids, node_infos, service_assignments, docker_by_name
 
 
@@ -5480,9 +5533,17 @@ def _try_build_segmented_topology_from_preview(
     for detail in switches_detail:
         try:
             sid = int(detail.get('switch_id'))
-            router_id = int(detail.get('router_id'))
         except Exception:
             continue
+        # A plan with no routers is a legitimate topology -- a single-switch
+        # star -- and it records router_id 0 (or omits it). The switch above is
+        # created either way, so requiring a router node here silently skipped
+        # every host attachment: the nodes came up running, unlinked and
+        # unaddressed, and nothing in the scenario could reach anything.
+        try:
+            router_id = int(detail.get('router_id') or 0)
+        except Exception:
+            router_id = 0
 
         # Skip orphan/empty switch details unless the switch was explicitly declared.
         try:
@@ -5502,9 +5563,11 @@ def _try_build_segmented_topology_from_preview(
             continue
 
         sw_node = switch_nodes.get(sid)
-        router_node = router_nodes.get(router_id)
-        if not sw_node or not router_node:
+        if not sw_node:
             continue
+        # May be absent: see above. Everything router-specific below is guarded,
+        # and the hosts still get their switch and their addresses.
+        router_node = router_nodes.get(router_id)
 
         rsw_subnet = detail.get('rsw_subnet')
         lan_subnet = detail.get('lan_subnet')
@@ -5547,36 +5610,44 @@ def _try_build_segmented_topology_from_preview(
         s_ip_val = None
         s_mask_int = r_mask_int
 
-        # Canonicalize the "shared" subnet to the router's actual interface subnet.
-        # This guarantees host IPs match the router<->switch link even if preview data
-        # contains mismatched rsw_subnet vs lan_subnet.
-        try:
-            if r_ip_val:
-                router_link_net = ipaddress.ip_network(f"{r_ip_val}/{r_mask_int}", strict=False)
-                if shared_net and (router_link_net.network_address != shared_net.network_address or router_link_net.prefixlen != shared_net.prefixlen):
-                    logger.warning(
-                        "[preview] overriding shared subnet for switch %s (router %s) from %s to router link %s",
-                        sid,
-                        router_id,
-                        shared_net,
-                        router_link_net,
-                    )
-                shared_net = router_link_net
-                shared_hosts = list(shared_net.hosts())
-        except Exception:
-            pass
+        if router_node is not None:
+            # Canonicalize the "shared" subnet to the router's actual interface subnet.
+            # This guarantees host IPs match the router<->switch link even if preview data
+            # contains mismatched rsw_subnet vs lan_subnet.
+            try:
+                if r_ip_val:
+                    router_link_net = ipaddress.ip_network(f"{r_ip_val}/{r_mask_int}", strict=False)
+                    if shared_net and (router_link_net.network_address != shared_net.network_address or router_link_net.prefixlen != shared_net.prefixlen):
+                        logger.warning(
+                            "[preview] overriding shared subnet for switch %s (router %s) from %s to router link %s",
+                            sid,
+                            router_id,
+                            shared_net,
+                            router_link_net,
+                        )
+                    shared_net = router_link_net
+                    shared_hosts = list(shared_net.hosts())
+            except Exception:
+                pass
 
-        r_ifid = router_next_ifid[router_id]
-        router_next_ifid[router_id] += 1
-        base_name = f"r{router_id}-rsw{sid}"
-        r_iface_name = _ensure_router_iface_name(router_iface_names, router_id, base_name)
-        r_iface = Interface(id=r_ifid, name=r_iface_name, ip4=r_ip_val, ip4_mask=r_mask_int, mac=mac_alloc.next_mac())
-        # Switches are L2; do not assign IPv4 fields at all on switch interfaces.
-        # Some CORE builds interpret even empty ip4/ip4_mask as an address assignment.
-        sw_iface = Interface(id=0, name=f"{getattr(sw_node, 'name', f'rsw-{sid}')}-r{router_id}", mac=mac_alloc.next_mac())
-        safe_add_link(session, router_node, sw_node, iface1=r_iface, iface2=sw_iface)
-        link_counters['attempts'] += 1
-        link_counters['success'] += 1
+            r_ifid = router_next_ifid[router_id]
+            router_next_ifid[router_id] += 1
+            base_name = f"r{router_id}-rsw{sid}"
+            r_iface_name = _ensure_router_iface_name(router_iface_names, router_id, base_name)
+            r_iface = Interface(id=r_ifid, name=r_iface_name, ip4=r_ip_val, ip4_mask=r_mask_int, mac=mac_alloc.next_mac())
+            # Switches are L2; do not assign IPv4 fields at all on switch interfaces.
+            # Some CORE builds interpret even empty ip4/ip4_mask as an address assignment.
+            sw_iface = Interface(id=0, name=f"{getattr(sw_node, 'name', f'rsw-{sid}')}-r{router_id}", mac=mac_alloc.next_mac())
+            safe_add_link(session, router_node, sw_node, iface1=r_iface, iface2=sw_iface)
+            link_counters['attempts'] += 1
+            link_counters['success'] += 1
+        else:
+            # No router owns this switch, so no gateway address is reserved and
+            # the hosts below are free to use the whole subnet.
+            logger.info(
+                "[preview] switch %s has no router; attaching its %d host(s) as a flat LAN on %s",
+                sid, len(host_nodes_by_id), shared_net or 'the plan\'s per-host addresses',
+            )
 
         host_if_ips = _normalize_host_if_ips(detail.get('host_if_ips'))
         host_list_raw = detail.get('hosts') or []
@@ -5603,6 +5674,12 @@ def _try_build_segmented_topology_from_preview(
                     logger.debug("[preview] host %s already attached to switch %s; skipping duplicate entry", hid, sid)
                 continue
             ip_str = host_if_ips.get(hid)
+            # A star plan carries no per-switch host_if_ips, but the plan's own
+            # host entries do have addresses -- the ones the report, the guides
+            # and the traffic flows all quote. Prefer them over reallocating, or
+            # the running node ends up on an address nothing else refers to.
+            if not ip_str:
+                ip_str = str((host_data_by_id.get(hid) or {}).get('ip4') or '')
             # Only accept explicit host IPs that belong to the shared subnet.
             ip_iface = None
             if ip_str and '/' in str(ip_str):
@@ -5862,6 +5939,8 @@ def _try_build_segmented_topology_from_preview(
         _enforce_default_route_on_docker_nodes(session, list(host_nodes_by_id.values()), context="segmented-preview")
     except Exception:
         pass
+
+    _report_unaddressed_hosts(session, hosts_info, context="preview")
 
     return session, routers_info, [ni for ni in hosts_info], {k: v for k, v in host_service_assignments.items()}, {k: v for k, v in router_protocols.items()}, docker_by_name
 
@@ -7651,5 +7730,6 @@ def build_segmented_topology(core,
         _enforce_default_route_on_docker_nodes(session, list(host_nodes_by_id.values()), context="segmented")
     except Exception:
         pass
+    _report_unaddressed_hosts(session, hosts, context="segmented")
     return session, routers, hosts, host_service_assignments, router_protocols, docker_by_name
     

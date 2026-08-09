@@ -15,6 +15,7 @@ def register(
     remove_scenarios_from_catalog: Callable[[list[str]], dict[str, Any]],
     delete_saved_scenario_xml_artifacts: Callable[[list[str]], dict[str, Any]],
     remove_scenarios_from_all_editor_snapshots: Callable[[list[str]], dict[str, Any]],
+    purge_core_secrets_for_scenarios: Callable[[list[str]], dict[str, Any]] | None = None,
     logger=None,
 ) -> None:
     """Register scenario purge/delete routes extracted from app_backend."""
@@ -64,6 +65,16 @@ def register(
             snapshots = remove_scenarios_from_all_editor_snapshots(names)
             planner_removed = purge_planner_state_for_scenarios(names)
             plans_removed = purge_plan_artifacts_for_scenarios(names)
+            # Stored CORE credentials are keyed by scenario name, so leaving
+            # them behind both accumulates secrets and lets a recreated
+            # scenario inherit a deleted one's connection.
+            secrets = {'core_secrets_removed': 0}
+            if purge_core_secrets_for_scenarios is not None:
+                try:
+                    secrets = purge_core_secrets_for_scenarios(names) or secrets
+                except Exception:
+                    if log is not None:
+                        log.exception('[delete_scenarios] core secret purge failed')
 
             history_removed = 0
             try:
@@ -80,6 +91,7 @@ def register(
                 **result,
                 **artifacts,
                 **snapshots,
+                **secrets,
                 'history_removed': history_removed,
                 'planner_removed': planner_removed,
                 'plans_removed': plans_removed,

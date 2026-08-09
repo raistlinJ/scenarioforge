@@ -136,30 +136,18 @@ def register(app, *, backend_module: Any) -> None:
             return request_assigns, 'request'
         return [], 'none'
 
-    def _load_flow_artifact_context(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        scenario_label = str(payload.get('scenario') or '').strip()
-        scenario_norm = backend._normalize_scenario_label(scenario_label)
-        if not scenario_norm:
-            return {'ok': False, 'error': 'No scenario specified.'}, 400
+    def _resolve_flow_core_cfg(xml_path: str, scenario_norm: str) -> Any:
+        """Resolve the CORE connection for a scenario's remote flow operations.
 
-        xml_hint = str(payload.get('xml_path') or '').strip()
-        xml_path = ''
-        if xml_hint:
-            try:
-                xml_path = backend.os.path.abspath(xml_hint)
-            except Exception:
-                xml_path = xml_hint
-        if not xml_path:
-            xml_path = backend._latest_xml_path_for_scenario(scenario_norm) or ''
-        if not xml_path or not backend.os.path.exists(xml_path):
-            return {'ok': False, 'error': 'No XML found for this scenario.'}, 404
-
-        flow_state = backend._flow_state_from_xml_path(xml_path, scenario_norm)
-        assigns, assigns_source = _flow_select_assignments(flow_state, payload, validation=False)
-        if not assigns:
-            return {'ok': False, 'error': 'No FlowState artifacts to validate. Run Generate and Save XML first.'}, 400
-
-        flow_core_cfg = backend._core_config_from_xml_path(xml_path, scenario_norm, include_password=True)
+        Layers the scenario XML's own CoreConnection over the page/destination
+        config and the stored secret, so a scenario whose XML omits a password
+        still reaches the host this installation is bound to. Shared by every
+        remote flow endpoint: Materialize issues two of them back to back, and
+        they must agree on the connection they open.
+        """
+        flow_core_cfg = backend._core_config_from_xml_path(
+            xml_path, scenario_norm, include_password=True
+        )
         try:
             page_core_cfg = backend._select_core_config_for_page(
                 scenario_norm,
@@ -183,6 +171,32 @@ def register(app, *, backend_module: Any) -> None:
                 flow_core_cfg = page_core_cfg
         if isinstance(flow_core_cfg, dict):
             flow_core_cfg = backend._apply_core_secret_to_config(flow_core_cfg, scenario_norm)
+        return flow_core_cfg
+
+    def _load_flow_artifact_context(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        scenario_label = str(payload.get('scenario') or '').strip()
+        scenario_norm = backend._normalize_scenario_label(scenario_label)
+        if not scenario_norm:
+            return {'ok': False, 'error': 'No scenario specified.'}, 400
+
+        xml_hint = str(payload.get('xml_path') or '').strip()
+        xml_path = ''
+        if xml_hint:
+            try:
+                xml_path = backend.os.path.abspath(xml_hint)
+            except Exception:
+                xml_path = xml_hint
+        if not xml_path:
+            xml_path = backend._latest_xml_path_for_scenario(scenario_norm) or ''
+        if not xml_path or not backend.os.path.exists(xml_path):
+            return {'ok': False, 'error': 'No XML found for this scenario.'}, 404
+
+        flow_state = backend._flow_state_from_xml_path(xml_path, scenario_norm)
+        assigns, assigns_source = _flow_select_assignments(flow_state, payload, validation=False)
+        if not assigns:
+            return {'ok': False, 'error': 'No FlowState artifacts to validate. Run Generate and Save XML first.'}, 400
+
+        flow_core_cfg = _resolve_flow_core_cfg(xml_path, scenario_norm)
         if not isinstance(flow_core_cfg, dict):
             return {'ok': False, 'error': 'No CORE VM connection is configured for this scenario.'}, 404
         try:
@@ -374,9 +388,12 @@ def register(app, *, backend_module: Any) -> None:
         if not assigns:
             return jsonify({'ok': False, 'error': 'No FlowState artifacts to validate. Run Generate and Save XML first.'}), 400
 
-        flow_core_cfg = backend._core_config_from_xml_path(xml_path, scenario_norm, include_password=True)
-        if isinstance(flow_core_cfg, dict):
-            flow_core_cfg = backend._apply_core_secret_to_config(flow_core_cfg, scenario_norm)
+        # Same resolution as _load_flow_artifact_context: Materialize calls that
+        # helper's endpoint and then this one, so resolving credentials
+        # differently here meant a scenario whose XML carried no password (an
+        # imported bundle) passed the first call and then stalled in SSH
+        # authentication on the second until the client's timeout fired.
+        flow_core_cfg = _resolve_flow_core_cfg(xml_path, scenario_norm)
         if not isinstance(flow_core_cfg, dict):
             return jsonify({'ok': False, 'error': 'No CoreConnection configured in XML for this scenario.'}), 404
 

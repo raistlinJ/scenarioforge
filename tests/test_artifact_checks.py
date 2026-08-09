@@ -340,6 +340,25 @@ def test_declared_traffic_without_runtime_summary_is_a_failure():
     assert "cannot be verified" in res["summary"]
 
 
+def test_missing_traffic_summary_names_the_root_owned_directory():
+    """The overwhelmingly common cause is /tmp/traffic being owned by root, so
+    the failure has to point there rather than leave the reader auditing the
+    traffic generator."""
+    probe = {"ok": True, "traffic_files": [], "summary": None, "nodes": {}, "ping": []}
+    summary = ac.traffic_result(probe, expected=True)["summary"]
+    assert "/tmp/traffic" in summary
+    assert "root" in summary
+    assert "tmpfiles.d" in summary
+
+
+def test_segmentation_without_rules_names_the_root_owned_directory():
+    probe = {"ok": True, "seg_files": [], "nodes": {}}
+    res = ac.segmentation_result(probe, expected=True)
+    assert res["status"] == "skip"
+    assert "/tmp/segmentation" in res["summary"]
+    assert "tmpfiles.d" in res["summary"]
+
+
 def test_probes_ignore_preview_directories():
     # /tmp/scenarioforge-preview-* holds plan-time scripts that are never
     # deployed; counting them reports traffic/segmentation for a scenario
@@ -1086,7 +1105,7 @@ def test_flow_pivot_probe_script_is_valid_and_enters_the_exact_source_node():
     assert "/proc/net/tcp" in script
     assert "socket.create_connection" in script
     assert "_nexec_python(nodes[source]['kind'],source" in script
-    assert "closed-port route probe" in script
+    assert "target listening port" in script
     assert "ATTEMPTS=3" in script
     assert "for ip in ips" in script
     assert '"source":"docker-12"' in script
@@ -1109,7 +1128,7 @@ def test_flow_pivot_result_accepts_target_rst_as_bidirectional_path_proof():
     probe = {"ok": True,
              "pivots": [{"source": "jump", "target": "db"}],
              "checks": [{"index": 0, "source": "jump", "target": "db",
-                         "ip": "10.0.0.8", "port": 9, "basis": "closed-port route probe",
+                         "ip": "10.0.0.8", "port": 5432, "basis": "target listening port",
                          "method": "tcp-rst", "reachable": True, "error": "refused"}]}
     res = ac.flow_pivot_result(probe)
     assert res["status"] == "pass"
@@ -1127,6 +1146,71 @@ def test_flow_pivot_result_fails_an_unreachable_required_chain_path():
     assert res["status"] == "fail"
     assert "challenge chain is unsolvable" in res["summary"]
     assert "Reproduce:" in res["items"][0]["detail"]
+
+
+def test_flow_pivot_result_fails_a_target_with_no_port_on_its_own_terms():
+    """No port to reach is a real defect, reported as such rather than as a timeout.
+
+    The old probe invented a synthetic closed port here, which under default-deny
+    segmentation timed out and was misreported as blocked routing.
+    """
+    probe = {"ok": True,
+             "pivots": [{"source": "docker-7", "target": "vulnslot-1"}],
+             "checks": [{"index": 0, "source": "docker-7", "target": "vulnslot-1",
+                         "ip": "172.30.96.2", "method": "no-target-port",
+                         "reachable": False,
+                         "error": "the target declares no Flow port and has nothing listening"}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "fail"
+    assert "exposes no port for this pivot" in res["items"][0]["detail"]
+    assert "routing or segmentation" not in res["items"][0]["detail"]
+
+
+def test_flow_pivot_result_warns_on_a_pivot_this_tcp_probe_cannot_judge():
+    probe = {"ok": True,
+             "pivots": [{"source": "jump", "target": "db"}],
+             "checks": [{"index": 0, "source": "jump", "target": "db",
+                         "ip": "10.0.0.8", "method": "unsupported-protocol",
+                         "reachable": False,
+                         "error": "the Flow pivot declares only UDP; this TCP probe cannot validate it"}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "warn"
+    assert "cannot be validated" in res["summary"]
+    assert "unsolvable" not in res["summary"]
+
+
+def test_flow_pivot_probe_never_falls_back_to_a_synthetic_port():
+    """Port 9 was never a scenario port; probing it produced uninterpretable results."""
+    script = ac.flow_pivot_probe_script(relationships=[{"source": "a", "target": "b"}])
+    assert "ports=[9]" not in script
+    assert "closed-port route probe" not in script
+    assert "no-target-port" in script
+
+
+def test_flow_pivot_result_still_fails_timeout_on_a_real_target_port():
+    """A timeout on an actual Flow/listening port remains a genuine failure."""
+    probe = {"ok": True,
+             "pivots": [{"source": "jump", "target": "db"}],
+             "checks": [{"index": 0, "source": "jump", "target": "db",
+                         "ip": "10.0.0.8", "port": 5432, "basis": "Flow target port",
+                         "method": "tcp-connect", "reachable": False,
+                         "error": "timeout", "attempts": 3}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "fail"
+    assert "challenge chain is unsolvable" in res["summary"]
+
+
+def test_flow_pivot_result_still_fails_no_route_on_the_synthetic_port():
+    """EHOSTUNREACH is a real routing failure whatever port was probed."""
+    probe = {"ok": True,
+             "pivots": [{"source": "jump", "target": "db"}],
+             "checks": [{"index": 0, "source": "jump", "target": "db",
+                         "ip": "10.0.0.8", "port": 9,
+                         "basis": "closed-port route probe", "method": "tcp-connect",
+                         "reachable": False, "error": "no-route", "attempts": 3}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "fail"
+    assert "no route to the target" in res["items"][0]["detail"]
 
 
 def test_flow_pivot_result_fails_missing_endpoint_or_probe_row_and_skips_no_edges():
@@ -1171,9 +1255,17 @@ HITL_NET = "10.254.200.0/24"
 
 def test_pivot_access_passes_when_the_provider_is_open_to_everyone():
     seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
-    res = ac.pivot_access_result(seg, [HITL_NET])
+    res = ac.pivot_access_result(seg, [HITL_NET], _live())
     assert res["status"] == "pass"
     assert "1 pivot provider(s) reachable" in res["summary"]
+
+
+def test_pivot_access_only_warns_when_the_rules_are_never_confirmed_on_the_wire():
+    """Rules permitting it is not the same as a packet proving it."""
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [HITL_NET])
+    assert res["status"] == "warn"
+    assert "not confirmed on the wire" in res["summary"]
 
 
 def test_pivot_access_fails_when_the_participant_is_not_covered():
@@ -1188,7 +1280,7 @@ def test_pivot_access_fails_when_the_participant_is_not_covered():
 
 def test_pivot_access_passes_when_the_allow_names_the_participant_subnet():
     seg = _pivot_probe([_provider()], [_allow(HITL_NET)])
-    assert ac.pivot_access_result(seg, [HITL_NET])["status"] == "pass"
+    assert ac.pivot_access_result(seg, [HITL_NET], _live())["status"] == "pass"
 
 
 def test_pivot_access_fails_when_no_node_was_placed():
@@ -1208,14 +1300,87 @@ def test_pivot_access_checks_the_providers_own_port():
 
 def test_pivot_access_without_hitl_asks_from_outside_the_subnet():
     # Still a meaningful question: the provider has to be reachable from
-    # somewhere outside the subnet it guards.
+    # somewhere outside the subnet it guards. But it is answered with a stand-in
+    # address, so it must not read as a verified participant path.
     seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
     res = ac.pivot_access_result(seg, [])
-    assert res["status"] == "pass"
+    assert res["status"] == "warn"
+    assert "no participant network is configured" in res["summary"]
     assert any("outside the walled-off subnet" in i["detail"] for i in res["items"])
 
+    # A scoped allow is not a failure when there is no participant. The rule
+    # opens the provider from a network outside the walled-off subnet, which is
+    # exactly what the stand-in stands for; the old "fail" came only from the
+    # stand-in being a documentation address no rule could cover -- a verdict
+    # the check produced from its own choice of source. With a participant
+    # network configured this same shape still fails, above.
     scoped = _pivot_probe([_provider()], [_allow("10.0.140.0/24")])
-    assert ac.pivot_access_result(scoped, [])["status"] == "fail"
+    assert ac.pivot_access_result(scoped, [])["status"] == "warn"
+
+
+def test_pivot_access_pass_states_the_participant_network_was_the_vantage():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [HITL_NET], _live())
+    assert res["status"] == "pass"
+    assert "reachable from the participant network" in res["summary"]
+
+
+def _seg_with_node_rules(providers, allows, node_rules):
+    seg = _pivot_probe(providers, allows)
+    seg["nodes"] = {name: {"kind": "vnode", "rule_lines": lines}
+                    for name, lines in node_rules.items()}
+    return seg
+
+
+def test_pivot_access_fails_when_an_earlier_drop_shadows_the_allow():
+    """An allow rule existing is not the same as traffic passing."""
+    allow = _allow("0.0.0.0/0")
+    allow["node_name"] = "router-1"
+    seg = _seg_with_node_rules([_provider()], [allow], {"router-1": [
+        "-A FORWARD -d 172.21.240.4/32 -j DROP",
+        "-A FORWARD -s 0.0.0.0/0 -d 172.21.240.4/32 -p tcp --dport 2222 -j ACCEPT",
+    ]})
+    res = ac.pivot_access_result(seg, [HITL_NET])
+    assert res["status"] == "fail"
+    assert any("matches earlier in the same chain" in i["detail"] for i in res["items"])
+
+
+def test_pivot_access_passes_when_the_allow_comes_first():
+    allow = _allow("0.0.0.0/0")
+    allow["node_name"] = "router-1"
+    seg = _seg_with_node_rules([_provider()], [allow], {"router-1": [
+        "-A FORWARD -s 0.0.0.0/0 -d 172.21.240.4/32 -p tcp -m tcp --dport 2222 -j ACCEPT",
+        "-A FORWARD -d 172.21.240.4/32 -j DROP",
+    ]})
+    assert ac.pivot_access_result(seg, [HITL_NET], _live())["status"] == "pass"
+
+
+def test_pivot_access_does_not_invent_a_shadow_from_uncaptured_rules():
+    """An unseen chain is not evidence of a problem."""
+    allow = _allow("0.0.0.0/0")
+    allow["node_name"] = "router-1"
+    seg = _seg_with_node_rules([_provider()], [allow], {})
+    assert ac.pivot_access_result(seg, [HITL_NET], _live())["status"] == "pass"
+
+
+def test_pivot_access_ignores_a_drop_on_an_unrelated_port_or_chain():
+    allow = _allow("0.0.0.0/0")
+    allow["node_name"] = "router-1"
+    seg = _seg_with_node_rules([_provider()], [allow], {"router-1": [
+        "-A INPUT -d 172.21.240.4/32 -j DROP",
+        "-A FORWARD -d 172.21.240.4/32 -p tcp --dport 9999 -j DROP",
+        "-A FORWARD -s 0.0.0.0/0 -d 172.21.240.4/32 -p tcp --dport 2222 -j ACCEPT",
+    ]})
+    assert ac.pivot_access_result(seg, [HITL_NET], _live())["status"] == "pass"
+
+
+def test_iptables_line_parsing_skips_policies_and_chain_declarations():
+    assert ac._parse_iptables_line("-P INPUT ACCEPT") is None
+    assert ac._parse_iptables_line("-N custom-seg") is None
+    parsed = ac._parse_iptables_line(
+        "-A INPUT -s 10.0.0.0/24 -p tcp -m tcp --dport 2222 -j ACCEPT")
+    assert parsed == {"chain": "INPUT", "src": "10.0.0.0/24", "dst": "",
+                      "proto": "tcp", "dport": 2222, "target": "ACCEPT"}
 
 
 def test_pivot_access_skips_when_the_scenario_has_no_providers():
@@ -1396,3 +1561,427 @@ def test_pivot_check_still_runs_when_providers_exist():
     res = ac.pivot_access_result(probe, [])
     assert res["status"] != "skip"
     assert any("docker-21" in i["name"] for i in res["items"])
+
+
+def test_flow_pivot_relationships_use_inferred_ports_when_segmentation_declares_none():
+    """The check probes the offering's port when the pivot declares none."""
+    state = {"assignments": [{"pivot": [
+        {"role": "target", "source": "docker-7", "target": "vulnslot-1",
+         "target_ports": [], "inferred_target_ports": ["8080"]},
+    ]}]}
+    rel = ac.flow_pivot_relationships(state)
+    assert rel[0]["target_ports"] == [8080]
+
+
+def test_flow_pivot_relationships_prefer_declared_ports_over_inferred():
+    state = {"assignments": [{"pivot": [
+        {"role": "target", "source": "docker-7", "target": "vulnslot-1",
+         "target_ports": ["9200"], "inferred_target_ports": ["8080"]},
+    ]}]}
+    rel = ac.flow_pivot_relationships(state)
+    assert rel[0]["target_ports"] == [9200]
+
+
+# --------------------------------------------------------------------------- #
+# Check 9: live participant-path probe
+# --------------------------------------------------------------------------- #
+
+def _live(dst="172.21.240.4", port=2222, reachable=True, reply="syn-ack",
+          error="", vantage="hitl-router-eth0-hitl0"):
+    return {"ok": True, "checks": [{"src": "10.254.200.1", "dst": dst, "port": port,
+                                    "reachable": reachable, "reply": reply,
+                                    "error": error, "vantage": vantage}]}
+
+
+def test_live_probe_rows_are_built_with_or_without_a_participant_network():
+    """The probe is always attempted; the vantage lookup decides if it can run."""
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    rows = ac.hitl_participant_path_probe_rows(seg, [HITL_NET])
+    assert rows == [{"src": "10.254.200.1", "dst": "172.21.240.4", "port": 2222,
+                     "label": "pivot-172-21-240-0"}]
+
+    # Without HITL it falls back to the same stand-in the rule analysis uses, so
+    # both halves of the check speak about the same source.
+    stand_in = ac.hitl_participant_path_probe_rows(seg, [])
+    assert len(stand_in) == 1
+    assert stand_in[0]["src"] == ac._outside_address("172.21.240.0/24")
+    assert stand_in[0]["dst"] == "172.21.240.4"
+
+
+def test_pivot_access_reports_a_live_syn_ack_as_verified():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [HITL_NET], _live())
+    assert res["status"] == "pass"
+    assert "verified live" in res["summary"]
+    assert "answered SYN-ACK" in res["items"][0]["detail"]
+
+
+def test_pivot_access_treats_a_live_rst_as_a_working_path():
+    """RST proves the round trip; the service just is not up yet."""
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [HITL_NET], _live(reply="rst"))
+    assert res["status"] == "pass"
+    assert "nothing is listening yet" in res["items"][0]["detail"]
+
+
+def test_pivot_access_fails_when_rules_permit_but_traffic_does_not_return():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    res = ac.pivot_access_result(seg, [HITL_NET],
+                                 _live(reachable=False, reply="", error="no reply"))
+    assert res["status"] == "fail"
+    assert "traffic does not return" in res["items"][0]["detail"]
+
+
+def test_pivot_access_warns_when_the_live_probe_could_not_run():
+    """No vantage or no raw socket is a missing measurement, not a failure.
+
+    With no router on the source network there is nothing to send from, and in
+    that topology the rule analysis is the whole answer available.
+    """
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    no_vantage = ac.pivot_access_result(
+        seg, [HITL_NET],
+        _live(reachable=False, reply="",
+              error="no node holds an interface on the participant subnet"))
+    assert no_vantage["status"] == "warn"
+    assert "no vantage" in no_vantage["summary"]
+    assert "unsolvable" not in no_vantage["summary"]
+
+    no_socket = ac.pivot_access_result(
+        seg, [HITL_NET],
+        _live(reachable=False, reply="",
+              error="cannot open raw socket: [Errno 1] Operation not permitted"))
+    assert no_socket["status"] == "warn"
+    assert "could not run on the vantage router" in no_socket["summary"]
+
+
+def test_hitl_probe_script_is_valid_python_and_enters_the_vantage_node():
+    import ast
+    script = ac.hitl_participant_path_probe_script(
+        "pw", 7, [{"src": "10.254.200.1", "dst": "172.21.240.4", "port": 2222}])
+    ast.parse(script)
+    assert "_nexec_python(kind, name, program" in script
+    assert "AF_PACKET" in ac._HITL_PROBE_PY
+    # Non-mutating: the probe must never claim an address.
+    assert "ip addr add" not in script and "ip addr add" not in ac._HITL_PROBE_PY
+
+
+# --------------------------------------------------------------------------- #
+# Check 6: traffic endpoints are identified by CORE node id
+# --------------------------------------------------------------------------- #
+
+def _lost_address_probe():
+    """A node that lost its CORE address and whose agent died with it."""
+    return {"ok": True, "traffic_files": ["/tmp/traffic/traffic_12.json"],
+            "summary": {"flows": [
+                {"src_id": 12, "dst_id": 14, "src_ip": "10.56.164.4", "dst_ip": "172.30.244.4"},
+                {"src_id": 8, "dst_id": 12, "src_ip": "172.30.24.3", "dst_ip": "10.56.164.4"},
+            ]},
+            "nodes": {
+                "docker-7": {"kind": "docker", "procs": [], "ip": "", "ips": [],
+                             "agent": {"present": True, "age_s": 198, "live": False}},
+                "docker-9": {"kind": "docker", "procs": ["traffic_14"], "ip": "172.30.244.4",
+                             "ips": ["172.30.244.4"],
+                             "agent": {"present": True, "age_s": 5, "live": True}},
+                "workstation-3": {"kind": "vnode", "procs": ["traffic_8"], "ip": "172.30.24.3",
+                                  "ips": ["172.30.24.3"],
+                                  "agent": {"present": True, "age_s": 5, "live": True}},
+            },
+            "ping": []}
+
+
+_NODE_IDS = {"8": "workstation-3", "12": "docker-7", "14": "docker-9"}
+
+
+def test_traffic_names_an_endpoint_by_node_id_when_its_address_is_gone():
+    """The node id is the endpoint's identity; the address is not.
+
+    A node that lost its CORE address is exactly the case worth reporting, and
+    matching on address alone makes it unidentifiable precisely then.
+    """
+    res = ac.traffic_result(_lost_address_probe(), expected=True, node_names_by_id=_NODE_IDS)
+    assert res["status"] == "fail"
+    names = [i["name"] for i in res["items"] if i["status"] != "pass"]
+    assert names == ["docker-7"]
+    detail = res["items"][[i["name"] for i in res["items"]].index("docker-7")]["detail"]
+    assert "required traffic names this node as a source/destination" in detail
+    assert "stopped updating stats" in detail
+
+
+def test_traffic_without_an_id_map_still_reports_the_node_id_it_could_not_resolve():
+    res = ac.traffic_result(_lost_address_probe(), expected=True)
+    assert res["status"] == "fail"
+    unresolved = [i for i in res["items"] if "was not found" in i["detail"]]
+    assert len(unresolved) == 2
+    assert all("(node 12)" in i["name"] for i in unresolved)
+
+
+def test_traffic_id_map_ignores_names_absent_from_the_running_session():
+    """A plan name with no running node must not resolve to nothing silently."""
+    res = ac.traffic_result(_lost_address_probe(), expected=True,
+                            node_names_by_id={"12": "a-node-that-was-never-created"})
+    assert res["status"] == "fail"
+    assert any("was not found" in i["detail"] for i in res["items"])
+
+
+def test_traffic_id_resolution_does_not_disturb_address_matching():
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.7"}]},
+             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"},
+                       "z": {"procs": ["x traffic_2_r0.py"], "ip": "10.0.0.7"}},
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True, node_names_by_id={"99": "h"})
+    assert res["status"] == "fail"
+    assert any("no traffic process is running" in i["detail"] for i in res["items"])
+
+
+def test_traffic_failure_carries_the_agent_log_reason():
+    """TrafficService records why it did not start; surface it with the failure.
+
+    Without this the reason sits on the node and every diagnosis starts with an
+    SSH session.
+    """
+    reason = "no traffic-agent binary for arch armv7l (looked in /tmp/traffic)"
+    probe = {"ok": True, "traffic_files": ["/tmp/traffic/traffic_12.json"],
+             "summary": {"flows": [{"src_id": 11, "dst_id": 12, "src_ip": "172.19.138.3",
+                                    "dst_ip": "172.19.138.4", "dst_port": 5012}]},
+             "nodes": {
+                 "docker-6": {"kind": "docker", "procs": ["traffic_11"], "ip": "172.19.138.3",
+                              "ips": ["172.19.138.3"],
+                              "agent": {"present": True, "age_s": 4, "live": True}},
+                 "docker-7": {"kind": "docker", "procs": [], "ip": "172.19.138.4",
+                              "ips": ["172.19.138.4"], "agent": {}, "agent_log": reason},
+             },
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True,
+                            node_names_by_id={"11": "docker-6", "12": "docker-7"})
+    assert res["status"] == "fail"
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "docker-7")
+    assert "no traffic process is running" in detail
+    assert f"Agent log: {reason}" in detail
+
+
+def test_traffic_failure_without_an_agent_log_is_unchanged():
+    probe = {"ok": True, "traffic_files": [],
+             "summary": {"flows": [{"src_ip": "10.0.0.5", "dst_ip": "10.0.0.7"}]},
+             "nodes": {"h": {"procs": [], "ip": "10.0.0.5"},
+                       "z": {"procs": ["x traffic_2_r0.py"], "ip": "10.0.0.7"}},
+             "ping": []}
+    res = ac.traffic_result(probe, expected=True)
+    detail = next(i["detail"] for i in res["items"] if i["name"] == "h")
+    assert "Agent log:" not in detail
+
+
+def test_traffic_probe_reads_the_agent_log_only_on_docker_nodes():
+    """A vnode shares the host /tmp, so the glob would return every node's log."""
+    script = ac.traffic_probe_script("pw", 7)
+    assert "output_*.txt" in script
+    marker = script.index("def _node_agent_log")
+    body = script[marker:marker + 400]
+    assert "if kind != 'docker'" in body
+
+
+def test_flow_pivot_reproduce_command_matches_the_endpoint_actually_tried():
+    """The prober walks every candidate; the command must name what it reported.
+
+    The command was built from candidate[0] up front while the reported port came
+    from the last candidate tried, so a multi-candidate failure printed a command
+    that reproduced a different port than the one in the label.
+    """
+    script = ac.flow_pivot_probe_script("pw", 7, [{"source": "a", "target": "b"}])
+    update_at = script.index("check.update({'ip':result[2]")
+    tail = script[update_at:update_at + 400]
+    assert "_repro(nodes[source]['kind'],source,result[2],result[3])" in tail
+
+
+def test_flow_pivot_result_reports_no_route_with_its_reproduce_command():
+    probe = {"ok": True,
+             "pivots": [{"source": "docker-7", "target": "docker-8"}],
+             "checks": [{"index": 0, "source": "docker-7", "target": "docker-8",
+                         "ip": "10.0.225.4", "port": 5005, "basis": "Flow target port",
+                         "method": "tcp-connect", "reachable": False,
+                         "error": "no-route", "attempts": 3,
+                         "cmd": "sudo nsenter ... 10.0.225.4 5005"}]}
+    res = ac.flow_pivot_result(probe)
+    assert res["status"] == "fail"
+    detail = res["items"][0]["detail"]
+    assert "no route to the target" in detail
+    assert "5005" in detail
+
+
+# --------------------------------------------------------------------------- #
+# "No route" is two different faults, and the live addresses tell them apart
+# --------------------------------------------------------------------------- #
+
+def _no_route_row(**extra):
+    row = {"src": "pc-8", "dst": "pc-4", "ip": "172.30.96.6", "port": 5004,
+           "protocol": "TCP", "reachable": False, "error": "no-route",
+           "attempts": 3, "cmd": "repro", "dst_ip_owned": False}
+    row.update(extra)
+    return row
+
+
+def test_no_route_names_the_live_addresses_when_the_target_exists_nowhere():
+    res = ac.reachability_result({"ok": True, "ping": [
+        _no_route_row(src_live=["10.0.5.2"], dst_live=["10.0.5.3"])]})
+    detail = res["items"][0]["detail"]
+    # Routing is not the fault here: the flow is aimed at an address this
+    # session never had, so the fix is to regenerate the traffic artifacts.
+    assert "No running node holds 172.30.96.6" in detail
+    assert "pc-4 is at 10.0.5.3" in detail
+    assert "pc-8 is at 10.0.5.2" in detail
+    assert "regenerated" in detail
+
+
+def test_no_route_reports_a_source_whose_interface_was_never_addressed():
+    res = ac.reachability_result({"ok": True, "ping": [
+        _no_route_row(src_live=[], dst_live=["10.0.5.3"], src_kind="vnode",
+                      src_links=["eth0"], src_links_queried=True)]})
+    detail = res["items"][0]["detail"]
+    # A node with no address has no route to anywhere; regenerating traffic
+    # would not help, so that advice must not appear.
+    assert "pc-8 has eth0 but no IPv4 address on it" in detail
+    assert "never applied or has been lost" in detail
+    assert "regenerated" not in detail
+    # A vnode cannot restart the way a container does, so that explanation must
+    # not be offered for one.
+    assert "restarted after execute" not in detail
+
+
+def test_no_route_blames_a_restart_only_for_a_container():
+    res = ac.reachability_result({"ok": True, "ping": [
+        _no_route_row(src_live=[], dst_live=["10.0.5.3"], src_kind="docker",
+                      src_links=["eth0"], src_links_queried=True)]})
+    assert "restarted after execute" in res["items"][0]["detail"]
+
+
+def test_no_route_reports_a_source_that_was_never_linked_into_the_topology():
+    # No interface beyond loopback is a different fault from an interface that
+    # lost its address: the node was created but never wired up.
+    res = ac.reachability_result({"ok": True, "ping": [
+        _no_route_row(src_live=[], dst_live=["10.0.5.3"], src_kind="vnode",
+                      src_links=[], src_links_queried=True)]})
+    detail = res["items"][0]["detail"]
+    assert "no network interface beyond loopback" in detail
+    assert "never linked into the topology" in detail
+
+
+def test_no_route_says_so_when_the_interfaces_could_not_be_listed():
+    res = ac.reachability_result({"ok": True, "ping": [
+        _no_route_row(src_live=[], dst_live=["10.0.5.3"], src_kind="docker",
+                      src_links=[], src_links_queried=False)]})
+    assert "interfaces could not be listed" in res["items"][0]["detail"]
+
+
+def test_no_route_reports_a_destination_that_has_no_address_at_all():
+    res = ac.reachability_result({"ok": True, "ping": [
+        _no_route_row(src_live=["10.0.5.2"], dst_live=[], dst_links=["eth0"],
+                      dst_links_queried=True)]})
+    detail = res["items"][0]["detail"]
+    assert "pc-4 has eth0 but no IPv4 address on it" in detail
+    assert "nothing can reach it" in detail
+    assert "regenerated" not in detail
+
+
+def test_no_route_stays_quiet_when_the_target_address_is_really_owned():
+    # Correctly addressed endpoints with no path between them: a routing or
+    # segmentation fault, and the addressing note would only be noise.
+    res = ac.reachability_result({"ok": True, "ping": [
+        _no_route_row(dst_ip_owned=True, src_live=["10.0.5.2"], dst_live=["172.30.96.6"])]})
+    detail = res["items"][0]["detail"]
+    assert "no route to the destination" in detail
+    assert "No running node holds" not in detail
+
+
+def test_no_route_from_an_older_probe_payload_reports_as_before():
+    # Rows recorded before the probe carried live addresses must still render.
+    res = ac.reachability_result({"ok": True, "ping": [_no_route_row()]})
+    detail = res["items"][0]["detail"]
+    assert "no route to the destination" in detail
+    assert "has no IPv4 address" not in detail
+
+
+# --------------------------------------------------------------------------- #
+# Check 9 must be able to reach a verdict without a participant network
+# --------------------------------------------------------------------------- #
+
+def _outside_live(src, *, reachable=True, error="", **extra):
+    """A live row as the VM returns it after substituting a real router."""
+    row = {"src": src, "dst": "172.21.240.4", "port": 2222, "vantage": "r1",
+           "reachable": reachable, "reply": "syn-ack" if reachable else "",
+           "error": error}
+    row.update(extra)
+    return {"ok": True, "checks": [row]}
+
+
+def test_stand_in_source_comes_from_the_rule_that_opens_the_provider():
+    # Asking from a documentation address only works for a wildcard allow; a
+    # rule scoped to one network does not cover it, and the check then blamed
+    # the scenario for a source it had picked itself.
+    seg = _pivot_probe([_provider()], [_allow("10.0.140.0/24")])
+    rows = ac.hitl_participant_path_probe_rows(seg, [])
+    assert [r["src"] for r in rows] == ["10.0.140.1"]
+
+
+def test_stand_in_falls_back_to_a_documentation_address_for_a_wildcard_allow():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    rows = ac.hitl_participant_path_probe_rows(seg, [])
+    assert [r["src"] for r in rows] == ["203.0.113.1"]
+    # ...and the walled-off subnet travels with the row, so the VM can swap in a
+    # router that really sits outside it. Without that the vantage search could
+    # never match and this check could not reach `pass` in any scenario with no
+    # participant network.
+    assert rows[0]["outside_of"] == "172.21.240.0/24"
+
+
+def test_a_real_participant_network_is_never_second_guessed():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    rows = ac.hitl_participant_path_probe_rows(seg, [HITL_NET])
+    assert "outside_of" not in rows[0]
+    assert rows[0]["src"].startswith("10.254.200.")
+
+
+def test_a_substituted_router_confirms_the_path_when_the_allow_covers_it():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    live = _outside_live("10.0.140.1", src_used="10.0.140.1",
+                         source="router outside 172.21.240.0/24")
+    res = ac.pivot_access_result(seg, [], live)
+    assert res["status"] == "pass"
+    assert "10.0.140.1" in res["items"][0]["detail"]
+
+
+def test_a_substituted_router_the_allow_does_not_cover_proves_nothing():
+    # The rule opens the provider from one network; the VM answered from
+    # another. That reply is real but it is not evidence about this rule.
+    seg = _pivot_probe([_provider()], [_allow("10.0.140.0/24")])
+    live = _outside_live("192.168.5.1", src_used="192.168.5.1",
+                         source="router outside 172.21.240.0/24")
+    res = ac.pivot_access_result(seg, [], live)
+    assert res["status"] == "warn"
+
+
+def test_silence_from_a_source_we_chose_ourselves_is_not_a_failure():
+    # The stand-in stands for a participant network that does not exist in this
+    # scenario, so its silence cannot condemn the real participant path.
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    live = _outside_live("10.0.140.1", reachable=False, error="no reply",
+                         src_used="10.0.140.1")
+    res = ac.pivot_access_result(seg, [], live)
+    assert res["status"] == "warn"
+    assert "does not show the real participant path is broken" in res["items"][0]["detail"]
+
+
+def test_a_silent_path_from_the_real_participant_is_still_a_failure():
+    seg = _pivot_probe([_provider()], [_allow("0.0.0.0/0")])
+    live = _outside_live("10.254.200.2", reachable=False, error="no reply")
+    res = ac.pivot_access_result(seg, [HITL_NET], live)
+    assert res["status"] == "fail"
+
+
+def test_probe_script_can_swap_in_a_router_outside_the_walled_off_subnet():
+    script = ac.hitl_participant_path_probe_script("pw", 3, [
+        {"src": "203.0.113.1", "dst": "172.21.240.4", "port": 2222,
+         "outside_of": "172.21.240.0/24"}])
+    compile(script, "<probe>", "exec")
+    assert "_outside_router" in script
+    assert "src_used" in script

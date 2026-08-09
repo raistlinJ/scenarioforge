@@ -94,7 +94,10 @@ def test_import_auto_detects_bundle_restores_artifacts_and_rewrites_xml(tmp_path
     imported_core = root.find("CoreConnection")
     assert imported_core is not None
     assert imported_core.get("ssh_host") == "source-core.invalid"
-    assert "ssh_password" not in imported_core.attrib
+    # Credentials are carried through import: downstream SSH operations
+    # (Materialize, Validate) open connections from this XML, and a stripped
+    # password left them stalling on an authentication they could not finish.
+    assert imported_core.get("ssh_password") == "source-secret"
     flow = json.loads(root.find(".//FlowState").text)
     restored_dir = flow["reproduction_artifact_sources"][0]["restored_path"]
     assert restored_dir.startswith(str(upload_root.resolve()))
@@ -610,3 +613,54 @@ def test_vm_import_continues_and_reports_when_runtime_credentials_are_missing(tm
     assert len(attention) == 1
     assert "SSH password is required" in attention[0]["detail"]
     assert progress["events"][-1]["step"] == "Import complete"
+
+
+def test_load_xml_skips_materialization_when_importer_declines(tmp_path, monkeypatch):
+    """Declining materialization must not touch the CORE host at all.
+
+    Copying bundled artifacts is the slow part of an import, so the choice has
+    to actually skip the work -- not merely hide its result.
+    """
+    bundle, _source_path = _bundle(tmp_path)
+    upload_root = tmp_path / "uploads"
+
+    monkeypatch.setitem(app.config, "UPLOAD_FOLDER", str(upload_root))
+    monkeypatch.setattr(backend, "_webui_runtime_mode", lambda: "vm")
+    monkeypatch.setattr(
+        backend,
+        "_open_ssh_client",
+        lambda _cfg: pytest.fail("declining materialization must not open SSH"),
+    )
+    monkeypatch.setattr(
+        reproduction_bundle_module,
+        "restore_bundled_artifacts_locally",
+        lambda **_kwargs: pytest.fail("declining materialization must not restore locally"),
+    )
+
+    with app.test_client() as client:
+        login = client.post("/login", data={"username": "coreadmin", "password": "coreadmin"})
+        assert login.status_code in (302, 303)
+        response = client.post(
+            "/load_xml",
+            data={
+                "scenarios_xml": (
+                    io.BytesIO(bundle.read_bytes()),
+                    "portable.scenarioforge.zip",
+                ),
+                "import_progress_id": "declineprogress1",
+                "import_materialize": "0",
+            },
+            content_type="multipart/form-data",
+        )
+        progress_response = client.get("/api/scenario-import-progress/declineprogress1")
+
+    # The scenario still imports; only the artifact copy is skipped.
+    assert response.status_code == 200
+    assert b"not materialized" in response.data
+    assert list(upload_root.glob("*.xml"))
+    progress = progress_response.get_json()
+    assert progress["status"] == "complete"
+    steps = [event["step"] for event in progress["events"]]
+    assert "Skipping artifact materialization" in steps
+    assert "Materializing bundled artifacts on CORE VM" not in steps
+    assert steps[-1] == "Import complete"

@@ -298,3 +298,115 @@ def test_entry_points_survive_malformed_preview_shapes():
 def test_port_lookup_returns_nothing_for_an_unknown_name():
     assert ab._flow_ports_for_offering('definitely-not-in-the-catalog') == []
     assert ab._flow_ports_for_offering('') == []
+
+
+def test_pivot_target_offering_ports_reads_names_and_dicts(monkeypatch):
+    """Graph nodes carry plain vuln names; chain nodes carry dicts."""
+    monkeypatch.setattr(ab, '_flow_ports_for_offering',
+                        lambda name: [8080] if name == 'spring/CVE-2017-8046' else [])
+
+    assert ab._flow_pivot_target_offering_ports(
+        {'vulnerabilities': ['spring/CVE-2017-8046']}) == [8080]
+    assert ab._flow_pivot_target_offering_ports(
+        {'vulnerabilities': [{'name': 'spring/CVE-2017-8046'}]}) == [8080]
+    assert ab._flow_pivot_target_offering_ports({'vulnerabilities': []}) == []
+    assert ab._flow_pivot_target_offering_ports(None) == []
+
+
+def test_pivot_rule_falls_back_to_offering_ports_when_segmentation_declares_none(monkeypatch):
+    """A pivot target with no SegmentationPorts must still carry its service port.
+
+    Without this the runtime check has nothing to probe but the node's live
+    listeners, and a slow-starting container reads as having no service at all.
+    """
+    monkeypatch.setattr(ab, '_flow_ports_for_offering',
+                        lambda name: [8080] if name == 'spring/CVE-2017-8046' else [])
+    source = {'id': 'n-jump', 'name': 'docker-7', 'type': 'docker'}
+    target = {'id': 'n-slot', 'name': 'vulnslot-1', 'type': 'docker',
+              'PivotRequires': 'Pivot(docker-7)',
+              'vulnerabilities': ['spring/CVE-2017-8046']}
+
+    rules = ab._flow_pivot_rules_for_chain(None, [source, target])
+
+    assert len(rules) == 1
+    assert rules[0]['inferred_target_ports'] == ['8080']
+    # target_ports must stay empty: the CLI maps it onto SegmentationPorts, where
+    # empty means "allow every compose-exposed port". Filling it in only narrows.
+    assert rules[0]['target_ports'] == []
+
+
+def test_pivot_rule_keeps_explicit_segmentation_ports(monkeypatch):
+    """An explicit SegmentationPorts value still wins over the offering default."""
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [8080])
+    source = {'id': 'n-jump', 'name': 'docker-7', 'type': 'docker'}
+    target = {'id': 'n-slot', 'name': 'vulnslot-1', 'type': 'docker',
+              'PivotRequires': 'Pivot(docker-7)',
+              'SegmentationPorts': '9200',
+              'vulnerabilities': ['spring/CVE-2017-8046']}
+
+    rules = ab._flow_pivot_rules_for_chain(None, [source, target])
+
+    assert rules[0]['target_ports'] == ['9200']
+    assert rules[0]['inferred_target_ports'] == []
+
+
+def _plan_file(tmp_path, payload):
+    import json
+    p = tmp_path / 'plan.json'
+    p.write_text(json.dumps(payload), encoding='utf-8')
+    return str(p)
+
+
+_PLAN = {
+    'hosts': [
+        {'node_id': '6', 'name': 'vulnslot-1', 'role': 'VulnerabilitySlot', 'ip4': '172.30.96.2/24'},
+        {'node_id': '12', 'name': 'docker-7', 'role': 'Docker', 'ip4': '172.30.10.2/24'},
+    ],
+    'vulnerabilities_by_node': {'6': ['spring/CVE-2017-8046']},
+}
+
+
+def test_check_derives_pivot_port_for_a_chain_saved_without_one(monkeypatch, tmp_path):
+    """Flow stamps pivot ports at Generate time; older chains carry none.
+
+    Deriving at check time means an already-saved scenario is checked correctly
+    without forcing the user to regenerate the chain.
+    """
+    monkeypatch.setattr(ab, '_flow_ports_for_offering',
+                        lambda name: [8080] if name == 'spring/CVE-2017-8046' else [])
+    rels = [{'source': 'docker-7', 'target': 'vulnslot-1', 'target_ports': []}]
+
+    out = ab._flow_pivot_fill_offering_ports(
+        rels, preview_plan_path=_plan_file(tmp_path, _PLAN))
+
+    assert out[0]['target_ports'] == [8080]
+
+
+def test_check_unwraps_a_full_preview_wrapper(monkeypatch, tmp_path):
+    """The XML stores the plan under 'full_preview'; a plan JSON is unwrapped."""
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [8080])
+    rels = [{'source': 'docker-7', 'target': 'vulnslot-1', 'target_ports': []}]
+
+    out = ab._flow_pivot_fill_offering_ports(
+        rels, preview_plan_path=_plan_file(tmp_path, {'full_preview': _PLAN, 'metadata': {}}))
+
+    assert out[0]['target_ports'] == [8080]
+
+
+def test_check_leaves_declared_pivot_ports_alone(monkeypatch, tmp_path):
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [8080])
+    rels = [{'source': 'docker-7', 'target': 'vulnslot-1', 'target_ports': [9200]}]
+
+    out = ab._flow_pivot_fill_offering_ports(
+        rels, preview_plan_path=_plan_file(tmp_path, _PLAN))
+
+    assert out[0]['target_ports'] == [9200]
+
+
+def test_check_port_derivation_is_a_noop_without_a_readable_plan(monkeypatch):
+    monkeypatch.setattr(ab, '_flow_ports_for_offering', lambda name: [8080])
+    rels = [{'source': 'docker-7', 'target': 'vulnslot-1', 'target_ports': []}]
+
+    out = ab._flow_pivot_fill_offering_ports(rels, preview_plan_path='/nonexistent/plan.json')
+
+    assert out[0]['target_ports'] == []

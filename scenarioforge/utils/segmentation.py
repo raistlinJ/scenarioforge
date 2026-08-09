@@ -9,6 +9,7 @@ import shutil
 from ..constants import DEFAULT_IPV4_PREFIXLEN
 from ..types import NodeInfo, SegmentationInfo
 from .services import ensure_service
+from .tmp_staging import prepare_output_dir
 from ..plugins import segmentation as seg_plugins
 from .vuln_process import extract_compose_ports
 from .pivot_access import plan_pivot_access
@@ -47,7 +48,7 @@ def reuse_preview_segmentation(preview_dir: str, runtime_dir: str = "/tmp/segmen
     if not preview_dir or not os.path.isdir(preview_dir):
         return {"rules": [], "error": f"preview_dir_missing:{preview_dir}"}
     # Prepare runtime dir (clean)
-    os.makedirs(runtime_dir, exist_ok=True)
+    prepare_output_dir(runtime_dir, logger=logger)
     try:
         for name in os.listdir(runtime_dir):
             p = os.path.join(runtime_dir, name)
@@ -123,7 +124,7 @@ def apply_preview_segmentation_rules(session: object,
     preview_rules expected shape (subset):
       { 'node_id': int, 'rule': { 'type': 'nat'|'host_block'|'custom'|..., ... } }
     """
-    os.makedirs(out_dir, exist_ok=True)
+    prepare_output_dir(out_dir, logger=logger)
     norm_rules: List[dict] = []
     for pr in preview_rules or []:
         try:
@@ -795,7 +796,7 @@ def plan_and_apply_segmentation(
     summary: Dict[str, object] = {"rules": []}
     if not hosts:
         return summary
-    os.makedirs(out_dir, exist_ok=True)
+    prepare_output_dir(out_dir, logger=logger)
 
     docker_nodes = docker_nodes or {}
     allow_docker_ports = bool(allow_docker_ports) and bool(docker_nodes)

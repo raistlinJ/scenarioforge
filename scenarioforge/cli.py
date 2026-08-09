@@ -61,6 +61,7 @@ from .parsers.services import parse_services
 from .parsers.hitl import parse_hitl_info
 from .utils.segmentation import apply_preview_segmentation_rules
 from .utils.allocation import compute_role_counts
+from .utils.tmp_staging import ensure_local_tmp_writable, is_tmp_staging_path
 from .builders.topology import (
     _docker_node_compose_path,
     _ensure_docker_node_default_routes,
@@ -3014,6 +3015,28 @@ def _apply_pivoting_to_docker_nodes(
         requires = _csv_values(getattr(item, "requires", "") or "")
         explicit_produces = _csv_values(getattr(item, "produces", "") or "")
         access_provider = _resolved_access_provider(requested_provider, pivot_node_names, requires, explicit_produces)
+        # An explicitly named pivot source skips the provider filter that
+        # inference applies, so it can be a node that already hosts a challenge.
+        # Installing the SSH container there would destroy that challenge, and
+        # merely skipping the install leaves the pivot with no way in while the
+        # metadata below still advertises ssh-fallback. Use the access the node
+        # actually offers instead; only warn when it offers none.
+        if access_provider == "ssh-fallback" and not any(
+            _can_replace_with_ssh_container(docker_nodes.get(name)) for name in pivot_node_names
+        ):
+            offered = {_candidate_provider(docker_nodes.get(name)) for name in pivot_node_names}
+            for alternative in ("vulnerability", "flag-node-generator"):
+                if alternative in offered:
+                    # Informational, not a warning: the pivot ends up with real,
+                    # working access. Reporting it as a warning made healthy runs
+                    # look degraded -- one line per pivot naming the same node.
+                    logging.info(
+                        "Pivoting: pivot[%s] ssh fallback not applicable to %s; "
+                        "using existing %s access instead",
+                        idx, ', '.join(pivot_node_names), alternative,
+                    )
+                    access_provider = alternative
+                    break
         produces = list(dict.fromkeys(explicit_produces + _default_pivot_produces(pivot_node_names, access_provider)))
         target_requires = _default_target_requires(pivot_node_names, access_provider)
         for pivot_name in pivot_node_names:
@@ -4393,6 +4416,16 @@ def _reset_runtime_artifact_dirs(dirs: Any = None, *, logger: Any = None) -> dic
     log = logger or logging
     removed_by_dir: dict[str, int] = {}
     for out_dir in (dirs if dirs is not None else RUNTIME_ARTIFACT_DIRS):
+        # The sudo'd docker preflight earlier in this same run bind-mounts these
+        # paths, and the daemon auto-creates a missing source as root:root. Every
+        # clear and write below would then fail with EACCES, so repair first.
+        if is_tmp_staging_path(out_dir):
+            try:
+                ok, detail = ensure_local_tmp_writable(out_dir, logger=log)
+                if not ok:
+                    log.warning('Runtime artifact dir %s is not writable: %s', out_dir, detail)
+            except Exception:
+                pass
         removed = 0
         try:
             names = os.listdir(out_dir)
@@ -8155,6 +8188,28 @@ def main():
 
     try:
         logging.info("PHASE: Topology built (routers=%d hosts=%d)", len(routers or []), len(hosts or []))
+    except Exception:
+        pass
+
+    # A host with no address is a dead node, not a degraded one: it runs, but
+    # nothing it takes part in can work. Say so here, at the phase that produced
+    # it, rather than letting it surface much later as a traffic failure.
+    try:
+        unaddressed = sorted(
+            int(getattr(h, 'node_id'))
+            for h in (hosts or [])
+            if not str(getattr(h, 'ip4', '') or '').strip()
+        )
+        generation_meta['hosts_unaddressed'] = unaddressed
+        if unaddressed:
+            names_by_id = _preview_host_names((preview_full or {}).get('hosts')) or {}
+            labelled = ', '.join(f"{names_by_id.get(nid) or 'node'}({nid})" for nid in unaddressed)
+            logging.error(
+                "Topology: %d of %d host(s) have no IPv4 address: %s. These nodes are "
+                "running but have no route to anything, so any traffic, challenge or "
+                "pivot involving them cannot work.",
+                len(unaddressed), len(hosts or []), labelled,
+            )
     except Exception:
         pass
 

@@ -28,6 +28,7 @@ live in ``app_backend``.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import json
 from typing import Any
 
@@ -125,8 +126,33 @@ def services_result(summary: dict[str, Any]) -> dict[str, Any]:
     not_running = [_name(n) for n in _as_list(summary.get("docker_not_running")) if _name(n)]
     missing = [_name(n) for n in _as_list(summary.get("docker_missing")) if _name(n)]
     pending = [_name(n) for n in _as_list(summary.get("docker_start_pending")) if _name(n)]
+    # A container in a restart loop answers "running" at every poll, so
+    # running-ness alone hides it. CORE applies a docker node's address, default
+    # route and traffic agent to the namespace of the container that was live at
+    # execute; a restart discards all three, which then surfaces as unrelated
+    # routing and traffic faults elsewhere in the checks.
+    restarting: dict[str, int] = {}
+    for entry in _as_list(summary.get("docker_restarting")):
+        if not isinstance(entry, dict):
+            continue
+        node = _name(entry.get("container"))
+        try:
+            count = int(entry.get("restart_count"))
+        except (TypeError, ValueError):
+            continue
+        if node and count > 0:
+            restarting[node] = count
+
     items: list[dict[str, Any]] = []
     for node in running:
+        if node in restarting:
+            items.append({
+                "name": node, "status": "fail",
+                "detail": (f"running, but has restarted {restarting[node]} time(s): CORE applies "
+                           "this node's address, default route and traffic agent at execute and "
+                           "nothing reapplies them, so each restart leaves it unconfigured"),
+            })
+            continue
         items.append({"name": node, "status": "pass", "detail": "running"})
     for node in not_running:
         items.append({"name": node, "status": "fail", "detail": "container not running"})
@@ -140,6 +166,12 @@ def services_result(summary: dict[str, Any]) -> dict[str, Any]:
     if not_running or missing:
         return _result("services", "fail",
                        f"{len(not_running) + len(missing)} service(s) not running.", items)
+    if restarting:
+        names = ", ".join(sorted(restarting))
+        return _result("services", "fail",
+                       f"{len(restarting)} service(s) running but stuck restarting ({names}); "
+                       "each restart discards the CORE network configuration applied at execute.",
+                       items)
     if pending:
         return _result("services", "warn", f"{len(pending)} service(s) still starting.", items)
     return _result("services", "pass", f"All {len(running)} services running.", items)
@@ -243,6 +275,107 @@ def _allow_rule_opening(src_ip: str, dst_ip: str, port: Any,
         if allow_covers(rule, _name(src_ip), _name(dst_ip), port):
             return rule
     return None
+
+
+def _segmentation_runtime_rules_by_node(segmentation: Any) -> dict[str, list[str]]:
+    """The live iptables lines each node ended up with, in chain order."""
+    out: dict[str, list[str]] = {}
+    if not isinstance(segmentation, dict):
+        return out
+    nodes = segmentation.get("nodes")
+    if not isinstance(nodes, dict):
+        return out
+    for name, info in nodes.items():
+        if not isinstance(info, dict):
+            continue
+        lines = [_name(line) for line in _as_list(info.get("rule_lines")) if _name(line)]
+        if lines:
+            out[_name(name)] = lines
+    return out
+
+
+def _parse_iptables_line(line: str) -> dict[str, Any] | None:
+    """The fields of an ``iptables -S`` line that decide whether it matches."""
+    tokens = _name(line).split()
+    if len(tokens) < 2 or tokens[0] not in ("-A", "-I"):
+        return None
+    parsed: dict[str, Any] = {"chain": tokens[1], "src": "", "dst": "",
+                              "proto": "", "dport": None, "target": ""}
+    index = 2
+    while index < len(tokens):
+        token = tokens[index]
+        value = tokens[index + 1] if index + 1 < len(tokens) else ""
+        if token in ("-s", "--source"):
+            parsed["src"] = value
+        elif token in ("-d", "--destination"):
+            parsed["dst"] = value
+        elif token in ("-p", "--protocol"):
+            parsed["proto"] = value.lower()
+        elif token == "--dport":
+            try:
+                parsed["dport"] = int(value)
+            except (TypeError, ValueError):
+                parsed["dport"] = None
+        elif token == "-j":
+            parsed["target"] = value.upper()
+        index += 2 if value and not value.startswith("-") else 1
+    return parsed
+
+
+def _iptables_line_matches(parsed: dict[str, Any], src_ip: str, dst_ip: str, port: Any) -> bool:
+    """Whether a parsed rule would match this specific packet.
+
+    An absent selector matches everything, which is exactly how a broad DROP
+    ends up shadowing a narrow ACCEPT.
+    """
+    try:
+        wanted_port = int(port)
+    except (TypeError, ValueError):
+        return False
+    if parsed.get("dport") is not None and parsed["dport"] != wanted_port:
+        return False
+    proto = _name(parsed.get("proto"))
+    if proto and proto not in ("tcp", "all"):
+        return False
+    for selector, address in (("src", src_ip), ("dst", dst_ip)):
+        cidr = _name(parsed.get(selector))
+        if not cidr or cidr in ("0.0.0.0/0", "anywhere"):
+            continue
+        try:
+            if ipaddress.ip_address(_name(address)) not in ipaddress.ip_network(cidr, strict=False):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _shadowing_rule(allow_rule: Any, src_ip: str, dst_ip: str, port: Any,
+                    node_rules: dict[str, list[str]]) -> str:
+    """A DROP that matches this path before its ACCEPT does, described for a reader.
+
+    Returns an empty string when nothing shadows the allow, including when the
+    node's live rules were not captured -- an unseen chain is not evidence of a
+    problem.
+    """
+    if not isinstance(allow_rule, dict):
+        return ""
+    node_name = _name(allow_rule.get("node_name"))
+    chain = _name(allow_rule.get("chain")).upper()
+    lines = node_rules.get(node_name) or []
+    if not lines:
+        return ""
+    for line in lines:
+        parsed = _parse_iptables_line(line)
+        if not parsed or (chain and parsed["chain"].upper() != chain):
+            continue
+        if not _iptables_line_matches(parsed, src_ip, dst_ip, port):
+            continue
+        target = parsed.get("target")
+        if target == "ACCEPT":
+            return ""
+        if target in ("DROP", "REJECT"):
+            return f"'{_name(line)}' on {node_name}"
+    return ""
 
 
 def _blocking_rule_detail(rule: dict[str, Any]) -> str:
@@ -594,6 +727,15 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "            rc, out = _run(['nsenter','-t',pid,'-n','ip','-4','-o','addr','show','scope','global'])\n"
         "            if rc == 0:\n"
         "                cidrs = _cidrs('\\n'.join(line.split()[3] if len(line.split()) > 3 else '' for line in out.splitlines()))\n"
+        # `scope global` is the right filter for a CORE address, but an address
+        # carrying some other scope is still an address the node can route from.
+        # Ask again without the filter rather than reporting the node as having
+        # none at all, which is a very different diagnosis.
+        "    if not cidrs:\n"
+        "        rc, out = _nexec(kind, name, ['sh','-lc',\n"
+        "                         \"ip -4 -o addr show 2>/dev/null | awk '{print $4}'\"])\n"
+        "        cidrs = [c for c in (_cidrs(out) if rc == 0 else [])\n"
+        "                 if not c.startswith('127.')]\n"
         "    if not cidrs:\n"
         "        return []\n"
         "    return list(dict.fromkeys(cidrs))\n"
@@ -602,6 +744,26 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "    if not cidrs:\n"
         "        return '', ''\n"
         "    return cidrs[0].split('/', 1)[0], cidrs[0]\n"
+        # An empty address list has three causes that need different fixes: the
+        # node has no interface at all (it was created but never linked into the
+        # topology), it has an interface that was never addressed (or lost its
+        # address), or the question could not be asked. Reporting them as one
+        # state sends the reader after the wrong bug.
+        "def _node_links(kind, name):\n"
+        "    rc, out = _nexec(kind, name, ['sh','-lc',\n"
+        "                     \"ip -o link show 2>/dev/null | awk -F': ' '{print $2}'\"])\n"
+        "    names = [l.strip().split('@', 1)[0] for l in str(out or '').splitlines() if l.strip()]\n"
+        "    if rc != 0 and not names and kind == 'docker':\n"
+        "        rc2, pid = _run(['docker','inspect','-f','{{.State.Pid}}',name])\n"
+        "        pid = pid.strip()\n"
+        "        if rc2 == 0 and pid.isdigit() and int(pid) > 0:\n"
+        "            rc, out = _run(['nsenter','-t',pid,'-n','ip','-o','link','show'])\n"
+        "            names = [l.split(':')[1].strip().split('@', 1)[0]\n"
+        "                     for l in str(out or '').splitlines() if l.count(':') >= 2]\n"
+        "    if rc != 0 and not names:\n"
+        "        return {'queried': False, 'links': []}\n"
+        "    return {'queried': True,\n"
+        "            'links': [n for n in dict.fromkeys(names) if n and n != 'lo']}\n"
     )
 
 
@@ -819,11 +981,14 @@ def segmentation_probe_script(sudo_password: str | None = None,
         + "        # declarations (-N) and any shell/ssh noise on the stream are not rules.\n"
         + "        non_default = [l.strip() for l in out.splitlines()\n"
         + "                       if l.strip().startswith('-A ') or l.strip().startswith('-I ')]\n"
+        # Keep the rules in chain order: iptables takes the first match, so a
+        # DROP ahead of an ACCEPT silences it. Order is the whole signal here.
         + "        nodes[name] = {\n"
         + "            'kind': kind,\n"
         + "            'rules_present': bool(non_default),\n"
         + "            'marker': ('custom-seg' in out) or ('scenarioforge' in out.lower()),\n"
         + "            'rule_count': len(non_default),\n"
+        + "            'rule_lines': non_default[:200],\n"
         + "        }\n"
         + "    print(json.dumps({'ok': True, 'seg_files': seg_files, 'stale_files': seg_stale, 'verification': verification, 'rules_summary': rules_summary, 'nodes': nodes}))\n"
         + "main()\n"
@@ -838,7 +1003,8 @@ _AGENT_STATS_FRESH_S = 60
 
 def traffic_probe_script(sudo_password: str | None = None,
                          session_id: Any = None,
-                         traffic_dirs: list[str] | None = None) -> str:
+                         traffic_dirs: list[str] | None = None,
+                         node_names_by_id: Any = None) -> str:
     """VM-side script: report the traffic summary artifact and generated traffic
     scripts, traffic processes and CORE IP inside every node (Docker + vnode),
     and reachability along each configured flow. Each ping row carries the exact
@@ -847,9 +1013,24 @@ def traffic_probe_script(sudo_password: str | None = None,
     Only the runtime directory is inspected. ``/tmp/scenarioforge-preview-traffic-*``
     holds plan-time scripts produced during preview that are never deployed, so
     counting them would report running traffic for a scenario that has none.
+
+    ``node_names_by_id`` maps the plan's CORE node ids to node names. Flows are
+    matched to running nodes by address first, but an address is not an
+    endpoint's identity: a node that came up with a different address than the
+    plan recorded -- which is exactly the state worth reporting -- becomes
+    unmatchable by IP, and every one of its flows then reported "source node not
+    found" instead of being tested at all. The id is stable, so it resolves the
+    node and the probe still runs, with its real result.
     """
     dirs = traffic_dirs or ["/tmp/traffic"]
     dirs_literal = json.dumps(dirs)
+    names_by_id = {}
+    for raw_id, raw_name in (node_names_by_id or {}).items():
+        node_id = str(raw_id).strip()
+        node_name = str(raw_name).strip()
+        if node_id and node_name:
+            names_by_id[node_id] = node_name
+    names_literal = json.dumps(names_by_id)
     # Finding the agent must not depend on the node's image shipping procps.
     # A Docker node's container IS the scenario's own image, and a minimal
     # vulnerability image often has no `pgrep` or `ps` at all -- on such a node
@@ -917,8 +1098,20 @@ def traffic_probe_script(sudo_password: str | None = None,
         _remote_preamble(sudo_password, session_id)
         + f"TRAFFIC_DIRS = {dirs_literal}\n"
         + f"PROC_SCAN = {json.dumps(proc_scan_sh)}\n"
+        + f"NODE_NAMES_BY_ID = {names_literal}\n"
         + f"AGENT_FRESH_S = {int(_AGENT_STATS_FRESH_S)}\n"
         + "import datetime as _dt\n"
+        + "def _node_agent_log(kind, name):\n"
+        # TrafficService writes why it did or did not start here -- a missing
+        # config, no binary for the node's architecture, or the agent's own
+        # stderr. Same Docker-only restriction as the stats glob below: a vnode
+        # shares the host /tmp and would return every node's log.\n
+        + "    if kind != 'docker':\n"
+        + "        return ''\n"
+        + "    rc, out = _nexec(kind, name, ['sh','-lc',\n"
+        + "                     'tail -c 800 /tmp/coretg_traffic/output_*.txt 2>/dev/null'])\n"
+        + "    lines = [l.strip() for l in str(out or '').splitlines() if l.strip()]\n"
+        + "    return lines[-1][:240] if lines else ''\n"
         + "def _node_agent(kind, name):\n"
         + "    # The agent's own stats file is the one liveness signal that needs no\n"
         + "    # tooling in the image at all -- just a readable file -- and it proves\n"
@@ -949,6 +1142,11 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "            'flows': len(s.get('flows') or [])}\n"
         + "def _ip(kind, name):\n"
         + "    return _node_addr(kind, name)[0]\n"
+        + "def _session_dirs():\n"
+        + "    try:\n"
+        + "        return sorted(os.path.basename(p) for p in glob.glob('/tmp/pycore.*') if os.path.isdir(p))\n"
+        + "    except Exception:\n"
+        + "        return []\n"
         + f"FLOW_PY = {json.dumps(flow_py)}\n"
         + "def _agent_stats(kind, name, node_id):\n"
         + "    if node_id is None:\n"
@@ -1018,8 +1216,12 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "                 if 'traffic_' in l and 'pgrep' not in l and '/proc/[0-9]' not in l]\n"
         + "        cidrs = _node_cidrs(kind, name)\n"
         + "        ips = [c.split('/',1)[0] for c in cidrs]\n"
+        + "        links = _node_links(kind, name) if not ips else {'queried': True, 'links': []}\n"
         + "        nodes[name] = {'kind': kind, 'procs': procs, 'ip': (ips[0] if ips else ''),\n"
-        + "                       'ips': ips, 'cidrs': cidrs, 'agent': _node_agent(kind, name)}\n"
+        + "                       'ips': ips, 'cidrs': cidrs, 'agent': _node_agent(kind, name),\n"
+        + "                       'links': links.get('links') or [],\n"
+        + "                       'links_queried': bool(links.get('queried')),\n"
+        + "                       'agent_log': _node_agent_log(kind, name)}\n"
         + "    # Reachability follows the configured traffic flows, and each flow is\n"
         + "    # tested on its own protocol and port rather than with ping. Under a\n"
         + "    # default-deny segmentation policy ICMP is normally not in the allow\n"
@@ -1034,6 +1236,36 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "        for ip in (nodes.get(name, {}).get('ips') or []):\n"
         + "            if ip and ip not in by_ip:\n"
         + "                by_ip[ip] = (kind, name)\n"
+        # An endpoint's identity is its CORE node id, not its address. When a
+        # node answers on a different address than the plan recorded, matching
+        # by id still finds it, so the flow gets probed and reports what is
+        # actually wrong instead of vanishing as an unknown source.
+        + "    by_id = {}\n"
+        + "    for node_id, node_name in (NODE_NAMES_BY_ID or {}).items():\n"
+        + "        for kind, name in alln:\n"
+        + "            if name == node_name:\n"
+        + "                by_id[str(node_id)] = (kind, name)\n"
+        + "                break\n"
+        + "    def _endpoint(node_id, ip):\n"
+        + "        return by_ip.get(ip) or by_id.get(str(node_id if node_id is not None else ''))\n"
+        # Say what the probe actually saw. "Not found" alone cannot distinguish
+        # a node discovery that returned nothing from a live topology addressed
+        # differently than the plan -- two problems with different fixes.
+        + "    seen_ips = sorted(by_ip)\n"
+        + "    def _discovery_note():\n"
+        + "        if not alln:\n"
+        + "            where = (' (session ' + SESSION_ID + ')' if SESSION_ID else ' (no session id was supplied)')\n"
+        + "            others = [s for s in _session_dirs() if s != ('pycore.' + SESSION_ID)]\n"
+        + "            if PYCORE and not os.path.isdir(PYCORE):\n"
+        + "                where += '; ' + PYCORE + ' does not exist'\n"
+        + "                where += (', but ' + ', '.join(others) + ' does' if others else '')\n"
+        + "            return 'no nodes were discovered on the CORE VM at all' + where\n"
+        + "        if not seen_ips:\n"
+        + "            return str(len(alln)) + ' node(s) were discovered but none reported an IPv4 address'\n"
+        + "        sample = ', '.join(seen_ips[:6]) + (', ...' if len(seen_ips) > 6 else '')\n"
+        + "        return (str(len(alln)) + ' node(s) are running with addresses: ' + sample\n"
+        + "                + '. The flow was planned for an address none of them has, so the'\n"
+        + "                + ' running topology is not the one this traffic plan was built for')\n"
         + "    ping = []\n"
         + "    seen = set()\n"
         + "    plan = {}\n"
@@ -1055,17 +1287,30 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "                         'protocol': proto, 'method': 'metadata',\n"
         + "                         'why': 'configured traffic flow is missing its source or destination address'})\n"
         + "            continue\n"
-        + "        dst_name = (by_ip.get(d_ip) or (None, d_ip))[1]\n"
-        + "        src = by_ip.get(s_ip)\n"
+        + "        dst_name = (_endpoint(flow.get('dst_id'), d_ip) or (None, d_ip))[1]\n"
+        + "        src = _endpoint(flow.get('src_id'), s_ip)\n"
         + "        if not src:\n"
         + "            ping.append({'src': s_ip, 'dst': dst_name, 'ip': d_ip, 'reachable': None,\n"
         + "                         'cmd': '', 'port': port, 'protocol': proto,\n"
-        + "                         'why': 'traffic source node not found for ' + s_ip})\n"
+        + "                         'why': ('traffic source node not found for ' + s_ip + ': '\n"
+        + "                                 + _discovery_note())})\n"
         + "            continue\n"
         + "        plan.setdefault(src[1], []).append([d_ip, port, proto, dst_name])\n"
+        # Carry each endpoint's live address alongside the planned one. "No
+        # route" has two very different causes -- a broken route between two
+        # correctly addressed nodes, or a flow aimed at an address that exists
+        # nowhere in this session -- and only the live addresses separate them.
         + "        flow_meta[(d_ip, str(port), proto)] = {\n"
         + "            'src_id': flow.get('src_id'), 'dst_id': flow.get('dst_id'),\n"
-        + "            'dst_name': dst_name, 'src_name': src[1]}\n"
+        + "            'dst_name': dst_name, 'src_name': src[1],\n"
+        + "            'src_live': (nodes.get(src[1], {}).get('ips') or []),\n"
+        + "            'dst_live': (nodes.get(dst_name, {}).get('ips') or []),\n"
+        + "            'src_kind': src[0],\n"
+        + "            'src_links': (nodes.get(src[1], {}).get('links') or []),\n"
+        + "            'src_links_queried': bool(nodes.get(src[1], {}).get('links_queried')),\n"
+        + "            'dst_links': (nodes.get(dst_name, {}).get('links') or []),\n"
+        + "            'dst_links_queried': bool(nodes.get(dst_name, {}).get('links_queried')),\n"
+        + "            'dst_ip_owned': bool(by_ip.get(d_ip))}\n"
         + "    kind_of = dict((name, kind) for kind, name in alln)\n"
         + "    for sn, rows in plan.items():\n"
         + "        sk = kind_of.get(sn)\n"
@@ -1087,6 +1332,13 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "                rc2, out2 = _nexec(sk, sn, ['sh','-lc','ping -c1 -W1 '+d_ip+' >/dev/null 2>&1 && echo OK || echo NO'])\n"
         + "                row['icmp'] = ('OK' in out2)\n"
         + "            meta = flow_meta.get((d_ip, str(port), proto)) or {}\n"
+        + "            row['src_live'] = meta.get('src_live') or []\n"
+        + "            row['dst_live'] = meta.get('dst_live') or []\n"
+        + "            row['dst_ip_owned'] = bool(meta.get('dst_ip_owned'))\n"
+        + "            for key in ('src_kind', 'src_links', 'src_links_queried',\n"
+        + "                        'dst_links', 'dst_links_queried'):\n"
+        + "                if key in meta:\n"
+        + "                    row[key] = meta.get(key)\n"
         + "            row.update(_arrival(meta, port, proto, kind_of))\n"
         + "            ping.append(row)\n"
         + "        for d_ip, port, proto, dst_name in rows:\n"
@@ -1097,9 +1349,20 @@ def traffic_probe_script(sudo_password: str | None = None,
         + "                   'error': '', 'cmd': _repro_flow(sk, sn, d_ip, port, proto),\n"
         + "                   'why': 'required traffic probe produced no result'}\n"
         + "            meta = flow_meta.get((d_ip, str(port), proto)) or {}\n"
+        + "            row['src_live'] = meta.get('src_live') or []\n"
+        + "            row['dst_live'] = meta.get('dst_live') or []\n"
+        + "            row['dst_ip_owned'] = bool(meta.get('dst_ip_owned'))\n"
+        + "            for key in ('src_kind', 'src_links', 'src_links_queried',\n"
+        + "                        'dst_links', 'dst_links_queried'):\n"
+        + "                if key in meta:\n"
+        + "                    row[key] = meta.get(key)\n"
         + "            row.update(_arrival(meta, port, proto, kind_of))\n"
         + "            ping.append(row)\n"
-        + "    print(json.dumps({'ok': True, 'traffic_files': traffic_files, 'stale_files': traffic_stale, 'summary': summary, 'nodes': nodes, 'ping': ping}))\n"
+        + "    print(json.dumps({'ok': True, 'traffic_files': traffic_files, 'stale_files': traffic_stale,\n"
+        + "                      'summary': summary, 'nodes': nodes, 'ping': ping,\n"
+        + "                      'session': {'id': SESSION_ID, 'pycore': PYCORE,\n"
+        + "                                  'pycore_present': bool(PYCORE and os.path.isdir(PYCORE)),\n"
+        + "                                  'sessions_present': _session_dirs()}}))\n"
         + "main()\n"
     )
 
@@ -1199,12 +1462,19 @@ def segmentation_result(probe: Any, *, expected: bool) -> dict[str, Any]:
             bits.append(f"{len(seg_files)} script(s)")
         return _result("segmentation", "pass", "Segmentation in place: " + ", ".join(bits) + ".", items)
     if expected:
+        # /tmp/segmentation is the sibling of /tmp/traffic and shares its
+        # failure mode: sudo'd docker bind-mounts it, so the daemon can create
+        # it as root and the run cannot write its scripts. See traffic_result.
         return _result("segmentation", "skip",
-                       "Segmentation is enabled for this scenario but generated no rules.", items)
+                       "Segmentation is enabled for this scenario but generated no rules. "
+                       "If execute logged 'Permission denied' under /tmp/segmentation, that "
+                       "directory is owned by root on the CORE host; fix its ownership and "
+                       "pin it with an /etc/tmpfiles.d entry so a reboot cannot undo it.", items)
     return _result("segmentation", "skip", "No segmentation configured for this scenario.", items)
 
 
-def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
+def traffic_result(probe: Any, *, expected: bool,
+                   node_names_by_id: Any = None) -> dict[str, Any]:
     """Check 6: are the traffic scripts generated and running where they should be?
 
     Reachability is deliberately NOT part of this check — see reachability_result.
@@ -1300,18 +1570,32 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
             # agent instead of allowing dictionary order to choose the child.
             if current is None or (node in live_nodes and current not in live_nodes):
                 ip_to_node[ip] = node
+    # Flows record the CORE node id, which is the endpoint's real identity. An
+    # address is not: a node that lost or changed its CORE address -- the exact
+    # state worth reporting -- becomes unidentifiable precisely when it matters,
+    # and its dead agent then reads as an unrelated extra rather than a failure.
+    by_id: dict[str, str] = {}
+    for raw_id, raw_name in (node_names_by_id or {}).items():
+        node_name = _name(raw_name)
+        if node_name in nodes:
+            by_id[_name(raw_id)] = node_name
     for flow in flows:
         if not isinstance(flow, dict):
             continue
         for role, bucket in (("src", expected_senders), ("dst", expected_receivers)):
             declared_name = _name(flow.get(f"{role}_name"))
             address = _name(flow.get(f"{role}_ip"))
-            node = declared_name if declared_name in nodes else ip_to_node.get(address)
+            node_id = _name(flow.get(f"{role}_id"))
+            node = (by_id.get(node_id)
+                    or (declared_name if declared_name in nodes else "")
+                    or ip_to_node.get(address))
             if node:
                 bucket.add(node)
             else:
-                unresolved_endpoints.append(("source" if role == "src" else "destination",
-                                             declared_name or address or "missing address"))
+                label = declared_name or address or "missing address"
+                if node_id:
+                    label = f"{label} (node {node_id})"
+                unresolved_endpoints.append(("source" if role == "src" else "destination", label))
 
     required_agents = expected_senders | expected_receivers
     missing_required = sorted(required_agents - set(nodes_with_procs))
@@ -1331,6 +1615,11 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
         else:
             detail = (f"required traffic names this node as a {role_text}, but no traffic "
                       "process is running")
+        # TrafficService records why it did not start; without this the reason
+        # sits on the node and every diagnosis begins with an SSH session.
+        agent_log = _name((nodes.get(node) or {}).get("agent_log"))
+        if agent_log:
+            detail += f". Agent log: {agent_log}"
         items.append({"name": node, "status": "fail", "detail": detail})
 
     for role, endpoint in unresolved_endpoints:
@@ -1375,9 +1664,19 @@ def traffic_result(probe: Any, *, expected: bool) -> dict[str, Any]:
             bits.append(f"{len(nodes_with_procs)} node(s) running traffic")
         return _result("traffic", "pass", "; ".join(bits), items)
     if summary_missing and expected:
+        # The usual cause is ownership, not a bug in traffic generation: the
+        # docker preflight runs under sudo earlier in the same execute and
+        # bind-mounts /tmp/traffic, and the daemon creates a missing bind-mount
+        # source as root. After a reboot empties /tmp, docker therefore wins the
+        # race and the traffic phase cannot write into its own directory.
         return _result("traffic", "fail",
                        "The scenario declares traffic, but no runtime traffic_summary.json was found. "
-                       "Required traffic cannot be verified; confirm traffic generation ran during execute.",
+                       "Required traffic cannot be verified; confirm traffic generation ran during execute. "
+                       "If execute logged 'Permission denied' under /tmp/traffic, that directory is owned "
+                       "by root on the CORE host -- the sudo'd docker preflight bind-mounts it and so "
+                       "creates it first whenever /tmp is empty after a reboot. Fix the ownership of "
+                       "/tmp/traffic and /tmp/segmentation; an /etc/tmpfiles.d entry makes the fix "
+                       "survive reboots.",
                        items)
     return _result("traffic", "skip", "No traffic configured for this scenario.", items)
 
@@ -1484,7 +1783,11 @@ def flow_pivot_relationships(flow_state: Any) -> list[dict[str, Any]]:
             by_edge[edge] = current
             relationships.append(current)
         current["assignment_indexes"].append(assignment_index)
-        for port in _ports(entry.get("target_ports")):
+        # A pivot target usually declares no segmentation port, so fall back to the
+        # port its offering publishes. Without one the probe has only the node's
+        # live listeners to go on, which are empty while a container is still
+        # starting -- a healthy target then reads as having no service at all.
+        for port in _ports(entry.get("target_ports") or entry.get("inferred_target_ports")):
             if port not in current["target_ports"]:
                 current["target_ports"].append(port)
         for protocol in _protocols(entry.get("target_protocols")):
@@ -1602,15 +1905,23 @@ def flow_pivot_probe_script(sudo_password: str | None = None,
         + "   base.update({'reachable':False,'error':'target node has no usable IPv4 address','method':'node-lookup','cmd':''});checks.append(base);continue\n"
         + "  explicit=[]\n"
         + "  protocols=[str(x).upper() for x in (rel.get('target_protocols') or [])]\n"
-        + "  if not protocols or 'TCP' in protocols:\n"
+        + "  tcp=(not protocols) or ('TCP' in protocols)\n"
+        + "  if tcp:\n"
         + "   for value in (rel.get('target_ports') or []):\n"
         + "    try:\n"
         + "     port=int(value)\n"
         + "     if 1<=port<=65535 and port not in explicit:explicit.append(port)\n"
         + "    except Exception:pass\n"
         + "  ports=explicit or list(nodes[target].get('listening') or [])\n"
-        + "  basis='Flow target port' if explicit else ('target listening port' if ports else 'closed-port route probe')\n"
-        + "  if not ports:ports=[9]\n"
+        + "  basis='Flow target port' if explicit else 'target listening port'\n"
+        # No real port means there is nothing on the target for a participant to
+        # reach, which is a defect in its own right.  Probing a synthetic closed
+        # port instead cannot tell a dropped packet from an absent service under
+        # default-deny segmentation, so report the actual condition.
+        + "  if not ports:\n"
+        + "   if not tcp:\n"
+        + "    base.update({'reachable':False,'error':'the Flow pivot declares only '+'/'.join(protocols)+'; this TCP probe cannot validate it','method':'unsupported-protocol','cmd':''});checks.append(base);continue\n"
+        + "   base.update({'reachable':False,'error':'the target declares no Flow port and has nothing listening','method':'no-target-port','cmd':''});checks.append(base);continue\n"
         + "  base.update({'ip':ips[0],'candidate_ips':ips,'candidate_ports':ports,'basis':basis,'cmd':_repro(nodes[source]['kind'],source,ips[0],ports[0])})\n"
         + "  plan.setdefault(source,[]).append([idx,target,ips,ports,basis])\n"
         + "  checks.append(base)\n"
@@ -1627,7 +1938,13 @@ def flow_pivot_probe_script(sudo_password: str | None = None,
         + "   if not result:\n"
         + "    check.update({'reachable':False,'method':'probe-execution','error':('probe produced no result: '+str(out or '')[-240:])})\n"
         + "   else:\n"
+        # Rebuild the reproduce command from the endpoint actually tried. It was
+        # first built from candidate[0], but the prober walks every candidate IP
+        # and port, so on a multi-candidate failure the reported endpoint and the
+        # pasted command named different ports.
         + "    check.update({'ip':result[2],'port':result[3],'basis':result[4],'reachable':bool(result[5]),'method':result[6],'error':result[7],'attempts':(result[8] if len(result)>8 else 1)})\n"
+        + "    if result[2] and result[3]:\n"
+        + "     check['cmd']=_repro(nodes[source]['kind'],source,result[2],result[3])\n"
         + " print(json.dumps({'ok':True,'pivots':PIVOTS,'nodes':nodes,'checks':checks}))\n"
         + "main()\n"
     )
@@ -1653,6 +1970,7 @@ def flow_pivot_result(probe: Any) -> dict[str, Any]:
     }
     items: list[dict[str, Any]] = []
     failures = 0
+    unproven = 0
     for index, pivot in enumerate(pivots):
         source = _name(pivot.get("source")) or "missing source"
         target = _name(pivot.get("target")) or "missing target"
@@ -1683,8 +2001,20 @@ def flow_pivot_result(probe: Any) -> dict[str, Any]:
                 detail = "runtime path probe reached the target"
             items.append({"name": label + endpoint, "status": "pass", "detail": detail})
             continue
+        if method == "unsupported-protocol":
+            # A UDP/ICMP-only pivot is not something this TCP probe can judge
+            # either way, so it is neither a pass nor a broken path.
+            unproven += 1
+            items.append({"name": label + endpoint, "status": "warn",
+                          "detail": error or "this pivot cannot be validated by the TCP probe"})
+            continue
         failures += 1
-        if method == "node-lookup" or method == "metadata":
+        if method == "no-target-port":
+            detail = ("the target exposes no port for this pivot: no Flow target port is declared "
+                      "and nothing is listening on the node, so the participant has no service to "
+                      "reach. Check that the target's service started and is bound to a "
+                      "non-loopback address")
+        elif method == "node-lookup" or method == "metadata":
             detail = error or "Flow pivot endpoint metadata is incomplete"
         elif error == "no-route":
             detail = f"the pivot source has no route to the target{attempts_note}"
@@ -1702,6 +2032,13 @@ def flow_pivot_result(probe: Any) -> dict[str, Any]:
             "flow_pivot", "fail",
             f"{failures} of {len(pivots)} Flow pivot path(s) cannot reach their target; "
             "the challenge chain is unsolvable.",
+            items,
+        )
+    if unproven:
+        return _result(
+            "flow_pivot", "warn",
+            f"{unproven} of {len(pivots)} Flow pivot path(s) declare a non-TCP protocol and "
+            "cannot be validated by this probe.",
             items,
         )
     return _result(
@@ -1737,7 +2074,75 @@ def participant_probe_sources(participant_subnets: Any) -> list[str]:
     return out
 
 
-def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> dict[str, Any]:
+def hitl_participant_path_probe_rows(segmentation: Any, participant_subnets: Any) -> list[dict[str, Any]]:
+    """One live probe row per pivot provider, sourced as close to the participant
+    as the scenario allows.
+
+    Always attempted, including without a HITL network: the probe finds its own
+    vantage by looking for a router holding an interface on the source subnet, so
+    a source nobody routes back to simply yields no vantage and the check says it
+    could not verify rather than guessing.
+    """
+    sources = participant_probe_sources(participant_subnets)
+    allow_rules = _segmentation_allow_rules(segmentation)
+    rules_summary = segmentation.get("rules_summary") if isinstance(segmentation, dict) else None
+    access = rules_summary.get("pivot_access") if isinstance(rules_summary, dict) else None
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+    for provider in _as_list(access.get("providers") if isinstance(access, dict) else []):
+        if not isinstance(provider, dict):
+            continue
+        address = _name(provider.get("address"))
+        entry = provider.get("entry") if isinstance(provider.get("entry"), dict) else {}
+        try:
+            port = int(entry.get("port"))
+        except (TypeError, ValueError):
+            continue
+        if not address:
+            continue
+        # With no participant network, ask from outside the subnet the provider
+        # guards -- the same stand-in the rule analysis uses, so both halves of
+        # the check speak about the same source.
+        subnet = _name(provider.get("subnet"))
+        probe_sources = sources or [_allow_rule_stand_in(address, port, subnet, allow_rules)
+                                    or _outside_address(subnet)]
+        for src in probe_sources:
+            key = (src, address, port)
+            if key in seen:
+                continue
+            seen.add(key)
+            row = {"src": src, "dst": address, "port": port,
+                   "label": _name(provider.get("node_name"))}
+            # The stand-in is a documentation address, which no node in a CORE
+            # topology can hold -- so the vantage search never matched it and
+            # the wire test could not run at all, leaving check 9 unable to
+            # reach `pass` in any scenario without a participant network.
+            # Name the subnet instead and let the VM pick a router that really
+            # sits outside it, which is a source the path can also answer.
+            if not sources and subnet:
+                row["outside_of"] = subnet
+            rows.append(row)
+    return rows
+
+
+def _live_path_verdicts(live_probe: Any) -> dict[tuple[str, int], dict[str, Any]]:
+    """Live participant-path results keyed by (provider address, port)."""
+    out: dict[tuple[str, int], dict[str, Any]] = {}
+    if not isinstance(live_probe, dict) or not live_probe.get("ok"):
+        return out
+    for row in _as_list(live_probe.get("checks")):
+        if not isinstance(row, dict):
+            continue
+        try:
+            key = (_name(row.get("dst")), int(row.get("port")))
+        except (TypeError, ValueError):
+            continue
+        out[key] = row
+    return out
+
+
+def pivot_access_result(segmentation: Any, participant_subnets: Any = None,
+                        live_probe: Any = None) -> dict[str, Any]:
     """Check 9: can the participant reach each pivot provider?
 
     A provider is the only way into a subnet segmentation walled off, so a
@@ -1778,9 +2183,21 @@ def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> d
 
     allow_rules = _segmentation_allow_rules(segmentation)
     sources = participant_probe_sources(participant_subnets)
+    node_rules = _segmentation_runtime_rules_by_node(segmentation)
     items: list[dict[str, Any]] = []
     unreachable = 0
     unplaced = 0
+    shadowed = 0
+    # No HITL network means no participant subnet to ask from, so the question is
+    # answered with a stand-in address outside the walled-off subnet. That is a
+    # weaker statement than the real one and the summary has to say so.
+    used_stand_in = not sources
+    live_verdicts = _live_path_verdicts(live_probe)
+    # A provider whose live probe could not run is neither proven nor broken.
+    # Without a router on the source subnet there is no vantage to ask from, and
+    # in that topology the rule analysis is the whole answer available.
+    unverified = 0
+    unverified_reasons: list[str] = []
 
     for provider in providers:
         if not isinstance(provider, dict):
@@ -1804,7 +2221,10 @@ def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> d
         probes = list(sources)
         origin = "the participant network"
         if not probes:
-            probes = [_outside_address(subnet)]
+            # Same stand-in the probe rows use, so both halves of the check
+            # speak about one source rather than reaching different verdicts.
+            probes = [_allow_rule_stand_in(address, port, subnet, allow_rules)
+                      or _outside_address(subnet)]
             origin = "outside the walled-off subnet"
         probes = [p for p in probes if p]
         if not probes:
@@ -1818,25 +2238,279 @@ def pivot_access_result(segmentation: Any, participant_subnets: Any = None) -> d
                           "detail": (f"no allow rule opens this provider from {origin} "
                                      f"({', '.join(missing)}), so the challenges behind "
                                      f"{subnet} cannot be started")})
-        else:
-            items.append({"name": label, "status": "pass",
-                          "detail": f"reachable from {origin} on port {port}"})
+            continue
 
-    if unplaced or unreachable:
-        broken = unplaced + unreachable
+        # An allow rule existing is not the same as traffic passing: iptables
+        # takes the first match, so a DROP sitting earlier in the same chain
+        # silences the allow entirely.
+        blocked_by = None
+        for src in probes:
+            opening = _allow_rule_opening(src, address, port, allow_rules)
+            blocked_by = _shadowing_rule(opening, src, address, port, node_rules)
+            if blocked_by:
+                break
+        if blocked_by:
+            shadowed += 1
+            items.append({"name": label, "status": "fail",
+                          "detail": (f"an allow rule opens this provider from {origin}, but "
+                                     f"{blocked_by} matches earlier in the same chain and drops "
+                                     f"the traffic first, so the challenges behind {subnet} "
+                                     "cannot be started")})
+            continue
+        # A live reply is stronger evidence than the rules: it also settles
+        # routing, NAT rewriting and conntrack, which the rules cannot show.
+        live = live_verdicts.get((address, int(port))) if str(port).isdigit() else None
+        error = _name(live.get("error")) if isinstance(live, dict) else ""
+        # The VM may have substituted a real router outside the walled-off
+        # subnet for our stand-in address. That is a better source -- it exists,
+        # so the reply has somewhere to return to -- but it only settles this
+        # check if the same allow rule opens the provider from there too.
+        stand_in_src = _name(live.get("src_used")) if isinstance(live, dict) else ""
+        stand_in_covered = bool(
+            stand_in_src and _allow_rule_opening(stand_in_src, address, port, allow_rules))
+        if isinstance(live, dict) and live.get("reachable") and (not stand_in_src or stand_in_covered):
+            reply = _name(live.get("reply"))
+            proof = ("the target answered SYN-ACK" if reply == "syn-ack"
+                     else "the target answered RST, so nothing is listening yet but the "
+                          "path carries traffic")
+            asked_from = (f"{_name(live.get('source')) or 'a router outside the subnet'} "
+                          f"at {stand_in_src}" if stand_in_src
+                          else _name(live.get('vantage')) or 'the participant-facing router')
+            items.append({"name": label, "status": "pass",
+                          "detail": (f"reachable from {origin} on port {port}; verified live "
+                                     f"from {asked_from} "
+                                     f"-- {proof} and the reply returned along the participant path")})
+            continue
+        # Anything short of a covered, answered probe from a source we chose
+        # ourselves leaves this unverified rather than failed: the stand-in
+        # stands for a participant network that does not exist here, so neither
+        # its silence nor a reply the rule does not speak about can condemn the
+        # real participant path.
+        if isinstance(live, dict) and stand_in_src:
+            unverified += 1
+            if live.get("reachable"):
+                reason = (f"the wire test answered from {stand_in_src}, which no allow rule for "
+                          "this provider covers, so the reply says nothing about the rule under "
+                          "test")
+            else:
+                reason = (f"asked from {stand_in_src}, a router outside the subnet standing in for the "
+                          f"participant, and got no reply ({error or 'no reply'}); with no participant "
+                          "network configured this does not show the real participant path is broken")
+            if reason not in unverified_reasons:
+                unverified_reasons.append(reason)
+            items.append({"name": label, "status": "warn",
+                          "detail": (f"an allow rule opens this provider from {origin} on port "
+                                     f"{port}, but this was not confirmed on the wire: {reason}")})
+            continue
+        # A genuine silent path is a fault; a probe that could not run is not.
+        if isinstance(live, dict) and not error.startswith("no node holds") and not error.startswith("cannot "):
+            unreachable += 1
+            items.append({"name": label, "status": "fail",
+                          "detail": (f"an allow rule opens this provider from {origin}, but a live "
+                                     f"probe from {_name(live.get('vantage')) or 'the participant-facing router'} "
+                                     f"got no reply ({error or 'no reply'}); the rules "
+                                     "permit it but traffic does not return, so check routing and NAT")})
+            continue
+        unverified += 1
+        if error.startswith("no node holds"):
+            reason = ("no router holds an interface on that source network, so there is no vantage "
+                      "to send from; in that topology the rule analysis above is the whole answer")
+        elif error.startswith("cannot "):
+            reason = f"the live probe could not run on the vantage router ({error})"
+        else:
+            reason = "no live probe result was returned for this provider"
+        if reason not in unverified_reasons:
+            unverified_reasons.append(reason)
+        items.append({"name": label, "status": "warn",
+                      "detail": (f"an allow rule opens this provider from {origin} on port {port}, "
+                                 f"but this was not confirmed on the wire: {reason}")})
+
+    vantage = ("an address outside each walled-off subnet (no participant network is "
+               "configured, so this does not prove the real participant network reaches them)"
+               if used_stand_in else "the participant network")
+    if unplaced or unreachable or shadowed:
+        broken = unplaced + unreachable + shadowed
         return _result("pivot_access", "fail",
-                       f"{broken} of {len(providers)} pivot provider(s) cannot be reached by the "
-                       f"participant; the challenges behind those boundaries are unsolvable.", items)
+                       f"{broken} of {len(providers)} pivot provider(s) cannot be reached from "
+                       f"{vantage}; the challenges behind those boundaries are unsolvable.", items)
+    if unverified:
+        # The rules permit it and nothing contradicts them, but no packet
+        # confirmed it, so this must not read as a verified participant path.
+        return _result("pivot_access", "warn",
+                       f"{unverified} of {len(providers)} pivot provider(s) are opened to "
+                       f"{vantage} by the rules, but were not confirmed on the wire: "
+                       f"{'; '.join(unverified_reasons)}.", items)
+    verified_from = ("a router outside each walled-off subnet" if used_stand_in
+                     else "the participant-facing router")
     return _result("pivot_access", "pass",
-                   f"All {len(providers)} pivot provider(s) reachable from the participant.", items)
+                   f"All {len(providers)} pivot provider(s) reachable from {vantage}, verified "
+                   f"live from {verified_from}.", items)
+
+
+_HITL_PROBE_PY = '\nimport json, random, socket, struct, time\n\nSRC = "__SRC__"\nDST = "__DST__"\nPORT = int("__PORT__")\nBUDGET = float("__BUDGET__")\n\ndef _csum(data):\n    if len(data) % 2:\n        data += b"\\x00"\n    total = 0\n    for i in range(0, len(data), 2):\n        total += (data[i] << 8) + data[i + 1]\n    total = (total >> 16) + (total & 0xFFFF)\n    total += total >> 16\n    return (~total) & 0xFFFF\n\ndef _syn(src, dst, sport, dport, seq):\n    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, random.randint(1, 65535), 0,\n                     64, socket.IPPROTO_TCP, 0,\n                     socket.inet_aton(src), socket.inet_aton(dst))\n    def _tcp(chk):\n        return struct.pack("!HHLLBBHHH", sport, dport, seq, 0, 5 << 4, 0x02, 5840, chk, 0)\n    pseudo = (socket.inet_aton(src) + socket.inet_aton(dst)\n              + struct.pack("!BBH", 0, socket.IPPROTO_TCP, 20))\n    return ip + _tcp(_csum(pseudo + _tcp(0)))\n\nout = {"src": SRC, "dst": DST, "port": PORT, "reachable": False,\n       "reply": "", "error": "", "attempts": 0}\n\ntry:\n    # SOCK_DGRAM strips the link-layer header, so this also works on the\n    # non-Ethernet links CORE sometimes puts between routers.\n    sniff = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0800))\n    sniff.settimeout(0.4)\nexcept Exception as exc:\n    out["error"] = "cannot sniff: %s" % exc\n    print(json.dumps(out))\n    raise SystemExit(0)\n\ntry:\n    sender = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)\nexcept Exception as exc:\n    out["error"] = "cannot open raw socket: %s" % exc\n    print(json.dumps(out))\n    raise SystemExit(0)\n\nsrc_raw = socket.inet_aton(SRC)\ndst_raw = socket.inet_aton(DST)\ndeadline = time.time() + BUDGET\n\nfor attempt in range(1, 4):\n    out["attempts"] = attempt\n    sport = random.randint(20000, 60000)\n    try:\n        sender.sendto(_syn(SRC, DST, sport, PORT, random.randint(0, 2 ** 32 - 1)), (DST, 0))\n    except Exception as exc:\n        out["error"] = "send failed: %s" % exc\n        break\n    while time.time() < deadline:\n        try:\n            data = sniff.recv(2048)\n        except socket.timeout:\n            break\n        except Exception:\n            break\n        if len(data) < 20 or (data[0] >> 4) != 4 or data[9] != socket.IPPROTO_TCP:\n            continue\n        # The reply is addressed to the participant, so we only ever see it in\n        # transit -- match it on the exact four-tuple, reversed.\n        if data[12:16] != dst_raw or data[16:20] != src_raw:\n            continue\n        ihl = (data[0] & 0x0F) * 4\n        tcp = data[ihl:ihl + 20]\n        if len(tcp) < 20:\n            continue\n        sport_r, dport_r = struct.unpack("!HH", tcp[0:4])\n        if sport_r != PORT or dport_r != sport:\n            continue\n        flags = tcp[13]\n        if flags & 0x12 == 0x12:\n            out["reachable"] = True\n            out["reply"] = "syn-ack"\n        elif flags & 0x04:\n            out["reachable"] = True\n            out["reply"] = "rst"\n        else:\n            continue\n        break\n    if out["reachable"] or time.time() >= deadline:\n        break\n\nif not out["reachable"] and not out["error"]:\n    out["error"] = "no reply"\nprint(json.dumps(out))\n'
+
+
+def hitl_participant_path_probe_script(sudo_password: str | None = None,
+                                       session_id: Any = None,
+                                       probes: Any = None,
+                                       budget_seconds: float = 4.0) -> str:
+    """VM-side live test of the participant -> provider path.
+
+    Check 9 can only read the rules, because the participant sits behind a
+    physical RJ45 that no namespace on this host owns. This gets as close as the
+    scenario allows: from the router that holds an interface on the participant
+    subnet, send a SYN carrying the participant's source address and watch the
+    wire for the answer.
+
+    Nothing is mutated and no address is claimed -- the reply is addressed to the
+    participant and merely passes through this router, so it is observed in
+    transit rather than received. A SYN-ACK or an RST both prove the round trip;
+    only silence means the path is broken. That covers what rule analysis cannot
+    see: routing, NAT rewriting and conntrack.
+    """
+    rows = [dict(item) for item in _as_list(probes) if isinstance(item, dict)]
+    return (
+        _remote_preamble(sudo_password, session_id)
+        + "import ipaddress\n"
+        + f"PROBES = {json.dumps(rows, separators=(',', ':'))}\n"
+        + f"PROBE_PY = {json.dumps(_HITL_PROBE_PY)}\n"
+        + f"BUDGET = {float(budget_seconds)!r}\n"
+        + "def _holds(kind, name, address):\n"
+        + "    for cidr in _node_cidrs(kind, name):\n"
+        + "        try:\n"
+        + "            if ipaddress.ip_address(address) in ipaddress.ip_network(cidr, strict=False):\n"
+        + "                return True\n"
+        + "        except Exception:\n"
+        + "            continue\n"
+        + "    return False\n"
+        # A router interface that sits outside the walled-off subnet. Used when
+        # the caller has no participant network and asked for a stand-in: it is
+        # both a real source the reply can come back to and its own vantage.
+        + "def _outside_router(nodes, subnet):\n"
+        + "    try:\n"
+        + "        walled = ipaddress.ip_network(subnet, strict=False)\n"
+        + "    except Exception:\n"
+        + "        return ('', '', '')\n"
+        + "    for kind, name in nodes:\n"
+        + "        if kind != 'vnode':\n"
+        + "            continue\n"
+        + "        for cidr in _node_cidrs(kind, name):\n"
+        + "            try:\n"
+        + "                addr = ipaddress.ip_interface(cidr).ip\n"
+        + "            except Exception:\n"
+        + "                continue\n"
+        + "            if addr not in walled:\n"
+        + "                return (kind, name, str(addr))\n"
+        + "    return ('', '', '')\n"
+        + "def main():\n"
+        + "    nodes = _all_nodes()\n"
+        + "    checks = []\n"
+        + "    vantage_cache = {}\n"
+        + "    outside_cache = {}\n"
+        + "    for row in PROBES:\n"
+        + "        src = str(row.get('src') or '')\n"
+        + "        dst = str(row.get('dst') or '')\n"
+        + "        port = row.get('port')\n"
+        + "        base = {'src': src, 'dst': dst, 'port': port,\n"
+        + "                'label': row.get('label') or '', 'vantage': ''}\n"
+        + "        if not src or not dst or not port:\n"
+        + "            base.update({'reachable': False, 'error': 'incomplete probe row'})\n"
+        + "            checks.append(base); continue\n"
+        # The router owning an interface on the participant subnet is the
+        # closest point to the participant this host can enter.
+        + "        if src not in vantage_cache:\n"
+        + "            found = ('', '')\n"
+        + "            for kind, name in nodes:\n"
+        + "                if kind == 'vnode' and _holds(kind, name, src):\n"
+        + "                    found = (kind, name); break\n"
+        + "            vantage_cache[src] = found\n"
+        + "        kind, name = vantage_cache[src]\n"
+        # No router sits on the requested source network. When the caller asked
+        # for a stand-in rather than a real participant address, any router
+        # outside the walled-off subnet answers the same question, and using its
+        # own address makes the source real instead of a fiction.
+        + "        outside_of = str(row.get('outside_of') or '')\n"
+        + "        if not name and outside_of:\n"
+        + "            if outside_of not in outside_cache:\n"
+        + "                outside_cache[outside_of] = _outside_router(nodes, outside_of)\n"
+        + "            kind, name, picked = outside_cache[outside_of]\n"
+        + "            if name and picked:\n"
+        + "                src = picked\n"
+        + "                base['src'] = src\n"
+        + "                base['src_used'] = src\n"
+        + "                base['source'] = 'router outside ' + outside_of\n"
+        + "        if not name:\n"
+        + "            base.update({'reachable': False,\n"
+        + "                         'error': 'no node holds an interface on the participant subnet'})\n"
+        + "            checks.append(base); continue\n"
+        + "        base['vantage'] = name\n"
+        + "        program = (PROBE_PY.replace('__SRC__', src).replace('__DST__', dst)\n"
+        + "                   .replace('__PORT__', str(int(port))).replace('__BUDGET__', str(BUDGET)))\n"
+        + "        rc, out = _nexec_python(kind, name, program, timeout=int(BUDGET) + 20)\n"
+        + "        parsed = None\n"
+        + "        try:\n"
+        + "            parsed = json.loads(out.strip().splitlines()[-1])\n"
+        + "        except Exception:\n"
+        + "            parsed = None\n"
+        + "        if not isinstance(parsed, dict):\n"
+        + "            base.update({'reachable': False,\n"
+        + "                         'error': 'probe produced no result: ' + str(out or '')[-200:]})\n"
+        + "        else:\n"
+        + "            base.update({'reachable': bool(parsed.get('reachable')),\n"
+        + "                         'reply': parsed.get('reply') or '',\n"
+        + "                         'error': parsed.get('error') or '',\n"
+        + "                         'attempts': parsed.get('attempts') or 0})\n"
+        + "        checks.append(base)\n"
+        + "    print(json.dumps({'ok': True, 'checks': checks}))\n"
+        + "main()\n"
+    )
+
+
+def _allow_rule_stand_in(address: str, port: Any, subnet: str,
+                         allow_rules: list[dict[str, Any]]) -> str:
+    """A stand-in source taken from whatever actually opens this provider.
+
+    Asking from a documentation address only works when the rule opens the
+    provider to everyone. A rule scoped to one source network does not cover
+    that address, so the check reported "no allow rule opens this provider" --
+    a hard failure produced entirely by our own choice of source. Reading the
+    source out of the rule asks the question the scenario actually arranged
+    for, and lands on a network the topology is likely to route.
+    """
+    try:
+        walled = ipaddress.ip_network(_name(subnet), strict=False) if subnet else None
+    except Exception:
+        walled = None
+    for rule in allow_rules:
+        try:
+            if int(rule.get("port")) != int(port):
+                continue
+        except (TypeError, ValueError):
+            continue
+        selector = _name(rule.get("src"))
+        if not selector or selector in ("*", "0.0.0.0/0"):
+            continue
+        try:
+            network = ipaddress.ip_network(selector, strict=False)
+        except Exception:
+            continue
+        candidates = ([network.network_address] if network.prefixlen >= 31
+                      else list(itertools.islice(network.hosts(), 1)))
+        for candidate in candidates:
+            if walled is not None and candidate in walled:
+                continue
+            if _allow_rule_opening(str(candidate), address, port, allow_rules):
+                return str(candidate)
+    return ""
 
 
 def _outside_address(subnet: str) -> str:
     """An address that is definitely not inside `subnet`.
 
-    Used when no participant network is configured: the provider still has to be
-    reachable from somewhere outside the subnet it guards, and that is the same
-    question with a stand-in for the participant.
+    Used when no participant network is configured and no allow rule names a
+    source network: the provider still has to be reachable from somewhere
+    outside the subnet it guards, and that is the same question with a stand-in
+    for the participant.
     """
     try:
         net = ipaddress.ip_network(_name(subnet), strict=False)
@@ -1846,6 +2520,71 @@ def _outside_address(subnet: str) -> str:
         if ipaddress.ip_address(candidate) not in net:
             return candidate
     return "203.0.113.1"
+
+
+def _unaddressed_note(row: Any, node: str, role: str, consequence: str) -> str:
+    """Why a node holds no address — the interfaces answer that, not the address.
+
+    Three states look identical from an empty address list and need different
+    fixes: the node has no interface beyond loopback, so it was created but
+    never linked into the topology; it has interfaces that were never addressed
+    (or lost their address, which is what a container restarted after execute
+    looks like); or its interfaces could not be listed at all.
+    """
+    links = [_name(v) for v in _as_list(row.get(f"{role}_links")) if _name(v)]
+    queried = bool(row.get(f"{role}_links_queried"))
+    kind = _name(row.get("src_kind")) if role == "src" else ""
+    if links:
+        lost = (" (a container that restarted after execute comes up unconfigured)"
+                if kind == "docker" else "")
+        return (f"{node} has {', '.join(links)} but no IPv4 address on it, {consequence}: "
+                f"its CORE addressing was never applied or has been lost{lost}")
+    if queried:
+        return (f"{node} has no network interface beyond loopback, {consequence}: the node is "
+                "running but was never linked into the topology, so no address could be "
+                "applied to it")
+    return (f"{node} has no IPv4 address of its own and its interfaces could not be listed, "
+            f"{consequence}: its CORE addressing was never applied or has been lost")
+
+
+def _addressing_note(row: Any) -> str:
+    """Say whether a failing flow is even aimed at an address that exists.
+
+    "No route" has two causes that need opposite fixes. Either two correctly
+    addressed nodes have no path between them — a routing or segmentation
+    problem — or the flow targets an address no node in this session owns,
+    which means the traffic artifacts were built against different addressing
+    and no amount of routing will help. The endpoints' live addresses are the
+    only thing that tells them apart, so report them here rather than leaving
+    the reader to go and look.
+    """
+    if not isinstance(row, dict):
+        return ""
+    target = _name(row.get("ip"))
+    dst_name = _name(row.get("dst"))
+    src_name = _name(row.get("src"))
+    dst_live = [_name(v) for v in _as_list(row.get("dst_live")) if _name(v)]
+    src_live = [_name(v) for v in _as_list(row.get("src_live")) if _name(v)]
+    if row.get("dst_ip_owned"):
+        return ""
+    # A node with no address of its own has no route to anywhere, which is a
+    # node-configuration fault, not a traffic-plan one. Say that first: it is
+    # the same evidence but a completely different fix.
+    if "src_live" in row and not src_live:
+        return f". {_unaddressed_note(row, src_name, 'src', 'so it has no route to anything')}"
+    if not dst_live:
+        # Regenerating the traffic plan cannot help an endpoint that holds no
+        # address, so do not suggest it here.
+        if dst_name and "dst_live" in row:
+            return f". {_unaddressed_note(row, dst_name, 'dst', 'so nothing can reach it')}"
+        return ""
+    note = f". No running node holds {target}: {dst_name} is at {', '.join(dst_live)}"
+    if src_live:
+        note += f", and {src_name} is at {', '.join(src_live)}"
+    note += (". This flow was generated against different addressing than the running "
+             "session, so it cannot connect until the traffic artifacts are regenerated "
+             "by an execute against this topology")
+    return note
 
 
 def reachability_result(probe: Any) -> dict[str, Any]:
@@ -1957,6 +2696,7 @@ def reachability_result(probe: Any) -> dict[str, Any]:
             icmp = row.get("icmp")
             if err == "no-route":
                 detail = (f"no route to the destination{attempts_note} — the source cannot reach that network at all")
+                detail += _addressing_note(row)
             elif icmp is True:
                 detail = (f"the host answers ping but the {proto or 'flow'} port is filtered or closed"
                           f"{attempts_note}, "

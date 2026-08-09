@@ -46,3 +46,28 @@ def test_traffic_service_degrades_loudly_when_no_agent_is_present():
     # Silent failure is what made the previous implementation hard to notice.
     assert 'no traffic-agent binary' in txt
     assert 'no traffic config' in txt
+
+
+def test_traffic_service_waits_for_a_config_that_has_not_landed_yet():
+    p = Path("on_core_machine/custom_services/TrafficService.py")
+    txt = p.read_text("utf-8", errors="ignore")
+
+    # Services start as the session comes up, and the traffic artifacts are
+    # staged into the shared /tmp/traffic at about the same moment. Checking
+    # once and exiting left the node silent for the whole run.
+    assert 'for _tick in 1 2 3' in txt
+    assert '[ -f "$config" ] && break' in txt
+    assert 'after ~60s' in txt
+
+
+def test_traffic_service_restarts_an_agent_that_dies_but_not_one_that_was_signalled():
+    p = Path("on_core_machine/custom_services/TrafficService.py")
+    txt = p.read_text("utf-8", errors="ignore")
+
+    # The agent retries every dial and every listen itself; the loop covers the
+    # case it cannot -- the process going away entirely.
+    assert 'restarting in 5s' in txt
+    # A signalled exit is session teardown. Restarting there fights CORE's
+    # cleanup and leaves orphans behind.
+    assert '[ "$rc" -ge 128 ]' in txt
+    assert 'not restarting' in txt

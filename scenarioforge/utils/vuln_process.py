@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 _COMPOSE_PORT_CACHE: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
 
+# How many times Docker may restart a crashing node service before leaving it
+# down. Enough to ride out a dependency warm-up race; low enough that a genuinely
+# broken image stops flapping, because every restart discards the CORE network
+# configuration applied to the previous container namespace.
+CORETG_NODE_RESTART_MAX_ATTEMPTS = 3
+
 
 _DOCKER_SUDO_PASSWORD_CACHE: Optional[str] = None
 
@@ -3965,7 +3971,13 @@ def _wrapper_app_user_shim_lines() -> List[str]:
 		"\t\techo '  if [ -n \"$name\" ] && [ \"$name\" != \"root\" ] && \"$BB\" id -u \"$name\" >/dev/null 2>&1; then'; \\",
 		"\t\techo '    tgt=\"$name\"'; \\",
 		"\t\techo '  fi'; \\",
-		"\t\techo '  exec \"$BB\" setuidgid \"$tgt\" \"$@\"'; \\",
+		# exec replaces this shell, so a busybox without the setuidgid applet
+		# would kill the container instead of starting the app. Probe first and
+		# fall through to running as-is: too privileged beats not running.
+		"\t\techo '  if \"$BB\" setuidgid \"$tgt\" true >/dev/null 2>&1; then'; \\",
+		"\t\techo '    exec \"$BB\" setuidgid \"$tgt\" \"$@\"'; \\",
+		"\t\techo '  fi'; \\",
+		"\t\techo '  echo \"[coretg] setuidgid unavailable; running as current user\" >&2'; \\",
 		"\t\techo 'fi'; \\",
 		"\t\techo 'exec \"$@\"'; \\",
 		f"\t}} > {CORETG_APP_USER_SHIM_PATH}; \\",
@@ -5712,12 +5724,26 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						pass
 					# Compose node services can fail once during dependency warm-up (e.g., DB not ready).
 					# Keep them resilient so transient startup races do not become hard validation failures.
+					#
+					# Bounded on purpose. CORE configures a docker node *after* its
+					# container is running: the interface address, the host-side
+					# default route (injected with `nsenter ... ip route replace`)
+					# and the traffic agent all live in the container's network
+					# namespace, and nothing re-applies them. A container that keeps
+					# restarting therefore comes back each time with no address, no
+					# route and no agent -- which surfaces as unrelated-looking
+					# reachability, routing and traffic failures rather than as the
+					# crash it is. `unless-stopped` restarts forever and on any exit
+					# code, so it turns one broken image into a silent loop;
+					# `on-failure` with a cap still covers the warm-up race this is
+					# here for, then leaves the container down where the artifact
+					# checks report it plainly.
 					try:
 						services = obj.get('services') if isinstance(obj, dict) else None
 						node_svc = services.get(node_name) if isinstance(services, dict) else None
 						if isinstance(node_svc, dict):
 							_force_service_root_user_for_core(node_svc)
-							node_svc['restart'] = 'unless-stopped'
+							node_svc['restart'] = f'on-failure:{CORETG_NODE_RESTART_MAX_ATTEMPTS}'
 					except Exception:
 						pass
 				except Exception:

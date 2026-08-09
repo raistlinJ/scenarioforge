@@ -275,6 +275,10 @@ them.
 - Traffic artifacts land in `/tmp/traffic` — one `traffic_<node_id>.json` agent config per node, the static agent binaries for both architectures, and `traffic_summary.json` — and respect overrides for pattern, rate, jitter, and content hints. They are per-flow *scripts* no longer: a vulnerability image often has no `python3`, so traffic assigned to a Docker node silently never ran.
 - Segmentation scripts land in `/tmp/segmentation` alongside a `segmentation_summary.json`; NAT mode, DNAT probability, host inclusion, and docker port allowances are configurable.
 - Both traffic and segmentation are decided at plan time and replayed at execute; see [The plan is what runs](#the-plan-is-what-runs).
+- **A host that finishes the build with no IPv4 address fails the phase loudly.** Such a node runs but has no route to anything, so every flow, challenge and pivot touching it silently cannot work — this shipped once as a scenario whose fifteen nodes were all unlinked, and nothing said so until the traffic reachability check failed much later, pointing at traffic rather than at the topology. Every builder path now reports the offending node ids at `ERROR`, and records them as `hosts_unaddressed` in the run metadata and the scenario report.
+- **The plan decides the endpoints; this run decides their addresses.** A replayed flow keeps its node ids, protocol, port, rate and pattern, but each endpoint's IP is rebound to the address that node actually has in the topology built by this execute. A plan carrying addresses from a different draw otherwise made senders dial IPs no node owned — the flows never connected, and the artifact check (which matches flows to running nodes by address) reported `traffic source node not found for <ip>` for every one of them. Endpoints absent from this run keep the planned address rather than being given an invented one.
+- **Both ends of a flow retry for the whole run.** A sender re-dials indefinitely, backing off 1s→15s, so a flow starts as soon as routing converges — OSPF adjacency on a large topology can take minutes. A receiver now retries its bind on the same terms: returning on the first `listen` error killed the flow permanently, and the sender then retried forever against a node that would never listen again, which reads as an unreachable destination rather than a dead receiver. Both log the first failure and every thirtieth, plus the recovery, so a slow convergence is visible without filling the node's log.
+- The launcher (`TrafficService`) waits up to ~60s for its `/tmp/traffic/traffic_<node_id>.json` to appear rather than checking once, and supervises the agent so a process that dies is restarted after 5s. A signalled exit (128+N) is treated as session teardown and is *not* restarted, so the loop never fights CORE's own cleanup.
 - Docker vulnerabilities attach per-node docker-compose files in `/tmp/vulns`; generated services default to `network_mode: none` so CORE owns `eth0` and Docker does not add an unmanaged backend interface. Multi-service Compose networking is an explicit opt-in via `CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1` plus `CORETG_DOCKER_IFID_START=1`.
 - Custom traffic plugins can register via `scenarioforge.plugins.traffic.register()` for bespoke sender/receiver code.
 
@@ -572,7 +576,7 @@ A downloadable, self-checking bash script generated from the resolved Attack Flo
 ## Artifact checks (live session validation)
 Verifies that a **running** CORE session matches what the scenario said it should be. Available as a per-session icon button in the CORE page **Active sessions** card, and as the `check-artifacts` CLI phase.
 
-Seven ordered checks, each reported as `pass`, `warn`, `fail`, `error`, or `skip`:
+Nine ordered checks, each reported as `pass`, `warn`, `fail`, `error`, or `skip`:
 
 1. Containers running on the correct nodes.
 2. Services running.
@@ -581,6 +585,64 @@ Seven ordered checks, each reported as `pass`, `warn`, `fail`, `error`, or `skip
 5. Firewall/segmentation rules in place.
 6. Traffic agents running where they should be.
 7. Each traffic source reaching its destination, tested on the flow's own protocol and port.
+8. Each Flow challenge-chain pivot path traversable from its source node to its target.
+9. Each segmentation pivot provider reachable from the participant.
+
+### The two "pivot" checks are unrelated features
+
+Checks 8 and 9 both say "pivot" and are routinely confused. They answer different
+questions, for different actors, and neither one's result says anything about the
+other.
+
+|                | 8 — Flow pivot paths | 9 — Pivot providers |
+| -------------- | -------------------- | ------------------- |
+| Question       | once you are inside, can you move along the chain? | can you get inside at all? |
+| Probes from    | the source node's own namespace | the participant network |
+| Probes to      | the next challenge's service port | the provider node's entry port |
+| Direction      | inside → inside | outside → inside |
+| Created by     | Flow sequencing, as `Pivot(node)` facts | Segmentation's `accessible_by_pivot` |
+| Access is      | **earned** by exploiting the source node | **granted** by a provisioned allow rule |
+
+**Check 8** validates the network precondition of a challenge dependency. When Flow
+records `Pivot(docker-7)` on a challenge, the participant is expected to solve
+docker-7 first and attack the next target from there — typically because that target
+carries `exposure: pivot-only`, so segmentation admits it only from the pivot
+source's address. The check enters the source node's network namespace and opens a
+TCP connection to the target's port, because reachability is vantage-dependent:
+under default-deny a target may be reachable from a router and not from the node the
+participant will actually be standing on.
+
+It does **not** exploit anything. It never verifies that the vulnerability works, or
+that solving the source yields what the target requires — that side is settled at
+plan time by the capability solver matching each vuln's declared `requires`/`provides`
+facts (see `VULN_CAPABILITY_METADATA.md`). "The challenge chain is unsolvable" in this
+check's summary means *the path does not exist*, not *the puzzle is wrong*.
+
+**Check 9** exists only when segmentation seals a subnet off from the participant
+entirely. Everything behind that wall is then unsolvable from the start, so
+`accessible_by_pivot` places a reachable **provider** node inside it — added new or
+reused from the subnet's existing hosts — and opens one allow rule from the
+participant network to its entry port. The check verifies that single rule really
+admits the participant. Three outcomes: an empty provider list is a `skip` (nothing
+was walled off); a provider with no address or port is a `fail` (an entrance was
+required and never placed); a placed provider is checked against the allow rules and,
+where a vantage exists, confirmed on the wire.
+
+A scenario can legitimately have one and not the other. If a vulnerability in the
+chain grants the access, that is check 8; if the scenario has to *hand over* access
+because no challenge can provide it, that is check 9. A chain full of `Pivot()` steps
+with `accessible_by_pivot` switched on will still skip check 9 whenever segmentation
+never produced a subnet needing an entrance — the toggle was on and had nothing to do.
+
+Three unrelated things wear the word "pivot", which is the root of most of the
+confusion:
+
+- `Pivot(node)` — a Flow fact: a challenge dependency.
+- `provider: vulnerability` on a Flow pivot rule — *how* the participant gets onto the
+  pivot source (by exploiting it), as opposed to `ssh-fallback` where a shell is
+  installed for them.
+- a **pivot provider node** — Segmentation's entrance through a wall, and the only one
+  of the three that check 9 measures.
 
 Implementation notes:
 
@@ -592,12 +654,20 @@ Implementation notes:
 - A connection **timeout** means packets are dropped and is reported as a blocked path; a **refused** connection means the port closed between enumeration and probe and is treated as a benign transient.
 - **Reachability tests each flow on its own protocol and port, never with ping.** Under a default-deny segmentation policy ICMP is normally not in the allow list, so pinging reports deliberately-permitted flows as broken. For **TCP** a completed handshake also settles the return path: the SYN arrived and the destination's SYN-ACK came back, which a one-way rule or an asymmetric route could not produce, so no separate reverse probe is needed. A **RST** counts as a working path with nothing listening. **UDP** has no handshake, so delivery is not confirmable — the check reports the datagram left without a routing error, and treats an ICMP port-unreachable reply as positive proof it arrived. Ping is used only as a diagnostic after a flow has already failed, to separate "no route at all" from "route fine, this port filtered".
 - **UDP delivery is confirmed from the receiving agent's own counters.** The traffic agent labels each flow `<proto>-<src_id>-<dst_id>-<port>-tx|rx` and writes `/tmp/coretg_traffic/stats_<node_id>.json`, so the destination's `-rx` entry measures exactly what landed. Bytes received confirms the flow; **bytes sent with none received is reported as a fault** — the silent failure mode no sender-side test can see. These counters are cumulative since the agent started, so the check answers "has this traffic arrived", not "is it arriving this second"; a flow that ran and later broke still shows its earlier bytes. Bursty and periodic patterns make a short sampling window unreliable, which is why cumulative totals are used rather than a delta.
+- **A flow endpoint is identified by its CORE node id, not only by its address.** Matching by IP alone meant a node that came up on a different address than the plan recorded — the exact state worth reporting — matched nothing, and its flows were reported as `traffic source node not found` instead of being probed at all. The id resolves the node, the probe still runs, and its real result (`no-route`, timeout, or a pass) is what gets reported. When neither the id nor the address resolves, the failure says what the probe actually saw: how many nodes are running and on which addresses, or that the session directory `/tmp/pycore.<session>` does not exist.
+- **"No route" is two different faults, and the reported live addresses tell them apart.** A failing flow carries each endpoint's actual address, so the check can say which it is: correctly addressed nodes with no path between them (a routing or segmentation fault), a flow aimed at an address no node in the session owns (the traffic artifacts were built against different addressing — regenerate them with an execute), or an endpoint holding **no IPv4 address at all**, which has no route anywhere and points at CORE addressing that was never applied or was lost, as happens to a container that restarted after execute.
 - The stats path is **per node** because CORE vnodes share the host's `/tmp` (they get a network namespace, not a mount namespace). A fixed filename made every vnode's agent overwrite the previous one's stats, leaving a single file describing whichever node wrote last.
 - **"Is the agent running" has two independent witnesses, because neither works on every image.** A Docker node's container *is* the scenario's own image, so a minimal vulnerability image may ship no `procps` — no `pgrep`, no `ps`. Detecting the agent by process listing alone made such a node look idle while it was in fact moving megabytes, and the check reported a sender with no traffic process. Detection is therefore: `pgrep` when it exists, else a scan of `/proc/[0-9]*/cmdline`, which is kernel-provided rather than a package; **plus** the agent's own `stats_<node_id>.json`, which needs only a readable file and proves *progress* rather than mere existence. A node is reported idle only when both are silent.
 - **The stats signal is Docker-only, deliberately.** A vnode shares the host's `/tmp`, so globbing `stats_*.json` inside one would return every node's file. Vnodes share the host filesystem and therefore always have `pgrep`, so they never need the fallback. The guard is explicit in `_node_agent` so the path is not widened by accident.
 - **A stopped agent is a third state, distinct from one that never started.** Freshness comes from `updated_at` against `_AGENT_STATS_FRESH_S` (60s — six missed writes at the agent's 10s `-stats-interval`). An agent that wrote stats and then stopped warns with its staleness (`last update 900s ago`) rather than being lumped in with "never launched". This also catches a dead **receiver**, which the sender-oriented check could not see: only flow sources are in `expected_senders`, so a receiver whose agent died would otherwise pass silently.
 - Segmentation and traffic prefer the runtime artifacts over the scenario XML's declared density, so a scenario that declares traffic but produced no flows reports `skip`, not a false warning. Whether segmentation exists comes from the rules it generated (`/tmp/segmentation/segmentation_summary.json` plus rules read inside the nodes); whether traffic exists comes from `/tmp/traffic/traffic_summary.json`.
 - `allow_verification.json` is a separate signal, not a measure of enforcement: `verify_flows_allowed` writes it to confirm every traffic flow is *permitted*, so its `blocked` list names traffic that segmentation is wrongly blocking. An empty list is healthy; a non-empty one fails the check because that traffic cannot arrive.
+- **A pivot target with no port is reported as such, not probed against a stand-in.** Check 8 uses the Flow edge's declared `target_ports`, falling back to the ports the target's own vulnerability publishes in its compose file (`inferred_target_ports`, derived from the plan so an already-saved chain needs no regenerate). Deliberately kept separate from `target_ports`, which the CLI maps onto `SegmentationPorts` where an empty value means "allow every compose-exposed port" — filling it in there would only narrow real allows. When neither yields a port and nothing is listening, the check reports that the target exposes no service rather than probing a synthetic closed port: under default-deny such a port is dropped even on a working path, so the timeout would prove nothing.
+- **A TCP RST counts as a traversable path for check 8.** The reply proves packets reached the target and came back. It does *not* prove the service is up — a slow-starting container answers RST while still booting — so a pass here means the path works, not that the challenge is solvable this second.
+- **Check 9 reads the rules and, where possible, confirms them on the wire.** An allow rule existing is not the same as traffic passing: iptables takes the first match, so the check parses each node's captured rule lines in chain order and fails an allow that a DROP shadows. It then probes the real path from the router holding an interface on the source subnet, sending a SYN that carries the participant's source address and watching for the reply in transit — nothing is mutated and no address is claimed. A SYN-ACK or an RST both prove the round trip; that covers routing, NAT rewriting and conntrack, which rule analysis cannot see. With no such router there is no vantage to send from, and the check warns rather than passing, because in that topology the rule analysis is the whole answer available.
+- **The participant is not directly reachable.** It sits behind a physical RJ45 that no namespace on the CORE host owns, so check 9 can never probe *as* the participant. Without a HITL network configured it asks from an address outside the walled-off subnet instead, and says so — the summary never claims the real participant network was used.
+- **The stand-in source must be an address the topology can actually answer.** It used to be a documentation address (`203.0.113.1`), which no CORE node can hold: the vantage search never matched it, the wire test never ran, and check 9 could not reach `pass` in *any* scenario without a participant network — an automatic `warn`, and an automatic failure under a strict validation policy. The stand-in now comes from the allow rule that opens the provider (a concrete source network yields a real address in it), and when the rule opens the provider to everyone the CORE VM substitutes a router that genuinely sits outside the walled-off subnet, using that router's own address so the reply has somewhere to return to.
+- **A stand-in can only ever upgrade the verdict.** A reply confirms the path only when the same allow rule also covers the address the VM answered from; otherwise the reply says nothing about the rule under test. Silence from a stand-in is *not* a failure either — it stands for a participant network this scenario does not have, so it cannot condemn a real participant path. Both cases stay `warn`. Silence from a genuine participant address remains a `fail`.
 - `skip` is a normal outcome meaning the scenario never configured that feature.
 - The Web UI runs the checks in a background job with polled progress; result sections are collapsible and scrollable.
 

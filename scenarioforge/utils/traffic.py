@@ -6,6 +6,7 @@ import random
 import shutil
 import stat
 from typing import Dict, List, Tuple, Optional
+from .tmp_staging import prepare_output_dir
 from ..plugins import traffic as custom_traffic
 from ..plugins import static_profile as _static_profile
 from ..types import NodeInfo, TrafficInfo
@@ -444,7 +445,7 @@ def _write_flow_artifacts(out_dir: str, flows: List[Dict[str, object]]) -> Dict[
     Flows fully determine every traffic artifact, which is what makes a planned
     set of flows replayable: nothing here draws a host, a target or a port.
     """
-    os.makedirs(out_dir, exist_ok=True)
+    prepare_output_dir(out_dir, logger=logger)
     result = _write_agent_configs(out_dir, flows)
     _stage_traffic_agent(out_dir)
 
@@ -466,6 +467,54 @@ def _write_flow_artifacts(out_dir: str, flows: List[Dict[str, object]]) -> Dict[
     except Exception:
         pass
     return result
+
+
+def _rebind_flow_addresses(flows: List[Dict[str, object]],
+                           hosts: List[NodeInfo]) -> List[Dict[str, object]]:
+    """Point each planned flow at the address its node actually has.
+
+    The plan decides *who* talks to whom, on which protocol, port and rate --
+    that is what makes a run reproducible, and none of it is redrawn here. The
+    addresses are not part of that decision: they belong to the topology built
+    in this run, and a plan produced against a different address draw carries
+    stale ones. A sender then dialled an IP no node owns, so the flow never
+    connected and the artifact check could not match either endpoint to a
+    running node ("traffic source node not found for <ip>").
+
+    The node id is the endpoint's identity, so rebinding by id keeps the planned
+    flow intact while making it land on the topology that exists.
+    """
+    ip_by_id: Dict[int, str] = {}
+    for host in hosts or []:
+        try:
+            node_id = int(getattr(host, "node_id"))
+        except Exception:
+            continue
+        ip = _ip_only(str(getattr(host, "ip4", "") or ""))
+        if ip:
+            ip_by_id.setdefault(node_id, ip)
+    if not ip_by_id:
+        return flows
+
+    rebound = 0
+    for flow in flows:
+        for role in ("src", "dst"):
+            try:
+                node_id = int(flow.get(f"{role}_id"))
+            except Exception:
+                continue
+            current = str(flow.get(f"{role}_ip") or "")
+            actual = ip_by_id.get(node_id)
+            if actual and actual != current:
+                flow[f"{role}_ip"] = actual
+                rebound += 1
+    if rebound:
+        logger.warning(
+            "Traffic: %d planned flow endpoint(s) named an address no node in this "
+            "run owns; rebound to the current address of the same node id",
+            rebound,
+        )
+    return flows
 
 
 def generate_traffic_scripts(
@@ -490,7 +539,8 @@ def generate_traffic_scripts(
             "Traffic: writing the %d flow(s) the saved plan decided; no new flows were drawn",
             len(planned_flows),
         )
-        return _write_flow_artifacts(out_dir, [dict(f) for f in planned_flows])
+        return _write_flow_artifacts(
+            out_dir, _rebind_flow_addresses([dict(f) for f in planned_flows], hosts))
 
     result: Dict[int, List[str]] = {}
     flows: List[Dict[str, object]] = []
@@ -501,7 +551,7 @@ def generate_traffic_scripts(
     if density <= 0 and not count_items:
         return result
 
-    os.makedirs(out_dir, exist_ok=True)
+    prepare_output_dir(out_dir, logger=logger)
     # Clean out any existing generated traffic scripts before writing new ones
     _clean_traffic_dir(out_dir)
 

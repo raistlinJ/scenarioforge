@@ -1040,20 +1040,24 @@ def test_flow_generate_button_and_options_are_wired() -> None:
     assert not missing, "Missing direct generate/options wiring in flow template: " + "; ".join(missing)
 
 
-def test_flow_materialize_replays_saved_assignments_without_generate() -> None:
+def test_flow_page_has_no_materialize_action() -> None:
+    """Materialization is chosen when importing a bundle, not from this page.
+
+    Asserts the wiring is actually gone rather than merely hidden: a handler
+    left referencing a button that no longer exists is dead code, and a prompt
+    left offering the action would be a dead end for whoever clicks it.
+    """
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
-    expected_snippets = [
+    removed_snippets = [
         'id="flowMaterializeBtn"',
-        "if (materializeBtnEl) materializeBtnEl.addEventListener('click'",
+        "materializeBtnEl",
         "'/api/flag-sequencing/regenerate_flow_artifacts'",
-        "flag_assignments: Array.isArray(currentFlagAssignments) ? currentFlagAssignments : []",
         "The chain and resolved values will not be regenerated.",
-        "if (materializeBtnEl) materializeBtnEl.click();",
     ]
 
-    missing = [snippet for snippet in expected_snippets if snippet not in text]
-    assert not missing, "Missing saved-flow materialization wiring: " + "; ".join(missing)
+    lingering = [snippet for snippet in removed_snippets if snippet in text]
+    assert not lingering, "Stale materialization wiring on the Flow page: " + "; ".join(lingering)
 
 
 def test_flow_non_json_error_classifier_does_not_call_all_html_login() -> None:

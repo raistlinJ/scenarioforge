@@ -104,6 +104,12 @@ def test_index_merges_single_result_xml_with_multi_scenario_snapshot(monkeypatch
         'project_key_hint': str(xml_scenario2),
     }
 
+    # Same hazard as the test above: a working checkout's
+    # outputs/scenario_catalog.json accumulates deleted scenario names, and a
+    # deleted name is filtered out of the payload. Without this pin the
+    # assertion depends on whatever the developer (or an earlier test run)
+    # happened to delete -- 'Scenario2' among them.
+    monkeypatch.setattr(backend, '_scenario_catalog_deleted_match_keys', lambda: set())
     monkeypatch.setattr(backend, '_load_editor_state_snapshot', lambda user=None: snapshot)
     monkeypatch.setattr(
         backend,

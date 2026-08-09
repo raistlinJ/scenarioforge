@@ -131,26 +131,11 @@
               </div>
               <div class="col-md-4">
                 <div class="d-flex gap-2 flex-wrap align-items-end">
-                  <div class="btn-group">
-                    <button id="flowActionDropdownBtn" class="btn btn-primary dropdown-toggle text-nowrap" type="button"
-                      data-bs-toggle="dropdown" aria-expanded="false"
-                      title="Choose an action: generate a new flow or materialize saved artifacts.">
-                      Flow Action
+                  <div>
+                    <button id="flowGenerateBtn" class="btn btn-primary text-nowrap" type="button"
+                      title="Generate a new flow from the latest preview plan. This will clear the current saved chain and create a new one.">
+                      Generate
                     </button>
-                    <ul class="dropdown-menu">
-                      <li>
-                        <button class="dropdown-item" id="flowGenerateBtn" type="button"
-                          title="Generate a new flow from the latest preview plan. This will clear the current saved chain and create a new one.">
-                          Generate
-                        </button>
-                      </li>
-                      <li>
-                        <button class="dropdown-item" id="flowMaterializeBtn" type="button" disabled
-                          title="Recreate missing CORE VM artifacts from the saved chain, assignments, seed, and resolved values without generating a new flow.">
-                          Materialize
-                        </button>
-                      </li>
-                    </ul>
                   </div>
                   <div>
                     <button class="btn btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="collapse"
@@ -433,7 +418,6 @@
     const dependencyLevelEl = document.getElementById('flowDependencyLevel');
     const dependencyLevelValueEl = document.getElementById('flowDependencyLevelValue');
     const btnEl = document.getElementById('flowGenerateBtn');
-    const materializeBtnEl = document.getElementById('flowMaterializeBtn');
     const revalidateBtnEl = document.getElementById('flowRevalidateBtn');
     const generateMaxRetriesEl = document.getElementById('flowGenerateMaxRetries');
     const flowSeedInputEl = document.getElementById('flowSeedInput');
@@ -608,24 +592,6 @@
       const hasChain = Array.isArray(currentChain) && currentChain.length > 0;
       revalidateBtnEl.disabled = (!!generateInFlight || !flowEnabled || !flowEligible || dirty || !hasChain);
     }
-    if (materializeBtnEl) {
-      const hasChain = Array.isArray(currentChain) && currentChain.length > 0;
-      const canMaterialize = !!(!generateInFlight && flowEnabled && flowEligible && !dirty && hasChain);
-      materializeBtnEl.disabled = !canMaterialize;
-      if (canMaterialize) {
-        materializeBtnEl.title = 'Recreate missing CORE VM artifacts from the saved chain, assignments, seed, and resolved values without generating a new flow.';
-      } else if (!hasChain) {
-        materializeBtnEl.title = 'A saved chain is required to materialize artifacts.';
-      } else if (dirty) {
-        materializeBtnEl.title = 'Re-run Generate after topology changes before materializing.';
-      } else if (!flowEnabled) {
-        materializeBtnEl.title = 'Enable flow sequencing to materialize saved artifacts.';
-      } else if (!flowEligible) {
-        materializeBtnEl.title = 'Flow is not eligible for materialization.';
-      } else {
-        materializeBtnEl.title = 'Materialize is not available right now.';
-      }
-    }
     if (flowDownloadDropdownEl) {
       flowDownloadDropdownEl.disabled = dirty;
       flowDownloadDropdownEl.title = dirty ? 'Re-run Generate to refresh chain and flags before downloading.' : '';
@@ -633,7 +599,19 @@
     updateDownloadDropdownState();
   }
 
+  // The single Generate button doubles as Re-Generate once a chain exists, so the
+  // label tells the user that clicking replaces the saved chain rather than adding to it.
+  function updateGenerateButtonLabel() {
+    if (!btnEl) return;
+    const hasChain = Array.isArray(currentChain) && currentChain.length > 0;
+    btnEl.textContent = hasChain ? 'Re-Generate' : 'Generate';
+    btnEl.title = hasChain
+      ? 'Re-generate the flow from the latest preview plan. This clears the current saved chain and creates a new one.'
+      : 'Generate a new flow from the latest preview plan.';
+  }
+
   function updateDownloadDropdownState() {
+    updateGenerateButtonLabel();
     if (!flowDownloadDropdownEl) return;
     const hasChain = Array.isArray(currentChain) && currentChain.length > 0;
     const isDirty = !!topologyDirty;
@@ -871,7 +849,6 @@
     try {
       if (btnEl) btnEl.disabled = !!generateInFlight || !flowEnabled || !flowEligible;
       if (revalidateBtnEl && generateInFlight) revalidateBtnEl.disabled = true;
-      if (materializeBtnEl && generateInFlight) materializeBtnEl.disabled = true;
       if (!generateInFlight) updateTopologyDirtyUi();
     } catch (e) { }
   }
@@ -14311,67 +14288,6 @@ ${out.join('\n')}
     generate(true, { savePreviewResolve: true, allow_node_duplicates: false, resolveOnGenerate: true });
   });
 
-  if (materializeBtnEl) materializeBtnEl.addEventListener('click', async (e) => {
-    try { e.preventDefault(); } catch (_) { }
-    const scenario = (scenarioEl && scenarioEl.value || activeScenario || '').toString().trim();
-    const xmlPath = (typeof window.coretgGetLatestXmlPathForScenario === 'function')
-      ? window.coretgGetLatestXmlPathForScenario(scenario)
-      : '';
-    if (!scenario || !xmlPath || !Array.isArray(currentChain) || !currentChain.length) {
-      setStatus('A saved scenario flow is required before materializing artifacts.', true);
-      return;
-    }
-    const confirmed = await confirmFlowAction(
-      'Materialize Saved Flow',
-      'Recreate missing CORE VM artifacts from the saved assignments and resolved inputs? The chain and resolved values will not be regenerated.',
-      'Materialize'
-    );
-    if (!confirmed) return;
-    try {
-      setGenerateBusy(true);
-      composeModalEnabled = true;
-      showComposeDialog('Materialize Saved Flow', 'Connecting to CORE VM…');
-      const steps = ['Connect to CORE VM', 'Replay missing artifacts', 'Verify files', 'Complete'];
-      setLoadingSteps(steps, 0);
-      appendLoadingLog('Replaying only missing artifacts from the saved flow…');
-      setLoadingSteps(steps, 1);
-      const replay = await postJson(
-        '/api/flag-sequencing/regenerate_flow_artifacts',
-        {
-          scenario,
-          xml_path: xmlPath,
-          flag_assignments: Array.isArray(currentFlagAssignments) ? currentFlagAssignments : [],
-        },
-        { timeoutMs: 20 * 60 * 1000 }
-      );
-      if (replay && replay.log) appendLoadingLog(String(replay.log));
-      setLoadingSteps(steps, 2);
-      const verified = await verifyFlowFiles(scenario, xmlPath);
-      if (!verified || !verified.ok) {
-        throw new Error((verified && (verified.error || verified.message)) || 'Artifact verification failed.');
-      }
-      const missing = Array.isArray(verified.missing) ? verified.missing : [];
-      if (missing.length) {
-        throw new Error(`${missing.length} expected artifact path${missing.length === 1 ? '' : 's'} remain missing.`);
-      }
-      setLoadingSteps(steps, steps.length);
-      appendLoadingLog('Saved flow materialized and verified without changing its chain or values.');
-      updateComposeDialog({
-        html: '<div class="alert alert-success mb-0"><strong>Materialization succeeded.</strong><div class="small mt-1">The saved chain, assignments, and resolved values were preserved.</div></div>',
-        statusText: 'Materialization complete.',
-        progressLabel: '100%',
-        progressVariant: 'success'
-      });
-      setStatus('Saved flow artifacts materialized and verified.', false);
-    } catch (err) {
-      const message = String(err && err.message || err);
-      setComposeError(message);
-      setStatus(`Materialization failed: ${message}`, true);
-    } finally {
-      setGenerateBusy(false);
-      if (typeof window.refreshDockLogs === 'function') window.refreshDockLogs();
-    }
-  });
 
   // Flow Seed Re-roll button handler
   if (flowSeedRerollBtnEl) flowSeedRerollBtnEl.addEventListener('click', (e) => {
@@ -14515,15 +14431,14 @@ ${out.join('\n')}
           snap
         );
         updateComposeDialog({ html, statusText: 'Re-Validate failed.', progressLabel: 'Failed', progressVariant: 'danger' });
-        setStatus('Re-validate failed: missing files.', true);
-        const regen = await confirmFlowAction(
-          'Missing CORE Files',
-          'Missing files were found on the CORE VM. Materialize them from the saved flow without generating a new chain?',
-          'Materialize Saved Flow'
+        // Materialization is chosen at import time now, so there is no
+        // in-page action to offer here -- say how to get the files back
+        // instead of prompting for a button that no longer exists.
+        setStatus(
+          'Re-validate failed: missing files. Re-import the bundle with '
+          + 'materialization enabled, or run Generate to build a new chain.',
+          true
         );
-        if (regen) {
-          if (materializeBtnEl) materializeBtnEl.click();
-        }
         return;
       }
       const errMsg = (data && (data.error || data.message)) ? String(data.error || data.message) : 'Re-validate failed.';

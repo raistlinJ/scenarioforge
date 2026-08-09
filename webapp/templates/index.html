@@ -510,6 +510,28 @@
                                 <div class="progress-bar progress-bar-striped progress-bar-animated"
                                     id="scenarioImportProgressBar" style="width: 0%"></div>
                             </div>
+                            <div class="alert alert-secondary d-none mb-3" id="scenarioImportMaterializePrompt">
+                                <div class="fw-semibold mb-1">Materialize bundled artifacts?</div>
+                                <div class="small mb-2">
+                                    This bundle ships generated flow artifacts. Copying them to the
+                                    CORE host now makes the scenario ready to execute, but it is the
+                                    slowest part of an import and can take several minutes.
+                                    Skipping keeps the import quick; the artifacts are regenerated
+                                    on the next execute instead.
+                                </div>
+                                <div class="form-check mb-2">
+                                    <input class="form-check-input" type="checkbox" id="scenarioImportMaterializeToggle" checked>
+                                    <label class="form-check-label small" for="scenarioImportMaterializeToggle">
+                                        Materialize artifacts on the CORE host during this import
+                                    </label>
+                                </div>
+                                <div class="d-flex justify-content-end gap-2">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        id="scenarioImportMaterializeCancel">Cancel</button>
+                                    <button type="button" class="btn btn-sm btn-primary"
+                                        id="scenarioImportMaterializeContinue">Continue</button>
+                                </div>
+                            </div>
                             <div class="alert alert-info d-none mb-3" id="scenarioImportCredentialPrompt">
                                 <div class="fw-semibold mb-1">Destination connection required</div>
                                 <div class="small mb-2" id="scenarioImportCredentialDetail"></div>
@@ -568,8 +590,10 @@
                                         id="scenarioImportCredentialContinue">Test connection &amp; continue</button>
                                 </div>
                                 <div class="small text-muted mt-2">
-                                    Never stored in the bundle, XML, or progress log. If selected above, the
-                                    password is encrypted in ScenarioForge's destination secret store.
+                                    Never written to the progress log. If selected above, the password is
+                                    encrypted in ScenarioForge's destination secret store. Note that
+                                    reproduction bundles carry their source scenario's CORE credentials,
+                                    so treat a bundle as a secret-bearing file.
                                 </div>
                             </div>
                             <div class="list-group list-group-flush border rounded small"
@@ -14106,6 +14130,10 @@
             const profileDetailEl = document.getElementById('scenarioImportProfileDetail');
             const saveProfileWrapEl = document.getElementById('scenarioImportSaveProfileWrap');
             const saveProfileEl = document.getElementById('scenarioImportSaveProfile');
+            const materializePromptEl = document.getElementById('scenarioImportMaterializePrompt');
+            const materializeToggleEl = document.getElementById('scenarioImportMaterializeToggle');
+            const materializeContinueEl = document.getElementById('scenarioImportMaterializeContinue');
+            const materializeCancelEl = document.getElementById('scenarioImportMaterializeCancel');
             const connectionInputs = {
                 core_host: document.getElementById('scenarioImportCoreHost'),
                 core_port: document.getElementById('scenarioImportCorePort'),
@@ -14203,6 +14231,7 @@
             if (stepsEl) stepsEl.replaceChildren();
             if (footerEl) footerEl.classList.add('d-none');
             if (credentialPromptEl) credentialPromptEl.classList.add('d-none');
+            if (materializePromptEl) materializePromptEl.classList.add('d-none');
             if (saveProfileWrapEl) saveProfileWrapEl.classList.add('d-none');
             if (saveProfileEl) saveProfileEl.checked = true;
             if (credentialErrorEl) credentialErrorEl.classList.add('d-none');
@@ -14232,6 +14261,10 @@
 
                 const formData = new FormData(hiddenLoadForm);
                 formData.set('import_progress_id', progressId);
+                formData.set(
+                    'import_materialize',
+                    (materializeToggleEl && !materializeToggleEl.checked) ? '0' : '1'
+                );
                 const formFields = {
                     core_host: 'import_core_host',
                     core_port: 'import_core_port',
@@ -14272,10 +14305,21 @@
                         return;
                     }
                     window.setTimeout(() => {
-                        try { window.history.replaceState({}, '', '/'); } catch (_) { }
-                        document.open();
-                        document.write(xhr.responseText);
-                        document.close();
+                        // Navigate rather than document.write() the response in.
+                        // Rewriting the document left the sidebar showing the
+                        // pre-import scenario list -- the swapped-in markup
+                        // carried the right payload, but the page's load-time
+                        // initialisation does not re-run cleanly against a
+                        // document written after load, so the imported scenario
+                        // only appeared once the user refreshed by hand. The
+                        // import has already persisted its editor snapshot
+                        // server-side, so a normal load renders the same state
+                        // the manual refresh was producing.
+                        try {
+                            window.location.replace('/');
+                        } catch (_) {
+                            window.location.href = '/';
+                        }
                     }, 250);
                 };
                 xhr.send(formData);
@@ -14452,6 +14496,35 @@
                     if (credentialContinueEl) credentialContinueEl.click();
                 }
             };
+            // Only a bundle can carry artifacts to materialize; a plain XML has
+            // nothing to copy, so asking there would be a pointless extra click.
+            const selectedName = (hiddenLoadInput.files[0]?.name || '').toLowerCase();
+            const looksLikeBundle = selectedName.endsWith('.zip') || selectedName.endsWith('.scenarioforge');
+            if (looksLikeBundle && materializePromptEl) {
+                setProgress(0, 'Choose import options', selectedName, 'running');
+                appendClientProgress('Waiting for import options', 'Materialize bundled artifacts?', 0);
+                if (spinnerEl) spinnerEl.classList.add('d-none');
+                if (materializeToggleEl) materializeToggleEl.checked = true;
+                materializePromptEl.classList.remove('d-none');
+                if (materializeContinueEl) materializeContinueEl.onclick = () => {
+                    materializePromptEl.classList.add('d-none');
+                    if (spinnerEl) spinnerEl.classList.remove('d-none');
+                    appendClientProgress(
+                        (materializeToggleEl && !materializeToggleEl.checked)
+                            ? 'Skipping artifact materialization'
+                            : 'Materializing artifacts during import',
+                        '',
+                        0,
+                    );
+                    requestImportRequirements();
+                };
+                if (materializeCancelEl) materializeCancelEl.onclick = () => {
+                    if (modal) modal.hide();
+                    hiddenLoadInput.value = '';
+                    if (importBtn) importBtn.disabled = false;
+                };
+                return;
+            }
             requestImportRequirements();
         };
         if (exportBtn) exportBtn.onclick = (e) => {

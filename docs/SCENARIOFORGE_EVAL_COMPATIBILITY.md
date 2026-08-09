@@ -332,11 +332,14 @@ Useful streamed progress patterns also include `Post-execution validation:`,
 ## Artifact Checks
 
 `execute` can optionally validate the live session it just created by adding
-`--check-artifacts`. This runs the same seven checks as the standalone
+`--check-artifacts`. This runs the same nine checks as the standalone
 `check-artifacts` phase: containers on the correct nodes, services running,
 service ports reachable across the CORE network, inject files placed,
-segmentation rules enforced, traffic scripts running, and each traffic source
-reaching its destination.
+segmentation rules enforced, traffic scripts running, each traffic source
+reaching its destination, each Flow challenge-chain pivot path traversable from
+its source node, and each segmentation pivot provider reachable from the
+participant. The last two both say "pivot" but are unrelated features — see
+`FEATURE_DEEP_DIVE.md` for the distinction.
 
 ```bash
 NO_COLOR=1 PYTHONUNBUFFERED=1 \

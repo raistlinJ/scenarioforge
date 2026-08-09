@@ -719,3 +719,66 @@ def test_pivot_compose_allow_widens_source_after_masquerade(tmp_path):
     assert (100, "FORWARD", "10.0.0.10") in observed
     assert (101, "FORWARD", "0.0.0.0/0") in observed
     assert (2, "INPUT", "0.0.0.0/0") in observed
+
+
+def test_explicit_ssh_fallback_source_uses_its_existing_vulnerability_access():
+    """An explicitly named pivot source skips inference's provider filter.
+
+    Naming a node that already hosts a challenge used to warn and skip the SSH
+    install while the metadata still advertised ssh-fallback -- leaving the pivot
+    claiming an access method the node never got. Clobbering it is not an option
+    either, since that destroys the challenge.
+    """
+    session = _DummySession([_DummyNode(1, "docker-10"), _DummyNode(2, "target-1")])
+    hosts = [
+        NodeInfo(node_id=1, ip4="10.0.0.10/24", role="Docker"),
+        NodeInfo(node_id=2, ip4="10.0.1.20/24", role="Docker"),
+    ]
+    docker_nodes = {
+        "docker-10": {
+            "Name": "Existing vulnerability",
+            "Type": "docker-compose",
+            "Path": "/tmp/docker-10.yml",
+            "Vector": "vulnerability",
+        },
+        "target-1": {"Name": "Target", "Type": "docker-compose", "Path": "/tmp/target-1.yml"},
+    }
+    items = [PivotInfo(
+        name="Pivot", pivot_node="docker-10", target_node="target-1",
+        access_provider="ssh-fallback",
+    )]
+
+    summary = _apply_pivoting_to_docker_nodes(
+        session=session, hosts=hosts, docker_nodes=docker_nodes, pivot_items=items,
+    )
+
+    # The challenge on the pivot source is preserved, not replaced.
+    assert docker_nodes["docker-10"]["Vector"] == "vulnerability"
+    # And the recorded provider matches the access that actually exists.
+    assert docker_nodes["target-1"]["PivotAccessProvider"] == "vulnerability"
+    # A working substitution must not be reported as a problem: these runs emit
+    # one line per pivot for the same node, which made healthy runs look degraded.
+    assert summary["warnings"] == []
+
+
+def test_ssh_fallback_still_installs_on_a_replaceable_source():
+    session = _DummySession([_DummyNode(1, "docker-10"), _DummyNode(2, "target-1")])
+    hosts = [
+        NodeInfo(node_id=1, ip4="10.0.0.10/24", role="Docker"),
+        NodeInfo(node_id=2, ip4="10.0.1.20/24", role="Docker"),
+    ]
+    docker_nodes = {
+        "docker-10": {"Name": "standard-ubuntu-docker-core", "Type": "docker-compose"},
+        "target-1": {"Name": "Target", "Type": "docker-compose", "Path": "/tmp/target-1.yml"},
+    }
+    items = [PivotInfo(
+        name="Pivot", pivot_node="docker-10", target_node="target-1",
+        access_provider="ssh-fallback",
+    )]
+
+    summary = _apply_pivoting_to_docker_nodes(
+        session=session, hosts=hosts, docker_nodes=docker_nodes, pivot_items=items,
+    )
+
+    assert docker_nodes["target-1"]["PivotAccessProvider"] == "ssh-fallback"
+    assert not any("using existing" in w for w in summary["warnings"])

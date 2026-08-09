@@ -265,6 +265,7 @@ def register(
         progress: Callable[[str, int, str], None] | None = None,
         connection_overrides: Any = None,
         profile_id: str = '',
+        requested: bool = True,
     ) -> dict[str, Any]:
         from webapp import app_backend as backend
         from webapp.reproduction_bundle import (
@@ -275,6 +276,24 @@ def register(
 
         if imported.kind != 'reproduction-bundle' or imported.bundled_artifact_sources < 1:
             return {'attempted': False, 'ok': True, 'restored_sources': 0, 'missing': []}
+        if not requested:
+            # The importer declined materialization: it copies every bundled
+            # artifact to the CORE host, which is the slow part of an import.
+            # The scenario still imports fully; its artifacts are simply not on
+            # the host yet, and a later execute regenerates what it needs.
+            if progress:
+                progress(
+                    'Skipping artifact materialization',
+                    88,
+                    'Not requested; bundled artifacts were not copied to the CORE host.',
+                )
+            return {
+                'attempted': False,
+                'ok': True,
+                'restored_sources': 0,
+                'missing': [],
+                'declined': True,
+            }
         flow_state = backend._flow_state_from_xml_path(imported.xml_path, None)
         if not isinstance(flow_state, dict):
             return {
@@ -636,6 +655,14 @@ def register(
 
         progress_id = str(request.form.get('import_progress_id') or '').strip()
         profile_id = str(request.form.get('import_core_profile_id') or '').strip()
+        # Materialization is the slow part of importing a bundle, so the
+        # importer chooses. Absent field means yes, keeping the API-level
+        # behaviour of existing callers (and tests) unchanged.
+        raw_materialize = request.form.get('import_materialize')
+        materialize_requested = (
+            True if raw_materialize is None
+            else str(raw_materialize).strip().lower() not in ('0', 'false', 'no', 'off', '')
+        )
         connection_overrides = {
             'core_host': request.form.get('import_core_host'),
             'core_port': request.form.get('import_core_port'),
@@ -727,6 +754,7 @@ def register(
                 progress=report_progress,
                 connection_overrides=connection_overrides,
                 profile_id=profile_id,
+                requested=materialize_requested,
             )
             if auto_materialization.get('attempted') and not auto_materialization.get('ok'):
                 materialization_detail = str(auto_materialization.get('error') or '').strip()
@@ -773,7 +801,14 @@ def register(
                     'total_artifact_sources': imported.total_artifact_sources,
                     'auto_materialization': auto_materialization,
                 }
-                if imported.bundled_artifact_sources and auto_materialization.get('ok'):
+                if imported.bundled_artifact_sources and auto_materialization.get('declined'):
+                    flash(
+                        'Imported ScenarioForge reproduction bundle '
+                        f'({imported.fidelity}; {imported.bundled_artifact_sources} artifact '
+                        'source(s) bundled but not materialized). Re-import with '
+                        'materialization enabled to copy them to the CORE host.'
+                    )
+                elif imported.bundled_artifact_sources and auto_materialization.get('ok'):
                     flash(
                         'Imported ScenarioForge reproduction bundle '
                         f'({imported.fidelity}; {imported.bundled_artifact_sources}/'
@@ -787,9 +822,9 @@ def register(
                     if error:
                         detail += f' Automatic materialization error: {error}'
                     flash(
-                        'Imported ScenarioForge reproduction bundle, but automatic '
+                        'Imported ScenarioForge reproduction bundle, but '
                         f'materialization restored {restored}/{imported.bundled_artifact_sources} '
-                        f'artifact sources.{detail} Use Materialize in Flag Sequencing to retry.'
+                        f'artifact sources.{detail} Re-import the bundle to retry.'
                     )
                 else:
                     flash(

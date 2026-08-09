@@ -987,14 +987,25 @@ def _run_artifact_checks_job(
         # Checks 6 & 7: traffic scripts running, then reachability along each
         # configured traffic flow (source node -> destination).
         _step(6, _ac.CHECK_LABELS['traffic'])
+        # Resolved before the probe runs, not after: the probe itself needs the
+        # id -> name map to identify a flow endpoint whose live address differs
+        # from the plan's, which is the case where it matters most.
+        try:
+            traffic_node_names = _plan_node_names_by_id(
+                xml_path=xml_path, preview_plan_path=preview_plan_path, scenario_label=scenario_label)
+        except Exception:
+            traffic_node_names = {}
         try:
             traffic_probe = _run_remote_python_json(
-                core_cfg, _ac.traffic_probe_script(sudo_pw, session_id),
+                core_cfg, _ac.traffic_probe_script(sudo_pw, session_id,
+                                                   node_names_by_id=traffic_node_names),
                 logger=log, label='check_artifacts.traffic', timeout=150.0,
             )
         except Exception as exc:
             traffic_probe = {'ok': False, 'error': str(exc)}
-        _apply(_ac.traffic_result(traffic_probe, expected=traffic_expected)); _step(6, _ac.CHECK_LABELS['traffic'])
+        _apply(_ac.traffic_result(traffic_probe, expected=traffic_expected,
+                                  node_names_by_id=traffic_node_names))
+        _step(6, _ac.CHECK_LABELS['traffic'])
 
         _step(7, _ac.CHECK_LABELS['reachability'])
         _apply(_ac.reachability_result(traffic_probe))
@@ -1004,6 +1015,15 @@ def _run_artifact_checks_job(
         # chain is traversable from that exact source node to its target.
         _step(8, _ac.CHECK_LABELS['flow_pivot'])
         flow_pivots = _ac.flow_pivot_relationships(flow_state)
+        try:
+            flow_pivots = _flow_pivot_fill_offering_ports(
+                flow_pivots,
+                xml_path=xml_path,
+                preview_plan_path=preview_plan_path,
+                scenario_label=scenario_label,
+            )
+        except Exception:
+            log.exception('[check_artifacts] could not derive pivot target ports')
         if flow_pivots:
             try:
                 flow_pivot_probe = _run_remote_python_json(
@@ -1037,7 +1057,25 @@ def _run_artifact_checks_job(
             )
         except Exception as exc:
             log.debug('[check_artifacts] participant subnets unavailable: %s', exc)
-        _apply(_ac.pivot_access_result(seg_probe, participant_subnets))
+        # The rules alone cannot show routing or NAT, so probe the real path from
+        # the router that holds an interface on the participant subnet. Nothing is
+        # mutated: the SYN carries the participant's source address and the reply
+        # is observed in transit rather than received.
+        hitl_live_probe = None
+        try:
+            live_rows = _ac.hitl_participant_path_probe_rows(seg_probe, participant_subnets)
+            if live_rows:
+                hitl_live_probe = _run_remote_python_json(
+                    core_cfg,
+                    _ac.hitl_participant_path_probe_script(sudo_pw, session_id, live_rows),
+                    logger=log,
+                    label='check_artifacts.hitl_path',
+                    timeout=120.0,
+                )
+        except Exception as exc:
+            log.debug('[check_artifacts] live participant-path probe unavailable: %s', exc)
+            hitl_live_probe = None
+        _apply(_ac.pivot_access_result(seg_probe, participant_subnets, hitl_live_probe))
         _step(9, _ac.CHECK_LABELS['pivot_access'])
 
         results = [dict(c) for c in checks]
@@ -2255,7 +2293,7 @@ def _cleanup_remote_test_runtime(meta: dict[str, Any]) -> None:
             rc, out, err = _exec_ssh_sudo_command(client, node_images_cmd, password=pw, timeout=60.0)
             node_compose_images = _parse_docker_ref_lines(out)
 
-            rm_node_cmd = f"docker rm -f {shlex.quote(node_token)} >/dev/null 2>&1 || true"
+            rm_node_cmd = f"docker rm -f -v {shlex.quote(node_token)} >/dev/null 2>&1 || true"
             rc, out, err = _exec_ssh_sudo_command(client, rm_node_cmd, password=pw, timeout=60.0)
             _log(
                 f"docker rm container (name={node_token}) rc={rc} "
@@ -2613,6 +2651,86 @@ def _compose_env_file_relpaths(local_compose_path: str) -> list[str]:
 def _remote_mkdirs(client: Any, path: str) -> None:
     quoted = shlex.quote(path)
     _exec_ssh_command(client, f"mkdir -p {quoted}")
+
+
+def _log_warning(logger: Any, message: str, *args: Any) -> None:
+    """Warn through a logger that may be a partial stand-in (tests, callers)."""
+    try:
+        logger.warning(message, *args)
+    except Exception:
+        pass
+
+
+def _ensure_remote_tmp_staging_writable(
+    client: Any,
+    path: str,
+    *,
+    core_cfg: Optional[Dict[str, Any]] = None,
+    sudo_password: str | None = None,
+    logger: Optional[logging.Logger] = None,
+) -> tuple[bool, str]:
+    """Verify a CORE-host /tmp staging dir is usable before writing into it.
+
+    Root-owned staging dirs (docker bind-mounts recreate them after a reboot)
+    make `mkdir -p` succeed while every later write fails with EACCES.
+    """
+    from scenarioforge.utils import tmp_staging as _tmp_staging
+
+    # Callers pass whatever remote dir they are about to write to; only the
+    # shared /tmp staging dirs need (or permit) this repair.
+    if not _tmp_staging.is_tmp_staging_path(path):
+        return True, 'not a /tmp staging path'
+
+    password = sudo_password
+    if password is None and isinstance(core_cfg, dict):
+        password = core_cfg.get('ssh_password')
+    password = str(password or '').strip()
+
+    def _run(cmd: str, *, timeout: float = 20.0) -> tuple[int, str, str]:
+        return _exec_ssh_command(client, cmd, timeout=timeout)
+
+    def _run_sudo_remote(cmd: str, *, timeout: float = 45.0) -> tuple[int, str, str]:
+        return _exec_ssh_sudo_command(client, cmd, password=password, timeout=timeout)
+
+    return _tmp_staging.ensure_remote_tmp_writable(
+        _run,
+        path,
+        exec_sudo=_run_sudo_remote if password else None,
+        logger=logger if logger is not None else getattr(app, 'logger', None),
+    )
+
+
+def _remote_free_bytes(client: Any, path: str, *, logger: Optional[logging.Logger] = None) -> Optional[int]:
+    """Free bytes on the filesystem holding a remote path, or None if unknown.
+
+    ``df -Pk`` is the portable form: POSIX output is one row per filesystem with
+    the available blocks in field 4, and -P stops long device names wrapping onto
+    a second line.
+    """
+    target = str(path or '').strip() or '/'
+    try:
+        code, out, _err = _exec_ssh_command(
+            client, f"df -Pk {shlex.quote(target)} 2>/dev/null", timeout=20.0)
+    except Exception:
+        return None
+    if code != 0:
+        return None
+    lines = [line for line in str(out or '').splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    fields = lines[-1].split()
+    if len(fields) < 4:
+        return None
+    try:
+        free = int(fields[3]) * 1024
+    except (TypeError, ValueError):
+        return None
+    if logger is not None:
+        try:
+            logger.info('[remote-sync] %s has %s MB free', target, free // (1024 * 1024))
+        except Exception:
+            pass
+    return free
 
 
 def _remote_remove_path(client: Any, path: str) -> None:
@@ -4847,7 +4965,44 @@ def _push_repo_to_remote(
                 except Exception:
                     pass
 
-        sftp.put(archive_path, remote_archive, callback=_sftp_progress)
+        # SFTP reports almost every server-side write problem as the generic
+        # SSH_FX_FAILURE, which paramiko surfaces as OSError('Failure') -- a
+        # message that says nothing. A full filesystem is by far the most common
+        # cause, so check for it before spending the upload and again on failure.
+        free_bytes = _remote_free_bytes(client, remote_parent, logger=log)
+        if free_bytes is not None and archive_size and free_bytes < archive_size:
+            raise RuntimeError(
+                f'Not enough free space on the CORE host to upload the repository snapshot: '
+                f'{remote_parent} has {free_bytes // (1024 * 1024)} MB free but the archive is '
+                f'{archive_size // (1024 * 1024)} MB. Free space on the CORE VM and re-run Execute.'
+            )
+        try:
+            sftp.put(archive_path, remote_archive, callback=_sftp_progress)
+        except Exception as exc:
+            detail = str(exc).strip() or repr(exc)
+            # A failed put leaves the partial archive behind. On a full disk that
+            # is exactly when it hurts most: the next attempt has even less room,
+            # and the leftovers accumulate until someone clears /tmp by hand.
+            try:
+                _exec_ssh_command(client, f"rm -f {shlex.quote(remote_archive)}", timeout=30.0)
+            except Exception:
+                pass
+            free_after = _remote_free_bytes(client, remote_parent, logger=log)
+            if free_after is not None and archive_size and free_after < archive_size:
+                raise RuntimeError(
+                    f'Repository snapshot upload to {remote_archive} failed ({detail}) because the '
+                    f'CORE host is out of space: {remote_parent} has {free_after // (1024 * 1024)} MB '
+                    f'free for a {archive_size // (1024 * 1024)} MB archive. Free space on the CORE '
+                    'VM and re-run Execute.'
+                ) from exc
+            hint = ''
+            if free_after is not None:
+                hint = f' ({remote_parent} has {free_after // (1024 * 1024)} MB free)'
+            raise RuntimeError(
+                f'Repository snapshot upload to {remote_archive} failed: {detail}{hint}. '
+                'SFTP reports server-side write errors generically; check free space, '
+                f'permissions and any quota on {remote_parent} on the CORE VM.'
+            ) from exc
         log.info('[remote-sync] upload complete')
         _update_repo_push_progress(progress_id, status='uploading', stage='uploaded', percent=40.0, detail='Upload complete; preparing remote finalize…')
         if finalize_async:
@@ -6533,6 +6688,12 @@ try:
     if inject_files:
         # Same class as the flow assignments: a long enough list would push past
         # the kernel's per-string argv/envp limit and break every execve here.
+        # Unlike `scenarioforge.cli execute` (invoked as `cd {{repo}} && python -m
+        # scenarioforge.cli`), this script runs as a bare `python3 -` heredoc with
+        # no cwd/PYTHONPATH pointed at the synced repo, so the package import
+        # below needs an explicit path first or it raises ModuleNotFoundError.
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
         from scenarioforge.utils.env_payload import set_env_payload
 
         set_env_payload(env, 'CORETG_INJECT_FILES_JSON', json.dumps(inject_files))
@@ -6698,6 +6859,136 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
         except Exception:
             pass
         raise RuntimeError(FLOW_REMOTE_ARTIFACTS_MISSING_MESSAGE)
+
+
+def _ensure_remote_traffic_agent(
+    *,
+    client: Any,
+    sftp: Any,
+    repo_dir: str,
+    log_handle: Any,
+) -> None:
+    """Push the static traffic-agent binaries to the CORE host if missing or stale.
+
+    scenarioforge.utils.traffic stages these from <repo>/traffic_agent/bin at
+    execute time, but _sync_runtime_subset_to_remote_repo deliberately never
+    carries them (it only ships .py/.yaml/.yml/.json runtime code). A CORE
+    host that never received a full repo push therefore has an empty
+    traffic_agent/bin: every flow silently fails to start, which only
+    surfaces much later as a failed "traffic"/"reachability" artifact check.
+    Checking and pushing here catches it immediately instead.
+    """
+    from scenarioforge.utils.traffic import AGENT_BINARY_PREFIX
+
+    log = getattr(app, 'logger', logging.getLogger(__name__))
+    local_bin_dir = os.path.join(_get_repo_root(), 'traffic_agent', 'bin')
+    try:
+        local_names = sorted(
+            name for name in os.listdir(local_bin_dir)
+            if name.startswith(AGENT_BINARY_PREFIX)
+            and os.path.isfile(os.path.join(local_bin_dir, name))
+        )
+    except Exception:
+        local_names = []
+    if not local_names:
+        # Nothing to push. Scenarios without traffic never miss it; ones that
+        # do will fail their own "traffic"/"reachability" artifact checks
+        # with an actionable message, so this stays a warning, not a hard stop.
+        message = (
+            f'traffic agent binaries are missing locally under {local_bin_dir}; run '
+            'traffic_agent/build.sh before executing scenarios with traffic.'
+        )
+        log.warning(message)
+        try:
+            log_handle.write(f"[remote] WARNING: {message}\n")
+        except Exception:
+            pass
+        return
+
+    def _sha256_file(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    expected = {name: _sha256_file(os.path.join(local_bin_dir, name)) for name in local_names}
+    remote_bin_dir = _remote_path_join(repo_dir, 'traffic_agent', 'bin')
+
+    def _remote_hashes(names: Iterable[str]) -> Dict[str, str]:
+        names = sorted(names)
+        if not names:
+            return {}
+        remote_paths = [_remote_path_join(remote_bin_dir, name) for name in names]
+        command = 'sha256sum ' + ' '.join(shlex.quote(p) for p in remote_paths) + ' 2>/dev/null'
+        try:
+            _rc, out, _err = _exec_ssh_command(client, command, timeout=30.0, check=False)
+        except Exception:
+            return {}
+        hashes: Dict[str, str] = {}
+        for line in out.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2:
+                continue
+            digest, path = parts
+            hashes[os.path.basename(path.lstrip('*'))] = digest
+        return hashes
+
+    # A single batched `sha256sum` call, not one exec per file: this runs on
+    # every remote execute once the agent is already deployed, so it needs to
+    # stay a cheap no-op in the common case rather than N SSH round trips.
+    missing = {
+        name: digest for name, digest in expected.items()
+        if _remote_hashes(expected).get(name) != digest
+    }
+    if not missing:
+        return
+
+    message = (
+        f"traffic agent binaries missing/stale on CORE host under {remote_bin_dir} "
+        f"({', '.join(sorted(missing))}); pushing from {local_bin_dir}"
+    )
+    log.warning(message)
+    try:
+        log_handle.write(f"[remote] WARNING: {message}\n")
+    except Exception:
+        pass
+
+    _remote_mkdirs(client, remote_bin_dir)
+    for name in sorted(missing):
+        local_path = os.path.join(local_bin_dir, name)
+        remote_path = _remote_path_join(remote_bin_dir, name)
+        try:
+            sftp.put(local_path, remote_path)
+            sftp.chmod(remote_path, 0o755)
+        except Exception as exc:
+            raise RuntimeError(
+                f'Failed to push traffic agent binary {name} to CORE host '
+                f'({local_path} -> {remote_path}): {exc}'
+            ) from exc
+
+    remote_hashes = _remote_hashes(missing)
+    still_missing = {
+        name: (digest, remote_hashes.get(name)) for name, digest in missing.items()
+        if remote_hashes.get(name) != digest
+    }
+    if still_missing:
+        detail = '; '.join(
+            f"{name} (expected sha256 {expected_digest}, got {actual_digest!r})"
+            for name, (expected_digest, actual_digest) in sorted(still_missing.items())
+        )
+        raise RuntimeError(
+            f'Traffic agent binaries still missing/incorrect on CORE host at {remote_bin_dir} '
+            f'after push: {detail}. Check CORE host disk space and permissions under the repo '
+            'directory and retry.'
+        )
+
+    try:
+        log_handle.write(
+            f"[remote] pushed traffic agent binaries to CORE host: {', '.join(sorted(missing))}\n"
+        )
+    except Exception:
+        pass
 
 
 def _prepare_remote_cli_context(
@@ -7295,6 +7586,21 @@ def _prepare_remote_cli_context(
             raise RuntimeError(
                 f'Failed to synchronize ScenarioForge runtime code to CORE host: {sync_exc}'
             ) from sync_exc
+        try:
+            _ensure_remote_traffic_agent(
+                client=client,
+                sftp=sftp,
+                repo_dir=repo_dir,
+                log_handle=log_handle,
+            )
+        except Exception as agent_exc:
+            try:
+                log_handle.write(f"[remote] traffic agent deployment failed: {agent_exc}\n")
+            except Exception:
+                pass
+            raise RuntimeError(
+                f'Failed to ensure traffic agent binaries on CORE host: {agent_exc}'
+            ) from agent_exc
         # Ensure reports/outputs/uploads directories exist for CLI outputs
         for subdir in ('reports', 'outputs', 'uploads'):
             _remote_mkdirs(client, _remote_path_join(repo_dir, subdir))
@@ -9171,6 +9477,12 @@ def _upload_file_to_core_host(core_cfg: Dict[str, Any], local_path: str, *, remo
     sftp = None
     try:
         sftp = client.open_sftp()
+        try:
+            ok_tmp, tmp_detail = _ensure_remote_tmp_staging_writable(client, remote_dir, core_cfg=cfg)
+            if not ok_tmp:
+                app.logger.warning('[upload] Staging dir %s may not be writable: %s', remote_dir, tmp_detail)
+        except Exception:
+            pass
         _sftp_ensure_dir(sftp, remote_dir)
         unique = f"{uuid.uuid4().hex}_{os.path.basename(local_path)}"
         remote_path = posixpath.normpath(posixpath.join(remote_dir, unique))
@@ -9923,10 +10235,27 @@ def _install_custom_services_to_core_vm(
 
     # Upload files to a temp directory first.
     tmp_dir = '/tmp/coretg_custom_services'
+    # Best-effort repair of a root-owned staging dir.  Do not gate the install on
+    # it: the upload below reports its own, more specific failure.
+    try:
+        ok_tmp, tmp_detail = _ensure_remote_tmp_staging_writable(
+            ssh_client, tmp_dir, core_cfg=core_cfg, sudo_password=sudo_password, logger=logger
+        )
+        if not ok_tmp:
+            _log_warning(logger, '[core] Staging dir %s may not be writable: %s', tmp_dir, tmp_detail)
+    except Exception:
+        _log_warning(logger, '[core] Could not verify staging dir %s', tmp_dir)
     _exec(f"sh -c {shlex.quote(f'mkdir -p {tmp_dir}')}", timeout=15.0)
     sftp = None
     try:
-        sftp = ssh_client.open_sftp()
+        try:
+            sftp = ssh_client.open_sftp()
+        except Exception as exc:
+            # A bare EOFError here means the SSH transport died before the
+            # subsystem was opened; surface something the user can act on.
+            raise RuntimeError(
+                f'Failed opening SFTP session to install custom services: {str(exc).strip() or repr(exc)}'
+            ) from exc
         for lp in local_files:
             rp = f"{tmp_dir}/{os.path.basename(lp)}"
             _upload_custom_service_file(sftp, lp, rp)
@@ -22707,6 +23036,14 @@ def _flow_pivot_rules_for_chain(
             else:
                 prod = [f'Shell({source_name})', f'Pivot({source_name})']
         req = _flow_split_top_level_list(target_requires) or [f'Pivot({source_name})']
+        ports = _flow_split_top_level_list(target_ports)
+        # The target's offering already declares the port its service publishes.
+        # Kept separate from target_ports on purpose: target_ports feeds the CLI's
+        # PivotInfo -> SegmentationPorts path, where an empty value means "allow
+        # every compose-exposed port". Filling it in there would only narrow that
+        # allow, never widen it. This field exists so the runtime check has an
+        # expected port to probe instead of relying on live listeners alone.
+        inferred = [] if ports else [str(port) for port in _flow_pivot_target_offering_ports(target_node)]
         rule = {
             'name': str(name or 'Pivot').strip() or 'Pivot',
             'unbacked_shell': unbacked_shell,
@@ -22719,7 +23056,8 @@ def _flow_pivot_rules_for_chain(
             'provider_label': _flow_pivot_provider_label(provider),
             'produces': prod,
             'target_requires': req,
-            'target_ports': _flow_split_top_level_list(target_ports),
+            'target_ports': ports,
+            'inferred_target_ports': inferred,
             'target_protocols': _flow_split_top_level_list(target_protocols),
             'exposure': str(exposure or 'pivot-only').strip() or 'pivot-only',
         }
@@ -23372,6 +23710,7 @@ def _flow_apply_pivot_context_to_assignments(
                     'requires': [fact for fact in source_requires if fact not in set(cyclic_pruned_requires)],
                     'produces': [],
                     'target_ports': ports,
+                    'inferred_target_ports': _flow_split_top_level_list(rule.get('inferred_target_ports')),
                     'target_protocols': _flow_split_top_level_list(rule.get('target_protocols')),
                     'exposure': rule.get('exposure') or 'pivot-only',
                 })
@@ -23641,6 +23980,147 @@ def _flow_preview_entry_points(preview: Any) -> dict[int, list]:
     for node_id, provisioned in provisioned_entry_points(preview.get('hosts') or []).items():
         entries.setdefault(int(node_id), []).extend(provisioned)
     return entries
+
+
+def _load_plan_preview_for_checks(
+    *,
+    xml_path: str = '',
+    preview_plan_path: Optional[str] = None,
+    scenario_label: str = '',
+) -> Optional[Dict[str, Any]]:
+    """The plan behind a finished run, from whichever artifact still holds it."""
+    for candidate in (preview_plan_path, xml_path):
+        path = str(candidate or '').strip()
+        if not path:
+            continue
+        preview: Any = None
+        try:
+            if path.lower().endswith('.xml'):
+                preview = _load_plan_preview_from_xml(path, scenario_label or None)
+            else:
+                with open(path, 'r', encoding='utf-8') as handle:
+                    preview = json.load(handle)
+        except Exception:
+            preview = None
+        if not isinstance(preview, dict) or not preview:
+            continue
+        # The XML stores the plan wrapped as {'full_preview': ..., 'metadata': ...};
+        # a plan JSON on disk is already unwrapped.
+        if not preview.get('hosts'):
+            for key in ('full_preview', 'plan', 'preview'):
+                nested = preview.get(key)
+                if isinstance(nested, dict) and nested.get('hosts'):
+                    preview = nested
+                    break
+        if preview.get('hosts'):
+            return preview
+    return None
+
+
+def _plan_node_names_by_id(
+    *,
+    xml_path: str = '',
+    preview_plan_path: Optional[str] = None,
+    scenario_label: str = '',
+) -> Dict[str, str]:
+    """CORE node id -> node name, straight from the plan.
+
+    Runtime artifacts identify traffic endpoints by node id, so this is what lets
+    a check name an endpoint whose address no longer matches any running node.
+    """
+    preview = _load_plan_preview_for_checks(
+        xml_path=xml_path, preview_plan_path=preview_plan_path, scenario_label=scenario_label)
+    out: Dict[str, str] = {}
+    for host in ((preview or {}).get('hosts') or []):
+        if not isinstance(host, dict):
+            continue
+        node_id = str(host.get('node_id') or '').strip()
+        name = str(host.get('name') or '').strip()
+        if node_id and name:
+            out[node_id] = name
+    return out
+
+
+def _flow_pivot_fill_offering_ports(
+    relationships: Any,
+    *,
+    xml_path: str = '',
+    preview_plan_path: Optional[str] = None,
+    scenario_label: str = '',
+) -> list[dict[str, Any]]:
+    """Give each portless pivot edge the port its target's offering publishes.
+
+    Flow stamps pivot metadata at Generate time, so a chain saved before this
+    existed carries no port at all and the runtime check falls back to the
+    target's live listeners -- which are empty while a slow container is still
+    starting. Deriving the port here means an already-saved chain is checked
+    correctly without forcing a regenerate.
+    """
+    rels = [rel for rel in (relationships or []) if isinstance(rel, dict)]
+    if not rels or not any(not (rel.get('target_ports') or []) for rel in rels):
+        return relationships if isinstance(relationships, list) else rels
+
+    preview = _load_plan_preview_for_checks(
+        xml_path=xml_path, preview_plan_path=preview_plan_path, scenario_label=scenario_label)
+    if not isinstance(preview, dict) or not preview:
+        return rels
+
+    try:
+        _nodes, by_key = _flow_node_lookup_for_pivot(preview, [])
+    except Exception:
+        return rels
+
+    for rel in rels:
+        if rel.get('target_ports'):
+            continue
+        node = by_key.get(str(rel.get('target') or '').strip().lower())
+        if not isinstance(node, dict):
+            continue
+        try:
+            ports = _flow_pivot_target_offering_ports(node)
+        except Exception:
+            ports = []
+        if ports:
+            rel['target_ports'] = list(ports)
+    return rels
+
+
+def _flow_pivot_target_offering_ports(target_node: Any) -> list[int]:
+    """TCP ports the offerings hosted on a pivot target publish, best effort.
+
+    A pivot edge whose target declares no port leaves the runtime check with
+    nothing to probe, so it falls back to the node's live listeners and reports
+    a healthy-but-slow container as having no service at all. The vulnerability
+    or generator on the node already names its published port in its compose
+    file, which is the same source segmentation rules use.
+    """
+    if not isinstance(target_node, dict):
+        return []
+    names: list[str] = []
+    for key in ('vulnerabilities', 'flag_node_generators', 'offerings'):
+        value = target_node.get(key)
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            continue
+        for entry in value:
+            # Graph nodes carry plain names; chain nodes carry the richer dicts.
+            if isinstance(entry, dict):
+                text = str(entry.get('name') or entry.get('id') or '').strip()
+            else:
+                text = str(entry or '').strip()
+            if text and text not in names:
+                names.append(text)
+    ports: list[int] = []
+    for name in names:
+        try:
+            found = _flow_ports_for_offering(name)
+        except Exception:
+            continue
+        for port in found:
+            if port not in ports:
+                ports.append(int(port))
+    return ports
 
 
 def _flow_ports_for_offering(name: str) -> list[int]:
@@ -27343,6 +27823,71 @@ def _sort_scenario_display_names(names: Iterable[Any] | None) -> list[str]:
         return sorted(cleaned, key=_scenario_display_sort_key)
     except Exception:
         return cleaned
+
+
+def _purge_core_secrets_for_scenarios(names_to_remove: Iterable[Any]) -> Dict[str, Any]:
+    """Delete stored CORE credentials bound to the named scenarios.
+
+    Scenario deletion previously left these behind, so encrypted records
+    accumulated forever and -- because _select_latest_core_secret_record()
+    matches on scenario name -- recreating a scenario under a deleted one's
+    name silently inherited its credentials.
+
+    Only records naming one of these scenarios are touched. A record with no
+    scenario_name is shared (VM mode reads its connection from
+    .scenarioforge.env rather than a per-scenario secret), so deleting one
+    here would break unrelated scenarios.
+    """
+    targets: set[str] = set()
+    match_keys: set[str] = set()
+    for raw in names_to_remove or []:
+        try:
+            name = str(raw).strip()
+        except Exception:
+            name = ''
+        if not name:
+            continue
+        norm = _normalize_scenario_label(name)
+        if norm:
+            targets.add(norm)
+        key = _scenario_match_key(name)
+        if key:
+            match_keys.add(key)
+    if not targets and not match_keys:
+        return {'core_secrets_removed': 0}
+
+    try:
+        entries = os.listdir(_core_secret_dir())
+    except Exception:
+        return {'core_secrets_removed': 0}
+
+    removed = 0
+    for entry in entries:
+        if not entry.endswith('.json'):
+            continue
+        identifier = entry[:-5]
+        try:
+            record = _load_core_credentials(identifier)
+        except Exception:
+            continue
+        if not record:
+            continue
+        scenario_name = record.get('scenario_name') or ''
+        if not scenario_name:
+            continue
+        record_norm = _normalize_scenario_label(scenario_name)
+        record_key = _scenario_match_key(scenario_name)
+        if not (
+            (record_norm and record_norm in targets)
+            or (record_key and record_key in match_keys)
+        ):
+            continue
+        try:
+            if _delete_core_credentials(identifier):
+                removed += 1
+        except Exception:
+            continue
+    return {'core_secrets_removed': removed}
 
 
 def _select_latest_core_secret_record(scenario_norm: str | None = None) -> Optional[Dict[str, Any]]:
@@ -32941,11 +33486,18 @@ def _prepare_payload_for_index(payload: Optional[Dict[str, Any]], *, user: Optio
     payload['core'] = core_meta
 
     # --- Scenarios ---
+    # An explicit "delete all" sets force_empty in the catalog.  Synthesizing the
+    # default scenario there would show a phantom "Scenario 1" that has no XML on
+    # disk, so downstream pages (Flag sequencing) fail with "No XML found".
+    catalog_force_empty = bool(payload.get('scenario_catalog_force_empty'))
     scenarios_raw = payload.get('scenarios')
     if not isinstance(scenarios_raw, list):
         # For actual restricted roles (builder/participant), an empty assignment list
         # should result in an empty scenario list ("all or none" visibility).
-        scenarios_raw = defaults['scenarios'] if allowed_norms is None else []
+        if allowed_norms is None and not catalog_force_empty:
+            scenarios_raw = defaults['scenarios']
+        else:
+            scenarios_raw = []
     # For restricted roles, always build scenarios from catalog + assignments so
     # Scenarios/CORE/Reports are consistent (including ordering).
     if allowed_norms is not None and allowed_norms:
@@ -33076,8 +33628,14 @@ def _prepare_payload_for_index(payload: Optional[Dict[str, Any]], *, user: Optio
 
         normalized_scenarios.append(scen_norm)
 
-    # Only synthesize a default scenario when the caller omitted scenarios entirely.
-    if not normalized_scenarios and allowed_norms is None and not had_explicit_scenarios_list:
+    # Only synthesize a default scenario when the caller omitted scenarios entirely
+    # and the catalog was not explicitly purged.
+    if (
+        not normalized_scenarios
+        and allowed_norms is None
+        and not had_explicit_scenarios_list
+        and not catalog_force_empty
+    ):
         normalized_scenarios = defaults['scenarios']
 
     # If the UI is in builder mode (even for admin users previewing builder view),
@@ -34924,6 +35482,11 @@ def _sync_local_vulns_to_remote(
                 log.warning("[sync] Uploaded %s but could not preserve executable mode on %s", local_path, remote_path)
 
         remote_dir_resolved = _remote_expand_path(sftp, remote_dir)
+        ok_tmp, tmp_detail = _ensure_remote_tmp_staging_writable(
+            client, remote_dir_resolved, core_cfg=core_cfg, logger=log
+        )
+        if not ok_tmp:
+            log.warning('[sync] Remote staging dir not writable (%s): %s', remote_dir_resolved, tmp_detail)
         _remote_mkdirs(client, remote_dir_resolved)
         made_dirs: set[str] = set()
         for lp in local_files:
@@ -35202,7 +35765,12 @@ def main():
         except Exception:
             stopped = False
         try:
-            p2 = _run_docker(['rm', nm], timeout=20)
+            # -v removes the container's *anonymous* volumes. Vulnerability
+            # stacks are database-backed (postgres/mysql declare VOLUME on their
+            # data directory), so without it every teardown orphans a data volume
+            # that nothing ever reclaims -- the scenario runs, the containers go
+            # away, and the disk keeps filling. Named volumes are untouched.
+            p2 = _run_docker(['rm', '-v', nm], timeout=20)
             removed = (p2.returncode == 0)
         except Exception:
             removed = False
@@ -40404,8 +40972,18 @@ def _inspect_state(container_name, attempts=4, delay_s=1.0):
     last_out = ''
     total_attempts = max(1, int(attempts or 1))
     for idx in range(total_attempts):
-        p = _run(['docker', 'inspect', '--format', '{{json .State}}', container_name], timeout=20)
+        # RestartCount sits at the top level, not under .State, so inspecting
+        # .State alone cannot tell a healthy container from one in a restart
+        # loop -- each poll just catches a fresh "running". Count first: it is an
+        # integer, so the split is unambiguous even when the JSON contains spaces.
+        p = _run(['docker', 'inspect', '--format', '{{.RestartCount}} {{json .State}}', container_name], timeout=20)
         out = str(p.stdout or '').strip()
+        restart_count = None
+        if out:
+            head, _, rest = out.partition(' ')
+            if head.isdigit() and rest.strip().startswith('{'):
+                restart_count = int(head)
+                out = rest.strip()
         if p.returncode == 0 and out:
             try:
                 st = json.loads(out)
@@ -40433,6 +41011,7 @@ def _inspect_state(container_name, attempts=4, delay_s=1.0):
                 'exit_code': exit_code,
                 'error': state_error,
                 'inspect_error': '',
+                'restart_count': restart_count,
             }
         if out:
             last_out = out
@@ -40678,12 +41257,14 @@ def main():
         state_exit_code = None
         state_error = ''
         inspect_error = ''
+        state_restart_count = None
         try:
             st = _inspect_state(c, attempts=4, delay_s=1.0)
             exists = bool(st.get('exists'))
             running = bool(st.get('running'))
             state_status = str(st.get('status') or '').strip()
             state_exit_code = st.get('exit_code')
+            state_restart_count = st.get('restart_count')
             state_error = str(st.get('error') or '').strip()
             inspect_error = str(st.get('inspect_error') or '').strip()
         except Exception:
@@ -40764,6 +41345,7 @@ def main():
             'state_status': state_status,
             'state_exit_code': state_exit_code,
             'state_error': state_error,
+            'state_restart_count': state_restart_count,
             'inspect_error': inspect_error,
             'inject_count': inject_count,
             'inject_samples': inject_samples,
@@ -41532,6 +42114,7 @@ def _validate_session_nodes_and_injects(
         'docker_not_running_details': [],
         'docker_start_pending': [],
         'docker_running': [],
+        'docker_restarting': [],
         'port_unreachable': [],
         'port_unreachable_details': [],
         'ports_checked': [],
@@ -42196,6 +42779,22 @@ def _validate_session_nodes_and_injects(
                             summary['injects_detail'].append(f"{name}: not running{reason}")
                     else:
                         summary['docker_running'].append(name)
+                        # A container in a restart loop is "running" at every
+                        # poll, so running-ness alone hides it. CORE configures a
+                        # docker node after its container starts (address, default
+                        # route, traffic agent, all in the namespace), and a
+                        # restart discards all of it -- which then surfaces as
+                        # unrelated routing and traffic faults.
+                        try:
+                            restarts = int(it.get('state_restart_count'))
+                        except (TypeError, ValueError):
+                            restarts = 0
+                        if restarts > 0:
+                            summary['docker_restarting'].append(
+                                {'container': name, 'restart_count': restarts})
+                            summary['injects_detail'].append(
+                                f"{name}: restarted {restarts} time(s); CORE network config is "
+                                "reapplied only at execute, so it is lost on each restart")
                         _record_port_checks(name, it)
                     try:
                         is_running = bool(it.get('running'))
@@ -42594,6 +43193,10 @@ def _validate_session_nodes_and_injects(
         summary['missing_nodes']
         or summary['docker_missing']
         or summary['docker_not_running']
+        # A container in a restart loop is "running" at every poll, so without
+        # this the validator reports ok while the node keeps losing the address,
+        # default route and traffic agent CORE applied to it at execute.
+        or summary['docker_restarting']
         or summary['injects_missing']
         or summary['missing_docker_nodes']
         or summary['extra_docker_nodes']
@@ -44013,7 +44616,9 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             "grep -vE '\"'\"' core-daemon$| registry:2$'\"'\"' | awk '\"'\"'{print $1}'\"'\"'); "
             "if [ -n \"$ids\" ]; then "
             f"imgs=$(docker inspect -f '\"'\"'{{{{.Image}}}}'\"'\"' $ids 2>/dev/null | sort -u{id_exclude}); "
-            "echo \"$ids\" | xargs -r docker rm -f; "
+            # -v reclaims each container's anonymous volumes; database-backed
+            # vulnerability stacks orphan a data volume per teardown without it.
+            "echo \"$ids\" | xargs -r docker rm -f -v; "
             "if [ -n \"$imgs\" ]; then echo \"$imgs\" | xargs -r docker rmi -f || true; fi; "
             "fi'"
         )
@@ -44207,15 +44812,15 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
         _fail_run(f"Failed to ensure core-daemon is ready: {exc}", code=1)
         return
 
+    # Keep Execute on the repository's current service implementations.
+    # CORE imports custom service classes in core-daemon, so merely syncing the
+    # repo is not enough; updated modules must be installed and the daemon restarted.
+    install_custom_services_on_execute = bool(
+        core_cfg.get('install_custom_services', False)
+        or core_cfg.get('ssh_password')
+    )
     try:
         required_custom_services = set(_local_custom_service_names() or ["DockerDefaultRoute", "CoreTGPrereqs"])
-        # Keep Execute on the repository's current service implementations.
-        # CORE imports custom service classes in core-daemon, so merely syncing the
-        # repo is not enough; updated modules must be installed and the daemon restarted.
-        install_custom_services_on_execute = bool(
-            core_cfg.get('install_custom_services', False)
-            or core_cfg.get('ssh_password')
-        )
         discovered = _remote_core_service_names(remote_client, core_cfg=core_cfg, require_custom_services_dir=True)
         missing = sorted([name for name in required_custom_services if name not in discovered])
         if install_custom_services_on_execute:
@@ -44272,10 +44877,28 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
             )
             return
     except Exception as exc:
+        # Paramiko signals a dropped channel/session with a bare EOFError, and an
+        # exec_command timeout with a bare socket.timeout; both stringify to ''.
+        # Fall back to repr() so the reason is never blank in the UI.
+        reason = str(exc).strip() or repr(exc)
+        if install_custom_services_on_execute:
+            # The toggle is already on -- that is why the install ran at all.
+            hint = (
+                "This is usually a dropped SSH session or a timed-out remote command; "
+                "check the CORE host is reachable, then re-run Execute."
+            )
+        else:
+            hint = (
+                "Open CORE Connection and enable 'Install custom services', "
+                "then re-run Execute."
+            )
+        try:
+            log_f.write(f"{log_prefix}Custom services step failed: {reason}\n")
+            log_f.write(traceback.format_exc())
+        except Exception:
+            pass
         _fail_run(
-            "Failed validating/installing custom services on remote CORE host: "
-            f"{exc}. Open CORE Connection and enable "
-            "'Install custom services', then re-run Execute.",
+            f"Failed validating/installing custom services on remote CORE host: {reason}. {hint}",
             code=1,
             extra={'error_code': 'custom_services_install_failed'},
         )
@@ -52161,6 +52784,7 @@ try:
         remove_scenarios_from_catalog=_remove_scenarios_from_catalog,
         delete_saved_scenario_xml_artifacts=_delete_saved_scenario_xml_artifacts,
         remove_scenarios_from_all_editor_snapshots=_remove_scenarios_from_all_editor_snapshots,
+        purge_core_secrets_for_scenarios=_purge_core_secrets_for_scenarios,
         logger=app.logger,
     )
 except Exception:

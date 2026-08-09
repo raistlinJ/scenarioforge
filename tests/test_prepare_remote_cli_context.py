@@ -1,6 +1,13 @@
+import hashlib
 import io
 import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
 import tarfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -9,10 +16,12 @@ from webapp import app_backend as backend
 
 
 class _FakeSFTP:
-    def __init__(self, existing_paths):
+    def __init__(self, existing_paths, existing_contents=None):
         self._existing_paths = set(existing_paths)
+        self.existing_contents = dict(existing_contents or {})
         self.put_calls = []
         self.uploaded_bytes = {}
+        self.chmod_calls = []
 
     def put(self, localpath, remotepath, callback=None):
         local_path = Path(localpath)
@@ -26,6 +35,12 @@ class _FakeSFTP:
                 callback(len(payload), len(payload))
             except Exception:
                 pass
+
+    def chmod(self, path, mode):
+        self.chmod_calls.append((str(path), mode))
+
+    def remote_content(self, path):
+        return self.uploaded_bytes.get(path, self.existing_contents.get(path))
 
     def stat(self, path):
         if str(path) not in self._existing_paths:
@@ -43,6 +58,42 @@ class _FailingArchiveSFTP(_FakeSFTP):
         return super().put(localpath, remotepath, callback=callback)
 
 
+class _FakeSSHChannel:
+    def __init__(self, stdout_bytes=b'', stderr_bytes=b'', exit_status=0):
+        self._stdout_bytes = stdout_bytes
+        self._stderr_bytes = stderr_bytes
+        self._exit_status = exit_status
+        self._stdout_sent = not stdout_bytes
+        self._stderr_sent = not stderr_bytes
+        self.closed = False
+
+    def settimeout(self, _timeout):
+        return None
+
+    def recv_ready(self):
+        return not self._stdout_sent
+
+    def recv_stderr_ready(self):
+        return not self._stderr_sent
+
+    def exit_status_ready(self):
+        return True
+
+    def recv(self, _size):
+        self._stdout_sent = True
+        return self._stdout_bytes
+
+    def recv_stderr(self, _size):
+        self._stderr_sent = True
+        return self._stderr_bytes
+
+    def recv_exit_status(self):
+        return self._exit_status
+
+    def close(self):
+        self.closed = True
+
+
 class _FakeSSHClient:
     def __init__(self, sftp):
         self._sftp = sftp
@@ -51,36 +102,31 @@ class _FakeSSHClient:
     def open_sftp(self):
         return self._sftp
 
+    def _respond(self, command):
+        """Answer `sha256sum <paths>` against the fake SFTP's known content.
+
+        Mirrors real sha256sum: files that don't exist are silently dropped
+        (the real command pipes stderr to /dev/null in _ensure_remote_traffic_agent),
+        everything else, this fake stays a no-op that matches paramiko's
+        exec_command contract (rc=0, empty output).
+        """
+        if command.startswith('sha256sum '):
+            body = command[len('sha256sum '):].split(' 2>/dev/null')[0]
+            lines = []
+            for remote_path in shlex.split(body):
+                content = self._sftp.remote_content(remote_path)
+                if content is None:
+                    continue
+                digest = hashlib.sha256(content).hexdigest()
+                lines.append(f'{digest}  {remote_path}')
+            stdout = ('\n'.join(lines) + ('\n' if lines else '')).encode('utf-8')
+            return stdout, b'', 0
+        return b'', b'', 0
+
     def exec_command(self, command):
         self.commands.append(str(command))
-
-        class _Channel:
-            def __init__(self):
-                self.closed = False
-
-            def settimeout(self, _timeout):
-                return None
-
-            def recv_ready(self):
-                return False
-
-            def recv_stderr_ready(self):
-                return False
-
-            def exit_status_ready(self):
-                return True
-
-            def recv(self, _size):
-                return b''
-
-            def recv_stderr(self, _size):
-                return b''
-
-            def recv_exit_status(self):
-                return 0
-
-            def close(self):
-                self.closed = True
+        stdout_bytes, stderr_bytes, exit_status = self._respond(str(command))
+        channel = _FakeSSHChannel(stdout_bytes, stderr_bytes, exit_status)
 
         class _Stream:
             def __init__(self, channel):
@@ -93,7 +139,6 @@ class _FakeSSHClient:
             def close(self):
                 return None
 
-        channel = _Channel()
         return _Stdin(), _Stream(channel), _Stream(channel)
 
 
@@ -425,6 +470,224 @@ def test_prepare_remote_cli_context_fails_when_runtime_sync_fails(tmp_path, monk
         )
 
     assert '[remote] runtime subset sync failed: runtime archive upload failed' in log_handle.getvalue()
+
+
+def _write_traffic_agent_binaries(repo_root):
+    bin_dir = repo_root / 'traffic_agent' / 'bin'
+    bin_dir.mkdir(parents=True)
+    (bin_dir / 'traffic-agent-linux-amd64').write_bytes(b'amd64-binary-bytes')
+    (bin_dir / 'traffic-agent-linux-arm64').write_bytes(b'arm64-binary-bytes-longer')
+
+
+def test_prepare_remote_cli_context_pushes_missing_traffic_agent_binaries(tmp_path, monkeypatch):
+    repo_root = tmp_path / 'repo'
+    (repo_root / 'scenarioforge').mkdir(parents=True)
+    (repo_root / 'scenarioforge' / '__init__.py').write_text('', encoding='utf-8')
+    _write_traffic_agent_binaries(repo_root)
+
+    xml_path = tmp_path / 'ephemeral.xml'
+    xml_path.write_text('<Scenarios />\n', encoding='utf-8')
+
+    remote_repo = '/remote/repo'
+    fake_sftp = _FakeSFTP(
+        {
+            remote_repo,
+            f'{remote_repo}/scenarioforge',
+            f'{remote_repo}/scenarioforge/__init__.py',
+        }
+    )
+    client = _FakeSSHClient(fake_sftp)
+
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _sftp: remote_repo)
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **_kwargs: None)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
+
+    log_handle = io.StringIO()
+
+    backend._prepare_remote_cli_context(
+        client=client,
+        run_id='run-traffic-agent-push',
+        xml_path=str(xml_path),
+        preview_plan_path=str(xml_path),
+        log_handle=log_handle,
+    )
+
+    pushed = {
+        remote: fake_sftp.uploaded_bytes[remote]
+        for _local, remote in fake_sftp.put_calls
+        if remote.startswith(f'{remote_repo}/traffic_agent/bin/')
+    }
+    assert pushed == {
+        f'{remote_repo}/traffic_agent/bin/traffic-agent-linux-amd64': b'amd64-binary-bytes',
+        f'{remote_repo}/traffic_agent/bin/traffic-agent-linux-arm64': b'arm64-binary-bytes-longer',
+    }
+    assert set(fake_sftp.chmod_calls) == {
+        (f'{remote_repo}/traffic_agent/bin/traffic-agent-linux-amd64', 0o755),
+        (f'{remote_repo}/traffic_agent/bin/traffic-agent-linux-arm64', 0o755),
+    }
+
+    log_text = log_handle.getvalue()
+    assert 'WARNING: traffic agent binaries missing/stale on CORE host' in log_text
+    assert 'pushed traffic agent binaries to CORE host' in log_text
+    assert 'traffic-agent-linux-amd64' in log_text
+    assert 'traffic-agent-linux-arm64' in log_text
+
+
+def test_prepare_remote_cli_context_skips_push_when_traffic_agent_already_current(tmp_path, monkeypatch):
+    repo_root = tmp_path / 'repo'
+    (repo_root / 'scenarioforge').mkdir(parents=True)
+    (repo_root / 'scenarioforge' / '__init__.py').write_text('', encoding='utf-8')
+    _write_traffic_agent_binaries(repo_root)
+
+    xml_path = tmp_path / 'ephemeral.xml'
+    xml_path.write_text('<Scenarios />\n', encoding='utf-8')
+
+    remote_repo = '/remote/repo'
+    fake_sftp = _FakeSFTP(
+        {
+            remote_repo,
+            f'{remote_repo}/scenarioforge',
+            f'{remote_repo}/scenarioforge/__init__.py',
+        },
+        existing_contents={
+            f'{remote_repo}/traffic_agent/bin/traffic-agent-linux-amd64': b'amd64-binary-bytes',
+            f'{remote_repo}/traffic_agent/bin/traffic-agent-linux-arm64': b'arm64-binary-bytes-longer',
+        },
+    )
+    client = _FakeSSHClient(fake_sftp)
+
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _sftp: remote_repo)
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **_kwargs: None)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
+
+    log_handle = io.StringIO()
+
+    backend._prepare_remote_cli_context(
+        client=client,
+        run_id='run-traffic-agent-current',
+        xml_path=str(xml_path),
+        preview_plan_path=str(xml_path),
+        log_handle=log_handle,
+    )
+
+    assert not any(
+        remote.startswith(f'{remote_repo}/traffic_agent/bin/')
+        for _local, remote in fake_sftp.put_calls
+    )
+    assert 'traffic agent' not in log_handle.getvalue()
+
+
+def test_prepare_remote_cli_context_warns_without_failing_when_traffic_agent_missing_locally(
+    tmp_path, monkeypatch
+):
+    repo_root = tmp_path / 'repo'
+    (repo_root / 'scenarioforge').mkdir(parents=True)
+    (repo_root / 'scenarioforge' / '__init__.py').write_text('', encoding='utf-8')
+    # Deliberately no traffic_agent/bin under repo_root.
+
+    xml_path = tmp_path / 'ephemeral.xml'
+    xml_path.write_text('<Scenarios />\n', encoding='utf-8')
+
+    remote_repo = '/remote/repo'
+    fake_sftp = _FakeSFTP(
+        {
+            remote_repo,
+            f'{remote_repo}/scenarioforge',
+            f'{remote_repo}/scenarioforge/__init__.py',
+        }
+    )
+    client = _FakeSSHClient(fake_sftp)
+
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _sftp: remote_repo)
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **_kwargs: None)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
+
+    log_handle = io.StringIO()
+
+    backend._prepare_remote_cli_context(
+        client=client,
+        run_id='run-traffic-agent-missing-locally',
+        xml_path=str(xml_path),
+        preview_plan_path=str(xml_path),
+        log_handle=log_handle,
+    )
+
+    assert not any(
+        remote.startswith(f'{remote_repo}/traffic_agent/bin/')
+        for _local, remote in fake_sftp.put_calls
+    )
+    log_text = log_handle.getvalue()
+    assert 'WARNING: traffic agent binaries are missing locally' in log_text
+    assert 'traffic_agent/build.sh' in log_text
+
+
+class _TrafficAgentPushDoesNotPersistSFTP(_FakeSFTP):
+    """Simulate a CORE host where the push call succeeds but the file never lands."""
+
+    def put(self, localpath, remotepath, callback=None):
+        if '/traffic_agent/bin/' in str(remotepath):
+            self.put_calls.append((str(localpath), str(remotepath)))
+            if callback is not None:
+                try:
+                    size = Path(localpath).stat().st_size
+                    callback(size, size)
+                except Exception:
+                    pass
+            return
+        return super().put(localpath, remotepath, callback=callback)
+
+
+def test_prepare_remote_cli_context_errors_when_traffic_agent_push_does_not_verify(
+    tmp_path, monkeypatch
+):
+    repo_root = tmp_path / 'repo'
+    (repo_root / 'scenarioforge').mkdir(parents=True)
+    (repo_root / 'scenarioforge' / '__init__.py').write_text('', encoding='utf-8')
+    _write_traffic_agent_binaries(repo_root)
+
+    xml_path = tmp_path / 'ephemeral.xml'
+    xml_path.write_text('<Scenarios />\n', encoding='utf-8')
+
+    remote_repo = '/remote/repo'
+    fake_sftp = _TrafficAgentPushDoesNotPersistSFTP(
+        {
+            remote_repo,
+            f'{remote_repo}/scenarioforge',
+            f'{remote_repo}/scenarioforge/__init__.py',
+        }
+    )
+    client = _FakeSSHClient(fake_sftp)
+
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _sftp: remote_repo)
+    monkeypatch.setattr(backend, '_remote_mkdirs', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **_kwargs: None)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(repo_root))
+
+    log_handle = io.StringIO()
+    with pytest.raises(
+        RuntimeError,
+        match='Failed to ensure traffic agent binaries on CORE host',
+    ):
+        backend._prepare_remote_cli_context(
+            client=client,
+            run_id='run-traffic-agent-push-fails',
+            xml_path=str(xml_path),
+            preview_plan_path=str(xml_path),
+            log_handle=log_handle,
+        )
+
+    log_text = log_handle.getvalue()
+    assert 'traffic agent deployment failed' in log_text
+    assert 'still missing/incorrect on CORE host' in log_text
+    assert 'traffic-agent-linux-amd64' in log_text
+    assert 'traffic-agent-linux-arm64' in log_text
 
 
 def test_prepare_remote_cli_context_runtime_subset_reuses_remote_mkdirs(tmp_path, monkeypatch):
@@ -804,6 +1067,62 @@ def test_remote_flow_regenerate_script_compiles() -> None:
     )
 
     compile(script, '<remote-flow-regenerate>', 'exec')
+
+
+def test_remote_flow_regenerate_script_imports_scenarioforge_without_ambient_install(tmp_path) -> None:
+    """The script must resolve `scenarioforge` on its own, not rely on this dev
+    venv's editable install being on sys.path.
+
+    On the CORE VM this runs as a bare `python3 -` heredoc with no `cd` into the
+    synced repo and no PYTHONPATH (see _compose_remote_python_command) -- unlike
+    `scenarioforge.cli execute`, which is invoked as `cd {repo} && python -m
+    scenarioforge.cli`. `compile()` alone can't catch a missing sys.path entry,
+    and running this test through the normal interpreter can't either, since the
+    project's own editable install makes `scenarioforge` importable from any
+    cwd. Run it with site-packages disabled and PYTHONPATH cleared to close both
+    gaps and actually exercise the import.
+    """
+    # A real (not sandboxed) path: the generated script actually creates and
+    # removes this directory on disk (os.makedirs / shutil.rmtree), so it must
+    # be unique per test run -- reusing a fixed literal here previously left a
+    # real /tmp/vulns/... directory behind that made an unrelated test
+    # (test_upload_flow_artifacts_resolves_remote_tmp_vulns_to_local_outputs)
+    # see stray local content and wrongly treat it as already-present.
+    out_dir = f'/tmp/vulns/flag_generators_runs/flow-regen-test-{uuid.uuid4().hex}/01_text'
+    repo_root = str(Path(__file__).resolve().parents[1])
+    script = backend._remote_flow_regenerate_script(
+        assignment={
+            'config': {'seed': 'demo'},
+            'inject_files': [f'{out_dir}/artifacts/secret.txt -> /flow_injects'],
+        },
+        remote_repo=repo_root,
+        out_dir=out_dir,
+        kind='flag-generator',
+        generator_id='this-generator-id-does-not-exist',
+        sudo_password='',
+    )
+
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
+    try:
+        proc = subprocess.run(
+            [sys.executable, '-S', '-'],
+            input=script,
+            text=True,
+            capture_output=True,
+            env=env,
+            cwd=str(tmp_path),
+            timeout=30,
+        )
+
+        assert "No module named 'scenarioforge'" not in proc.stdout, proc.stdout
+        payload = json.loads(proc.stdout)
+        # Reached and ran the generator runner subprocess -- proof the import that
+        # gated it succeeded -- and failed only because the generator id is fake.
+        assert payload['ok'] is False
+        assert 'Generator not found' in payload['stderr']
+    finally:
+        shutil.rmtree(os.path.dirname(out_dir), ignore_errors=True)
 
 
 def test_remote_flow_regenerate_failure_raises_concise_user_message(tmp_path, monkeypatch):

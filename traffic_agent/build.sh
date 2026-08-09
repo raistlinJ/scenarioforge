@@ -20,7 +20,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 go_image="${GO_IMAGE:-golang:1.22-alpine}"
-version="${AGENT_VERSION:-1.0.0}"
+version="${AGENT_VERSION:-1.0.1}"
 out="$here/bin"
 
 if ! command -v docker >/dev/null 2>&1; then

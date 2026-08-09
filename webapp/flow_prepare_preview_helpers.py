@@ -14,6 +14,8 @@ import json
 
 from werkzeug.utils import secure_filename
 
+from scenarioforge.utils import tmp_staging
+
 
 def flow_is_file_input_type(type_value: Any) -> bool:
     try:
@@ -2460,6 +2462,18 @@ def prepare_generator_run_dir(
     scenario_root = os.path.join('/tmp/vulns', subdir, f"flow-{scenario_safe}")
 
     if not flow_run_remote:
+        # /tmp/vulns is shared with root-owned docker writers; repair it before
+        # staging so the rmtree/makedirs below cannot fail with EACCES.
+        try:
+            ok_tmp, tmp_detail = tmp_staging.ensure_local_tmp_writable(scenario_root)
+            if not ok_tmp:
+                raise RuntimeError(
+                    f'Local generator staging dir {scenario_root} is not writable: {tmp_detail}'
+                )
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
         try:
             if scenario_root not in cleaned_scenario_roots:
                 if os.path.exists(scenario_root):

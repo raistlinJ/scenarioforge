@@ -24,11 +24,20 @@ connection and profile metadata. A password entered during import is used only
 by that request unless the user selects **Save encrypted destination access
 profile for later Generate/Run**. With that explicit option, it is encrypted in
 ScenarioForge's existing destination secret store and the XML receives only the
-profile identifier; it is never written to the bundle, XML, or progress state.
+profile identifier; it is never written to the progress state. Note that an
+exported reproduction bundle does carry its own source scenario's CORE
+credentials so imports can reach a host without re-entering them, which makes a
+bundle a secret-bearing file — share one only with people you would give that
+CORE host's password.
 If preflight validation fails, upload waits and the
 connection form remains available for correction. If CORE becomes unavailable
-after validation, the scenario still imports and Flag Sequencing's
-**Materialize** action remains available for retry.
+after validation, the scenario still imports without its artifacts; re-import
+the bundle to retry.
+Importing a bundle asks whether to materialize its artifacts onto the CORE
+host. Materializing makes the scenario immediately executable but is the
+slowest part of an import; declining keeps the import quick and leaves the
+artifacts to be regenerated on the next execute. Either choice reports its
+progress in the import dialog.
 Replay-only packages and plain XML do not run generators during import.
 
 ## Table of contents

@@ -278,10 +278,12 @@ def _rewrite_xml_artifact_paths(
     except ET.ParseError as exc:
         raise ValueError(f"bundle scenario XML is invalid: {exc}") from exc
     for element in root.iter():
-        if str(element.tag).rsplit("}", 1)[-1] == "CoreConnection":
-            # Reproduction packages are portable inputs, never credential carriers.
-            element.attrib.pop("ssh_password", None)
-            element.attrib.pop("password", None)
+        # CoreConnection credentials are kept as authored. An imported scenario
+        # is a local working file with the same trust level as any other
+        # scenario XML, and downstream operations (Materialize, Validate) open
+        # SSH from it -- dropping the password here left them stalling on an
+        # authentication they could not complete. Any value the destination
+        # should override is rebound after import by _update_core_config_in_xml.
         for key, value in list(element.attrib.items()):
             element.attrib[key] = _replace_path(value, path_map)
         text = element.text or ""
