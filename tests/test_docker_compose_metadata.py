@@ -1417,7 +1417,10 @@ def test_prepare_compose_repairs_joomla_mysql55_gosu_on_emulated_arm(tmp_path, m
     assert (mysql.get("labels") or {}).get("coretg.repaired_catalog_user") == (
         "mysql-gosu-emulation-bypass"
     )
-    assert mysql.get("network_mode") == "none"
+    # joomla + mysql is an app and its own sidecar, so the sidecar shares the
+    # node's network namespace and is reachable over loopback rather than being
+    # severed onto its own `none`.
+    assert mysql.get("network_mode") == "service:docker-14"
 
 
 def test_prepare_compose_flow_injects_default_to_flow_injects_dir(tmp_path, monkeypatch):
@@ -1908,7 +1911,7 @@ def test_prepare_compose_root_workdir_auto_mode_skips_app_images(tmp_path, monke
     assert target.get("working_dir") != "/"
 
 
-def test_prepare_compose_forces_no_network_for_multi_service_dependencies_by_default(tmp_path, monkeypatch):
+def test_prepare_compose_shares_the_node_namespace_for_multi_service_stacks(tmp_path, monkeypatch):
     try:
         import yaml  # type: ignore
     except Exception:
@@ -1954,12 +1957,18 @@ services:
     assert isinstance(target, dict)
     assert isinstance(php, dict)
 
+    # The node keeps CORE's isolation and owns the namespace.
     assert target.get("network_mode") == "none"
-    assert php.get("network_mode") == "none"
+    # The sidecar joins that namespace instead of being severed onto its own
+    # `none`. Severing it is what made nginx crash-loop on an unreachable
+    # upstream, which in a real run aborted CORE session boot for unrelated
+    # nodes too.
+    assert php.get("network_mode") == "service:docker-1"
+    # ...and the recipe's own `fastcgi_pass php:9000` still resolves.
+    assert "php:127.0.0.1" in (target.get("extra_hosts") or [])
     assert "ports" not in target
     assert "ports" not in php
     assert "80" in [str(entry) for entry in (target.get("expose") or [])]
-    assert "depends_on" not in target
     assert "links" not in target
 
 

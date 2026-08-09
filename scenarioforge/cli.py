@@ -1202,7 +1202,21 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
     """Best-effort restart a single service from a compose file.
 
     Intended as a recovery path when CORE starts a Docker node before our compose
-    override has taken effect (leading to "vanilla" containers).
+    override has taken effect (leading to "vanilla" containers), or when the
+    container crashed after starting (heavy amd64-under-qemu images are the
+    common case -- Confluence and similarly slow apps can restart once or twice
+    during boot on an arm64 CORE VM).
+
+    CORE names a Docker node's container after the node itself (`docker-N`),
+    and the generated compose file pins that same fixed `container_name:` --
+    it is not project-scoped. This call has no `-p` of its own, so without a
+    pre-clean step Compose derives its project name from the compose file's
+    directory, which does not match whatever project (if any) originally
+    created the container; Compose then tries to *create* a new container
+    under that fixed name and Docker refuses because the old, now-dead one by
+    that exact name is still present. The caller has already classified this
+    name as not-running before invoking recovery, so removing it first is safe
+    and turns the collision into a normal recreate.
     """
     p = str(compose_path or '').strip()
     svc = str(service or '').strip()
@@ -1212,6 +1226,13 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
         return {'ok': False, 'error': 'compose missing', 'compose_path': p, 'service': svc}
     if not shutil.which('docker'):
         return {'ok': False, 'error': 'docker not found', 'compose_path': p, 'service': svc}
+
+    try:
+        _run_docker_cmd(['docker', 'rm', '-f', svc], timeout_s=20.0, allow_sudo_retry=True)
+    except Exception:
+        # Nothing to remove, or removal failed -- the compose-up attempt below
+        # will surface the real error either way.
+        pass
 
     try:
         cmd = ['docker', 'compose', '-f', p, 'up', '-d', svc]
@@ -1713,13 +1734,72 @@ _ROUTING_CONFIG_STANZAS = {
 }
 
 
+def _routing_control_plane_retry_config() -> tuple[int, float]:
+    """(attempts, retry_delay_s) for `_ensure_router_control_planes`, from env.
+
+    Overridable per the same pattern as `CORETG_CORE_START_TIMEOUT_S` and
+    `CORETG_DOCKER_WAIT_RUNNING_S` -- a site whose CORE VM is reliably slower
+    (or faster) than the ~60s default budget assumes can tune this without a
+    code change.
+    """
+    try:
+        attempts = int(os.getenv('CORETG_ROUTING_CONTROL_PLANE_ATTEMPTS') or 40)
+    except Exception:
+        attempts = 40
+    try:
+        retry_delay_s = float(os.getenv('CORETG_ROUTING_CONTROL_PLANE_RETRY_DELAY_S') or 1.5)
+    except Exception:
+        retry_delay_s = 1.5
+    attempts = max(1, min(attempts, 120))
+    retry_delay_s = max(0.1, min(retry_delay_s, 10.0))
+    return attempts, retry_delay_s
+
+
+def _routing_control_plane_failure_message(routing_control_plane: dict[str, Any]) -> str:
+    """Turn `_ensure_router_control_planes`'s result into an actionable error.
+
+    `unreachable` and the rest of `missing` are different failures needing
+    different fixes: a router `vcmd` could never reach for the whole retry
+    window means its netns was never instantiated -- the CORE session likely
+    never left "configuration" at all, and no amount of retrying a Quagga
+    reapply fixes that. A router `vcmd` *can* reach but whose stanza never
+    appears is the real, narrower race this check was built for. A real eval
+    run reported both as one generic "did not load", sending the reader after
+    a Quagga config problem when the session itself never finished building
+    the topology.
+    """
+    missing_routers = routing_control_plane.get('missing') or []
+    unreachable_routers = routing_control_plane.get('unreachable') or []
+    reachable_missing = [n for n in missing_routers if n not in unreachable_routers]
+    parts: list[str] = []
+    if unreachable_routers:
+        parts.append(
+            'CORE never finished instantiating '
+            + ', '.join(str(name) for name in unreachable_routers)
+            + ' (the session likely stayed in "configuration" the whole startup '
+              'window rather than racing a Quagga reapply; increase --start-timeout-s '
+              'or investigate CORE VM load before rerunning)'
+        )
+    if reachable_missing:
+        parts.append(
+            'Quagga configuration did not load within the retry window on: '
+            + ', '.join(str(name) for name in reachable_missing)
+        )
+    if parts:
+        return '; '.join(parts)
+    return (
+        'Routing control-plane configuration did not load on: '
+        + ', '.join(str(name) for name in missing_routers)
+    )
+
+
 def _ensure_router_control_planes(
     session: Any,
     session_id: int,
     router_protocols: Any,
     *,
-    attempts: int = 5,
-    retry_delay_s: float = 0.5,
+    attempts: int = 40,
+    retry_delay_s: float = 1.5,
 ) -> dict[str, Any]:
     """Reapply and verify Quagga/FRR configs after CORE reaches runtime.
 
@@ -1727,6 +1807,13 @@ def _ensure_router_control_planes(
     runs ``vtysh -b``. On a busy VM the daemon socket may not be ready yet; the
     daemon remains alive but has no ``router ...`` stanza, permanently isolating
     that router. Reapplying the saved config is idempotent and closes that race.
+
+    The defaults (~60s total) assume the VM can be genuinely slow, not just
+    momentarily racing: a real run saw its CORE session never leave
+    "configuration" for the whole 120s start timeout, needed a 45s Docker
+    restart-recovery in the same execute, and then had this check give up on
+    every router after 2.5s under the previous 5x0.5s defaults. A VM already
+    that loaded elsewhere in the same run is not a 2.5s problem.
     """
     configured: list[str] = []
     missing: list[str] = []
@@ -1779,13 +1866,28 @@ def _ensure_router_control_planes(
                 if line.strip()
             }
             absent = sorted(stanza for stanza in expected if stanza not in running_lines)
+            apply_exit = int(getattr(apply_result, 'returncode', 1))
+            inspect_exit = int(getattr(inspect_result, 'returncode', 1))
             details[node_name] = {
                 'attempt': attempt,
-                'apply_exit': int(getattr(apply_result, 'returncode', 1)),
-                'inspect_exit': int(getattr(inspect_result, 'returncode', 1)),
+                'apply_exit': apply_exit,
+                'inspect_exit': inspect_exit,
                 'expected': sorted(expected),
                 'missing': absent,
             }
+            # A nonzero exit here means `vcmd` itself could not reach this
+            # node at all -- its control socket, and so its whole netns,
+            # never came up -- not that vtysh ran fine and simply had not
+            # applied the stanza yet. Those are different failures needing
+            # different fixes (the session never finished instantiating the
+            # topology, vs. a Quagga bootstrap race that outlasted the retry
+            # budget), so the raw command output is kept to tell them apart in
+            # the final error rather than reporting both as "did not load".
+            if apply_exit != 0 or inspect_exit != 0:
+                unreachable_output = str(
+                    (apply_result.stdout if apply_exit != 0 else inspect_result.stdout) or ''
+                ).strip()
+                details[node_name]['unreachable_output'] = unreachable_output[-500:]
             if not absent:
                 configured.append(node_name)
                 pending.pop(node_id, None)
@@ -1795,10 +1897,19 @@ def _ensure_router_control_planes(
             time.sleep(max(0.0, float(retry_delay_s or 0.0)))
 
     missing = [node_name for node_name, _expected in pending.values()]
+    # A router's LAST attempt (not just its first) decides whether it was ever
+    # reachable: a node that answers by the final retry was successfully
+    # instantiated late, and belongs with the ordinary "raced but real"
+    # failures, not the "session never built this" ones.
+    unreachable = sorted(
+        node_name for node_name in set(missing)
+        if (details.get(node_name) or {}).get('apply_exit') != 0
+    )
     return {
         'ok': not missing,
         'configured': sorted(set(configured)),
         'missing': sorted(set(missing)),
+        'unreachable': unreachable,
         'details': details,
     }
 
@@ -9179,6 +9290,9 @@ def main():
         docker_wait_s = 45.0
     core_start_timeout_s = max(5.0, min(core_start_timeout_s, 600.0))
     docker_wait_s = max(5.0, min(docker_wait_s, 600.0))
+    routing_control_plane_attempts, routing_control_plane_retry_delay_s = (
+        _routing_control_plane_retry_config()
+    )
     try:
         logging.info("PHASE: Start CORE session")
         # Preflight: check for conflicting Docker containers/images for any compose-based Docker nodes.
@@ -9570,6 +9684,8 @@ def main():
                 locals().get('router_protocols')
                 if isinstance(locals().get('router_protocols'), dict)
                 else {},
+                attempts=routing_control_plane_attempts,
+                retry_delay_s=routing_control_plane_retry_delay_s,
             )
             if routing_control_plane.get('ok'):
                 configured_routers = routing_control_plane.get('configured') or []
@@ -9579,12 +9695,8 @@ def main():
                         ', '.join(str(name) for name in configured_routers),
                     )
             else:
-                missing_routers = routing_control_plane.get('missing') or []
                 start_ok = False
-                start_error = (
-                    'Routing control-plane configuration did not load on: '
-                    + ', '.join(str(name) for name in missing_routers)
-                )
+                start_error = _routing_control_plane_failure_message(routing_control_plane)
                 logging.error('%s', start_error)
 
         # CORE can swallow per-node boot exceptions from its thread pool while the

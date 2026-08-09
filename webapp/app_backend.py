@@ -28491,6 +28491,36 @@ def _delete_saved_scenario_xml_artifacts(names_to_remove: Iterable[Any]) -> Dict
     return {'artifacts_removed': removed}
 
 
+def _snapshot_source_still_names_a_removed_scenario(
+    snap: Dict[str, Any], remove_norms: set[str], remove_match: set[str]
+) -> bool:
+    """Whether the snapshot's XML source file still contains a removed name.
+
+    ``result_path``/``project_key_hint`` normally point at a file this snapshot
+    wrote itself, but an imported bundle's source file is the exception: it is
+    never rewritten by delete (it lives outside outputs/, and it may back other
+    scenarios besides the one deleted), so it keeps every scenario the import
+    contained. A snapshot that still names that file as its source hands the
+    deleted scenario straight back on the next load -- into the "Live XML
+    preview" pane, the Download-XML button, and any Generate/Execute that
+    resolves its XML from ``project_key_hint`` before a fresh save replaces it.
+    """
+    for key in ('result_path', 'project_key_hint'):
+        path = snap.get(key)
+        if not isinstance(path, str) or not path.strip():
+            continue
+        try:
+            if not os.path.exists(path):
+                continue
+            names = _scenario_names_from_xml(path)
+        except Exception:
+            continue
+        for name in names:
+            if _normalize_scenario_label(name) in remove_norms or _scenario_match_key(name) in remove_match:
+                return True
+    return False
+
+
 def _remove_scenarios_from_all_editor_snapshots(names_to_remove: Iterable[Any]) -> Dict[str, Any]:
     """Remove scenario entries from all editor snapshots in outputs/editor_snapshots.
 
@@ -28564,11 +28594,22 @@ def _remove_scenarios_from_all_editor_snapshots(names_to_remove: Iterable[Any]) 
                 continue
             kept.append(scen)
         if not removed_here:
-            # Still clear scenario_query if it targets a deleted scenario.
+            # This snapshot's own scenario list never named the deleted
+            # scenario, but its result_path/project_key_hint file might still
+            # (e.g. it was set from an imported bundle covering more scenarios
+            # than this snapshot tracks). Still clear scenario_query if it
+            # targets a deleted scenario.
             try:
+                dirty = False
+                if _snapshot_source_still_names_a_removed_scenario(snap, remove_norms, remove_match):
+                    snap['result_path'] = None
+                    snap['project_key_hint'] = None
+                    dirty = True
                 q = snap.get('scenario_query')
                 if q and (_normalize_scenario_label(q) in remove_norms or _scenario_match_key(q) in remove_match):
                     snap['scenario_query'] = ''
+                    dirty = True
+                if dirty:
                     tmp = path + '.tmp'
                     with open(tmp, 'w', encoding='utf-8') as fh:
                         json.dump(snap, fh, indent=2)
@@ -28578,6 +28619,16 @@ def _remove_scenarios_from_all_editor_snapshots(names_to_remove: Iterable[Any]) 
                 pass
             continue
         scenarios_removed += removed_here
+        # Check the ORIGINAL result_path/project_key_hint before they are
+        # touched below: an imported bundle's source file is never rewritten by
+        # delete, so it still carries the removed scenario even though `kept`
+        # (built from the snapshot's own, already-pruned list) does not.
+        try:
+            if _snapshot_source_still_names_a_removed_scenario(snap, remove_norms, remove_match):
+                snap['result_path'] = None
+                snap['project_key_hint'] = None
+        except Exception:
+            pass
         snap['scenarios'] = kept
         # Clear scenario_query if it targets a deleted scenario.
         try:

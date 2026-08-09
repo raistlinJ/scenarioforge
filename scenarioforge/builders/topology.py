@@ -1960,6 +1960,32 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                     f"docker compose up -d failed (node={node_name} compose={compose_path} svc={target_service} helpers={inject_helper_services} rc={rc})\n{tail}".strip()
                 )
 
+            # A sidecar that shares this node's network namespace has to be
+            # started explicitly. `docker compose up -d <node>` starts only the
+            # node and whatever the node depends on, and the dependency here
+            # runs the other way (the sidecar joins the node's namespace, so it
+            # depends on the node) -- declaring it in reverse would be a cycle
+            # Compose rejects outright. Without this the node comes up alone and
+            # every request to its own sidecar is refused.
+            try:
+                shared_ns_services = _compose_shared_namespace_services(compose_path, str(target_service))
+            except Exception:
+                shared_ns_services = []
+            if shared_ns_services:
+                rc_side, tail_side = _run(
+                    compose_base + ['up', '-d', '--no-build'] + shared_ns_services, timeout=900
+                )
+                if rc_side != 0:
+                    logger.warning(
+                        '[docker-node] sidecar start failed node=%s services=%s rc=%s tail=%s',
+                        node_name, ', '.join(shared_ns_services), rc_side, tail_side,
+                    )
+                else:
+                    logger.info(
+                        '[docker-node] started %d namespace-sharing sidecar(s) node=%s: %s',
+                        len(shared_ns_services), node_name, ', '.join(shared_ns_services),
+                    )
+
             # Best-effort: wait for PID to be non-zero.
             # Container name should match node_name when `container_name` is set (our default).
             # If not, this still helps in many cases because CORE uses the node name.
@@ -2475,6 +2501,42 @@ def _ensure_docker_node_compose_prepared(node_name: str, rec: Optional[Dict[str,
                 _log_docker_compose_preflight_failure(node_name, locals().get('out_path', ''), exc)
             raise
         return
+
+
+def _compose_shared_namespace_services(compose_path: str, node_service: str) -> list[str]:
+    """Services in this compose file that live in the node service's namespace.
+
+    These carry `network_mode: service:<node>` so a vulnerability's own
+    sidecar (php-fpm, a db) can be reached over loopback while the node keeps
+    `network_mode: none`. Compose will not start them alongside the node --
+    they depend on it, not the other way round -- so the caller starts them
+    itself once the node's namespace exists.
+    """
+    try:
+        import yaml as _yaml
+    except Exception:
+        return []
+    target = str(node_service or '').strip()
+    if not target or not compose_path or not os.path.exists(compose_path):
+        return []
+    try:
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            compose_obj = _yaml.safe_load(handle)
+    except Exception:
+        return []
+    if not isinstance(compose_obj, dict):
+        return []
+    services = compose_obj.get('services')
+    if not isinstance(services, dict):
+        return []
+    wanted = f'service:{target}'
+    out: list[str] = []
+    for name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        if str(svc.get('network_mode') or '').strip() == wanted:
+            out.append(str(name))
+    return out
 
 
 def _docker_ifid_start() -> int:

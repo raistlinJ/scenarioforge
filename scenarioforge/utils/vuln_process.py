@@ -532,6 +532,51 @@ def _repair_known_catalog_compose(obj: dict, rec: Dict[str, str], *, src_dir: st
 		return obj
 
 
+_SHARED_NETWORK_CHECK_CACHE: Dict[str, bool] = {}
+
+
+def _vuln_catalog_item_unusable_under_core_networking(item: Dict[str, str]) -> bool:
+	"""Whether a catalog row cannot work under CORE-only networking at all.
+
+	A stack whose services talk to each other is normally fine: the compose
+	generator repairs it so they share the node's network namespace and reach
+	each other over loopback, keeping `network_mode: none`'s isolation. What
+	cannot be repaired is two services binding the same container port, since one
+	namespace is one port space -- those are the only rows excluded here.
+
+	Cached by path: catalog loading scans every row on every call, and the
+	compose files on disk do not change within a process's lifetime.
+	Unreadable/non-compose rows are kept (fail open) -- excluding something we
+	could not actually check would silently shrink the catalog for the wrong
+	reason.
+	"""
+	try:
+		if _norm_type(str(item.get('Type') or '')) != 'docker-compose':
+			return False
+		path = str(item.get('Path') or '').strip()
+		if not path:
+			return False
+	except Exception:
+		return False
+	if path in _SHARED_NETWORK_CHECK_CACHE:
+		return _SHARED_NETWORK_CHECK_CACHE[path]
+	unusable = False
+	try:
+		if os.path.exists(path):
+			with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+				compose_obj = yaml.safe_load(f)  # type: ignore
+			from .compose_networking import (
+				compose_stack_needs_shared_network,
+				compose_stack_shared_netns_blockers,
+			)
+			if compose_stack_needs_shared_network(compose_obj):
+				unusable = bool(compose_stack_shared_netns_blockers(compose_obj))
+	except Exception:
+		unusable = False
+	_SHARED_NETWORK_CHECK_CACHE[path] = unusable
+	return unusable
+
+
 def load_vuln_catalog(repo_root: str) -> List[Dict[str, str]]:
 	"""Load a vulnerability catalog for CLI selection.
 
@@ -661,6 +706,23 @@ def load_vuln_catalog(repo_root: str) -> List[Dict[str, str]]:
 				continue
 	except Exception:
 		pass
+	# A vulnerability whose services cannot reach each other at all under
+	# CORE-only networking is not selectable: the app crash-loops against an
+	# unreachable sidecar, and that is not merely a broken node -- CORE's own
+	# daemon can throw an unhandled exception wiring a veth into the dead
+	# container's stale PID, which has been observed to abort the rest of
+	# session boot (including starting Quagga/FRR on unrelated routers), so one
+	# incompatible catalog entry can take an entire scenario down.
+	#
+	# Most such stacks are repaired rather than excluded: the compose generator
+	# has them share the node's own network namespace and talk over loopback,
+	# which keeps `network_mode: none`'s isolation. Only stacks that cannot be
+	# repaired -- two services binding the same port, since one namespace is one
+	# port space -- are dropped here. Set
+	# CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 to skip this filter entirely.
+	if not _compose_allow_internal_networking_enabled():
+		items = [it for it in items if not _vuln_catalog_item_unusable_under_core_networking(it)]
+
 	# Deduplicate by vulnerability identity so installed-catalog rows win over
 	# repo defaults that describe the same vulnerability differently.
 	seen = set()
@@ -1931,6 +1993,157 @@ def _force_compose_no_network(compose_obj: dict) -> dict:
 		return compose_obj
 	except Exception:
 		return compose_obj
+
+
+def _compose_stack_needs_shared_network(compose_obj: object) -> bool:
+	"""Whether this stack's own services need to reach each other.
+
+	Thin wrapper so the heavy call site reads plainly and the shared detector
+	stays in one place (`utils.compose_networking`, which catalog and manifest
+	discovery also use).
+	"""
+	try:
+		from .compose_networking import compose_stack_needs_shared_network
+		return compose_stack_needs_shared_network(compose_obj)
+	except Exception:
+		return False
+
+
+def _shared_netns_plan(compose_obj: dict, main_service: str) -> Dict[str, object]:
+	"""How to fit this stack into one namespace: what to drop, what blocks it.
+
+	Thin wrapper so the shared logic lives in `utils.compose_networking`,
+	which catalog and manifest discovery also consult.
+	"""
+	try:
+		from .compose_networking import compose_stack_shared_netns_plan
+		return compose_stack_shared_netns_plan(compose_obj, main_service)
+	except Exception:
+		return {'drop': [], 'blockers': []}
+
+def _apply_shared_netns_sidecars(
+	compose_obj: dict, node_name: str, drop_services: Optional[List[str]] = None,
+) -> tuple[dict, bool, str]:
+	"""Let a vuln stack's own sidecars talk to it without a Docker network.
+
+	The problem this solves: ScenarioForge runs every generated service with
+	``network_mode: none`` so an exploited node cannot reach the host or another
+	node through a Docker-managed gateway. A vulnerability whose app talks to its
+	*own* sidecar by service name (nginx -> php-fpm, app -> db) can then never
+	reach it, and crash-loops permanently -- which has taken a whole CORE session
+	down, not just the one node.
+
+	The repair keeps the isolation and restores the conversation: sidecars join
+	the node's own network namespace (``network_mode: service:<node>``) and reach
+	each other over loopback, with ``extra_hosts`` mapping each sidecar's service
+	name to 127.0.0.1 so the recipe's own config (``fastcgi_pass php:9000``)
+	resolves unchanged. Verified against Docker directly: the namespace holds
+	only ``lo`` -- no Docker interface, no gateway, no route to the host or the
+	internet -- so CORE still owns eth0 and no interface renumbering is needed.
+
+	Deliberately not a Docker ``internal: true`` network, which was measured to
+	still reach services on the Docker host via the bridge gateway address: that
+	is the exact exposure ``network_mode: none`` exists to prevent.
+
+	Returns (compose_obj, applied, reason). `applied` is False when the stack
+	cannot safely share one namespace, leaving the caller's existing behaviour
+	untouched.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj, False, 'compose is not a mapping'
+		services = compose_obj.get('services')
+		if not isinstance(services, dict) or not services:
+			return compose_obj, False, 'no services'
+		main = str(node_name or '').strip()
+		if main not in services or not isinstance(services.get(main), dict):
+			return compose_obj, False, f'node service {main!r} not in compose'
+
+		sidecars = [
+			name for name in services
+			if name != main
+			and not str(name).startswith('inject_copy')
+			and isinstance(services.get(name), dict)
+		]
+		if not sidecars:
+			return compose_obj, False, 'no sidecars to attach'
+
+		# A stack whose services collide on a port is not an app plus a sidecar:
+		# it ships two independent instances side by side for comparison (xdebug 2
+		# and 3; ecshop 2.7.3 and 3.6.0 over one shared mysql). A CORE node is one
+		# host with one address, so only one instance can be it -- drop the
+		# duplicate and keep the rest, including any real sidecar the survivor
+		# needs. Refused only when something being kept depends on the duplicate.
+		# `drop_services` is computed by the caller against the ORIGINAL recipe.
+		# Recomputing here would find nothing: earlier transforms strip ports and
+		# expose from secondary services, erasing the collisions this is based on.
+		if drop_services is None:
+			plan = _shared_netns_plan(compose_obj, main)
+			if plan.get('blockers'):
+				return compose_obj, False, (
+					'services bind the same port(s) so they cannot share one network '
+					f'namespace: {", ".join(plan["blockers"])}'
+				)
+			drop_services = list(plan.get('drop') or [])
+		dropped = [name for name in drop_services if name in services and name != main]
+		for name in dropped:
+			services.pop(name, None)
+			if name in sidecars:
+				sidecars.remove(name)
+
+		main_svc = services[main]
+		# The node keeps network_mode: none -- CORE owns its networking exactly as
+		# before. Only the sidecars change.
+		_force_service_network_mode_none(main_svc)
+		_drop_service_dependencies_for_no_network(main_svc)
+		_ports_to_expose(main_svc)
+		main_svc.pop('ports', None)
+
+		# Resolve every sidecar's service name to loopback inside the shared
+		# namespace, so recipe configs that address sidecars by name keep working.
+		extra_hosts = main_svc.get('extra_hosts')
+		host_entries: List[str] = []
+		if isinstance(extra_hosts, list):
+			host_entries = [str(item) for item in extra_hosts if str(item or '').strip()]
+		elif isinstance(extra_hosts, dict):
+			host_entries = [f'{key}:{value}' for key, value in extra_hosts.items()]
+		# A sidecar's own service name must resolve to loopback: after this repair
+		# that is genuinely where it lives, so an inherited mapping pointing anywhere
+		# else is now wrong and would leave the stack broken. Mappings for anything
+		# that is not a sidecar (a real external host the recipe pins) are untouched.
+		sidecar_names = set(sidecars)
+		host_entries = [
+			entry for entry in host_entries
+			if entry.split(':', 1)[0].strip() not in sidecar_names
+		]
+		for name in sidecars:
+			host_entries.append(f'{name}:127.0.0.1')
+		main_svc['extra_hosts'] = host_entries
+
+		for name in sidecars:
+			svc = services[name]
+			svc.pop('networks', None)
+			# Joining the node's namespace requires the node to exist first.
+			svc['network_mode'] = f'service:{main}'
+			svc['depends_on'] = [main]
+			_ports_to_expose(svc)
+			svc.pop('ports', None)
+			# A sidecar sharing the namespace must not also publish or expose the
+			# node's ports to CORE's discovery; its own `expose` stays for intent.
+
+		compose_obj.pop('networks', None)
+		parts = []
+		if sidecars:
+			parts.append(f'sidecars sharing node namespace: {", ".join(sorted(sidecars))}')
+		reason = '; '.join(parts) if parts else 'nothing left to share the namespace'
+		if dropped:
+			reason += (
+				'; dropped duplicate instance(s) that cannot share the node\'s single '
+				f'address: {", ".join(sorted(dropped))}'
+			)
+		return compose_obj, True, reason
+	except Exception as exc:
+		return compose_obj, False, f'{exc.__class__.__name__}: {exc}'
 
 
 def _command_starts_with_token(value: object, token: str) -> bool:
@@ -5659,20 +5872,36 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					pass
 			# Apply published-port pruning late so overlays/wrappers can't reintroduce
 			# fixed host port publishing.
+			# Both captured before the transforms below, which force every service to
+			# `network_mode: none` (making the detector answer False) and strip
+			# ports/expose from secondary services (erasing the port collisions the
+			# drop plan is computed from).
+			needs_service_networking = False
+			shared_ns_drop: List[str] = []
 			try:
 				force_no_network = _compose_force_no_network_enabled()
 				allow_internal_networking = _compose_allow_internal_networking_enabled()
-				if force_no_network and (not _compose_requires_internal_networking(obj) or not allow_internal_networking):
-					if _compose_requires_internal_networking(obj) and not allow_internal_networking:
-						logger.info(
-							'[vuln] using CORE-only networking for multi-service compose node=%s; '
-							'Docker-managed internal networking remains disabled. Set '
-							'CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 and CORETG_DOCKER_IFID_START=1 '
-							'only for labs that intentionally need Compose service networking.',
-							node_name,
-						)
+				# `_compose_requires_internal_networking` only fires on an explicit
+				# depends_on/links/networks marker. A plain multi-service recipe needs
+				# none of those for service-name DNS under vanilla `docker-compose up`
+				# -- vulhub's nginx+php-fpm has no marker at all -- so gate on the
+				# structural check instead, or the repair below silently never runs
+				# for exactly the recipes that need it.
+				needs_service_networking = _compose_stack_needs_shared_network(obj)
+				if needs_service_networking:
+					shared_ns_drop = list(
+						(_shared_netns_plan(obj, _select_service_key(obj, prefer_service=prefer)) or {})
+						.get('drop') or []
+					)
+				if force_no_network and (not needs_service_networking or not allow_internal_networking):
+					if needs_service_networking and not allow_internal_networking:
+						# This stack's own services talk to each other. The repair that lets
+						# them do so over loopback runs after the alias below, once service
+						# names are final; here we only keep the node isolated as before.
 						obj = _repair_apache_foreground_for_no_network(obj)
-					obj = _force_compose_no_network(obj)
+						obj = _force_compose_no_network(obj)
+					else:
+						obj = _force_compose_no_network(obj)
 				else:
 					obj = _prune_compose_published_ports(obj)
 			except Exception:
@@ -5707,6 +5936,32 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 						services_obj = obj.get('services') if isinstance(obj, dict) else None
 						if replace_original and alias_src and alias_src != str(node_name) and isinstance(services_obj, dict):
 							services_obj.pop(alias_src, None)
+					except Exception:
+						pass
+					# Now that service names are final, let this stack's own sidecars reach
+					# the node over loopback. Runs here rather than earlier because the node
+					# service only takes its CORE name in the alias step above, and the
+					# sidecars' `network_mode: service:<node>` has to name it correctly.
+					try:
+						if _compose_force_no_network_enabled() and not _compose_allow_internal_networking_enabled():
+							if needs_service_networking:
+								obj, _ns_ok, _ns_reason = _apply_shared_netns_sidecars(obj, node_name, shared_ns_drop)
+								if _ns_ok:
+									logger.info(
+										'[vuln] multi-service compose node=%s repaired for CORE-only networking '
+										'(%s); services reach each other over loopback inside the node\'s own '
+										'namespace, with no Docker network, gateway or route to the host.',
+										node_name, _ns_reason,
+									)
+								else:
+									logger.warning(
+										'[vuln] multi-service compose node=%s cannot share one network namespace '
+										'(%s); its services cannot reach each other under CORE-only networking, so '
+										'this node is expected to fail. Set '
+										'CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 only for labs that '
+										'intentionally need Compose service networking.',
+										node_name, _ns_reason,
+									)
 					except Exception:
 						pass
 					# CORE should start the node-name service.

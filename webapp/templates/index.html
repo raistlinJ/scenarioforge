@@ -14315,6 +14315,18 @@
                         // import has already persisted its editor snapshot
                         // server-side, so a normal load renders the same state
                         // the manual refresh was producing.
+                        //
+                        // This reload is the app's own doing, not the user
+                        // navigating away, but the unsaved-changes guard cannot
+                        // tell the difference: if anything on the page (an edit
+                        // made before opening the import dialog, a background
+                        // autosave marking previewState dirty) left
+                        // hasUnsavedChanges() true, the browser's native "leave
+                        // site?" prompt fired on a reload the user never asked
+                        // to confirm -- while the import UI still read
+                        // "importing". Suppress it the same way in-app link
+                        // navigation already does.
+                        try { window.coretgAllowUnsavedNavOnce && window.coretgAllowUnsavedNavOnce(); } catch (_) { }
                         try {
                             window.location.replace('/');
                         } catch (_) {

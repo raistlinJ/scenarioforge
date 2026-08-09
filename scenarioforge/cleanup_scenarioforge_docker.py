@@ -102,6 +102,53 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _prerequisite_and_persistent_images() -> list[str]:
+    """Images this cleanup must never remove, unless told to.
+
+    Mirrors ``scenarioforge.cli._persistent_images_to_keep`` exactly, but stays
+    import-light (no ``scenarioforge.cli``) to match this module's existing
+    "self-contained" design -- it is meant to run standalone against a host
+    with nothing else importable yet.
+
+    Two sources: images the operator explicitly pinned ``persistent`` in the
+    web UI (published for a remote run via the same env-payload channel the
+    UI already uses), and the framework's own prerequisites -- the pivot
+    provider image and everything ``prerequisite_images()`` names (busybox,
+    the wrapper base, inject-copy, generator template bases). Both are cheap
+    to keep and expensive to lose: re-provisioning them is exactly what the
+    air-gap/offline story exists to avoid, so a cleanup meant to reclaim disk
+    space from *residual* scenario content should not undo it.
+    """
+    keep: list[str] = []
+    try:
+        from scenarioforge.utils.env_payload import read_env_payload
+
+        import json as _json
+
+        raw = read_env_payload("CORETG_PERSISTENT_IMAGES_JSON")
+        data = _json.loads(raw) if raw else []
+        if isinstance(data, list):
+            keep.extend(str(x).strip() for x in data if str(x or "").strip())
+    except Exception:
+        pass
+    try:
+        from scenarioforge.utils.pivot_access import PIVOT_SSH_IMAGE
+
+        if PIVOT_SSH_IMAGE and PIVOT_SSH_IMAGE not in keep:
+            keep.append(str(PIVOT_SSH_IMAGE))
+    except Exception:
+        pass
+    try:
+        from scenarioforge.utils.prerequisite_images import prerequisite_images
+
+        for image in prerequisite_images():
+            if image and image not in keep:
+                keep.append(str(image))
+    except Exception:
+        pass
+    return keep
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cleanup-scenarioforge-docker",
@@ -125,7 +172,20 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Skip the interactive confirmation prompt. This is still destructive: "
-            "all Docker containers and images on the remote host will be removed."
+            "all non-prerequisite, non-persistent Docker containers and images on "
+            "the remote host will be removed."
+        ),
+    )
+    parser.add_argument(
+        "--include-prerequisites",
+        action="store_true",
+        help=(
+            "Also remove images the framework needs to stand any node up (busybox, "
+            "wrapper bases, inject-copy, the pivot provider image) and any image the "
+            "operator pinned `persistent`. Off by default: reclaiming these forces "
+            "re-provisioning on the next run, which is exactly what pre-seeding them "
+            "for an air-gapped host is meant to avoid. Containers are always removed "
+            "regardless of this flag -- only images carry a persistence concept."
         ),
     )
     return parser
@@ -152,19 +212,30 @@ def _validate_config(cfg: dict[str, Any]) -> list[str]:
     return missing
 
 
-def _danger_warning(cfg: dict[str, Any], *, dry_run: bool) -> str:
+def _danger_warning(cfg: dict[str, Any], *, dry_run: bool, keep_count: int = 0) -> str:
     target = f"{cfg.get('ssh_username')}@{cfg.get('ssh_host')}:{cfg.get('ssh_port')}"
     if dry_run:
         return f"DRY RUN: inspecting Docker usage on remote host {target}; no Docker resources will be removed."
-    return (
-        "DANGER: this will remove ALL Docker containers, images, build cache, "
-        f"and unused Docker volumes/networks on remote host {target}."
+    scope = (
+        f"remove ALL Docker containers, build cache, and unused Docker volumes/networks, "
+        f"and every image except {keep_count} prerequisite/persistent image(s)"
+        if keep_count
+        else "remove ALL Docker containers, images, build cache, and unused Docker volumes/networks"
     )
+    return f"DANGER: this will {scope} on remote host {target}."
 
 
-def _confirm_or_abort(cfg: dict[str, Any], *, force: bool, dry_run: bool, input_stream: Any = None, output_stream: Any = None) -> bool:
+def _confirm_or_abort(
+    cfg: dict[str, Any],
+    *,
+    force: bool,
+    dry_run: bool,
+    keep_count: int = 0,
+    input_stream: Any = None,
+    output_stream: Any = None,
+) -> bool:
     out = output_stream if output_stream is not None else sys.stderr
-    print(_danger_warning(cfg, dry_run=dry_run), file=out)
+    print(_danger_warning(cfg, dry_run=dry_run, keep_count=keep_count), file=out)
     if dry_run or force:
         return True
 
@@ -179,9 +250,20 @@ def _confirm_or_abort(cfg: dict[str, Any], *, force: bool, dry_run: bool, input_
     return False
 
 
-def _cleanup_script(*, dry_run: bool) -> str:
+def _keep_refs_array(keep_images: list[str]) -> str:
+    """A bash array literal for the given image refs, quoted for embedding."""
+    return " ".join(shlex.quote(str(ref)) for ref in keep_images if str(ref or "").strip())
+
+
+def _cleanup_script(*, dry_run: bool, keep_images: list[str] | None = None) -> str:
+    keep = [str(r).strip() for r in (keep_images or []) if str(r or "").strip()]
+
     if dry_run:
-        return r"""
+        keep_note = (
+            f"printf 'kept_by_config=%s\\n' {len(keep)}\n" if keep else ""
+        )
+        return (
+            r"""
 set -u
 echo '[cleanup] starting dry run'
 echo '[cleanup] docker system df'
@@ -189,12 +271,74 @@ docker system df || true
 echo '[cleanup] counting Docker resources'
 printf 'containers=%s\n' "$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
 printf 'images=%s\n' "$(docker images -aq 2>/dev/null | sort -u | wc -l | tr -d ' ')"
-printf 'volumes=%s\n' "$(docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
+"""
+            + keep_note
+            + r"""printf 'volumes=%s\n' "$(docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
 printf 'networks=%s\n' "$(docker network ls -q 2>/dev/null | wc -l | tr -d ' ')"
 echo '[cleanup] dry run complete'
 """.strip()
+        )
 
-    return r"""
+    if keep:
+        # Containers carry no persistence concept -- only images do -- so the
+        # container sweep is unchanged. For images: resolve each configured
+        # keep-ref to the image ID it currently points to on THIS host (a ref
+        # that is not pulled here resolves to nothing and is simply skipped,
+        # not an error), then remove everything else. `--no-trunc` on both
+        # sides is required: `docker images -q` truncates to 12 hex chars by
+        # default, while `docker image inspect --format {{.Id}}` never does,
+        # so without it nothing would ever match and the keep-list would
+        # silently protect nothing.
+        images_block = (
+            "KEEP_REFS=(" + _keep_refs_array(keep) + ")\n"
+            r"""KEEP_IDS=""
+for ref in "${KEEP_REFS[@]}"; do
+  id="$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)"
+  if [ -n "$id" ]; then
+    KEEP_IDS="$KEEP_IDS $id"
+  fi
+done
+printf '[cleanup] keeping %s of %s configured prerequisite/persistent image ref(s)\n' \
+  "$(echo "$KEEP_IDS" | wc -w | tr -d ' ')" "${#KEEP_REFS[@]}"
+images="$(docker images -aq --no-trunc 2>/dev/null | sort -u || true)"
+to_remove=""
+for img in $images; do
+  keep_this=0
+  for kid in $KEEP_IDS; do
+    if [ "$img" = "$kid" ]; then
+      keep_this=1
+      break
+    fi
+  done
+  if [ "$keep_this" -eq 0 ]; then
+    to_remove="$to_remove $img"
+  fi
+done
+if [ -n "$to_remove" ]; then
+  echo "$to_remove" | xargs -r docker rmi -f
+else
+  echo 'no images to remove'
+fi
+"""
+        )
+        # `docker image prune -af` removes every unused image regardless of
+        # dangling status, which would immediately undo the keep-list above --
+        # so it is skipped here rather than run unconditionally.
+        prune_images_block = "echo '[cleanup] skipping unused-image prune (keep-list active)'\n"
+    else:
+        images_block = (
+            r"""images="$(docker images -aq 2>/dev/null | sort -u || true)"
+if [ -n "$images" ]; then
+  echo "$images" | xargs -r docker rmi -f
+else
+  echo 'no images to remove'
+fi
+"""
+        )
+        prune_images_block = "docker image prune -af || true\n"
+
+    return (
+        r"""
 set -u
 echo '[cleanup] starting destructive Docker cleanup'
 echo '[cleanup] before cleanup: docker system df'
@@ -209,18 +353,15 @@ else
 fi
 
 echo '[cleanup] removing all images'
-images="$(docker images -aq 2>/dev/null | sort -u || true)"
-if [ -n "$images" ]; then
-  echo "$images" | xargs -r docker rmi -f
-else
-  echo 'no images to remove'
-fi
-
+"""
+        + images_block
+        + r"""
 echo '[cleanup] pruning stopped containers'
 docker container prune -f || true
 echo '[cleanup] pruning unused images'
-docker image prune -af || true
-echo '[cleanup] pruning build cache'
+"""
+        + prune_images_block
+        + r"""echo '[cleanup] pruning build cache'
 docker builder prune -af || true
 echo '[cleanup] pruning unused volumes'
 docker volume prune -f || true
@@ -231,6 +372,7 @@ echo '[cleanup] after cleanup: docker system df'
 docker system df || true
 echo '[cleanup] destructive cleanup complete'
 """.strip()
+    )
 
 
 def _sudo_command(script: str, password: str) -> str:
@@ -336,10 +478,14 @@ def _run_remote_cleanup(
     *,
     dry_run: bool,
     timeout: float,
+    keep_images: list[str] | None = None,
     output_stream: Any = None,
     error_stream: Any = None,
 ) -> tuple[int, str, str]:
-    command = _sudo_command(_cleanup_script(dry_run=dry_run), str(cfg.get("ssh_password") or ""))
+    command = _sudo_command(
+        _cleanup_script(dry_run=dry_run, keep_images=keep_images),
+        str(cfg.get("ssh_password") or ""),
+    )
     stdin = stdout = stderr = None
     try:
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout, get_pty=True)
@@ -399,7 +545,11 @@ def main(argv: list[str] | None = None) -> int:
             + ". Provide --ssh-* flags or set CORE_SSH_* in .scenarioforge.env."
         )
 
-    if not _confirm_or_abort(cfg, force=bool(args.force), dry_run=bool(args.dry_run)):
+    keep_images: list[str] = [] if args.include_prerequisites else _prerequisite_and_persistent_images()
+
+    if not _confirm_or_abort(
+        cfg, force=bool(args.force), dry_run=bool(args.dry_run), keep_count=len(keep_images)
+    ):
         return 2
 
     client = None
@@ -417,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg,
             dry_run=bool(args.dry_run),
             timeout=float(args.timeout or 900.0),
+            keep_images=keep_images,
             output_stream=sys.stdout,
             error_stream=sys.stderr,
         )

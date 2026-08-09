@@ -34,6 +34,19 @@ CANONICAL_INPUT_TYPES: set[str] = {
 HINT_LEVELS: tuple[str, ...] = ('low', 'medium', 'high')
 
 
+def _generator_compose_allow_internal_networking_enabled() -> bool:
+    """Same env var / same default as `vuln_process._compose_allow_internal_networking_enabled`.
+
+    Read independently (not imported from `vuln_process`, a much heavier
+    module) so manifest discovery -- used by lightweight UI listing calls --
+    stays cheap to import.
+    """
+    val = os.environ.get('CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING')
+    if val is None:
+        return False
+    return str(val).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def normalize_artifact_name(name: Any) -> str:
     raw = str(name or '').strip()
     if not raw:
@@ -764,6 +777,43 @@ def discover_generator_manifests(
                             gen['missing_required_files'] = missing_dependency_paths(dependency_summary)
                             if dependency_summary.get('warning'):
                                 gen['compose_dependency_warning'] = str(dependency_summary.get('warning') or '')
+                            # A generator whose services cannot reach each other
+                            # under CORE-only networking crash-loops against an
+                            # unreachable sidecar -- and a crashed node can take
+                            # the rest of the session down with it (CORE's daemon
+                            # has thrown an unhandled exception wiring a veth into
+                            # an already-dead container's stale PID, aborting boot
+                            # for unrelated nodes too).
+                            #
+                            # Most such stacks are repaired rather than disabled:
+                            # the compose generator has their services share the
+                            # node's own network namespace and talk over loopback,
+                            # which keeps `network_mode: none`'s isolation. Only
+                            # stacks that cannot be repaired -- two services
+                            # binding the same port, since one namespace is one
+                            # port space -- are disabled here. Set
+                            # CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING=1 to skip
+                            # this check entirely.
+                            try:
+                                if not _generator_compose_allow_internal_networking_enabled():
+                                    with open(compose_path, 'r', encoding='utf-8', errors='ignore') as cf:
+                                        compose_obj = yaml.safe_load(cf)  # type: ignore
+                                    from scenarioforge.utils.compose_networking import (
+                                        compose_stack_needs_shared_network,
+                                        compose_stack_shared_netns_blockers,
+                                    )
+                                    if compose_stack_needs_shared_network(compose_obj):
+                                        blockers = compose_stack_shared_netns_blockers(compose_obj)
+                                        if blockers:
+                                            gen['_disabled'] = True
+                                            gen['_disabled_reason'] = (
+                                                'its services bind the same port(s) ('
+                                                + ', '.join(blockers)
+                                                + ') so they cannot share one network namespace under '
+                                                'CORE-only networking'
+                                            )
+                            except Exception:
+                                pass
                     except Exception:
                         gen.setdefault('required_files', [])
                         gen.setdefault('missing_required_files', [])
@@ -879,5 +929,26 @@ def discover_generator_manifests(
         }
 
     generators = [generator for generator in generators if generator]
+    if not include_disabled:
+        # `disabled_suppressed_ids` above only covers pack/item state from
+        # _packs_state.json; a generator disabled here because its own compose
+        # stack needs Docker's shared network (set while scanning dependencies,
+        # after that block already ran) needs its own exclusion pass, or a
+        # caller asking for enabled-only generators would still get it back.
+        excluded_ids = {
+            str(generator.get('id') or '').strip()
+            for generator in generators
+            if generator.get('_disabled') and str(generator.get('id') or '').strip()
+        }
+        if excluded_ids:
+            generators = [
+                generator for generator in generators
+                if str(generator.get('id') or '').strip() not in excluded_ids
+            ]
+            plugins_by_id = {
+                generator_id: plugin
+                for generator_id, plugin in plugins_by_id.items()
+                if str(generator_id or '').strip() not in excluded_ids
+            }
     generators.sort(key=lambda g: (str(g.get('name') or '').lower(), str(g.get('id') or '')))
     return generators, plugins_by_id, errors

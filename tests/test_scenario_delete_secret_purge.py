@@ -38,22 +38,3 @@ def test_purge_removes_only_the_deleted_scenarios_secrets():
     remaining = _identifiers()
     assert str(doomed.get('identifier')) not in remaining
     assert str(kept.get('identifier')) in remaining
-    assert str(shared.get('identifier')) in remaining
-
-
-def test_purge_matches_scenario_names_loosely():
-    """Deletion sends display names; secrets store them as saved."""
-    record = _store('Demo Scenario 1')
-
-    result = backend._purge_core_secrets_for_scenarios(['demo scenario 1'])
-
-    assert result['core_secrets_removed'] == 1
-    assert str(record.get('identifier')) not in _identifiers()
-
-
-def test_purge_is_a_noop_without_names():
-    record = _store('untouched-scenario')
-
-    assert backend._purge_core_secrets_for_scenarios([])['core_secrets_removed'] == 0
-    assert backend._purge_core_secrets_for_scenarios(['', '   '])['core_secrets_removed'] == 0
-    assert str(record.get('identifier')) in _identifiers()

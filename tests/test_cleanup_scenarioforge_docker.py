@@ -1,4 +1,6 @@
 import io
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 from scenarioforge import cleanup_scenarioforge_docker as cleanup
@@ -112,6 +114,9 @@ def test_force_cleanup_runs_remote_destructive_docker_commands(monkeypatch, caps
         return client
 
     monkeypatch.setattr(cleanup, "_open_ssh_client", fake_open)
+    # This test is about the container/prune plumbing, not the keep-list --
+    # isolate it from whatever prerequisites happen to be importable.
+    monkeypatch.setattr(cleanup, "_prerequisite_and_persistent_images", lambda: [])
 
     code = cleanup.main(
         [
@@ -148,6 +153,214 @@ def test_force_cleanup_runs_remote_destructive_docker_commands(monkeypatch, caps
     assert "[cleanup] connecting to corevm@10.0.0.50:2222" in captured.err
     assert "cleanup output" in captured.out
     assert "Remote ScenarioForge Docker cleanup complete." in captured.out
+
+
+# --------------------------------------------------------------------------- #
+# Default behavior now protects prerequisite/persistent images -- the flag's
+# own docstring calls it "remove ALL", but the fully-total version of that
+# forced every scenario, including ones that changed nothing framework-side,
+# to re-provision busybox/wrapper-base/inject-copy/pivot-provider images (and
+# anything an operator explicitly pinned `persistent`) from scratch. That is
+# exactly what pre-seeding those images for an air-gapped host exists to
+# avoid, so the destructive sweep now carries them forward by default.
+# --------------------------------------------------------------------------- #
+
+def test_default_cleanup_keeps_prerequisite_and_persistent_images(monkeypatch, capsys):
+    client = _FakeSSHClient()
+    monkeypatch.setattr(cleanup, "_open_ssh_client", lambda _cfg: client)
+    monkeypatch.setattr(
+        cleanup,
+        "_prerequisite_and_persistent_images",
+        lambda: ["busybox:1.36.1-musl", "vulhub/confluence:7.13.6"],
+    )
+
+    code = cleanup.main(
+        [
+            "--ssh-host", "10.0.0.50",
+            "--ssh-username", "corevm",
+            "--ssh-password", "pw",
+            "--force",
+        ]
+    )
+
+    assert code == 0
+    command = client.commands[0]["command"]
+    # The whole script is shlex.quote()-wrapped for the outer `sudo ... bash -lc`
+    # call, which rewrites every embedded `'` into a `'"'"'` sequence -- so only
+    # substrings with no single quotes of their own survive verbatim here.
+    assert "KEEP_REFS=(busybox:1.36.1-musl vulhub/confluence:7.13.6)" in command
+    assert "docker image inspect --format" in command
+    assert "--no-trunc" in command
+    # The blanket prune would remove every unused image regardless of the
+    # keep-list's exclusions, undoing them immediately after the filtered
+    # `docker rmi -f` sweep ran.
+    assert "docker image prune -af" not in command
+    assert "skipping unused-image prune (keep-list active)" in command
+    captured = capsys.readouterr()
+    assert "every image except 2 prerequisite/persistent image(s)" in captured.err
+
+
+def test_include_prerequisites_flag_restores_the_old_remove_everything_behavior(monkeypatch, capsys):
+    client = _FakeSSHClient()
+    monkeypatch.setattr(cleanup, "_open_ssh_client", lambda _cfg: client)
+    monkeypatch.setattr(
+        cleanup, "_prerequisite_and_persistent_images", lambda: ["busybox:1.36.1-musl"]
+    )
+
+    code = cleanup.main(
+        [
+            "--ssh-host", "10.0.0.50",
+            "--ssh-username", "corevm",
+            "--ssh-password", "pw",
+            "--force",
+            "--include-prerequisites",
+        ]
+    )
+
+    assert code == 0
+    command = client.commands[0]["command"]
+    assert "KEEP_REFS=" not in command
+    assert "docker image prune -af" in command
+    captured = capsys.readouterr()
+    assert "remove ALL Docker containers, images, build cache" in captured.err
+
+
+def test_dry_run_reports_the_configured_keep_count(monkeypatch, capsys):
+    client = _FakeSSHClient()
+    monkeypatch.setattr(cleanup, "_open_ssh_client", lambda _cfg: client)
+    monkeypatch.setattr(cleanup, "_prerequisite_and_persistent_images", lambda: ["a", "b", "c"])
+
+    code = cleanup.main(
+        [
+            "--ssh-host", "10.0.0.50",
+            "--ssh-username", "corevm",
+            "--ssh-password", "pw",
+            "--dry-run",
+        ]
+    )
+
+    assert code == 0
+    command = client.commands[0]["command"]
+    assert "kept_by_config" in command
+    assert "docker rmi -f" not in command
+
+
+# --------------------------------------------------------------------------- #
+# _cleanup_script: the shell fragment that actually decides what survives
+# --------------------------------------------------------------------------- #
+
+def test_cleanup_script_is_valid_shell(tmp_path):
+    for keep_images in (None, ["ref-a", "ref-b"]):
+        for dry_run in (False, True):
+            script = "set -eu\n" + cleanup._cleanup_script(dry_run=dry_run, keep_images=keep_images)
+            path = tmp_path / "script.sh"
+            path.write_text(script, encoding="utf-8")
+            result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+            assert result.returncode == 0, (
+                f"invalid shell (dry_run={dry_run}, keep_images={keep_images}): {result.stderr}"
+            )
+
+
+def test_cleanup_script_without_keep_images_matches_old_unconditional_sweep():
+    script = cleanup._cleanup_script(dry_run=False, keep_images=None)
+    assert "docker images -aq 2>/dev/null | sort -u" in script
+    assert "docker rmi -f" in script
+    assert "docker image prune -af" in script
+    assert "KEEP_REFS" not in script
+
+
+def test_cleanup_script_quotes_keep_refs_for_shell_safety():
+    script = cleanup._cleanup_script(dry_run=False, keep_images=['weird ref"with quotes'])
+    assert "'weird ref\"with quotes'" in script
+
+
+def test_cleanup_script_empty_keep_list_behaves_like_no_keep_list():
+    # An empty list and None must be equivalent -- both mean "nothing to
+    # protect," not "protect nothing found," which would be a no-op anyway
+    # but should still take the simpler, well-tested unconditional path.
+    assert cleanup._cleanup_script(dry_run=False, keep_images=[]) == cleanup._cleanup_script(
+        dry_run=False, keep_images=None
+    )
+
+
+# --------------------------------------------------------------------------- #
+# _prerequisite_and_persistent_images: must mirror
+# scenarioforge.cli._persistent_images_to_keep without importing cli itself
+# --------------------------------------------------------------------------- #
+
+def test_prerequisite_images_module_stays_import_light():
+    # A `sys.modules` check would be order-dependent -- any other test in the
+    # same run that imports scenarioforge.cli first (several legitimately do)
+    # leaves it cached for the rest of the process regardless of what this
+    # module itself imports. A static check of this module's own import
+    # statements is what actually verifies the property, independent of
+    # what else has already run.
+    import ast
+
+    source = Path(cleanup.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+
+    cli_imports = {name for name in imported if name == "scenarioforge.cli" or name.endswith(".cli")}
+    assert not cli_imports, (
+        f"cleanup_scenarioforge_docker.py imports {cli_imports} -- this module is "
+        "meant to run standalone without scenarioforge.cli"
+    )
+
+
+def test_prerequisite_and_persistent_images_includes_pivot_and_framework_images(monkeypatch):
+    monkeypatch.setattr(
+        "scenarioforge.utils.pivot_access.PIVOT_SSH_IMAGE",
+        "example/pivot-ssh:latest",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "scenarioforge.utils.prerequisite_images.prerequisite_images",
+        lambda: ["busybox:1.36.1-musl", "ubuntu:22.04"],
+    )
+    monkeypatch.delenv("CORETG_PERSISTENT_IMAGES_JSON", raising=False)
+
+    keep = cleanup._prerequisite_and_persistent_images()
+
+    assert "example/pivot-ssh:latest" in keep
+    assert "busybox:1.36.1-musl" in keep
+    assert "ubuntu:22.04" in keep
+
+
+def test_prerequisite_and_persistent_images_includes_operator_pinned_images(monkeypatch):
+    import json
+
+    monkeypatch.setattr(
+        "scenarioforge.utils.prerequisite_images.prerequisite_images", lambda: []
+    )
+    monkeypatch.setattr(
+        "scenarioforge.utils.pivot_access.PIVOT_SSH_IMAGE", "", raising=False
+    )
+    monkeypatch.setenv(
+        "CORETG_PERSISTENT_IMAGES_JSON", json.dumps(["operator/pinned:v1"])
+    )
+
+    keep = cleanup._prerequisite_and_persistent_images()
+
+    assert keep == ["operator/pinned:v1"]
+
+
+def test_prerequisite_and_persistent_images_deduplicates(monkeypatch):
+    monkeypatch.setattr(
+        "scenarioforge.utils.prerequisite_images.prerequisite_images", lambda: ["dup:latest"]
+    )
+    monkeypatch.setattr(
+        "scenarioforge.utils.pivot_access.PIVOT_SSH_IMAGE", "dup:latest", raising=False
+    )
+
+    keep = cleanup._prerequisite_and_persistent_images()
+
+    assert keep.count("dup:latest") == 1
 
 
 def test_dry_run_skips_force_and_uses_inspection_only(monkeypatch, capsys):
