@@ -221,5 +221,5 @@ def test_remote_docker_cleanup_prunes_unused_volumes():
     import inspect
     from webapp import app_backend as backend
 
-    source = inspect.getsource(backend._run_cli_background_task)
+    source = inspect.getsource(backend._run_cli_background_task_locked)
     assert "docker volume prune -f" in source

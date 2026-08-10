@@ -2205,6 +2205,98 @@ def _repair_apache_foreground_for_no_network(compose_obj: dict) -> dict:
 		return compose_obj
 
 
+def _repair_ingress_nginx_route_wait_for_no_network(compose_obj: dict) -> dict:
+	"""Make vulhub/ingress-nginx's k3s entrypoint tolerate CORE's no-network start.
+
+	`vulhub/ingress-nginx:1.9.5` bakes `Entrypoint: [/bin/sh, entrypoint.sh]`
+	and `Cmd: [k3s, server]` into the image (neither appears in the vulhub
+	compose file, so there's nothing in the compose service dict for
+	`_entrypoint_uses_custom_script`-style detection to key off -- this repair
+	matches by image name instead, the same way `_service_requires_image_workdir`
+	already does for this image's working_dir issue).
+
+	k3s's own startup script checks for a default route in `/proc/net/route`
+	immediately on boot and exits fatally if none exists yet:
+
+		level=fatal msg="no default routes found in \\"/proc/net/route\\" ..."
+
+	CORE creates docker nodes with `network_mode: none` and injects the
+	veth/route only after the container is already running (this is by
+	design -- see `_compose_force_no_network_enabled`'s docstring -- so
+	the container's own entrypoint always starts network-less). Confirmed
+	on real x86 hardware: architecture-independent, a startup-ordering
+	conflict between this image's own boot check and CORE's docker-node
+	bring-up model, not related to the working_dir bug above.
+
+	Fix: wrap the real entrypoint in a bounded poll for a default route
+	before exec'ing it, mirroring `_repair_apache_foreground_for_no_network`'s
+	shape for a different image's no-network startup problem. `working_dir`
+	is deliberately left alone here (already handled by
+	`_service_requires_image_workdir`): the wrapper still execs a *relative*
+	`entrypoint.sh`, which only resolves correctly with the image's own
+	`WorkingDir: /opt/k3s` in effect, not `/`.
+	"""
+	try:
+		if not isinstance(compose_obj, dict):
+			return compose_obj
+		services = compose_obj.get('services')
+		if not isinstance(services, dict):
+			return compose_obj
+		for _svc_name, svc in services.items():
+			if not isinstance(svc, dict):
+				continue
+			try:
+				img = str(_service_effective_image(svc) or '').strip().lower()
+			except Exception:
+				img = ''
+			if 'ingress-nginx' not in img:
+				continue
+			# Only touch services that haven't already had entrypoint/command
+			# overridden by something else (an explicit compose override
+			# means this repair's assumptions about the image defaults may
+			# no longer apply).
+			if svc.get('entrypoint') or svc.get('command'):
+				continue
+			svc['entrypoint'] = ['/bin/sh', '-c']
+			svc['command'] = [
+				# k3s's own "no default routes found" check runs inside `k3s server`
+				# itself (confirmed by reading the image's entrypoint.sh: it only
+				# backgrounds a health-check loop, then `exec "$@"`), so this has to
+				# wait before the `exec` below, not patch the script. 600s mirrors the
+				# timeout the image's own entrypoint.sh already uses elsewhere
+				# (`kubectl wait --timeout=600s`) -- CORE's own docker-node network
+				# wiring (veth attach, then the DockerDefaultRoute service) can take
+				# a while on a busy host, and giving up too early just trades a clear
+				# wait for the same fatal crash a bit later. On exhaustion this exits
+				# with a distinct, greppable message instead of silently exec-ing
+				# into the crash anyway.
+				# `$$i` (not `$i`): this string is a docker-compose YAML value, not
+				# a shell script yet -- compose interpolates bare `$identifier` (its
+				# own env-var substitution, unrelated to the container's shell)
+				# *before* the container ever sees this string, silently replacing
+				# unset `$i` with an empty string and breaking the loop condition.
+				# `$$` is compose's own escape for a literal `$`. Confirmed by
+				# reproducing it for real: compose logged exactly `The "i" variable
+				# is not set. Defaulting to a blank string.` `$2` in the awk program
+				# and `$((i+1))` below don't need escaping -- compose only
+				# interpolates `$`/`${` followed by a letter or underscore, and
+				# neither matches that.
+				'i=0; while [ "$$i" -lt 600 ]; do '
+				'if awk \'$2 == "00000000" { f=1 } END { exit !f }\' /proc/net/route 2>/dev/null; '
+				'then exec /bin/sh entrypoint.sh k3s server; fi; '
+				'i=$((i+1)); sleep 1; done; '
+				'echo "[coretg] no default route appeared within 600s, not starting k3s" >&2; exit 1'
+			]
+			labs = svc.get('labels')
+			if not isinstance(labs, dict):
+				labs = {}
+			labs.setdefault('coretg.repaired_no_network_entrypoint', 'ingress-nginx-route-wait')
+			svc['labels'] = labs
+		return compose_obj
+	except Exception:
+		return compose_obj
+
+
 def _compose_force_no_network_enabled() -> bool:
 	"""Whether generated vuln docker-compose stacks should run with network_mode: none.
 
@@ -2481,6 +2573,19 @@ def _service_requires_image_workdir(service: Dict[str, object]) -> bool:
 	# OFBiz startup often uses relative paths (e.g. ./build/libs/ofbiz.jar)
 	# from image-default command/entrypoint behavior.
 	if 'ofbiz' in img:
+		return True
+	# vulhub/ingress-nginx bakes `WorkingDir: /opt/k3s` and
+	# `Entrypoint: [/bin/sh entrypoint.sh]` into the image itself -- the
+	# vulhub docker-compose.yml sets neither, so nothing in the compose
+	# service dict reveals the relative path for
+	# `_service_uses_relative_command_path` to catch (that check only reads
+	# the compose file's own entrypoint/command, not the image's baked-in
+	# ones). Forcing `working_dir: /` breaks `entrypoint.sh` resolution and
+	# the container exits immediately with "can't open 'entrypoint.sh'".
+	# Confirmed via `docker image inspect`, reproduces identically on x86
+	# and arm64 -- not an emulation issue, the image just requires its own
+	# working directory.
+	if 'ingress-nginx' in img:
 		return True
 	return False
 
@@ -5880,6 +5985,11 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 			shared_ns_drop: List[str] = []
 			try:
 				force_no_network = _compose_force_no_network_enabled()
+				if force_no_network:
+					# Applied unconditionally (not just on the multi-service branch
+					# below, unlike the apache repair) because vulhub/ingress-nginx
+					# is a single-service stack and would never reach that branch.
+					obj = _repair_ingress_nginx_route_wait_for_no_network(obj)
 				allow_internal_networking = _compose_allow_internal_networking_enabled()
 				# `_compose_requires_internal_networking` only fires on an explicit
 				# depends_on/links/networks marker. A plain multi-service recipe needs

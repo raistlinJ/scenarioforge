@@ -43899,7 +43899,180 @@ if __name__ == '__main__':
      .replace('__MAX_FIND_LITERAL__', max_find_literal)
 
 
+# ---------------- Shared CORE VM lock ----------------
+#
+# The scenarioforge-eval harness serializes its runs against a shared CORE VM
+# with an flock on a temp file keyed by the SSH target (see
+# `ScenarioExecutor._shared_vm_lock` in the scenarioforge-eval repo).
+#
+# Background CLI jobs started from the web UI talk to that same VM and do
+# daemon-level work: `core-cleanup`, custom-service installs, and
+# `systemctl restart core-daemon` -- and a daemon restart destroys every
+# in-memory CORE session, including sessions the harness is mid-way through
+# bringing up. Taking that same lock here is what stops a web UI job from
+# pulling the daemon out from under an eval run; the eval side otherwise
+# reports the damage much later and far from its cause, as
+# `CORE session did not reach runtime (state=unknown)`.
+#
+# The key and path derivation below must stay byte-for-byte identical to the
+# harness's: both sides hash the key to choose a lock file, so any drift
+# silently stops the two from excluding each other while still looking locked.
+# `tests/test_shared_vm_lock.py` pins the format against a known-good vector.
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - hosts without fcntl (e.g. Windows)
+    _fcntl = None  # type: ignore[assignment]
+
+_SHARED_VM_LOCK_DEFAULT_TIMEOUT_S = 900.0
+_SHARED_VM_LOCK_POLL_S = 0.5
+
+
+def _shared_vm_lock_key(core_cfg: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Identity of the CORE VM a job is about to touch, or None when unknown.
+
+    Mirrors `ScenarioExecutor._shared_vm_lock_key`. Returning None (no SSH
+    target resolved) means the job is not reaching out to a shared VM, so there
+    is nothing to serialize against.
+    """
+    if not isinstance(core_cfg, dict):
+        return None
+    ssh_host = str(core_cfg.get('ssh_host') or core_cfg.get('host') or '').strip()
+    ssh_port = str(core_cfg.get('ssh_port') or '').strip()
+    ssh_username = str(core_cfg.get('ssh_username') or '').strip()
+    vm_identifier = str(core_cfg.get('vmid') or core_cfg.get('vm_key') or '').strip()
+    if not (ssh_host and ssh_port and ssh_username):
+        return None
+    parts = [ssh_host, ssh_port, ssh_username]
+    if vm_identifier:
+        parts.append(vm_identifier)
+    return ':'.join(parts)
+
+
+def _shared_vm_lock_path(lock_key: str) -> str:
+    """Lock file for a VM identity. Mirrors the harness's path derivation."""
+    digest = hashlib.sha256(lock_key.encode('utf-8')).hexdigest()[:16]
+    return os.path.join(tempfile.gettempdir(), f'scenarioforge-eval-{digest}.lock')
+
+
+def _shared_vm_lock_timeout_s() -> float:
+    """How long to queue behind another VM user before giving up.
+
+    Bounded rather than indefinite: this runs in a web UI background job, and
+    the harness releases the lock per run rather than per batch, so a normal
+    wait is about one run long. Waiting past this means something is wedged.
+    """
+    raw = os.getenv('CORETG_SHARED_VM_LOCK_TIMEOUT_S')
+    try:
+        value = float(raw) if raw not in (None, '') else _SHARED_VM_LOCK_DEFAULT_TIMEOUT_S
+    except (TypeError, ValueError):
+        value = _SHARED_VM_LOCK_DEFAULT_TIMEOUT_S
+    return max(0.0, min(value, 86400.0))
+
+
+def _acquire_shared_vm_lock(
+    core_cfg: Optional[Dict[str, Any]],
+    *,
+    log_handle: Any = None,
+    log_prefix: str = '',
+) -> Optional[Dict[str, Any]]:
+    """Take the shared-VM lock, blocking until free or the timeout elapses.
+
+    Returns a handle for `_release_shared_vm_lock`, or None when no lock
+    applies. Raises TimeoutError when the VM stays busy past the timeout:
+    failing the job is safer than running daemon-level work concurrently.
+    """
+    if _fcntl is None:
+        return None
+    lock_key = _shared_vm_lock_key(core_cfg)
+    if not lock_key:
+        return None
+
+    lock_path = _shared_vm_lock_path(lock_key)
+    timeout_s = _shared_vm_lock_timeout_s()
+
+    def _write_log(message: str) -> None:
+        try:
+            if log_handle is not None:
+                log_handle.write(f'{log_prefix}{message}\n')
+        except Exception:
+            pass
+        try:
+            app.logger.info('[shared-vm-lock] %s', message)
+        except Exception:
+            pass
+
+    handle = open(lock_path, 'a+', encoding='utf-8')
+    wait_started = time.monotonic()
+    announced = False
+    while True:
+        try:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            break
+        except OSError:
+            waited = time.monotonic() - wait_started
+            if waited >= timeout_s:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+                raise TimeoutError(
+                    f'Timed out after {waited:.0f}s waiting for exclusive access to CORE VM '
+                    f'{lock_key}. Another ScenarioForge run (for example a scenarioforge-eval '
+                    f'batch) holds {lock_path}. Wait for it to finish, or raise '
+                    f'CORETG_SHARED_VM_LOCK_TIMEOUT_S.'
+                )
+            if not announced:
+                _write_log(
+                    f'Waiting for exclusive access to CORE VM {lock_key}; '
+                    f'another run holds {lock_path}.'
+                )
+                announced = True
+            time.sleep(_SHARED_VM_LOCK_POLL_S)
+
+    wait_s = round(time.monotonic() - wait_started, 6)
+    if announced:
+        _write_log(f'Acquired CORE VM {lock_key} after {wait_s:.1f}s.')
+    return {'key': lock_key, 'path': lock_path, 'wait_s': wait_s, 'handle': handle}
+
+
+def _release_shared_vm_lock(lock: Optional[Dict[str, Any]]) -> None:
+    if not isinstance(lock, dict):
+        return
+    handle = lock.get('handle')
+    if handle is None:
+        return
+    try:
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
 def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
+    """Run a background CLI job, holding the shared-VM lock for its duration.
+
+    The lock is taken deep inside `_run_cli_background_task_locked`, once the
+    SSH target is actually known, but released here: the inner function has
+    many early-return paths, and releasing on all of them individually is what
+    a leaked lock is made of. `lock_holder` carries the handle back out.
+    """
+    lock_holder: Dict[str, Any] = {}
+    try:
+        _run_cli_background_task_locked(run_id, job_spec, lock_holder)
+    finally:
+        _release_shared_vm_lock(lock_holder.get('lock'))
+
+
+def _run_cli_background_task_locked(
+    run_id: str,
+    job_spec: dict[str, Any],
+    lock_holder: Dict[str, Any],
+) -> None:
     run_id_local = run_id
     seed = job_spec.get('seed')
     xml_path = job_spec.get('xml_path')
@@ -44133,6 +44306,17 @@ def _run_cli_background_task(run_id: str, job_spec: dict[str, Any]) -> None:
     try:
         core_cfg = _require_core_ssh_credentials(core_cfg)
     except _SSHTunnelError as exc:
+        _fail_run(str(exc))
+        return
+
+    # The SSH target is now known, and everything past this point may reach the
+    # VM (core-cleanup, custom-service install, `systemctl restart core-daemon`).
+    # Serialize against the eval harness and other jobs before touching it.
+    try:
+        lock_holder['lock'] = _acquire_shared_vm_lock(
+            core_cfg, log_handle=log_f, log_prefix='[remote] '
+        )
+    except TimeoutError as exc:
         _fail_run(str(exc))
         return
 

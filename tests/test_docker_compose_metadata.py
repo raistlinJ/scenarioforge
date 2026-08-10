@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import types
 from types import SimpleNamespace
@@ -12,7 +14,12 @@ from scenarioforge.builders.topology import (
     _docker_node_compose_path,
     NodeType,
 )
-from scenarioforge.utils.vuln_process import prepare_compose_for_assignments
+from scenarioforge.utils.vuln_process import (
+    _maybe_force_service_workdir_root,
+    _repair_ingress_nginx_route_wait_for_no_network,
+    _service_requires_image_workdir,
+    prepare_compose_for_assignments,
+)
 
 
 class DummySession:
@@ -414,7 +421,174 @@ services:
     assert "NET_ADMIN" in (svc.get("cap_add") or [])
     assert "NET_RAW" in (svc.get("cap_add") or [])
     assert str(svc.get("user") or "") == "0:0"
-    assert svc.get("working_dir") == "/"
+    # NOT forced to root: the image bakes `WorkingDir: /opt/k3s` and
+    # `Entrypoint: [/bin/sh entrypoint.sh]` (a relative path) into itself, so
+    # forcing `working_dir: /` breaks entrypoint.sh resolution and the
+    # container exits immediately with "can't open 'entrypoint.sh'".
+    # `ingress-nginx` coincidentally matches the `'nginx' in image` heuristic
+    # meant for the real nginx web server; `_service_requires_image_workdir`
+    # exempts it. Confirmed against a real docker image inspect and
+    # reproduced identically on x86 and arm64 -- not an emulation issue.
+    assert svc.get("working_dir") is None
+
+    # A second, separate bug this repair uncovered: `k3s server` itself (not
+    # entrypoint.sh -- confirmed by extracting and reading the real script
+    # from the image) fatally exits if no default route exists yet in
+    # /proc/net/route, but CORE always starts docker nodes with
+    # network_mode: none and injects the route later -- so the unwrapped
+    # entrypoint can never succeed on the first try.
+    # `_repair_ingress_nginx_route_wait_for_no_network` wraps it in a
+    # bounded poll, exec-ing only once the route actually appears, and
+    # failing with a distinct message (not a silent exec into the same
+    # crash) if it never does. Confirmed on real x86 hardware: also
+    # architecture-independent, a startup-ordering conflict rather than an
+    # emulation one.
+    assert svc.get("entrypoint") == ["/bin/sh", "-c"]
+    command = svc.get("command") or []
+    assert len(command) == 1
+    assert "/proc/net/route" in command[0]
+    assert "exec /bin/sh entrypoint.sh k3s server" in command[0]
+    assert command[0].rstrip().endswith("exit 1")
+    assert labels.get("coretg.repaired_no_network_entrypoint") == "ingress-nginx-route-wait"
+
+
+def test_service_requires_image_workdir_exempts_ingress_nginx():
+    # Direct unit coverage of the guard itself, alongside the end-to-end
+    # compose-generation assertion above: `vulhub/ingress-nginx` bakes a
+    # relative-path entrypoint (`sh entrypoint.sh`) into a non-root image
+    # WorkingDir (`/opt/k3s`), which forcing `working_dir: /` breaks. This
+    # mirrors the existing `ofbiz` exemption directly above it in
+    # `_service_requires_image_workdir`.
+    assert _service_requires_image_workdir({"image": "vulhub/ingress-nginx:1.9.5"})
+    # Unrelated nginx-based images are unaffected -- only the ingress-nginx
+    # name match is exempted, not every image containing "nginx".
+    assert not _service_requires_image_workdir({"image": "nginx:1.25"})
+
+
+def test_maybe_force_service_workdir_root_leaves_ingress_nginx_unset(monkeypatch):
+    monkeypatch.delenv("CORETG_COMPOSE_FORCE_ROOT_WORKDIR", raising=False)
+    monkeypatch.delenv("CORETG_COMPOSE_FORCE_ROOT_WORKDIR_STRICT", raising=False)
+    svc = {"image": "vulhub/ingress-nginx:1.9.5"}
+    _maybe_force_service_workdir_root(svc)
+    assert "working_dir" not in svc
+
+    # The strict override exists precisely to let an operator force this
+    # back on if they need to -- confirm it still works as an escape hatch.
+    monkeypatch.setenv("CORETG_COMPOSE_FORCE_ROOT_WORKDIR_STRICT", "1")
+    svc_strict = {"image": "vulhub/ingress-nginx:1.9.5"}
+    _maybe_force_service_workdir_root(svc_strict)
+    assert svc_strict.get("working_dir") == "/"
+
+
+def test_repair_ingress_nginx_route_wait_wraps_entrypoint():
+    obj = {
+        "services": {
+            "k3s": {"image": "vulhub/ingress-nginx:1.9.5", "privileged": True},
+        }
+    }
+    result = _repair_ingress_nginx_route_wait_for_no_network(obj)
+    svc = result["services"]["k3s"]
+    assert svc["entrypoint"] == ["/bin/sh", "-c"]
+    assert len(svc["command"]) == 1
+    assert "/proc/net/route" in svc["command"][0]
+    # exec happens once the route is found (inside the loop, not after it),
+    # and the script still ends with a clear failure if it never is --
+    # confirm both, not just a substring match, to catch drift in either
+    # direction.
+    assert "exec /bin/sh entrypoint.sh k3s server" in svc["command"][0]
+    assert svc["command"][0].rstrip().endswith("exit 1")
+    assert svc["labels"]["coretg.repaired_no_network_entrypoint"] == "ingress-nginx-route-wait"
+    # `$i` must be escaped as `$$i` in the *source* compose value -- compose
+    # interpolates a bare `$i` as its own (unset) variable and silently
+    # blanks it out before the container's shell ever runs the string. See
+    # `_compose_interpolate` below for the reduction this survives once
+    # compose has processed it.
+    assert '"$$i" -lt 600' in svc["command"][0]
+
+
+def _compose_interpolate(value):
+    # Minimal stand-in for Docker Compose's own variable interpolation pass,
+    # which runs on every string value in the compose file *before* the
+    # container ever sees it. The only construct this script relies on
+    # compose to handle is its escape convention for a literal `$` --
+    # `$$` in the source becomes a single `$` by the time the container's
+    # shell runs it. Reproduce exactly that reduction here so these tests
+    # exercise the same string the container actually gets, not the
+    # pre-interpolation source (which still has `$i`, a compose variable
+    # reference, not a shell variable).
+    return value.replace("$$", "$")
+
+
+def test_repair_ingress_nginx_route_wait_script_is_valid_posix_sh():
+    # The generated command is a single embedded shell string that never
+    # gets a syntax check anywhere else in the pipeline -- `sh -c` inside
+    # the container would just fail at runtime on a typo. Catch that here
+    # instead of on a live CORE VM.
+    if shutil.which("sh") is None:
+        return
+    obj = {"services": {"k3s": {"image": "vulhub/ingress-nginx:1.9.5"}}}
+    svc = _repair_ingress_nginx_route_wait_for_no_network(obj)["services"]["k3s"]
+    script = _compose_interpolate(svc["command"][0])
+    result = subprocess.run(["sh", "-n", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_repair_ingress_nginx_route_wait_exits_nonzero_when_route_never_appears():
+    # Behavioral test, not just a syntax check: run the real generated
+    # script against a fake /proc/net/route with no default route, using a
+    # short loop bound substituted in for the real 600 so the test doesn't
+    # take ten minutes. Confirms the exhaustion path actually falls through
+    # to the distinct failure message and a nonzero exit, rather than
+    # silently exec-ing into `entrypoint.sh` (which won't exist in this
+    # sandbox and would otherwise fail for the wrong reason).
+    if shutil.which("sh") is None:
+        return
+    import tempfile
+
+    obj = {"services": {"k3s": {"image": "vulhub/ingress-nginx:1.9.5"}}}
+    svc = _repair_ingress_nginx_route_wait_for_no_network(obj)["services"]["k3s"]
+    script = _compose_interpolate(svc["command"][0])
+    script = script.replace('"$i" -lt 600', '"$i" -lt 2').replace("sleep 1", "sleep 0")
+
+    with tempfile.NamedTemporaryFile("w", suffix=".route", delete=False) as fake_route:
+        fake_route.write(
+            "Iface\tDestination\tGateway\tFlags\n"
+            "eth0\tFFFFFFFF\t00000000\t0001\n"  # no 00000000 destination anywhere
+        )
+        fake_route_path = fake_route.name
+    try:
+        script = script.replace("/proc/net/route", fake_route_path)
+        result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+        assert result.returncode == 1
+        assert "no default route appeared" in result.stderr
+    finally:
+        os.unlink(fake_route_path)
+
+
+def test_repair_ingress_nginx_route_wait_ignores_other_images():
+    obj = {"services": {"web": {"image": "nginx:1.25"}}}
+    result = _repair_ingress_nginx_route_wait_for_no_network(obj)
+    svc = result["services"]["web"]
+    assert "entrypoint" not in svc
+    assert "command" not in svc
+
+
+def test_repair_ingress_nginx_route_wait_does_not_clobber_explicit_override():
+    # If something upstream already set an explicit entrypoint/command for
+    # this image, this repair's assumption about the image defaults may no
+    # longer hold -- it should back off rather than overwrite it.
+    obj = {
+        "services": {
+            "k3s": {
+                "image": "vulhub/ingress-nginx:1.9.5",
+                "command": ["some", "explicit", "override"],
+            }
+        }
+    }
+    result = _repair_ingress_nginx_route_wait_for_no_network(obj)
+    svc = result["services"]["k3s"]
+    assert svc["command"] == ["some", "explicit", "override"]
+    assert "entrypoint" not in svc
 
 
 def test_prepare_compose_overrides_image_or_compose_non_root_user_for_core(tmp_path, monkeypatch):

@@ -548,7 +548,7 @@ def test_remote_execute_generator_image_cleanup_uses_shell_command() -> None:
 
     from webapp import app_backend as backend
 
-    source = inspect.getsource(backend._run_cli_background_task)
+    source = inspect.getsource(backend._run_cli_background_task_locked)
 
     assert '_exec_sudo(_remote_docker_remove_generator_images_script' not in source
     assert '_remote_docker_remove_generator_images_shell' in source
@@ -560,7 +560,7 @@ def test_remote_execute_builtin_service_preflight_has_session_xml_input_defined(
 
     from webapp import app_backend as backend
 
-    source = inspect.getsource(backend._run_cli_background_task)
+    source = inspect.getsource(backend._run_cli_background_task_locked)
 
     assert "session_xml_str = job_spec.get('session_xml_str')" in source
     assert "_required_builtin_core_services_for_xml_input(\n            xml_path,\n            session_xml_str," in source
@@ -571,7 +571,7 @@ def test_run_cli_background_task_marks_remote_cli_as_delegated() -> None:
 
     from webapp import app_backend as backend
 
-    source = inspect.getsource(backend._run_cli_background_task)
+    source = inspect.getsource(backend._run_cli_background_task_locked)
 
     assert "'CORETG_CLI_REMOTE_DELEGATED=1'" in source
     assert "'scenarioforge.cli',\n            'execute'," in source
@@ -584,7 +584,7 @@ def test_webui_execute_refreshes_custom_services_when_ssh_password_is_available(
 
     from webapp import app_backend as backend
 
-    source = inspect.getsource(backend._run_cli_background_task)
+    source = inspect.getsource(backend._run_cli_background_task_locked)
 
     assert "or core_cfg.get('ssh_password')" in source
     assert 'install_custom_services_on_execute' in source
