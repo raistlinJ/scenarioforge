@@ -34,6 +34,7 @@ def register(
         """
         notes: list[dict[str, str]] = []
         layout_items: list[dict[str, str]] = []
+        state_items: list[dict[str, Any]] = []
         for item in normalize_vuln_catalog_items(catalog):
             if not isinstance(item, dict):
                 continue
@@ -44,6 +45,33 @@ def register(
                     'compose_rel': compose_rel,
                     'category': category,
                 })
+                # Everything an import cannot work out for itself. Architectures
+                # in particular: an air-gapped CORE host has no registry to ask,
+                # so without carrying them here it could never tell an
+                # amd64-only item from an unscanned one. The operator's own
+                # enable/disable decision travels too, so a curated catalog
+                # stays curated across the round trip.
+                architectures = [
+                    str(a).strip() for a in (item.get('architectures') or []) if str(a or '').strip()
+                ]
+                entry: dict[str, Any] = {'compose_rel': compose_rel}
+                if architectures:
+                    entry['architectures'] = architectures
+                    entry['architecture_source'] = str(item.get('architecture_source') or '').strip() or 'unknown'
+                    unresolved = [
+                        str(u).strip() for u in (item.get('architecture_unresolved') or [])
+                        if str(u or '').strip()
+                    ]
+                    if unresolved:
+                        entry['architecture_unresolved'] = unresolved
+                if item.get('disabled') is not None:
+                    entry['disabled'] = bool(item.get('disabled'))
+                    entry['disabled_by_operator'] = bool(item.get('disabled_by_operator'))
+                if item.get('persistent') is not None:
+                    entry['persistent'] = bool(item.get('persistent'))
+                # Only carry an entry that actually says something.
+                if len(entry) > 1:
+                    state_items.append(entry)
             note = str(item.get('note') or '').strip()
             color = str(item.get('note_color') or '').strip().lower()
             if not note and color not in {'red', 'yellow', 'green'}:
@@ -62,6 +90,7 @@ def register(
                 if info.filename.replace('\\', '/') in {
                     '.scenarioforge/catalog_notes.json',
                     '.scenarioforge/catalog_layout.json',
+                    '.scenarioforge/catalog_items.json',
                 }:
                     continue
                 output.writestr(info, source.read(info.filename))
@@ -72,6 +101,10 @@ def register(
             output.writestr(
                 '.scenarioforge/catalog_layout.json',
                 json.dumps({'version': 1, 'items': layout_items}, indent=2, sort_keys=True) + '\n',
+            )
+            output.writestr(
+                '.scenarioforge/catalog_items.json',
+                json.dumps({'version': 1, 'items': state_items}, indent=2, sort_keys=True) + '\n',
             )
         return mem.getvalue()
 

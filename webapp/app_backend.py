@@ -47965,6 +47965,9 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_cache_error'] = info.get('cache_error')
             g['_requires_build_network'] = bool(info.get('requires_build_network', False))
             g['_build_network_notes'] = info.get('build_network_notes') if isinstance(info.get('build_network_notes'), list) else []
+            g['_architectures'] = info.get('architectures') if isinstance(info.get('architectures'), list) else []
+            g['_architecture_source'] = str(info.get('architecture_source') or '').strip() or 'unscanned'
+            g['_architecture_unresolved'] = info.get('architecture_unresolved') if isinstance(info.get('architecture_unresolved'), list) else []
         else:
             g['_category'] = None
             g['_disabled'] = False
@@ -47986,6 +47989,9 @@ def _annotate_disabled_state(generators: list[dict], *, kind: str) -> list[dict]
             g['_cache_error'] = None
             g['_requires_build_network'] = False
             g['_build_network_notes'] = []
+            g['_architectures'] = []
+            g['_architecture_source'] = 'unscanned'
+            g['_architecture_unresolved'] = []
         out.append(g)
     return out
 
@@ -48251,6 +48257,34 @@ def _download_zip_from_url(url: str, *, max_bytes: int = 50_000_000) -> bytes:
 # ---------------- Vulnerability Catalog Packs -----------------
 
 
+def _vuln_catalog_architecture_scan_enabled() -> bool:
+    """Whether catalog install should determine each item's architectures.
+
+    On by default: knowing an item is amd64-only is what lets an arm64 host
+    warn before a node segfaults under emulation. Set
+    CORETG_CATALOG_ARCH_SCAN=0 to skip it when install speed matters more.
+    """
+    raw = os.environ.get('CORETG_CATALOG_ARCH_SCAN')
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
+def _vuln_catalog_architecture_registry_enabled() -> bool:
+    """Whether the architecture scan may consult a container registry.
+
+    Locally cached images are inspected either way. Registry lookups are the
+    only way to learn about an image this host has never pulled, but they need
+    network and burn registry quota, so a site that installs catalogs on an
+    air-gapped machine can turn them off with
+    CORETG_CATALOG_ARCH_SCAN_REGISTRY=0 and rely on the exported values.
+    """
+    raw = os.environ.get('CORETG_CATALOG_ARCH_SCAN_REGISTRY')
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
 def _installed_vuln_catalogs_root() -> str:
     return os.path.join(_outputs_dir(), 'installed_vuln_catalogs')
 
@@ -48505,6 +48539,8 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
     compose_items: list[dict[str, Any]] = []
     imported_notes_by_compose_rel: dict[str, dict[str, str]] = {}
     imported_categories_by_compose_rel: dict[str, str] = {}
+    imported_architectures_by_compose_rel: dict[str, dict[str, Any]] = {}
+    imported_item_state_by_compose_rel: dict[str, dict[str, Any]] = {}
     try:
         # Extract the entire ZIP directory tree so compose directories (and their
         # support files) are preserved.
@@ -48551,6 +48587,42 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             pass
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ValueError(f'Invalid ScenarioForge catalog layout metadata: {exc}') from exc
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                raw_items = archive.read('.scenarioforge/catalog_items.json').decode('utf-8', errors='ignore')
+            items_doc = json.loads(raw_items or '{}')
+            item_entries = items_doc.get('items') if isinstance(items_doc, dict) else []
+            if isinstance(item_entries, list):
+                for raw_entry in item_entries:
+                    if not isinstance(raw_entry, dict):
+                        continue
+                    compose_rel = str(raw_entry.get('compose_rel') or '').replace('\\', '/').strip().lstrip('/')
+                    if not compose_rel or '..' in compose_rel.split('/'):
+                        continue
+                    architectures = [
+                        str(a).strip() for a in (raw_entry.get('architectures') or []) if str(a or '').strip()
+                    ]
+                    if architectures:
+                        imported_architectures_by_compose_rel[compose_rel] = {
+                            'architectures': architectures,
+                            'architecture_source': str(raw_entry.get('architecture_source') or 'imported'),
+                            'architecture_unresolved': [
+                                str(u).strip() for u in (raw_entry.get('architecture_unresolved') or [])
+                                if str(u or '').strip()
+                            ],
+                        }
+                    state: dict[str, Any] = {}
+                    if 'disabled' in raw_entry:
+                        state['disabled'] = bool(raw_entry.get('disabled'))
+                        state['disabled_by_operator'] = bool(raw_entry.get('disabled_by_operator'))
+                    if 'persistent' in raw_entry:
+                        state['persistent'] = bool(raw_entry.get('persistent'))
+                    if state:
+                        imported_item_state_by_compose_rel[compose_rel] = state
+        except KeyError:
+            pass
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f'Invalid ScenarioForge catalog item metadata: {exc}') from exc
         try:
             from scenarioforge.compose_dependencies import missing_dependency_paths, scan_compose_dependencies
         except Exception:
@@ -48625,10 +48697,55 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 'requires_build_network': needs_build_network,
                 'build_network_notes': list(compose_dependency_summary.get('build_network_notes') or []),
             }
+            # Which CPU architectures this item's images can run on. An
+            # amd64-only recipe on an arm64 CORE VM runs only under qemu
+            # emulation, where heavy applications segfault mid-boot and lose
+            # the addressing CORE applied -- a failure that presents as a
+            # networking fault. Prefer whatever the export carried (an
+            # air-gapped host cannot reach a registry to work it out), and only
+            # scan when the export said nothing.
+            imported_arch = imported_architectures_by_compose_rel.get(compose_rel)
+            if isinstance(imported_arch, dict) and imported_arch.get('architectures'):
+                item['architectures'] = list(imported_arch.get('architectures') or [])
+                item['architecture_source'] = str(imported_arch.get('architecture_source') or 'imported')
+                item['architecture_unresolved'] = list(imported_arch.get('architecture_unresolved') or [])
+            elif _vuln_catalog_architecture_scan_enabled():
+                try:
+                    from scenarioforge.utils.image_architectures import (
+                        architecture_summary_for_compose_file,
+                    )
+
+                    arch_summary = architecture_summary_for_compose_file(
+                        compose_path,
+                        allow_registry=_vuln_catalog_architecture_registry_enabled(),
+                    )
+                    item['architectures'] = list(arch_summary.get('architectures') or [])
+                    item['architecture_source'] = str(arch_summary.get('architecture_source') or arch_summary.get('source') or 'unknown')
+                    item['architecture_unresolved'] = list(arch_summary.get('unresolved') or [])
+                except Exception:
+                    item['architectures'] = []
+                    item['architecture_source'] = 'unknown'
+                    item['architecture_unresolved'] = []
+            else:
+                item['architectures'] = []
+                item['architecture_source'] = 'unscanned'
+                item['architecture_unresolved'] = []
             imported_note = imported_notes_by_compose_rel.get(compose_rel)
             if imported_note:
                 item['note'] = imported_note['note']
                 item['note_color'] = imported_note['note_color'] or None
+            imported_state = imported_item_state_by_compose_rel.get(compose_rel)
+            if isinstance(imported_state, dict):
+                # An operator's own enable/disable decision travels with the
+                # export and must survive the round trip. It can only ever be
+                # more restrictive than this install's own findings: a catalog
+                # scanned elsewhere cannot vouch for files or a build network
+                # on THIS host, so auto_disabled still wins when it is set.
+                if 'disabled' in imported_state:
+                    item['disabled'] = bool(item['disabled']) or bool(imported_state.get('disabled'))
+                    item['disabled_by_operator'] = bool(imported_state.get('disabled_by_operator'))
+                if imported_state.get('persistent') is not None:
+                    item['persistent'] = bool(imported_state.get('persistent'))
             compose_items.append(item)
 
         # Generate a catalog CSV from discovered compose directories.
@@ -48929,6 +49046,22 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         it['requires_build_network'] = bool(it.get('requires_build_network', False))
         bn = it.get('build_network_notes')
         it['build_network_notes'] = [str(v) for v in bn] if isinstance(bn, list) else []
+        # Architectures this item's images can run on. An empty list means "not
+        # known", never "runs nowhere" -- an unscanned catalog must not disable
+        # itself. `architecture_source` is what tells those apart downstream.
+        archs = it.get('architectures')
+        it['architectures'] = [str(v).strip() for v in archs if str(v or '').strip()] if isinstance(archs, list) else []
+        it['architecture_source'] = str(it.get('architecture_source') or '').strip() or (
+            'unknown' if it['architectures'] else 'unscanned'
+        )
+        arch_unresolved = it.get('architecture_unresolved')
+        it['architecture_unresolved'] = (
+            [str(v).strip() for v in arch_unresolved if str(v or '').strip()]
+            if isinstance(arch_unresolved, list) else []
+        )
+        # Records that an operator turned this off by hand, as opposed to the
+        # installer auto-disabling it, so the two survive a round trip apart.
+        it['disabled_by_operator'] = bool(it.get('disabled_by_operator', False))
         it['verify_path'] = str(it.get('verify_path') or '').strip()
         it['verify_expect'] = str(it.get('verify_expect') or '').strip()
         out.append(it)
@@ -50513,6 +50646,22 @@ def _install_generator_pack_payload(
                 installed_item['note'] = str(imported_note.get('note') or '').strip()
                 installed_item['note_color'] = imported_note.get('note_color')
             compose_dependency_summary = it.get('compose_dependencies') if isinstance(it.get('compose_dependencies'), dict) else {}
+            # The compose file as installed, for the architecture scan below.
+            compose_path_for_scan = ''
+            try:
+                for _candidate in ('docker-compose.yml', 'docker-compose.yaml'):
+                    _p = os.path.join(dest_dir, _candidate)
+                    if os.path.isfile(_p):
+                        compose_path_for_scan = _p
+                        break
+                if not compose_path_for_scan:
+                    for _rp in Path(dest_dir).rglob('docker-compose.y*ml'):
+                        if '__MACOSX' in str(_rp):
+                            continue
+                        compose_path_for_scan = str(_rp)
+                        break
+            except Exception:
+                compose_path_for_scan = ''
             required_files = compose_dependency_summary.get('requires') if isinstance(compose_dependency_summary, dict) else []
             if isinstance(required_files, list):
                 installed_item['required_files'] = required_files
@@ -50538,6 +50687,35 @@ def _install_generator_pack_payload(
                 if needs_build_network:
                     installed_item['disabled'] = True
                     installed_item['disabled_due_to_build_network'] = True
+            # Architectures this generator's images can run on, recorded for the
+            # same reason as vulnerabilities: an amd64-only image on an arm64
+            # CORE VM runs only under emulation. Prefer whatever the exported
+            # pack already knew, since an air-gapped host cannot ask a registry.
+            try:
+                arch_imported = installed_item.get('architectures')
+                if isinstance(arch_imported, list) and arch_imported:
+                    installed_item['architectures'] = [
+                        str(a).strip() for a in arch_imported if str(a or '').strip()
+                    ]
+                    installed_item.setdefault('architecture_source', 'imported')
+                elif compose_path_for_scan and _vuln_catalog_architecture_scan_enabled():
+                    from scenarioforge.utils.image_architectures import (
+                        architecture_summary_for_compose_file,
+                    )
+
+                    arch_summary = architecture_summary_for_compose_file(
+                        compose_path_for_scan,
+                        allow_registry=_vuln_catalog_architecture_registry_enabled(),
+                    )
+                    installed_item['architectures'] = list(arch_summary.get('architectures') or [])
+                    installed_item['architecture_source'] = str(arch_summary.get('source') or 'unknown')
+                    installed_item['architecture_unresolved'] = list(arch_summary.get('unresolved') or [])
+                else:
+                    installed_item.setdefault('architectures', [])
+                    installed_item.setdefault('architecture_source', 'unscanned')
+            except Exception:
+                installed_item.setdefault('architectures', [])
+                installed_item.setdefault('architecture_source', 'unknown')
             installed.append(installed_item)
 
         return True, note, installed, next_numeric, warnings

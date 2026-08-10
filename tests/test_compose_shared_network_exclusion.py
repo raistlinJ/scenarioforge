@@ -598,3 +598,54 @@ def test_pipeline_drops_a_duplicate_with_no_sidecar_at_all(tmp_path, monkeypatch
     assert not any(
         str(s.get("network_mode", "")).startswith("service:") for s in services.values()
     )
+
+
+# --------------------------------------------------------------------------- #
+# 9. ScenarioForge's own inject helper is not a peer service
+# --------------------------------------------------------------------------- #
+#
+# `inject_copy*` is injected by ScenarioForge to populate a shared volume; it
+# talks to nothing. Counting it as a peer made every ordinary single-service
+# node look like a stack needing service-to-service networking, and a real run
+# logged "this node is expected to fail" at WARNING for three nodes that were
+# entirely healthy.
+
+def test_inject_copy_alone_does_not_make_a_node_look_multi_service():
+    stack = {
+        "services": {
+            "docker-8": {"image": "x"},
+            "inject_copy": {"image": "alpine:3.19", "network_mode": "none"},
+        }
+    }
+    assert not compose_stack_needs_shared_network(stack)
+
+
+def test_a_real_sidecar_alongside_inject_copy_still_counts():
+    stack = {
+        "services": {
+            "docker-8": {"image": "x"},
+            "db": {"image": "postgres"},
+            "inject_copy": {"image": "alpine:3.19", "network_mode": "none"},
+        }
+    }
+    assert compose_stack_needs_shared_network(stack)
+
+
+def test_generation_pipeline_does_not_warn_for_a_single_service_node(tmp_path, monkeypatch, caplog):
+    # End-to-end guard: a plain one-service recipe must produce no
+    # "expected to fail" warning once inject_copy is added downstream.
+    from scenarioforge.utils.vuln_process import prepare_compose_for_assignments
+
+    monkeypatch.delenv("CORETG_COMPOSE_ALLOW_INTERNAL_NETWORKING", raising=False)
+    recipe = tmp_path / "recipe" / "docker-compose.yml"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text("services:\n  web:\n    image: nginx\n", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        prepare_compose_for_assignments(
+            {"docker-8": {"Name": "x/single", "Path": str(recipe),
+                          "Type": "docker-compose", "Vector": ""}},
+            out_base=str(tmp_path / "out"),
+        )
+    noisy = [r.getMessage() for r in caplog.records if "expected to fail" in r.getMessage()]
+    assert not noisy, f"false-alarm warning for a healthy single-service node: {noisy}"

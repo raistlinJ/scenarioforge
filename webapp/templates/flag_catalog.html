@@ -1662,6 +1662,7 @@
             ${isDuplicateConflict ? `<span class="badge bg-danger ms-2">Duplicate ID</span>` : ''}
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${g._requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(g._build_network_notes) ? g._build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
+            ${generatorArchitectureBadge(g)}
           </div>
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
           ${missingRequiredHtml}
@@ -1884,6 +1885,7 @@
             ${isDuplicateConflict ? `<span class="badge bg-danger ms-2">Duplicate ID</span>` : ''}
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${g._requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(g._build_network_notes) ? g._build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
+            ${generatorArchitectureBadge(g)}
           </div>
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
           ${missingRequiredHtml}
@@ -2562,6 +2564,27 @@
 
       try { modalObj?.show(); } catch (e) {}
     });
+  }
+
+  // Architecture marking, same rationale as the vulnerability catalog: an
+  // amd64-only image on an arm64 CORE VM runs only under qemu emulation. An
+  // unscanned generator shows no badge -- empty means "not known", never
+  // "runs nowhere".
+  function generatorArchitectureBadge(g) {
+    const archs = Array.isArray(g && g._architectures) ? g._architectures.filter(Boolean) : [];
+    const source = String((g && g._architecture_source) || '').trim();
+    if (!archs.length) {
+      if (source && source !== 'unscanned' && source !== 'unknown') {
+        return `<span class="badge text-bg-warning ms-2" title="This generator's images share no common architecture, so at least one runs under emulation on any host.">Mixed Arch</span>`;
+      }
+      return '';
+    }
+    const hostArch = String(window.CORETG_HOST_ARCH || '').trim();
+    const label = escapeHtml(archs.join(', '));
+    if (hostArch && !archs.includes(hostArch)) {
+      return `<span class="badge text-bg-warning ms-2" title="Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation.">${label} (emulated)</span>`;
+    }
+    return `<span class="badge text-bg-light text-dark border ms-2" title="Runs natively on: ${label}.">${label}</span>`;
   }
 
   function escapeHtml(str) {

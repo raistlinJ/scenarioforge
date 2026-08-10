@@ -43,11 +43,22 @@ def compose_stack_needs_shared_network(compose_obj: Any) -> bool:
     if not isinstance(compose_obj, dict):
         return False
     services = compose_obj.get("services")
-    if not isinstance(services, dict) or len(services) <= 1:
+    if not isinstance(services, dict):
+        return False
+    # `inject_copy*` is ScenarioForge's own one-shot helper, not part of the
+    # recipe: it only populates a shared volume and talks to nothing. Counting
+    # it made every single-service node look like a stack needing
+    # service-to-service networking, which then reported "this node is expected
+    # to fail" for nodes that were entirely healthy.
+    peers = {
+        name: svc for name, svc in services.items()
+        if not str(name).startswith("inject_copy")
+    }
+    if len(peers) <= 1:
         return False
     already_isolated = all(
         isinstance(svc, dict) and svc.get("network_mode") == "none"
-        for svc in services.values()
+        for svc in peers.values()
     )
     return not already_isolated
 

@@ -672,6 +672,33 @@
     }
   });
 
+  // Architecture marking. An amd64-only image on an arm64 CORE VM runs only
+  // under qemu emulation, where heavy apps segfault mid-boot and lose the
+  // addressing CORE applied -- a failure that presents as a networking fault.
+  // An unscanned item shows nothing rather than a misleading "unsupported":
+  // an empty architecture list means "not known", never "runs nowhere".
+  function architectureBadge(it) {
+    const archs = Array.isArray(it && it.architectures) ? it.architectures.filter(Boolean) : [];
+    const source = String((it && it.architecture_source) || '').trim();
+    const unresolved = Array.isArray(it && it.architecture_unresolved) ? it.architecture_unresolved : [];
+    if (!archs.length) {
+      // Resolved but sharing no common architecture is a real finding; simply
+      // never scanned is not worth a badge.
+      if (source && source !== 'unscanned' && source !== 'unknown') {
+        return `<span class="badge text-bg-warning ms-2" title="This item's images share no common architecture, so at least one of them runs under emulation on any host.">Mixed Arch</span>`;
+      }
+      return '';
+    }
+    const hostArch = String(window.CORETG_HOST_ARCH || '').trim();
+    const native = hostArch ? archs.includes(hostArch) : null;
+    const label = escapeHtml(archs.join(', '));
+    const extra = unresolved.length ? ` ${unresolved.length} image(s) could not be resolved.` : '';
+    if (native === false) {
+      return `<span class="badge text-bg-warning ms-2" title="Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation, where heavy applications can segfault mid-boot.${escapeHtml(extra)}">${label} (emulated)</span>`;
+    }
+    return `<span class="badge text-bg-light text-dark border ms-2" title="Runs natively on: ${label}.${escapeHtml(extra)}">${label}</span>`;
+  }
+
   function escapeHtml(s) {
     try {
       return String(s ?? '')
@@ -1216,6 +1243,7 @@
             ${isBatchRunning ? `<span class="badge text-bg-primary ms-2">Batch Active</span>` : ''}
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${it.requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(it.build_network_notes) ? it.build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
+            ${architectureBadge(it)}
           </div>
           <div class="small text-muted">ID: ${escapeHtml(it.id ?? '')}</div>
           ${missingRequiredHtml}
@@ -1338,6 +1366,11 @@
       }
       _vulnCatalogState.active = data.active || null;
       _vulnCatalogState.items = Array.isArray(data.items) ? data.items : [];
+      // Architecture verdicts are relative to the host that will run the
+      // scenario, so record what this deployment actually is.
+      if (typeof data.host_architecture === 'string') {
+        window.CORETG_HOST_ARCH = data.host_architecture;
+      }
       _pruneVulnSelection();
       const src = _vulnCatalogState.active && _vulnCatalogState.active.from_source ? String(_vulnCatalogState.active.from_source) : '';
       const activeLabel = _vulnCatalogState.active && _vulnCatalogState.active.label ? String(_vulnCatalogState.active.label) : 'repo default';

@@ -244,7 +244,20 @@ def register(
                 'cache_error': str(item.get('cache_error') or '').strip() or None,
                 'requires_build_network': bool(item.get('requires_build_network', False)),
                 'build_network_notes': item.get('build_network_notes') if isinstance(item.get('build_network_notes'), list) else [],
+                'architectures': item.get('architectures') if isinstance(item.get('architectures'), list) else [],
+                'architecture_source': str(item.get('architecture_source') or '').strip() or 'unscanned',
+                'architecture_unresolved': item.get('architecture_unresolved') if isinstance(item.get('architecture_unresolved'), list) else [],
+                'disabled_by_operator': bool(item.get('disabled_by_operator', False)),
             })
+        # The catalog is judged against the machine that will actually run it,
+        # so the UI needs to know what this host is before it can say whether an
+        # item runs natively or only under emulation.
+        try:
+            from scenarioforge.utils.image_architectures import host_architecture
+
+            host_arch = host_architecture()
+        except Exception:
+            host_arch = ''
         return jsonify({
             'ok': True,
             'active': {
@@ -252,6 +265,7 @@ def register(
                 'label': str(entry.get('label') or '').strip() or cid,
                 'from_source': from_source,
             },
+            'host_architecture': host_arch,
             'items': out_items,
         })
 
