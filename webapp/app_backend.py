@@ -25861,7 +25861,24 @@ def _flow_validate_chain_order_by_requires_produces(
             start_plugin_id = str(start_assignment.get('id') or start_assignment.get('generator_id') or '').strip()
             supplied = start_assignment.get('chain_supplied_inputs') if isinstance(start_assignment.get('chain_supplied_inputs'), list) else []
             available |= {str(x).strip() for x in (supplied or []) if str(x).strip()}
-            if start_plugin_id:
+            # `flow_supply_when_first` inputs are only ever handed to the chain's
+            # actual opening step, so only index 0 may treat them as available.
+            #
+            # Every other index here is a *parallel-branch* start, and
+            # _flow_parallel_start_assignment_indexes calls a step one whenever
+            # none of its requirements were produced earlier -- which is exactly
+            # the shape of a broken chain as well as a branch head. Granting the
+            # exemption on that basis made an unsatisfiable step vouch for
+            # itself: `dep_ssh_key_bastion` placed second, requiring
+            # `SSHPrivateKey(path)` that nothing produced, was read as a branch
+            # start, had the requirement waived, and validated clean -- then
+            # refused its own config at run time and failed the run two layers
+            # later as "Challenges and Flow Data not found on CORE VM".
+            #
+            # Explicit `chain_supplied_inputs` above stay trusted at any index:
+            # those record a value Flow actually resolved, rather than a
+            # manifest's declaration of what it would accept if it went first.
+            if start_plugin_id and start_index == 0:
                 start_gen = gen_defs_by_id.get(start_plugin_id)
                 available |= set(_flow_first_step_chain_supplied_input_names(start_gen if isinstance(start_gen, dict) else start_assignment))
     except Exception:
@@ -26003,11 +26020,22 @@ def _flow_validate_chain_order_by_requires_produces(
         # Flow itself built -- and resolved, with a real value -- as unsolvable.
         # The same helper is used deliberately: two readings of one marker is
         # how the two disagreed in the first place.
+        #
+        # Only at position 0. The marker is `flow_supply_when_first`, and Flow
+        # supplies the value only to the opening step -- every other reader of
+        # this helper asks it about a chain *start*. Applying the exemption at
+        # every position waved through chains whose later steps depended on an
+        # artifact nothing produced: `dep_ssh_key_bastion` sitting second with
+        # `SSHPrivateKey(path)` required and no earlier step emitting one
+        # validated clean, then the generator itself refused the config at run
+        # time with "[validation error] SSHPrivateKey(path) is required",
+        # wrote no outputs.json, and execute failed much later and much less
+        # helpfully with "Challenges and Flow Data not found on CORE VM".
         supplied_by_flow = {
             str(name).strip()
             for name in _flow_first_step_chain_supplied_input_names(a)
             if str(name or '').strip()
-        }
+        } if step_index == 0 else set()
         if supplied_by_flow:
             base_requires -= supplied_by_flow
             inferred_requires = {r for r in inferred_requires if r not in supplied_by_flow}
