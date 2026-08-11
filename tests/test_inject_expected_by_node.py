@@ -587,3 +587,54 @@ def test_extract_inject_expected_by_node_ignores_node_generator_mount_root(monke
     out = backend._extract_inject_expected_by_node('/tmp/scenario.xml', 'NewScenario1')
 
     assert 'docker-5' not in out
+
+
+def test_inject_copy_clears_dotfiles_from_the_inject_volume(tmp_path):
+    # `inject-flow-injects` is a named volume keyed on the node name, so it
+    # outlives the scenario that created it and the next scenario reusing that
+    # node inherits its contents. The pre-copy cleanup therefore has to empty
+    # the directory completely. It used to be `rm -rf <dir>/*`, which does not
+    # match dotfiles, so a generator artifact like `.env.backup` survived and
+    # showed up inside an unrelated scenario -- one challenge's flag artifact
+    # appearing in another. Observed live on docker-13, which held both its own
+    # `incident_payload.hex` and a stale `.env.backup` from a different run.
+    import subprocess
+
+    from scenarioforge.utils import vuln_process as vp
+
+    run_dir = tmp_path / 'run1'
+    run_dir.mkdir()
+    (run_dir / 'payload.hex').write_text('DEADBEEF')
+
+    compose = {'services': {'target': {'image': 'nginx', 'container_name': 'docker-13'}}}
+    result = vp._inject_copy_for_inject_files(
+        compose,
+        inject_files=['payload.hex'],
+        source_dir=str(run_dir),
+        prefer_service='target',
+    )
+
+    # The emitted cleanup is the first command in the inject_copy helper.
+    command = result['services']['inject_copy']['command']
+    script = command[-1]
+    assert script.startswith('rm -rf '), script[:120]
+    # Dotfile-matching globs must be part of the cleanup, not just `/*`.
+    assert '/.[!.]*' in script and '/..?*' in script
+
+    # Behavioral: run the real emitted cleanup against a real directory (with
+    # the container-side mount path swapped for a temp one) and confirm it
+    # empties the directory without removing the directory itself.
+    victim = tmp_path / 'flow_injects'
+    victim.mkdir()
+    for name in ('normal.txt', '.env.backup', '.hidden', '..double'):
+        (victim / name).write_text('x')
+    (victim / 'sub').mkdir()
+    (victim / 'sub' / 'nested').write_text('x')
+
+    cleanup = script.split(' && ', 1)[0].replace('/dst/tmp', str(victim))
+    subprocess.run(['sh', '-c', cleanup], check=True)
+
+    assert victim.is_dir(), 'cleanup must keep the directory itself'
+    assert list(victim.iterdir()) == [], (
+        f'stale entries survived: {[p.name for p in victim.iterdir()]}'
+    )

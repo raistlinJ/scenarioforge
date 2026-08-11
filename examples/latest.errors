@@ -1,6 +1,6 @@
 # ScenarioForge latest warnings/errors
-# Started: 2026-08-10T18:28:51.112629+00:00
+# Started: 2026-08-11T04:25:24.613248+00:00
 # Includes log records at WARNING and ERROR level.
 
-2026-08-10 12:28:51,113 ERROR root - VM mode requires additional configuration before the execute phase can run.
-2026-08-10 12:28:51,113 ERROR root - Missing or unconfigured: scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)
+2026-08-10 22:25:24,614 ERROR root - VM mode requires additional configuration before the execute phase can run.
+2026-08-10 22:25:24,614 ERROR root - Missing or unconfigured: scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)

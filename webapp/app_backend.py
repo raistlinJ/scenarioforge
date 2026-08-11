@@ -7043,6 +7043,61 @@ def _prepare_remote_cli_context(
                     remote_file = _remote_path_join(remote_root, file_name)
                     _put_required_file(local_file, remote_file, label='compose asset')
 
+        def _assert_staged_context_matches_recipe(local_dir: str, remote_dir: str) -> None:
+            """Fail loudly if a staged build context holds files the recipe does not.
+
+            A build context is only trustworthy if it contains that recipe and
+            nothing else. When several recipes were staged into one directory,
+            their same-named files overwrote each other and an image was built
+            from another vulnerability's `docker-entrypoint.sh` -- which fails
+            at run time as a container restart, far from the cause, and looks
+            like a network fault because CORE's addressing is applied once at
+            execute and lost on restart.
+
+            Checking the image's ENTRYPOINT/CMD against the Dockerfile does not
+            catch this: the Dockerfile is copied intact, so both agree on
+            `/docker-entrypoint.sh` while the script behind it belongs to a
+            different recipe. Comparing the staged file set against the source
+            recipe is what actually detects it.
+
+            Extra files are the signal. Missing files are left to the upload
+            itself to report, and are not treated as contamination here.
+            """
+            try:
+                expected = set()
+                for root_dir, _dirs, files in os.walk(local_dir):
+                    rel_dir = os.path.relpath(root_dir, local_dir)
+                    for file_name in files:
+                        rel = file_name if rel_dir in ('.', '') else posixpath.join(
+                            rel_dir.replace('\\', '/'), file_name
+                        )
+                        expected.add(rel)
+                found = set()
+                stack = ['']
+                while stack:
+                    rel_dir = stack.pop()
+                    listing_dir = _remote_path_join(remote_dir, rel_dir) if rel_dir else remote_dir
+                    try:
+                        entries = sftp.listdir_attr(listing_dir)
+                    except Exception:
+                        continue
+                    for entry in entries:
+                        rel = posixpath.join(rel_dir, entry.filename) if rel_dir else entry.filename
+                        if stat.S_ISDIR(entry.st_mode or 0):
+                            stack.append(rel)
+                        else:
+                            found.add(rel)
+                unexpected = sorted(found - expected)
+                if unexpected:
+                    logger.error(
+                        '[remote] staged build context is contaminated: %s contains %d file(s) '
+                        'not present in the recipe at %s -- an image built here may use another '
+                        "recipe's files. Unexpected: %s",
+                        remote_dir, len(unexpected), local_dir, unexpected[:10],
+                    )
+            except Exception as exc:
+                logger.debug('staged context check skipped for %s: %s', remote_dir, exc)
+
         def _upload_local_asset(local_path: str, remote_path: str) -> None:
             if os.path.isdir(local_path):
                 if local_path in uploaded_dirs:
@@ -7097,9 +7152,15 @@ def _prepare_remote_cli_context(
                 local_compose_dir = os.path.dirname(os.path.abspath(local_compose_path))
                 remote_compose_dir = posixpath.dirname(remote_compose_path) or run_dir
                 
-                if local_compose_dir not in uploaded_dirs:
+                # Keyed on the pair, not the local directory alone: the same
+                # recipe can legitimately be staged into more than one remote
+                # directory now that each vulnerability gets its own, and keying
+                # on the source would skip every destination after the first.
+                upload_key = (local_compose_dir, remote_compose_dir)
+                if upload_key not in uploaded_dirs:
                     _upload_wrapper_dir(local_compose_dir, remote_compose_dir)
-                    uploaded_dirs.add(local_compose_dir)
+                    uploaded_dirs.add(upload_key)
+                    _assert_staged_context_matches_recipe(local_compose_dir, remote_compose_dir)
 
                 if isinstance(services, dict):
                     for svc in services.values():
@@ -7321,8 +7382,29 @@ def _prepare_remote_cli_context(
                 raw_name = str(item_el.get('v_name') or item_el.get('Name') or '').strip()
                 safe_name = _safe_name(raw_name) if raw_name else ''
                 base_name = os.path.basename(local_compose_path)
-                remote_basename = f"{safe_name}_{base_name}" if safe_name else base_name
-                remote_compose_path = _remote_path_join(run_dir, remote_basename)
+                # Each recipe gets its own directory under the run dir. Uploading
+                # them side by side into the run dir itself only kept the compose
+                # files apart -- those were prefixed with the vulnerability name --
+                # while every sibling the recipe needs (Dockerfile,
+                # docker-entrypoint.sh, src/, app.py) kept its original name and so
+                # overwrote the same file from another recipe, last upload winning.
+                # A scenario with several vulnerabilities then built some of them
+                # from another vulnerability's files. Observed with vulhub's four
+                # django CVEs in one scenario: three use `app.py`, CVE-2019-14234
+                # uses `manage.py`, and whichever docker-entrypoint.sh landed last
+                # was baked into all four images.
+                #
+                # Isolation also repairs the build context. vulhub composes say
+                # `build: .`, which is resolved relative to the compose file, so
+                # moving the compose into the shared run dir silently repointed
+                # every recipe's context at that whole directory -- which is why
+                # unrelated compose files and even run artifacts ended up inside
+                # the build contexts.
+                remote_compose_path = (
+                    _remote_path_join(run_dir, safe_name, base_name)
+                    if safe_name
+                    else _remote_path_join(run_dir, base_name)
+                )
                 
                 if local_compose_path not in uploaded_paths:
                     _upload_compose_with_remote_wrapper_paths(local_compose_path, remote_compose_path)

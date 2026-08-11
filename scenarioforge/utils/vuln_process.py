@@ -4085,11 +4085,22 @@ def _inject_copy_for_inject_files(compose_obj: dict, *, inject_files: list[str],
 		mount_path = dest_mounts.get(dest_dir)
 		if not mount_path:
 			continue
-		# Remove all contents of the destination directory (but keep the directory itself).
+		# Remove all contents of the destination directory (but keep the directory
+		# itself). The three patterns are one idiom: `/*` on its own leaves dotfiles
+		# behind, and these directories are named volumes that outlive a scenario --
+		# `inject-flow-injects` is keyed on the node name, so the next scenario
+		# reusing that node name inherits whatever the last one left there. A
+		# generator whose artifact starts with a dot (`.env.backup`) therefore
+		# survived this cleanup and turned up in unrelated scenarios as an extra
+		# file in the inject directory -- a flag artifact from one challenge
+		# appearing inside another. `.[!.]*` covers dotfiles and `..?*` covers names
+		# starting with two dots, while neither can match `.` or `..` themselves.
+		# Globs that match nothing stay literal, which `rm -rf` ignores.
+		targets = f"\"{mount_path}\"/* \"{mount_path}\"/.[!.]* \"{mount_path}\"/..?*"
 		if use_wrapper_busybox:
-			cmds.append(f"{bb_path} rm -rf \"{mount_path}\"/* 2>/dev/null || {bb_fallback} rm -rf \"{mount_path}\"/*")
+			cmds.append(f"{bb_path} rm -rf {targets} 2>/dev/null || {bb_fallback} rm -rf {targets}")
 		else:
-			cmds.append(f"rm -rf \"{mount_path}\"/*")
+			cmds.append(f"rm -rf {targets}")
 
 	for rel, dest_dir in volume_inject_map.items():
 		mount_path = dest_mounts.get(dest_dir)
