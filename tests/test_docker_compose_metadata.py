@@ -2535,3 +2535,31 @@ def test_prepare_compose_can_disable_root_workdir_with_env(tmp_path, monkeypatch
     target = services.get("docker-1")
     assert isinstance(target, dict)
     assert "working_dir" not in target
+
+
+def test_image_derived_command_escapes_dollars_for_compose():
+    """An image's CMD is written for the container's shell, not for Compose.
+
+    `${VAR}` in an ENTRYPOINT/CMD is expanded at run time from the image's own
+    ENV. Copied into a compose file unescaped, Compose substitutes it first --
+    from its own environment, where the variable does not exist -- and leaves
+    an empty string. vulhub/nexus ships
+    `sh -c ${SONATYPE_DIR}/start-nexus-repository-manager.sh`; unescaped it ran
+    as `sh -c /start-nexus-repository-manager.sh`, the container exited at once
+    and docker preflight failed with "container PID remained 0".
+
+    Verified against real Docker: unescaped yields `/start.sh`, escaped yields
+    `/opt/sonatype/start.sh` inside the container.
+    """
+    from scenarioforge.builders.topology import _compose_escape_image_value as esc
+
+    assert esc("${SONATYPE_DIR}/start-nexus-repository-manager.sh") == (
+        "$${SONATYPE_DIR}/start-nexus-repository-manager.sh"
+    )
+    assert esc("$SONATYPE_DIR/start.sh") == "$$SONATYPE_DIR/start.sh"
+    # Values with no `$` must pass through byte-for-byte -- most commands are
+    # plain and must not be disturbed.
+    for plain in ("sh", "-c", "/usr/bin/java", "--flag=1", "catalina.sh run"):
+        assert esc(plain) == plain
+    # Non-string input is coerced, not crashed on.
+    assert esc(8081) == "8081"

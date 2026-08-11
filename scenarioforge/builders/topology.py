@@ -927,11 +927,11 @@ def _apply_wrapper_app_user_entrypoints(
             base_ep = cfg.get('Entrypoint') or []
             if not isinstance(base_ep, list):
                 base_ep = [str(base_ep)]
-            base_ep = [str(x) for x in base_ep]
+            base_ep = [_compose_escape_image_value(x) for x in base_ep]
             base_cmd = cfg.get('Cmd') or []
             if not isinstance(base_cmd, list):
                 base_cmd = [str(base_cmd)] if base_cmd else []
-            base_cmd = [str(x) for x in base_cmd]
+            base_cmd = [_compose_escape_image_value(x) for x in base_cmd]
             # The shim execs its arguments; with none it exits 0 and the
             # container "succeeds" while running nothing. Setting entrypoint to
             # the shim alone does exactly that whenever the image carries no
@@ -1362,6 +1362,35 @@ def _apply_manifest_platform_fallback(
         return fallback, changed
     except Exception:
         return '', []
+
+
+def _compose_escape_image_value(value: Any) -> str:
+    """Escape `$` in a value copied out of an image so Compose leaves it alone.
+
+    An image's ENTRYPOINT/CMD is written for the container's own shell, where
+    `${VAR}` is expanded at run time from the image's ENV. Copying it into a
+    compose file hands that `$` to Compose instead, which substitutes it long
+    before the container starts -- from *its* environment, where the variable
+    does not exist -- and silently leaves an empty string.
+
+    vulhub/nexus ships `sh -c ${SONATYPE_DIR}/start-nexus-repository-manager.sh`.
+    Copied through unescaped it became `sh -c /start-nexus-repository-manager.sh`,
+    the container exited immediately, its PID stayed 0, and the run failed in
+    docker preflight. Compose logged exactly what happened -- `The
+    "SONATYPE_DIR" variable is not set. Defaulting to a blank string.` -- but
+    two layers away from where it looked like the problem.
+
+    Only values taken *from an image* go through here: anything already written
+    in a compose file is authored in compose semantics, where a bare `$` is
+    meant for Compose.
+
+    The escaping itself lives in `shell_text_for_compose` so that every place
+    embedding shell text in a compose file agrees on it -- this same mistake
+    was made independently in four places before it was centralised.
+    """
+    from scenarioforge.utils.compose_shell import shell_text_for_compose
+
+    return shell_text_for_compose(value)
 
 
 def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
@@ -2241,9 +2270,23 @@ def _resolve_compose_interpolations(text: str) -> str:
 
     # Mako hazard: docker-compose uses `$${VAR}` to escape a literal `$`.
     # Mako will still parse `${VAR}` starting at the second `$` and raise NameError.
-    # Rewrite to `$VAR` (no braces) so shells inside the container can expand it.
+    # Drop the braces so Mako has no `${` to latch onto, but keep the doubled
+    # `$`: this value has two readers in sequence, and it has to survive both.
+    #
+    # Rewriting to a bare `$VAR` cleared Mako and then lost the variable to the
+    # next reader -- Compose interpolates `$VAR` exactly as it does `${VAR}`,
+    # substituting from its own environment where the name is not defined.
+    # vulhub/nexus reached the container as `sh -c /start-nexus-repository-manager.sh`
+    # and exited 127 on every restart, with Compose warning `The "SONATYPE_DIR"
+    # variable is not set. Defaulting to a blank string.`
+    #
+    # `$$VAR` is the form both readers accept: no `${` for Mako, and `$$` is
+    # Compose's own escape, so the container's shell receives `$VAR` and
+    # expands it from the image's ENV as the image author intended. Confirmed
+    # against real Docker: `$VAR` yields `/start.sh`, `$$VAR` yields
+    # `/opt/sonatype/start.sh`.
     try:
-        out = _re.sub(r'\$\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}', r'$\1', out)
+        out = _re.sub(r'\$\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}', r'$$\1', out)
     except Exception:
         pass
 

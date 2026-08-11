@@ -3,6 +3,7 @@ import copy
 import hashlib
 import logging
 import os
+from scenarioforge.utils.compose_shell import shell_text_for_compose
 import csv
 import json
 import random
@@ -2270,22 +2271,19 @@ def _repair_ingress_nginx_route_wait_for_no_network(compose_obj: dict) -> dict:
 				# wait for the same fatal crash a bit later. On exhaustion this exits
 				# with a distinct, greppable message instead of silently exec-ing
 				# into the crash anyway.
-				# `$$i` (not `$i`): this string is a docker-compose YAML value, not
-				# a shell script yet -- compose interpolates bare `$identifier` (its
-				# own env-var substitution, unrelated to the container's shell)
-				# *before* the container ever sees this string, silently replacing
-				# unset `$i` with an empty string and breaking the loop condition.
-				# `$$` is compose's own escape for a literal `$`. Confirmed by
-				# reproducing it for real: compose logged exactly `The "i" variable
-				# is not set. Defaulting to a blank string.` `$2` in the awk program
-				# and `$((i+1))` below don't need escaping -- compose only
-				# interpolates `$`/`${` followed by a letter or underscore, and
-				# neither matches that.
-				'i=0; while [ "$$i" -lt 600 ]; do '
-				'if awk \'$2 == "00000000" { f=1 } END { exit !f }\' /proc/net/route 2>/dev/null; '
-				'then exec /bin/sh entrypoint.sh k3s server; fi; '
-				'i=$((i+1)); sleep 1; done; '
-				'echo "[coretg] no default route appeared within 600s, not starting k3s" >&2; exit 1'
+				# Written as plain shell and escaped on the way out. This value is read
+				# by Mako and then by compose before the container's shell sees it, and
+				# each treats `$` as its own; shell_text_for_compose holds that rule so
+				# it is not re-derived by hand here. An unescaped `$i` was silently
+				# blanked by compose once already, which broke the loop condition and
+				# crashed the node on every start.
+				shell_text_for_compose(
+					'i=0; while [ "$i" -lt 600 ]; do '
+					'if awk \'$2 == "00000000" { f=1 } END { exit !f }\' /proc/net/route 2>/dev/null; '
+					'then exec /bin/sh entrypoint.sh k3s server; fi; '
+					'i=$((i+1)); sleep 1; done; '
+					'echo "[coretg] no default route appeared within 600s, not starting k3s" >&2; exit 1'
+				)
 			]
 			labs = svc.get('labels')
 			if not isinstance(labs, dict):
