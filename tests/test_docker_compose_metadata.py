@@ -2553,10 +2553,16 @@ def test_image_derived_command_escapes_dollars_for_compose():
     """
     from scenarioforge.builders.topology import _compose_escape_image_value as esc
 
+    # Braces are dropped as well as the `$` doubled. Both readers have to be
+    # satisfied: Mako parses any `${` and raises NameError -- including inside
+    # `$${VAR}`, since it starts at the second `$` -- while Compose needs the
+    # `$$` escape. `$$NAME` is the only form that survives both, and it reaches
+    # the container's shell as `$NAME` for the image's own ENV to expand.
     assert esc("${SONATYPE_DIR}/start-nexus-repository-manager.sh") == (
-        "$${SONATYPE_DIR}/start-nexus-repository-manager.sh"
+        "$$SONATYPE_DIR/start-nexus-repository-manager.sh"
     )
     assert esc("$SONATYPE_DIR/start.sh") == "$$SONATYPE_DIR/start.sh"
+    assert "${" not in esc("${SONATYPE_DIR}/start.sh")
     # Values with no `$` must pass through byte-for-byte -- most commands are
     # plain and must not be disturbed.
     for plain in ("sh", "-c", "/usr/bin/java", "--flag=1", "catalina.sh run"):
