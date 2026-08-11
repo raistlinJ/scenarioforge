@@ -59,10 +59,11 @@ def test_supply_when_first_is_honored_for_the_opening_step():
     assert ok, errors
 
 
-def test_supply_when_first_does_not_exempt_a_later_step():
-    # The regression: same generator, same marker, but second in the chain.
-    # Nothing before it produces SSHPrivateKey(path), so this must be rejected
-    # rather than deferred to a run-time crash.
+def test_supply_when_first_does_not_exempt_a_later_step_that_cannot_self_supply():
+    # The regression: same generator, same marker, but second in the chain and
+    # not producing the fact itself. Nothing before it produces
+    # SSHPrivateKey(path), so this must be rejected rather than deferred to a
+    # run-time crash.
     ok, errors = _validate([
         _plugin('first', [], ['File(path)']),
         _plugin('dep_ssh_key_bastion', ['SSHPrivateKey(path)'], ['Flag(flag_id)'],
@@ -70,6 +71,22 @@ def test_supply_when_first_does_not_exempt_a_later_step():
     ])
     assert not ok
     assert any('SSHPrivateKey(path)' in e for e in errors), errors
+
+
+def test_a_later_self_gating_step_keeps_the_exemption():
+    # The legitimate later-step case, and the one the marker exists for beyond
+    # position 0: a generator that mints a credential and then puts its own
+    # service behind it both requires and produces the fact, so nothing
+    # upstream has to. Observed in the catalog as
+    # `ssh_password_finance_terminal`.
+    ok, errors = _validate([
+        _plugin('opener', [], ['File(path)']),
+        _plugin('ssh_password_finance_terminal',
+                ['Credential(user, password)'],
+                ['Credential(user, password)', 'Flag(flag_id)'],
+                supply_when_first=['Credential(user, password)']),
+    ])
+    assert ok, errors
 
 
 def test_a_later_step_is_fine_when_an_earlier_step_produces_the_artifact():
@@ -81,3 +98,40 @@ def test_a_later_step_is_fine_when_an_earlier_step_produces_the_artifact():
                 supply_when_first=['SSHPrivateKey(path)']),
     ])
     assert ok, errors
+
+
+# --------------------------------------------------------------------------- #
+# Selection must ask the same question supply does
+# --------------------------------------------------------------------------- #
+
+def test_selection_rejects_a_marked_consumer_that_depends_on_the_chain():
+    """A marked input is only free where Flow will actually supply it.
+
+    Supply happens at a branch start, and a step is only a branch start when
+    none of its other requirements came from an earlier step. Selection used to
+    waive marked inputs everywhere, so it placed `dep_ssh_key_bastion` -- which
+    needs a marked `SSHPrivateKey(path)` *and* a `Pivot(...)` an earlier step
+    produces -- at a position where supply was then skipped. Nothing else
+    produces the key, and the generator refused its own config at run time.
+    """
+    from webapp import app_backend as ab
+
+    # Mirrors the real shape: the marked fact is not self-produced, and another
+    # requirement is satisfied only by an earlier step's output.
+    gen = {
+        'id': 'dep_ssh_key_bastion',
+        'requires': ['Pivot(docker-15)', 'SSHPrivateKey(path)'],
+        'produces': [{'artifact': 'Flag(flag_id)'}],
+        'input_defs': [
+            {'name': 'SSHPrivateKey(path)', 'required': True,
+             'flow_supply_when_first': True},
+        ],
+    }
+    names = ab._flow_first_step_chain_supplied_input_names(gen)
+    assert names == ['SSHPrivateKey(path)'], names
+
+    # A step whose only unmet requirement is the marked one *is* a branch start
+    # and stays selectable; the guard is specifically about depending on the
+    # chain so far. Both shapes are exercised end-to-end through the solver in
+    # tests/test_flow_staged_topology_expansion.py, which covers the parallel
+    # branch case this must not regress.

@@ -20982,12 +20982,41 @@ def _flow_compute_flag_assignments(
         a parallel branch, so it must not force the solver to reuse a node or
         generator merely because an earlier sequence did not produce it.
         Unmarked requirements remain strict: Flow never invents those values.
+
+        The marker is only worth anything where Flow will really supply it, and
+        it does that only at a branch start --
+        _flow_parallel_start_assignment_indexes calls a step a start only when
+        none of its other requirements came from an earlier step. Selection has
+        to ask the same question, or it places a consumer that supply then
+        skips: `dep_ssh_key_bastion` needs a marked `SSHPrivateKey(path)` plus a
+        `Pivot(...)` an earlier step produces, so it is not a branch start, gets
+        no supply, and nothing else produces the key -- it was selected anyway
+        and died at run time with "[validation error] SSHPrivateKey(path) is
+        required". A step that produces the marked fact itself keeps the
+        exemption anywhere, since it is its own supplier.
         """
         try:
-            branch_start_inputs = set(_flow_first_step_chain_supplied_input_names(gen))
+            marked = set(_flow_first_step_chain_supplied_input_names(gen))
         except Exception:
-            branch_start_inputs = set()
-        return (_requires_cached(gen) - branch_start_inputs).issubset(state)
+            marked = set()
+        reqs = _requires_cached(gen)
+        if not marked:
+            return reqs.issubset(state)
+        # Facts already produced by earlier chain steps, as opposed to the
+        # synthesized/initial context every step starts with.
+        try:
+            chain_produced = set(state) - set(initial_facts)
+        except Exception:
+            chain_produced = set()
+        if (reqs - marked) & chain_produced:
+            # Not a branch start here, so the marked inputs will not be
+            # supplied. Only ones it produces itself remain free.
+            try:
+                self_supplied = marked & _provides_cached(gen)
+            except Exception:
+                self_supplied = set()
+            return (reqs - self_supplied).issubset(state)
+        return (reqs - marked).issubset(state)
 
     pool_by_pos: list[list[dict[str, Any]]] = []
     for cid in chain_ids:
@@ -26021,32 +26050,6 @@ def _flow_validate_chain_order_by_requires_produces(
         # The same helper is used deliberately: two readings of one marker is
         # how the two disagreed in the first place.
         #
-        # Only at position 0. The marker is `flow_supply_when_first`, and Flow
-        # supplies the value only to the opening step -- every other reader of
-        # this helper asks it about a chain *start*. Applying the exemption at
-        # every position waved through chains whose later steps depended on an
-        # artifact nothing produced: `dep_ssh_key_bastion` sitting second with
-        # `SSHPrivateKey(path)` required and no earlier step emitting one
-        # validated clean, then the generator itself refused the config at run
-        # time with "[validation error] SSHPrivateKey(path) is required",
-        # wrote no outputs.json, and execute failed much later and much less
-        # helpfully with "Challenges and Flow Data not found on CORE VM".
-        supplied_by_flow = {
-            str(name).strip()
-            for name in _flow_first_step_chain_supplied_input_names(a)
-            if str(name or '').strip()
-        } if step_index == 0 else set()
-        if supplied_by_flow:
-            base_requires -= supplied_by_flow
-            inferred_requires = {r for r in inferred_requires if r not in supplied_by_flow}
-
-        requires = set(_flow_prune_unavailable_or_self_pivot_facts(
-            sorted(base_requires | inferred_requires),
-            chain_nodes,
-            current_node=node_by_id.get(cid),
-            current_assignment=a,
-        ))
-
         base_prod: set[str] = set()
         try:
             for p in (plugin.get('produces') or []):
@@ -26058,6 +26061,39 @@ def _flow_validate_chain_order_by_requires_produces(
         except Exception:
             base_prod = set()
         produces = base_prod | inferred_produces
+
+        # The marker is honored at the opening step, where Flow really does hand
+        # the value in, and after it only for a fact the step produces itself.
+        #
+        # That second case is the self-gating generator: it mints a credential
+        # and then puts its own service behind it, so it both requires and
+        # produces the fact and nothing upstream needs to. Waiving the marker
+        # for *any* later step went further than that and let a step vouch for a
+        # dependency it could not satisfy -- `dep_ssh_key_bastion` sitting
+        # second, requiring an `SSHPrivateKey(path)` it does not produce and no
+        # earlier step emitted, validated clean here, then refused its own
+        # config at run time with "[validation error] SSHPrivateKey(path) is
+        # required", wrote no outputs.json, and failed the run two layers later
+        # as "Challenges and Flow Data not found on CORE VM".
+        marked_supply = {
+            str(name).strip()
+            for name in _flow_first_step_chain_supplied_input_names(a)
+            if str(name or '').strip()
+        }
+        if step_index == 0:
+            supplied_by_flow = marked_supply
+        else:
+            supplied_by_flow = {name for name in marked_supply if name in produces}
+        if supplied_by_flow:
+            base_requires -= supplied_by_flow
+            inferred_requires = {r for r in inferred_requires if r not in supplied_by_flow}
+
+        requires = set(_flow_prune_unavailable_or_self_pivot_facts(
+            sorted(base_requires | inferred_requires),
+            chain_nodes,
+            current_node=node_by_id.get(cid),
+            current_assignment=a,
+        ))
 
         missing = sorted(list({r for r in requires if r not in available}))
         if missing:
