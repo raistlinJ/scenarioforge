@@ -21000,7 +21000,22 @@ def _flow_compute_flag_assignments(
         no supply, and nothing else produces the key -- it was selected anyway
         and died at run time with "[validation error] SSHPrivateKey(path) is
         required". A step that produces the marked fact itself keeps the
-        exemption anywhere, since it is its own supplier.
+        exemption anywhere.
+
+        That last exemption is *not* the one the chain validator grants for a
+        self-produced fact, even though it reads the same. It is safe here for
+        a mechanical reason: whenever this check passes, every requirement
+        outside `marked` is already in `state`, so `required_for_start` below
+        is empty and the supply step always fabricates a value. Selection
+        cannot place a step that supply then skips.
+
+        What supply cannot see is a requirement added *after* selection. Pivot
+        context does exactly that, and the later position refresh then revokes
+        the supply for a step that is no longer a branch start -- which is how
+        `ssh_password_finance_terminal` reached its generator with no
+        credential. Tightening this check does not catch that case (the pivot
+        fact does not exist yet) and costs generator diversity when it fires,
+        so the guard against it lives in the chain validator instead.
         """
         try:
             marked = set(_flow_first_step_chain_supplied_input_names(gen))

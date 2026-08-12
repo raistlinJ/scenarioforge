@@ -15,15 +15,17 @@ found on CORE VM".
 from webapp import app_backend
 
 
-def _plugin(pid, requires, produces, supply_when_first=()):
+def _plugin(pid, requires, produces, supply_when_first=(), optional_supply_when_first=()):
     return {
         'id': pid,
         'requires': list(requires),
         'produces': [{'artifact': p} for p in produces],
-        'input_defs': [
-            {'name': n, 'required': True, 'flow_supply_when_first': True}
-            for n in supply_when_first
-        ],
+        'input_defs': (
+            [{'name': n, 'required': True, 'flow_supply_when_first': True}
+             for n in supply_when_first]
+            + [{'name': n, 'required': False, 'flow_supply_when_first': True}
+               for n in optional_supply_when_first]
+        ),
     }
 
 
@@ -41,6 +43,10 @@ def _chain(plugins):
             # step looked like a branch start.
             'requires': list(p['requires']),
             'outputs': [entry['artifact'] for entry in p['produces']],
+            'input_fields_optional': [
+                str(d['name']) for d in (p.get('input_defs') or [])
+                if d.get('required') is False
+            ],
         })
     return nodes, assignments
 
@@ -105,6 +111,37 @@ def test_producing_the_fact_does_not_exempt_a_step_wired_into_the_chain():
     ])
     assert not ok
     assert any('Credential(user, password)' in e for e in errors), errors
+
+
+def test_an_optional_marked_input_is_free_anywhere_in_the_chain():
+    """How a generator that really can mint its own value says so.
+
+    Eleven catalog manifests -- the SMB, mail, database and cache variants
+    whose generator does `if parsed_credential: ... elif needs_credential:
+    <mint>` -- used to declare `Credential(user, password)` as
+    `required: true`. That is what the stricter check above now rejects
+    mid-chain, and for those generators it would be rejecting a chain that
+    works. `required: false` is the accurate declaration: the input drops out
+    of the dependency question entirely, at any position, while
+    `flow_supply_when_first` still hands the step a value (and hints it) where
+    it does open a branch.
+    """
+    ok, errors = _validate([
+        _plugin('git_http_bare_repo', [], ['Pivot(docker-1)', 'File(path)']),
+        _plugin('database_oracle_wallet_note',
+                ['Credential(user, password)', 'Pivot(docker-1)'],
+                ['Credential(user, password)', 'Flag(flag_id)'],
+                optional_supply_when_first=['Credential(user, password)']),
+    ])
+    assert ok, errors
+
+    # The marker is read off `flow_supply_when_first` alone, so making the
+    # input optional must not quietly switch supply off.
+    from webapp import app_backend as ab
+    assert ab._flow_first_step_chain_supplied_input_names({
+        'inputs': [{'name': 'Credential(user, password)', 'required': False,
+                    'flow_supply_when_first': True}],
+    }) == ['Credential(user, password)']
 
 
 def test_a_self_producing_branch_head_keeps_the_exemption():
@@ -216,3 +253,82 @@ def test_selection_rejects_a_marked_consumer_that_depends_on_the_chain():
     # chain so far. Both shapes are exercised end-to-end through the solver in
     # tests/test_flow_staged_topology_expansion.py, which covers the parallel
     # branch case this must not regress.
+
+
+def test_selection_and_validation_agree_about_a_self_producing_consumer(monkeypatch):
+    """Whatever selection picks, the chain it hands back has to validate.
+
+    Selection and the chain validator both decide when a marked input counts
+    as satisfied, and the two drifting apart is what let a starved
+    `ssh_password_finance_terminal` through. They read the marker differently
+    on purpose -- selection may keep the exemption for a self-produced fact
+    because its own supply step then always fabricates a value, which the
+    validator has no way to assume -- so the invariant worth pinning is the
+    agreement itself, not either rule.
+
+    Asserting a specific pick would just record today's shuffle; asserting
+    agreement fails whenever a change to either side reintroduces the split.
+    """
+    from webapp import app_backend as ab
+
+    credential = 'Credential(user, password)'
+    node_gens = [
+        {
+            'id': 'pivot_source', 'name': 'PivotSource', 'language': 'python',
+            '_source_name': 'test',
+            'inputs': [], 'outputs': [{'name': 'Shell(host)'}],
+            'hint_levels': {'low': ['Next: {{NEXT_NODE_ID}}']},
+        },
+        {
+            # Requires the credential *and* a fact only step 1 produces, so it
+            # can never be a branch start at position 2.
+            'id': 'ssh_password_finance_terminal', 'name': 'SelfProducer',
+            'language': 'python', '_source_name': 'test',
+            'inputs': [
+                {'name': credential, 'required': True, 'flow_supply_when_first': True},
+                {'name': 'Shell(host)', 'required': True},
+            ],
+            'outputs': [{'name': credential}, {'name': 'Flag(flag_id)'}],
+            'hint_levels': {'low': ['Next: {{NEXT_NODE_ID}}']},
+        },
+        {
+            'id': 'plain_follower', 'name': 'PlainFollower', 'language': 'python',
+            '_source_name': 'test',
+            'inputs': [{'name': 'Shell(host)', 'required': True}],
+            'outputs': [{'name': 'Flag(flag_id)'}],
+            'hint_levels': {'low': ['Next: {{NEXT_NODE_ID}}']},
+        },
+    ]
+    contracts = {
+        'pivot_source': {'requires': [], 'produces': [{'artifact': 'Shell(host)'}]},
+        'ssh_password_finance_terminal': {
+            'requires': [credential, 'Shell(host)'],
+            'produces': [{'artifact': credential}, {'artifact': 'Flag(flag_id)'}],
+        },
+        'plain_follower': {
+            'requires': ['Shell(host)'], 'produces': [{'artifact': 'Flag(flag_id)'}],
+        },
+    }
+    monkeypatch.setattr(ab, '_flag_generators_from_enabled_sources', lambda: ([], []))
+    monkeypatch.setattr(ab, '_flag_node_generators_from_enabled_sources', lambda: (node_gens, []))
+    monkeypatch.setattr(ab, '_flow_enabled_plugin_contracts_by_id', lambda: contracts)
+    monkeypatch.setattr(ab, '_flow_enabled_generator_defs_by_id',
+                        lambda: {g['id']: g for g in node_gens})
+
+    preview = {'seed': 0, 'hosts': [
+        {'node_id': 'h1', 'name': 'docker-1', 'role': 'Docker', 'vulnerabilities': []},
+        {'node_id': 'h2', 'name': 'docker-2', 'role': 'Docker', 'vulnerabilities': []},
+    ]}
+    chain_nodes = [
+        {'id': 'h1', 'name': 'docker-1', 'type': 'docker', 'is_vuln': False},
+        {'id': 'h2', 'name': 'docker-2', 'type': 'docker', 'is_vuln': False},
+    ]
+
+    assignments = ab._flow_compute_flag_assignments(preview, chain_nodes, 'TestScenario')
+    assert len(assignments) == 2, assignments
+
+    ok, errors = ab._flow_validate_chain_order_by_requires_produces(
+        chain_nodes, assignments, scenario_label='TestScenario',
+        plugins_by_id_override=contracts,
+    )
+    assert ok, ([a.get('id') for a in assignments], errors)
