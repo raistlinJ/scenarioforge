@@ -76,6 +76,7 @@ from ..utils.services import (
     ROUTING_STACK_SERVICES,
 )
 from ..utils.allocation import compute_counts_by_factor
+from ..utils.compose_shell import dump_compose_yaml
 
 logger = logging.getLogger(__name__)
 import os
@@ -791,7 +792,7 @@ def _sanitize_compose_incompatible_workdirs(compose_path: str) -> bool:
 
     try:
         with open(compose_path, 'w', encoding='utf-8') as fh:
-            yaml.safe_dump(compose_obj, fh, sort_keys=False)  # type: ignore
+            fh.write(dump_compose_yaml(compose_obj))
         logger.info('[docker-node] sanitized incompatible working_dir overrides for compose=%s', compose_path)
     except Exception:
         return False
@@ -805,6 +806,115 @@ _CORETG_APP_USER_SHIM = '/usr/local/coretg/bin/coretg-app-user-exec'
 # Config.User values that already run the app as root; anything else means the
 # base image expects a non-root app user.
 _ROOTLIKE_IMAGE_USERS = {'', '0', 'root', '0:0', 'root:root', '0:root', 'root:0'}
+
+# Shells that read from stdin when handed no script. With no TTY attached they
+# reach EOF at once and exit 0, so a container whose whole startup is one of
+# these is gone before CORE can read its pid.
+_BARE_SHELL_COMMANDS = {'sh', 'bash', 'ash', 'dash', 'zsh', 'ksh'}
+
+_KEEPALIVE_COMMAND = ['sh', '-lc', 'sleep infinity']
+
+
+_NAMESPACE_JOIN_REFUSED = 'cannot join network namespace'
+
+# Enough attempts to outlast a database's first-boot schema import, which is
+# what the node is usually waiting on, without letting a permanently broken app
+# hold the container open forever: it still ends as "PID remained 0", just after
+# its sidecars had a fair chance.
+_NODE_APP_RETRY_ATTEMPTS = 30
+_NODE_APP_RETRY_SLEEP_S = 5
+
+
+def _compose_namespace_join_refused(output: object) -> bool:
+    """Whether Docker refused a sidecar because the node is not running."""
+    return _NAMESPACE_JOIN_REFUSED in str(output or '')
+
+
+def _wrap_node_command_with_retry(compose_path: str, service_name: str) -> bool:
+    """Make the node's PID 1 outlive its app, so sidecars can attach.
+
+    The app keeps its own argv; it is just re-executed on failure instead of
+    taking the container down with it. Returns False when there is nothing to
+    wrap or the wrap is already in place.
+    """
+    try:
+        import shlex  # type: ignore
+        import yaml  # type: ignore
+
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            obj = yaml.safe_load(fh) or {}
+        svc = ((obj.get('services') or {}) if isinstance(obj, dict) else {}).get(service_name)
+        if not isinstance(svc, dict):
+            return False
+
+        def _argv(value: object) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, list):
+                return [str(part) for part in value]
+            return shlex.split(str(value))
+
+        argv = _argv(svc.get('entrypoint')) + _argv(svc.get('command'))
+        if not argv:
+            # Without the image's own startup recorded here there is nothing to
+            # re-execute; the app-user shim leaves such services alone too.
+            return False
+        if argv[0] in ('sh', '/bin/sh') and any('coretg-app-retry' in part for part in argv):
+            return False
+
+        app = ' '.join(shlex.quote(part) for part in argv)
+        script = (
+            f"# coretg-app-retry\n"
+            f"attempt=0\n"
+            f"while :; do\n"
+            f"  {app} && exit 0\n"
+            f"  attempt=$((attempt+1))\n"
+            f"  [ \"$attempt\" -ge {_NODE_APP_RETRY_ATTEMPTS} ] && exit 1\n"
+            f"  sleep {_NODE_APP_RETRY_SLEEP_S}\n"
+            f"done\n"
+        )
+        svc['entrypoint'] = ['sh', '-c', script]
+        svc.pop('command', None)
+        with open(compose_path, 'w', encoding='utf-8') as fh:
+            fh.write(dump_compose_yaml(obj))
+        return True
+    except Exception as exc:
+        try:
+            logger.warning(
+                '[docker-node] could not wrap node app for retry compose=%s service=%s err=%s',
+                compose_path, service_name, exc,
+            )
+        except Exception:
+            pass
+        return False
+
+
+def _image_startup_is_bare_shell(image_config: dict) -> bool:
+    """Whether an image's own startup is an interactive shell and nothing else.
+
+    `_ensure_keepalive_for_base_os_images` answers the same question at compose
+    generation time, but all it has is the image *reference*, so it matches on
+    names like `ubuntu`/`alpine`. That misses any vuln image built on one:
+    `vulhub/imagemagick:7.0.10-36` declares `Cmd: ["bash"]` with no entrypoint,
+    exited immediately, and preflight failed the node with "container PID
+    remained 0" (dataset-catalog-coverage-030).
+
+    By preflight the image config is already in hand, which answers it directly
+    rather than by naming convention.
+    """
+    if not isinstance(image_config, dict):
+        return False
+    entrypoint = image_config.get('Entrypoint') or []
+    if not isinstance(entrypoint, list):
+        entrypoint = [entrypoint]
+    command = image_config.get('Cmd') or []
+    if not isinstance(command, list):
+        command = [command]
+    argv = [str(part) for part in (list(entrypoint) + list(command)) if str(part).strip()]
+    if len(argv) != 1:
+        # Anything with arguments (`sh -c ...`, a real binary) is not a bare shell.
+        return False
+    return os.path.basename(argv[0]) in _BARE_SHELL_COMMANDS
 
 
 _JVM_HEAP_CAP_DEFAULT_MB = 512
@@ -1007,7 +1117,7 @@ def _apply_jvm_heap_cap(
             )
         if changed:
             with open(compose_path, 'w', encoding='utf-8') as handle:
-                yaml.safe_dump(obj, handle, sort_keys=False, allow_unicode=True)
+                handle.write(dump_compose_yaml(obj))
     except Exception as exc:
         logger.debug('jvm heap cap skipped node=%s: %s', node_name, exc)
 
@@ -1113,6 +1223,26 @@ def _apply_wrapper_app_user_entrypoints(
                 pass
             continue
 
+        # A service declaring no command inherits the image's, so an image whose
+        # startup is a bare shell leaves CORE a pid of 0. Done before the
+        # root-user check below on purpose: that check skips the shim entirely
+        # for a root image, and the container still has to stay up.
+        if (
+            svc.get('command') is None
+            and svc.get('entrypoint') is None
+            and _image_startup_is_bare_shell(cfg)
+        ):
+            svc['command'] = list(_KEEPALIVE_COMMAND)
+            changed = True
+            try:
+                logger.info(
+                    '[docker-node] keepalive command injected node=%s service=%s base=%s '
+                    '(image startup is a bare shell and would exit at once)',
+                    node_name, svc_name, base_image,
+                )
+            except Exception:
+                pass
+
         user = str(cfg.get('User') or '').strip()
         if not force_shim and user.lower() in _ROOTLIKE_IMAGE_USERS:
             continue
@@ -1158,7 +1288,7 @@ def _apply_wrapper_app_user_entrypoints(
 
     if changed:
         with open(compose_path, 'w', encoding='utf-8') as fh:
-            yaml.safe_dump(obj, fh, sort_keys=False)
+            fh.write(dump_compose_yaml(obj))
 
 
 _BUSYBOX_REPAIR_IMAGE = 'busybox:1.36.1-musl'
@@ -1563,7 +1693,7 @@ def _apply_manifest_platform_fallback(
             return '', []
 
         with open(compose_path, 'w', encoding='utf-8') as fh:
-            yaml.safe_dump(compose_obj, fh, sort_keys=False)
+            fh.write(dump_compose_yaml(compose_obj))
         return fallback, changed
     except Exception:
         return '', []
@@ -2204,6 +2334,33 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                             f"helper={helper_service} rc={helper_rc})\n{detail}"
                         )
 
+            # A node with namespace-sharing sidecars starts before they can:
+            # they carry `network_mode: service:<node>`, so nothing can attach
+            # until the node is running. Its app therefore always races a
+            # dependency that cannot yet exist, and the recipes that survive
+            # that are the ones retrying by hand -- rocketchat loops `node
+            # main.js` thirty times for exactly this reason.
+            #
+            # Measured both ways it can fail. zabbix exits instantly and flaps,
+            # so Docker refuses the sidecars outright ("cannot join network
+            # namespace ... is restarting") and nothing ever starts. apisix
+            # retries `http://etcd:2379` twice, gets connection refused, and
+            # exits before etcd is up -- no Docker error at all, just a node
+            # that is gone. One condition covers both: the node holds a
+            # namespace others need, so its PID 1 has to outlive its app.
+            #
+            # Bounded, so a genuinely broken app still ends as "PID remained 0"
+            # rather than being held open forever.
+            try:
+                sidecars_for_wrap = _compose_shared_namespace_services(compose_path, str(target_service))
+            except Exception:
+                sidecars_for_wrap = []
+            if sidecars_for_wrap and _wrap_node_command_with_retry(compose_path, str(target_service)):
+                logger.info(
+                    '[docker-node] node app wrapped to hold the namespace node=%s sidecars=%s',
+                    node_name, ', '.join(sidecars_for_wrap),
+                )
+
             up_services = [str(target_service)]
             # Never build here; wrapper images should already be built above.
             rc, tail = _run(compose_base + ['up', '-d', '--no-build'] + up_services, timeout=900)
@@ -2227,6 +2384,41 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                 rc_side, tail_side = _run(
                     compose_base + ['up', '-d', '--no-build'] + shared_ns_services, timeout=900
                 )
+                if rc_side != 0 and _compose_namespace_join_refused(tail_side):
+                    # The node's app needs a sidecar that cannot start until the
+                    # node is running, and the node exits because that sidecar is
+                    # not up: a closed loop neither side can break. Docker names
+                    # it exactly -- "cannot join network namespace of container:
+                    # ... is restarting".
+                    #
+                    # Recreating the node once the sidecars are attached is not an
+                    # option (that strands them), so the node's PID 1 has to
+                    # outlive the app's failures instead. Retrying the app inside
+                    # the container is what vulhub does by hand for the recipes
+                    # that work -- rocketchat wraps `node main.js` in a 30-attempt
+                    # loop for the same reason.
+                    #
+                    # Reactive on purpose: 73 of 218 recorded runs reach the
+                    # namespace repair and 72 pass, so the startup they already
+                    # have must not change. Only a stack that has demonstrably
+                    # deadlocked gets rewritten.
+                    logger.warning(
+                        '[docker-node] namespace-join deadlock node=%s services=%s; '
+                        'retrying with the node app wrapped so it holds the namespace',
+                        node_name, ', '.join(shared_ns_services),
+                    )
+                    if _wrap_node_command_with_retry(compose_path, str(target_service)):
+                        _run(compose_base + ['up', '-d', '--no-build', '--force-recreate',
+                                             str(target_service)], timeout=900)
+                        rc_side, tail_side = _run(
+                            compose_base + ['up', '-d', '--no-build'] + shared_ns_services,
+                            timeout=900,
+                        )
+                        if rc_side == 0:
+                            logger.info(
+                                '[docker-node] namespace-join deadlock cleared node=%s: %s',
+                                node_name, ', '.join(shared_ns_services),
+                            )
                 if rc_side != 0:
                     logger.warning(
                         '[docker-node] sidecar start failed node=%s services=%s rc=%s tail=%s',
@@ -4058,9 +4250,20 @@ def _apply_docker_compose_meta(node, rec, session=None):
                     _txt = fh.read()
                 import re as _re
                 _fixed = _resolve_compose_interpolations(_txt)
-                # CORE writes rendered compose via a shell `printf` format string, so escape
-                # backslashes and single percent signs only after docker preflight is done.
-                _fixed = _fixed.replace('\\', '\\\\\\\\')
+                # Percent signs are doubled because CORE was observed to write a
+                # rendered compose through a shell `printf` format string, where a
+                # bare `%` becomes a directive (`%Y` in `date +"%Y-%m-%d"`).
+                #
+                # Backslashes are deliberately NOT doubled here. Measured on this
+                # CORE build: it parses the compose and re-dumps it into
+                # /tmp/pycore.N/<node>.conf/docker-compose.yml rather than
+                # printf-rendering the content, so nothing ever halves them again.
+                # `rocketchat/CVE-2021-22911` embeds `--eval \"...\"`; doubling
+                # turned that into `\\\\"` all the way through to the runtime file
+                # and compose rejected the service with "invalid command line
+                # string", so docker-6 never started. Only composes containing a
+                # backslash were affected, which is why one vuln in the catalog
+                # failed and the rest did not.
                 _fixed = _re.sub(r'(?<!%)%(?!%)', '%%', _fixed)
                 if _fixed != _txt:
                     with open(compose_path, 'w', encoding='utf-8') as fh:
@@ -4472,8 +4675,7 @@ def _write_pivot_access_compose(node_name: str, image: str, port: int, out_base:
     compose = {'services': {service: body}}
 
     try:
-        import yaml as _yaml
-        text = _yaml.safe_dump(compose, sort_keys=False)
+        text = dump_compose_yaml(compose)
     except Exception:
         env = body.get('environment') or []
         lines = ['services:', f'  {service}:', f'    image: {image}']

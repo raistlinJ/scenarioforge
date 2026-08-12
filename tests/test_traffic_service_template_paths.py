@@ -19,7 +19,7 @@ def test_traffic_service_uses_absolute_paths_and_runtime_dir():
     # Traffic runs the static Go agent against the node's config. The old
     # per-flow python3 scripts could not run in images without an interpreter,
     # which silently produced no traffic on Docker nodes.
-    assert 'config=/tmp/traffic/traffic_"$NODE_ID".json' in txt
+    assert 'config="$traffic_dir"/traffic_"$NODE_ID".json' in txt
     assert '-config "$config"' in txt
     # No interpreter is invoked any more (the word may still appear in comments
     # explaining why), and the old per-flow script glob is gone.
@@ -56,7 +56,10 @@ def test_traffic_service_waits_for_a_config_that_has_not_landed_yet():
     # staged into the shared /tmp/traffic at about the same moment. Checking
     # once and exiting left the node silent for the whole run.
     assert 'for _tick in 1 2 3' in txt
-    assert '[ -f "$config" ] && break' in txt
+    # The wait now settles which of the two bind points holds this node's
+    # config, so the loop breaks on having chosen one rather than on a
+    # pre-computed path.
+    assert '[ -n "$traffic_dir" ] && break' in txt
     assert 'after ~60s' in txt
 
 
@@ -71,3 +74,36 @@ def test_traffic_service_restarts_an_agent_that_dies_but_not_one_that_was_signal
     # cleanup and leaves orphans behind.
     assert '[ "$rc" -ge 128 ]' in txt
     assert 'not restarting' in txt
+
+
+def test_traffic_service_reads_a_path_a_dind_tmpfs_cannot_hide():
+    """/tmp is not always ours.
+
+    A Docker-in-Docker image runs Docker's `dind` wrapper, which does
+    `mountpoint -q /tmp || mount -t tmpfs none /tmp`. /tmp itself is not a
+    mountpoint -- only /tmp/traffic is -- so the tmpfs goes on top and hides the
+    bind. `docker/unauthorized-rce` is the only such image in the catalog, and
+    its agent logged "no traffic config" for an entire run while every other
+    node on the same scenario ran its flows (dataset-catalog-coverage-013).
+
+    The artifacts are bound at /coretg/traffic as well, and the service takes
+    whichever actually holds this node's config, so a plain CORE vnode that only
+    has /tmp/traffic keeps working.
+    """
+    p = Path("on_core_machine/custom_services/TrafficService.py")
+    txt = p.read_text("utf-8", errors="ignore")
+
+    assert '/coretg/traffic/traffic_"$NODE_ID".json' in txt
+    assert '/tmp/traffic/traffic_"$NODE_ID".json' in txt
+    # Whichever won is what the agent binary is looked up in first, since the
+    # binary is staged beside the config and a tmpfs hides both alike.
+    assert '"$traffic_dir/traffic-agent-linux-$arch"' in txt
+    # The fallback list keeps its original entries.
+    assert '"/tmp/traffic/traffic-agent-linux-$arch"' in txt
+    assert '"/usr/local/coretg/bin/traffic-agent"' in txt
+
+
+def test_traffic_service_reports_both_locations_when_it_finds_nothing():
+    p = Path("on_core_machine/custom_services/TrafficService.py")
+    txt = p.read_text("utf-8", errors="ignore")
+    assert 'no traffic config at /coretg/traffic or /tmp/traffic' in txt

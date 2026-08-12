@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,25 @@ UNKNOWN = "unknown"
 # the install.
 _LOCAL_TIMEOUT_S = 10.0
 _REGISTRY_TIMEOUT_S = 15.0
+
+# Importing a generator repository scans one compose file per generator, and
+# generators overwhelmingly share a handful of base images. Without this, an
+# 80-generator repo ran `docker manifest inspect` 80+ times for the same few
+# refs -- about 2.2s each, so the install took minutes and looked hung. Results
+# are memoized per image ref so each distinct image is resolved once.
+#
+# Unresolved answers expire quickly: an image that could not be reached because
+# the registry was briefly unavailable, or that has since been pulled locally,
+# must not stay "unknown" for the life of a long-running webapp process.
+_CACHE_TTL_RESOLVED_S = 900.0
+_CACHE_TTL_UNRESOLVED_S = 60.0
+
+_arch_cache: dict[tuple[str, bool], tuple[float, list[str], str]] = {}
+
+
+def clear_image_architecture_cache() -> None:
+    """Drop memoized architecture lookups (tests, and after pulling images)."""
+    _arch_cache.clear()
 
 
 def _docker_available() -> bool:
@@ -199,14 +219,28 @@ def image_architectures(image: str, *, allow_registry: bool = True) -> tuple[lis
     ref = str(image or "").strip()
     if not ref or not _docker_available():
         return [], UNKNOWN
+
+    key = (ref, bool(allow_registry))
+    now = time.monotonic()
+    cached = _arch_cache.get(key)
+    if cached is not None:
+        cached_at, cached_archs, cached_source = cached
+        ttl = _CACHE_TTL_RESOLVED_S if cached_archs else _CACHE_TTL_UNRESOLVED_S
+        if (now - cached_at) < ttl:
+            return list(cached_archs), cached_source
+
+    archs: list[str] = []
+    source = UNKNOWN
     local = _architectures_from_local(ref)
     if local:
-        return local, "local"
-    if allow_registry:
+        archs, source = local, "local"
+    elif allow_registry:
         registry = _architectures_from_registry(ref)
         if registry:
-            return registry, "registry"
-    return [], UNKNOWN
+            archs, source = registry, "registry"
+
+    _arch_cache[key] = (now, list(archs), source)
+    return list(archs), source
 
 
 def compose_architectures(compose_obj: Any, *, allow_registry: bool = True) -> dict[str, Any]:

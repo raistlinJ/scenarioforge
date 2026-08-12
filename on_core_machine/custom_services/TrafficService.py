@@ -81,7 +81,15 @@ class TrafficService(CoreService):
         # Docker nodes have their own /tmp and are unaffected either way.
         log="$runtime_dir/output_$NODE_ID.txt"
         stats="$runtime_dir/stats_$NODE_ID.json"
-        config=/tmp/traffic/traffic_"$NODE_ID".json
+        # The artifacts are bind-mounted at both paths. /tmp is not always
+        # ours: a Docker-in-Docker image runs Docker's `dind` wrapper, which
+        # does `mountpoint -q /tmp || mount -t tmpfs none /tmp` and so hides
+        # every bind underneath it. Binding the same directory outside /tmp as
+        # well gives those nodes a view the tmpfs cannot cover.
+        # Measured on `docker/unauthorized-rce`, the only such image in the
+        # catalog: its agent reported "no traffic config" for the whole run
+        # while every other node on the same scenario had its traffic.
+        traffic_dir=""
 
         # Wait for the config rather than checking once. Services start as the
         # session comes up, and the traffic artifacts are staged into the shared
@@ -93,14 +101,20 @@ class TrafficService(CoreService):
         # this runs in whatever image the scenario author chose, and neither
         # `seq` nor `expr` is guaranteed to be in it.
         for _tick in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
-            [ -f "$config" ] && break
+            if [ -f /coretg/traffic/traffic_"$NODE_ID".json ]; then
+                traffic_dir=/coretg/traffic
+            elif [ -f /tmp/traffic/traffic_"$NODE_ID".json ]; then
+                traffic_dir=/tmp/traffic
+            fi
+            [ -n "$traffic_dir" ] && break
             sleep 2
         done
 
-        if [ ! -f "$config" ]; then
-            echo "no traffic config at $config after ~60s; nothing to run" >> "$log"
+        if [ -z "$traffic_dir" ]; then
+            echo "no traffic config at /coretg/traffic or /tmp/traffic for node $NODE_ID after ~60s; nothing to run" >> "$log"
             exit 0
         fi
+        config="$traffic_dir"/traffic_"$NODE_ID".json
 
         # The node decides its own architecture: a Docker node may be an
         # emulated amd64 image on an arm64 host, so the host's arch is not
@@ -113,6 +127,7 @@ class TrafficService(CoreService):
 
         agent=""
         for candidate in \\
+            "$traffic_dir/traffic-agent-linux-$arch" \\
             "/tmp/traffic/traffic-agent-linux-$arch" \\
             "/usr/local/coretg/bin/traffic-agent" \\
             "$(command -v traffic-agent 2>/dev/null)"; do
@@ -123,7 +138,7 @@ class TrafficService(CoreService):
         done
 
         if [ -z "$agent" ]; then
-            echo "no traffic-agent binary for arch $arch (looked in /tmp/traffic and /usr/local/coretg/bin)" >> "$log"
+            echo "no traffic-agent binary for arch $arch (looked in $traffic_dir, /tmp/traffic and /usr/local/coretg/bin)" >> "$log"
             exit 0
         fi
 

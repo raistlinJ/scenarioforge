@@ -71,3 +71,46 @@ def shell_text_for_compose(text: Any) -> str:
     # Every literal `$` the shell should see has to reach Compose doubled.
     value = value.replace("$", "$$")
     return value.replace(_SENTINEL, "$$")
+
+
+def dump_compose_yaml(compose_obj: Any) -> str:
+    """Serialize a compose document, forcing literal block style for multiline strings.
+
+    Every compose file this project writes has to survive one more reader after
+    YAML: the host-side ``printf`` that CORE renders it through, which escapes
+    each backslash. PyYAML's default emitter writes a multiline string as a
+    *double-quoted* scalar, spelling newlines ``\\n`` and inner quotes ``\\"``.
+    Backslash-doubling that text turns ``\\"`` into ``\\\\\\\\"``, and inside a
+    double-quoted scalar those two escaped backslashes leave the ``"`` free to
+    close the string early -- so the remainder of the command is reparsed as
+    YAML.
+
+    Observed on ``rocketchat/CVE-2021-22911``, whose ``mongo-init-replica``
+    command embeds ``--eval \\"...\\"``. One pass re-dumped the file with a
+    plain ``yaml.safe_dump``, the printf escaping ran over the result, and the
+    inner ``_id: 'rs0'`` became a stray mapping key. ``docker compose`` refused
+    the file with "mapping values are not allowed in this context", the node
+    never started, and the run failed as a CORE startup timeout.
+
+    A literal block scalar (``|``) holds real newlines and needs no escapes, so
+    backslash-doubling cannot break the quoting. PyYAML falls back to a quoted
+    style on its own for any value a block scalar cannot represent, so this is
+    always safe to ask for.
+
+    Use this for every compose write. A single writer that reaches for
+    ``yaml.safe_dump`` puts the escapes back and the failure returns.
+    """
+    import yaml  # local import: keeps this module importable without PyYAML
+
+    try:
+        class _LiteralMultilineDumper(yaml.SafeDumper):
+            pass
+
+        def _represent_str(dumper: Any, value: str) -> Any:
+            style = '|' if '\n' in value else None
+            return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
+
+        _LiteralMultilineDumper.add_representer(str, _represent_str)
+        return yaml.dump(compose_obj, Dumper=_LiteralMultilineDumper, sort_keys=False)
+    except Exception:
+        return yaml.safe_dump(compose_obj, sort_keys=False)

@@ -1,6 +1,8 @@
 import io
 import os
 import zipfile
+
+import pytest
 from pathlib import Path
 
 from webapp.app_backend import app
@@ -995,3 +997,91 @@ services:
     data2 = data_resp2.get_json() or {}
     ids2 = {g.get("id") for g in (data2.get("generators") or []) if isinstance(g, dict)}
     assert gen_id in ids2
+
+
+def _repo_generator_entries(label, kind_dir, category, gid, kind='flag-generator'):
+    manifest = f"""manifest_version: 1
+id: {gid}
+kind: {kind}
+name: {gid}
+source_path: {gid}
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+artifacts:
+  produces: [File(path)]
+"""
+    compose = "services:\n  generator:\n    image: nginx:alpine\n"
+    base = f'{label}/{kind_dir}/{category}/{gid}'
+    return [
+        (f'{base}/manifest.yaml', manifest, 'manifest.yaml'),
+        (f'{base}/docker-compose.yml', compose, 'docker-compose.yml'),
+    ]
+
+
+def _post_repo_folder(entries, label, client):
+    items = [('repo_label', label)]
+    for path, content, name in entries:
+        items.append(('repo_paths', path))
+        items.append(('repo_files', (io.BytesIO(content.encode()), name)))
+    return client.post(
+        '/generator_packs/upload',
+        data=MultiDict(items),
+        content_type='multipart/form-data',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+
+
+@pytest.mark.parametrize('kind_dir', ['flag_generators', 'flag-generators', 'Flag Generators'])
+def test_repository_categories_survive_however_the_kind_dir_is_spelled(kind_dir, tmp_path, monkeypatch):
+    """A downloaded repo spells its kind directory however it likes. Failing to
+    recognise it flattened every category into one undifferentiated pack."""
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+
+    label = 'generators-repo'
+    entries = []
+    for category, gid in [('archives', 'arch_gen'), ('binary-generators', 'bin_gen')]:
+        entries += _repo_generator_entries(label, kind_dir, category, gid)
+
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    resp = _post_repo_folder(entries, label, client)
+    assert resp.status_code == 200, (resp.get_json() or {}).get('error')
+
+    installed = sorted(
+        str(p.relative_to(install_root).parent.parent) for p in install_root.rglob('manifest.yaml')
+    )
+    assert installed == ['flag_generators/archives', 'flag_generators/binary-generators']
+
+
+def test_import_does_not_scan_image_architectures(tmp_path, monkeypatch):
+    """Resolving an unpulled image costs a registry round trip per image, which
+    turned an ~80-generator import into minutes of dead time in the request."""
+    from scenarioforge.utils import image_architectures as ia
+
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+    ia.clear_image_architecture_cache()
+    monkeypatch.setattr(
+        ia, '_run',
+        lambda *_a, **_k: pytest.fail('import must not shell out to docker to scan architectures'),
+    )
+
+    label = 'generators-repo'
+    entries = _repo_generator_entries(label, 'flag-generators', 'archives', 'scan_gen')
+
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    resp = _post_repo_folder(entries, label, client)
+    assert resp.status_code == 200, (resp.get_json() or {}).get('error')
+
+    state = app_backend._load_installed_generator_packs_state()
+    installed_items = [
+        item
+        for pack in (state.get('packs') or [])
+        for item in (pack.get('installed') or [])
+    ]
+    assert installed_items
+    assert all(item.get('architecture_source') == 'unscanned' for item in installed_items)

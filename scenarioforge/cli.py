@@ -1325,6 +1325,82 @@ def _restart_not_running_docker_nodes(
     return attempts
 
 
+def _start_namespace_sharing_sidecars(names: list[str]) -> list[dict[str, Any]]:
+    """Start the sidecars CORE does not, for each node that has any.
+
+    A multi-service vuln is collapsed onto the node's network namespace, so its
+    sidecars carry `network_mode: service:<node>` and therefore depend on the
+    node. `docker compose up -d <node>` starts a service's *dependencies*, and
+    this dependency runs the other way, so CORE brings the node up alone.
+    Preflight compensates with an explicit start, but preflight's containers are
+    torn down before CORE ever begins and nothing repeated it for the real run.
+
+    Measured on dataset-catalog-coverage-005: `apisix` came up with no `etcd`
+    and exited, the start-recovery restart then invalidated CORE's veth/netns,
+    the session never left "configuration", and the failure surfaced as
+    "CORE never finished instantiating router-1, router-2, router-3".
+    """
+    from scenarioforge.builders.topology import (
+        _compose_shared_namespace_services,
+        _docker_node_compose_path,
+    )
+
+    started: list[dict[str, Any]] = []
+    for raw_name in names or []:
+        name = str(raw_name or '').strip()
+        if not name:
+            continue
+        compose_path = _docker_node_compose_path(name)
+        if not compose_path or not os.path.exists(compose_path):
+            continue
+        try:
+            sidecars = _compose_shared_namespace_services(compose_path, name)
+        except Exception:
+            sidecars = []
+        if not sidecars:
+            continue
+        # The project name has to be the one core-daemon uses, which it derives
+        # from the `<node>conf` directory it runs compose in. Without `-p` the
+        # project comes from this compose file's own directory instead, and the
+        # sidecar then looks for `service:<node>` inside a project that has no
+        # such container -- it fails, having touched nothing CORE owns.
+        # `_docker_compose_preflight` forces the same name, for the same reason.
+        project = f'{name}conf'
+        # `--no-deps` is not an optimisation, it is the whole safety of this.
+        # Each sidecar declares `depends_on: [<node>]`, so without it compose
+        # recreates and restarts the node CORE is already running -- which tears
+        # down the veth and network namespace CORE built and strands every
+        # sidecar sharing it. Measured on docker-12: compose logged "Container
+        # docker-12 Starting / Started", the sidecars then failed with "runc
+        # create failed: can't get final child's PID from pipe: EOF", and both
+        # nodes ended up exited. CORE has already started the node; the only
+        # thing missing is its sidecars.
+        cmd = [
+            'docker', 'compose', '-p', project, '-f', compose_path,
+            'up', '-d', '--no-build', '--no-deps',
+        ] + sidecars
+        try:
+            proc = _run_docker_cmd(cmd, timeout_s=300.0, allow_sudo_retry=True)
+            rc = int(proc.returncode)
+            # Compose reports what went wrong on stderr; stdout alone gave
+            # "1 Creating" and said nothing about the cause.
+            output = ((proc.stderr or '') + '\n' + (proc.stdout or '')).strip()
+        except Exception as exc:
+            rc, output = 1, f'{exc.__class__.__name__}: {exc}'
+        started.append({'node': name, 'services': list(sidecars), 'rc': rc})
+        if rc == 0:
+            logging.info(
+                "Started %d namespace-sharing sidecar(s) for docker node %s: %s",
+                len(sidecars), name, ', '.join(sidecars),
+            )
+        else:
+            logging.warning(
+                "Failed starting namespace-sharing sidecar(s) for docker node %s (%s): rc=%s %s",
+                name, ', '.join(sidecars), rc, str(output)[-600:],
+            )
+    return started
+
+
 def _ensure_docker_nodes_running(
     names: list[str],
     *,
@@ -1332,6 +1408,15 @@ def _ensure_docker_nodes_running(
     poll_s: float = 0.5,
     generation_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # Before waiting on the nodes: a node whose app needs a sidecar exits without
+    # one, and the wait would only watch it fail.
+    try:
+        sidecar_starts = _start_namespace_sharing_sidecars(names)
+        if sidecar_starts and generation_meta is not None:
+            generation_meta.setdefault('docker_sidecar_starts', sidecar_starts)
+    except Exception as exc:
+        logging.warning("Namespace-sharing sidecar startup skipped: %s", exc)
+
     docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
     not_running_names = [
         str(name or '').strip()

@@ -1811,6 +1811,81 @@ CONTAINER_NETWORK_MODE_CONFLICTING_KEYS = (
 )
 
 
+_COMPOSE_SOURCE_SERVICE_LABEL = 'coretg.compose.source_service'
+
+
+def _record_compose_source_service(service: object, source_name: str) -> None:
+	"""Remember the recipe's own name for a service renamed to the node name."""
+	name = str(source_name or '').strip()
+	if not name or not isinstance(service, dict):
+		return
+	labels = service.get('labels')
+	if isinstance(labels, dict):
+		labels[_COMPOSE_SOURCE_SERVICE_LABEL] = name
+		return
+	if isinstance(labels, list):
+		prefix = f'{_COMPOSE_SOURCE_SERVICE_LABEL}='
+		service['labels'] = [
+			item for item in labels if not str(item or '').startswith(prefix)
+		] + [f'{prefix}{name}']
+		return
+	service['labels'] = {_COMPOSE_SOURCE_SERVICE_LABEL: name}
+
+
+def _compose_source_service(service: object) -> str:
+	"""The recipe name recorded by `_record_compose_source_service`, or ''."""
+	if not isinstance(service, dict):
+		return ''
+	labels = service.get('labels')
+	if isinstance(labels, dict):
+		return str(labels.get(_COMPOSE_SOURCE_SERVICE_LABEL) or '').strip()
+	if isinstance(labels, list):
+		prefix = f'{_COMPOSE_SOURCE_SERVICE_LABEL}='
+		for item in labels:
+			text = str(item or '')
+			if text.startswith(prefix):
+				return text[len(prefix):].strip()
+	return ''
+
+
+def _rewrite_env_hostnames_to_loopback(service: object, names: set) -> list:
+	"""Point env values naming a collapsed sibling at 127.0.0.1.
+
+	A sidecar cannot carry `extra_hosts`: Docker rejects it outright when the
+	container joins another's namespace ("conflicting options: custom
+	host-to-IP mapping and the network mode"), so the node's mapping cannot
+	simply be copied onto the sidecars. Rewriting the value is the only way to
+	reach a sibling that now lives on loopback.
+
+	Only whole-value matches are rewritten. A value that merely contains the
+	name (`http://mysql:3306/db`) is left alone rather than risk mangling a URL
+	the recipe cares about.
+	"""
+	if not isinstance(service, dict) or not names:
+		return []
+	env = service.get('environment')
+	changed = []
+	if isinstance(env, dict):
+		for key, value in list(env.items()):
+			if str(value or '').strip() in names:
+				env[key] = '127.0.0.1'
+				changed.append(str(key))
+	elif isinstance(env, list):
+		updated = []
+		for item in env:
+			text = str(item or '')
+			if '=' in text:
+				key, _sep, value = text.partition('=')
+				if value.strip() in names:
+					updated.append(f'{key}=127.0.0.1')
+					changed.append(key.strip())
+					continue
+			updated.append(item)
+		if changed:
+			service['environment'] = updated
+	return changed
+
+
 def _compose_service_is_referenced(services: dict, name: str) -> bool:
 	"""Whether any sibling service names `name` in its wiring.
 
@@ -2112,14 +2187,34 @@ def _apply_shared_netns_sidecars(
 		# that is genuinely where it lives, so an inherited mapping pointing anywhere
 		# else is now wrong and would leave the stack broken. Mappings for anything
 		# that is not a sidecar (a real external host the recipe pins) are untouched.
-		sidecar_names = set(sidecars)
+		# The node's own recipe name counts too: it was renamed to the node name,
+		# so anything still addressing it (`ZBX_SRV_HOST=server`) resolves nowhere.
+		loopback_names = set(sidecars)
+		source_service = _compose_source_service(main_svc)
+		if source_service and source_service != main:
+			loopback_names.add(source_service)
 		host_entries = [
 			entry for entry in host_entries
-			if entry.split(':', 1)[0].strip() not in sidecar_names
+			if entry.split(':', 1)[0].strip() not in loopback_names
 		]
-		for name in sidecars:
+		for name in sorted(loopback_names):
 			host_entries.append(f'{name}:127.0.0.1')
 		main_svc['extra_hosts'] = host_entries
+
+		# Sidecars cannot take `extra_hosts` -- Docker refuses it alongside a
+		# shared network namespace -- so their references have to be rewritten
+		# in place instead.
+		rewrite_targets = loopback_names | {main}
+		for name in sidecars:
+			rewritten = _rewrite_env_hostnames_to_loopback(services.get(name), rewrite_targets)
+			if rewritten:
+				try:
+					logger.info(
+						'[vuln] sidecar %s env pointed at loopback for %s (no extra_hosts allowed in a shared namespace)',
+						name, ', '.join(sorted(rewritten)),
+					)
+				except Exception:
+					pass
 
 		for name in sidecars:
 			svc = services[name]
@@ -5115,6 +5210,17 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 					services.get(node_key)['container_name'] = node_key
 			except Exception:
 				pass
+			# Siblings may address this service by its recipe name in their own
+			# config rather than through compose wiring -- zabbix's `agent` and
+			# `web` carry `ZBX_SRV_HOST=server`, which
+			# `_compose_service_is_referenced` does not inspect, so the name is
+			# about to disappear. Record it so the namespace repair can map it to
+			# loopback alongside the sidecars.
+			try:
+				if src_key != node_key:
+					_record_compose_source_service(services.get(node_key), src_key)
+			except Exception:
+				pass
 			# The alias is a byte-for-byte copy, so leaving the source behind
 			# builds the same image twice and creates a container that is never
 			# started. Drop it -- but only when no sibling names it, since a
@@ -5322,30 +5428,17 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 			return text
 
 	def _yaml_dump_literal_multiline(data: object) -> str:
-		"""Dump YAML while forcing literal block style for multiline strings.
+		"""Serialize a compose document; see compose_shell.dump_compose_yaml.
 
-		Why: PyYAML often serializes multiline strings using `\n` escape sequences inside
-		double-quoted scalars. Our CORE host-side printf escaping must escape backslashes,
-		which turns `\n` into `\\n`, and that then reaches containers as a literal
-		backslash-n (breaking bash conditionals like `then\\n`).
-
-		By forcing multiline strings to use a literal block scalar (`|`), the dumped YAML
-		contains real newlines instead of `\n` escape sequences, so backslash-escaping
-		does not corrupt the command.
+		Kept as a local alias so this module's call sites read unchanged. The
+		implementation lives beside the other compose-escaping rules because
+		every writer has to agree on it: one that re-dumps with a plain
+		`yaml.safe_dump` reintroduces the `\\n`/`\\"` escapes and the host-side
+		printf pass then breaks the file.
 		"""
-		try:
-			class _CoreTGYamlDumper(yaml.SafeDumper):
-				pass
+		from .compose_shell import dump_compose_yaml
 
-			def _repr_str(dumper, value: str):
-				style = '|' if '\n' in value else None
-				return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
-
-			_CoreTGYamlDumper.add_representer(str, _repr_str)
-			return yaml.dump(data, Dumper=_CoreTGYamlDumper, sort_keys=False)
-		except Exception:
-			# Fall back to PyYAML default behavior.
-			return yaml.safe_dump(data, sort_keys=False)
+		return dump_compose_yaml(data)
 	cache: Dict[Tuple[str, str], Tuple[Optional[dict], Optional[str], Optional[str], bool]] = {}
 	for node_name, rec in name_to_vuln.items():
 		if not _is_docker_compose_record(rec):
@@ -5685,6 +5778,15 @@ def prepare_compose_for_assignments(name_to_vuln: Dict[str, Dict[str, str]], out
 				enable_seg = _truthy(rec.get('EnableSegmentationMount') or rec.get('segmentation_mount') or rec.get('is_segmentation_node'))
 				if enable_traffic:
 					obj = _inject_service_bind_mount(obj, '/tmp/traffic:/tmp/traffic:ro', prefer_service=prefer)
+					# A second view outside /tmp, because /tmp is not always ours:
+					# a Docker-in-Docker image runs Docker's `dind` wrapper, which
+					# mounts a tmpfs over /tmp when /tmp is not already a
+					# mountpoint -- hiding every bind beneath it, this one
+					# included. `docker/unauthorized-rce` is the only such image in
+					# the catalog and its agent found no config for a whole run.
+					# TrafficService reads whichever of the two actually holds the
+					# node's config.
+					obj = _inject_service_bind_mount(obj, '/tmp/traffic:/coretg/traffic:ro', prefer_service=prefer)
 					obj = _inject_service_environment(obj, {'CORETG_TRAFFIC_NODE': '1'}, prefer_service=prefer)
 				if enable_seg:
 					obj = _inject_service_bind_mount(obj, '/tmp/segmentation:/tmp/segmentation:ro', prefer_service=prefer)

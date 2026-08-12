@@ -712,11 +712,23 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "            return 127, 'docker network namespace unavailable'\n"
         "        return _run(['nsenter','-t',pid,'-n',sys.executable,'-c',program], timeout=timeout)\n"
         "    return _nexec(kind, name, [sys.executable,'-c',program], timeout=timeout)\n"
+        # Interface names Docker gives its own bridges. A CORE-assigned
+        # interface is eth0..ethN, so excluding these cannot hide one.
+        "def _is_own_bridge(ifname):\n"
+        "    n = str(ifname or '').strip().rstrip(':')\n"
+        "    return n.startswith('docker') or n.startswith('br-') or n.startswith('virbr')\n"
         "def _node_cidrs(kind, name):\n"
         "    def _cidrs(output):\n"
         "        return [line.strip() for line in output.splitlines()\n"
         "                if '/' in line.strip() and line.strip().split('/', 1)[0].count('.') == 3]\n"
-        "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}'\"])\n"
+        # A workload can own interfaces of its own. `docker/unauthorized-rce`
+        # runs a Docker daemon, whose docker0 bridge carries a global
+        # 172.17.0.1/16 alongside the address CORE assigned. Taking the first
+        # address then identified the node by its private bridge, and every
+        # probe of it was reported as "packets dropped (no-route)" because
+        # nothing else on the CORE network can reach that address.
+        "    skip_if = \"$2 !~ /^(docker[0-9]+|br-|virbr)/\"\n"
+        "    rc, out = _nexec(kind, name, ['sh','-lc',\"ip -4 -o addr show scope global 2>/dev/null | awk '\" + skip_if + \" {print $4}'\"])\n"
         "    cidrs = _cidrs(out) if rc == 0 else []\n"
         "    # Minimal workload images may omit iproute2. Inspect the container's\n"
         "    # network namespace from the CORE VM instead of losing its identity.\n"
@@ -726,14 +738,17 @@ def _remote_preamble(sudo_password: str | None, session_id: Any = None) -> str:
         "        if rc == 0 and pid.isdigit() and int(pid) > 0:\n"
         "            rc, out = _run(['nsenter','-t',pid,'-n','ip','-4','-o','addr','show','scope','global'])\n"
         "            if rc == 0:\n"
-        "                cidrs = _cidrs('\\n'.join(line.split()[3] if len(line.split()) > 3 else '' for line in out.splitlines()))\n"
+        "                cidrs = _cidrs('\\n'.join(\n"
+        "                    (line.split()[3] if len(line.split()) > 3 else '')\n"
+        "                    for line in out.splitlines()\n"
+        "                    if len(line.split()) > 1 and not _is_own_bridge(line.split()[1])))\n"
         # `scope global` is the right filter for a CORE address, but an address
         # carrying some other scope is still an address the node can route from.
         # Ask again without the filter rather than reporting the node as having
         # none at all, which is a very different diagnosis.
         "    if not cidrs:\n"
         "        rc, out = _nexec(kind, name, ['sh','-lc',\n"
-        "                         \"ip -4 -o addr show 2>/dev/null | awk '{print $4}'\"])\n"
+        "                         \"ip -4 -o addr show 2>/dev/null | awk '\" + skip_if + \" {print $4}'\"])\n"
         "        cidrs = [c for c in (_cidrs(out) if rc == 0 else [])\n"
         "                 if not c.startswith('127.')]\n"
         "    if not cidrs:\n"

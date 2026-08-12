@@ -23177,6 +23177,32 @@ def _flow_pivot_rules_for_chain(
         # allow, never widen it. This field exists so the runtime check has an
         # expected port to probe instead of relying on live listeners alone.
         inferred = [] if ports else [str(port) for port in _flow_pivot_target_offering_ports(target_node)]
+        if not ports and not inferred and _flow_pivot_target_publishes_nothing(target_node):
+            # This target's offerings are known, and none of them publishes a
+            # port, so there is no service a participant could reach across the
+            # pivot and nothing the runtime check could probe -- it reports
+            # `no-target-port` and fails the run every time. Declaring the edge
+            # asserts a path that cannot exist.
+            #
+            # Two catalog vulns are shaped this way (imagemagick/CVE-2020-29599
+            # and openssl/CVE-2022-0778 of 306): both are "run a tool against a
+            # crafted file" bugs with no service at all, so a node carrying only
+            # one of them plus a file-based generator has nothing listening.
+            # Seen as dataset-catalog-coverage-030's
+            # "docker-10 -> docker-8: the target exposes no port for this pivot".
+            #
+            # An empty port list on its own is *not* enough to skip: a node whose
+            # offerings are simply unrecorded also yields one, and the runtime
+            # check finds those services by probing live listeners. Treating the
+            # unknown case as "no ports" dropped every pivot edge.
+            try:
+                logging.getLogger(__name__).info(
+                    '[flow.pivot] skipped pivot edge %s -> %s: every offering on the target publishes no port',
+                    source_name, target_name,
+                )
+            except Exception:
+                pass
+            return
         rule = {
             'name': str(name or 'Pivot').strip() or 'Pivot',
             'unbacked_shell': unbacked_shell,
@@ -24216,6 +24242,50 @@ def _flow_pivot_fill_offering_ports(
         if ports:
             rel['target_ports'] = list(ports)
     return rels
+
+
+def _flow_pivot_target_offering_names(target_node: Any) -> list[str]:
+    """Names of the vulnerabilities/generators hosted on a node."""
+    if not isinstance(target_node, dict):
+        return []
+    names: list[str] = []
+    for key in ('vulnerabilities', 'flag_node_generators', 'offerings'):
+        value = target_node.get(key)
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            continue
+        for entry in value:
+            # Graph nodes carry plain names; chain nodes carry the richer dicts.
+            if isinstance(entry, dict):
+                text = str(entry.get('name') or entry.get('id') or '').strip()
+            else:
+                text = str(entry or '').strip()
+            if text and text not in names:
+                names.append(text)
+    return names
+
+
+def _flow_pivot_target_publishes_nothing(target_node: Any) -> bool:
+    """Whether a node is *known* to host nothing that publishes a port.
+
+    Distinct from "we found no ports": a node whose offerings were never
+    recorded also yields none, and the runtime check reaches those services by
+    probing live listeners. Only a node whose offerings are all known, and all
+    portless, can be ruled out in advance.
+    """
+    names = _flow_pivot_target_offering_names(target_node)
+    if not names:
+        return False
+    for name in names:
+        try:
+            if _flow_ports_for_offering(name):
+                return False
+        except Exception:
+            # An offering we cannot resolve might publish anything; that is the
+            # unknown case again, so make no claim about this node.
+            return False
+    return True
 
 
 def _flow_pivot_target_offering_ports(target_node: Any) -> list[int]:
@@ -50481,6 +50551,22 @@ def _safe_extract_zip_to_dir(zip_path: str, dest_dir: str) -> None:
                 pass
 
 
+def _canonical_kind_dir(value: Any) -> str:
+    """Canonical spelling of a generator-kind directory name.
+
+    A repository cloned from anywhere may spell these 'flag-generators',
+    'flag generators', or 'Flag_Generators'; the installed tree uses
+    'flag_generators'. Comparing canonically keeps category inference working
+    for repositories that were not laid out by this app.
+    """
+    text = str(value or '').strip().lower()
+    for separator in ('-', ' '):
+        text = text.replace(separator, '_')
+    while '__' in text:
+        text = text.replace('__', '_')
+    return text.strip('_')
+
+
 def _normalize_generator_category_path(value: Any) -> str:
     """Return a safe, portable relative category path for catalog generators."""
     raw_parts = [
@@ -50666,7 +50752,11 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             return ''
         anchor = -1
         for index, part in enumerate(rel_parts[:-1]):
-            if part == base_name:
+            # Downloaded repositories name these directories however they like:
+            # 'flag-generators' and 'Flag Generators' are the same anchor as the
+            # installed-tree spelling. Missing the anchor silently flattens every
+            # category into one undifferentiated pack.
+            if _canonical_kind_dir(part) == base_name:
                 anchor = index
         # base/category[/subcategory]/generator/manifest.yaml
         if anchor < 0 or len(rel_parts) - anchor < 4:
@@ -51084,8 +51174,15 @@ def _install_generator_pack_payload(
                     installed_item['disabled_due_to_build_network'] = True
             # Architectures this generator's images can run on, recorded for the
             # same reason as vulnerabilities: an amd64-only image on an arm64
-            # CORE VM runs only under emulation. Prefer whatever the exported
-            # pack already knew, since an air-gapped host cannot ask a registry.
+            # CORE VM runs only under emulation.
+            #
+            # Importing does NOT scan. Resolving an image the host has not
+            # pulled costs a `docker manifest inspect` round trip per image,
+            # and a repository of ~80 generators turned that into minutes of
+            # dead time inside the upload request, which read as a hung import.
+            # Whatever an exported pack already knew is kept, since that is
+            # free and an air-gapped host cannot ask a registry anyway;
+            # anything else is left 'unscanned' for a later explicit scan.
             try:
                 arch_imported = installed_item.get('architectures')
                 if isinstance(arch_imported, list) and arch_imported:
@@ -51093,18 +51190,6 @@ def _install_generator_pack_payload(
                         str(a).strip() for a in arch_imported if str(a or '').strip()
                     ]
                     installed_item.setdefault('architecture_source', 'imported')
-                elif compose_path_for_scan and _vuln_catalog_architecture_scan_enabled():
-                    from scenarioforge.utils.image_architectures import (
-                        architecture_summary_for_compose_file,
-                    )
-
-                    arch_summary = architecture_summary_for_compose_file(
-                        compose_path_for_scan,
-                        allow_registry=_vuln_catalog_architecture_registry_enabled(),
-                    )
-                    installed_item['architectures'] = list(arch_summary.get('architectures') or [])
-                    installed_item['architecture_source'] = str(arch_summary.get('source') or 'unknown')
-                    installed_item['architecture_unresolved'] = list(arch_summary.get('unresolved') or [])
                 else:
                     installed_item.setdefault('architectures', [])
                     installed_item.setdefault('architecture_source', 'unscanned')

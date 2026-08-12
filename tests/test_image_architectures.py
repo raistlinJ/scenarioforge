@@ -18,6 +18,15 @@ import pytest
 from scenarioforge.utils import image_architectures as ia
 
 
+@pytest.fixture(autouse=True)
+def _clear_architecture_cache():
+    """Lookups are memoized per image ref, so a ref reused across tests would
+    otherwise be answered from an earlier test's mock."""
+    ia.clear_image_architecture_cache()
+    yield
+    ia.clear_image_architecture_cache()
+
+
 # --------------------------------------------------------------------------- #
 # Normalization: the same CPU has several spellings
 # --------------------------------------------------------------------------- #
@@ -240,3 +249,79 @@ def test_compose_file_on_disk_is_scanned(tmp_path, monkeypatch):
     compose.write_text("services:\n  web:\n    image: nginx:1\n", encoding="utf-8")
     result = ia.architecture_summary_for_compose_file(str(compose))
     assert result["architectures"] == ["amd64"]
+
+
+# --------------------------------------------------------------------------- #
+# Memoization: importing a repository must not re-query one image per generator
+# --------------------------------------------------------------------------- #
+
+def test_repeated_lookups_query_the_registry_once(monkeypatch):
+    """An 80-generator repo sharing a base image resolved it 80 times, taking
+    ~2.2s each, which made the import look hung."""
+    calls: list[str] = []
+
+    monkeypatch.setattr(ia, "_docker_available", lambda: True)
+    monkeypatch.setattr(ia, "_architectures_from_local", lambda _i: [])
+
+    def _registry(image):
+        calls.append(image)
+        return ["amd64", "arm64"]
+
+    monkeypatch.setattr(ia, "_architectures_from_registry", _registry)
+
+    for _ in range(25):
+        archs, source = ia.image_architectures("shared/base:1")
+        assert archs == ["amd64", "arm64"]
+        assert source == "registry"
+
+    assert calls == ["shared/base:1"]
+
+
+def test_distinct_images_are_each_resolved(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(ia, "_docker_available", lambda: True)
+    monkeypatch.setattr(ia, "_architectures_from_local", lambda _i: [])
+
+    def _registry(image):
+        calls.append(image)
+        return ["amd64"]
+
+    monkeypatch.setattr(ia, "_architectures_from_registry", _registry)
+
+    ia.image_architectures("one:1")
+    ia.image_architectures("two:2")
+    ia.image_architectures("one:1")
+
+    assert calls == ["one:1", "two:2"]
+
+
+def test_unresolved_lookups_expire_so_a_pulled_image_is_seen(monkeypatch):
+    """A transient registry failure must not pin an image to 'unknown' for the
+    life of a long-running webapp process."""
+    monkeypatch.setattr(ia, "_docker_available", lambda: True)
+    monkeypatch.setattr(ia, "_architectures_from_registry", lambda _i: [])
+    monkeypatch.setattr(ia, "_architectures_from_local", lambda _i: [])
+
+    archs, source = ia.image_architectures("later/pulled:1")
+    assert archs == [] and source == ia.UNKNOWN
+
+    # The image is now available locally, and the negative entry has aged out.
+    monkeypatch.setattr(ia, "_architectures_from_local", lambda _i: ["arm64"])
+    monkeypatch.setattr(
+        ia, "_CACHE_TTL_UNRESOLVED_S", -1.0
+    )
+
+    archs, source = ia.image_architectures("later/pulled:1")
+    assert archs == ["arm64"]
+    assert source == "local"
+
+
+def test_cached_result_cannot_be_mutated_by_a_caller(monkeypatch):
+    monkeypatch.setattr(ia, "_docker_available", lambda: True)
+    monkeypatch.setattr(ia, "_architectures_from_local", lambda _i: ["amd64"])
+
+    first, _ = ia.image_architectures("mutate/me:1")
+    first.append("sneaky")
+
+    second, _ = ia.image_architectures("mutate/me:1")
+    assert second == ["amd64"]
