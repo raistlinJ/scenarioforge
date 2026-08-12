@@ -98,7 +98,12 @@ celerybeat-schedule
 
 # Environments
 .env
-.scenarioforge.env
+# Real CORE credentials live in these. The bare name was not enough: a Finder
+# duplicate named '.scenarioforge copy.env' was committed to a public repo with
+# a working CORE_SSH_PASSWORD in it. Match every variant, but keep the tracked
+# template, which holds placeholders only.
+.scenarioforge*.env
+!.scenarioforge.env.example
 .venv
 env/
 venv/
