@@ -169,3 +169,31 @@ def test_only_generated_images_are_removed_during_cleanup(monkeypatch):
     removals = [entry for entry in order if entry.startswith('docker image rm')]
     assert removals == ['docker image rm coretg/x:iproute2']
     assert not any('vulhub/solr' in entry for entry in removals)
+
+
+def _volume_prune(monkeypatch):
+    return next(
+        entry for entry in _record_cleanup_order(monkeypatch)
+        if entry.startswith('docker volume prune')
+    )
+
+
+def test_volume_prune_removes_named_volumes(monkeypatch):
+    """Without `-a` this reclaims nothing on Docker >= 23.
+
+    Docker 23.0 narrowed a bare `volume prune` to *anonymous* volumes only.
+    Every volume a scenario leaves behind is named (`<project>_<name>`), so the
+    prune ran clean on each execute while reclaiming none of them -- measured on
+    the CORE VM as 44 orphaned volumes surviving a prune that reported 0B.
+    """
+    assert '-af' in _volume_prune(monkeypatch).split()
+
+
+def test_volume_prune_is_scoped_to_volumes_compose_created(monkeypatch):
+    """`-a` without a filter would take unused volumes we do not own.
+
+    An unfiltered `-a` removes any unused volume on the host, including data
+    belonging to a stopped container the operator cares about (a local registry,
+    say). Compose labels what it creates, so the filter keeps removal to ours.
+    """
+    assert 'label=com.docker.compose.project' in _volume_prune(monkeypatch)

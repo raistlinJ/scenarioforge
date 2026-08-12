@@ -807,6 +807,211 @@ _CORETG_APP_USER_SHIM = '/usr/local/coretg/bin/coretg-app-user-exec'
 _ROOTLIKE_IMAGE_USERS = {'', '0', 'root', '0:0', 'root:root', '0:root', 'root:0'}
 
 
+_JVM_HEAP_CAP_DEFAULT_MB = 512
+
+
+def _jvm_heap_cap_mb() -> int:
+    """Heap ceiling applied to each JVM docker node, in MB.
+
+    `CORETG_JVM_HEAP_CAP_MB=0` disables the cap entirely.
+    """
+    raw = str(os.environ.get('CORETG_JVM_HEAP_CAP_MB') or '').strip()
+    if not raw:
+        return _JVM_HEAP_CAP_DEFAULT_MB
+    try:
+        value = int(raw)
+    except Exception:
+        return _JVM_HEAP_CAP_DEFAULT_MB
+    return max(0, value)
+
+
+# Env vars through which images hand JVM flags to their launcher. Any of them
+# carrying a heap flag also identifies the image as JVM-based, which name-based
+# or JAVA_HOME-based detection misses: vulhub/nexus declares neither JAVA_HOME
+# nor `java` in its command, and starts through
+# `sh -c ${SONATYPE_DIR}/start-nexus-repository-manager.sh`.
+_JVM_FLAG_ENV_NAMES = (
+    'INSTALL4J_ADD_VM_PARAMS', 'JAVA_TOOL_OPTIONS', 'JAVA_OPTS', 'JDK_JAVA_OPTIONS',
+    'CATALINA_OPTS', 'ES_JAVA_OPTS', 'JVM_OPTS', 'JAVA_OPTIONS', '_JAVA_OPTIONS',
+)
+_JVM_MEMORY_FLAG = re.compile(
+    r'-Xmx\s*\d+[kKmMgG]?|-Xms\s*\d+[kKmMgG]?|-XX:MaxDirectMemorySize=\d+[kKmMgG]?'
+)
+
+
+def _image_is_jvm_based(cfg: dict) -> bool:
+    """Whether an image runs a JVM, judged from its own config.
+
+    Reads the image rather than matching names: the catalog carries dozens of
+    Java services under names that say nothing about the runtime (nexus,
+    solr, activemq, confluence), and a name list would silently miss the next
+    one added.
+    """
+    try:
+        for entry in (cfg.get('Env') or []):
+            name, _, value = str(entry).partition('=')
+            name = name.strip().upper()
+            if name in ('JAVA_HOME', 'JAVA_VERSION', 'JDK_HOME', 'JRE_HOME'):
+                return True
+            if name in _JVM_FLAG_ENV_NAMES and _JVM_MEMORY_FLAG.search(value or ''):
+                return True
+        launch = ' '.join(
+            str(x) for x in ((cfg.get('Entrypoint') or []) + (cfg.get('Cmd') or []))
+        )
+        return 'java' in launch.lower()
+    except Exception:
+        return False
+
+
+def _shrink_jvm_memory_flags(value: str, cap_mb: int) -> str:
+    """Reduce heap/direct-memory flags in a launcher string to `cap_mb`.
+
+    Only ever shrinks. A value already at or below the cap is returned
+    unchanged, so an image asking for less than the cap keeps its own figure.
+    """
+    def _bytes(text: str) -> int:
+        digits = re.search(r'(\d+)\s*([kKmMgG]?)', text)
+        if not digits:
+            return 0
+        n = int(digits.group(1))
+        unit = (digits.group(2) or '').lower()
+        return n * {'k': 1024, 'm': 1024 ** 2, 'g': 1024 ** 3, '': 1}.get(unit, 1)
+
+    cap_bytes = cap_mb * 1024 ** 2
+
+    def _replace(match: 're.Match[str]') -> str:
+        flag = match.group(0)
+        if _bytes(flag) <= cap_bytes:
+            return flag
+        prefix = flag.split('=')[0] + '=' if '=' in flag else flag[:4]
+        return f'{prefix}{cap_mb}m'
+
+    return _JVM_MEMORY_FLAG.sub(_replace, value)
+
+
+def _apply_jvm_heap_cap(
+    compose_path: str,
+    *,
+    docker_cmd: List[str],
+    run,
+    node_name: str,
+) -> None:
+    """Cap each JVM node's heap so co-scheduled nodes fit in the host's RAM.
+
+    A JVM with no `-Xmx` sizes its heap from the memory it can see, which on a
+    CORE VM is the whole host -- every Java node independently plans to use a
+    quarter of the box. One or two get away with it; the rest of a multi-node
+    scenario does not. Three vulhub/nexus nodes on a 7.9GB host drove it into
+    swap and one died inside OrientDB's page cache with a NullPointerException,
+    exit 0, no OOM kill: not a crash the logs blame on memory, and the node
+    then failed validation for having restarted.
+
+    `JAVA_TOOL_OPTIONS` is used because every JVM honours it regardless of how
+    it was launched -- nexus starts through an install4j launcher that ignores
+    JAVA_OPTS, and each image otherwise has its own variable (CATALINA_OPTS,
+    ES_JAVA_OPTS, INSTALL4J_ADD_VM_PARAMS).
+
+    Never overrides a heap the image or the compose file already asked for:
+    an author who set a size knows something this does not.
+    """
+    cap_mb = _jvm_heap_cap_mb()
+    if cap_mb <= 0:
+        return
+
+    def _config_from_json_tail(raw_tail: str) -> dict | None:
+        for line in reversed([ln.strip() for ln in str(raw_tail).splitlines() if ln.strip()]):
+            try:
+                cand = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(cand, dict):
+                return cand
+        return None
+
+    try:
+        import yaml  # type: ignore
+
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            obj = yaml.safe_load(handle) or {}
+        services = obj.get('services') if isinstance(obj, dict) else None
+        if not isinstance(services, dict):
+            return
+        changed = False
+        for svc_name, svc in services.items():
+            if not isinstance(svc, dict):
+                continue
+            image = str(svc.get('image') or '').strip()
+            if not image:
+                continue
+            rc, tail = run(
+                docker_cmd + ['image', 'inspect', '--format', '{{json .Config}}', image],
+                timeout=60,
+            )
+            if rc != 0 or not tail:
+                continue
+            cfg = _config_from_json_tail(tail)
+            if not isinstance(cfg, dict) or not _image_is_jvm_based(cfg):
+                continue
+            env = svc.get('environment')
+            # Compose accepts both a mapping and a `KEY=value` list.
+            if isinstance(env, dict):
+                if any(str(k).strip() == 'JAVA_TOOL_OPTIONS' for k in env):
+                    continue
+                already = any('-Xmx' in str(v) for v in env.values())
+            elif isinstance(env, list):
+                if any(str(v).split('=', 1)[0].strip() == 'JAVA_TOOL_OPTIONS' for v in env):
+                    continue
+                already = any('-Xmx' in str(v) for v in env)
+            else:
+                env, already = {}, False
+            if already:
+                continue
+            # An image that pins its own sizing is sized for running alone.
+            # vulhub/nexus asks for `-Xms1200m -Xmx1200m
+            # -XX:MaxDirectMemorySize=2g`, about 3.2GB; three of those nodes in
+            # one scenario reserve more than the host has, and the loser dies
+            # inside OrientDB's page cache rather than being OOM-killed, so
+            # nothing in its log names memory. Those values are shrunk to the
+            # cap rather than deferred to -- via the same variable the image
+            # used, since that is what its launcher reads. Values already at or
+            # below the cap are left as the author wrote them.
+            overrides: dict[str, str] = {}
+            for entry in (cfg.get('Env') or []):
+                name, _, value = str(entry).partition('=')
+                name = name.strip()
+                if name.upper() not in _JVM_FLAG_ENV_NAMES:
+                    continue
+                if not _JVM_MEMORY_FLAG.search(value or ''):
+                    continue
+                shrunk = _shrink_jvm_memory_flags(value, cap_mb)
+                if shrunk != value:
+                    overrides[name] = shrunk
+            if not overrides:
+                # No launcher variable to trim: fall back to the one every JVM
+                # honours regardless of how it was started.
+                overrides['JAVA_TOOL_OPTIONS'] = f'-Xmx{cap_mb}m'
+            if isinstance(env, list):
+                existing = {str(v).split('=', 1)[0].strip() for v in env}
+                for name, value in overrides.items():
+                    if name not in existing:
+                        env.append(f'{name}={value}')
+            else:
+                env = dict(env)
+                for name, value in overrides.items():
+                    env.setdefault(name, value)
+            svc['environment'] = env
+            changed = True
+            logger.info(
+                '[docker-node] jvm heap capped node=%s service=%s image=%s cap=%sMB',
+                node_name, svc_name, image, cap_mb,
+            )
+        if changed:
+            with open(compose_path, 'w', encoding='utf-8') as handle:
+                yaml.safe_dump(obj, handle, sort_keys=False, allow_unicode=True)
+    except Exception as exc:
+        logger.debug('jvm heap cap skipped node=%s: %s', node_name, exc)
+
+
 def _apply_wrapper_app_user_entrypoints(
     compose_path: str,
     *,
@@ -1681,6 +1886,24 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
         except Exception:
             pass
 
+    # Deliberately not gated on `wrapper_builds`: that list is only populated
+    # when a wrapper image is built *this* pass, and a cached image means no
+    # build, so gating skipped the cap on exactly the reruns where the node had
+    # already proven it needs one. The cap reads the compose and the image, and
+    # neither depends on a build having just happened.
+    try:
+        _apply_jvm_heap_cap(
+            compose_path,
+            docker_cmd=docker_cmd,
+            run=_run,
+            node_name=node_name,
+        )
+    except Exception as exc:
+        logger.warning(
+            '[docker-node] jvm heap cap failed node=%s compose=%s err=%s',
+            node_name, compose_path, exc,
+        )
+
     # Build any services that declare a `build:` stanza using host networking.
     # This avoids reliance on Docker's default bridge network (which may be disabled
     # on CORE VMs) and prevents apt/apk installs from failing due to missing DNS.
@@ -2147,6 +2370,50 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             raise
         try:
             logger.warning('[docker-node] preflight start/wait skipped node=%s compose=%s err=%s', node_name, compose_path, exc)
+        except Exception:
+            pass
+
+    # Hand the stack to CORE stopped, not running.
+    #
+    # Preflight and core-daemon bring up the same compose project (`<node>conf`)
+    # from two different files: this one, and the copy CORE renders into its own
+    # node directory, where it rewrites a sidecar's `network_mode` to
+    # `service:<node>`, drops `depends_on` and extends `extra_hosts`. Compose
+    # sees that drift and *recreates* the services on CORE's `up`.
+    #
+    # For a single-service recipe a recreate costs nothing. For one that
+    # initializes a stateful sidecar it is fatal, because compose reattaches the
+    # sidecar's existing anonymous volume to the new container: measured on
+    # joomla/CVE-2015-8562, preflight's container ran `joomla site:install` and
+    # created the database, CORE's recreate re-ran the same non-idempotent
+    # entrypoint, it aborted with "A database with name joomla already exists"
+    # and exited, and the restart that followed landed in a fresh network
+    # namespace where the mysql sidecar -- still in the old one -- was
+    # unreachable. The node then ran with no site installed and served nothing,
+    # while Docker reported it healthy.
+    #
+    # Removing the containers here leaves CORE as the only thing that ever
+    # starts them, so every service comes up once, together, against clean
+    # sidecar state. Everything preflight is actually for -- building the
+    # wrapper image, pulling, validating the compose, proving the container
+    # reaches a usable pid -- has already happened by this point and is kept.
+    #
+    # Deliberately without `--volumes`: `inject_copy` has already seeded the
+    # named `<node>conf_inject-flow-injects` volume that carries this node's
+    # Flow injects, and that must survive. A sidecar's data volume is anonymous,
+    # so removing its container orphans it and the next `up` builds a new one --
+    # which is exactly the reset this is for.
+    try:
+        _run(compose_base + ['down', '--remove-orphans'], timeout=120)
+    except Exception as exc:
+        # Not fatal: CORE's `up` still reconciles the project. A stateful
+        # recipe may then hit the recreate described above, so say so.
+        try:
+            logger.warning(
+                '[docker-node] preflight teardown failed node=%s project=%s err=%s; '
+                'CORE will recreate instead of starting clean',
+                node_name, project, exc,
+            )
         except Exception:
             pass
 

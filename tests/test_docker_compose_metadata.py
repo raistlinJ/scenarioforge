@@ -2569,3 +2569,112 @@ def test_image_derived_command_escapes_dollars_for_compose():
         assert esc(plain) == plain
     # Non-string input is coerced, not crashed on.
     assert esc(8081) == "8081"
+
+
+def _jvm_cap_services(services, monkeypatch=None):
+    """Run the heap cap over a compose dict with image inspects stubbed."""
+    import json as _json
+    import tempfile as _tempfile
+
+    import yaml as _yaml
+
+    from scenarioforge.builders import topology as _t
+
+    images = {
+        "vulhub/nexus:3.21.1": {"Env": ["JAVA_HOME=/opt/java"], "Cmd": ["sh", "-c", "s.sh"]},
+        "nginx:1.25": {"Env": ["PATH=/usr/bin"], "Cmd": ["nginx"]},
+        "tomcat:9": {"Env": ["JAVA_VERSION=8"], "Cmd": ["catalina.sh", "run"]},
+        "preset/app:1": {"Env": ["JAVA_HOME=/j", "JAVA_TOOL_OPTIONS=-Xmx4g"], "Cmd": ["java"]},
+    }
+
+    def _run(args, timeout=None):
+        image = args[-1]
+        return (0, _json.dumps(images[image])) if image in images else (1, "")
+
+    path = _tempfile.mktemp(suffix=".yml")
+    with open(path, "w") as handle:
+        _yaml.safe_dump({"services": services}, handle)
+    _t._apply_jvm_heap_cap(path, docker_cmd=["docker"], run=_run, node_name="docker-9")
+    with open(path) as handle:
+        return _yaml.safe_load(handle)["services"]
+
+
+def test_jvm_nodes_get_a_heap_cap_and_others_are_untouched():
+    """A JVM sizes its heap from the memory it can see, which is the whole host.
+
+    Every Java node then independently plans to use a large share of the box.
+    Three vulhub/nexus nodes drove a 7.9GB CORE VM into swap and one died
+    inside OrientDB's page cache with a NullPointerException and exit 0 -- no
+    OOM kill to point at -- then failed validation for having restarted.
+
+    Detection reads the image's own config rather than matching names, because
+    the catalog is full of Java services whose names say nothing about the
+    runtime (nexus, solr, activemq, confluence).
+    """
+    out = _jvm_cap_services({
+        "nexus": {"image": "vulhub/nexus:3.21.1"},
+        "web": {"image": "nginx:1.25"},
+    })
+    assert out["nexus"]["environment"]["JAVA_TOOL_OPTIONS"] == "-Xmx512m"
+    # A non-JVM service must not gain an environment block at all.
+    assert "environment" not in out["web"]
+
+
+def test_jvm_heap_cap_shrinks_an_images_own_sizing_but_not_the_authors():
+    """An image's sizing assumes it runs alone; a scenario's does not.
+
+    vulhub/nexus asks for `-Xms1200m -Xmx1200m -XX:MaxDirectMemorySize=2g`,
+    roughly 3.2GB, which is reasonable for one instance and impossible for the
+    three that one coverage fixture schedules on a 7.9GB host. So an
+    image-declared size is shrunk to the cap, through the same variable the
+    image used, because that is the one its launcher reads.
+
+    A size written into the compose file is different: that is this scenario
+    speaking about this run, so it wins.
+    """
+    out = _jvm_cap_services({
+        # Image itself pins -Xmx4g -> shrunk, since the image cannot know how
+        # many siblings it has.
+        "preset": {"image": "preset/app:1"},
+        # Compose author pins it -> left exactly as written.
+        "author": {"image": "tomcat:9", "environment": {"JAVA_TOOL_OPTIONS": "-Xmx2g"}},
+    })
+    assert out["preset"]["environment"]["JAVA_TOOL_OPTIONS"] == "-Xmx512m"
+    assert out["author"]["environment"]["JAVA_TOOL_OPTIONS"] == "-Xmx2g"
+
+
+def test_jvm_heap_cap_shrinks_launcher_specific_variables_in_place():
+    """Nexus reads INSTALL4J_ADD_VM_PARAMS and ignores JAVA_OPTS entirely.
+
+    Adding JAVA_TOOL_OPTIONS alongside would leave the launcher's own 1200m
+    heap and 2g of direct memory in place, so the variable the image actually
+    uses is the one rewritten -- and only its memory flags, leaving unrelated
+    options untouched.
+    """
+    from scenarioforge.builders.topology import _shrink_jvm_memory_flags
+
+    original = "-Xms1200m -Xmx1200m -XX:MaxDirectMemorySize=2g -Djava.util.prefs.userRoot=/nexus-data/javaprefs"
+    shrunk = _shrink_jvm_memory_flags(original, 512)
+    assert "-Xmx512m" in shrunk and "-Xms512m" in shrunk
+    assert "-XX:MaxDirectMemorySize=512m" in shrunk
+    # Non-memory options survive verbatim.
+    assert "-Djava.util.prefs.userRoot=/nexus-data/javaprefs" in shrunk
+    # Only ever shrinks: a value under the cap is left alone.
+    assert _shrink_jvm_memory_flags("-Xmx256m", 512) == "-Xmx256m"
+
+
+def test_jvm_heap_cap_preserves_list_form_environment():
+    """Compose accepts `KEY=value` lists as well as mappings."""
+    out = _jvm_cap_services({"tomcat": {"image": "tomcat:9", "environment": ["FOO=1"]}})
+    assert "FOO=1" in out["tomcat"]["environment"]
+    assert "JAVA_TOOL_OPTIONS=-Xmx512m" in out["tomcat"]["environment"]
+
+
+def test_jvm_heap_cap_is_configurable_and_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("CORETG_JVM_HEAP_CAP_MB", "256")
+    out = _jvm_cap_services({"nexus": {"image": "vulhub/nexus:3.21.1"}})
+    assert out["nexus"]["environment"]["JAVA_TOOL_OPTIONS"] == "-Xmx256m"
+
+    monkeypatch.setenv("CORETG_JVM_HEAP_CAP_MB", "0")
+    out = _jvm_cap_services({"nexus": {"image": "vulhub/nexus:3.21.1"}})
+    assert "environment" not in out["nexus"]

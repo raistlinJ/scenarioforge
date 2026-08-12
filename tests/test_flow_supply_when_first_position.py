@@ -35,6 +35,12 @@ def _chain(plugins):
             'node_id': str(i),
             'id': p['id'],
             'input_defs': p.get('input_defs') or [],
+            # Real assignments carry these, and whether a step is a branch start
+            # -- which decides whether Flow supplies it anything -- is read off
+            # them. Omitting them made every step look dependency-free, so every
+            # step looked like a branch start.
+            'requires': list(p['requires']),
+            'outputs': [entry['artifact'] for entry in p['produces']],
         })
     return nodes, assignments
 
@@ -73,12 +79,39 @@ def test_supply_when_first_does_not_exempt_a_later_step_that_cannot_self_supply(
     assert any('SSHPrivateKey(path)' in e for e in errors), errors
 
 
-def test_a_later_self_gating_step_keeps_the_exemption():
-    # The legitimate later-step case, and the one the marker exists for beyond
-    # position 0: a generator that mints a credential and then puts its own
-    # service behind it both requires and produces the fact, so nothing
-    # upstream has to. Observed in the catalog as
-    # `ssh_password_finance_terminal`.
+def test_producing_the_fact_does_not_exempt_a_step_wired_into_the_chain():
+    """dataset-segmented-firewall-pivot_run02: the same bug, one fact later.
+
+    A later step used to keep the exemption whenever it also produced the
+    marked fact, on the theory that such a generator mints the credential and
+    then gates its own service behind it. `ssh_password_finance_terminal` --
+    the generator that carve-out was written for -- does not mint it: its
+    generator.py parses `Credential(user, password)` out of the run config,
+    raises "Credential(user, password) is required" when it is absent, and
+    re-exports the value it was handed.
+
+    Producing the fact is still what makes Flow's invented value usable, but it
+    is worth nothing unless Flow actually supplies one, and supply only happens
+    at a branch start. Here the step takes `Pivot(docker-1)` from step 1, which
+    is exactly what stops it being a branch start -- so it got no credential,
+    and died at run time the same way `dep_ssh_key_bastion` did.
+    """
+    ok, errors = _validate([
+        _plugin('git_http_bare_repo', [], ['Pivot(docker-1)', 'File(path)']),
+        _plugin('ssh_password_finance_terminal',
+                ['Credential(user, password)', 'Pivot(docker-1)'],
+                ['Credential(user, password)', 'Flag(flag_id)'],
+                supply_when_first=['Credential(user, password)']),
+    ])
+    assert not ok
+    assert any('Credential(user, password)' in e for e in errors), errors
+
+
+def test_a_self_producing_branch_head_keeps_the_exemption():
+    # The legitimate later-step case: nothing this step needs came from an
+    # earlier one, so it is a branch start and Flow does supply the credential
+    # -- and because the step produces the fact, it creates the account with
+    # the supplied value rather than needing a real upstream artifact.
     ok, errors = _validate([
         _plugin('opener', [], ['File(path)']),
         _plugin('ssh_password_finance_terminal',
@@ -97,6 +130,54 @@ def test_a_later_step_is_fine_when_an_earlier_step_produces_the_artifact():
         _plugin('dep_ssh_key_bastion', ['SSHPrivateKey(path)'], ['Flag(flag_id)'],
                 supply_when_first=['SSHPrivateKey(path)']),
     ])
+    assert ok, errors
+
+
+# --------------------------------------------------------------------------- #
+# The order Flow actually ships, not just the verdict on one
+# --------------------------------------------------------------------------- #
+
+def test_the_dag_moves_a_producer_ahead_of_a_marked_consumer(monkeypatch):
+    """dataset-segmented-firewall-pivot_run02, reduced to its three moving parts.
+
+    The DAG asks the validator whether a candidate order is acceptable, so a
+    validator that waived `Credential(user, password)` for the self-producing
+    consumer let the DAG keep it at sequence 2 with both real producers behind
+    it. Flow reported flow_valid=True, the generator wrote no outputs.json, and
+    execute then failed re-running it with "Challenges and Flow Data not found
+    on CORE VM". Asserting the repaired order, not just the verdict, is what
+    ties this file to the run that motivated it.
+    """
+    from webapp import app_backend as ab
+
+    pivot = 'Pivot(docker-1)'
+    credential = 'Credential(user, password)'
+    plugins = [
+        _plugin('git_http_bare_repo', [], [pivot, 'File(path)']),
+        _plugin('ssh_password_finance_terminal',
+                [credential, pivot], [credential, 'Flag(flag_id)'],
+                supply_when_first=[credential]),
+        _plugin('text_support_ticket_dump', [pivot], [credential, 'Flag(flag_id)']),
+    ]
+    nodes, assignments = _chain(plugins)
+    monkeypatch.setattr(ab, '_flow_enabled_generator_defs_by_id', lambda: {})
+    contracts = {p['id']: p for p in plugins}
+
+    ordered_nodes, ordered_assignments, _debug = ab._flow_reorder_chain_by_generator_dag(
+        nodes,
+        assignments,
+        scenario_label='TestScenario',
+        plugins_by_id_override=contracts,
+    )
+    order = [str(a.get('id') or '') for a in ordered_assignments]
+    assert order.index('text_support_ticket_dump') < order.index('ssh_password_finance_terminal'), order
+
+    ok, errors = ab._flow_validate_chain_order_by_requires_produces(
+        ordered_nodes,
+        ordered_assignments,
+        scenario_label='TestScenario',
+        plugins_by_id_override=contracts,
+    )
     assert ok, errors
 
 

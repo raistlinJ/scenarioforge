@@ -754,7 +754,21 @@ def _best_effort_cli_execute_cleanup(args: Any, core: Any) -> bool:
                 ['docker', 'container', 'prune', '-f'],
                 ['docker', 'image', 'prune', '-f'],
                 ['docker', 'network', 'prune', '-f'],
-                ['docker', 'volume', 'prune', '-f'],
+                # `docker volume prune` removes only *anonymous* volumes as of
+                # Docker 23.0, so without `-a` this reclaimed nothing: every
+                # volume a scenario creates is named (`<project>_<name>`), and
+                # 44 of them had accumulated on the test host while this ran
+                # clean on every execute. `-a` also takes named volumes.
+                #
+                # The label filter is what makes `-a` safe. Unfiltered, `-a`
+                # would take any unused volume on the host -- including data
+                # belonging to a stopped container someone cares about, such as
+                # a local registry. Compose stamps every volume it creates with
+                # `com.docker.compose.project`, so filtering on that key
+                # restricts removal to volumes this application generated.
+                # Volumes in use by a running container are never pruned.
+                ['docker', 'volume', 'prune', '-af',
+                 '--filter', 'label=com.docker.compose.project'],
             ):
                 try:
                     proc = _run_docker_cmd(cmd, timeout_s=120.0, allow_sudo_retry=True)
@@ -1356,6 +1370,247 @@ def _ensure_docker_nodes_running(
     if any(bool(item.get('ok')) for item in restart_attempts):
         docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
     return docker_runtime
+
+
+# `st` column of /proc/net/tcp for a socket in LISTEN.
+_TCP_LISTEN_STATE = '0A'
+
+
+def _parse_proc_net_tcp_listening_ports(text: str) -> set[int]:
+    """Return the TCP ports in LISTEN state from /proc/net/tcp[6] contents.
+
+    Read from inside the container rather than probed with a tool, because the
+    tool is not a given: the images a scenario names range from Alpine to
+    distroless, and `nc`/`ss`/`curl` are each missing from some of them. /proc
+    is always there.
+    """
+    ports: set[int] = set()
+    for line in (text or '').splitlines():
+        fields = line.split()
+        # sl local_address rem_address st ...
+        if len(fields) < 4 or ':' not in fields[1]:
+            continue
+        if fields[3].strip().upper() != _TCP_LISTEN_STATE:
+            continue
+        try:
+            ports.add(int(fields[1].rsplit(':', 1)[1], 16))
+        except Exception:
+            continue
+    return ports
+
+
+def _docker_container_listening_ports(name: str) -> set[int] | None:
+    """Ports the container is listening on, or None when that cannot be read.
+
+    None and "listening on nothing" are deliberately different results. A node
+    is only ever judged unhealthy on a definite answer, so an image without a
+    shell, a container that just exited, or a refused exec all return None and
+    leave the node alone.
+    """
+    try:
+        proc = _run_docker_cmd(
+            ['docker', 'exec', name, 'cat', '/proc/net/tcp', '/proc/net/tcp6'],
+            timeout_s=15.0,
+            allow_sudo_retry=True,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return _parse_proc_net_tcp_listening_ports(proc.stdout or '')
+
+
+def _docker_container_exposed_tcp_ports(name: str) -> set[int]:
+    """TCP ports the container's image declares, as the readiness expectation."""
+    try:
+        proc = _run_docker_cmd(
+            ['docker', 'inspect', '-f', '{{json .Config.ExposedPorts}}', name],
+            timeout_s=20.0,
+            allow_sudo_retry=True,
+        )
+        if proc.returncode != 0:
+            return set()
+        raw = json.loads((proc.stdout or '').strip() or 'null') or {}
+    except Exception:
+        return set()
+    ports: set[int] = set()
+    for key in raw:
+        spec = str(key or '').strip()
+        if spec.endswith('/udp'):
+            continue
+        try:
+            ports.add(int(spec.split('/', 1)[0]))
+        except Exception:
+            continue
+    return ports
+
+
+def _docker_container_log_marker(name: str) -> str | None:
+    """A value that changes whenever the container writes another log line."""
+    try:
+        proc = _run_docker_cmd(
+            ['docker', 'logs', '-t', '--tail', '1', name],
+            timeout_s=20.0,
+            allow_sudo_retry=True,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or '')[-600:]
+
+
+def _wait_for_docker_nodes_serving(
+    names: list[str],
+    *,
+    timeout_s: float,
+    quiet_s: float,
+    poll_s: float = 3.0,
+) -> dict[str, Any]:
+    """Wait until each node listens on a port its image exposes.
+
+    Reports two distinct groups, because "slow" and "wedged" need opposite
+    responses. `not_serving` is any node that never listened. `hung` is the
+    subset that also stopped logging for `quiet_s` -- a node still writing log
+    lines is making progress and is left to finish however long it takes.
+
+    Nodes exposing no TCP port are not waited on at all: there is nothing to
+    check, and inventing an expectation for them would only produce false
+    alarms for the traffic-only and shell-only nodes a scenario also runs.
+    """
+    expected: dict[str, set[int]] = {}
+    for raw_name in names or []:
+        node = str(raw_name or '').strip()
+        if node:
+            expected[node] = _docker_container_exposed_tcp_ports(node)
+    pending = {node for node, ports in expected.items() if ports}
+    skipped = sorted(set(expected) - pending)
+
+    now = time.time()
+    deadline = now + max(0.0, float(timeout_s or 0.0))
+    markers: dict[str, str | None] = {node: None for node in pending}
+    last_change: dict[str, float] = {node: now for node in pending}
+    served: list[str] = []
+
+    while pending and time.time() < deadline:
+        for node in sorted(pending):
+            listening = _docker_container_listening_ports(node)
+            if listening is None:
+                # Cannot tell; do not hold the node against it.
+                pending.discard(node)
+                skipped.append(node)
+                continue
+            # Every exposed port, not any of them. A wedged JVM still holds the
+            # ports it opened before it stalled -- the measured Nexus hang was
+            # listening on its 5005 debug port with 8081 dead -- so "any" reads
+            # a stuck service as a healthy one.
+            if expected[node] <= listening:
+                served.append(node)
+                pending.discard(node)
+                continue
+            marker = _docker_container_log_marker(node)
+            if marker is not None and marker != markers.get(node):
+                markers[node] = marker
+                last_change[node] = time.time()
+        if pending:
+            time.sleep(poll_s)
+
+    stalled = time.time()
+    hung = [
+        node for node in sorted(pending)
+        if (stalled - last_change.get(node, stalled)) >= max(0.0, float(quiet_s or 0.0))
+    ]
+    return {
+        'served': sorted(served),
+        'not_serving': sorted(pending),
+        'hung': hung,
+        'skipped': sorted(set(skipped)),
+    }
+
+
+def _ensure_docker_nodes_serving(
+    names: list[str],
+    *,
+    serving_wait_s: float,
+    generation_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Recover Docker nodes whose service wedged without the container exiting.
+
+    `restart: on-failure` cannot see this failure. Measured on the CORE VM:
+    Nexus 3.21.1 lost a race bootstrapping its OrientDB databases, logged
+    "Failed to start nexus" and began shutting down, then deadlocked in OSGi
+    teardown -- the JVM stayed at ~50% CPU and never exited, so Docker kept
+    reporting the container `running` with `RestartCount=0` while nothing
+    served on 8081 for the rest of the run. Only an active check recovers it.
+
+    Detection is the default and restarting is opt-in
+    (`CORETG_DOCKER_RESTART_HUNG_SERVICE=1`), because by this point recovery
+    cannot be silent: CORE attached the node's veth into the namespace of the
+    running container, so replacing that container leaves the service healthy
+    but off the topology. Naming the wedged node in the log turns a five-minute
+    run ending in a bare "execute FAIL" into a specific, actionable one; the
+    restart is left to the operator, who can also re-run the session.
+
+    Restarting, when enabled, is further conditional on the node having gone
+    quiet as well as not listening (see `_wait_for_docker_nodes_serving`), so a
+    merely slow service is never torn down mid-boot.
+    """
+    result: dict[str, Any] = {'served': [], 'not_serving': [], 'hung': [], 'skipped': []}
+    wait_s = max(0.0, float(serving_wait_s or 0.0))
+    if not names or wait_s <= 0.0:
+        return result
+
+    try:
+        quiet_s = float(os.getenv('CORETG_DOCKER_SERVING_QUIET_S') or 60.0)
+    except Exception:
+        quiet_s = 60.0
+
+    result = _wait_for_docker_nodes_serving(names, timeout_s=wait_s, quiet_s=quiet_s)
+    hung = list(result.get('hung') or [])
+    not_serving = list(result.get('not_serving') or [])
+    if not_serving:
+        logging.warning(
+            "Docker node(s) exposed a port but never served within %.0fs: %s",
+            wait_s,
+            ', '.join(not_serving),
+        )
+    if not hung:
+        return result
+
+    logging.warning(
+        "Docker node(s) running but wedged -- no listener and no log output for "
+        "%.0fs, which `restart: on-failure` cannot detect: %s",
+        quiet_s,
+        ', '.join(hung),
+    )
+    try:
+        val = os.getenv('CORETG_DOCKER_RESTART_HUNG_SERVICE')
+        restart_enabled = bool(val) and str(val).strip().lower() not in ('0', 'false', 'no', 'off', '')
+    except Exception:
+        restart_enabled = False
+    if not restart_enabled:
+        return result
+
+    try:
+        restart_timeout = float(os.getenv('CORETG_DOCKER_RESTART_TIMEOUT_S') or 120.0)
+    except Exception:
+        restart_timeout = 120.0
+    logging.warning(
+        "CORETG_DOCKER_RESTART_HUNG_SERVICE is set; recreating wedged node(s), "
+        "which discards the interfaces CORE attached to them: %s",
+        ', '.join(hung),
+    )
+    attempts = _restart_not_running_docker_nodes(hung, restart_timeout_s=restart_timeout)
+    try:
+        if generation_meta is not None:
+            generation_meta.setdefault('docker_nodes_serving_recovery_attempts', attempts)
+    except Exception:
+        pass
+    if any(bool(item.get('ok')) for item in attempts):
+        retry = _wait_for_docker_nodes_serving(hung, timeout_s=wait_s, quiet_s=quiet_s)
+        result['recovered'] = retry.get('served') or []
+        result['still_not_serving'] = retry.get('not_serving') or []
+    return result
 
 
 def _repair_docker_home_permissions() -> str:
@@ -9512,6 +9767,24 @@ def main():
                         logging.info('docker node %s default route: %s', _rn, _outcome)
                 except Exception as exc:
                     logging.warning('host-side default route pass failed: %s', exc)
+
+            # A container can be `running` with its service wedged -- see
+            # `_ensure_docker_nodes_serving`. Reported, never fatal: a node that
+            # is slow rather than stuck would otherwise start failing runs that
+            # pass today, and the phases below already decide the verdict.
+            if (start_ok or configuration_state_pending_docker_validation) and docker_names2:
+                try:
+                    serving_wait_s = float(os.getenv('CORETG_DOCKER_SERVING_WAIT_S') or 180.0)
+                except Exception:
+                    serving_wait_s = 180.0
+                try:
+                    _ensure_docker_nodes_serving(
+                        list(docker_names2),
+                        serving_wait_s=serving_wait_s,
+                        generation_meta=generation_meta if isinstance(generation_meta, dict) else None,
+                    )
+                except Exception as exc:
+                    logging.warning('docker node serving check failed: %s', exc)
 
             # Strict: ensure docker-compose nodes are running the intended compose service/image.
             # This prevents intermittent outcomes where CORE starts the default "sleep" container before we swap

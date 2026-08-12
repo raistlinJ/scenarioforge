@@ -6823,10 +6823,17 @@ def _regenerate_missing_remote_flow_artifacts_for_plan(
             failures.append(f"assignment {index} ({generator_id}) regenerate failed: {exc}")
             continue
         if not isinstance(result, dict) or result.get('ok') is not True:
+            # The generator's own stdout/stderr is the only account of why it
+            # failed, and it is nested inside this payload. At 600 characters
+            # the envelope alone consumed the budget and the output was cut
+            # mid-word ("Container fg_... Creatin"), leaving a failure whose
+            # cause could not be recovered from the log afterwards -- the
+            # exception raised below deliberately carries a fixed message, so
+            # this line is the only place the reason is ever written down.
             try:
-                detail = _summarize_for_log(json.dumps(result, ensure_ascii=False), limit=600)
+                detail = _summarize_for_log(json.dumps(result, ensure_ascii=False), limit=8000)
             except Exception:
-                detail = str(result or '')[:600]
+                detail = str(result or '')[:8000]
             failures.append(f"assignment {index} ({generator_id}) regenerate failed: {detail}")
             continue
         if verify_after:
@@ -25881,6 +25888,10 @@ def _flow_validate_chain_order_by_requires_produces(
     gen_defs_by_id: dict[str, dict[str, Any]] = _flow_enabled_generator_defs_by_id()
 
     available: set[str] = set(_flow_synthesized_inputs())
+    # Where the sequencer supplies `flow_supply_when_first` inputs. Hoisted out
+    # of the try below because the per-step check further down needs it too:
+    # asking the sequencer's own helper is what keeps the two from drifting.
+    start_positions: set[int] = set()
     try:
         start_positions = _flow_parallel_start_assignment_indexes(ordered_assignments, gen_defs_by_id=gen_defs_by_id)
         for start_index in sorted(start_positions):
@@ -26062,19 +26073,33 @@ def _flow_validate_chain_order_by_requires_produces(
             base_prod = set()
         produces = base_prod | inferred_produces
 
-        # The marker is honored at the opening step, where Flow really does hand
-        # the value in, and after it only for a fact the step produces itself.
+        # Waiving a marked input takes two separate things, and checking only
+        # one of them has now caused the same run-time failure twice.
         #
-        # That second case is the self-gating generator: it mints a credential
-        # and then puts its own service behind it, so it both requires and
-        # produces the fact and nothing upstream needs to. Waiving the marker
-        # for *any* later step went further than that and let a step vouch for a
-        # dependency it could not satisfy -- `dep_ssh_key_bastion` sitting
-        # second, requiring an `SSHPrivateKey(path)` it does not produce and no
-        # earlier step emitted, validated clean here, then refused its own
-        # config at run time with "[validation error] SSHPrivateKey(path) is
-        # required", wrote no outputs.json, and failed the run two layers later
-        # as "Challenges and Flow Data not found on CORE VM".
+        # 1. Flow has to hand this step a value at all. It does that at index 0
+        #    and at parallel-branch starts, and nowhere else -- a step is only a
+        #    branch start when none of its requirements came from an earlier
+        #    step, so a step wired into the chain never gets one.
+        # 2. The invented value has to be usable. A step that *produces* the
+        #    fact makes Flow's stand-in real -- it creates the account with
+        #    those credentials. A step that only consumes it needs the real
+        #    upstream artifact, and a fabricated path or secret is worthless.
+        #
+        # Checking only (1) let `dep_ssh_key_bastion` -- second, needing an
+        # `SSHPrivateKey(path)` it does not produce -- read as a branch start
+        # and validate clean, then refuse its own config at run time with
+        # "[validation error] SSHPrivateKey(path) is required", write no
+        # outputs.json, and fail the run two layers later as "Challenges and
+        # Flow Data not found on CORE VM".
+        #
+        # Checking only (2) did the same thing to
+        # `ssh_password_finance_terminal`, whose generator.py parses
+        # `Credential(user, password)` out of its config, raises when it is
+        # absent, and re-exports it -- so it produces the fact without minting
+        # it. Sitting at sequence 2 behind a pivot it took from step 1, it was
+        # never a branch start and never got a credential, but produced the
+        # fact so the requirement was waived anyway. Identical failure, one
+        # fact name later.
         marked_supply = {
             str(name).strip()
             for name in _flow_first_step_chain_supplied_input_names(a)
@@ -26082,8 +26107,10 @@ def _flow_validate_chain_order_by_requires_produces(
         }
         if step_index == 0:
             supplied_by_flow = marked_supply
-        else:
+        elif step_index in start_positions:
             supplied_by_flow = {name for name in marked_supply if name in produces}
+        else:
+            supplied_by_flow = set()
         if supplied_by_flow:
             base_requires -= supplied_by_flow
             inferred_requires = {r for r in inferred_requires if r not in supplied_by_flow}
@@ -50770,6 +50797,19 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             errors.append(f'{mp}: python syntax error: {exc}')
             continue
 
+        # A note declared in the manifest travels with the generator's *source*,
+        # so a lesson learned about a generator can live in the repo it is
+        # authored in and reach every install of it. Until this was read, the
+        # only way a note survived was inside a pack exported from a running
+        # instance -- which meant a note written here was lost the moment the
+        # generator was reinstalled from its repo. Packs carrying their own
+        # notes still win over the manifest (see the install path).
+        manifest_note = str(doc.get('note') or '').strip()
+        manifest_note_color = str(doc.get('note_color') or '').strip().lower()
+        if manifest_note_color and manifest_note_color not in {'red', 'yellow', 'green'}:
+            errors.append(f'{mp}: note_color must be red, yellow, or green')
+            continue
+
         items.append({
             'id': gen_id,
             'kind': kind,
@@ -50780,6 +50820,8 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
             'manifest_id': manifest_id,
             'manifest_path': str(mp),
             'compose_dependencies': compose_dependency_summary,
+            'manifest_note': manifest_note,
+            'manifest_note_color': manifest_note_color or None,
         })
 
     # An installed pack is remapped to numeric directory ids, but Flow resolves
@@ -50973,8 +51015,16 @@ def _install_generator_pack_payload(
             }
             imported_note = imported_note_map.get((kind, source_gid))
             if imported_note:
+                # A note carried by the pack reflects what this deployment
+                # learned about the generator, so it outranks the manifest's.
                 installed_item['note'] = str(imported_note.get('note') or '').strip()
                 installed_item['note_color'] = imported_note.get('note_color')
+            else:
+                manifest_note = str(it.get('manifest_note') or '').strip()
+                manifest_note_color = it.get('manifest_note_color')
+                if manifest_note or manifest_note_color:
+                    installed_item['note'] = manifest_note
+                    installed_item['note_color'] = manifest_note_color
             compose_dependency_summary = it.get('compose_dependencies') if isinstance(it.get('compose_dependencies'), dict) else {}
             # The compose file as installed, for the architecture scan below.
             compose_path_for_scan = ''

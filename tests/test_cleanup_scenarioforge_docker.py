@@ -145,7 +145,8 @@ def test_force_cleanup_runs_remote_destructive_docker_commands(monkeypatch, caps
     assert "docker images -aq" in command
     assert "docker rmi -f" in command
     assert "docker builder prune -af" in command
-    assert "docker volume prune -f" in command
+    # `-a`, because a bare prune leaves named volumes behind on Docker >= 23.
+    assert "docker volume prune -af" in command
     assert "[cleanup] removing all containers" in command
     assert "[cleanup] pruning unused volumes" in command
     captured = capsys.readouterr()

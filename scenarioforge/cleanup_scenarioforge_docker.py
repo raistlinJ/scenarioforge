@@ -364,7 +364,13 @@ echo '[cleanup] pruning unused images'
         + r"""echo '[cleanup] pruning build cache'
 docker builder prune -af || true
 echo '[cleanup] pruning unused volumes'
-docker volume prune -f || true
+# `-a` is required: since Docker 23.0 a bare `volume prune` skips *named*
+# volumes, which is what a scenario creates, so this reclaimed nothing --
+# measured on the CORE VM as 44 orphaned volumes surviving a prune reporting
+# 0B. An unqualified `-a` is correct here, unlike the per-run cleanup: this
+# command's stated contract is to remove everything unused, and every container
+# is already gone by this point.
+docker volume prune -af || true
 echo '[cleanup] pruning unused networks'
 docker network prune -f || true
 
