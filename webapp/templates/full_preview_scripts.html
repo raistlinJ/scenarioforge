@@ -17,6 +17,7 @@
     var planFlow = null;
     var flowSourceOk = true;
     let scenarioMeta = { scenario: '', xml_basename: '' };
+    const pageXmlPath = {{ (xml_path or '') | tojson }};
 
     const flowNodeFlagModalEl = document.getElementById('flowNodeFlagModal');
     const flowNodeFlagModalTitleEl = document.getElementById('flowNodeFlagModalTitle');
@@ -34,7 +35,7 @@
         }
         const warningState = helper({
           scenario: '{{ scenario or "" }}',
-          xmlPath: '{{ xml_path or "" }}',
+          xmlPath: pageXmlPath,
           allowStored: true,
         });
         if (warningState && warningState.active === true) {
@@ -3708,7 +3709,7 @@
         return;
       }
       window.coretgRunArtifactChecks({
-        xmlPath: '{{ xml_path or "" }}',
+        xmlPath: pageXmlPath,
         scenario: scen,
         title: scen ? `Full Validation — ${scen}` : 'Full Validation',
       });
@@ -3840,7 +3841,7 @@
           const scen = (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '{{ (scenario or "")|e }}').trim();
           const proceedWithSavedXml = await ((window.top || window).coretgConfirmSavedXmlGroundTruth?.('Execute', {
             scenario: scen,
-            xmlPath: '{{ xml_path or "" }}',
+            xmlPath: pageXmlPath,
             allowStored: true,
           }) ?? true);
           if (!proceedWithSavedXml) {
@@ -3854,7 +3855,7 @@
         dockerRetryAttempted = false;
         try {
           openExecuteProgress('Executing scenario…');
-          appendExecuteProgressLog('Submitting run for {{ xml_path }}');
+          appendExecuteProgressLog('Submitting run for ' + pageXmlPath);
           cleanupExecuteProgress();
 
           function getExecuteRunReturnCode(runStatus) {
@@ -3878,7 +3879,7 @@
           function buildExecuteForm(opts) {
             const o = opts || {};
             const form = new FormData();
-            form.append('xml_path', '{{ xml_path }}');
+            form.append('xml_path', pageXmlPath);
             if (o.dockerRemoveConflicts) { form.append('docker_remove_conflicts', '1'); }
             try {
               const scen = (typeof scenarioMeta?.scenario === 'string' ? scenarioMeta.scenario : '').trim();
@@ -3937,8 +3938,16 @@
             res = await fetch("{{ url_for('run_cli_async') }}", { method: 'POST', body: form });
           }
           if (!res.ok) {
-            appendExecuteProgressLog('Failed to start execution (HTTP ' + res.status + ')');
-            setExecuteProgressUI({ status: 'Failed to start', meta: 'HTTP ' + res.status, barText: 'Error', animate: false });
+            let startError = '';
+            try {
+              const errorPayload = await res.clone().json();
+              startError = String(errorPayload?.error || errorPayload?.message || '').trim();
+            } catch (e) {
+              try { startError = String(await res.text()).trim(); } catch (_e) { }
+            }
+            const startFailure = 'Failed to start execution (HTTP ' + res.status + ')' + (startError ? ': ' + startError : '');
+            appendExecuteProgressLog(startFailure);
+            setExecuteProgressUI({ status: 'Failed to start', meta: startError || ('HTTP ' + res.status), barText: 'Error', animate: false });
             return;
           }
           const initData = await res.json();

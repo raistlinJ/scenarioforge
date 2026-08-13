@@ -43,9 +43,19 @@ def test_vuln_catalog_page_renders_active_catalog(monkeypatch):
     assert 'Clear' in page
     assert 'id="vulnPackImportMethod"' in page
     assert 'id="vulnPackImportSubmit"' in page
+    assert 'data-vuln-pack-import-method="folder"' in page
     assert 'data-vuln-pack-import-method="zip"' in page
     assert 'data-vuln-pack-import-method="url"' in page
+    assert 'id="vulnPackFolderUploadForm"' in page
+    assert 'id="vulnPackFolderInput"' in page
+    assert 'webkitdirectory' in page
+    assert "fd.append('repo_paths', relativePaths[index]);" in page
     assert 'function syncVulnPackImportMethod()' in page
+    assert 'id="vulnPackImportSteps"' in page
+    assert 'id="vulnPackImportActivity"' in page
+    assert 'function beginVulnServerProcessing(detail)' in page
+    assert 'function vulnImportResultText(payload)' in page
+    assert "urlImportForm.addEventListener('submit'" in page
 
 
 def test_vuln_catalog_filters_include_compose_dependency_metadata() -> None:

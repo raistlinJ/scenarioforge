@@ -114,7 +114,7 @@
                             <input type="hidden" name="disabled" value="{{ 0 if p.disabled else 1 }}" />
                             <button class="btn btn-sm btn-outline-warning" type="submit">{{ 'Enable' if p.disabled else 'Disable' }}</button>
                           </form>
-                          <form action="{{ url_for('generator_packs_delete', pack_id=p.id) }}" method="post" onsubmit="return confirm('Uninstall this pack?');">
+                          <form action="{{ url_for('generator_packs_delete', pack_id=p.id) }}" method="post" data-pack-uninstall-form data-pack-id="{{ p.id }}" data-pack-label="{{ p.label or p.id }}" onsubmit="event.preventDefault(); submitPackUninstall(this.dataset.packId, this.dataset.packLabel); return false;">
                             <button class="btn btn-sm btn-outline-danger" type="submit">Uninstall</button>
                           </form>
                         </div>
@@ -595,6 +595,27 @@
   </div>
 </div>
 
+<!-- Generator Pack Uninstall Status Modal -->
+<div class="modal fade" id="packUninstallProgressModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="packUninstallProgressTitle">Uninstalling Generator Pack…</h5>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex align-items-center gap-2" id="packUninstallWorking">
+          <div class="spinner-border spinner-border-sm text-danger" role="status" aria-hidden="true"></div>
+          <span id="packUninstallProgressText">Removing CORE runtime and local catalog copies…</span>
+        </div>
+        <pre class="small bg-light p-2 mt-3 mb-0" id="packUninstallResult" style="max-height: 220px; overflow:auto; display:none;"></pre>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="packUninstallCloseBtn" data-bs-dismiss="modal" style="display:none;">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Generator Pack Upload Progress Modal -->
 <div class="modal fade" id="packUploadProgressModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
   <div class="modal-dialog modal-dialog-centered">
@@ -607,7 +628,17 @@
         <div class="progress" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100">
           <div class="progress-bar progress-bar-striped progress-bar-animated" id="packUploadProgressBar" style="width: 0%">0%</div>
         </div>
-        <div class="small text-muted mt-2" id="packUploadProgressBytes"></div>
+        <div class="d-flex justify-content-between small text-muted mt-2">
+          <span id="packUploadProgressBytes"></span>
+          <span id="packUploadElapsed">Elapsed 0s</span>
+        </div>
+        <ol class="small mt-3 mb-2 ps-3" id="packImportSteps">
+          <li data-import-step="prepare">Prepare selected files</li>
+          <li data-import-step="upload">Upload or download pack data</li>
+          <li data-import-step="process">Discover and validate manifests</li>
+          <li data-import-step="install">Install generators and update catalog</li>
+        </ol>
+        <div class="small text-muted border rounded p-2" id="packImportActivity" style="max-height: 100px; overflow:auto;" aria-live="polite"></div>
         <pre class="small bg-light p-2 mt-3" id="packUploadResult" style="max-height: 180px; overflow: auto; display:none;"></pre>
       </div>
       <div class="modal-footer">
@@ -2602,18 +2633,75 @@
     return norm.includes('outputs/installed_generators') || norm.includes('/installed_generators/');
   }
 
-  function submitPackUninstall(packId, packLabel) {
+  let packUninstallInFlight = false;
+
+  async function submitPackUninstall(packId, packLabel) {
     const pid = String(packId || '').trim();
-    if (!pid) return;
+    if (!pid || packUninstallInFlight) return;
     const label = String(packLabel || '').trim() || pid;
-    const ok = confirm(`Uninstall pack "${label}"?\n\nThis removes every generator installed by that pack.`);
+    const prompt = `This removes every generator installed by “${label}” from the local catalog and its synchronized CORE runtime copy.`;
+    const ok = typeof window.confirmWithModal === 'function'
+      ? await window.confirmWithModal('Uninstall Generator Pack?', prompt, 'Uninstall', 'danger')
+      : confirm(`Uninstall pack "${label}"?\n\n${prompt}`);
     if (!ok) return;
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.action = `/generator_packs/delete/${encodeURIComponent(pid)}`;
-    form.style.display = 'none';
-    document.body.appendChild(form);
-    form.submit();
+
+    const modalEl = document.getElementById('packUninstallProgressModal');
+    const titleEl = document.getElementById('packUninstallProgressTitle');
+    const textEl = document.getElementById('packUninstallProgressText');
+    const workingEl = document.getElementById('packUninstallWorking');
+    const resultEl = document.getElementById('packUninstallResult');
+    const closeBtn = document.getElementById('packUninstallCloseBtn');
+    const modal = modalEl ? bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false }) : null;
+
+    packUninstallInFlight = true;
+    if (titleEl) titleEl.textContent = `Uninstalling ${label}…`;
+    if (textEl) textEl.textContent = 'Removing the synchronized CORE runtime copy, then local generator files…';
+    if (workingEl) workingEl.style.display = '';
+    if (workingEl) workingEl.querySelector('.spinner-border')?.classList.remove('d-none');
+    if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
+    if (closeBtn) closeBtn.style.display = 'none';
+    if (modal) modal.show();
+
+    try {
+      const response = await fetch(`/generator_packs/delete/${encodeURIComponent(pid)}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest',
+          'Accept': 'application/json',
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      const message = String(payload.message || payload.error || `Uninstall failed (HTTP ${response.status}).`);
+      if (!response.ok || payload.ok !== true) {
+        if (titleEl) titleEl.textContent = 'Uninstall did not complete';
+        if (textEl) textEl.textContent = 'The pack is still installed.';
+        if (workingEl) workingEl.querySelector('.spinner-border')?.classList.add('d-none');
+        if (resultEl) { resultEl.style.display = 'block'; resultEl.textContent = message; }
+        if (closeBtn) closeBtn.style.display = '';
+        return;
+      }
+
+      if (titleEl) titleEl.textContent = 'Generator pack uninstalled';
+      if (textEl) textEl.textContent = 'Cleanup completed. Refreshing the catalog…';
+      if (workingEl) workingEl.querySelector('.spinner-border')?.classList.add('d-none');
+      if (resultEl) { resultEl.style.display = 'block'; resultEl.textContent = message; }
+      window.setTimeout(() => {
+        try { history.replaceState(null, '', '{{ url_for('flag_catalog_page') }}#flagGenSources'); } catch (e) {}
+        window.location.reload();
+      }, 700);
+    } catch (error) {
+      if (titleEl) titleEl.textContent = 'Uninstall request failed';
+      if (textEl) textEl.textContent = 'The pack may still be installed. Refresh before retrying.';
+      if (workingEl) workingEl.querySelector('.spinner-border')?.classList.add('d-none');
+      if (resultEl) {
+        resultEl.style.display = 'block';
+        resultEl.textContent = String((error && error.message) || error || 'Network error during uninstall.');
+      }
+      if (closeBtn) closeBtn.style.display = '';
+    } finally {
+      packUninstallInFlight = false;
+    }
   }
 
   function appendPreLine(preId, line) {
@@ -4467,6 +4555,9 @@
     const barEl = document.getElementById('packUploadProgressBar');
     const textEl = document.getElementById('packUploadProgressText');
     const bytesEl = document.getElementById('packUploadProgressBytes');
+    const elapsedEl = document.getElementById('packUploadElapsed');
+    const stepsEl = document.getElementById('packImportSteps');
+    const activityEl = document.getElementById('packImportActivity');
     const cancelBtn = document.getElementById('packUploadCancelBtn');
     const resultEl = document.getElementById('packUploadResult');
     const closeBtn = document.getElementById('packUploadCloseBtn');
@@ -4475,6 +4566,95 @@
     const successMetaEl = document.getElementById('packInstallSuccessMeta');
 
     if (!form || !fileInput || !folderForm || !folderInput || !importForm || !importUrlInput || !modalEl || !barEl || !textEl || !bytesEl || !cancelBtn || !resultEl || !closeBtn) return;
+
+    let importStartedAt = 0;
+    let importProgressTimer = null;
+    let processingMessageIndex = 0;
+    const processingMessages = [
+      'Scanning recursively for generator manifests…',
+      'Validating YAML, compose services, and Python syntax…',
+      'Resolving generator IDs and dependency files…',
+      'Copying validated generators into the installed catalog…',
+    ];
+
+    function appendImportActivity(message) {
+      if (!activityEl || !message) return;
+      const elapsed = importStartedAt ? Math.max(0, Math.floor((Date.now() - importStartedAt) / 1000)) : 0;
+      const line = document.createElement('div');
+      line.textContent = `[${elapsed}s] ${message}`;
+      activityEl.appendChild(line);
+      activityEl.scrollTop = activityEl.scrollHeight;
+    }
+
+    function setImportStep(name, status) {
+      if (!stepsEl) return;
+      const item = stepsEl.querySelector(`[data-import-step="${name}"]`);
+      if (!item) return;
+      if (!item.dataset.label) item.dataset.label = item.textContent.trim();
+      const icons = { pending: '○', running: '◉', complete: '✓', error: '✕' };
+      item.textContent = `${icons[status] || icons.pending} ${item.dataset.label}`;
+      item.classList.toggle('text-muted', status === 'pending');
+      item.classList.toggle('text-primary', status === 'running');
+      item.classList.toggle('text-success', status === 'complete');
+      item.classList.toggle('text-danger', status === 'error');
+    }
+
+    function beginDetailedImport(detail) {
+      if (importProgressTimer) window.clearInterval(importProgressTimer);
+      importStartedAt = Date.now();
+      processingMessageIndex = 0;
+      if (activityEl) activityEl.textContent = '';
+      ['prepare', 'upload', 'process', 'install'].forEach((name) => setImportStep(name, 'pending'));
+      setImportStep('prepare', 'complete');
+      setImportStep('upload', 'running');
+      appendImportActivity(detail || 'Prepared import request.');
+      if (elapsedEl) elapsedEl.textContent = 'Elapsed 0s';
+      importProgressTimer = window.setInterval(() => {
+        const elapsed = Math.max(0, Math.floor((Date.now() - importStartedAt) / 1000));
+        if (elapsedEl) elapsedEl.textContent = `Elapsed ${elapsed}s`;
+      }, 1000);
+    }
+
+    function beginServerProcessing(detail) {
+      setImportStep('upload', 'complete');
+      setImportStep('process', 'running');
+      setProgress(75, 0, 0);
+      textEl.textContent = detail || processingMessages[0];
+      appendImportActivity('Transfer complete; server-side processing started.');
+      const cycle = () => {
+        if (!importProgressTimer) return;
+        const message = processingMessages[processingMessageIndex % processingMessages.length];
+        processingMessageIndex += 1;
+        textEl.textContent = message;
+        appendImportActivity(message);
+      };
+      cycle();
+      const baseTimer = importProgressTimer;
+      const processingTimer = window.setInterval(() => {
+        if (!importProgressTimer || importProgressTimer !== baseTimer) {
+          window.clearInterval(processingTimer);
+          return;
+        }
+        cycle();
+      }, 4000);
+    }
+
+    function finishDetailedImport(success, message) {
+      if (importProgressTimer) window.clearInterval(importProgressTimer);
+      importProgressTimer = null;
+      if (elapsedEl && importStartedAt) {
+        elapsedEl.textContent = `Elapsed ${Math.max(0, Math.floor((Date.now() - importStartedAt) / 1000))}s`;
+      }
+      if (success) {
+        setImportStep('upload', 'complete');
+        setImportStep('process', 'complete');
+        setImportStep('install', 'complete');
+      } else {
+        const running = stepsEl && stepsEl.querySelector('.text-primary');
+        if (running) setImportStep(running.getAttribute('data-import-step'), 'error');
+      }
+      appendImportActivity(message || (success ? 'Import complete.' : 'Import failed.'));
+    }
 
     function fmtBytes(n) {
       const num = Number(n) || 0;
@@ -4539,6 +4719,10 @@
       const detailLines = [];
       const confirmationDetail = String((payload && payload.confirmation_detail) || '').trim();
       if (confirmationDetail) detailLines.push(confirmationDetail);
+      const importSummary = payload && typeof payload.import_summary === 'object' ? payload.import_summary : {};
+      const installedCount = Number(importSummary.installed_generator_count) || 0;
+      const kindCount = Number(importSummary.generator_kind_count) || 0;
+      if (installedCount) detailLines.push(`Installed ${installedCount} generator(s) across ${kindCount || 1} kind(s).`);
       grouped.forEach((group) => {
         const kind = String(group && group.kind || '').trim();
         const ids = Array.isArray(group && group.ids) ? group.ids.map((id) => String(id || '').trim()).filter(Boolean) : [];
@@ -4551,6 +4735,7 @@
       if (dependencyWarnings.length) {
         detailLines.push(`Missing compose support files: ${dependencyWarnings.slice(0, 3).join(', ')}${dependencyWarnings.length > 3 ? `, +${dependencyWarnings.length - 3} more` : ''}`);
       }
+      if (warnings.length && !dependencyWarnings.length) detailLines.push(`Validation warnings: ${warnings.length}.`);
       if (successTextEl) successTextEl.textContent = confirmationText;
       if (successMetaEl) successMetaEl.textContent = detailLines.join(' ');
       if (successAlertEl) {
@@ -4584,6 +4769,7 @@
         const modal = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
         if (titleEl) titleEl.textContent = 'Uploading Generator Pack…';
         textEl.textContent = `Uploading ${file.name}…`;
+        beginDetailedImport(`Prepared ZIP ${file.name} (${fmtBytes(file.size)}).`);
         showResult('');
         setBarStyle('working');
         setProgress(0, 0, file.size);
@@ -4603,6 +4789,7 @@
           textEl.textContent = 'Upload cancelled.';
           setBarStyle('cancel');
           showResult('Request aborted by user.');
+          finishDetailedImport(false, 'Import cancelled by user.');
           enterTerminalState();
         };
         cancelBtn.addEventListener('click', onCancel, { once: true });
@@ -4611,9 +4798,10 @@
           if (!e) return;
           const total = e.total || file.size || 0;
           const loaded = e.loaded || 0;
-          const pct = total ? (loaded / total) * 100 : 0;
+          const pct = total ? (loaded / total) * 70 : 0;
           setProgress(pct, loaded, total);
         };
+        xhr.upload.onload = () => beginServerProcessing('Upload complete; validating generator pack…');
 
         xhr.onload = () => {
           try {
@@ -4638,6 +4826,7 @@
               }
               setBarStyle('success');
               textEl.textContent = 'Installed.';
+              finishDetailedImport(true, 'Generator catalog updated successfully.');
               showResult(resultTextFromPayload(payload || {}));
               enterTerminalState();
               // Reload the catalog to show the updated pack table.
@@ -4652,6 +4841,7 @@
             }
 
             setBarStyle('error');
+            finishDetailedImport(false, 'Generator import failed.');
             textEl.textContent = `Upload failed (HTTP ${status || 'error'}).`;
             const err = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : respText;
             showResult(err || 'Upload failed.');
@@ -4670,6 +4860,7 @@
           textEl.textContent = 'Upload failed (network error).';
           setBarStyle('error');
           showResult('Network error while uploading. Check the Web UI server logs and your browser console.');
+          finishDetailedImport(false, 'Network error during generator import.');
           enterTerminalState();
         };
 
@@ -4680,6 +4871,7 @@
           setBarStyle('error');
           textEl.textContent = 'Upload aborted.';
           showResult('Upload was aborted (not by user). If this repeats, check server logs and browser console.');
+          finishDetailedImport(false, 'Generator import was aborted.');
           enterTerminalState();
         };
 
@@ -4712,6 +4904,7 @@
         const modal = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
         if (titleEl) titleEl.textContent = 'Uploading Generator Repository…';
         textEl.textContent = `Uploading ${repositoryLabel} (${files.length} files)…`;
+        beginDetailedImport(`Prepared ${files.length} files (${fmtBytes(totalSize)}) from ${repositoryLabel}.`);
         showResult('');
         setBarStyle('working');
         setProgress(0, 0, totalSize);
@@ -4731,6 +4924,7 @@
           textEl.textContent = 'Upload cancelled.';
           setBarStyle('cancel');
           showResult('Request aborted by user.');
+          finishDetailedImport(false, 'Import cancelled by user.');
           enterTerminalState();
         };
         cancelBtn.addEventListener('click', onCancel, { once: true });
@@ -4739,9 +4933,10 @@
           if (!e) return;
           const total = e.total || totalSize || 0;
           const loaded = e.loaded || 0;
-          const pct = total ? (loaded / total) * 100 : 0;
+          const pct = total ? (loaded / total) * 70 : 0;
           setProgress(pct, loaded, total);
         };
+        xhr.upload.onload = () => beginServerProcessing('Upload complete; discovering generator manifests…');
 
         xhr.onload = () => {
           try {
@@ -4764,6 +4959,7 @@
               }
               setBarStyle('success');
               textEl.textContent = 'Installed.';
+              finishDetailedImport(true, 'Generator catalog updated successfully.');
               showResult(resultTextFromPayload(payload || {}));
               enterTerminalState();
               window.setTimeout(() => {
@@ -4777,6 +4973,7 @@
             }
 
             setBarStyle('error');
+            finishDetailedImport(false, 'Generator repository import failed.');
             textEl.textContent = `Upload failed (HTTP ${status || 'error'}).`;
             const err = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : respText;
             showResult(err || 'Repository upload failed.');
@@ -4795,6 +4992,7 @@
           textEl.textContent = 'Upload failed (network error).';
           setBarStyle('error');
           showResult('Network error while uploading. Check the Web UI server logs and your browser console.');
+          finishDetailedImport(false, 'Network error during generator import.');
           enterTerminalState();
         };
 
@@ -4804,6 +5002,7 @@
           setBarStyle('error');
           textEl.textContent = 'Upload aborted.';
           showResult('Upload was aborted (not by user). If this repeats, check server logs and browser console.');
+          finishDetailedImport(false, 'Generator import was aborted.');
           enterTerminalState();
         };
 
@@ -4835,6 +5034,8 @@
         let finished = false;
         if (titleEl) titleEl.textContent = 'Importing Generator Pack…';
         textEl.textContent = 'Downloading ZIP and validating generator pack…';
+        beginDetailedImport(`Requested generator pack from ${zipUrl}.`);
+        beginServerProcessing('Server is downloading and validating the generator pack…');
         showResult('');
         setBarStyle('working');
         setProgress(15, 0, 0);
@@ -4849,6 +5050,7 @@
           textEl.textContent = 'Import cancelled.';
           setBarStyle('cancel');
           showResult('Request aborted by user.');
+          finishDetailedImport(false, 'URL import cancelled by user.');
           enterTerminalState();
         };
         cancelBtn.addEventListener('click', onCancel, { once: true });
@@ -4870,11 +5072,13 @@
           setBarStyle('error');
           textEl.textContent = `Import failed (HTTP ${resp.status || 'error'}).`;
           showResult(String((payload && (payload.error || payload.message)) || 'URL import failed.'));
+          finishDetailedImport(false, 'Generator URL import failed.');
           enterTerminalState();
           return;
         }
         setBarStyle('success');
         textEl.textContent = 'Installed.';
+        finishDetailedImport(true, 'Generator catalog updated successfully.');
         showResult(resultTextFromPayload(payload || {}));
         enterTerminalState();
         window.setTimeout(() => {
@@ -4891,6 +5095,7 @@
         textEl.textContent = 'Import failed (network error).';
         setBarStyle('error');
         showResult(String((e && e.message) || e || 'URL import failed.'));
+        finishDetailedImport(false, 'Network error during generator URL import.');
         enterTerminalState();
       }
     });

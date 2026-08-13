@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 from webapp import app_backend
 from webapp.app_backend import app
-from webapp.flow_prepare_preview_execute import _prepare_remote_generator_execution
+from webapp.flow_prepare_preview_execute import (
+    _load_prepare_preview_request_context,
+    _prepare_remote_generator_execution,
+)
 
 
 def test_prune_remote_installed_generator_packs_uses_local_catalog_names(
@@ -54,6 +57,86 @@ def test_remote_flow_refuses_to_run_when_selected_generator_has_no_sync_path() -
     response, status = result['response']
     assert status == 500
     assert 'No generator paths resolved for Flow sync' in response.get_json()['error']
+
+
+def test_vm_flow_adopts_page_ssh_enabled_and_never_silently_falls_back_local(tmp_path: Path) -> None:
+    xml_path = tmp_path / 'Scenario2.xml'
+    xml_path.write_text('<Scenarios/>', encoding='utf-8')
+    deps = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower(),
+        _webui_runtime_mode=lambda: 'vm',
+        _coerce_bool=lambda value: bool(value),
+        _flow_normalize_dependency_level=lambda value: 3,
+        _existing_xml_path_or_none=lambda value: str(value) if Path(value).exists() else None,
+        _latest_preview_plan_for_scenario_norm_origin=lambda *_args, **_kwargs: None,
+        _latest_preview_plan_for_scenario_norm=lambda *_args, **_kwargs: None,
+        _planner_get_plan=lambda *_args, **_kwargs: None,
+        _core_config_from_xml_path=lambda *_args, **_kwargs: {'validated': True},
+        _select_core_config_for_page=lambda *_args, **_kwargs: {
+            'ssh_enabled': True,
+            'ssh_host': '12.0.0.100',
+            'ssh_port': 22,
+            'ssh_username': 'corevm',
+            'ssh_password': 'secret',
+        },
+        _apply_core_secret_to_config=lambda cfg, *_args, **_kwargs: cfg,
+        _flow_normalize_fact_override=lambda value: value,
+        _load_preview_payload_from_path=lambda *_args, **_kwargs: {'full_preview': {}},
+        _canonicalize_payload_flow_from_xml=lambda payload, **_kwargs: ({}, None),
+    )
+
+    with app.test_request_context('/'):
+        context = _load_prepare_preview_request_context(
+            deps=deps,
+            flow_progress=lambda _message: None,
+            payload={
+                'scenario': 'Scenario2',
+                'preview_plan': str(xml_path),
+                'mode': 'resolve',
+            },
+        )
+
+    assert context['response'] is None
+    assert context['flow_core_cfg']['ssh_enabled'] is True
+    assert context['flow_run_remote'] is True
+    assert context['flow_remote_forced'] is True
+
+
+def test_vm_flow_explicit_run_local_remains_local(tmp_path: Path) -> None:
+    xml_path = tmp_path / 'Scenario2.xml'
+    xml_path.write_text('<Scenarios/>', encoding='utf-8')
+    deps = SimpleNamespace(
+        _normalize_scenario_label=lambda value: str(value or '').strip().lower(),
+        _webui_runtime_mode=lambda: 'vm',
+        _coerce_bool=lambda value: bool(value),
+        _flow_normalize_dependency_level=lambda value: 3,
+        _existing_xml_path_or_none=lambda value: str(value) if Path(value).exists() else None,
+        _latest_preview_plan_for_scenario_norm_origin=lambda *_args, **_kwargs: None,
+        _latest_preview_plan_for_scenario_norm=lambda *_args, **_kwargs: None,
+        _planner_get_plan=lambda *_args, **_kwargs: None,
+        _core_config_from_xml_path=lambda *_args, **_kwargs: {'validated': True},
+        _select_core_config_for_page=lambda *_args, **_kwargs: {'ssh_enabled': True},
+        _apply_core_secret_to_config=lambda cfg, *_args, **_kwargs: cfg,
+        _flow_normalize_fact_override=lambda value: value,
+        _load_preview_payload_from_path=lambda *_args, **_kwargs: {'full_preview': {}},
+        _canonicalize_payload_flow_from_xml=lambda payload, **_kwargs: ({}, None),
+    )
+
+    with app.test_request_context('/'):
+        context = _load_prepare_preview_request_context(
+            deps=deps,
+            flow_progress=lambda _message: None,
+            payload={
+                'scenario': 'Scenario2',
+                'preview_plan': str(xml_path),
+                'mode': 'resolve',
+                'run_local': True,
+            },
+        )
+
+    assert context['response'] is None
+    assert context['flow_run_remote'] is False
+    assert context['flow_remote_forced'] is False
 
 
 def test_pack_uninstall_removes_matching_core_runtime_directory(tmp_path: Path, monkeypatch) -> None:

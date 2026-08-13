@@ -3,6 +3,8 @@ import json
 import zipfile
 from pathlib import Path
 
+from werkzeug.datastructures import MultiDict
+
 from webapp import app_backend as backend
 
 
@@ -37,7 +39,7 @@ def _login(client):
     assert resp.status_code in (200, 302)
 
 
-def test_vuln_catalog_pack_upload_ajax_missing_file_returns_400(monkeypatch):
+def test_vuln_catalog_pack_upload_ajax_missing_input_returns_400(monkeypatch):
     client = app.test_client()
     _login(client)
 
@@ -51,7 +53,66 @@ def test_vuln_catalog_pack_upload_ajax_missing_file_returns_400(monkeypatch):
     )
 
     assert resp.status_code == 400
-    assert resp.get_json() == {'ok': False, 'error': 'Missing zip_file'}
+    assert resp.get_json() == {'ok': False, 'error': 'No vulnerability catalog folder or ZIP selected.'}
+
+
+def test_vuln_catalog_pack_upload_rejects_folder_and_zip_together(monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
+    monkeypatch.setattr(
+        backend,
+        '_install_vuln_catalog_zip_file',
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError('install should not run')),
+    )
+
+    response = client.post(
+        '/vuln_catalog_packs/upload',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        data=MultiDict([
+            ('zip_file', (io.BytesIO(b'PK\x03\x04demo'), 'catalog.zip')),
+            ('repo_paths', 'catalog/docker-compose.yml'),
+            ('repo_files', (io.BytesIO(b'services: {}\n'), 'docker-compose.yml')),
+        ]),
+        content_type='multipart/form-data',
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        'ok': False,
+        'error': 'Select either a vulnerability catalog folder or a ZIP, not both.',
+    }
+
+
+def test_vuln_catalog_folder_upload_allows_more_than_flask_default_form_parts(monkeypatch):
+    client = app.test_client()
+    _login(client)
+    captured = {}
+
+    def fake_install(*, zip_file_path, label, origin):
+        with zipfile.ZipFile(zip_file_path, 'r') as archive:
+            captured['count'] = len(archive.namelist())
+        return {'id': 'large-folder-catalog'}
+
+    monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
+    monkeypatch.setattr(backend, '_install_vuln_catalog_zip_file', fake_install)
+
+    upload = MultiDict([('repo_label', 'large-folder')])
+    for index in range(501):
+        upload.add('repo_paths', f'large-folder/demo-{index}/docker-compose.yml')
+        upload.add('repo_files', (io.BytesIO(b'services: {}\n'), 'docker-compose.yml'))
+
+    response = client.post(
+        '/vuln_catalog_packs/upload',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        data=upload,
+        content_type='multipart/form-data',
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()['catalog_id'] == 'large-folder-catalog'
+    assert captured['count'] == 501
 
 
 def test_vuln_catalog_pack_upload_ajax_installs_zip(monkeypatch, tmp_path):
@@ -81,12 +142,90 @@ def test_vuln_catalog_pack_upload_ajax_installs_zip(monkeypatch, tmp_path):
         'ok': True,
         'message': 'Vulnerability catalog pack installed.',
         'catalog_id': 'catalog-123',
+        'import_method': 'upload',
+        'uploaded_file_count': 0,
+        'discovered_compose_count': 0,
+        'installed_catalog_count': 1,
+        'installed_vulnerability_count': 0,
         'missing_required_file_count': 0,
+        'bundle_failures': [],
     }
     assert captured['origin'] == 'upload'
     assert captured['label'] == 'danger_demo.zip'
     assert captured['exists_during_install'] is True
     assert not Path(captured['zip_file_path']).exists()
+
+
+def test_vuln_catalog_folder_upload_installs_with_relative_paths(monkeypatch):
+    client = app.test_client()
+    _login(client)
+    captured = {}
+
+    def fake_install(*, zip_file_path, label, origin):
+        captured['label'] = label
+        captured['origin'] = origin
+        with zipfile.ZipFile(zip_file_path, 'r') as archive:
+            captured['names'] = set(archive.namelist())
+            captured['compose'] = archive.read('downloaded-vulns/web/demo/docker-compose.yml')
+        return {'id': 'catalog-folder'}
+
+    monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
+    monkeypatch.setattr(backend, '_install_vuln_catalog_zip_file', fake_install)
+
+    response = client.post(
+        '/vuln_catalog_packs/upload',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        data=MultiDict([
+            ('repo_label', 'downloaded-vulns'),
+            ('repo_paths', 'downloaded-vulns/web/demo/docker-compose.yml'),
+            ('repo_paths', 'downloaded-vulns/web/demo/README.md'),
+            ('repo_files', (io.BytesIO(b'services: {}\n'), 'docker-compose.yml')),
+            ('repo_files', (io.BytesIO(b'# Demo\n'), 'README.md')),
+        ]),
+        content_type='multipart/form-data',
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['catalog_id'] == 'catalog-folder'
+    assert payload['import_method'] == 'folder-upload'
+    assert payload['uploaded_file_count'] == 2
+    assert payload['discovered_compose_count'] == 1
+    assert captured == {
+        'label': 'downloaded-vulns',
+        'origin': 'folder-upload',
+        'names': {
+            'downloaded-vulns/web/demo/docker-compose.yml',
+            'downloaded-vulns/web/demo/README.md',
+        },
+        'compose': b'services: {}\n',
+    }
+
+
+def test_vuln_catalog_folder_upload_rejects_unsafe_relative_path(monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
+    monkeypatch.setattr(
+        backend,
+        '_install_vuln_catalog_zip_file',
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError('install should not run')),
+    )
+
+    response = client.post(
+        '/vuln_catalog_packs/upload',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        data=MultiDict([
+            ('repo_label', 'unsafe-vulns'),
+            ('repo_paths', 'unsafe-vulns/../docker-compose.yml'),
+            ('repo_files', (io.BytesIO(b'services: {}\n'), 'docker-compose.yml')),
+        ]),
+        content_type='multipart/form-data',
+    )
+
+    assert response.status_code == 400
+    assert 'unsafe path' in response.get_json()['error']
 
 
 def test_vuln_catalog_pack_upload_ajax_reports_bundle_count(monkeypatch):
@@ -112,7 +251,13 @@ def test_vuln_catalog_pack_upload_ajax_reports_bundle_count(monkeypatch):
         'ok': True,
         'message': 'Installed 2 vulnerability catalog pack(s) from bundle.',
         'catalog_id': 'catalog-123',
+        'import_method': 'upload',
+        'uploaded_file_count': 0,
+        'discovered_compose_count': 0,
+        'installed_catalog_count': 2,
+        'installed_vulnerability_count': 0,
         'missing_required_file_count': 0,
+        'bundle_failures': [],
     }
 
 
@@ -202,6 +347,43 @@ def test_vuln_catalog_pack_import_url_installs_downloaded_zip(monkeypatch):
         'zip_bytes': b'zip-bytes',
         'label': 'demo.zip',
         'origin': 'https://example.com/packs/demo.zip',
+    }
+
+
+def test_vuln_catalog_pack_import_url_ajax_returns_detailed_summary(monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    monkeypatch.setattr(backend, '_require_builder_or_admin', lambda: None)
+    monkeypatch.setattr(backend, '_is_safe_remote_zip_url', lambda url: (True, ''))
+    monkeypatch.setattr(backend, '_download_zip_from_url', lambda url: b'zip-bytes')
+    monkeypatch.setattr(
+        backend,
+        '_install_vuln_catalog_zip_bytes',
+        lambda **kwargs: {
+            'id': 'catalog-789',
+            'compose_count': 7,
+            'missing_required_file_count': 2,
+        },
+    )
+
+    response = client.post(
+        '/vuln_catalog_packs/import_url',
+        data={'zip_url': 'https://example.com/packs/demo.zip'},
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        'ok': True,
+        'message': 'Vulnerability catalog pack installed from URL.',
+        'catalog_id': 'catalog-789',
+        'import_method': 'url',
+        'downloaded_bytes': 9,
+        'installed_catalog_count': 1,
+        'installed_vulnerability_count': 7,
+        'missing_required_file_count': 2,
+        'bundle_failures': [],
     }
 
 

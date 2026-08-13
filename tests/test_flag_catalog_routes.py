@@ -63,6 +63,10 @@ def test_flag_catalog_page_groups_installed_ids_by_kind(monkeypatch):
     assert 'repo_paths' in page
     assert 'packUploadProgressTitle' in page
     assert 'function syncImportMethod()' in page
+    assert 'id="packImportSteps"' in page
+    assert 'id="packImportActivity"' in page
+    assert 'function beginServerProcessing(detail)' in page
+    assert 'Transfer complete; server-side processing started.' in page
 
 
 def test_flag_catalog_batch_status_discovers_active_run_without_saved_id() -> None:
@@ -141,6 +145,18 @@ def test_flag_catalog_template_handles_duplicate_conflict_rows() -> None:
     assert 'submitPackUninstall(packId, packLabel)' in text
     assert 'Duplicate ID' in text
     assert 'Uninstall Pack' in text
+
+
+def test_flag_catalog_pack_uninstall_keeps_status_visible_until_outcome() -> None:
+    text = FLAG_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert 'id="packUninstallProgressModal"' in text
+    assert 'data-pack-uninstall-form' in text
+    assert 'async function submitPackUninstall(packId, packLabel)' in text
+    assert "'X-Requested-With': 'XMLHttpRequest'" in text
+    assert "titleEl.textContent = 'Uninstall did not complete'" in text
+    assert "textEl.textContent = 'The pack is still installed.'" in text
+    assert "history.replaceState(null, '', '{{ url_for('flag_catalog_page') }}#flagGenSources')" in text
+    assert 'window.location.reload();' in text
 
 
 def test_generator_catalog_tabs_use_bootstrap_tab_triggers() -> None:

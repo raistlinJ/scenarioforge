@@ -3113,6 +3113,35 @@
     } catch (e) {
       const payload = e && typeof e === 'object' ? e.payload : null;
       const payloadError = payload && typeof payload === 'object' ? String(payload.error || payload.message || '').trim() : '';
+      // A prerequisite failure (most commonly an unvalidated CORE connection)
+      // does not make the saved topology counts unknown. The endpoint includes
+      // those counts in its error payload; keep the summary accurate while the
+      // Generate controls remain disabled.
+      try {
+        if (payload && typeof payload === 'object') {
+          const dockerCount = Number.isFinite(+payload.docker_count) ? (+payload.docker_count) : 0;
+          const vulnCount = Number.isFinite(+payload.vuln_count) ? (+payload.vuln_count) : 0;
+          if (dockerCount > 0 || vulnCount > 0) {
+            const bucketFrom = (key) => (Number.isFinite(+payload[key]) ? Math.max(0, +payload[key]) : 0);
+            lastStats = {
+              vuln_total: vulnCount,
+              docker_nonvuln_total: Number.isFinite(+payload.docker_nonvuln_count) ? (+payload.docker_nonvuln_count) : 0,
+              docker_total: dockerCount,
+              topology_flag_node_generator_total: Number.isFinite(+payload.topology_flag_node_generator_count)
+                ? (+payload.topology_flag_node_generator_count)
+                : 0,
+              generic_docker_total: Number.isFinite(+payload.generic_docker_count) ? (+payload.generic_docker_count) : 0,
+              specified_flag_node_generator_total: bucketFrom('specified_flag_node_generator_total'),
+              specified_vulnerability_total: bucketFrom('specified_vulnerability_total'),
+              flag_gen_slot_total: bucketFrom('flag_gen_slot_total'),
+              vulnerability_slot_total: bucketFrom('vulnerability_slot_total'),
+              docker_slot_total: bucketFrom('docker_slot_total'),
+              mandatory_challenge_total: bucketFrom('mandatory_challenge_total'),
+            };
+            updateLengthSpinnerMax();
+          }
+        }
+      } catch (statsError) { }
       if (payloadError && payloadError.includes('No XML found for this scenario')) {
         flowEligibilityReasons = [];
         flowEligible = true;

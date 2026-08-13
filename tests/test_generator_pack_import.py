@@ -20,6 +20,124 @@ def _make_zip(files: dict[str, str | bytes]) -> bytes:
     return buf.read()
 
 
+def _minimal_generator_files(generator_id: str, *, kind: str = "flag-generator") -> dict[str, str]:
+    catalog_dir = "flag_node_generators" if kind == "flag-node-generator" else "flag_generators"
+    produced_artifact = "Flag(flag_id)" if kind == "flag-node-generator" else "File(path)"
+    base = f"{catalog_dir}/{generator_id}"
+    return {
+        f"{base}/manifest.yaml": f"""manifest_version: 1
+id: {generator_id}
+kind: {kind}
+name: {generator_id}
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+artifacts:
+  produces: [{produced_artifact}]
+""",
+        f"{base}/docker-compose.yml": "services:\n  generator:\n    image: python:3.11-slim\n",
+    }
+
+
+def test_generator_pack_rolls_back_files_when_state_commit_fails(tmp_path, monkeypatch):
+    install_root = tmp_path / "installed_generators"
+    monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))
+    zip_path = tmp_path / "pack.zip"
+    zip_path.write_bytes(_make_zip(_minimal_generator_files("transaction_test")))
+
+    def fail_state_save(_state):
+        raise OSError("state write failed")
+
+    monkeypatch.setattr(app_backend, "_save_installed_generator_packs_state", fail_state_save)
+
+    ok, note = app_backend._install_generator_pack(
+        zip_path=str(zip_path),
+        pack_label="transaction-test",
+        pack_origin="upload",
+    )
+
+    assert ok is False
+    assert "state write failed" in note
+    assert not list(install_root.rglob("manifest.yaml"))
+    assert not list(install_root.rglob(".coretg_pack.json"))
+    assert not list(install_root.glob(".coretg-generator-stage-*"))
+
+
+def test_generator_pack_rolls_back_first_item_when_second_publish_fails(tmp_path, monkeypatch):
+    install_root = tmp_path / "installed_generators"
+    monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))
+    zip_path = tmp_path / "two-generators.zip"
+    pack_files = {
+        **_minimal_generator_files("transaction_first"),
+        **_minimal_generator_files("transaction_second", kind="flag-node-generator"),
+    }
+    zip_path.write_bytes(_make_zip(pack_files))
+
+    real_replace = os.replace
+    publish_calls = 0
+
+    def fail_second_publish(source, destination):
+        nonlocal publish_calls
+        if ".coretg-generator-stage-" in str(source):
+            publish_calls += 1
+            if publish_calls == 2:
+                raise OSError("second publish failed")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(app_backend.os, "replace", fail_second_publish)
+
+    with pytest.raises(OSError, match="second publish failed"):
+        app_backend._install_generator_pack_payload(
+            zip_path=str(zip_path),
+            pack_id="transaction-pack",
+            safe_label="transaction-pack",
+            pack_origin="upload",
+            next_numeric=1,
+        )
+
+    assert publish_calls == 2
+    assert not list(install_root.rglob("manifest.yaml"))
+    assert not list(install_root.rglob(".coretg_pack.json"))
+    assert not list(install_root.glob(".coretg-generator-stage-*"))
+    assert not (install_root / "flag_generators").exists()
+    assert not (install_root / "flag_node_generators").exists()
+
+
+def test_generator_bundle_rolls_back_all_packs_when_state_commit_fails(tmp_path, monkeypatch):
+    install_root = tmp_path / "installed_generators"
+    monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))
+    first_pack = _make_zip(_minimal_generator_files("bundle_transaction_first"))
+    second_pack = _make_zip(
+        _minimal_generator_files("bundle_transaction_second", kind="flag-node-generator")
+    )
+    bundle_path = tmp_path / "bundle.zip"
+    bundle_path.write_bytes(
+        _make_zip({
+            "packs/first.zip": first_pack,
+            "packs/second.zip": second_pack,
+        })
+    )
+
+    def fail_state_save(_state):
+        raise OSError("bundle state write failed")
+
+    monkeypatch.setattr(app_backend, "_save_installed_generator_packs_state", fail_state_save)
+
+    ok, note = app_backend._install_generator_pack_or_bundle(
+        zip_path=str(bundle_path),
+        pack_label="transaction-bundle",
+        pack_origin="upload",
+    )
+
+    assert ok is False
+    assert "staged installs were rolled back" in note
+    assert "bundle state write failed" in note
+    assert not list(install_root.rglob("manifest.yaml"))
+    assert not list(install_root.rglob(".coretg_pack.json"))
+    assert not list(install_root.glob(".coretg-generator-stage-*"))
+
+
 def test_generator_pack_zip_upload_installs_and_is_discoverable(tmp_path, monkeypatch):
     # Install into a temp directory so tests don't mutate the repo.
     install_root = tmp_path / "installed_generators"
@@ -176,6 +294,11 @@ services:
     payload = resp.get_json() or {}
     assert payload.get("ok") is True
     assert payload.get("confirmation_text") == f"Added to catalog as {gen_id}."
+    assert payload.get("import_summary") == {
+        "installed_generator_count": 1,
+        "generator_kind_count": 1,
+        "warning_count": 0,
+    }
     assert payload.get("installed_as", {}).get("pack_label") == "pack-xhr"
     assert payload.get("installed_as", {}).get("grouped") == [
         {"kind": "flag-generator", "count": 1, "ids": [gen_id]}
@@ -226,6 +349,7 @@ artifacts:
     assert response.status_code == 200
     payload = response.get_json() or {}
     assert payload.get('confirmation_text') == f'Added to catalog as {gen_id}.'
+    assert payload.get('import_summary', {}).get('installed_generator_count') == 1
     assert payload.get('installed_as', {}).get('pack_label') == 'downloaded-generator-repo'
     assert payload.get('installed_as', {}).get('origin') == 'folder-upload'
     installed_manifest = next(install_root.rglob('manifest.yaml'))
@@ -348,6 +472,7 @@ services:
     payload = resp.get_json() or {}
     assert payload.get("ok") is True
     assert payload.get("confirmation_text") == f"Added to catalog as {gen_id}."
+    assert payload.get("import_summary", {}).get("installed_generator_count") == 1
     assert payload.get("installed_as", {}).get("origin") == "url"
     assert payload.get("installed_as", {}).get("grouped") == [
         {"kind": "flag-generator", "count": 1, "ids": [gen_id]}
@@ -431,6 +556,77 @@ services:
     data = data_resp.get_json() or {}
     ids = {g.get("id") for g in (data.get("generators") or []) if isinstance(g, dict)}
     assert gen_id not in ids
+
+
+def test_generator_pack_uninstall_ajax_returns_success_and_removes_pack(tmp_path, monkeypatch):
+    install_root = tmp_path / 'installed_generators'
+    installed_path = install_root / 'flag_generators' / 'p_demo__1'
+    installed_path.mkdir(parents=True)
+    state = {
+        'packs': [{
+            'id': 'pack-demo',
+            'label': 'Demo Pack',
+            'installed': [{'id': '1', 'kind': 'flag-generator', 'path': str(installed_path)}],
+        }],
+    }
+    saved = {}
+    monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(install_root))
+    monkeypatch.setattr(app_backend, '_load_installed_generator_packs_state', lambda: state)
+    monkeypatch.setattr(app_backend, '_save_installed_generator_packs_state', lambda value: saved.update(value))
+    monkeypatch.setattr(app_backend, '_cleanup_remote_generator_pack', lambda pack: (True, 'remote copy removed'))
+
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    response = client.post(
+        '/generator_packs/delete/pack-demo',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['ok'] is True
+    assert payload['pack_id'] == 'pack-demo'
+    assert payload['removed'] == 1
+    assert payload['remote_cleanup'] == 'remote copy removed'
+    assert saved['packs'] == []
+    assert not installed_path.exists()
+
+
+def test_generator_pack_uninstall_ajax_explains_remote_cleanup_failure(tmp_path, monkeypatch):
+    install_root = tmp_path / 'installed_generators'
+    installed_path = install_root / 'flag_generators' / 'p_demo__1'
+    installed_path.mkdir(parents=True)
+    state = {
+        'packs': [{
+            'id': 'pack-demo',
+            'label': 'Demo Pack',
+            'installed': [{'id': '1', 'kind': 'flag-generator', 'path': str(installed_path)}],
+        }],
+    }
+    monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(install_root))
+    monkeypatch.setattr(app_backend, '_load_installed_generator_packs_state', lambda: state)
+    monkeypatch.setattr(
+        app_backend,
+        '_save_installed_generator_packs_state',
+        lambda value: (_ for _ in ()).throw(AssertionError('state must not change')),
+    )
+    monkeypatch.setattr(app_backend, '_cleanup_remote_generator_pack', lambda pack: (False, 'CORE VM unavailable'))
+
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    response = client.post(
+        '/generator_packs/delete/pack-demo',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        'ok': False,
+        'message': 'Uninstall aborted: failed removing the CORE runtime copy: CORE VM unavailable',
+        'pack_id': 'pack-demo',
+        'stage': 'remote_cleanup',
+    }
+    assert installed_path.exists()
 
 
 def test_delete_installed_generator_by_source_id_removes_imported_generator(tmp_path, monkeypatch):

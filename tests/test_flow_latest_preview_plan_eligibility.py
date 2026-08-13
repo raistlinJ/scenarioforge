@@ -286,3 +286,55 @@ def test_latest_preview_plan_returns_not_modified_when_cache_key_matches(tmp_pat
     assert second_data.get('ok') is True
     assert second_data.get('not_modified') is True
     assert second_data.get('data_cache_key') == cache_key
+
+
+def test_latest_preview_plan_computes_summary_from_topology_without_embedded_preview(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+
+    xml_path = tmp_path / 'Scenario2.xml'
+    xml_path.write_text(
+        """<Scenarios><Scenario name='Scenario2'><ScenarioEditor>
+        <section name='Node Information'>
+          <item selected='Docker' v_metric='Count' v_count='5'/>
+        </section>
+        <section name='Routing' density='0.0'/>
+        <section name='Services' density='0.0'/>
+        <section name='Traffic' density='0.0'/>
+        <section name='Vulnerabilities' density='0.0'>
+          <item selected='Specific' v_metric='Count' v_count='2'
+                v_name='example/vuln' v_path='https://example.invalid/vuln'/>
+        </section>
+        <section name='Flag Node Generators' density='0.0'>
+          <item selected='Specific' v_metric='Count' v_count='1'
+                g_id='example-generator' g_name='Example generator'/>
+        </section>
+        <section name='Segmentation' density='0.0'/>
+        </ScenarioEditor></Scenario></Scenarios>""",
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(backend, '_latest_xml_path_for_scenario', lambda _scenario: str(xml_path))
+    monkeypatch.setattr(backend, '_load_plan_preview_from_xml', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backend, '_core_config_from_xml_path', lambda *_args, **_kwargs: {'validated': True, 'ssh_enabled': True})
+    monkeypatch.setattr(backend, '_apply_core_secret_to_config', lambda cfg, *_args, **_kwargs: cfg)
+    monkeypatch.setattr(backend, '_flag_generators_from_enabled_sources', lambda: ([{'id': 'fg-1'}], []))
+    monkeypatch.setattr(backend, '_flag_node_generators_from_enabled_sources', lambda: ([{'id': 'fng-1'}], []))
+    monkeypatch.setattr(backend, '_load_backend_vuln_catalog_items', lambda selectable_only=True: [{'Name': 'Example Vuln'}])
+
+    resp = client.get(
+        '/api/flag-sequencing/latest_preview_plan',
+        query_string={'scenario': 'Scenario 2', 'xml_path': str(xml_path)},
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json() or {}
+    assert data['preview_source'] == 'topology_xml'
+    assert data['preview_plan_path'] == ''
+    assert data['specified_flag_node_generator_total'] == 1
+    assert data['specified_vulnerability_total'] == 2
+    assert data['flag_gen_slot_total'] == 0
+    assert data['vulnerability_slot_total'] == 0
+    assert data['docker_slot_total'] == 5
+    assert data['mandatory_challenge_total'] == 3
+    assert data['docker_count'] == 8

@@ -61,6 +61,7 @@ def _backend_dependencies(backend: Any) -> Any:
     bound_names = [
         '_coerce_bool',
         '_normalize_scenario_label',
+        '_webui_runtime_mode',
         '_existing_xml_path_or_none',
         '_latest_xml_path_for_scenario',
         '_planner_get_plan',
@@ -317,6 +318,7 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
 
     flow_run_remote = False
     flow_remote_forced = False
+    flow_local_forced = False
     flow_core_cfg: Dict[str, Any] | None = None
     try:
         if 'run_remote' in j:
@@ -325,6 +327,7 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
         if 'run_local' in j and deps._coerce_bool(j.get('run_local')):
             flow_run_remote = False
             flow_remote_forced = False
+            flow_local_forced = True
     except Exception:
         pass
 
@@ -394,6 +397,7 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
                     merged_core_cfg['ssh_password'] = page_password
 
                 for field in (
+                    'ssh_enabled',
                     'ssh_username',
                     'ssh_port',
                     'venv_bin',
@@ -436,8 +440,17 @@ def _load_prepare_preview_request_context(*, deps, flow_progress, payload: dict[
                 flow_core_cfg['grpc_port'] = explicit_core_port
     except Exception:
         flow_core_cfg = None
-    if not flow_remote_forced and isinstance(flow_core_cfg, dict) and deps._coerce_bool(flow_core_cfg.get('ssh_enabled')):
+    if not flow_remote_forced and not flow_local_forced and isinstance(flow_core_cfg, dict) and deps._coerce_bool(flow_core_cfg.get('ssh_enabled')):
         flow_run_remote = True
+    # In VM mode, silently falling back to the web server's local Docker daemon
+    # executes generators in the wrong environment. Treat the runtime-selected
+    # CORE VM as authoritative so missing SSH/repo access is reported directly.
+    if flow_run_remote and not flow_local_forced:
+        try:
+            if str(deps._webui_runtime_mode() or '').strip().lower() == 'vm':
+                flow_remote_forced = True
+        except Exception:
+            pass
     if flow_run_remote and not isinstance(flow_core_cfg, dict):
         return {
             'response': (jsonify({'ok': False, 'error': 'No CoreConnection configured in XML for this scenario.'}), 404),
@@ -1297,7 +1310,6 @@ def _execute_or_prepare_assignments(
                             cleaned_scenario_roots=cleaned_scenario_roots,
                         )
 
-                        print(f"DEBUG: flow_run_remote={flow_run_remote} flow_out_dir={flow_out_dir}", flush=True)
                         try:
                             created_run_dirs.append(str(flow_out_dir))
                         except Exception:

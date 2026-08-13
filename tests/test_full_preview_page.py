@@ -85,6 +85,15 @@ def test_full_preview_scripts_use_pre_serialized_preview_json() -> None:
     assert '{{ full_preview | tojson }}' not in text
 
 
+def test_full_preview_execute_uses_json_safe_xml_path() -> None:
+    text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding='utf-8', errors='ignore')
+
+    assert "const pageXmlPath = {{ (xml_path or '') | tojson }};" in text
+    assert "form.append('xml_path', pageXmlPath);" in text
+    assert "appendExecuteProgressLog('Submitting run for ' + pageXmlPath);" in text
+    assert "form.append('xml_path', '{{ xml_path }}');" not in text
+
+
 def test_full_preview_scripts_guard_execute_when_saved_xml_warning_is_active() -> None:
     text = FULL_PREVIEW_SCRIPTS_PATH.read_text(encoding='utf-8', errors='ignore')
 

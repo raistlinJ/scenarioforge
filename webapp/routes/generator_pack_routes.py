@@ -141,6 +141,11 @@ def register(
             'ok': True,
             'message': note,
             'warnings': warnings,
+            'import_summary': {
+                'installed_generator_count': len(installed_generators),
+                'generator_kind_count': len(grouped),
+                'warning_count': len(warnings),
+            },
             'confirmation_text': confirmation_text,
             'confirmation_detail': note,
             'installed_as': {
@@ -260,10 +265,17 @@ def register(
 
     @app.route('/generator_packs/delete/<pack_id>', methods=['POST'])
     def generator_packs_delete(pack_id: str):
+        is_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest' or 'application/json' in str(request.headers.get('Accept') or '')
+
+        def _delete_response(*, ok: bool, message: str, status: int = 200, **extra: Any):
+            if is_xhr:
+                return jsonify({'ok': ok, 'message': message, **extra}), status
+            flash(message)
+            return redirect(url_for('flag_catalog_page'))
+
         pid = str(pack_id or '').strip()
         if not pid:
-            flash('Missing pack id')
-            return redirect(url_for('flag_catalog_page'))
+            return _delete_response(ok=False, message='Missing pack id.', status=400)
 
         installed_root = os_module.path.abspath(installed_generators_root())
         state = load_installed_generator_packs_state()
@@ -280,8 +292,7 @@ def register(
             kept.append(pack)
 
         if not target:
-            flash('Pack not found')
-            return redirect(url_for('flag_catalog_page'))
+            return _delete_response(ok=False, message='Pack not found.', status=404, pack_id=pid)
 
         remote_cleanup_note = ''
         if target.get('repo_local') is not True and cleanup_remote_pack is not None:
@@ -290,8 +301,13 @@ def register(
             except Exception as exc:
                 remote_ok, remote_cleanup_note = False, str(exc)
             if not remote_ok:
-                flash(f'Uninstall aborted: failed removing the CORE runtime copy: {remote_cleanup_note}')
-                return redirect(url_for('flag_catalog_page'))
+                return _delete_response(
+                    ok=False,
+                    message=f'Uninstall aborted: failed removing the CORE runtime copy: {remote_cleanup_note}',
+                    status=409,
+                    pack_id=pid,
+                    stage='remote_cleanup',
+                )
 
         if isinstance(target, dict) and target.get('repo_local') is True:
             target = dict(target)
@@ -300,8 +316,13 @@ def register(
             target['uninstalled_at'] = local_timestamp_display()
             state['packs'] = kept + [target]
             save_installed_generator_packs_state(state)
-            flash(f'Uninstalled pack {pid} (repo-local files remain in the workspace)')
-            return redirect(url_for('flag_catalog_page'))
+            return _delete_response(
+                ok=True,
+                message=f'Uninstalled pack {pid}; repo-local files remain in the workspace.',
+                pack_id=pid,
+                removed=0,
+                repo_local=True,
+            )
 
         removed = 0
         failures: list[str] = []
@@ -334,11 +355,18 @@ def register(
         save_installed_generator_packs_state(state)
 
         if failures:
-            flash(f'Uninstalled pack {pid} with warnings: removed={removed}; {failures[0]}')
+            message = f'Uninstalled pack {pid} with warnings: removed={removed}; {failures[0]}'
         else:
             suffix = f'; {remote_cleanup_note}' if remote_cleanup_note else ''
-            flash(f'Uninstalled pack {pid} (removed {removed} item(s)){suffix}')
-        return redirect(url_for('flag_catalog_page'))
+            message = f'Uninstalled pack {pid} (removed {removed} item(s)){suffix}'
+        return _delete_response(
+            ok=True,
+            message=message,
+            pack_id=pid,
+            removed=removed,
+            warnings=failures,
+            remote_cleanup=remote_cleanup_note,
+        )
 
     @app.route('/generator_packs/download/<pack_id>')
     def generator_packs_download(pack_id: str):

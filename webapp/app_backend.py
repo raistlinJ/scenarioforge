@@ -3093,25 +3093,131 @@ def _should_exclude_repo_member(rel_path: str, *, allowed_outputs: Optional[List
     return False
 
 
-def _create_local_repo_archive(src_dir: str, dest_basename: str, *, allowed_outputs: Optional[List[str]] = None) -> str:
+def _create_local_repo_archive(
+    src_dir: str,
+    dest_basename: str,
+    *,
+    allowed_outputs: Optional[List[str]] = None,
+    log_handle: Any | None = None,
+) -> str:
     base_name = dest_basename.strip('/') or 'scenarioforge'
     tmp_fd, tmp_path = tempfile.mkstemp(prefix='coretg_repo_', suffix='.tar.gz')
     os.close(tmp_fd)
 
-    def _filter(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        rel_name = member.name
-        prefix = f"{base_name}/"
-        if rel_name.startswith(prefix):
-            rel_name = rel_name[len(prefix):]
-        elif rel_name == base_name:
-            rel_name = ''
-        if rel_name and _should_exclude_repo_member(rel_name, allowed_outputs=allowed_outputs):
-            return None
-        return member
+    def _record_skip(local_path: str, reason: str) -> None:
+        try:
+            app.logger.warning('[remote-sync] skipped unavailable catalog source: %s (%s)', local_path, reason)
+        except Exception:
+            pass
+        try:
+            if log_handle:
+                rel = os.path.relpath(local_path, os.path.abspath(src_dir)).replace('\\', '/')
+                log_handle.write(f'[remote] Repo upload: skipped unavailable catalog source: {rel} ({reason})\n')
+                log_handle.flush()
+        except Exception:
+            pass
 
     with tarfile.open(tmp_path, 'w:gz') as tar:
-        tar.add(src_dir, arcname=base_name, filter=_filter)
+        _add_repo_tree_to_archive(
+            tar,
+            os.path.abspath(src_dir),
+            base_name,
+            exclude_member=lambda rel: _should_exclude_repo_member(rel, allowed_outputs=allowed_outputs),
+            on_skip=_record_skip,
+        )
     return tmp_path
+
+
+def _tar_add_stable_path(
+    tar: tarfile.TarFile,
+    local_path: str,
+    *,
+    arcname: str,
+    on_skip: Any = None,
+) -> bool:
+    """Add one path, tolerating only entries that vanish during inventory.
+
+    Imported catalogs can be inspected or quarantined by host security software
+    while a remote sync is being packaged.  A path may therefore be returned by
+    ``os.walk`` and disappear before ``tarfile`` opens it.  That transient race
+    must not abort an otherwise valid snapshot, but persistent read failures
+    still need to fail loudly.
+    """
+    try:
+        tar.add(local_path, arcname=arcname, recursive=False)
+        return True
+    except OSError as exc:
+        try:
+            still_present = os.path.lexists(local_path)
+        except Exception:
+            still_present = True
+        if not still_present:
+            if callable(on_skip):
+                on_skip(local_path, 'vanished during packaging')
+            return False
+        # Microsoft Defender commonly returns ERROR_INVALID_PARAMETER through
+        # Python as errno 22 immediately before quarantining a detected PoC.
+        # These imported catalog sources are not ScenarioForge application
+        # code. Skip the blocked entry and retain an explicit warning; never
+        # generalize this exception to repository or generator source files.
+        normalized = str(local_path or '').replace('\\', '/').lower()
+        if int(getattr(exc, 'errno', 0) or 0) == 22 and '/outputs/installed_vuln_catalogs/' in normalized:
+            if callable(on_skip):
+                on_skip(local_path, 'blocked by Windows security scanning (errno 22)')
+            return False
+        raise
+
+
+def _add_repo_tree_to_archive(
+    tar: tarfile.TarFile,
+    source_root: str,
+    archive_root: str,
+    *,
+    exclude_member: Any = None,
+    on_skip: Any = None,
+) -> int:
+    """Add a repository tree one entry at a time and return vanished count."""
+    source_root = os.path.abspath(source_root)
+    archive_root = str(archive_root or '').replace('\\', '/').strip('/')
+    vanished = 0
+    if not os.path.lexists(source_root):
+        return vanished
+
+    if not os.path.isdir(source_root):
+        if not _tar_add_stable_path(tar, source_root, arcname=archive_root, on_skip=on_skip):
+            vanished += 1
+        return vanished
+
+    if not _tar_add_stable_path(tar, source_root, arcname=archive_root, on_skip=on_skip):
+        return vanished + 1
+
+    for dirpath, dirnames, filenames in os.walk(source_root, topdown=True, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, source_root)
+        rel_dir = '' if rel_dir == '.' else rel_dir.replace('\\', '/')
+
+        kept_dirs: list[str] = []
+        for dirname in dirnames:
+            rel_child = posixpath.join(rel_dir, dirname) if rel_dir else dirname
+            if callable(exclude_member) and exclude_member(rel_child):
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
+
+        if rel_dir:
+            arc_dir = posixpath.join(archive_root, rel_dir)
+            if not _tar_add_stable_path(tar, dirpath, arcname=arc_dir, on_skip=on_skip):
+                vanished += 1
+
+        for filename in filenames:
+            rel_file = posixpath.join(rel_dir, filename) if rel_dir else filename
+            if callable(exclude_member) and exclude_member(rel_file):
+                continue
+            local_file = os.path.join(dirpath, filename)
+            arc_file = posixpath.join(archive_root, rel_file)
+            if not _tar_add_stable_path(tar, local_file, arcname=arc_file, on_skip=on_skip):
+                vanished += 1
+
+    return vanished
 
 
 def _normalize_repo_push_method(core_cfg: Dict[str, Any]) -> str:
@@ -3909,7 +4015,36 @@ def _push_repo_to_remote_via_sftp_delta(
                         arcname = str(rel0).replace('\\', '/').lstrip('/')
                         if not arcname:
                             continue
-                        tar.add(local_path0, arcname=arcname, recursive=False)
+                        def _log_bundle_skip(_local_path: str, reason: str) -> None:
+                            try:
+                                app.logger.warning(
+                                    '[remote-sync] skipped unavailable catalog source: %s (%s)',
+                                    arcname,
+                                    reason,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                if log_handle:
+                                    log_handle.write(
+                                        f"[remote] Repo upload: skipped unavailable catalog source: {arcname} ({reason})\n"
+                                    )
+                                    log_handle.flush()
+                            except Exception:
+                                pass
+
+                        if not _tar_add_stable_path(
+                            tar,
+                            local_path0,
+                            arcname=arcname,
+                            on_skip=_log_bundle_skip,
+                        ):
+                            try:
+                                if log_handle:
+                                    log_handle.flush()
+                            except Exception:
+                                pass
+                            continue
                         built_files += 1
                         built_bytes += int(_sz0 or 0)
                         now = time.time()
@@ -4568,12 +4703,28 @@ def _create_local_repo_archive_from_paths(
     src_dir: str,
     dest_basename: str,
     include_paths: list[str],
+    *,
+    log_handle: Any | None = None,
 ) -> str:
     base_name = dest_basename.strip('/') or 'scenarioforge'
     tmp_fd, tmp_path = tempfile.mkstemp(prefix='coretg_repo_', suffix='.tar.gz')
     os.close(tmp_fd)
 
     root = os.path.abspath(src_dir)
+
+    def _record_skip(local_path: str, reason: str) -> None:
+        try:
+            app.logger.warning('[remote-sync] skipped unavailable catalog source: %s (%s)', local_path, reason)
+        except Exception:
+            pass
+        try:
+            if log_handle:
+                rel_path = os.path.relpath(local_path, root).replace('\\', '/')
+                log_handle.write(f'[remote] Repo upload: skipped unavailable catalog source: {rel_path} ({reason})\n')
+                log_handle.flush()
+        except Exception:
+            pass
+
     with tarfile.open(tmp_path, 'w:gz') as tar:
         for raw in include_paths or []:
             rel = str(raw or '').replace('\\', '/').lstrip('/')
@@ -4583,7 +4734,16 @@ def _create_local_repo_archive_from_paths(
             if not os.path.exists(full):
                 continue
             arcname = posixpath.join(base_name, rel)
-            tar.add(full, arcname=arcname)
+            _add_repo_tree_to_archive(
+                tar,
+                full,
+                arcname,
+                exclude_member=lambda member: any(
+                    part in ('.git', '.hg', '.svn')
+                    for part in str(member or '').replace('\\', '/').split('/')
+                ),
+                on_skip=_record_skip,
+            )
     return tmp_path
 
 
@@ -4920,9 +5080,19 @@ def _push_repo_to_remote(
         log.info('[remote-sync] creating archive snapshot')
         t0 = time.monotonic()
         if include_repo_paths:
-            archive_path = _create_local_repo_archive_from_paths(repo_root, base_name, include_repo_paths)
+            archive_path = _create_local_repo_archive_from_paths(
+                repo_root,
+                base_name,
+                include_repo_paths,
+                log_handle=log_handle,
+            )
         else:
-            archive_path = _create_local_repo_archive(repo_root, base_name, allowed_outputs=allowed_outputs)
+            archive_path = _create_local_repo_archive(
+                repo_root,
+                base_name,
+                allowed_outputs=allowed_outputs,
+                log_handle=log_handle,
+            )
         t1 = time.monotonic()
         try:
             archive_size = os.path.getsize(archive_path) if archive_path else 0
@@ -13815,9 +13985,31 @@ def _canonicalize_flow_assignment_paths(assignment: dict[str, Any]) -> dict[str,
     if not isinstance(assignment, dict):
         return assignment
     out = dict(assignment)
+    raw_path_roots = [
+        str(out.get(key) or '').strip().replace('\\', '/')
+        for key in ('run_dir', 'artifacts_dir', 'outputs_manifest')
+    ]
+    remote_generator_paths = any(
+        value.startswith(('/tmp/vulns/flag_generators_runs/', '/tmp/vulns/flag_node_generators_runs/'))
+        for value in raw_path_roots
+        if value
+    )
+
+    def _canonicalize_assignment_path(value: Any, *, base_dir: str | None = None) -> str:
+        if not remote_generator_paths:
+            return _abs_path_or_original(value, base_dir=base_dir)
+        raw = str(value or '').strip().replace('\\', '/')
+        if not raw:
+            return ''
+        if raw.startswith('/'):
+            return posixpath.normpath(raw)
+        if base_dir:
+            return posixpath.normpath(posixpath.join(str(base_dir).replace('\\', '/'), raw))
+        return posixpath.normpath(raw)
+
     for key in ('artifacts_dir', 'run_dir', 'outputs_manifest'):
         if key in out:
-            out[key] = _abs_path_or_original(out.get(key))
+            out[key] = _canonicalize_assignment_path(out.get(key))
     base_dir = (
         str(out.get('run_dir') or '').strip()
         or str(out.get('artifacts_dir') or '').strip()
@@ -13880,13 +14072,13 @@ def _canonicalize_flow_assignment_paths(assignment: dict[str, Any]) -> dict[str,
                 try:
                     resolved_src = resolved_outputs.get(src) if isinstance(resolved_outputs, dict) else None
                     if isinstance(resolved_src, str) and resolved_src.strip() and _looks_like_fs_path(resolved_src):
-                        fixed_src = _abs_path_or_original(resolved_src, base_dir=base_dir or None)
+                        fixed_src = _canonicalize_assignment_path(resolved_src, base_dir=base_dir or None)
                         fixed_injects.append(f"{fixed_src} -> {dest}" if dest else fixed_src)
                         continue
                 except Exception:
                     pass
             if _looks_like_fs_path(src):
-                fixed_src = _abs_path_or_original(src, base_dir=base_dir or None)
+                fixed_src = _canonicalize_assignment_path(src, base_dir=base_dir or None)
                 fixed_injects.append(f"{fixed_src} -> {dest}" if dest else fixed_src)
             else:
                 fixed_injects.append(str(item))
@@ -13901,9 +14093,9 @@ def _canonicalize_flow_assignment_paths(assignment: dict[str, Any]) -> dict[str,
                 continue
             item2 = dict(item)
             if 'path' in item2:
-                item2['path'] = _abs_path_or_original(item2.get('path'), base_dir=base_dir or None)
+                item2['path'] = _canonicalize_assignment_path(item2.get('path'), base_dir=base_dir or None)
             if 'resolved' in item2:
-                item2['resolved'] = _abs_path_or_original(item2.get('resolved'), base_dir=base_dir or None)
+                item2['resolved'] = _canonicalize_assignment_path(item2.get('resolved'), base_dir=base_dir or None)
             fixed_detail.append(item2)
         out['inject_files_detail'] = fixed_detail
 
@@ -13912,7 +14104,7 @@ def _canonicalize_flow_assignment_paths(assignment: dict[str, Any]) -> dict[str,
         fixed_ro: dict[str, Any] = {}
         for key, value in ro.items():
             if isinstance(value, str) and _looks_like_path_field(str(key)):
-                fixed_ro[key] = _abs_path_or_original(value, base_dir=base_dir or None)
+                fixed_ro[key] = _canonicalize_assignment_path(value, base_dir=base_dir or None)
             else:
                 fixed_ro[key] = value
         out['resolved_outputs'] = fixed_ro
@@ -13927,7 +14119,7 @@ def _canonicalize_flow_assignment_paths(assignment: dict[str, Any]) -> dict[str,
             item2 = dict(item)
             field = str(item2.get('field') or '').strip()
             if isinstance(item2.get('resolved'), str) and _looks_like_path_field(field):
-                item2['resolved'] = _abs_path_or_original(item2.get('resolved'), base_dir=base_dir or None)
+                item2['resolved'] = _canonicalize_assignment_path(item2.get('resolved'), base_dir=base_dir or None)
             fixed_ro_detail.append(item2)
         out['resolved_outputs_detail'] = fixed_ro_detail
 
@@ -25498,6 +25690,12 @@ def _enrich_flow_state_with_artifacts(flow_state: dict[str, Any]) -> dict[str, A
         # This ensures docker-compose generation gets full paths when loading from saved XML.
         try:
             art_dir = str(a2.get('inject_source_dir') or a2.get('artifacts_dir') or a2.get('run_dir') or '').strip()
+            remote_art_dir = art_dir.replace('\\', '/').startswith(
+                ('/tmp/vulns/flag_generators_runs/', '/tmp/vulns/flag_node_generators_runs/')
+            )
+            artifact_path = posixpath if remote_art_dir else os.path
+            if remote_art_dir:
+                art_dir = posixpath.normpath(art_dir.replace('\\', '/'))
             if art_dir and os.path.isabs(art_dir):
                 # Resolve relative paths in inject_files_detail.resolved
                 detail = a2.get('inject_files_detail') if isinstance(a2.get('inject_files_detail'), list) else None
@@ -25512,27 +25710,27 @@ def _enrich_flow_state_with_artifacts(flow_state: dict[str, Any]) -> dict[str, A
                         if resolved and not os.path.isabs(resolved):
                             rel_resolved = resolved.lstrip('/').replace('\\', '/')
                             try:
-                                if os.path.basename(os.path.normpath(art_dir)) == 'artifacts':
+                                if artifact_path.basename(artifact_path.normpath(art_dir)) == 'artifacts':
                                     while rel_resolved.startswith('artifacts/'):
                                         rel_resolved = rel_resolved[len('artifacts/'):]
                             except Exception:
                                 pass
                             # Resolve relative path to absolute using artifacts_dir
                             # 1. Try literal join
-                            full_path = os.path.join(art_dir, rel_resolved)
+                            full_path = artifact_path.join(art_dir, rel_resolved)
                             # 2. Try outputs/ subdirectory
                             if not os.path.exists(full_path):
-                                cand = os.path.join(art_dir, 'outputs', rel_resolved)
+                                cand = artifact_path.join(art_dir, 'outputs', rel_resolved)
                                 if os.path.exists(cand):
                                     full_path = cand
                             # 3. Try without 'artifacts/' prefix if it exists
                             if not os.path.exists(full_path):
                                 if resolved.startswith('artifacts/'):
-                                    alt_path = os.path.join(art_dir, resolved[len('artifacts/'):])
+                                    alt_path = artifact_path.join(art_dir, resolved[len('artifacts/'):])
                                     if os.path.exists(alt_path):
                                         full_path = alt_path
                                     else:
-                                        alt_path = os.path.join(art_dir, 'outputs', resolved[len('artifacts/'):])
+                                        alt_path = artifact_path.join(art_dir, 'outputs', resolved[len('artifacts/'):])
                                         if os.path.exists(alt_path):
                                             full_path = alt_path
                             item2['resolved'] = full_path
@@ -25547,7 +25745,7 @@ def _enrich_flow_state_with_artifacts(flow_state: dict[str, Any]) -> dict[str, A
                         if isinstance(v, str) and v.strip() and not os.path.isabs(v):
                             rel_v = v.lstrip('/').replace('\\', '/')
                             try:
-                                if os.path.basename(os.path.normpath(art_dir)) == 'artifacts':
+                                if artifact_path.basename(artifact_path.normpath(art_dir)) == 'artifacts':
                                     while rel_v.startswith('artifacts/'):
                                         rel_v = rel_v[len('artifacts/'):]
                             except Exception:
@@ -25555,20 +25753,20 @@ def _enrich_flow_state_with_artifacts(flow_state: dict[str, Any]) -> dict[str, A
                             # Check if this looks like a file path (contains slash or file extension)
                             if '/' in v or ('.' in v and not v.startswith('{')):
                                 # Try to find the file in art_dir or art_dir/outputs
-                                flat_v = os.path.basename(v)
-                                full_path = os.path.join(art_dir, rel_v)
+                                flat_v = artifact_path.basename(v.replace('\\', '/'))
+                                full_path = artifact_path.join(art_dir, rel_v)
                                 if not os.path.exists(full_path):
-                                    cand = os.path.join(art_dir, 'outputs', rel_v)
+                                    cand = artifact_path.join(art_dir, 'outputs', rel_v)
                                     if os.path.exists(cand):
                                         full_path = cand
                                 if not os.path.exists(full_path):
                                     # Try flattened fallback in outputs/
-                                    cand = os.path.join(art_dir, 'outputs', flat_v)
+                                    cand = artifact_path.join(art_dir, 'outputs', flat_v)
                                     if os.path.exists(cand):
                                         full_path = cand
                                 if not os.path.exists(full_path):
                                     # Try flattened fallback in root
-                                    cand = os.path.join(art_dir, flat_v)
+                                    cand = artifact_path.join(art_dir, flat_v)
                                     if os.path.exists(cand):
                                         full_path = cand
                                 fixed_ro[k] = full_path
@@ -25637,18 +25835,18 @@ def _enrich_flow_state_with_artifacts(flow_state: dict[str, Any]) -> dict[str, A
                         if os.path.isabs(s):
                             base = os.path.basename(s.rstrip('/'))
                             if base and art_dir:
-                                candidate = os.path.join(art_dir, base)
+                                candidate = artifact_path.join(art_dir, base)
                                 if os.path.exists(candidate):
                                     return candidate
                             return s
                         if art_dir:
                             rel = s.lstrip('/')
-                            candidate = os.path.join(art_dir, rel)
+                            candidate = artifact_path.join(art_dir, rel)
                             if os.path.exists(candidate):
                                 return candidate
                             base = os.path.basename(rel)
                             if base:
-                                candidate2 = os.path.join(art_dir, base)
+                                candidate2 = artifact_path.join(art_dir, base)
                                 if os.path.exists(candidate2):
                                     return candidate2
                         return s
@@ -33708,7 +33906,9 @@ def _collect_scenario_norms(scenarios: Iterable[Any]) -> set[str]:
     for scen in scenarios or []:
         if not isinstance(scen, dict):
             continue
-        norm = _normalize_scenario_label(scen.get('name'))
+        # Scenario names are canonicalized for XML filenames, so display forms
+        # such as "Scenario 1" and "Scenario1" must occupy one identity slot.
+        norm = _scenario_match_key(scen.get('name'))
         if norm:
             norms.add(norm)
     return norms
@@ -33728,7 +33928,7 @@ def _order_scenarios_by_catalog_names(
     rank_by_norm: Dict[str, int] = {}
     next_rank = 0
     for display in catalog_names or []:
-        norm = _normalize_scenario_label(display)
+        norm = _scenario_match_key(display)
         if not norm or norm in rank_by_norm:
             continue
         rank_by_norm[norm] = next_rank
@@ -33737,7 +33937,7 @@ def _order_scenarios_by_catalog_names(
     indexed = list(enumerate(ordered))
     indexed.sort(
         key=lambda pair: (
-            rank_by_norm.get(_normalize_scenario_label(pair[1].get('name')), float('inf')),
+            rank_by_norm.get(_scenario_match_key(pair[1].get('name')), float('inf')),
             _scenario_display_sort_key(pair[1].get('name')),
             pair[0],
         )
@@ -34079,7 +34279,7 @@ def _prepare_payload_for_index(payload: Optional[Dict[str, Any]], *, user: Optio
             catalog_names = payload.get('scenario_catalog_names') if isinstance(payload.get('scenario_catalog_names'), list) else []
             existing_norms = _collect_scenario_norms(normalized_scenarios)
             for display_name in catalog_names:
-                norm = _normalize_scenario_label(display_name)
+                norm = _scenario_match_key(display_name)
                 if not norm or norm in existing_norms:
                     continue
                 normalized_scenarios.append(_default_scenario_payload(display_name))
@@ -34216,7 +34416,7 @@ def _merge_catalog_scenario_stubs_into_payload(payload: Optional[Dict[str, Any]]
         payload['scenario_catalog_names'] = catalog_names
         existing_norms = _collect_scenario_norms(scenarios)
         for display_name in catalog_names:
-            norm = _normalize_scenario_label(display_name)
+            norm = _scenario_match_key(display_name)
             if not norm or norm in existing_norms:
                 continue
             scenarios.append(_default_scenario_payload(display_name))
@@ -49323,6 +49523,10 @@ def _install_vuln_catalog_zip_file(*, zip_file_path: str, label: str, origin: st
                     'label': str(label or '').strip() or 'vulnerability_catalog.zip',
                     'origin': str(origin or '').strip(),
                     'bundle_count': len(installed_entries),
+                    'compose_count': sum(int(item.get('compose_count') or 0) for item in installed_entries),
+                    'missing_required_file_count': sum(
+                        int(item.get('missing_required_file_count') or 0) for item in installed_entries
+                    ),
                     'installed_catalog_ids': [str(item.get('id') or '') for item in installed_entries if str(item.get('id') or '')],
                     'bundle_failures': failures,
                 }
@@ -51009,6 +51213,7 @@ def _install_generator_pack_payload(
         return False, f'Pack install requires PyYAML: {exc}', [], next_numeric, []
 
     root = _installed_generators_root()
+    os.makedirs(root, exist_ok=True)
     imported_note_map: dict[tuple[str, str], dict[str, str | None]] = {}
     for raw_note in (imported_catalog_notes or []):
         if not isinstance(raw_note, dict):
@@ -51024,6 +51229,8 @@ def _install_generator_pack_payload(
                 'note_color': note_color,
             }
     tmp_dir = tempfile.mkdtemp(prefix='coretg_pack_')
+    staging_root = tempfile.mkdtemp(prefix='.coretg-generator-stage-', dir=root)
+    staged_pairs: list[tuple[str, str]] = []
     try:
         _safe_extract_zip_to_dir(zip_path, tmp_dir)
         ok, note, items, warnings = _validate_generator_pack_tree(tmp_dir)
@@ -51046,7 +51253,6 @@ def _install_generator_pack_payload(
                 dest_base = os.path.join(root, 'flag_generators')
             if category:
                 dest_base = os.path.join(dest_base, *category.split('/'))
-            os.makedirs(dest_base, exist_ok=True)
 
             dir_name = secure_filename(f"p_{pack_id}__{assigned_gid}") or f"p_{pack_id}__generator"
             dest_dir = os.path.join(dest_base, dir_name)
@@ -51055,62 +51261,59 @@ def _install_generator_pack_payload(
                 dest_dir = os.path.join(dest_base, f"{dir_name}_{suffix}")
                 suffix += 1
 
+            stage_dir = os.path.join(staging_root, f'item-{len(staged_pairs) + 1}')
+
             src_abs = os.path.abspath(src_dir)
             runtime_src_abs = os.path.abspath(runtime_src_dir) if runtime_src_dir else ''
             if runtime_src_abs and runtime_src_abs != src_abs and os.path.isdir(runtime_src_abs):
-                shutil.copytree(runtime_src_abs, dest_dir)
-                shutil.copytree(src_abs, dest_dir, dirs_exist_ok=True)
+                shutil.copytree(runtime_src_abs, stage_dir)
+                shutil.copytree(src_abs, stage_dir, dirs_exist_ok=True)
             else:
-                shutil.copytree(src_abs, dest_dir)
+                shutil.copytree(src_abs, stage_dir)
 
             # Rewrite installed manifest id and avoid overriding installed source path.
-            try:
-                manifest_path = None
-                for nm in ('manifest.yaml', 'manifest.yml'):
-                    p = os.path.join(dest_dir, nm)
-                    if os.path.exists(p) and os.path.isfile(p):
-                        manifest_path = p
-                        break
-                if manifest_path is None:
-                    for rp in Path(dest_dir).rglob('manifest.yaml'):
-                        if '__MACOSX' in str(rp):
-                            continue
-                        manifest_path = str(rp)
-                        break
-                if manifest_path is None:
-                    for rp in Path(dest_dir).rglob('manifest.yml'):
-                        if '__MACOSX' in str(rp):
-                            continue
-                        manifest_path = str(rp)
-                        break
-
-                if manifest_path:
-                    doc = yaml.safe_load(Path(manifest_path).read_text('utf-8', errors='ignore'))
-                    if isinstance(doc, dict):
-                        doc['id'] = assigned_gid
-                        doc.pop('source_path', None)
-                        if isinstance(doc.get('source'), dict):
-                            doc.pop('source', None)
-                        Path(manifest_path).write_text(yaml.safe_dump(doc, sort_keys=False), encoding='utf-8')
-            except Exception:
-                pass
+            manifest_path = None
+            for nm in ('manifest.yaml', 'manifest.yml'):
+                p = os.path.join(stage_dir, nm)
+                if os.path.exists(p) and os.path.isfile(p):
+                    manifest_path = p
+                    break
+            if manifest_path is None:
+                for rp in Path(stage_dir).rglob('manifest.yaml'):
+                    if '__MACOSX' in str(rp):
+                        continue
+                    manifest_path = str(rp)
+                    break
+            if manifest_path is None:
+                for rp in Path(stage_dir).rglob('manifest.yml'):
+                    if '__MACOSX' in str(rp):
+                        continue
+                    manifest_path = str(rp)
+                    break
+            if manifest_path is None:
+                raise ValueError(f'Validated generator {source_gid or assigned_gid} lost its manifest while staging')
+            doc = yaml.safe_load(Path(manifest_path).read_text('utf-8', errors='ignore'))
+            if not isinstance(doc, dict):
+                raise ValueError(f'Installed manifest for {source_gid or assigned_gid} is not a mapping')
+            doc['id'] = assigned_gid
+            doc.pop('source_path', None)
+            if isinstance(doc.get('source'), dict):
+                doc.pop('source', None)
+            Path(manifest_path).write_text(yaml.safe_dump(doc, sort_keys=False), encoding='utf-8')
 
             # Marker for debugging/traceability.
-            try:
-                marker = {
-                    'pack_id': pack_id,
-                    'pack_label': safe_label,
-                    'origin': pack_origin,
-                    'installed_at': _local_timestamp_display(),
-                    'generator_id': assigned_gid,
-                    'kind': kind,
-                    'source_generator_id': source_gid,
-                    'source_category': category,
-                }
-                with open(os.path.join(dest_dir, '.coretg_pack.json'), 'w', encoding='utf-8') as fh:
-                    json.dump(marker, fh, indent=2)
-            except Exception:
-                pass
+            marker = {
+                'pack_id': pack_id,
+                'pack_label': safe_label,
+                'origin': pack_origin,
+                'installed_at': _local_timestamp_display(),
+                'generator_id': assigned_gid,
+                'kind': kind,
+                'source_generator_id': source_gid,
+                'source_category': category,
+            }
+            with open(os.path.join(stage_dir, '.coretg_pack.json'), 'w', encoding='utf-8') as fh:
+                json.dump(marker, fh, indent=2)
 
             installed_item: dict[str, Any] = {
                 'id': assigned_gid,
@@ -51135,12 +51338,12 @@ def _install_generator_pack_payload(
             compose_path_for_scan = ''
             try:
                 for _candidate in ('docker-compose.yml', 'docker-compose.yaml'):
-                    _p = os.path.join(dest_dir, _candidate)
+                    _p = os.path.join(stage_dir, _candidate)
                     if os.path.isfile(_p):
                         compose_path_for_scan = _p
                         break
                 if not compose_path_for_scan:
-                    for _rp in Path(dest_dir).rglob('docker-compose.y*ml'):
+                    for _rp in Path(stage_dir).rglob('docker-compose.y*ml'):
                         if '__MACOSX' in str(_rp):
                             continue
                         compose_path_for_scan = str(_rp)
@@ -51197,16 +51400,68 @@ def _install_generator_pack_payload(
                 installed_item.setdefault('architectures', [])
                 installed_item.setdefault('architecture_source', 'unknown')
             installed.append(installed_item)
+            staged_pairs.append((stage_dir, dest_dir))
+
+        # Publish only fully prepared generator directories. If any rename
+        # fails, the exception handler below removes every directory already
+        # published for this pack.
+        for stage_dir, dest_dir in staged_pairs:
+            if os.path.exists(dest_dir):
+                raise FileExistsError(f'Generator install destination appeared during import: {dest_dir}')
+            os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
+            os.replace(stage_dir, dest_dir)
 
         return True, note, installed, next_numeric, warnings
+    except Exception:
+        # Include unpublished destinations so an empty category directory made
+        # immediately before a failed rename is pruned as well.
+        rollback_paths = [dest_dir for _stage_dir, dest_dir in staged_pairs]
+        _rollback_installed_generator_items([{'path': path} for path in rollback_paths])
+        raise
     finally:
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             pass
+        try:
+            shutil.rmtree(staging_root, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def _rollback_installed_generator_items(items: list[dict[str, Any]] | None) -> list[str]:
+    """Remove generator directories created by an import that could not commit."""
+    failures: list[str] = []
+    installed_root = os.path.abspath(_installed_generators_root())
+    for item in reversed(items or []):
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get('path') or '').strip()
+        if not raw_path:
+            continue
+        target = os.path.abspath(raw_path)
+        try:
+            if os.path.commonpath([installed_root, target]) != installed_root or target == installed_root:
+                failures.append(f'refused rollback outside installed root: {target}')
+                continue
+            if os.path.isdir(target):
+                shutil.rmtree(target, ignore_errors=False)
+            elif os.path.exists(target):
+                os.remove(target)
+            parent = os.path.dirname(target)
+            while parent != installed_root and os.path.commonpath([installed_root, parent]) == installed_root:
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    break
+                parent = os.path.dirname(parent)
+        except Exception as exc:
+            failures.append(f'{target}: {exc}')
+    return failures
 
 
 def _install_generator_pack(*, zip_path: str, pack_label: str, pack_origin: str) -> tuple[bool, str]:
+    installed: list[dict[str, Any]] = []
     try:
         try:
             repo_root = _get_repo_root()
@@ -51241,7 +51496,16 @@ def _install_generator_pack(*, zip_path: str, pack_label: str, pack_origin: str)
             'installed_at': _local_timestamp_display(),
             'installed': installed,
         })
-        _save_installed_generator_packs_state(state)
+        try:
+            _save_installed_generator_packs_state(state)
+        except Exception as exc:
+            rollback_failures = _rollback_installed_generator_items(installed)
+            installed = []
+            if rollback_failures:
+                raise RuntimeError(
+                    f'{exc}; rollback warning: {rollback_failures[0]}'
+                ) from exc
+            raise
         warn_note = ''
         try:
             if isinstance(warnings, list) and warnings:
@@ -51381,6 +51645,8 @@ def _install_generator_pack_or_bundle(*, zip_path: str, pack_label: str, pack_or
                             successes += 1
                         else:
                             failures.append(f'{inner_name}: {note_inner}')
+                    except Exception as exc:
+                        failures.append(f'{inner_name}: install failed ({exc})')
                     finally:
                         try:
                             os.remove(inner_tmp)
@@ -51395,8 +51661,16 @@ def _install_generator_pack_or_bundle(*, zip_path: str, pack_label: str, pack_or
                         state.setdefault('packs', [])
                         state['packs'].extend(rows_to_append)
                         _save_installed_generator_packs_state(state)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        rollback_items = [
+                            installed_item
+                            for row in rows_to_append
+                            for installed_item in (row.get('installed') or [])
+                            if isinstance(installed_item, dict)
+                        ]
+                        rollback_failures = _rollback_installed_generator_items(rollback_items)
+                        detail = f'; rollback warning: {rollback_failures[0]}' if rollback_failures else ''
+                        return False, f'Unable to commit generator bundle state; staged installs were rolled back: {exc}{detail}'
 
                 warn_note = f" (warnings: {warnings_total})" if warnings_total else ''
                 if failures:

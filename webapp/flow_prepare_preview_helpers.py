@@ -471,7 +471,7 @@ def flow_try_run_generator_remote(
     except Exception:
         inject_json = None
     script = (
-        "import json, os, shutil, subprocess, sys\n"
+        "import json, os, posixpath, shutil, subprocess, sys\n"
         f"REPO={json.dumps(str(repo_dir))}\n"
         f"OUT={json.dumps(str(out_dir))}\n"
         f"GEN={json.dumps(str(generator_id))}\n"
@@ -482,7 +482,10 @@ def flow_try_run_generator_remote(
         # json.loads below raise and the fallback assign a list to an env var,
         # which subprocess rejects outright.
         f"INJECT={json.dumps(inject_json) if inject_json is not None else 'None'}\n"
-        "OUT=os.path.abspath(OUT)\n"
+        # OUT is interpreted on the remote Linux host even when this wrapper is
+        # assembled (or exercised in tests) on Windows. Keep its normalization
+        # independent of the web server's host OS.
+        "OUT=posixpath.normpath(OUT.replace('\\\\', '/'))\n"
         "safe_roots=('/tmp/vulns/flag_node_generators_runs/', '/tmp/vulns/flag_generators_runs/')\n"
         "if not any((OUT + '/').startswith(root) for root in safe_roots):\n"
         "  raise RuntimeError('refusing to clean unexpected generator output dir: ' + OUT)\n"
@@ -534,11 +537,12 @@ def flow_try_run_generator_remote(
         "if SOURCE: cmd.extend(['--source-dir', SOURCE])\n"
         f"p=subprocess.run(cmd, cwd=REPO, env=env, check=False, capture_output=True, text=True, timeout=max(1, int({timeout_literal})))\n"
         "OUT_ARTIFACTS=OUT\n"
-        "manifest=os.path.join(OUT,'outputs.json')\n"
+        "manifest_fs=os.path.join(OUT,'outputs.json')\n"
+        "manifest=posixpath.join(OUT,'outputs.json')\n"
         "outputs=None\n"
-        "if os.path.exists(manifest):\n"
+        "if os.path.exists(manifest_fs):\n"
         "  try:\n"
-        "    with open(manifest,'r',encoding='utf-8') as f:\n"
+        "    with open(manifest_fs,'r',encoding='utf-8') as f:\n"
         "      m=json.load(f) or {}\n"
         "    outputs=m.get('outputs') if isinstance(m, dict) else None\n"
         "  except Exception:\n"
@@ -643,7 +647,20 @@ def flow_try_run_generator_remote(
         "            resolved_existing=cand\n"
         "            break\n"
         "      if exists and resolved_existing:\n"
-        "        outputs[k]=resolved_existing\n"
+        "        try:\n"
+        "          resolved_posix=resolved_existing.replace('\\\\','/')\n"
+        "          out_prefix=OUT.rstrip('/') + '/'\n"
+        "          out_index=resolved_posix.find(out_prefix)\n"
+        "          if out_index >= 0:\n"
+        "            outputs[k]=resolved_posix[out_index:]\n"
+        "          else:\n"
+        "            resolved_rel=os.path.relpath(resolved_existing, OUT).replace('\\\\','/')\n"
+        "            if resolved_rel == '..' or resolved_rel.startswith('../'):\n"
+        "              outputs[k]=resolved_posix\n"
+        "            else:\n"
+        "              outputs[k]=posixpath.join(OUT, resolved_rel)\n"
+        "        except Exception:\n"
+        "          outputs[k]=resolved_existing.replace('\\\\','/')\n"
         "      if not exists:\n"
         "        ok=False\n"
         "        err=f'Artifact verification failed: {v} does not exist on remote disk (checked: {checked})'\n"
@@ -666,7 +683,7 @@ def flow_try_run_generator_remote(
         "  'rc': int(p.returncode or 0),\n"
         "  'stdout': _clip(preflight + (p.stdout or '')),\n"
         "  'stderr': _clip(preflight + (p.stderr or '')),\n"
-        "  'manifest': manifest if os.path.exists(manifest) else None,\n"
+        "  'manifest': manifest if os.path.exists(manifest_fs) else None,\n"
         "  'outputs': outputs,\n"
         "  'error': err,\n"
         "}))\n"
@@ -688,6 +705,22 @@ def flow_try_run_generator_remote(
     stderr = str(payload.get('stderr') or '') if isinstance(payload, dict) else ''
     manifest_path = payload.get('manifest') if isinstance(payload, dict) else None
     outputs = payload.get('outputs') if isinstance(payload, dict) else None
+    # Treat everything returned by the remote runner as a CORE/Linux path.
+    # This also protects against a remote adapter or test transport applying
+    # Windows path semantics before handing the payload back to us.
+    if isinstance(outputs, dict):
+        try:
+            remote_root = posixpath.normpath(str(out_dir or '').replace('\\', '/'))
+            remote_prefix = remote_root.rstrip('/') + '/'
+            for output_key, output_value in list(outputs.items()):
+                if not isinstance(output_value, str):
+                    continue
+                normalized_value = output_value.replace('\\', '/')
+                root_index = normalized_value.find(remote_prefix)
+                if root_index >= 0:
+                    outputs[output_key] = normalized_value[root_index:]
+        except Exception:
+            pass
     remote_err = payload.get('error') if isinstance(payload, dict) else None
     note = 'ok'
     if not ok:
@@ -2459,7 +2492,8 @@ def prepare_generator_run_dir(
 ) -> str:
     subdir = 'flag_node_generators_runs' if assignment_type == 'flag-node-generator' else 'flag_generators_runs'
     scenario_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', scenario_norm)
-    scenario_root = os.path.join('/tmp/vulns', subdir, f"flow-{scenario_safe}")
+    path_module = posixpath if flow_run_remote else os.path
+    scenario_root = path_module.join('/tmp/vulns', subdir, f"flow-{scenario_safe}")
 
     if not flow_run_remote:
         # /tmp/vulns is shared with root-owned docker writers; repair it before
@@ -2503,7 +2537,7 @@ def prepare_generator_run_dir(
     safe_gen_lbl = re.sub(r'[^a-zA-Z0-9_-]', '_', generator_id)
     safe_node_lbl = re.sub(r'[^a-zA-Z0-9_-]', '_', str(host_name or node_id))
     unique_sub = f"{run_index:02d}_{safe_gen_lbl[:30]}_{safe_node_lbl[:30]}"
-    flow_out_dir = os.path.join(scenario_root, unique_sub)
+    flow_out_dir = path_module.join(scenario_root, unique_sub)
 
     if not flow_run_remote:
         try:
@@ -2707,7 +2741,9 @@ def process_generator_outputs(
         pass
 
     try:
-        if flow_out_dir and os.path.isdir(flow_out_dir):
+        # Remote outputs were already verified and resolved on CORE. Never
+        # reinterpret their POSIX paths against the web server's local OS.
+        if (not flow_run_remote) and flow_out_dir and os.path.isdir(flow_out_dir):
             updates: dict[str, str] = {}
             for key, value in outputs.items():
                 if not flow_should_verify_output_path(key, value):

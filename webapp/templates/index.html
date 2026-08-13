@@ -8830,6 +8830,29 @@
                         if (data.core) {
                             applyCoreUpdate(data.core);
                         }
+                        // The server canonicalizes scenario names for XML (for
+                        // example, "Scenario 1" becomes "Scenario1"). Adopt
+                        // that response before persisting the preview or using
+                        // Continue, otherwise those follow-up requests target a
+                        // scenario name that does not exist in the saved XML.
+                        if (Array.isArray(data.scenarios)) {
+                            state.scenarios = data.scenarios;
+                            if (state.scenarios.length) {
+                                activeIdx = Math.max(0, Math.min(activeIdx, state.scenarios.length - 1));
+                                const canonicalActive = String(
+                                    data.active_scenario
+                                    || state.scenarios[activeIdx]?.name
+                                    || ''
+                                ).trim();
+                                try {
+                                    if (canonicalActive && typeof window.coretgSetActiveScenarioForNav === 'function') {
+                                        window.coretgSetActiveScenarioForNav(canonicalActive);
+                                    } else if (canonicalActive && typeof window.coretgSetLastSelectedScenario === 'function') {
+                                        window.coretgSetLastSelectedScenario(canonicalActive);
+                                    }
+                                } catch (e) { }
+                            }
+                        }
                         if (data.result_path) {
                             applyResultPath(data.result_path, data.active_scenario || '');
                             try { logInfo(`[xml-save] Saved XML path: ${data.result_path}`); } catch (e) { }

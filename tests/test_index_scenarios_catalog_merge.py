@@ -114,6 +114,27 @@ def test_merge_catalog_scenario_stubs_filters_deleted_payload_entries(monkeypatc
     assert out.get('scenario_catalog_names') == ['NewScenario2']
 
 
+def test_merge_catalog_stubs_treats_spaced_and_canonical_names_as_same_scenario(monkeypatch, tmp_path):
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / 'scenario_catalog.json').write_text(
+        '{"names":["Scenario1"]}',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+
+    payload = {
+        'scenario_catalog_names': ['Scenario1'],
+        'scenarios': [
+            {'name': 'Scenario 1', 'sections': {'Node Information': {'items': []}}},
+        ],
+    }
+
+    out = backend._merge_catalog_scenario_stubs_into_payload(payload)
+
+    assert [scenario['name'] for scenario in out['scenarios']] == ['Scenario 1']
+
+
 def test_prepare_payload_includes_catalog_scenario_stubs(monkeypatch):
     monkeypatch.setattr(
         backend,

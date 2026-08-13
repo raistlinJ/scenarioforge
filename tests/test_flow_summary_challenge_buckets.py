@@ -214,3 +214,13 @@ def test_page_load_buckets_use_the_same_origin_rule():
     block = route[route.index(marker):route.index(marker) + 700]
     # Slot roles are decided before what happens to sit on the host.
     assert block.index("flag_gen_slot_total") < block.index("specified_flag_node_generator_total")
+
+
+def test_prerequisite_error_payload_still_populates_topology_summary() -> None:
+    """CORE validation may disable Generate, but it must not zero known counts."""
+    template = FLOW_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    error_block_start = template.index("const payloadError = payload && typeof payload === 'object'")
+    error_block = template[error_block_start:error_block_start + 3500]
+    assert "specified_flag_node_generator_total: bucketFrom('specified_flag_node_generator_total')" in error_block
+    assert "specified_vulnerability_total: bucketFrom('specified_vulnerability_total')" in error_block
+    assert "updateLengthSpinnerMax();" in error_block

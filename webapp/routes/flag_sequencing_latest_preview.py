@@ -39,6 +39,87 @@ def register(app, *, backend_module: Any) -> None:
             raw = repr(value)
         return hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:24]
 
+    def _compute_preview_payload_from_topology_xml(
+        xml_path: str,
+        scenario_label: str,
+        scenario_norm: str,
+    ) -> dict[str, Any] | None:
+        """Build an in-memory preview when a saved XML has no PlanPreview yet.
+
+        Saving Topology and immediately opening Flag Sequencing is a valid flow.
+        The summary must therefore be able to describe the saved topology before
+        Generate has persisted a PlanPreview.  This is deliberately read-only:
+        it neither installs artifacts nor writes the computed preview into XML.
+        """
+        if not xml_path:
+            return None
+        try:
+            xml_abs = os.path.abspath(xml_path)
+            if not os.path.isfile(xml_abs) or not xml_abs.lower().endswith('.xml'):
+                return None
+        except Exception:
+            return None
+
+        actual_scenario = str(scenario_label or '').strip()
+        try:
+            requested_key = backend._scenario_match_key(actual_scenario or scenario_norm)
+            parsed = backend._parse_scenarios_xml(xml_abs)
+            parsed_scenarios = parsed.get('scenarios') if isinstance(parsed, dict) else None
+            if isinstance(parsed_scenarios, list):
+                for parsed_scenario in parsed_scenarios:
+                    if not isinstance(parsed_scenario, dict):
+                        continue
+                    candidate = str(parsed_scenario.get('name') or '').strip()
+                    if candidate and backend._scenario_match_key(candidate) == requested_key:
+                        actual_scenario = candidate
+                        break
+        except Exception:
+            pass
+        if not actual_scenario:
+            actual_scenario = scenario_norm
+
+        try:
+            from scenarioforge.planning.orchestrator import compute_full_plan
+            from scenarioforge.planning.plan_cache import hash_xml_file
+
+            xml_hash = hash_xml_file(xml_abs)
+            seed = backend._derive_default_seed(xml_hash)
+            plan = compute_full_plan(
+                xml_abs,
+                scenario=actual_scenario,
+                seed=seed,
+                include_breakdowns=True,
+            )
+            full_preview = backend._build_full_preview_from_plan(
+                plan,
+                seed,
+                [],
+                [],
+                hitl_config={'enabled': False, 'interfaces': []},
+            )
+            if not isinstance(full_preview, dict):
+                return None
+            return {
+                'metadata': {
+                    'scenario': actual_scenario,
+                    'seed': seed,
+                    'origin': 'topology-xml-fallback',
+                    'ephemeral': True,
+                },
+                'full_preview': full_preview,
+            }
+        except Exception as exc:
+            try:
+                app.logger.warning(
+                    '[flow.latest_preview] unable to compute topology fallback scenario=%s xml=%s: %s',
+                    scenario_norm,
+                    xml_abs,
+                    exc,
+                )
+            except Exception:
+                pass
+            return None
+
     @app.route('/api/flag-sequencing/latest_preview_plan')
     def api_flow_latest_preview_plan():
         scenario_label = (request.args.get('scenario') or '').strip()
@@ -379,6 +460,33 @@ def register(app, *, backend_module: Any) -> None:
                         preview_meta = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
             except Exception:
                 pass
+
+        # Older saves and a first Save -> Continue transition may have a complete
+        # ScenarioEditor but no embedded PlanPreview. Compute the same local plan
+        # used by Preview so the eligibility and five summary buckets still
+        # reflect the saved topology. Keep preview_plan_path empty: this fallback
+        # is not a persisted plan and Generate must still create the canonical one.
+        if preview_payload is None:
+            fallback_xml_path = xml_path_for_core
+            if not fallback_xml_path:
+                try:
+                    fallback_xml_path = backend._latest_xml_path_for_scenario(scenario_norm) or ''
+                except Exception:
+                    fallback_xml_path = ''
+            fallback_payload = _compute_preview_payload_from_topology_xml(
+                fallback_xml_path,
+                scenario_label,
+                scenario_norm,
+            )
+            if isinstance(fallback_payload, dict):
+                preview_payload = fallback_payload
+                preview_path = ''
+                preview_source = 'topology_xml'
+                preview_meta = (
+                    fallback_payload.get('metadata')
+                    if isinstance(fallback_payload.get('metadata'), dict)
+                    else {}
+                )
 
         if not core_validated:
             details = _flow_eligibility_details(preview_payload)

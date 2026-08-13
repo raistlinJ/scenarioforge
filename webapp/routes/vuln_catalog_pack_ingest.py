@@ -1,10 +1,54 @@
 from __future__ import annotations
 
+import re
+import shutil
+import zipfile
 from typing import Any, Callable
 
 from flask import flash, jsonify, redirect, request, url_for
 
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
+
+
+MAX_FOLDER_UPLOAD_FILES = 10000
+
+
+def _folder_upload_path(raw_path: str) -> str:
+    normalized = str(raw_path or '').replace('\\', '/').strip()
+    if not normalized or '\x00' in normalized:
+        raise ValueError('Folder upload contains an empty file path.')
+    if normalized.startswith('/') or re.match(r'^[A-Za-z]:/', normalized):
+        raise ValueError(f'Folder upload contains an absolute path: {normalized}')
+    parts = [part for part in normalized.split('/') if part not in ('', '.')]
+    if not parts or any(part == '..' for part in parts):
+        raise ValueError(f'Folder upload contains an unsafe path: {normalized}')
+    return '/'.join(parts)
+
+
+def _folder_upload_to_zip(repo_files: list[Any], repo_paths: list[str], zip_path: str) -> None:
+    if not repo_files:
+        raise ValueError('No vulnerability catalog folder selected.')
+    if len(repo_files) > MAX_FOLDER_UPLOAD_FILES:
+        raise ValueError('Vulnerability catalog folder contains more than 10,000 files; upload a ZIP instead.')
+    if len(repo_paths) != len(repo_files):
+        raise ValueError(
+            'The browser did not provide folder-relative paths. '
+            'Try a current Chrome, Edge, Firefox, or Safari browser, or upload a ZIP instead.'
+        )
+
+    normalized_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for raw_path in repo_paths:
+        normalized = _folder_upload_path(raw_path)
+        if normalized in seen_paths:
+            raise ValueError(f'Folder upload contains a duplicate path: {normalized}')
+        seen_paths.add(normalized)
+        normalized_paths.append(normalized)
+
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for file_obj, relative_path in zip(repo_files, normalized_paths):
+            with archive.open(relative_path, 'w') as destination:
+                shutil.copyfileobj(file_obj.stream, destination, length=1024 * 1024)
 
 
 def register(
@@ -28,26 +72,53 @@ def register(
     def vuln_catalog_packs_upload():
         require_builder_or_admin()
         is_ajax = str(request.headers.get('X-Requested-With') or '').lower() == 'xmlhttprequest' or 'application/json' in str(request.headers.get('Accept') or '')
-        try:
-            upload_file = request.files.get('zip_file')
-        except request_entity_too_large_type:
-            msg = 'File too large for this server upload limit.'
-            if is_ajax:
-                return jsonify({'ok': False, 'error': msg}), 413
-            flash(msg)
-            return redirect(url_for('vuln_catalog_page'))
-
-        if not upload_file:
-            if is_ajax:
-                return jsonify({'ok': False, 'error': 'Missing zip_file'}), 400
-            flash('Missing zip_file')
-            return redirect(url_for('vuln_catalog_page'))
 
         max_upload_bytes = 1024 * 1024 * 1024
         try:
             max_upload_bytes = int(os_module.getenv('CORETG_VULN_PACK_MAX_BYTES') or max_upload_bytes)
         except Exception:
             max_upload_bytes = 1024 * 1024 * 1024
+
+        # Flask 3.1 defaults MAX_FORM_PARTS to 1,000. Folder uploads send one
+        # file part and one repo_paths field per file, so otherwise a catalog
+        # with about 500 files is rejected before this route can validate it.
+        # Keep the override local to this endpoint and aligned with our own
+        # explicit file-count and byte limits.
+        try:
+            request.max_content_length = max_upload_bytes
+            request.max_form_parts = (MAX_FOLDER_UPLOAD_FILES * 2) + 10
+        except Exception:
+            pass
+
+        try:
+            upload_file = request.files.get('zip_file')
+            repo_files = [
+                item for item in request.files.getlist('repo_files')
+                if item and str(item.filename or '').strip()
+            ]
+        except request_entity_too_large_type:
+            msg = (
+                'Upload exceeds the vulnerability catalog limits '
+                f'(max {max_upload_bytes // (1024 * 1024)}MB or {MAX_FOLDER_UPLOAD_FILES:,} folder files).'
+            )
+            if is_ajax:
+                return jsonify({'ok': False, 'error': msg}), 413
+            flash(msg)
+            return redirect(url_for('vuln_catalog_page'))
+
+        if not upload_file and not repo_files:
+            msg = 'No vulnerability catalog folder or ZIP selected.'
+            if is_ajax:
+                return jsonify({'ok': False, 'error': msg}), 400
+            flash(msg)
+            return redirect(url_for('vuln_catalog_page'))
+        if upload_file and repo_files:
+            msg = 'Select either a vulnerability catalog folder or a ZIP, not both.'
+            if is_ajax:
+                return jsonify({'ok': False, 'error': msg}), 400
+            flash(msg)
+            return redirect(url_for('vuln_catalog_page'))
+
         try:
             req_len = request.content_length
             if isinstance(req_len, int) and req_len > max_upload_bytes:
@@ -60,11 +131,17 @@ def register(
             pass
 
         tmp_path = ''
+        uploaded_file_count = 0
+        uploaded_compose_count = 0
         try:
             try:
                 with tempfile_module.NamedTemporaryFile(prefix='vuln-upload-', suffix='.zip', delete=False) as tmp:
                     tmp_path = tmp.name
-                upload_file.save(tmp_path)
+                if repo_files:
+                    repo_paths = [str(path or '') for path in request.form.getlist('repo_paths')]
+                    _folder_upload_to_zip(repo_files, repo_paths, tmp_path)
+                else:
+                    upload_file.save(tmp_path)
             except request_entity_too_large_type:
                 msg = 'File too large for this server upload limit.'
                 if is_ajax:
@@ -72,8 +149,25 @@ def register(
                 flash(msg)
                 return redirect(url_for('vuln_catalog_page'))
 
-            label = secure_filename_func(getattr(upload_file, 'filename', '') or '') or 'vuln-catalog'
-            entry = install_vuln_catalog_zip_file(zip_file_path=tmp_path, label=label, origin='upload')
+            if repo_files:
+                label = secure_filename_func(str(request.form.get('repo_label') or '').strip()) or 'vuln-catalog'
+                origin = 'folder-upload'
+            else:
+                label = secure_filename_func(getattr(upload_file, 'filename', '') or '') or 'vuln-catalog'
+                origin = 'upload'
+            try:
+                with zipfile.ZipFile(tmp_path, 'r') as archive:
+                    uploaded_names = [name for name in archive.namelist() if name and not name.endswith('/')]
+                uploaded_file_count = len(uploaded_names)
+                uploaded_compose_count = sum(
+                    1 for name in uploaded_names
+                    if name == 'docker-compose.yml' or name.endswith('/docker-compose.yml')
+                )
+            except Exception:
+                uploaded_file_count = 0
+                uploaded_compose_count = 0
+
+            entry = install_vuln_catalog_zip_file(zip_file_path=tmp_path, label=label, origin=origin)
             try:
                 os_module.remove(tmp_path)
             except Exception:
@@ -98,7 +192,13 @@ def register(
                     'ok': True,
                     'message': message,
                     'catalog_id': str(entry.get('id') or ''),
+                    'import_method': origin,
+                    'uploaded_file_count': uploaded_file_count,
+                    'discovered_compose_count': uploaded_compose_count,
+                    'installed_catalog_count': bundle_count or 1,
+                    'installed_vulnerability_count': int(entry.get('compose_count') or uploaded_compose_count or 0),
                     'missing_required_file_count': missing_required_file_count,
+                    'bundle_failures': list(entry.get('bundle_failures') or []),
                 })
             flash(message)
         except Exception as exc:
@@ -115,17 +215,39 @@ def register(
     @app.route('/vuln_catalog_packs/import_url', methods=['POST'])
     def vuln_catalog_packs_import_url():
         require_builder_or_admin()
+        is_ajax = str(request.headers.get('X-Requested-With') or '').lower() == 'xmlhttprequest' or 'application/json' in str(request.headers.get('Accept') or '')
         url = str(request.form.get('zip_url') or '').strip()
         ok, msg = is_safe_remote_zip_url(url)
         if not ok:
+            if is_ajax:
+                return jsonify({'ok': False, 'error': f'Blocked URL: {msg}'}), 400
             flash(f'Blocked URL: {msg}')
             return redirect(url_for('vuln_catalog_page'))
         try:
             data = download_zip_from_url(url)
             label = os_module.path.basename(urlparse_func(url).path) or 'vuln-catalog'
-            install_vuln_catalog_zip_bytes(zip_bytes=data, label=label, origin=url)
+            entry = install_vuln_catalog_zip_bytes(zip_bytes=data, label=label, origin=url)
+            bundle_count = int(entry.get('bundle_count') or 0)
+            missing_count = int(entry.get('missing_required_file_count') or 0)
+            message = 'Vulnerability catalog pack installed from URL.'
+            if bundle_count:
+                message = f'Installed {bundle_count} vulnerability catalog pack(s) from URL bundle.'
+            if is_ajax:
+                return jsonify({
+                    'ok': True,
+                    'message': message,
+                    'catalog_id': str(entry.get('id') or ''),
+                    'import_method': 'url',
+                    'downloaded_bytes': len(data),
+                    'installed_catalog_count': bundle_count or 1,
+                    'installed_vulnerability_count': int(entry.get('compose_count') or 0),
+                    'missing_required_file_count': missing_count,
+                    'bundle_failures': list(entry.get('bundle_failures') or []),
+                })
             flash('Vulnerability catalog pack installed from URL.')
         except Exception as exc:
+            if is_ajax:
+                return jsonify({'ok': False, 'error': f'Failed to import vulnerability catalog pack: {exc}'}), 400
             flash(f'Failed to import vulnerability catalog pack: {exc}')
         return redirect(url_for('vuln_catalog_page'))
 
