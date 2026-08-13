@@ -95,6 +95,11 @@ ScenarioForge supports both **VM mode** and **native mode**. The README focuses 
 
 For native/non-VM operation, including autodetected local CORE, explicit remote CORE targets without Proxmox, Docker-only notes, and CLI usage, see [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md).
 
+Full step-by-step setup guides:
+
+- [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md) – CORE VM three-interface layout (management, HITL/participant, uplink), Proxmox bridges, and the complete VM-mode `.scenarioforge.env` reference.
+- [docs/NATIVE_MODE_SETUP.md](docs/NATIVE_MODE_SETUP.md) – local and remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox **VM / Access** workflow (credentials, required API privileges, CORE VM selection, HITL bridge apply).
+
 ### Recommended Lab Layout
 
 Use three machines or clearly separated VM roles when possible:
@@ -123,7 +128,7 @@ Key runtime variables in [.scenarioforge.env.example](.scenarioforge.env.example
 - `CORETG_WEBUI_MODE` – set this to `vm` to pre-seed VM-oriented UI behavior and VM-mode HITL defaults.
 - `CORETG_HITL_CORE_IFX_IPV4` – optional IPv4 or CIDR to pre-seed on a HITL interface entry in either mode, such as `10.254.200.3/24`. In native mode it only fills the first existing HITL interface entry that does not already define an IPv4 value; it does not create a HITL interface or enable HITL by itself. In VM mode it also populates the runtime-managed HITL default interface, but that interface still requires `CORETG_VM_MODE_HITL_CORE_IFX_NAME` to be configured.
 - `CORETG_VM_MODE_HITL_ENABLED` – enables participant-facing HITL defaults in VM mode.
-- `CORETG_VM_MODE_HITL_CORE_IFX_NAME` – expected Linux interface name inside the CORE VM for the participant network, such as `ens18`.
+- `CORETG_VM_MODE_HITL_CORE_IFX_NAME` – expected Linux interface name inside the CORE VM for the participant network, such as `ens19`. It must be a physical/virtio NIC as the guest sees it, named by guest interface name rather than Proxmox slot id. See [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md#2-core-vm-network-interfaces).
 - `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target for that VM-mode interface: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
 - `CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION` – optional label/description applied to that VM-mode HITL interface entry.
 - `CORETG_VM_MODE_PARTICIPANT_URL` – optional participant UI URL shown in VM-mode flows.
@@ -144,7 +149,7 @@ CORE_SSH_USERNAME=corevm
 CORE_SSH_PASSWORD=change-me
 CORETG_WEBUI_MODE=vm
 CORETG_VM_MODE_HITL_ENABLED=true
-CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens18
+CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19
 CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router
 CORETG_HITL_CORE_IFX_IPV4=10.254.200.3/24
 ```

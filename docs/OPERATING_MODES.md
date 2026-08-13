@@ -2,6 +2,8 @@
 
 ScenarioForge can run in VM mode, native/non-VM mode, and CLI-only workflows. The README is VM-mode first; this page collects the other launch paths and when to use them.
 
+For step-by-step setup, see [VM Mode Setup](VM_MODE_SETUP.md) and [Native Mode Setup](NATIVE_MODE_SETUP.md). Both include a full `.scenarioforge.env` reference; the native page also covers Proxmox credentials, privileges, and the VM / Access workflow.
+
 Native mode is not a separate "local-only" deployment. It is the default non-VM application mode, and CORE may be on the same machine or on another reachable host. The launcher has `auto`, `local`, and `remote` CORE target selectors; those choose the CORE endpoint, while `CORETG_WEBUI_MODE=native` keeps VM-mode HITL defaults disabled.
 
 ## Mode Summary

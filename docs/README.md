@@ -5,6 +5,8 @@ Use this page to navigate the main project documentation.
 ## Getting started
 - [Quick Start](QUICK_START.md)
 - [Operating Modes](OPERATING_MODES.md)
+- [VM Mode Setup](VM_MODE_SETUP.md) – CORE VM interface layout, Proxmox bridges, and the VM-mode `.scenarioforge.env` reference.
+- [Native Mode Setup](NATIVE_MODE_SETUP.md) – local/remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox VM / Access workflow.
 - [Runtime Validation (strict by default)](QUICK_START.md#runtime-validation)
 - [Catalog Batch Testing](CATALOG_BATCH_TESTING.md)
 - [Artifact Checks (validate a running session)](CLI_EXECUTION_DEEP_DIVE.md#check-artifacts-phase)

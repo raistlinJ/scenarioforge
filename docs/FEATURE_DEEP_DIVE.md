@@ -73,7 +73,7 @@ flowchart LR
 - Router and vulnerability planning capture derived vs explicit counts via `explicit_count`, `derived_count`, and `total_planned`.
 - Scenario-level `scenario_total_nodes` summarises planned hosts, routers, and vulnerability targets.
 - Parser helpers expose metadata programmatically: `scenarioforge.parsers.planning_metadata.parse_planning_metadata()`.
-- Hardware-in-the-Loop plans persist per-scenario preferences (enabled state, interface list, attachment choice). Attachments normalize to `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`. When interfaces map to Proxmox VMs, the apply flow ensures the selected bridge exists on the node (creating it if needed) and rewrites the CORE/external VM adapters to land on that bridge.
+- Hardware-in-the-Loop plans persist per-scenario preferences (enabled state, interface list, attachment choice). Attachments normalize to `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`. When interfaces map to Proxmox VMs, the apply flow verifies the selected bridge already exists on the node — operators pre-create it, and a missing bridge is a hard error rather than an auto-create — and rewrites the CORE/external VM adapters to land on that bridge.
 
 ### The plan is what runs
 

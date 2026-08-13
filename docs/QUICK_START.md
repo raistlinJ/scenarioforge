@@ -49,7 +49,7 @@ python webapp/app_backend.py
 - The Scenarios editor can be empty. If you delete the last scenario, the UI keeps an empty project until you create or import another scenario.
 - Saving an empty editor snapshot preserves that state, but no scenario XML is generated until at least one scenario exists.
 - For HTTPS + reverse proxy mode, use [HTTPS via Docker Compose](#https-via-docker-compose).
-- HITL editor note: the “Attach to” dropdown offers `Existing Router`, `Existing Switch`, or `New Router`. Once Proxmox credentials and VM selections are validated, use **Apply Internal Bridge** to create/update a Proxmox bridge and retarget both the CORE VM and external VM interfaces in one step.
+- HITL editor note: the “Attach to” dropdown offers `Existing Router`, `Existing Switch`, or `New Router`. Once Proxmox credentials and VM selections are validated, use **Apply Internal Bridge** to retarget both the CORE VM and external VM interfaces onto the bridge in one step. The bridge must already exist on the Proxmox node — the apply flow verifies it and fails if it is missing. See [Native Mode Setup](NATIVE_MODE_SETUP.md#4-proxmox-setup).
 
 ## Run the CLI
 With **uv**:
