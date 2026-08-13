@@ -49330,6 +49330,12 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 'compose_path': os.path.relpath(compose_path, _get_repo_root()).replace('\\', '/'),
                 'dir': os.path.relpath(os.path.dirname(compose_path), _get_repo_root()).replace('\\', '/'),
                 'from_source': norm_label,
+                # Freshly imported items are pinned by default: an operator who
+                # just went to the trouble of importing a catalog wants its
+                # images to survive cleanup, not to be pulled again every run.
+                # An export's own pin state still wins below, so an item
+                # deliberately unpinned elsewhere stays unpinned on reinstall.
+                'persistent': True,
                 'disabled': auto_disabled,
                 'disabled_due_to_missing_files': bool(missing_required_files),
                 'disabled_due_to_build_network': needs_build_network,
@@ -51320,6 +51326,10 @@ def _install_generator_pack_payload(
                 'kind': kind,
                 'category': category,
                 'path': dest_dir,
+                # Same default as an imported vulnerability catalog item: a
+                # generator someone just installed keeps its cached image
+                # through cleanup until the operator unpins it.
+                'persistent': True,
             }
             imported_note = imported_note_map.get((kind, source_gid))
             if imported_note:

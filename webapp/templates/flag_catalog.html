@@ -391,7 +391,12 @@
                 scenario execution there doesn't need internet access. Use <strong>Refresh Image Cache</strong> to
                 check what's already present on a given CORE VM. Generators marked <strong>Persistent</strong> (see
                 the Flag-Generators / Flag-Node-Generators tabs) are never removed by ScenarioForge's own cleanup
-                routines. Generators without a docker-compose runtime have nothing to cache.
+                routines; newly imported generators are marked Persistent automatically, so unmark one before
+                clearing its image. Generators without a docker-compose runtime have nothing to cache.
+              </div>
+              <div class="alert alert-info py-2 px-3 small d-none" id="genCacheImportNote">
+                <span id="genCacheImportNoteText"></span>
+                <button class="btn btn-link btn-sm p-0 ms-2 align-baseline" type="button" id="genCacheImportNoteClearBtn">Use all generators instead</button>
               </div>
               <div class="row g-2 align-items-end">
                 <div class="col-md-2">
@@ -3649,13 +3654,109 @@
     if (stopBtn) stopBtn.style.display = 'none';
   }
 
+  // One-shot preset handed to this tab by a generator-pack import, so the
+  // obvious next action -- caching what was just installed -- is a single
+  // click. Session storage survives the reload the import triggers and dies
+  // with the tab; the record is consumed on first read so it cannot re-arm.
+  const genCacheImportKey = 'coretg_flag_cache_import';
+  const GEN_CACHE_IMPORT_MAX_AGE_MS = 30 * 60 * 1000;
+  let genCacheImportPreset = null;
+
+  function rememberGeneratorImportForCache(payload) {
+    try {
+      const installedAs = (payload && payload.installed_as) || {};
+      const generators = Array.isArray(installedAs.generators) ? installedAs.generators : [];
+      const ids = { 'flag-generator': [], 'flag-node-generator': [] };
+      const counts = { 'flag-generator': 0, 'flag-node-generator': 0 };
+      generators.forEach((record) => {
+        const kind = String((record && record.kind) || '').trim();
+        if (!ids[kind]) return;
+        // A catalog row is keyed by its installed manifest id, but an older
+        // pack state can surface the source id instead. Carry both: an id the
+        // catalog does not know simply matches nothing server-side.
+        const candidates = [
+          String((record && record.id) || '').trim(),
+          String((record && record.source_id) || '').trim(),
+        ].filter(Boolean);
+        if (!candidates.length) return;
+        counts[kind] += 1;
+        candidates.forEach((value) => {
+          if (!ids[kind].includes(value)) ids[kind].push(value);
+        });
+      });
+      if (!ids['flag-generator'].length && !ids['flag-node-generator'].length) return;
+      sessionStorage.setItem(genCacheImportKey, JSON.stringify({
+        label: String(installedAs.pack_label || '').trim(),
+        ids,
+        counts,
+        at: Date.now(),
+      }));
+    } catch (e) {}
+  }
+
+  function clearGenCacheImportPreset() {
+    genCacheImportPreset = null;
+    const noteEl = document.getElementById('genCacheImportNote');
+    if (noteEl) noteEl.classList.add('d-none');
+  }
+
+  function renderGenCacheImportNote() {
+    const noteEl = document.getElementById('genCacheImportNote');
+    const textEl = document.getElementById('genCacheImportNoteText');
+    if (!noteEl || !textEl) return;
+    if (!genCacheImportPreset) {
+      noteEl.classList.add('d-none');
+      return;
+    }
+    const kind = selectedGenCacheKind();
+    const ids = (genCacheImportPreset.ids && genCacheImportPreset.ids[kind]) || [];
+    const count = Number((genCacheImportPreset.counts || {})[kind]) || ids.length;
+    const label = String(genCacheImportPreset.label || '').trim() || 'the last import';
+    noteEl.classList.remove('d-none');
+    textEl.textContent = ids.length
+      ? `Preset to the ${count} generator(s) imported from ${label}. They are marked Persistent and not cached yet — Cache Images pulls only those.`
+      : `${label} installed no ${kind === 'flag-node-generator' ? 'flag-node-generators' : 'flag-generators'}, so this kind uses the filter below as usual.`;
+  }
+
+  function applyGenCacheImportPreset() {
+    let record = null;
+    try {
+      const raw = sessionStorage.getItem(genCacheImportKey);
+      sessionStorage.removeItem(genCacheImportKey);
+      record = raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      record = null;
+    }
+    if (!record || !record.ids) return;
+    const at = Number(record.at);
+    if (!Number.isFinite(at) || (Date.now() - at) > GEN_CACHE_IMPORT_MAX_AGE_MS) return;
+    const counts = (record.counts && typeof record.counts === 'object') ? record.counts : {};
+    genCacheImportPreset = {
+      label: String(record.label || ''),
+      ids: {
+        'flag-generator': (record.ids['flag-generator'] || []).map((v) => String(v)),
+        'flag-node-generator': (record.ids['flag-node-generator'] || []).map((v) => String(v)),
+      },
+      counts: {
+        'flag-generator': Number(counts['flag-generator']) || 0,
+        'flag-node-generator': Number(counts['flag-node-generator']) || 0,
+      },
+    };
+    renderGenCacheImportNote();
+  }
+
+  function genCacheImportPresetIds(kind) {
+    if (!genCacheImportPreset) return [];
+    return (genCacheImportPreset.ids && genCacheImportPreset.ids[kind]) || [];
+  }
+
   function selectedGenCacheKind() {
     const el = document.getElementById('genCacheKind');
     const value = String((el && el.value) || 'flag-generator');
     return value === 'flag-node-generator' ? 'flag-node-generator' : 'flag-generator';
   }
 
-  function collectGenCacheSelection() {
+  function collectGenCacheSelection(mode) {
     const kind = selectedGenCacheKind();
     const selectedOnlyEl = document.getElementById('genCacheSelectedOnly');
     if (selectedOnlyEl && selectedOnlyEl.checked) {
@@ -3666,6 +3767,14 @@
     const limitEl = document.getElementById('genCacheLimit');
     const includeDisabledEl = document.getElementById('genCacheIncludeDisabled');
     const scopeEl = document.getElementById('genCacheScope');
+    // Never for 'clear': the preset's generators are all Persistent, so a clear
+    // scoped to them would match nothing and read as an error.
+    const presetIds = mode === 'clear' ? [] : genCacheImportPresetIds(kind);
+    // An untouched filter means the operator did not narrow anything down, so
+    // the import preset stands in; typing a filter takes it back over.
+    if (presetIds.length && !String((queryEl && queryEl.value) || '').trim()) {
+      return { kind, generator_ids: presetIds.slice() };
+    }
     const limitRaw = String((limitEl && limitEl.value) || '').trim();
     let limit = null;
     if (limitRaw) {
@@ -3881,7 +3990,7 @@
       if (metaEl) metaEl.textContent = `Failed to start: ${String(e)}`;
       return;
     }
-    const selection = collectGenCacheSelection();
+    const selection = collectGenCacheSelection(mode);
     const startingText = mode === 'status' ? 'Starting refresh…' : (mode === 'clear' ? 'Starting cache clear…' : 'Starting cache pull…');
     if (metaEl) metaEl.textContent = startingText;
     try {
@@ -3948,6 +4057,9 @@
       if (metaEl) metaEl.textContent = `Cache stop failed: ${String(e)}`;
     }
   });
+  document.getElementById('genCacheKind')?.addEventListener('change', renderGenCacheImportNote);
+  document.getElementById('genCacheImportNoteClearBtn')?.addEventListener('click', clearGenCacheImportPreset);
+  applyGenCacheImportPreset();
   (function resumeGenCachePoll() {
     const savedRunId = loadSavedGenCacheRunId();
     if (savedRunId) {
@@ -4826,6 +4938,7 @@
               }
               setBarStyle('success');
               textEl.textContent = 'Installed.';
+              rememberGeneratorImportForCache(payload || {});
               finishDetailedImport(true, 'Generator catalog updated successfully.');
               showResult(resultTextFromPayload(payload || {}));
               enterTerminalState();
@@ -4959,6 +5072,7 @@
               }
               setBarStyle('success');
               textEl.textContent = 'Installed.';
+              rememberGeneratorImportForCache(payload || {});
               finishDetailedImport(true, 'Generator catalog updated successfully.');
               showResult(resultTextFromPayload(payload || {}));
               enterTerminalState();
@@ -5078,6 +5192,7 @@
         }
         setBarStyle('success');
         textEl.textContent = 'Installed.';
+        rememberGeneratorImportForCache(payload || {});
         finishDetailedImport(true, 'Generator catalog updated successfully.');
         showResult(resultTextFromPayload(payload || {}));
         enterTerminalState();

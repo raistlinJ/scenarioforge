@@ -156,6 +156,12 @@ Pin an item when its scenario images must remain available between runs. Without
 that flag, ordinary pulled bases and locally built outputs are eligible for
 cleanup; only framework prerequisites are retained automatically.
 
+Items and generators arrive **persistent** when they are imported, so a freshly
+imported catalog keeps whatever gets cached for it. An export carries each
+item's own pin state, so reinstalling a catalog curated elsewhere restores that
+curation instead of re-pinning everything. To clear a pinned item's image, unmark
+it first (**Unmark Persistent** on the catalog tab), then run **Clear Cache**.
+
 ## CLI Mode
 
 Run the CLI with uv:

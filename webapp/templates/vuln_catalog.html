@@ -339,8 +339,10 @@
                 Pull the docker images required by catalog items onto the CORE VM ahead of time so scenario
                 execution there doesn't need internet access. Use <strong>Refresh Image Cache</strong> to check
                 what's already present on a given CORE VM. Items marked <strong>Persistent</strong> (see the
-                Vulnerability Catalog tab) are never removed by ScenarioForge's own cleanup routines.
+                Vulnerability Catalog tab) are never removed by ScenarioForge's own cleanup routines; newly
+                imported items are marked Persistent automatically, so unmark an item before clearing its image.
               </div>
+              <div class="alert alert-info py-2 px-3 small d-none" id="vulnCacheImportNote" data-active-catalog-id="{{ active_id or '' }}"></div>
               <div class="row g-2 align-items-end">
                 <div class="col-md-4">
                   <label class="form-label">Filter</label>
@@ -1870,6 +1872,56 @@
   let _vulnCachePollTimer = null;
   const _vulnCacheState = { runId: null, done: true };
 
+  // A just-imported pack is the thing an operator wants cached next, so the
+  // import hands the Image Cache tab a one-shot preset across the page reload
+  // that follows it. Session storage (not local) so it dies with the tab, and
+  // it is consumed on first read so it can never quietly re-arm later.
+  const _vulnCacheImportKey = 'coretg_vuln_cache_import';
+  const _VULN_CACHE_IMPORT_MAX_AGE_MS = 30 * 60 * 1000;
+
+  function _rememberVulnImportForCache(payload, label) {
+    try {
+      const catalogId = String((payload && payload.catalog_id) || '').trim();
+      if (!catalogId) return;
+      sessionStorage.setItem(_vulnCacheImportKey, JSON.stringify({
+        catalog_id: catalogId,
+        label: String(label || '').trim(),
+        count: Number((payload && payload.installed_vulnerability_count) || 0) || 0,
+        at: Date.now(),
+      }));
+    } catch (e) {}
+  }
+
+  function _applyVulnCacheImportPreset() {
+    const noteEl = _qs('vulnCacheImportNote');
+    if (!noteEl) return;
+    let record = null;
+    try {
+      const raw = sessionStorage.getItem(_vulnCacheImportKey);
+      sessionStorage.removeItem(_vulnCacheImportKey);
+      record = raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      record = null;
+    }
+    if (!record || !String(record.catalog_id || '').trim()) return;
+    const at = Number(record.at);
+    if (!Number.isFinite(at) || (Date.now() - at) > _VULN_CACHE_IMPORT_MAX_AGE_MS) return;
+
+    const label = String(record.label || '').trim() || String(record.catalog_id);
+    const count = Number(record.count) || 0;
+    const activeId = String(noteEl.getAttribute('data-active-catalog-id') || '').trim();
+    noteEl.classList.remove('d-none', 'alert-info', 'alert-warning');
+    if (activeId && activeId === String(record.catalog_id).trim()) {
+      noteEl.classList.add('alert-info');
+      noteEl.textContent = `Imported ${label}${count ? ` (${count} item(s))` : ''}. Its items are marked Persistent and none are cached yet — click Cache Images to pull them onto the CORE VM.`;
+      const scopeEl = _qs('vulnCacheScope');
+      if (scopeEl) scopeEl.value = 'uncached';
+    } else {
+      noteEl.classList.add('alert-warning');
+      noteEl.textContent = `Imported ${label}, which is not the active catalog pack. Image Cache only acts on the active pack — set it active on the Vulnerability Catalog Packs tab first, then return here.`;
+    }
+  }
+
   function _loadSavedVulnCacheRunId() {
     try {
       return localStorage.getItem(_vulnCacheStorageKey) || '';
@@ -2804,6 +2856,7 @@
           progressText.textContent = msg || 'Upload rejected: catalog exceeds the configured byte or file-count limit (HTTP 413).';
         }
         if (ok) {
+          try { _rememberVulnImportForCache(JSON.parse(xhr.responseText || '{}'), file.name); } catch (e) {}
           finishVulnDetailedImport(true, 'Vulnerability catalog updated successfully.');
           setTimeout(() => { window.location.reload(); }, 700);
         } else {
@@ -2866,6 +2919,7 @@
           if (progressText) progressText.textContent = String(payload.message || 'Installed.');
           if (resultPre) { resultPre.style.display = 'block'; resultPre.textContent = vulnImportResultText(payload); }
           if (closeBtn) closeBtn.style.display = 'inline-block';
+          _rememberVulnImportForCache(payload, (zipUrl.split('/').pop() || zipUrl));
           finishVulnDetailedImport(true, 'Vulnerability catalog updated successfully.');
           setTimeout(() => { window.location.reload(); }, 900);
         } catch (error) {
@@ -3000,6 +3054,7 @@
         _setText('vulnCacheMeta', `Cache stop failed: ${String(e)}`);
       }
     });
+    _applyVulnCacheImportPreset();
     const savedCacheRunId = _loadSavedVulnCacheRunId();
     if (savedCacheRunId) {
       _vulnCacheState.runId = savedCacheRunId;

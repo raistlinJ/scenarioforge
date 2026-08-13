@@ -1281,3 +1281,34 @@ def test_import_does_not_scan_image_architectures(tmp_path, monkeypatch):
     ]
     assert installed_items
     assert all(item.get('architecture_source') == 'unscanned' for item in installed_items)
+
+
+def test_imported_generators_are_persistent_by_default(tmp_path, monkeypatch):
+    """`persistent` is what protects a cached image from Clear Cache and the
+    cleanup routines. Leaving imports unpinned meant every pack needed a
+    second, easily forgotten pass before its cached images were worth
+    anything, so the pin now comes with the install."""
+    install_root = tmp_path / 'installed_generators'
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(install_root))
+    zip_path = tmp_path / 'persist-default.zip'
+    zip_path.write_bytes(_make_zip({
+        **_minimal_generator_files('persist_default_gen'),
+        **_minimal_generator_files('persist_default_node', kind='flag-node-generator'),
+    }))
+
+    ok, note = app_backend._install_generator_pack(
+        zip_path=str(zip_path),
+        pack_label='persist-default',
+        pack_origin='upload',
+    )
+    assert ok is True, note
+
+    installed = app_backend._load_installed_generator_packs_state()['packs'][-1]['installed']
+    assert len(installed) == 2
+    assert all(item.get('persistent') is True for item in installed)
+
+    # And the annotated view that cleanup's keep-set is built from agrees.
+    _packs, generators_by_kind_id = app_backend._build_installed_disable_maps()
+    for item in installed:
+        info = generators_by_kind_id[(item['kind'], item['id'])]
+        assert info['persistent'] is True

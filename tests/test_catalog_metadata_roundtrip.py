@@ -177,6 +177,24 @@ def test_import_restores_operator_disable(tmp_path, monkeypatch):
     assert item["disabled_by_operator"] is True
 
 
+def test_import_pins_new_items_persistent_by_default(tmp_path, monkeypatch):
+    # `persistent` is what keeps a cached image alive through Clear Cache and
+    # the cleanup routines. Importing a catalog and then pulling its images is
+    # one workflow, so the pin comes with the import rather than needing a
+    # second pass over every item.
+    item = _install(tmp_path, monkeypatch, items_metadata=None)
+    assert item["persistent"] is True
+
+
+def test_import_keeps_an_exported_item_unpinned(tmp_path, monkeypatch):
+    # The default must not overrule curation carried by an export: an item
+    # deliberately left unpinned elsewhere stays unpinned on reinstall.
+    item = _install(tmp_path, monkeypatch, items_metadata=[{
+        "compose_rel": COMPOSE_REL, "persistent": False,
+    }])
+    assert item["persistent"] is False
+
+
 def test_import_restores_persistent_pin(tmp_path, monkeypatch):
     item = _install(tmp_path, monkeypatch, items_metadata=[{
         "compose_rel": COMPOSE_REL, "persistent": True,
