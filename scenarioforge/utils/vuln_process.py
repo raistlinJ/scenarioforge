@@ -2889,20 +2889,27 @@ def _copy_path_replace_wrong_type(src_path: str, dst_path: str) -> None:
 
 
 def _restore_executable_support_script(dst_path: str) -> None:
-	"""Restore execute bits for a staged, shebang-based catalog support script.
+	"""Make a staged shebang script Linux-safe and executable.
 
 	Older catalog installs used a safe ZIP extractor that did not restore Unix
 	permission bits.  A bind-mounted CGI file consequently reached Apache as a
 	non-executable regular file and failed with a generic CGI error.  Restrict the
 	repair to files that explicitly declare an interpreter, so data files are not
-	made executable.
+	made executable. Catalogs prepared on Windows can also contain CRLF scripts;
+	``/bin/sh script.sh`` then parses the carriage return into command names (for
+	example ``apache2-foreground\r``) and the node immediately crash-loops. Normalize
+	those staged copies only, leaving the installed catalog untouched.
 	"""
 	try:
 		if not os.path.isfile(dst_path):
 			return
 		with open(dst_path, 'rb') as handle:
-			if handle.read(2) != b'#!':
+			content = handle.read()
+			if not content.startswith(b'#!'):
 				return
+		if b'\r\n' in content:
+			with open(dst_path, 'wb') as handle:
+				handle.write(content.replace(b'\r\n', b'\n'))
 		mode = os.stat(dst_path).st_mode
 		os.chmod(dst_path, mode | 0o111)
 	except Exception:

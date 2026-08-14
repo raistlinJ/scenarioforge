@@ -65,6 +65,7 @@ from .utils.tmp_staging import ensure_local_tmp_writable, is_tmp_staging_path
 from .builders.topology import (
     _docker_node_compose_path,
     _ensure_docker_node_default_routes,
+    _finalize_shared_namespace_supervisor,
     build_star_from_roles,
     build_segmented_topology,
     build_multi_switch_topology,
@@ -123,6 +124,41 @@ def _write_compose_assignments_summary(
         json.dump(summary, handle, indent=2)
         handle.write('\n')
     return path
+
+
+def _finalize_prepared_shared_namespace_nodes(node_names: list[str]) -> list[str]:
+    """Reapply stable app supervision after the CLI's final compose rewrite.
+
+    Topology preflight validates and may enrich a compose before CORE starts,
+    but execute performs one final ``prepare_compose_for_assignments`` pass to
+    add Flow/traffic/segmentation mounts.  That pass is intentionally a full
+    regeneration and used to erase the preflight-only supervisor.  Finalize the
+    files that CORE will actually render, while the helper itself keeps
+    single-service nodes untouched.
+    """
+    applied: list[str] = []
+    for raw_name in node_names or []:
+        name = str(raw_name or '').strip()
+        if not name:
+            continue
+        compose_path = _docker_node_compose_path(name)
+        try:
+            if _finalize_shared_namespace_supervisor(compose_path, name):
+                applied.append(name)
+        except Exception as exc:
+            logging.warning(
+                'Stable node supervisor finalization failed node=%s compose=%s err=%s',
+                name,
+                compose_path,
+                exc,
+            )
+    if applied:
+        logging.info(
+            'Stable node supervisor finalized for %d shared-netns node(s): %s',
+            len(applied),
+            ', '.join(applied),
+        )
+    return applied
 
 
 def _preview_vuln_slot_overrides(
@@ -9429,6 +9465,7 @@ def main():
                     pass
                 created = prepare_compose_for_assignments(all_docker_nodes, out_base="/tmp/vulns")
                 logging.info("Prepared docker compose files (all docker nodes): %d for %d docker nodes", len(created), len(all_docker_nodes))
+                _finalize_prepared_shared_namespace_nodes(list(all_docker_nodes.keys()))
                 try:
                     _write_compose_assignments_summary(
                         all_docker_nodes,

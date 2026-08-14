@@ -76,7 +76,7 @@ from ..utils.services import (
     ROUTING_STACK_SERVICES,
 )
 from ..utils.allocation import compute_counts_by_factor
-from ..utils.compose_shell import dump_compose_yaml
+from ..utils.compose_shell import dump_compose_yaml, shell_text_for_compose
 
 logger = logging.getLogger(__name__)
 import os
@@ -830,7 +830,58 @@ def _compose_namespace_join_refused(output: object) -> bool:
     return _NAMESPACE_JOIN_REFUSED in str(output or '')
 
 
-def _wrap_node_command_with_retry(compose_path: str, service_name: str) -> bool:
+def _stable_node_supervisor_enabled() -> bool:
+    """Whether shared-netns nodes keep their container namespace stable.
+
+    Enabled by default.  This is deliberately narrower than a general restart
+    policy: it is used only when another compose service joins the node's
+    network namespace.  Set ``CORETG_STABLE_NODE_SUPERVISOR=0`` for an
+    emergency rollback without changing single-service Docker nodes.
+    """
+    value = os.getenv('CORETG_STABLE_NODE_SUPERVISOR')
+    if value is None:
+        return True
+    return str(value).strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
+def _service_startup_argv(
+    service: dict,
+    image_config: dict | None = None,
+    *,
+    escape_image_values: bool = False,
+) -> list[str]:
+    """Resolve the argv Compose will give a service, including image defaults."""
+    import shlex
+
+    def _argv(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(part) for part in value]
+        return shlex.split(str(value))
+
+    cfg = image_config if isinstance(image_config, dict) else {}
+    if service.get('entrypoint') is not None:
+        entrypoint = _argv(service.get('entrypoint'))
+    else:
+        entrypoint = _argv(cfg.get('Entrypoint'))
+        if escape_image_values:
+            entrypoint = [_compose_escape_image_value(part) for part in entrypoint]
+    if service.get('command') is not None:
+        command = _argv(service.get('command'))
+    else:
+        command = _argv(cfg.get('Cmd'))
+        if escape_image_values:
+            command = [_compose_escape_image_value(part) for part in command]
+    return entrypoint + command
+
+
+def _wrap_node_command_with_retry(
+    compose_path: str,
+    service_name: str,
+    *,
+    image_config: dict | None = None,
+) -> bool:
     """Make the node's PID 1 outlive its app, so sidecars can attach.
 
     The app keeps its own argv; it is just re-executed on failure instead of
@@ -838,7 +889,6 @@ def _wrap_node_command_with_retry(compose_path: str, service_name: str) -> bool:
     wrap or the wrap is already in place.
     """
     try:
-        import shlex  # type: ignore
         import yaml  # type: ignore
 
         with open(compose_path, 'r', encoding='utf-8', errors='ignore') as fh:
@@ -847,34 +897,66 @@ def _wrap_node_command_with_retry(compose_path: str, service_name: str) -> bool:
         if not isinstance(svc, dict):
             return False
 
-        def _argv(value: object) -> list[str]:
-            if value is None:
-                return []
-            if isinstance(value, list):
-                return [str(part) for part in value]
-            return shlex.split(str(value))
+        labels = svc.get('labels') if isinstance(svc.get('labels'), dict) else {}
+        if str(labels.get('coretg.stable_node_supervisor') or '').strip() == '1':
+            return False
 
-        argv = _argv(svc.get('entrypoint')) + _argv(svc.get('command'))
+        argv = _service_startup_argv(svc, image_config, escape_image_values=True)
         if not argv:
             # Without the image's own startup recorded here there is nothing to
             # re-execute; the app-user shim leaves such services alone too.
             return False
-        if argv[0] in ('sh', '/bin/sh') and any('coretg-app-retry' in part for part in argv):
+        if any('coretg-stable-node-supervisor' in part for part in argv):
             return False
 
-        app = ' '.join(shlex.quote(part) for part in argv)
-        script = (
-            f"# coretg-app-retry\n"
-            f"attempt=0\n"
-            f"while :; do\n"
-            f"  {app} && exit 0\n"
-            f"  attempt=$((attempt+1))\n"
-            f"  [ \"$attempt\" -ge {_NODE_APP_RETRY_ATTEMPTS} ] && exit 1\n"
+        raw_script = (
+            "# coretg-stable-node-supervisor\n"
+            "attempt=1\n"
+            "child=\n"
+            "forward_signal() {\n"
+            "  if [ -n \"$child\" ]; then\n"
+            "    kill -TERM \"$child\" 2>/dev/null || true\n"
+            "    wait \"$child\" 2>/dev/null || true\n"
+            "  fi\n"
+            "  exit 143\n"
+            "}\n"
+            "trap forward_signal TERM INT HUP\n"
+            "while :; do\n"
+            "  echo \"[coretg] starting node app attempt $attempt\" >&2\n"
+            "  \"$@\" &\n"
+            "  child=$!\n"
+            "  wait \"$child\"\n"
+            "  rc=$?\n"
+            "  child=\n"
+            "  if [ \"$rc\" -eq 0 ]; then exit 0; fi\n"
+            f"  if [ \"$attempt\" -ge {_NODE_APP_RETRY_ATTEMPTS} ]; then\n"
+            "    echo \"[coretg] node app exhausted retries rc=$rc\" >&2\n"
+            "    exit \"$rc\"\n"
+            "  fi\n"
+            "  attempt=$((attempt+1))\n"
             f"  sleep {_NODE_APP_RETRY_SLEEP_S}\n"
-            f"done\n"
+            "done\n"
         )
-        svc['entrypoint'] = ['sh', '-c', script]
-        svc.pop('command', None)
+        script = shell_text_for_compose(raw_script)
+        image = str(svc.get('image') or '').strip()
+        if image.startswith('coretg/') and image.endswith(':iproute2'):
+            svc['entrypoint'] = [
+                '/usr/local/coretg/bin/busybox', 'sh', '-c', script,
+                'coretg-stable-node-supervisor',
+            ]
+        else:
+            svc['entrypoint'] = ['sh', '-c', script, 'coretg-stable-node-supervisor']
+        # Keep the application argv as Compose argv instead of embedding it in
+        # shell text.  This preserves quoting and applies Compose interpolation
+        # exactly once; the supervisor receives it as "$@".
+        svc['command'] = argv
+        # Docker must not replace this container: CORE's interface, route and
+        # traffic agent live in its network namespace.  The supervisor retries
+        # only the application child; exhausting the budget leaves the node
+        # plainly down instead of deceptively running in a fresh namespace.
+        svc['restart'] = 'no'
+        labels['coretg.stable_node_supervisor'] = '1'
+        svc['labels'] = labels
         with open(compose_path, 'w', encoding='utf-8') as fh:
             fh.write(dump_compose_yaml(obj))
         return True
@@ -887,6 +969,125 @@ def _wrap_node_command_with_retry(compose_path: str, service_name: str) -> bool:
         except Exception:
             pass
         return False
+
+
+def _run_docker_capture(args: List[str], timeout: int) -> tuple[int, str]:
+    """Run a host Docker command with the same sudo behavior as preflight."""
+    try:
+        sudo_pw = _docker_sudo_password()
+        use_stdin = bool(sudo_pw) and args and args[0] == 'sudo' and '-S' in args
+        proc = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            input=(sudo_pw + '\n') if use_stdin else None,
+        )
+        return int(proc.returncode or 0), str(proc.stdout or '').strip()
+    except Exception as exc:
+        return 1, f'{type(exc).__name__}: {exc}'
+
+
+def _inspect_compose_service_image_config(
+    compose_path: str,
+    service_name: str,
+    *,
+    node_name: str,
+    docker_cmd: List[str] | None = None,
+    run=None,
+) -> dict | None:
+    """Read effective image ENTRYPOINT/CMD after preflight has built or pulled it."""
+    try:
+        import yaml  # type: ignore
+
+        with open(compose_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            obj = yaml.safe_load(handle) or {}
+        service = ((obj.get('services') or {}) if isinstance(obj, dict) else {}).get(service_name)
+        if not isinstance(service, dict):
+            return None
+        image = str(service.get('image') or '').strip()
+        project = f'{node_name}conf' if node_name else 'coretg'
+        candidates = [image] if image else []
+        if service.get('build'):
+            candidates.extend((f'{project}-{service_name}', f'{project}_{service_name}'))
+        candidates = [candidate for candidate in dict.fromkeys(candidates) if candidate]
+        if not candidates:
+            return None
+
+        cmd = list(docker_cmd or _docker_cmd())
+
+        runner = run or _run_docker_capture
+        for candidate in candidates:
+            rc, output = runner(
+                cmd + ['image', 'inspect', '--format', '{{json .Config}}', candidate],
+                timeout=60,
+            )
+            if rc != 0:
+                continue
+            for line in reversed([part.strip() for part in str(output or '').splitlines() if part.strip()]):
+                try:
+                    config = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(config, dict):
+                    return config
+    except Exception:
+        return None
+    return None
+
+
+def _finalize_shared_namespace_supervisor(
+    compose_path: str,
+    node_name: str,
+    *,
+    docker_cmd: List[str] | None = None,
+    run=None,
+) -> bool:
+    """Keep a shared-netns CORE node stable while its app retries in place."""
+    if not _stable_node_supervisor_enabled():
+        return False
+    sidecars = _compose_shared_namespace_services(compose_path, node_name)
+    if not sidecars:
+        return False
+    resolved_docker_cmd = list(docker_cmd or _docker_cmd())
+    runner = run or _run_docker_capture
+    # The final CLI compose regeneration also erases the preflight's app-user
+    # shim. Restore it before capturing argv so non-root images still launch as
+    # their intended user while the container remains root for CORE docker-exec.
+    try:
+        _apply_wrapper_app_user_entrypoints(
+            compose_path,
+            docker_cmd=resolved_docker_cmd,
+            run=runner,
+            node_name=node_name,
+        )
+    except Exception as exc:
+        logger.warning(
+            '[docker-node] app-user restoration skipped before stable supervision '
+            'node=%s err=%s',
+            node_name,
+            exc,
+        )
+    image_config = _inspect_compose_service_image_config(
+        compose_path,
+        node_name,
+        node_name=node_name,
+        docker_cmd=resolved_docker_cmd,
+        run=runner,
+    )
+    changed = _wrap_node_command_with_retry(
+        compose_path,
+        node_name,
+        image_config=image_config,
+    )
+    if changed:
+        logger.info(
+            '[docker-node] stable node supervisor applied node=%s sidecars=%s',
+            node_name,
+            ', '.join(sidecars),
+        )
+    return changed
 
 
 def _image_startup_is_bare_shell(image_config: dict) -> bool:
@@ -2352,13 +2553,17 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
             # Bounded, so a genuinely broken app still ends as "PID remained 0"
             # rather than being held open forever.
             try:
-                sidecars_for_wrap = _compose_shared_namespace_services(compose_path, str(target_service))
-            except Exception:
-                sidecars_for_wrap = []
-            if sidecars_for_wrap and _wrap_node_command_with_retry(compose_path, str(target_service)):
-                logger.info(
-                    '[docker-node] node app wrapped to hold the namespace node=%s sidecars=%s',
-                    node_name, ', '.join(sidecars_for_wrap),
+                _finalize_shared_namespace_supervisor(
+                    compose_path,
+                    str(target_service),
+                    docker_cmd=docker_cmd,
+                    run=_run,
+                )
+            except Exception as exc:
+                logger.warning(
+                    '[docker-node] stable node supervisor skipped node=%s err=%s',
+                    node_name,
+                    exc,
                 )
 
             up_services = [str(target_service)]
@@ -2407,7 +2612,12 @@ def _docker_compose_preflight(compose_path: str, *, node_name: str) -> None:
                         'retrying with the node app wrapped so it holds the namespace',
                         node_name, ', '.join(shared_ns_services),
                     )
-                    if _wrap_node_command_with_retry(compose_path, str(target_service)):
+                    if _finalize_shared_namespace_supervisor(
+                        compose_path,
+                        str(target_service),
+                        docker_cmd=docker_cmd,
+                        run=_run,
+                    ):
                         _run(compose_base + ['up', '-d', '--no-build', '--force-recreate',
                                              str(target_service)], timeout=900)
                         rc_side, tail_side = _run(

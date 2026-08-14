@@ -90,6 +90,32 @@ def test_staging_repairs_non_executable_shebang_cgi_support_file(tmp_path):
     assert updated["services"]["web"]["volumes"] == [f"{staged_victim}:/var/www/html/victim.cgi"]
 
 
+def test_staging_normalizes_crlf_shebang_script_without_mutating_catalog(tmp_path):
+    """Linux must not parse a trailing carriage return into a mounted command name."""
+    from scenarioforge.utils.vuln_process import _copy_support_paths_and_absolutize_binds
+
+    source_dir = tmp_path / "catalog"
+    source_dir.mkdir()
+    start = source_dir / "start.sh"
+    source_bytes = b"#!/bin/sh\r\nchmod 777 /srv/uploads\r\napache2-foreground\r\n"
+    start.write_bytes(source_bytes)
+    staged_dir = tmp_path / "staged"
+
+    compose = {
+        "services": {
+            "web": {
+                "volumes": ["./start.sh:/var/www/start.sh"],
+            }
+        }
+    }
+    updated = _copy_support_paths_and_absolutize_binds(compose, str(source_dir), str(staged_dir))
+
+    staged_start = staged_dir / "start.sh"
+    assert staged_start.read_bytes() == source_bytes.replace(b"\r\n", b"\n")
+    assert start.read_bytes() == source_bytes
+    assert updated["services"]["web"]["volumes"] == [f"{staged_start}:/var/www/start.sh"]
+
+
 def test_node_bind_isolation_repairs_non_executable_cgi_at_final_mount_path(tmp_path):
     """The per-node bind copy, rather than an earlier staging copy, is what Docker mounts."""
     from scenarioforge.utils.vuln_process import _rewrite_abs_paths_from_dir_to_dir
