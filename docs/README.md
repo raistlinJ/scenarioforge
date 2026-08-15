@@ -4,6 +4,7 @@ Use this page to navigate the main project documentation.
 
 ## Getting started
 - [Quick Start](QUICK_START.md)
+- [CORE Install](CORE_INSTALL.md) – install our CORE fork (<https://github.com/raistlinJ/core>), or the updates to apply to a vanilla CORE install.
 - [Operating Modes](OPERATING_MODES.md)
 - [VM Mode Setup](VM_MODE_SETUP.md) – CORE VM interface layout, Proxmox bridges, and the VM-mode `.scenarioforge.env` reference.
 - [Native Mode Setup](NATIVE_MODE_SETUP.md) – local/remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox VM / Access workflow.

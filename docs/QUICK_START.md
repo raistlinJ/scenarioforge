@@ -3,7 +3,7 @@
 ## Prerequisites
 - Python 3.10+ (3.11 recommended)
 - [uv](https://docs.astral.sh/uv/)
-- [CORE](https://www.nrl.navy.mil/Our-Work/Areas-of-Research/CORE/) 9.2 or newer with `core-daemon` running
+- [CORE](https://www.nrl.navy.mil/Our-Work/Areas-of-Research/CORE/) 9.2 or newer with `core-daemon` running. Install **our CORE fork**, <https://github.com/raistlinJ/core>, which already carries the fixes and updates ScenarioForge needs. With upstream/vanilla CORE you must apply those updates yourself — see [CORE Install](CORE_INSTALL.md).
 - Docker (optional) for nginx reverse proxy or vulnerability compose targets
 - Graphviz `dot` (optional, required for attack graph PDF export)
 	- macOS: `brew install graphviz`

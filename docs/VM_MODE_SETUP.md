@@ -25,6 +25,11 @@ Three roles, which may be three physical machines or three VMs:
 The Proxmox server hosts the CORE VM and (usually) the participant VM, and owns
 the bridges that connect them.
 
+Install CORE on the CORE VM from **our fork**, <https://github.com/raistlinJ/core>
+— it already includes the fixes and updates ScenarioForge depends on. If you
+install upstream/vanilla CORE 9.2 instead, apply those updates to it before
+running a scenario; see [CORE Install](CORE_INSTALL.md).
+
 ---
 
 ## 2. CORE VM Network Interfaces

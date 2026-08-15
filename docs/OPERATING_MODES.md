@@ -2,6 +2,8 @@
 
 ScenarioForge can run in VM mode, native/non-VM mode, and CLI-only workflows. The README is VM-mode first; this page collects the other launch paths and when to use them.
 
+Whatever the mode, install CORE from our fork, <https://github.com/raistlinJ/core>, which already carries the fixes and updates ScenarioForge depends on; with an upstream/vanilla CORE install you must apply those updates yourself. See [CORE Install](CORE_INSTALL.md).
+
 For step-by-step setup, see [VM Mode Setup](VM_MODE_SETUP.md) and [Native Mode Setup](NATIVE_MODE_SETUP.md). Both include a full `.scenarioforge.env` reference; the native page also covers Proxmox credentials, privileges, and the VM / Access workflow.
 
 Native mode is not a separate "local-only" deployment. It is the default non-VM application mode, and CORE may be on the same machine or on another reachable host. The launcher has `auto`, `local`, and `remote` CORE target selectors; those choose the CORE endpoint, while `CORETG_WEBUI_MODE=native` keeps VM-mode HITL defaults disabled.
@@ -23,7 +25,7 @@ Native mode is the non-VM mode. Use it whenever you are not asking ScenarioForge
 
 When CORE 9.2 is running on the same machine and no `CORE_HOST` override is set, the auto/default launch path uses the local CORE endpoint. You can usually leave `CORETG_WEBUI_MODE=native` and avoid setting a remote host.
 
-1. Start CORE 9.2 and ensure `core-daemon` is listening on `127.0.0.1:50051`.
+1. Start CORE 9.2 — installed from [our fork](https://github.com/raistlinJ/core), or vanilla CORE with the [ScenarioForge updates applied](CORE_INSTALL.md#using-upstream-core-instead) — and ensure `core-daemon` is listening on `127.0.0.1:50051`.
 2. Copy the local env override file if you want persistent defaults:
 
 ```bash

@@ -45,6 +45,7 @@ Replay-only packages and plain XML do not run generators during import.
 - [Screenshots](docs/screenshots.md)
 - [VM-mode setup](#vm-mode-setup-recommended)
 - [Other operating modes](#other-operating-modes)
+- [CORE install](docs/CORE_INSTALL.md)
 - [Quick start](docs/QUICK_START.md)
 - [CLI execution deep dive](docs/CLI_EXECUTION_DEEP_DIVE.md)
 - [Catalog batch testing](docs/CATALOG_BATCH_TESTING.md)
@@ -97,6 +98,7 @@ For native/non-VM operation, including autodetected local CORE, explicit remote 
 
 Full step-by-step setup guides:
 
+- [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md) – install CORE from our fork ([github.com/raistlinJ/core](https://github.com/raistlinJ/core)), which ships the fixes and updates ScenarioForge depends on, or apply those updates to a vanilla CORE install.
 - [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md) – CORE VM three-interface layout (management, HITL/participant, uplink), Proxmox bridges, and the complete VM-mode `.scenarioforge.env` reference.
 - [docs/NATIVE_MODE_SETUP.md](docs/NATIVE_MODE_SETUP.md) – local and remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox **VM / Access** workflow (credentials, required API privileges, CORE VM selection, HITL bridge apply).
 
@@ -105,7 +107,7 @@ Full step-by-step setup guides:
 Use three machines or clearly separated VM roles when possible:
 
 1. **ScenarioForge application host** – runs this repository, the Web UI, and optional Docker Compose/nginx wrapper.
-2. **CORE 9.2 machine** – usually a Proxmox VM with CORE 9.2, `core-daemon`, SSH access, and Docker if vulnerability compose targets are used.
+2. **CORE 9.2 machine** – usually a Proxmox VM with CORE 9.2, `core-daemon`, SSH access, and Docker if vulnerability compose targets are used. Install CORE from **our fork**, [github.com/raistlinJ/core](https://github.com/raistlinJ/core), which already carries the fixes and updates ScenarioForge depends on; with upstream/vanilla CORE you must apply those updates yourself, as described in [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md).
 3. **Participant machine** – a Kali VM or physical participant host attached through HITL to the generated exercise network.
 
 The Proxmox server manages the CORE VM and participant VM/interface plumbing. In VM mode, ScenarioForge uses CORE gRPC for topology/session control, SSH for remote setup and validation, and Proxmox bridge workflows when you apply HITL wiring from the UI.
@@ -220,6 +222,7 @@ Native mode is the non-VM application mode. It can talk to CORE on the same mach
 See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with local or remote CORE targets, direct Python launches, Docker Compose notes, and CLI commands.
 
 ## Guides
+- [CORE install](docs/CORE_INSTALL.md)
 - [Operating modes](docs/OPERATING_MODES.md)
 - [Quick start](docs/QUICK_START.md)
 - [Full Preview workflow](docs/FULL_PREVIEW_WORKFLOW.md)

@@ -25,6 +25,11 @@ variables already answer those questions.
 The launcher scripts have `auto`, `local`, and `remote` CORE target selectors.
 Those choose the endpoint; they are independent of `CORETG_WEBUI_MODE`.
 
+Whichever host ends up running `core-daemon`, install CORE from **our fork**,
+<https://github.com/raistlinJ/core>, which already carries the fixes and updates
+ScenarioForge depends on. With an upstream/vanilla CORE 9.2 install you have to
+apply those updates yourself — see [CORE Install](CORE_INSTALL.md).
+
 ---
 
 ## 2. `.scenarioforge.env` Settings
