@@ -53,7 +53,12 @@ def test_vuln_catalog_pack_upload_ajax_missing_input_returns_400(monkeypatch):
     )
 
     assert resp.status_code == 400
-    assert resp.get_json() == {'ok': False, 'error': 'No vulnerability catalog folder or ZIP selected.'}
+    payload = resp.get_json()
+    assert payload['ok'] is False
+    assert payload['error'].startswith('No vulnerability catalog folder or ZIP selected.')
+    # The diagnostic tail is what distinguishes an empty body from parts that
+    # arrived but were unusable, so keep asserting that it is present.
+    assert 'Request carried 0 repo_files part(s)' in payload['error']
 
 
 def test_vuln_catalog_pack_upload_rejects_folder_and_zip_together(monkeypatch):

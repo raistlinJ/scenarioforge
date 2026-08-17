@@ -84,9 +84,19 @@ def register(
         # with about 500 files is rejected before this route can validate it.
         # Keep the override local to this endpoint and aligned with our own
         # explicit file-count and byte limits.
+        #
+        # These are set in separate try blocks on purpose. On Flask 3.0.x
+        # `max_content_length` is a read-only property, so assigning it raises
+        # AttributeError; sharing one try block let that failure skip the
+        # `max_form_parts` assignment underneath it, silently leaving the
+        # 1,000-part default in place and rejecting every folder upload of
+        # more than ~500 files.
+        try:
+            request.max_form_parts = (MAX_FOLDER_UPLOAD_FILES * 2) + 10
+        except Exception:
+            pass
         try:
             request.max_content_length = max_upload_bytes
-            request.max_form_parts = (MAX_FOLDER_UPLOAD_FILES * 2) + 10
         except Exception:
             pass
 
@@ -107,7 +117,31 @@ def register(
             return redirect(url_for('vuln_catalog_page'))
 
         if not upload_file and not repo_files:
+            # A folder upload that reaches here sent a body the parser accepted
+            # but that carried no usable file parts. Report what actually
+            # arrived: the difference between "no parts at all", "parts under
+            # an unexpected field name", and "parts whose filename was blank"
+            # points at three completely different causes, and none of them is
+            # distinguishable from the bare message.
             msg = 'No vulnerability catalog folder or ZIP selected.'
+            try:
+                raw_repo_files = request.files.getlist('repo_files')
+                blank_named = sum(
+                    1 for item in raw_repo_files
+                    if not str(getattr(item, 'filename', '') or '').strip()
+                )
+                detail = (
+                    f'Request carried {len(raw_repo_files)} repo_files part(s) '
+                    f'({blank_named} with a blank filename), '
+                    f'{len(request.form.getlist("repo_paths"))} repo_paths field(s); '
+                    f'file fields={sorted(set(request.files.keys()))}, '
+                    f'form fields={sorted(set(request.form.keys()))}, '
+                    f'content_length={request.content_length}, '
+                    f'content_type={(request.content_type or "")[:80]!r}.'
+                )
+                msg = f'{msg} {detail}'
+            except Exception:
+                pass
             if is_ajax:
                 return jsonify({'ok': False, 'error': msg}), 400
             flash(msg)

@@ -2816,8 +2816,15 @@
       xhr.open('POST', form.action, true);
       xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
+      // Some browsers (Safari in particular) fail to serialize a very large
+      // multi-thousand-part FormData: they send the multipart Content-Type
+      // header with an empty body. The server then sees a well-formed request
+      // carrying no parts, which is indistinguishable from "nothing selected".
+      // Track how much actually went out so we can name the real cause.
+      let uploadedBytes = 0;
       xhr.upload.onprogress = (ev) => {
         if (!ev.lengthComputable) return;
+        uploadedBytes = ev.loaded;
         const pct = Math.max(0, Math.min(70, Math.round((ev.loaded / ev.total) * 70)));
         if (progressBar) { progressBar.style.width = `${pct}%`; progressBar.textContent = `${pct}%`; }
         if (progressBytes) progressBytes.textContent = `${_fmtBytes(ev.loaded)} / ${_fmtBytes(ev.total)}`;
@@ -2836,6 +2843,18 @@
           msg = (xhr.responseText || '').trim();
         }
         if (!msg) msg = ok ? 'Upload complete.' : `Upload failed (HTTP ${xhr.status}).`;
+        if (!ok && folderFiles.length && uploadedBytes === 0) {
+          // Chromium-based browsers all report "Safari" in the UA string, so
+          // only treat this as Safari when no Chromium marker is present.
+          const ua = navigator.userAgent || '';
+          const onChromium = /Chrome|Chromium|CriOS|Edg\//.test(ua);
+          msg = `This browser did not send the upload body: ${folderFiles.length} files `
+            + `(${_fmtBytes(file.size)}) were prepared but 0 bytes were transmitted. `
+            + 'Safari cannot reliably serialize folder uploads this large. '
+            + (onChromium
+              ? 'Compress the folder and use the "ZIP file" import option instead.'
+              : 'Try again in Chrome, or compress the folder and use the "ZIP file" import option.');
+        }
         if (progressText) progressText.textContent = msg;
         if (progressBar) {
           progressBar.classList.remove('progress-bar-animated');
