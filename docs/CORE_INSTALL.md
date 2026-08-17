@@ -11,13 +11,45 @@ Install CORE from **<https://github.com/raistlinJ/core>**.
 
 It is a fork of [coreemu/core](https://github.com/coreemu/core) that already
 carries the fixes and updates ScenarioForge depends on, so nothing extra has to
-be patched in afterwards. Follow the fork's own README for the install itself
-(package install from the release artifacts, or the script install), on whichever
-machine will run `core-daemon`:
+be patched in afterwards. Install it on whichever machine will run
+`core-daemon`:
 
 - **VM mode** — the CORE VM. See [VM Mode Setup](VM_MODE_SETUP.md).
 - **Native mode** — the local machine, or whichever remote host you point
   `CORE_HOST` at. See [Native Mode Setup](NATIVE_MODE_SETUP.md).
+
+### The easy path: the coreemu-minimal installer
+
+<https://github.com/raistlinJ/coreemu-minimal> builds a CORE machine from a
+minimal Debian 12 install, and brings along the pieces ScenarioForge needs
+anyway: CORE, the OSPF-MDR routing daemons, Docker Engine, a lightweight XFCE
+desktop, and optional systemd scenario autostart.
+
+```bash
+git clone https://github.com/raistlinJ/coreemu-minimal.git
+cd coreemu-minimal/9.2.1
+./setup-coreemu9.2.1.sh --from-source https://github.com/raistlinJ/core.git master
+```
+
+`--from-source` with the fork URL is the part that matters. Run without it and
+the script installs a release `.deb` from **upstream** `coreemu/core` — our fork
+publishes no release artifacts — which puts you in
+[Using upstream CORE instead](#using-upstream-core-instead) below. Name the
+branch explicitly too: our fork has only `master`, while the script defaults to
+`release-9.2.1`, which does not exist there (it warns and falls back to `master`
+on its own).
+
+The default `.deb` asset is `amd64`-only, so on an arm64 host the from-source
+path is also the only one that builds.
+
+`sudo ./update-core9-source.sh` in the same repo pulls later fork updates.
+
+### Installing the fork by hand
+
+The fork's own README covers the package and script installs if you would rather
+not use coreemu-minimal, or are adding CORE to a machine that already exists.
+The result is the same; you are then responsible for Docker and the routing
+daemons separately.
 
 ---
 

@@ -92,25 +92,27 @@ View the WebUI images gallery [`docs/screenshots.md`](docs/screenshots.md).
 
 ## VM-Mode Setup (Recommended)
 
-ScenarioForge supports both **VM mode** and **native mode**. The README focuses on VM mode because it matches the intended Proxmox lab workflow: ScenarioForge runs as the control application, talks to a CORE 9.2 VM over gRPC/SSH, and can prepare participant-facing HITL attachments.
+ScenarioForge supports both **VM mode** and **native mode**. The README focuses on VM mode because it matches the intended lab workflow: ScenarioForge runs as the control application, talks to a CORE 9.2 VM over gRPC/SSH, and can prepare participant-facing HITL attachments.
 
-For native/non-VM operation, including autodetected local CORE, explicit remote CORE targets without Proxmox, Docker-only notes, and CLI usage, see [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md).
+**VM mode does not require Proxmox.** A host running ScenarioForge, a CORE VM, and a Kali VM is a complete lab, on whichever hypervisor you already use. Proxmox is only needed for the UI's optional automated HITL bridge wiring; elsewhere you create the participant network in your own hypervisor.
+
+For native/non-VM operation, including autodetected local CORE, explicit remote CORE targets, Docker-only notes, and CLI usage, see [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md).
 
 Full step-by-step setup guides:
 
-- [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md) – install CORE from our fork ([github.com/raistlinJ/core](https://github.com/raistlinJ/core)), which ships the fixes and updates ScenarioForge depends on, or apply those updates to a vanilla CORE install.
-- [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md) – CORE VM three-interface layout (management, HITL/participant, uplink), Proxmox bridges, and the complete VM-mode `.scenarioforge.env` reference.
+- [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md) – install CORE from our fork ([github.com/raistlinJ/core](https://github.com/raistlinJ/core)), which ships the fixes and updates ScenarioForge depends on — most easily via the [coreemu-minimal](https://github.com/raistlinJ/coreemu-minimal) installer — or apply those updates to a vanilla CORE install.
+- [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md) – building the CORE VM, the three-interface layout (management, HITL/participant, uplink), wiring the three machines on any hypervisor, and the complete VM-mode `.scenarioforge.env` reference.
 - [docs/NATIVE_MODE_SETUP.md](docs/NATIVE_MODE_SETUP.md) – local and remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox **VM / Access** workflow (credentials, required API privileges, CORE VM selection, HITL bridge apply).
 
 ### Recommended Lab Layout
 
 Use three machines or clearly separated VM roles when possible:
 
-1. **ScenarioForge application host** – runs this repository, the Web UI, and optional Docker Compose/nginx wrapper.
-2. **CORE 9.2 machine** – usually a Proxmox VM with CORE 9.2, `core-daemon`, SSH access, and Docker if vulnerability compose targets are used. Install CORE from **our fork**, [github.com/raistlinJ/core](https://github.com/raistlinJ/core), which already carries the fixes and updates ScenarioForge depends on; with upstream/vanilla CORE you must apply those updates yourself, as described in [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md).
+1. **ScenarioForge application host** – runs this repository, the Web UI, and optional Docker Compose/nginx wrapper. A workstation or laptop is fine; it does not have to be a VM.
+2. **CORE 9.2 machine** – a VM with CORE 9.2, `core-daemon`, SSH access, and Docker if vulnerability compose targets are used. Install CORE from **our fork**, [github.com/raistlinJ/core](https://github.com/raistlinJ/core), which already carries the fixes and updates ScenarioForge depends on; the [coreemu-minimal](https://github.com/raistlinJ/coreemu-minimal) installer builds this VM from a minimal Debian 12 install and brings Docker and the routing daemons with it. With upstream/vanilla CORE you must apply those updates yourself, as described in [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md).
 3. **Participant machine** – a Kali VM or physical participant host attached through HITL to the generated exercise network.
 
-The Proxmox server manages the CORE VM and participant VM/interface plumbing. In VM mode, ScenarioForge uses CORE gRPC for topology/session control, SSH for remote setup and validation, and Proxmox bridge workflows when you apply HITL wiring from the UI.
+Two networks connect them: a management network between the application host and the CORE VM, and an isolated participant network between the CORE VM and the participant machine. In VM mode, ScenarioForge uses CORE gRPC for topology/session control and SSH for remote setup and validation; Proxmox bridge workflows come into play only if you apply HITL wiring from the UI on a Proxmox-hosted lab.
 
 ### Configure VM Mode
 
@@ -130,7 +132,7 @@ Key runtime variables in [.scenarioforge.env.example](.scenarioforge.env.example
 - `CORETG_WEBUI_MODE` – set this to `vm` to pre-seed VM-oriented UI behavior and VM-mode HITL defaults.
 - `CORETG_HITL_CORE_IFX_IPV4` – optional IPv4 or CIDR to pre-seed on a HITL interface entry in either mode, such as `10.254.200.3/24`. In native mode it only fills the first existing HITL interface entry that does not already define an IPv4 value; it does not create a HITL interface or enable HITL by itself. In VM mode it also populates the runtime-managed HITL default interface, but that interface still requires `CORETG_VM_MODE_HITL_CORE_IFX_NAME` to be configured.
 - `CORETG_VM_MODE_HITL_ENABLED` – enables participant-facing HITL defaults in VM mode.
-- `CORETG_VM_MODE_HITL_CORE_IFX_NAME` – expected Linux interface name inside the CORE VM for the participant network, such as `ens19`. It must be a physical/virtio NIC as the guest sees it, named by guest interface name rather than Proxmox slot id. See [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md#2-core-vm-network-interfaces).
+- `CORETG_VM_MODE_HITL_CORE_IFX_NAME` – expected Linux interface name inside the CORE VM for the participant network, such as `ens19`. It must be a physical/virtio NIC as the guest sees it, named by guest interface name rather than the hypervisor's slot id. See [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md#3-core-vm-network-interfaces).
 - `CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT` – default HITL attachment target for that VM-mode interface: `existing_router`, `existing_switch`, `new_router`, or `proxmox_vm`.
 - `CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION` – optional label/description applied to that VM-mode HITL interface entry.
 - `CORETG_VM_MODE_PARTICIPANT_URL` – optional participant UI URL shown in VM-mode flows.

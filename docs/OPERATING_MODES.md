@@ -2,7 +2,7 @@
 
 ScenarioForge can run in VM mode, native/non-VM mode, and CLI-only workflows. The README is VM-mode first; this page collects the other launch paths and when to use them.
 
-Whatever the mode, install CORE from our fork, <https://github.com/raistlinJ/core>, which already carries the fixes and updates ScenarioForge depends on; with an upstream/vanilla CORE install you must apply those updates yourself. See [CORE Install](CORE_INSTALL.md).
+Whatever the mode, install CORE from our fork, <https://github.com/raistlinJ/core>, which already carries the fixes and updates ScenarioForge depends on; with an upstream/vanilla CORE install you must apply those updates yourself. The [coreemu-minimal](https://github.com/raistlinJ/coreemu-minimal) installer is the quickest way to get one. See [CORE Install](CORE_INSTALL.md).
 
 For step-by-step setup, see [VM Mode Setup](VM_MODE_SETUP.md) and [Native Mode Setup](NATIVE_MODE_SETUP.md). Both include a full `.scenarioforge.env` reference; the native page also covers Proxmox credentials, privileges, and the VM / Access workflow.
 
@@ -12,9 +12,9 @@ Native mode is not a separate "local-only" deployment. It is the default non-VM 
 
 | Mode | Best For | CORE Target |
 | --- | --- | --- |
-| VM mode | Proxmox labs with a separate CORE 9.2 VM and participant machine | Remote CORE VM over gRPC and SSH |
+| VM mode | Labs with a separate CORE 9.2 VM and participant machine, on any hypervisor | Remote CORE VM over gRPC and SSH |
 | Native mode, local CORE | Local development and quick previews | Autodetected/default local CORE endpoint |
-| Native mode, remote CORE | Non-Proxmox remote CORE hosts | Explicit remote CORE host over gRPC and SSH |
+| Native mode, remote CORE | Remote CORE hosts you select from the UI | Explicit remote CORE host over gRPC and SSH |
 | CLI mode | Scripted topology generation and reports | Any reachable CORE endpoint |
 
 ## Native Mode

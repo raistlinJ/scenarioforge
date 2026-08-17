@@ -1,20 +1,31 @@
 # VM Mode Setup
 
-VM mode is the Proxmox lab deployment: ScenarioForge runs as the control
-application on one host, CORE 9.2 runs in a dedicated VM, and participants
-attach to the emulated network through Hardware-in-the-Loop (HITL).
+VM mode is the split deployment: ScenarioForge runs as the control application
+on one host, CORE 9.2 runs in a dedicated VM, and participants attach to the
+emulated network through Hardware-in-the-Loop (HITL).
 
 The defining difference from [native mode](NATIVE_MODE_SETUP.md) is **where the
 CORE connection comes from**. In VM mode it is supplied by `.scenarioforge.env`
 at process start, so the Web UI hides the **VM / Access** tab and never asks an
-operator to pick a CORE VM out of a Proxmox inventory. Native mode does the
-opposite. Everything below assumes `CORETG_WEBUI_MODE=vm`.
+operator to pick a CORE VM out of an inventory. Native mode does the opposite.
+Everything below assumes `CORETG_WEBUI_MODE=vm`.
+
+**Proxmox is not required.** VM mode needs three machines that can reach each
+other on the right networks; the hypervisor underneath them is your choice —
+Proxmox, VMware, VirtualBox, KVM/libvirt, UTM, or bare metal. In VM mode the
+CORE connection comes entirely from `.scenarioforge.env`, and ScenarioForge
+stores no VM identity at all (node, VMID, and VM name are left empty). The one
+Proxmox-specific feature is the UI's **automated HITL bridge wiring**, which
+edits VM configs through the Proxmox API; on any other hypervisor you create the
+equivalent virtual network yourself and skip that step. See
+[Connecting the Three Machines](#4-connecting-the-three-machines).
 
 ---
 
 ## 1. Lab Layout
 
-Three roles, which may be three physical machines or three VMs:
+Three roles, which may be three VMs on one hypervisor host, VMs spread across
+hosts, or physical machines:
 
 | Role | What it runs | Talks to |
 | --- | --- | --- |
@@ -22,33 +33,96 @@ Three roles, which may be three physical machines or three VMs:
 | **CORE VM** | CORE 9.2, `core-daemon`, Docker, SSH | Container registries (image pulls); the participant network |
 | **Participant machine** | Kali or another attacker host | The emulated scenario network, through HITL |
 
-The Proxmox server hosts the CORE VM and (usually) the participant VM, and owns
-the bridges that connect them.
+The ScenarioForge host does not have to be a VM — running it on your workstation
+or laptop and pointing `CORE_HOST` at the CORE VM is a normal setup.
 
-Install CORE on the CORE VM from **our fork**, <https://github.com/raistlinJ/core>
-— it already includes the fixes and updates ScenarioForge depends on. If you
-install upstream/vanilla CORE 9.2 instead, apply those updates to it before
-running a scenario; see [CORE Install](CORE_INSTALL.md).
+A minimal working lab is therefore: **your host running ScenarioForge, a CORE
+VM, and a Kali VM**, with two networks — a management network between the host
+and the CORE VM, and an isolated participant network between the CORE VM and
+Kali.
 
 ---
 
-## 2. CORE VM Network Interfaces
+## 2. Installing CORE on the CORE VM
+
+CORE must carry ScenarioForge's fixes and updates, which means installing from
+**our fork**, <https://github.com/raistlinJ/core>. Upstream/vanilla CORE 9.2
+works only after you apply those updates yourself — see
+[CORE Install](CORE_INSTALL.md).
+
+### Recommended: the coreemu-minimal installer
+
+<https://github.com/raistlinJ/coreemu-minimal> builds the CORE VM from a
+minimal Debian install. It installs CORE, the OSPF-MDR routing daemons, Docker
+Engine, a lightweight XFCE desktop, and optional systemd scenario autostart —
+which covers the CORE-side prerequisites ScenarioForge expects, Docker included.
+
+Build the guest from the **Debian 12 netinst** image with the SSH server and
+standard utilities selected and desktop environments unchecked. The installer's
+stated minimums are 2 vCores, 2 GB RAM (4 GB+ for larger topologies or Docker
+nodes), and 15–20 GB of disk. For ScenarioForge scenarios, plan above those
+floors: vulnerability images and per-node compose targets are the disk and
+memory consumers.
+
+Then run the 9.2.1 setup script **from source, pointed at our fork**:
+
+```bash
+git clone https://github.com/raistlinJ/coreemu-minimal.git
+cd coreemu-minimal/9.2.1
+./setup-coreemu9.2.1.sh --from-source https://github.com/raistlinJ/core.git master
+```
+
+Passing `--from-source` with the fork URL is what makes this a ScenarioForge
+CORE VM. Two details make it easy to get wrong:
+
+- **Without `--from-source`, you get upstream CORE.** The default path downloads
+  a release `.deb` from `coreemu/core`, and our fork publishes no release
+  artifacts. A `.deb` install is an upstream install and needs the manual update
+  steps in [CORE Install](CORE_INSTALL.md).
+- **Name the branch explicitly.** Our fork's only branch is `master`. The script
+  defaults to `release-9.2.1`, which does not exist there; it warns and falls
+  back to `master` on its own, but passing `master` avoids the detour.
+
+The default `.deb` asset is also `amd64`-only, so on an arm64 host the
+from-source path is the one that builds at all.
+
+To pull fork updates later, the same repo ships `sudo ./update-core9-source.sh`.
+
+### After CORE is installed
+
+Two things still have to happen on the CORE VM, both one-click actions on the
+**CORE Management** page — see [CORE Install](CORE_INSTALL.md) for what they do
+and for the manual equivalents:
+
+- **Install custom services.** ScenarioForge's CORE services (segmentation,
+  traffic, per-node Docker Compose, default route) are versioned with this
+  repository, not with CORE, so they are installed from the UI and re-installed
+  after you pull repository updates. No installer provides them.
+- **Fix Docker daemon for CORE.** coreemu-minimal already writes
+  `{"iptables": false}` to `/etc/docker/daemon.json`, which is half of it; the
+  UI action also disables the default bridge. Note that the installer writes
+  that file only when it installs Docker itself, so a VM where Docker was
+  already present gets neither setting.
+
+---
+
+## 3. CORE VM Network Interfaces
 
 Give the CORE VM **three interfaces**. They serve three unrelated purposes and
 collapsing them causes problems that are hard to diagnose later — a participant
 who can reach the management address can reach the ScenarioForge API and the
 scenario's own answer key.
 
-| Purpose | Proxmox slot (typical) | Guest name (typical) | Addressed by | Configured in ScenarioForge? |
+| Purpose | NIC (typical) | Guest name (typical) | Addressed by | Configured in ScenarioForge? |
 | --- | --- | --- | --- | --- |
-| **Management** — gRPC + SSH from the ScenarioForge host | `net0` | `ens18` | Static IPv4 in the guest OS | Indirectly, as `CORE_HOST` / `CORE_SSH_HOST` |
-| **HITL / participant** | `net1` | `ens19` | Left unconfigured in the guest; CORE addresses it | Yes — `CORETG_VM_MODE_HITL_CORE_IFX_NAME` |
-| **Uplink / internet** | `net2` | `ens20` | DHCP or static, with a default route | No |
+| **Management** — gRPC + SSH from the ScenarioForge host | 1st (Proxmox `net0`) | `ens18` | Static IPv4 in the guest OS | Indirectly, as `CORE_HOST` / `CORE_SSH_HOST` |
+| **HITL / participant** | 2nd (Proxmox `net1`) | `ens19` | Left unconfigured in the guest; CORE addresses it | Yes — `CORETG_VM_MODE_HITL_CORE_IFX_NAME` |
+| **Uplink / internet** | 3rd (Proxmox `net2`) | `ens20` | DHCP or static, with a default route | No |
 
-Guest interface names follow the order the NICs were added in Proxmox, not the
-slot number, and `ens18`/`ens19`/`ens20` are only the common result of adding
-`net0`/`net1`/`net2` in order on a modern Debian/Ubuntu guest. Confirm the real
-names inside the VM before configuring anything:
+Guest interface names follow the order the NICs were added to the VM, not any
+slot number the hypervisor shows, and `ens18`/`ens19`/`ens20` are only the
+common result of adding three NICs in order on a modern Debian/Ubuntu guest.
+Confirm the real names inside the VM before configuring anything:
 
 ```bash
 ip -br link
@@ -77,10 +151,11 @@ come from the code, not from convention:
 
 - **It must be a physical (PCI) NIC as the guest sees it.** Interface
   enumeration lists only names that have a `/sys/class/net/<name>/device` entry,
-  so Proxmox virtio NICs appear while bridges, veth pairs, and `lo` do not. A
-  guest-side bridge built on top of the NIC is not selectable.
-- **Configure it by guest interface name, not by Proxmox slot id.**
-  `CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19` is correct; `net1` is not.
+  so emulated/virtio NICs from any hypervisor appear while bridges, veth pairs,
+  and `lo` do not. A guest-side bridge built on top of the NIC is not
+  selectable.
+- **Configure it by guest interface name, not by the hypervisor's slot id.**
+  `CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19` is correct; Proxmox's `net1` is not.
 
 Leave the interface unaddressed in the guest OS (no DHCP, no static IP). CORE
 takes it over when the session starts, and `CORETG_HITL_CORE_IFX_IPV4` seeds the
@@ -107,34 +182,79 @@ regardless of the CORE VM's own uplink.
 
 ---
 
-## 3. Proxmox Bridges
+## 4. Connecting the Three Machines
 
-Create one bridge per interface role on the Proxmox node, then attach the CORE
-VM's NICs to them:
+Create one virtual network per interface role, then attach the VMs' NICs to
+them. The names differ by hypervisor — Proxmox calls them bridges, VMware calls
+them virtual networks or port groups, VirtualBox calls them internal/host-only
+networks, libvirt calls them networks — but the shape is the same:
 
-| Bridge | Attaches | Notes |
+| Network | Attaches | Requirement |
 | --- | --- | --- |
-| Management bridge (e.g. `vmbr0`) | CORE VM `net0` | Reachable from the ScenarioForge host |
-| Participant bridge | CORE VM `net1`, participant VM `netX` | An isolated internal bridge with no uplink |
-| Uplink bridge (e.g. `vmbr0`) | CORE VM `net2` | Routes to the internet |
+| **Management** | CORE VM NIC 1, ScenarioForge host | The host must reach the CORE VM on `50051` and `22`. The participant must not. |
+| **Participant** | CORE VM NIC 2, participant/Kali VM | Isolated, with no uplink and no route to the management network. |
+| **Uplink** | CORE VM NIC 3 | Routes to the internet, for image pulls. |
 
-**The participant bridge must already exist before you apply HITL wiring.**
-ScenarioForge validates that the bridge is present on the node and fails with
-`Bridge <name> not found on node <node>. Create the bridge manually before
-applying HITL mappings.` if it is not. It does not create bridges.
+Typical mappings, none of which ScenarioForge cares about as long as the
+reachability requirements above hold:
 
-Bridge names are normalized before use: lowercased, non-alphanumeric characters
-folded to `-`, truncated to **10 characters**, and required to match
-`[a-z0-9][a-z0-9_-]*`. Pick a name that survives that transformation so the name
-you type is the name Proxmox needs.
+| Hypervisor | Management | Participant | Uplink |
+| --- | --- | --- | --- |
+| Proxmox | `vmbr0` | a dedicated bridge with no physical port | `vmbr0` |
+| VMware Workstation/Fusion | Host-only | a Custom (`vmnetN`) network, host connection off | NAT or Bridged |
+| VirtualBox | Host-only Network | Internal Network | NAT |
+| KVM/libvirt | default NAT network | an isolated network | default NAT network |
 
-Applying HITL wiring rewrites the `bridge=` token in the selected `netX` line of
-both the CORE VM and the external/participant VM configs, leaving the MAC
-address and model untouched. Both VMs must live on the same Proxmox node.
+The management and uplink roles can share one network when your lab's management
+segment already has internet access — that is why `vmbr0` appears twice in the
+Proxmox row. **The participant network is the one that must stay separate**: a
+participant who can reach the management address can reach the ScenarioForge API
+and the scenario's own answer key.
+
+With the participant NIC left unaddressed in the guest, CORE takes it over when
+the session starts and bridges it into the emulated topology. That is all HITL
+needs — the Proxmox workflow further down automates this wiring but is not
+required to run a scenario.
+
+### Participant (Kali) machine
+
+Kali is the usual choice, but ScenarioForge requires nothing of it beyond a NIC
+on the participant network — no agent, no ScenarioForge install. Give it a
+single NIC there, and address it inside the scenario's HITL subnet (statically,
+or from a DHCP service in the topology if the scenario provides one).
+
+Only the participant machine attaches to the scenario network. The ScenarioForge
+host stays on the management network, and reaches nodes for validation by
+tunneling through the CORE VM over SSH rather than by joining the emulated
+network itself.
+
+### Proxmox only: automated HITL bridge wiring
+
+If — and only if — the lab runs on Proxmox, the UI can do the participant-side
+NIC wiring for you instead of your doing it in the hypervisor: it rewrites the
+`bridge=` token in the selected `netX` line of both the CORE VM and the
+external/participant VM configs, leaving the MAC address and model untouched.
+Both VMs must live on the same Proxmox node, and it needs Proxmox API
+credentials stored in the secret store.
+
+- **The participant bridge must already exist before you apply HITL wiring.**
+  ScenarioForge validates that the bridge is present on the node and fails with
+  `Bridge <name> not found on node <node>. Create the bridge manually before
+  applying HITL mappings.` if it is not. It does not create bridges — you still
+  create the bridge itself, and the workflow only moves the two VMs onto it.
+- Bridge names are normalized before use: lowercased, non-alphanumeric
+  characters folded to `-`, truncated to **10 characters**, and required to
+  match `[a-z0-9][a-z0-9_-]*`. Pick a name that survives that transformation so
+  the name you type is the name Proxmox needs.
+
+On every other hypervisor, wire the participant network by hand as in the table
+above and use the `existing_router`, `existing_switch`, or `new_router`
+attachment types. The `proxmox_vm` attachment is the only one that depends on
+this workflow.
 
 ---
 
-## 4. `.scenarioforge.env` Settings
+## 5. `.scenarioforge.env` Settings
 
 Copy the versioned template and edit the local copy:
 
@@ -251,7 +371,7 @@ CORETG_HITL_CORE_IFX_IPV4=10.254.200.3/24
 
 ---
 
-## 5. Launch
+## 6. Launch
 
 Compose (recommended — includes Graphviz, so attack graph PDF export works):
 
@@ -271,7 +391,7 @@ CORETG_USE_RELOADER=0 uv run python webapp/app_backend.py
 
 ---
 
-## 6. Verify
+## 7. Verify
 
 1. **CORE Management page** — it should open without asking you to select a CORE
    VM. If it shows *"VM mode CORE defaults are incomplete"*, the `CORE_*`

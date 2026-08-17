@@ -260,7 +260,7 @@ and players open the same console. This step is native-mode only; VM mode uses
 ### CORE VM interfaces
 
 The three-interface layout described in
-[VM Mode Setup](VM_MODE_SETUP.md#2-core-vm-network-interfaces) — management,
+[VM Mode Setup](VM_MODE_SETUP.md#3-core-vm-network-interfaces) — management,
 HITL/participant, and uplink — applies equally to a Proxmox-hosted CORE VM
 driven from native mode. The difference is only in how ScenarioForge learns
 about them: enumerated over SSH and chosen in Step 3, rather than declared in
