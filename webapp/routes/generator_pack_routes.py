@@ -7,6 +7,7 @@ from typing import Any, Callable
 from flask import flash, jsonify, redirect, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
+from webapp import progress_store
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
 
 
@@ -462,6 +463,20 @@ def register(
             resp.set_cookie('coretg_catalog_download_token', token, max_age=60, path='/', samesite='Lax')
         return resp
 
+    @app.get('/api/core-sync-progress/<progress_id>')
+    def core_sync_progress(progress_id: str):
+        """Progress for an in-flight CORE runtime sync, generators or catalogs.
+
+        Shared between both catalogs: the store is keyed by the client's id, so
+        a second endpoint would differ only in its URL.
+        """
+        if not progress_store.PROGRESS_ID_RE.fullmatch(str(progress_id or '')):
+            return jsonify({'ok': False, 'error': 'Invalid progress id.'}), 400
+        snapshot = progress_store.snapshot(progress_id)
+        if snapshot is None:
+            return jsonify({'ok': True, 'status': 'waiting', 'percent': 0})
+        return jsonify({'ok': True, **snapshot})
+
     @app.route('/api/generator_packs/sync_core', methods=['POST'])
     def generator_packs_sync_core():
         """Remove CORE-runtime generator copies that no longer exist locally.
@@ -476,8 +491,11 @@ def register(
             return jsonify({'ok': False, 'error': 'CORE runtime reconciliation is unavailable.'}), 501
         payload = request.get_json(silent=True) or {}
         dry_run = bool(payload.get('dry_run'))
+        progress_id = str(payload.get('progress_id') or '').strip()
+        if not progress_store.PROGRESS_ID_RE.fullmatch(progress_id):
+            progress_id = ''
         try:
-            result = reconcile_remote_runtime(dry_run=dry_run)
+            result = reconcile_remote_runtime(dry_run=dry_run, progress_id=progress_id)
         except Exception as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 502
         if not result.get('ok'):

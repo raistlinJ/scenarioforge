@@ -190,6 +190,7 @@
                       <th style="width: 42px;"><input class="form-check-input" type="checkbox" id="vulnCatalogCheckAll" aria-label="Select all visible vulnerabilities"></th>
                       <th style="width: 60px;">#</th>
                       <th>Name</th>
+                      <th style="width: 150px;">Architecture</th>
                       <th>Description</th>
                       <th style="width: 140px;">Validated</th>
                       <th>Category / Source</th>
@@ -797,10 +798,20 @@
     const hostArch = String(window.CORETG_HOST_ARCH || '').trim();
     const native = hostArch ? archs.includes(hostArch) : null;
     const label = escapeHtml(archs.join(', '));
+    // A build-only stack was resolved through its Dockerfile's base image, so
+    // the honest claim is about where it can be *built*, not about a published
+    // image's platforms.
+    const fromBase = source.indexOf('build-base') >= 0;
     if (native === false) {
-      return `<span class="badge text-bg-warning ms-2" title="Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation, where heavy applications can segfault mid-boot.${escapeHtml(extra)}">${label} (emulated)</span>`;
+      const why = fromBase
+        ? `Its base image supports ${label}; this host is ${escapeHtml(hostArch)}, so the build runs under qemu emulation.`
+        : `Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation, where heavy applications can segfault mid-boot.`;
+      return `<span class="badge text-bg-warning ms-2" title="${why}${escapeHtml(extra)}">${label} (emulated)</span>`;
     }
-    return `<span class="badge text-bg-success ms-2" title="Runs natively on: ${label}.${escapeHtml(extra)}">${label}</span>`;
+    const why = fromBase
+      ? `Builds its own image from a base supporting: ${label}, so it builds natively on those.`
+      : `Runs natively on: ${label}.`;
+    return `<span class="badge text-bg-success ms-2" title="${why}${escapeHtml(extra)}">${label}</span>`;
   }
 
   function escapeHtml(s) {
@@ -1347,11 +1358,11 @@
             ${isBatchRunning ? `<span class="badge text-bg-primary ms-2">Batch Active</span>` : ''}
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${it.requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(it.build_network_notes) ? it.build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
-            ${architectureBadge(it)}
           </div>
           <div class="small text-muted">ID: ${escapeHtml(it.id ?? '')}</div>
           ${missingRequiredHtml}
         </td>
+        <td class="small">${architectureBadge(it)}</td>
         <td class="small">
           ${it.readme_url ? `<a href="${escapeHtml(it.readme_url)}" target="_blank" rel="noopener">README</a>` : '<span class="text-muted">—</span>'}
         </td>
@@ -2725,12 +2736,30 @@
         previewBtn.disabled = true;
         confirmBtn.disabled = true;
         active.textContent = dryRun ? 'Checking…' : 'Removing…';
+        // The sync walks the CORE VM over SFTP and deletes one directory at a
+        // time; without progress a large prune is indistinguishable from a hang.
+        // Poll the same way the catalog import does.
+        const progressId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+          ? window.crypto.randomUUID().replaceAll('-', '')
+          : `coresync${Date.now()}${Math.random().toString(36).slice(2)}`;
+        let poll = window.setInterval(async () => {
+          try {
+            const pr = await fetch(`/api/core-sync-progress/${encodeURIComponent(progressId)}`, { cache: 'no-store' });
+            if (!pr.ok) return;
+            const p = await pr.json();
+            if (!p || p.ok === false || p.status === 'waiting') return;
+            const total = Number(p.total) || 0;
+            const cur = Number(p.current) || 0;
+            const counted = total > 0 ? ` ${cur} / ${total}` : (cur ? ` ${cur}` : '');
+            show(`${p.step || 'Working'}${counted}${p.detail ? `\n  ${p.detail}` : ''}`);
+          } catch (e) { /* a transient poll failure is not fatal */ }
+        }, 400);
         try {
           const resp = await fetch('/api/vuln_catalog_packs/sync_core', {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-            body: JSON.stringify({ dry_run: !!dryRun }),
+            body: JSON.stringify({ dry_run: !!dryRun, progress_id: progressId }),
           });
           const data = await resp.json().catch(() => ({}));
           if (!resp.ok || data.ok === false) {
@@ -2750,6 +2779,7 @@
         } catch (e) {
           show(`Failed: ${e}`);
         } finally {
+          if (poll) window.clearInterval(poll);
           previewBtn.disabled = false;
           confirmBtn.disabled = false;
           active.textContent = original;

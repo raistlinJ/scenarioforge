@@ -80,7 +80,19 @@ def test_vuln_catalog_page_renders_active_catalog(monkeypatch):
     # the build host's architecture -- that is not "unknown".
     assert 'Built locally' in page
     # Native reads as good and must not share the grey of the unknown states.
-    assert 'badge text-bg-success ms-2" title="Runs natively on:' in page
+    assert 'badge text-bg-success ms-2" title="${why}' in page
+    # A build-only stack is resolved through its Dockerfile base, so the claim
+    # is about where it can be built -- not about a published image's platforms.
+    assert "const fromBase = source.indexOf('build-base') >= 0;" in page
+    assert 'Builds its own image from a base supporting:' in page
+    # A prune walks the CORE VM and deletes one directory at a time; the dialog
+    # polls so a long sync is not indistinguishable from a hang.
+    assert '/api/core-sync-progress/' in page
+    assert 'progress_id: progressId' in page
+    assert 'window.clearInterval(poll)' in page
+    # Architecture gets its own column here too, matching the flag catalog.
+    assert '<th style="width: 150px;">Architecture</th>' in page
+    assert '<td class="small">${architectureBadge(it)}</td>' in page
     # Modals resolve Bootstrap at click time, not while the block is parsed --
     # layout.html renders page content before loading the bundle, so an eager
     # read yields undefined and the dialog silently never opens.

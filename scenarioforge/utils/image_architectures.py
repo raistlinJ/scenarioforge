@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from typing import Any, Iterable
@@ -140,6 +141,71 @@ def compose_image_refs(compose_obj: Any) -> list[str]:
     return out
 
 
+def dockerfile_base_images(text: str) -> list[str]:
+    """Base images a Dockerfile pulls, in stable order.
+
+    Skips two things that are not pullable references: a ``FROM`` naming an
+    earlier build stage, and one parameterised by an ARG, which cannot be
+    resolved without performing the build.
+    """
+    stages: set[str] = set()
+    out: list[str] = []
+    for match in re.finditer(
+        r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+[Aa][Ss]\s+(\S+))?", str(text or ""), re.M
+    ):
+        ref = str(match.group(1) or "").strip()
+        alias = str(match.group(2) or "").strip()
+        if alias:
+            stages.add(alias.lower())
+        if not ref or "$" in ref or ref.lower() in stages:
+            continue
+        if ref not in out:
+            out.append(ref)
+    return out
+
+
+def compose_build_base_images(compose_obj: Any, base_dir: str) -> list[str]:
+    """Base images the stack's own Dockerfiles pull.
+
+    A service that only ``build:``s has no pullable image, but the image it
+    produces still inherits its base. Reading that base is the difference
+    between "not checked" and a real answer for a build-only stack.
+    """
+    if not isinstance(compose_obj, dict) or not base_dir:
+        return []
+    services = compose_obj.get("services")
+    if not isinstance(services, dict):
+        return []
+    out: list[str] = []
+    for _name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        build = svc.get("build")
+        if build is None:
+            continue
+        if isinstance(build, str):
+            context, dockerfile = build, "Dockerfile"
+        elif isinstance(build, dict):
+            context = str(build.get("context") or ".")
+            dockerfile = str(build.get("dockerfile") or "Dockerfile")
+        else:
+            continue
+        if "$" in context or "$" in dockerfile:
+            continue
+        path = os.path.normpath(os.path.join(base_dir, context, dockerfile))
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        for ref in dockerfile_base_images(text):
+            if ref not in out:
+                out.append(ref)
+    return out
+
+
 def compose_declared_platforms(compose_obj: Any) -> list[str]:
     """Architectures the compose file pins explicitly via ``platform:``."""
     if not isinstance(compose_obj, dict):
@@ -243,7 +309,9 @@ def image_architectures(image: str, *, allow_registry: bool = True) -> tuple[lis
     return list(archs), source
 
 
-def compose_architectures(compose_obj: Any, *, allow_registry: bool = True) -> dict[str, Any]:
+def compose_architectures(
+    compose_obj: Any, *, allow_registry: bool = True, base_dir: str | None = None
+) -> dict[str, Any]:
     """Architectures a whole compose stack can run on.
 
     A stack runs natively only where *every* one of its images does, so the
@@ -264,9 +332,15 @@ def compose_architectures(compose_obj: Any, *, allow_registry: bool = True) -> d
         }
 
     refs = compose_image_refs(compose_obj)
+    from_build = False
+    if not refs and base_dir:
+        # A build-only stack has no pinned image, but the image it produces
+        # inherits its Dockerfile's base -- which is a real, checkable answer.
+        # Without this the whole stack reported as unknown, which reads the same
+        # as "never scanned" and hides an amd64-only base behind a neutral badge.
+        refs = compose_build_base_images(compose_obj, base_dir)
+        from_build = bool(refs)
     if not refs:
-        # Build-only stacks inherit the build host's architecture; there is no
-        # pinned image to disqualify them.
         return {"architectures": [], "source": UNKNOWN, "per_image": {}, "unresolved": []}
 
     per_image: dict[str, list[str]] = {}
@@ -289,6 +363,10 @@ def compose_architectures(compose_obj: Any, *, allow_registry: bool = True) -> d
     # Prefer the weaker claim when some images could not be resolved: what we
     # know is only about the images we could actually see.
     source = "registry" if "registry" in sources else ("local" if "local" in sources else UNKNOWN)
+    if from_build and source != UNKNOWN:
+        # Say where the answer came from: these are the architectures the stack
+        # can be *built* natively on, not those of a published image.
+        source = "build-base"
     if unresolved:
         source = f"partial-{source}"
     return {
@@ -311,7 +389,11 @@ def architecture_summary_for_compose_file(
 
         with open(compose_path, "r", encoding="utf-8", errors="ignore") as handle:
             compose_obj = yaml.safe_load(handle)
-        return compose_architectures(compose_obj, allow_registry=allow_registry)
+        return compose_architectures(
+            compose_obj,
+            allow_registry=allow_registry,
+            base_dir=os.path.dirname(os.path.abspath(compose_path)),
+        )
     except Exception as exc:
         logger.debug("architecture scan failed for %s: %s", compose_path, exc)
         return empty

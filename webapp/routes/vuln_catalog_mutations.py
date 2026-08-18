@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from flask import flash, jsonify, redirect, request, url_for
 
+from webapp import progress_store
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
 
 
@@ -60,8 +61,11 @@ def register(
             return jsonify({'ok': False, 'error': 'CORE runtime reconciliation is unavailable.'}), 501
         payload = request.get_json(silent=True) or {}
         dry_run = bool(payload.get('dry_run'))
+        progress_id = str(payload.get('progress_id') or '').strip()
+        if not progress_store.PROGRESS_ID_RE.fullmatch(progress_id):
+            progress_id = ''
         try:
-            result = reconcile_remote_runtime(dry_run=dry_run)
+            result = reconcile_remote_runtime(dry_run=dry_run, progress_id=progress_id)
         except Exception as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 502
         if not result.get('ok'):

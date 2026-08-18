@@ -1611,3 +1611,166 @@ injects: []
     reported = [str(w.filename) for w in escapes]
     assert '<unknown>' not in reported, f'warning did not name the file: {reported}'
     assert any(r.endswith('generator.py') for r in reported), reported
+
+
+def test_build_only_stack_resolves_through_its_dockerfile_base(tmp_path, monkeypatch):
+    """A build-only stack has no pinned image, but its base image is checkable.
+
+    Reporting it as unknown read the same as "never scanned" and hid an
+    amd64-only base behind a neutral badge.
+    """
+    import json as _json
+
+    import scenarioforge.utils.image_architectures as ia
+
+    (tmp_path / 'Dockerfile').write_text('FROM python:3.11-slim\nRUN true\n')
+    (tmp_path / 'docker-compose.yml').write_text('services:\n  generator:\n    build: .\n')
+
+    monkeypatch.setattr(ia, '_docker_available', lambda: True)
+    monkeypatch.setattr(ia, '_run', lambda cmd, timeout: (
+        (0, _json.dumps({'manifests': [{'platform': {'architecture': a}} for a in ('amd64', 'arm64')]}))
+        if 'manifest' in cmd else (1, '')
+    ))
+    ia._arch_cache.clear()
+
+    summary = ia.architecture_summary_for_compose_file(str(tmp_path / 'docker-compose.yml'))
+    assert summary['architectures'] == ['amd64', 'arm64']
+    # Labelled distinctly so the UI can say "builds natively on" rather than
+    # claiming a published image supports these platforms.
+    assert summary['source'] == 'build-base'
+
+
+def test_dockerfile_base_parsing_skips_stages_and_arg_refs():
+    from scenarioforge.utils.image_architectures import dockerfile_base_images
+
+    assert dockerfile_base_images('FROM python:3.11-slim\n') == ['python:3.11-slim']
+    # A FROM naming an earlier stage is not a pullable image.
+    assert dockerfile_base_images(
+        'FROM golang:1.22 AS build\nRUN x\nFROM build\nFROM alpine:3.19\n'
+    ) == ['golang:1.22', 'alpine:3.19']
+    # ARG-parameterised bases cannot be resolved without building; --platform
+    # is a flag, not the image.
+    assert dockerfile_base_images(
+        'ARG B=x\nFROM ${B}\nFROM --platform=$BUILDPLATFORM debian:12\n'
+    ) == ['debian:12']
+
+
+def test_remote_failure_from_stale_core_copies_names_the_fix():
+    """A wall of duplicate-id warnings must point at Sync CORE Runtime.
+
+    Uninstall is local-only, so a replaced pack lingers on the CORE VM and every
+    generator id resolves twice. The raw runner output blames a missing
+    generator, which points nowhere near the cause.
+    """
+    from webapp.flow_prepare_preview_helpers import summarize_remote_generator_failure
+
+    stdout = (
+        '[manifest] warning: /tmp/scenarioforge/outputs/installed_generators/'
+        'flag_node_generators/database/p_old__163/manifest.yaml: '
+        'duplicate generator id: mysql_backup_table\n'
+        '[manifest] warning: /tmp/scenarioforge/outputs/installed_generators/'
+        'flag_node_generators/dns/p_old__165/manifest.yaml: '
+        'duplicate generator id: 137\n'
+        '... 69 more\n'
+        'Generator not found at requested source: 130\n'
+    )
+    msg = summarize_remote_generator_failure(rc=1, stdout=stdout, stderr='')
+
+    assert 'Sync CORE Runtime' in msg
+    assert 'removes it locally only' in msg
+    assert 'generator 130' in msg
+    # 2 inline warnings plus the truncated remainder.
+    assert '71 duplicate generator id warning(s)' in msg
+
+
+def test_unrelated_remote_failure_keeps_its_raw_output():
+    """The hint must not fire on failures that have nothing to do with staleness."""
+    from webapp.flow_prepare_preview_helpers import summarize_remote_generator_failure
+
+    msg = summarize_remote_generator_failure(rc=1, stdout='boom: something else broke', stderr='')
+    assert 'Sync CORE Runtime' not in msg
+    assert 'boom: something else broke' in msg
+
+
+def test_core_sync_publishes_progress_and_a_terminal_state(tmp_path, monkeypatch):
+    """A long prune must report what it is doing, and finish cleanly.
+
+    The sync walks the CORE VM over SFTP and deletes one directory at a time; a
+    dialog with no progress is indistinguishable from a hang.
+    """
+    from webapp import progress_store
+
+    removed: list[str] = []
+    _setup_reconcile(tmp_path, monkeypatch, removed)
+
+    progress_id = 'syncprogresstest1'
+    result = app_backend._reconcile_remote_generator_runtime(progress_id=progress_id)
+    assert result['ok'] is True
+
+    snapshot = progress_store.snapshot(progress_id)
+    assert snapshot is not None
+    assert snapshot['status'] == 'complete'
+    assert snapshot['step'] == 'Sync complete'
+    # Two stale, one kept, per the shared fixture.
+    assert 'Removed 2' in snapshot['detail']
+    assert 'kept 1' in snapshot['detail']
+
+
+def test_core_sync_preview_reports_without_deleting(tmp_path, monkeypatch):
+    from webapp import progress_store
+
+    removed: list[str] = []
+    _setup_reconcile(tmp_path, monkeypatch, removed)
+
+    progress_id = 'syncpreviewtest01'
+    app_backend._reconcile_remote_generator_runtime(dry_run=True, progress_id=progress_id)
+
+    snapshot = progress_store.snapshot(progress_id)
+    assert snapshot['status'] == 'complete'
+    assert snapshot['step'] == 'Preview complete'
+    assert removed == [], 'preview must not delete anything'
+
+
+def test_core_sync_progress_reports_failure(tmp_path, monkeypatch):
+    from webapp import progress_store
+
+    # Get past the root checks so the SSH failure is what we actually exercise.
+    _setup_reconcile(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(
+        app_backend, '_require_core_ssh_credentials',
+        lambda cfg: (_ for _ in ()).throw(RuntimeError('no ssh host')),
+    )
+
+    progress_id = 'syncfailuretest01'
+    result = app_backend._reconcile_remote_generator_runtime(progress_id=progress_id)
+
+    assert result['ok'] is False
+    snapshot = progress_store.snapshot(progress_id)
+    # A dialog that just stops is worse than one that says why.
+    assert snapshot['status'] == 'failed'
+    assert 'no ssh host' in snapshot['detail']
+
+
+def test_core_sync_progress_reports_a_root_outside_the_repository(monkeypatch):
+    """Every exit closes the progress record, including the early guards."""
+    from webapp import progress_store
+
+    monkeypatch.setattr(app_backend, '_get_repo_root', lambda: '/some/repo')
+    monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: '/elsewhere/gens')
+
+    progress_id = 'syncoutsidetest01'
+    result = app_backend._reconcile_remote_generator_runtime(progress_id=progress_id)
+
+    assert result['ok'] is False
+    snapshot = progress_store.snapshot(progress_id)
+    assert snapshot['status'] == 'failed'
+    assert 'outside the repository' in snapshot['detail']
+
+
+def test_core_sync_progress_endpoint_is_shared_and_validates_ids():
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+
+    assert client.get('/api/core-sync-progress/short').status_code == 400
+    pending = client.get('/api/core-sync-progress/neverusedsync1')
+    assert pending.status_code == 200 and pending.get_json()['status'] == 'waiting'

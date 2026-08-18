@@ -174,7 +174,7 @@
                       <th style="width: 42px;"><input class="form-check-input" type="checkbox" id="genCheckAll" aria-label="Select all visible generators"></th>
                       <th style="width: 60px;">#</th>
                       <th>Name</th>
-                      <th>Type</th>
+                      <th style="width: 150px;">Architecture</th>
                       <th>Inputs</th>
                       <th>Outputs</th>
                       <th>Injects</th>
@@ -230,7 +230,7 @@
                       <th style="width: 42px;"><input class="form-check-input" type="checkbox" id="nodeGenCheckAll" aria-label="Select all visible node-generators"></th>
                       <th style="width: 60px;">#</th>
                       <th>Name</th>
-                      <th>Type</th>
+                      <th style="width: 150px;">Architecture</th>
                       <th>Inputs</th>
                       <th>Outputs</th>
                       <th>Injects</th>
@@ -1761,24 +1761,23 @@
         tr.classList.add('table-warning');
       }
 
-      const typeLabel = String(g.language || '');
+      const langLabel = String(g.language || '');
       tr.innerHTML = `
         <td><input class="form-check-input" type="checkbox" data-role="row-select" data-generator-id="${escapeHtml(g.id || '')}" ${rowSelected ? 'checked' : ''} ${(rowSelectable && !generatorSelectionLocked()) ? '' : 'disabled'} aria-label="Select generator ${escapeHtml(g.name || '')}"></td>
         <td class="text-muted">${idx + 1}</td>
         <td>
           <div>
-            <strong>${escapeHtml(g.name || '')}</strong>
+            <strong${langLabel ? ` title="Implementation: ${escapeHtml(langLabel)}"` : ''}>${escapeHtml(g.name || '')}</strong>
             ${isDisabled ? `<span class="badge bg-warning text-dark ms-2">Disabled</span>` : ''}
             ${isDuplicateConflict ? `<span class="badge bg-danger ms-2">Duplicate ID</span>` : ''}
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${g._requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(g._build_network_notes) ? g._build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
-            ${generatorArchitectureBadge(g)}
           </div>
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
           ${missingRequiredHtml}
           ${isDuplicateConflict ? `<div class="small text-danger">${escapeHtml(String(g._duplicate_conflict_note || 'This installed generator conflicts with another installed generator id. Remove one of the packs to resolve it.'))}</div>` : ''}
         </td>
-        <td class="small">${escapeHtml(typeLabel)}</td>
+        <td class="small">${generatorArchitectureBadge(g)}</td>
         <td class="small" title="${escapeHtml(inTypes)}">${inHtml}</td>
         <td class="small" title="${escapeHtml(outTypes)}">${outHtml}</td>
         <td class="small" style="max-width: 520px; word-break: break-all;">${escapeHtml(injected)}</td>
@@ -1984,24 +1983,23 @@
         tr.classList.add('table-warning');
       }
 
-      const typeLabel = String(g.language || '');
+      const langLabel = String(g.language || '');
       tr.innerHTML = `
         <td><input class="form-check-input" type="checkbox" data-role="row-select" data-generator-id="${escapeHtml(g.id || '')}" ${rowSelected ? 'checked' : ''} ${(rowSelectable && !generatorSelectionLocked()) ? '' : 'disabled'} aria-label="Select node-generator ${escapeHtml(g.name || '')}"></td>
         <td class="text-muted">${idx + 1}</td>
         <td>
           <div>
-            <strong>${escapeHtml(g.name || '')}</strong>
+            <strong${langLabel ? ` title="Implementation: ${escapeHtml(langLabel)}"` : ''}>${escapeHtml(g.name || '')}</strong>
             ${isDisabled ? `<span class="badge bg-warning text-dark ms-2">Disabled</span>` : ''}
             ${isDuplicateConflict ? `<span class="badge bg-danger ms-2">Duplicate ID</span>` : ''}
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${g._requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(g._build_network_notes) ? g._build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
-            ${generatorArchitectureBadge(g)}
           </div>
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
           ${missingRequiredHtml}
           ${isDuplicateConflict ? `<div class="small text-danger">${escapeHtml(String(g._duplicate_conflict_note || 'This installed node-generator conflicts with another installed node-generator id. Remove one of the packs to resolve it.'))}</div>` : ''}
         </td>
-        <td class="small">${escapeHtml(typeLabel)}</td>
+        <td class="small">${generatorArchitectureBadge(g)}</td>
         <td class="small" title="${escapeHtml(inTypes)}">${inHtml}</td>
         <td class="small" title="${escapeHtml(outTypes)}">${outHtml}</td>
         <td class="small" style="max-width: 520px; word-break: break-all;">${escapeHtml(injected)}</td>
@@ -2708,10 +2706,20 @@
     // host architecture is unknown, which must not be reported as emulated.
     const native = hostArch ? archs.includes(hostArch) : null;
     const label = escapeHtml(archs.join(', '));
+    // A build-only stack was resolved through its Dockerfile's base image, so
+    // the honest claim is about where it can be *built*, not about a published
+    // image's platforms.
+    const fromBase = source.indexOf('build-base') >= 0;
     if (native === false) {
-      return `<span class="badge text-bg-warning ms-2" title="Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation, where heavy applications can segfault mid-boot.${escapeHtml(extra)}">${label} (emulated)</span>`;
+      const why = fromBase
+        ? `Its base image supports ${label}; this host is ${escapeHtml(hostArch)}, so the build runs under qemu emulation.`
+        : `Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation, where heavy applications can segfault mid-boot.`;
+      return `<span class="badge text-bg-warning ms-2" title="${why}${escapeHtml(extra)}">${label} (emulated)</span>`;
     }
-    return `<span class="badge text-bg-success ms-2" title="Runs natively on: ${label}.${escapeHtml(extra)}">${label}</span>`;
+    const why = fromBase
+      ? `Builds its own image from a base supporting: ${label}, so it builds natively on those.`
+      : `Runs natively on: ${label}.`;
+    return `<span class="badge text-bg-success ms-2" title="${why}${escapeHtml(extra)}">${label}</span>`;
   }
 
   function escapeHtml(str) {
@@ -4814,12 +4822,30 @@
       previewBtn.disabled = true;
       confirmBtn.disabled = true;
       active.textContent = dryRun ? 'Checking…' : 'Removing…';
+      // The sync walks the CORE VM over SFTP and deletes one directory at a
+      // time; without progress a large prune is indistinguishable from a hang.
+      // Poll the same way the catalog import does.
+      const progressId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+        ? window.crypto.randomUUID().replaceAll('-', '')
+        : `coresync${Date.now()}${Math.random().toString(36).slice(2)}`;
+      let poll = window.setInterval(async () => {
+        try {
+          const pr = await fetch(`/api/core-sync-progress/${encodeURIComponent(progressId)}`, { cache: 'no-store' });
+          if (!pr.ok) return;
+          const p = await pr.json();
+          if (!p || p.ok === false || p.status === 'waiting') return;
+          const total = Number(p.total) || 0;
+          const cur = Number(p.current) || 0;
+          const counted = total > 0 ? ` ${cur} / ${total}` : (cur ? ` ${cur}` : '');
+          show(`${p.step || 'Working'}${counted}${p.detail ? `\n  ${p.detail}` : ''}`);
+        } catch (e) { /* a transient poll failure is not fatal */ }
+      }, 400);
       try {
         const resp = await fetch('/api/generator_packs/sync_core', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ dry_run: !!dryRun }),
+          body: JSON.stringify({ dry_run: !!dryRun, progress_id: progressId }),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || data.ok === false) {
@@ -4839,6 +4865,7 @@
       } catch (e) {
         show(`Failed: ${e}`);
       } finally {
+        if (poll) window.clearInterval(poll);
         previewBtn.disabled = false;
         confirmBtn.disabled = false;
         active.textContent = original;

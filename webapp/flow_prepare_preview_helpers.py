@@ -410,12 +410,53 @@ def _summarize_docker_registry_failure(text: str) -> str | None:
     )
 
 
+def _summarize_stale_remote_generator_copies(text: str) -> str:
+    """Recognise a CORE VM still holding generators this deployment removed.
+
+    Uninstall is local-only, so the CORE VM keeps the copies of every pack that
+    has been replaced. Generators are resolved by walking directories and
+    reading manifests, so each id then appears twice, every duplicate is
+    rejected, and the run fails claiming the generator does not exist -- which
+    points nowhere near the actual cause.
+    """
+    blob = str(text or '')
+    if 'duplicate generator id' not in blob.lower():
+        return ''
+    lowered = blob.lower()
+    duplicates = lowered.count('duplicate generator id')
+    # The runner truncates its warning list; recover the real total when it says so.
+    more = re.search(r'\.\.\.\s*(\d+)\s+more', blob)
+    if more:
+        try:
+            duplicates += int(more.group(1))
+        except ValueError:
+            pass
+    missing = ''
+    match = re.search(r'Generator not found at requested source:\s*(\S+)', blob)
+    if match:
+        missing = f' The chain then could not resolve generator {match.group(1)}.'
+    return (
+        f'The CORE VM holds generator copies this machine no longer has '
+        f'({duplicates} duplicate generator id warning(s)). Uninstalling a pack '
+        f'removes it locally only, so replaced packs stay on the VM and every '
+        f'generator id resolves twice, which makes the runner reject all of '
+        f'them.{missing} Fix it from the Flag Catalog page: '
+        f'"Sync CORE Runtime" removes the copies with no local counterpart '
+        f'(use Preview first to see what would go), then rerun Generate.'
+    )
+
+
 def summarize_remote_generator_failure(*, rc: Any, stdout: str, stderr: str, remote_err: Any = None) -> str:
     if remote_err:
         return str(remote_err)
     stdout_text = str(stdout or '').strip()
     stderr_text = str(stderr or '').strip()
     full_text = '\n'.join([part for part in (stdout_text, stderr_text) if part]).strip()
+    # Check this first: when it matches it is definitive, and the raw output is
+    # a wall of manifest warnings that buries the cause.
+    stale_summary = _summarize_stale_remote_generator_copies(full_text)
+    if stale_summary:
+        return f'remote generator failed (rc={rc}): {stale_summary}'
     docker_summary = _summarize_docker_registry_failure(full_text)
     if docker_summary:
         return f'remote generator failed (rc={rc}): {docker_summary}'

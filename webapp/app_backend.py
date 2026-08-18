@@ -2738,11 +2738,25 @@ def _remote_remove_path(client: Any, path: str) -> None:
     _exec_ssh_command(client, f"rm -rf {quoted}")
 
 
+def _progress_update(progress_id: str, **kwargs: Any) -> None:
+    """Publish progress if the caller asked for it; never fail the operation."""
+    if not progress_id:
+        return
+    try:
+        from webapp import progress_store
+
+        progress_store.update(progress_id, **kwargs)
+    except Exception:  # pragma: no cover - progress is best-effort only
+        pass
+
+
 def _reconcile_remote_installed_root(
     *,
     local_root: str,
     is_leaf: Any,
     dry_run: bool = False,
+    progress_id: str = '',
+    label: str = 'directories',
 ) -> dict[str, Any]:
     """Remove CORE-runtime directories under one installed root with no local twin.
 
@@ -2773,10 +2787,12 @@ def _reconcile_remote_installed_root(
     try:
         local_rel = os.path.relpath(local_root, repo_root).replace('\\', '/')
     except Exception:
-        result['error'] = 'Installed root is outside the repository.'
-        return result
+        local_rel = '..'
     if local_rel.startswith('..'):
+        # Every exit has to close out the progress record; one that returns
+        # silently leaves the dialog spinning with no explanation.
         result['error'] = 'Installed root is outside the repository.'
+        _progress_update(progress_id, step='Sync failed', detail=result['error'], status='failed')
         return result
 
     def _collect_local(root: str) -> set[str]:
@@ -2803,6 +2819,7 @@ def _reconcile_remote_installed_root(
         client = _open_ssh_client(core_cfg)
     except Exception as exc:
         result['error'] = f'CORE SSH configuration is required: {exc}'
+        _progress_update(progress_id, step='Sync failed', detail=result['error'], status='failed')
         return result
 
     sftp = None
@@ -2819,6 +2836,10 @@ def _reconcile_remote_installed_root(
             result['ok'] = True
             return result
 
+        _progress_update(
+            progress_id, step=f'Scanning CORE VM {label}', detail='Listing remote directories…'
+        )
+        stale: list[str] = []
         stack = [('', remote_root)]
         while stack:
             rel_prefix, abs_dir = stack.pop()
@@ -2837,16 +2858,54 @@ def _reconcile_remote_installed_root(
                     result['checked'] += 1
                     if rel in local_dirs:
                         result['kept'] += 1
-                        continue
-                    result['removed'].append(rel)
-                    if not dry_run:
-                        _remote_remove_path(client, _remote_path_join(remote_root, rel))
+                    else:
+                        stale.append(rel)
+                    _progress_update(
+                        progress_id,
+                        step=f'Scanning CORE VM {label}',
+                        detail=rel,
+                        current=result['checked'],
+                        total=0,
+                    )
                 else:
                     stack.append((rel, _remote_path_join(abs_dir, name)))
+
+        result['removed'] = stale
+        total = len(stale)
+        if dry_run:
+            _progress_update(
+                progress_id,
+                step='Preview complete',
+                detail=f'{total} of {result["checked"]} would be removed',
+                current=total,
+                total=max(total, 1),
+                status='complete',
+            )
+            result['ok'] = True
+            return result
+
+        for index, rel in enumerate(stale, start=1):
+            _progress_update(
+                progress_id,
+                step=f'Removing stale {label}',
+                detail=rel,
+                current=index,
+                total=total,
+            )
+            _remote_remove_path(client, _remote_path_join(remote_root, rel))
+        _progress_update(
+            progress_id,
+            step='Sync complete',
+            detail=f'Removed {total}; kept {result["kept"]}',
+            current=total,
+            total=max(total, 1),
+            status='complete',
+        )
         result['ok'] = True
         return result
     except Exception as exc:
         result['error'] = str(exc)
+        _progress_update(progress_id, step='Sync failed', detail=str(exc), status='failed')
         return result
     finally:
         try:
@@ -2860,7 +2919,7 @@ def _reconcile_remote_installed_root(
             pass
 
 
-def _reconcile_remote_generator_runtime(*, dry_run: bool = False) -> dict[str, Any]:
+def _reconcile_remote_generator_runtime(*, dry_run: bool = False, progress_id: str = '') -> dict[str, Any]:
     """Prune CORE-runtime generator directories with no local counterpart.
 
     Generators are resolved by walking directories and reading manifests, so a
@@ -2873,10 +2932,12 @@ def _reconcile_remote_generator_runtime(*, dry_run: bool = False) -> dict[str, A
         # kind/category directories that other packs also write into.
         is_leaf=lambda rel, name: name.startswith('p_'),
         dry_run=dry_run,
+        progress_id=progress_id,
+        label='generators',
     )
 
 
-def _reconcile_remote_vuln_catalog_runtime(*, dry_run: bool = False) -> dict[str, Any]:
+def _reconcile_remote_vuln_catalog_runtime(*, dry_run: bool = False, progress_id: str = '') -> dict[str, Any]:
     """Prune CORE-runtime vulnerability catalogs with no local counterpart.
 
     A stale catalog here is inert rather than live -- vulnerabilities are
@@ -2890,6 +2951,8 @@ def _reconcile_remote_vuln_catalog_runtime(*, dry_run: bool = False) -> dict[str
         # One directory per catalog id, directly under the root.
         is_leaf=lambda rel, name: '/' not in rel,
         dry_run=dry_run,
+        progress_id=progress_id,
+        label='catalogs',
     )
 
 
