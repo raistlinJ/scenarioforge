@@ -6,10 +6,12 @@ from pathlib import Path
 from werkzeug.datastructures import MultiDict
 
 from webapp import app_backend as backend
+from webapp.routes import vuln_catalog_pack_ingest as ingest
 
 
 app = backend.app
 app.config.setdefault('TESTING', True)
+
 
 
 def _make_zip(files: dict[str, str | bytes]) -> bytes:
@@ -441,3 +443,264 @@ def test_vulnerability_import_and_export_preserve_original_categories(tmp_path, 
     assert items_response.status_code == 200
     items_payload = items_response.get_json() or {}
     assert (items_payload.get('items') or [])[0]['category'] == 'download-main/web/auth'
+
+
+def test_vuln_catalog_import_reports_per_vulnerability_progress(monkeypatch):
+    """Discovery should name each vulnerability and count it against the total.
+
+    The import runs as one blocking POST, so this per-item reporting is the
+    only thing the browser can show while a large catalog is validated.
+    """
+    client = app.test_client()
+    _login(client)
+
+    updates: list[dict] = []
+    real_update = ingest.update_progress
+
+    def capture(progress_id, **kwargs):
+        updates.append({'progress_id': progress_id, **kwargs})
+        return real_update(progress_id, **kwargs)
+
+    monkeypatch.setattr(ingest, 'update_progress', capture)
+
+    zip_bytes = _make_zip({
+        f'pack/vuln-{index}/docker-compose.yml': 'services: {}\n'
+        for index in range(5)
+    })
+
+    response = client.post(
+        '/vuln_catalog_packs/upload',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        data=MultiDict([
+            ('zip_file', (io.BytesIO(zip_bytes), 'pack.zip')),
+            ('import_progress_id', 'progressid12345'),
+        ]),
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+
+    discovery = [
+        update for update in updates
+        if update.get('step') == 'Discovering and validating vulnerabilities'
+    ]
+    assert [(u['current'], u['total']) for u in discovery] == [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]
+    assert [u['detail'] for u in discovery] == [f'pack/vuln-{index}' for index in range(5)]
+
+
+def test_vuln_catalog_import_progress_endpoint_reports_snapshot_and_rejects_bad_id():
+    client = app.test_client()
+    _login(client)
+
+    assert client.get('/api/vuln-catalog-import-progress/short').status_code == 400
+
+    # An id nobody has reported against is 'waiting', not an error, so the
+    # client can start polling before the upload reaches the server.
+    pending = client.get('/api/vuln-catalog-import-progress/neverusedid123')
+    assert pending.status_code == 200
+    assert pending.get_json()['status'] == 'waiting'
+
+    ingest.update_progress(
+        'livesnapshotid123',
+        step='Discovering and validating vulnerabilities',
+        detail='pack/vuln-7',
+        current=7,
+        total=20,
+    )
+    payload = client.get('/api/vuln-catalog-import-progress/livesnapshotid123').get_json()
+    assert payload['step'] == 'Discovering and validating vulnerabilities'
+    assert payload['detail'] == 'pack/vuln-7'
+    assert (payload['current'], payload['total'], payload['percent']) == (7, 20, 35)
+
+
+def test_vuln_catalog_import_progress_requires_login():
+    assert app.test_client().get('/api/vuln-catalog-import-progress/anonymousid123').status_code == 401
+
+
+def test_import_validation_choice_overrides_environment_default(monkeypatch):
+    """The Import dialog's answer wins over CORETG_CATALOG_ARCH_SCAN."""
+    monkeypatch.setenv('CORETG_CATALOG_ARCH_SCAN', '1')
+    ingest.set_active_architecture_scan(False)
+    try:
+        assert backend._vuln_catalog_architecture_scan_enabled() is False
+    finally:
+        ingest.set_active_architecture_scan(None)
+    # Cleared override falls back to the environment.
+    assert backend._vuln_catalog_architecture_scan_enabled() is True
+
+    monkeypatch.setenv('CORETG_CATALOG_ARCH_SCAN', '0')
+    ingest.set_active_architecture_scan(True)
+    try:
+        assert backend._vuln_catalog_architecture_scan_enabled() is True
+    finally:
+        ingest.set_active_architecture_scan(None)
+    assert backend._vuln_catalog_architecture_scan_enabled() is False
+
+
+def test_upload_route_applies_and_clears_validation_choice(monkeypatch):
+    """The posted choice is active during install and reset afterwards."""
+    client = app.test_client()
+    _login(client)
+    seen: dict = {}
+
+    def fake_install(*, zip_file_path, label, origin):
+        seen['during_install'] = ingest.active_architecture_scan()
+        return {'id': 'choice-catalog'}
+
+    monkeypatch.setattr(backend, '_install_vuln_catalog_zip_file', fake_install)
+
+    for posted, expected in (('0', False), ('1', True)):
+        seen.clear()
+        response = client.post(
+            '/vuln_catalog_packs/upload',
+            headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+            data=MultiDict([
+                ('zip_file', (io.BytesIO(b'PK\x03\x04demo'), 'catalog.zip')),
+                ('validate_architectures', posted),
+            ]),
+            content_type='multipart/form-data',
+        )
+        assert response.status_code == 200
+        assert seen['during_install'] is expected
+        # Never leaks past the request onto a pooled worker thread.
+        assert ingest.active_architecture_scan() is None
+
+
+def test_upload_route_without_choice_keeps_configured_default(monkeypatch):
+    """A POST that predates the dialog must not silently change behaviour."""
+    client = app.test_client()
+    _login(client)
+    seen: dict = {}
+
+    def fake_install(*, zip_file_path, label, origin):
+        seen['during_install'] = ingest.active_architecture_scan()
+        return {'id': 'default-catalog'}
+
+    monkeypatch.setattr(backend, '_install_vuln_catalog_zip_file', fake_install)
+
+    response = client.post(
+        '/vuln_catalog_packs/upload',
+        headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        data={'zip_file': (io.BytesIO(b'PK\x03\x04demo'), 'catalog.zip')},
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    assert seen['during_install'] is None
+
+
+def _fake_remote_catalogs(monkeypatch, tmp_path, removed, local_ids, remote_ids):
+    """Local catalogs vs. what the CORE VM still holds."""
+    import stat as _stat
+
+    catalog_root = tmp_path / 'outputs' / 'installed_vuln_catalogs'
+    for cid in local_ids:
+        (catalog_root / cid / 'content').mkdir(parents=True, exist_ok=True)
+
+    class _Attr:
+        def __init__(self, name):
+            self.filename = name
+            self.st_mode = _stat.S_IFDIR | 0o755
+
+    remote_root = '/remote/repo/outputs/installed_vuln_catalogs'
+    tree = {
+        '/remote/repo': [_Attr('outputs')],
+        remote_root: [_Attr(cid) for cid in remote_ids],
+    }
+    # Each remote catalog has content below it; the walk must stop at the
+    # catalog directory rather than descending into per-vulnerability dirs.
+    for cid in remote_ids:
+        tree[f'{remote_root}/{cid}'] = [_Attr('content')]
+
+    class _Sftp:
+        def stat(self, path):
+            if path not in tree:
+                raise IOError(path)
+            return object()
+
+        def listdir_attr(self, path):
+            if path not in tree:
+                raise IOError(path)
+            return tree[path]
+
+        def close(self):
+            pass
+
+    class _Client:
+        def open_sftp(self):
+            return _Sftp()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(tmp_path))
+    monkeypatch.setattr(backend, '_installed_vuln_catalogs_root', lambda: str(catalog_root))
+    monkeypatch.setattr(backend, '_core_config_for_request', lambda **kw: {'ssh_host': 'core.example'})
+    monkeypatch.setattr(backend, '_require_core_ssh_credentials', lambda cfg: cfg)
+    monkeypatch.setattr(backend, '_open_ssh_client', lambda cfg: _Client())
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda sftp: '/remote/repo')
+    monkeypatch.setattr(backend, '_remote_remove_path', lambda client, path: removed.append(path))
+
+
+def test_vuln_core_runtime_sync_removes_catalogs_absent_locally(tmp_path, monkeypatch):
+    removed: list[str] = []
+    _fake_remote_catalogs(
+        monkeypatch, tmp_path, removed,
+        local_ids=['05-27-26-keep'],
+        remote_ids=['05-27-26-keep', '01-01-26-stale', '02-02-26-other-deployment'],
+    )
+
+    result = backend._reconcile_remote_vuln_catalog_runtime()
+
+    assert result['ok'] is True
+    assert result['checked'] == 3
+    assert result['kept'] == 1
+    assert sorted(result['removed']) == ['01-01-26-stale', '02-02-26-other-deployment']
+    assert sorted(removed) == [
+        '/remote/repo/outputs/installed_vuln_catalogs/01-01-26-stale',
+        '/remote/repo/outputs/installed_vuln_catalogs/02-02-26-other-deployment',
+    ]
+
+
+def test_vuln_core_runtime_sync_dry_run_deletes_nothing(tmp_path, monkeypatch):
+    removed: list[str] = []
+    _fake_remote_catalogs(
+        monkeypatch, tmp_path, removed,
+        local_ids=['keep-me'], remote_ids=['keep-me', 'drop-me'],
+    )
+
+    result = backend._reconcile_remote_vuln_catalog_runtime(dry_run=True)
+
+    assert result['ok'] is True
+    assert result['dry_run'] is True
+    assert result['removed'] == ['drop-me']
+    assert removed == [], 'preview must not delete anything'
+
+
+def test_vuln_core_runtime_sync_route_reports_counts(tmp_path, monkeypatch):
+    removed: list[str] = []
+    _fake_remote_catalogs(
+        monkeypatch, tmp_path, removed,
+        local_ids=['keep-me'], remote_ids=['keep-me', 'drop-me'],
+    )
+    client = app.test_client()
+    _login(client)
+
+    response = client.post('/api/vuln_catalog_packs/sync_core', json={'dry_run': True})
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['ok'] is True
+    assert (payload['checked'], payload['kept'], payload['removed_count']) == (2, 1, 1)
+    assert removed == []
+
+
+def test_vuln_core_runtime_sync_route_surfaces_unreachable_core_vm(monkeypatch):
+    monkeypatch.setattr(
+        backend,
+        '_reconcile_remote_vuln_catalog_runtime',
+        lambda **kwargs: {'ok': False, 'error': 'CORE SSH configuration is required: no host'},
+    )
+    client = app.test_client()
+    _login(client)
+
+    response = client.post('/api/vuln_catalog_packs/sync_core', json={})
+    assert response.status_code == 502
+    assert 'CORE SSH configuration is required' in response.get_json()['error']

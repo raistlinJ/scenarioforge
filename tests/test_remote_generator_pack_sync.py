@@ -1,3 +1,4 @@
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,15 +140,40 @@ def test_vm_flow_explicit_run_local_remains_local(tmp_path: Path) -> None:
     assert context['flow_remote_forced'] is False
 
 
-def test_pack_uninstall_removes_matching_core_runtime_directory(tmp_path: Path, monkeypatch) -> None:
+def test_core_runtime_sync_removes_matching_core_runtime_directory(tmp_path: Path, monkeypatch) -> None:
+    """The remote path a sync deletes must mirror the local layout exactly.
+
+    Uninstall is local-only, so this reconciliation is the only thing that ever
+    removes a generator from the CORE VM; building the remote path wrongly
+    would either miss the stale copy or delete an unrelated directory.
+    """
     repo_root = tmp_path / 'repo'
-    local_pack_dir = repo_root / 'outputs' / 'installed_generators' / 'flag_node_generators' / 'p_current__51'
-    local_pack_dir.mkdir(parents=True)
+    install_root = repo_root / 'outputs' / 'installed_generators'
+    (install_root / 'flag_node_generators' / 'p_current__51').mkdir(parents=True)
     removed: list[str] = []
 
+    class FakeAttr:
+        def __init__(self, name: str) -> None:
+            self.filename = name
+            self.st_mode = stat.S_IFDIR | 0o755
+
+    remote_root = '/tmp/scenarioforge/outputs/installed_generators'
+    tree = {
+        '/tmp/scenarioforge': [FakeAttr('outputs')],
+        remote_root: [FakeAttr('flag_node_generators')],
+        f'{remote_root}/flag_node_generators': [FakeAttr('p_current__51'), FakeAttr('p_removed__52')],
+    }
+
     class FakeSftp:
-        def stat(self, _path):
+        def stat(self, path):
+            if path not in tree:
+                raise IOError(path)
             return object()
+
+        def listdir_attr(self, path):
+            if path not in tree:
+                raise IOError(path)
+            return tree[path]
 
         def close(self):
             return None
@@ -160,20 +186,19 @@ def test_pack_uninstall_removes_matching_core_runtime_directory(tmp_path: Path, 
             return None
 
     monkeypatch.setattr(app_backend, '_get_repo_root', lambda: str(repo_root))
-    monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(repo_root / 'outputs' / 'installed_generators'))
+    monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(install_root))
     monkeypatch.setattr(app_backend, '_core_config_for_request', lambda **_kwargs: {'ssh_host': 'core.example'})
     monkeypatch.setattr(app_backend, '_require_core_ssh_credentials', lambda cfg: cfg)
     monkeypatch.setattr(app_backend, '_open_ssh_client', lambda _cfg: FakeClient())
     monkeypatch.setattr(app_backend, '_remote_static_repo_dir', lambda _sftp: '/tmp/scenarioforge')
     monkeypatch.setattr(app_backend, '_remote_remove_path', lambda _client, path: removed.append(path))
 
-    ok, note = app_backend._cleanup_remote_generator_pack({
-        'installed': [{'path': str(local_pack_dir)}],
-    })
+    result = app_backend._reconcile_remote_generator_runtime()
 
-    assert ok is True
-    assert note == 'removed 1 CORE runtime generator directory(s)'
-    assert removed == ['/tmp/scenarioforge/outputs/installed_generators/flag_node_generators/p_current__51']
+    assert result['ok'] is True
+    assert result['kept'] == 1
+    assert result['removed'] == ['flag_node_generators/p_removed__52']
+    assert removed == ['/tmp/scenarioforge/outputs/installed_generators/flag_node_generators/p_removed__52']
 
 
 def test_remote_runner_binds_execution_to_the_selected_generator_source() -> None:

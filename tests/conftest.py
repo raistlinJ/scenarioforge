@@ -56,6 +56,80 @@ def _isolate_core_runtime_env(monkeypatch, _isolated_secrets_dir):
     monkeypatch.setenv('CORETG_SECRETS_DIR', _isolated_secrets_dir)
 
 
+# Endpoints that run a generator or a batch hand the work to a daemon thread and
+# respond immediately. That thread persists its result when it finishes -- and
+# it resolves the state path *then*, not when it started. A test can therefore
+# return, its monkeypatched environment can be torn down, and the thread can
+# land its write on the operator's real catalog a moment later. Joining these
+# before the redirect is undone keeps the write where the test put it.
+_APP_WORKER_THREAD_PREFIXES = (
+    'flaggen-',
+    'flagnodegen-',
+    'flag-batch-',
+    'flag-cache-',
+    'builder-test-',
+    'artifact-check-',
+    'core-repo-push-',
+)
+
+
+def _join_app_worker_threads(timeout_s: float = 10.0) -> None:
+    import threading
+    import time as _time
+
+    deadline = _time.time() + timeout_s
+    for thread in list(threading.enumerate()):
+        if thread is threading.current_thread() or not thread.is_alive():
+            continue
+        if not str(thread.name or '').startswith(_APP_WORKER_THREAD_PREFIXES):
+            continue
+        remaining = deadline - _time.time()
+        if remaining <= 0:
+            break
+        # Best effort: a wedged worker must not hang the suite.
+        thread.join(timeout=remaining)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        'markers',
+        'real_installed_catalogs: test reads the machine\'s installed catalogs '
+        'instead of an isolated temp root (read-only tests only)',
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_installed_catalog_roots(request, monkeypatch, tmp_path_factory):
+    """Keep catalog installs out of the operator's real catalogs.
+
+    Installing a generator pack or a vulnerability catalog writes into
+    ``outputs/installed_generators`` and ``outputs/installed_vuln_catalogs``.
+    Those are live application state that the Web UI and CLI read,
+    ``_catalogs_state.json`` is rewritten wholesale rather than appended to, and
+    both are gitignored -- so anything a test overwrites is gone, with no
+    ``git checkout`` to undo it. A suite run once left junk catalogs behind,
+    made one of them active, and destroyed the installed vulnerability catalog
+    outright.
+
+    Redirecting by default means a new test cannot cause that by forgetting to
+    isolate itself. A handful of end-to-end tests genuinely need the machine's
+    real catalog to have vulnerabilities in it; they opt out with
+    ``@pytest.mark.real_installed_catalogs`` and must be read-only, since
+    opting out puts the operator's data back in reach.
+
+    A test that sets either variable itself still wins, because a test body
+    runs after its fixtures.
+    """
+    if request.node.get_closest_marker('real_installed_catalogs'):
+        yield
+        return
+    root = tmp_path_factory.mktemp('scenarioforge-catalogs')
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(root / 'installed_generators'))
+    monkeypatch.setenv('CORETG_INSTALLED_VULN_CATALOGS_DIR', str(root / 'installed_vuln_catalogs'))
+    yield
+    _join_app_worker_threads()
+
+
 @pytest.fixture(autouse=True)
 def _collect_abandoned_stream_generators():
     """Close abandoned streaming responses in the test that created them.

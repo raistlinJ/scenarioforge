@@ -2738,42 +2738,72 @@ def _remote_remove_path(client: Any, path: str) -> None:
     _exec_ssh_command(client, f"rm -rf {quoted}")
 
 
-def _cleanup_remote_generator_pack(pack: dict[str, Any]) -> tuple[bool, str]:
-    """Remove the CORE-runtime copies of one catalog pack before local uninstall.
+def _reconcile_remote_installed_root(
+    *,
+    local_root: str,
+    is_leaf: Any,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Remove CORE-runtime directories under one installed root with no local twin.
 
-    Catalog packs are mirrored to the CORE VM for generator execution.  Leaving
-    those directories behind means a future remote run can resolve an
-    uninstalled, stale generator.  This is intentionally strict: local removal
-    is aborted if the selected CORE runtime cannot be cleaned too.
+    Uninstall is local-only, so the CORE VM keeps copies of content this
+    deployment no longer has. Reconciliation compares the remote tree under the
+    same repo-relative path against the local one and removes the extras.
+
+    Anything removed is removed regardless of an operator's "persistent" mark:
+    persistent protects an item from image cleanup *within* a catalog and says
+    nothing about a copy of a catalog this machine no longer has. Callers must
+    tell the operator that before running it.
+
+    ``is_leaf(rel_path, name)`` decides which directories are the unit to
+    compare -- a generator pack publishes ``p_<pack>__<n>`` leaves, while a
+    vulnerability catalog is one directory per catalog id at the top level.
     """
-    if not isinstance(pack, dict):
-        return False, 'Invalid generator pack.'
-    installed = [item for item in (pack.get('installed') or []) if isinstance(item, dict)]
-    if not installed:
-        return True, 'no remote generator directories to remove'
+    result: dict[str, Any] = {
+        'ok': False,
+        'checked': 0,
+        'removed': [],
+        'kept': 0,
+        'dry_run': bool(dry_run),
+        'error': '',
+    }
 
+    local_root = os.path.abspath(local_root)
     repo_root = os.path.abspath(_get_repo_root())
-    local_root = os.path.abspath(_installed_generators_root())
-    relative_paths: list[str] = []
-    for item in installed:
-        raw_path = str(item.get('path') or '').strip()
-        if not raw_path:
-            return False, 'Pack contains an installed generator with no path.'
-        local_path = os.path.abspath(raw_path)
-        try:
-            if os.path.commonpath([local_root, local_path]) != local_root:
-                return False, f'Refusing remote cleanup for path outside installed generators: {local_path}'
-            if os.path.commonpath([repo_root, local_path]) != repo_root:
-                return False, f'Refusing remote cleanup for path outside the repository: {local_path}'
-            relative_paths.append(os.path.relpath(local_path, repo_root).replace('\\', '/'))
-        except Exception:
-            return False, f'Refusing remote cleanup for path: {local_path}'
+    try:
+        local_rel = os.path.relpath(local_root, repo_root).replace('\\', '/')
+    except Exception:
+        result['error'] = 'Installed root is outside the repository.'
+        return result
+    if local_rel.startswith('..'):
+        result['error'] = 'Installed root is outside the repository.'
+        return result
+
+    def _collect_local(root: str) -> set[str]:
+        found: set[str] = set()
+        for dirpath, dirnames, _files in os.walk(root):
+            descend: list[str] = []
+            for name in dirnames:
+                abs_dir = os.path.join(dirpath, name)
+                rel = os.path.relpath(abs_dir, root).replace('\\', '/')
+                if is_leaf(rel, name):
+                    found.add(rel)
+                else:
+                    descend.append(name)
+            # Never walk inside a leaf. It is the unit being compared, and for a
+            # vulnerability catalog its contents are thousands of files that
+            # cannot contain another leaf -- matching how the remote walk stops.
+            dirnames[:] = descend
+        return found
+
+    local_dirs = _collect_local(local_root) if os.path.isdir(local_root) else set()
 
     try:
         core_cfg = _require_core_ssh_credentials(_core_config_for_request(include_password=True))
         client = _open_ssh_client(core_cfg)
     except Exception as exc:
-        return False, f'CORE SSH configuration is required: {exc}'
+        result['error'] = f'CORE SSH configuration is required: {exc}'
+        return result
 
     sftp = None
     try:
@@ -2781,12 +2811,43 @@ def _cleanup_remote_generator_pack(pack: dict[str, Any]) -> tuple[bool, str]:
         remote_repo = _remote_static_repo_dir(sftp)
         # Confirm this is the expected static repo before deleting any child.
         sftp.stat(remote_repo)
-        for relative_path in sorted(set(relative_paths)):
-            remote_path = _remote_path_join(remote_repo, relative_path)
-            _remote_remove_path(client, remote_path)
-        return True, f'removed {len(set(relative_paths))} CORE runtime generator directory(s)'
+        remote_root = _remote_path_join(remote_repo, local_rel)
+        try:
+            sftp.stat(remote_root)
+        except IOError:
+            # Nothing mirrored yet; there is nothing to reconcile.
+            result['ok'] = True
+            return result
+
+        stack = [('', remote_root)]
+        while stack:
+            rel_prefix, abs_dir = stack.pop()
+            try:
+                entries = sftp.listdir_attr(abs_dir)
+            except IOError:
+                continue
+            for entry in entries:
+                name = str(getattr(entry, 'filename', '') or '')
+                if not name or name in ('.', '..'):
+                    continue
+                if not stat.S_ISDIR(getattr(entry, 'st_mode', 0) or 0):
+                    continue
+                rel = f'{rel_prefix}/{name}' if rel_prefix else name
+                if is_leaf(rel, name):
+                    result['checked'] += 1
+                    if rel in local_dirs:
+                        result['kept'] += 1
+                        continue
+                    result['removed'].append(rel)
+                    if not dry_run:
+                        _remote_remove_path(client, _remote_path_join(remote_root, rel))
+                else:
+                    stack.append((rel, _remote_path_join(abs_dir, name)))
+        result['ok'] = True
+        return result
     except Exception as exc:
-        return False, str(exc)
+        result['error'] = str(exc)
+        return result
     finally:
         try:
             if sftp is not None:
@@ -2797,6 +2858,39 @@ def _cleanup_remote_generator_pack(pack: dict[str, Any]) -> tuple[bool, str]:
             client.close()
         except Exception:
             pass
+
+
+def _reconcile_remote_generator_runtime(*, dry_run: bool = False) -> dict[str, Any]:
+    """Prune CORE-runtime generator directories with no local counterpart.
+
+    Generators are resolved by walking directories and reading manifests, so a
+    stale remote directory is live code a later run can pick up, and duplicate
+    ids from it break discovery for the whole catalog.
+    """
+    return _reconcile_remote_installed_root(
+        local_root=_installed_generators_root(),
+        # A pack publishes leaves named p_<pack>__<n>, nested under
+        # kind/category directories that other packs also write into.
+        is_leaf=lambda rel, name: name.startswith('p_'),
+        dry_run=dry_run,
+    )
+
+
+def _reconcile_remote_vuln_catalog_runtime(*, dry_run: bool = False) -> dict[str, Any]:
+    """Prune CORE-runtime vulnerability catalogs with no local counterpart.
+
+    A stale catalog here is inert rather than live -- vulnerabilities are
+    addressed through the active catalog's state and CSV, not discovered by
+    walking directories. It is still worth removing: catalog content is large,
+    and a CORE VM inherited from another deployment accumulates catalogs nobody
+    can account for.
+    """
+    return _reconcile_remote_installed_root(
+        local_root=_installed_vuln_catalogs_root(),
+        # One directory per catalog id, directly under the root.
+        is_leaf=lambda rel, name: '/' not in rel,
+        dry_run=dry_run,
+    )
 
 
 def _resolve_repo_push_allowed_outputs(upload_only_injected_artifacts: bool) -> List[str]:
@@ -48905,11 +48999,47 @@ def _vuln_catalog_architecture_scan_enabled() -> bool:
     On by default: knowing an item is amd64-only is what lets an arm64 host
     warn before a node segfaults under emulation. Set
     CORETG_CATALOG_ARCH_SCAN=0 to skip it when install speed matters more.
+
+    A per-import choice from the Import dialog wins over the environment, so an
+    operator can skip the registry round trips for one catalog without changing
+    how the deployment behaves.
     """
+    try:
+        from webapp.routes.vuln_catalog_pack_ingest import active_architecture_scan
+
+        override = active_architecture_scan()
+    except Exception:  # pragma: no cover - override is best-effort only
+        override = None
+    if override is not None:
+        return bool(override)
     raw = os.environ.get('CORETG_CATALOG_ARCH_SCAN')
     if raw is None:
         return True
     return str(raw).strip().lower() not in ('0', 'false', 'no', 'off', '')
+
+
+def _generator_pack_architecture_scan_enabled() -> bool:
+    """Whether a generator pack install should resolve each item's architectures.
+
+    Off by default, unlike the vulnerability catalog. Resolving an image the
+    host has not pulled costs a `docker manifest inspect` round trip, and a
+    repository of ~80 generators turned that into minutes of dead time inside
+    the upload request, which read as a hung import. The Import dialog's
+    per-import choice wins over the environment; set
+    CORETG_GENERATOR_ARCH_SCAN=1 to make scanning the default.
+    """
+    try:
+        from webapp.routes.generator_pack_routes import active_architecture_scan
+
+        override = active_architecture_scan()
+    except Exception:  # pragma: no cover - override is best-effort only
+        override = None
+    if override is not None:
+        return bool(override)
+    raw = os.environ.get('CORETG_GENERATOR_ARCH_SCAN')
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def _vuln_catalog_architecture_registry_enabled() -> bool:
@@ -48928,6 +49058,20 @@ def _vuln_catalog_architecture_registry_enabled() -> bool:
 
 
 def _installed_vuln_catalogs_root() -> str:
+    """Root directory for installed vulnerability catalogs.
+
+    Defaults to ./outputs/installed_vuln_catalogs under the outputs dir.
+    Overridable via CORETG_INSTALLED_VULN_CATALOGS_DIR, which the test suite
+    uses: installing a catalog rewrites the operator's live catalog state, and
+    that directory is gitignored, so a test that installs for real destroys
+    work with no way to recover it. Mirrors
+    CORETG_INSTALLED_GENERATORS_DIR for generator packs.
+    """
+    env = str(os.environ.get('CORETG_INSTALLED_VULN_CATALOGS_DIR') or '').strip()
+    if env:
+        root = os.path.abspath(os.path.expanduser(env))
+        os.makedirs(root, exist_ok=True)
+        return root
     return os.path.join(_outputs_dir(), 'installed_vuln_catalogs')
 
 
@@ -49292,6 +49436,11 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
 
         # Build item metadata (stable numeric id; UI name uses the parent folder name).
         norm_label = str(label or '').strip()
+        try:
+            from webapp.routes.vuln_catalog_pack_ingest import report_discovery_item
+        except Exception:  # pragma: no cover - progress is best-effort only
+            report_discovery_item = None  # type: ignore
+        discovery_total = len(compose_paths)
         for idx, (rel_name, compose_path) in enumerate(sorted(compose_paths, key=lambda t: t[0]), start=1):
             rel_dir = rel_name
             # Display name should include the parent folder when nested: <parent>/<leaf>.
@@ -49303,6 +49452,14 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                     display_name = f"{parts[-2]}/{parts[-1]}"
                 else:
                     display_name = parts[-1] if parts else 'root'
+            # Report before the per-item work below (dependency scan, optional
+            # architecture probe), so the name shown is the one being validated
+            # rather than the one already finished.
+            if report_discovery_item is not None:
+                try:
+                    report_discovery_item(idx, discovery_total, display_name)
+                except Exception:
+                    pass
             compose_rel = os.path.relpath(compose_path, content_dir).replace('\\', '/')
             dir_rel = os.path.relpath(os.path.dirname(compose_path), content_dir).replace('\\', '/')
             compose_dependency_summary: dict[str, Any] = {}
@@ -49638,6 +49795,7 @@ try:
         write_vuln_catalog_csv_from_items=lambda **kwargs: _write_vuln_catalog_csv_from_items(**kwargs),
         vuln_catalog_pack_dir=lambda catalog_id: _vuln_catalog_pack_dir(catalog_id),
         shutil_module=shutil,
+        reconcile_remote_runtime=lambda **kwargs: _reconcile_remote_vuln_catalog_runtime(**kwargs),
     )
 except Exception:
     try:
@@ -51389,13 +51547,13 @@ def _install_generator_pack_payload(
             # same reason as vulnerabilities: an amd64-only image on an arm64
             # CORE VM runs only under emulation.
             #
-            # Importing does NOT scan. Resolving an image the host has not
-            # pulled costs a `docker manifest inspect` round trip per image,
-            # and a repository of ~80 generators turned that into minutes of
-            # dead time inside the upload request, which read as a hung import.
-            # Whatever an exported pack already knew is kept, since that is
-            # free and an air-gapped host cannot ask a registry anyway;
-            # anything else is left 'unscanned' for a later explicit scan.
+            # Scanning is opt-in per import. Resolving an image the host has
+            # not pulled costs a `docker manifest inspect` round trip per
+            # image, and a repository of ~80 generators turns that into
+            # minutes inside the upload request, so the Import dialog asks
+            # first. Whatever an exported pack already knew is kept either way,
+            # since that is free and an air-gapped host cannot ask a registry
+            # anyway; declining leaves the rest 'unscanned'.
             try:
                 arch_imported = installed_item.get('architectures')
                 if isinstance(arch_imported, list) and arch_imported:
@@ -51403,6 +51561,22 @@ def _install_generator_pack_payload(
                         str(a).strip() for a in arch_imported if str(a or '').strip()
                     ]
                     installed_item.setdefault('architecture_source', 'imported')
+                elif compose_path_for_scan and _generator_pack_architecture_scan_enabled():
+                    from scenarioforge.utils.image_architectures import (
+                        architecture_summary_for_compose_file,
+                    )
+
+                    arch_summary = architecture_summary_for_compose_file(
+                        compose_path_for_scan,
+                        allow_registry=_vuln_catalog_architecture_registry_enabled(),
+                    )
+                    installed_item['architectures'] = list(arch_summary.get('architectures') or [])
+                    installed_item['architecture_source'] = str(
+                        arch_summary.get('architecture_source')
+                        or arch_summary.get('source')
+                        or 'unknown'
+                    )
+                    installed_item['architecture_unresolved'] = list(arch_summary.get('unresolved') or [])
                 else:
                     installed_item.setdefault('architectures', [])
                     installed_item.setdefault('architecture_source', 'unscanned')
@@ -51869,7 +52043,8 @@ try:
         download_zip_from_url=lambda url: _download_zip_from_url(url),
         pack_to_zip_bytes=lambda pack: _pack_to_zip_bytes(pack),
         catalog_packs_for_export=lambda: _flag_catalog_packs_for_export(),
-        cleanup_remote_pack=lambda pack: _cleanup_remote_generator_pack(pack),
+        reconcile_remote_runtime=lambda **kwargs: _reconcile_remote_generator_runtime(**kwargs),
+        require_builder_or_admin=lambda: _require_builder_or_admin(),
         os_module=os,
         tempfile_module=tempfile,
         uuid_module=uuid,

@@ -53,7 +53,24 @@ def test_vuln_catalog_page_renders_active_catalog(monkeypatch):
     assert 'function syncVulnPackImportMethod()' in page
     assert 'id="vulnPackImportSteps"' in page
     assert 'id="vulnPackImportActivity"' in page
-    assert 'function beginVulnServerProcessing(detail)' in page
+    assert 'function beginVulnServerProcessing(detail, progressId)' in page
+    # Per-vulnerability import progress: the client sends an id and polls it so
+    # the discovery step can name the item being validated and count it.
+    assert "fd.append('import_progress_id', progressId);" in page
+    assert '/api/vuln-catalog-import-progress/' in page
+    # Import asks whether to resolve image architectures, because that step is
+    # the one that reaches a registry and dominates a large catalog's install.
+    assert 'id="vulnPackValidateModal"' in page
+    assert 'id="vulnPackValidateRunBtn"' in page
+    assert 'id="vulnPackValidateSkipBtn"' in page
+    assert "fd.append('validate_architectures'" in page
+    # Deleting a catalog is local-only; the CORE VM is reconciled on demand,
+    # and the dialog must say persistent items go too.
+    assert 'id="vulnSyncCoreBtn"' in page
+    assert 'id="vulnSyncCoreModal"' in page
+    assert 'id="vulnSyncCorePreviewBtn"' in page
+    assert '/api/vuln_catalog_packs/sync_core' in page
+    assert 'Persistent</strong> are removed too' in page
     assert 'function vulnImportResultText(payload)' in page
     assert "urlImportForm.addEventListener('submit'" in page
 

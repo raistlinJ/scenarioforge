@@ -480,14 +480,6 @@ services:
 
 
 def test_generator_pack_uninstall_removes_generators(tmp_path, monkeypatch):
-    # Uninstall removes the CORE runtime copy over SSH before touching local
-    # files, and aborts if that fails. There is no CORE VM in a test run, so
-    # without this the delete is refused and nothing is removed. These tests
-    # are about local pack removal, so the remote step is stubbed as done.
-    monkeypatch.setattr(
-        app_backend, "_cleanup_remote_generator_pack",
-        lambda pack: (True, "remote cleanup stubbed in tests"),
-    )
     install_root = tmp_path / "installed_generators"
     monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))
 
@@ -573,7 +565,6 @@ def test_generator_pack_uninstall_ajax_returns_success_and_removes_pack(tmp_path
     monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(install_root))
     monkeypatch.setattr(app_backend, '_load_installed_generator_packs_state', lambda: state)
     monkeypatch.setattr(app_backend, '_save_installed_generator_packs_state', lambda value: saved.update(value))
-    monkeypatch.setattr(app_backend, '_cleanup_remote_generator_pack', lambda pack: (True, 'remote copy removed'))
 
     client = app.test_client()
     client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
@@ -587,12 +578,18 @@ def test_generator_pack_uninstall_ajax_returns_success_and_removes_pack(tmp_path
     assert payload['ok'] is True
     assert payload['pack_id'] == 'pack-demo'
     assert payload['removed'] == 1
-    assert payload['remote_cleanup'] == 'remote copy removed'
     assert saved['packs'] == []
     assert not installed_path.exists()
 
 
-def test_generator_pack_uninstall_ajax_explains_remote_cleanup_failure(tmp_path, monkeypatch):
+def test_generator_pack_uninstall_succeeds_without_a_reachable_core_vm(tmp_path, monkeypatch):
+    """Uninstall is local-only and must not depend on a CORE VM.
+
+    It used to run the remote cleanup inline and abort the local delete if it
+    failed, which made uninstall impossible in native mode and after
+    repointing at a different CORE VM. Stale remote copies are reconciled from
+    "Sync CORE Runtime" instead.
+    """
     install_root = tmp_path / 'installed_generators'
     installed_path = install_root / 'flag_generators' / 'p_demo__1'
     installed_path.mkdir(parents=True)
@@ -603,14 +600,15 @@ def test_generator_pack_uninstall_ajax_explains_remote_cleanup_failure(tmp_path,
             'installed': [{'id': '1', 'kind': 'flag-generator', 'path': str(installed_path)}],
         }],
     }
+    saved = {}
     monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(install_root))
     monkeypatch.setattr(app_backend, '_load_installed_generator_packs_state', lambda: state)
+    monkeypatch.setattr(app_backend, '_save_installed_generator_packs_state', lambda value: saved.update(value))
     monkeypatch.setattr(
         app_backend,
-        '_save_installed_generator_packs_state',
-        lambda value: (_ for _ in ()).throw(AssertionError('state must not change')),
+        '_open_ssh_client',
+        lambda cfg: (_ for _ in ()).throw(AssertionError('uninstall must not touch the CORE VM')),
     )
-    monkeypatch.setattr(app_backend, '_cleanup_remote_generator_pack', lambda pack: (False, 'CORE VM unavailable'))
 
     client = app.test_client()
     client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
@@ -619,14 +617,12 @@ def test_generator_pack_uninstall_ajax_explains_remote_cleanup_failure(tmp_path,
         headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
     )
 
-    assert response.status_code == 409
-    assert response.get_json() == {
-        'ok': False,
-        'message': 'Uninstall aborted: failed removing the CORE runtime copy: CORE VM unavailable',
-        'pack_id': 'pack-demo',
-        'stage': 'remote_cleanup',
-    }
-    assert installed_path.exists()
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['ok'] is True
+    assert payload['removed'] == 1
+    assert saved['packs'] == []
+    assert not installed_path.exists()
 
 
 def test_delete_installed_generator_by_source_id_removes_imported_generator(tmp_path, monkeypatch):
@@ -1102,14 +1098,6 @@ injects: []
 
 
 def test_generator_pack_can_roundtrip_export_all_zip(tmp_path, monkeypatch):
-    # Uninstall removes the CORE runtime copy over SSH before touching local
-    # files, and aborts if that fails. There is no CORE VM in a test run, so
-    # without this the delete is refused and nothing is removed. These tests
-    # are about local pack removal, so the remote step is stubbed as done.
-    monkeypatch.setattr(
-        app_backend, "_cleanup_remote_generator_pack",
-        lambda pack: (True, "remote cleanup stubbed in tests"),
-    )
     install_root = tmp_path / "installed_generators"
     monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(install_root))
 
@@ -1312,3 +1300,273 @@ def test_imported_generators_are_persistent_by_default(tmp_path, monkeypatch):
     for item in installed:
         info = generators_by_kind_id[(item['kind'], item['id'])]
         assert info['persistent'] is True
+
+
+def _arch_pack_zip(gen_id: str) -> bytes:
+    manifest = f"""manifest_version: 1
+id: {gen_id}
+kind: flag-generator
+name: "Arch Scan Test"
+description: "Architecture scan test generator"
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+inputs: []
+artifacts:
+  requires: []
+  produces:
+        - File(path)
+injects: []
+"""
+    compose = """version: '3.8'
+services:
+  generator:
+    image: python:3.11-slim
+    command: ["python", "-c", "print('ok')"]
+"""
+    return _make_zip({
+        f"flag_generators/{gen_id}/manifest.yaml": manifest,
+        f"flag_generators/{gen_id}/docker-compose.yml": compose,
+        f"flag_generators/{gen_id}/generator.py": "def main():\n    return 0\n",
+    })
+
+
+def _installed_generator_item() -> dict:
+    """The single generator installed into this test's isolated root.
+
+    Installed items carry a numeric catalog id, not the manifest's string id,
+    so there is nothing to match on; each of these tests installs exactly one.
+    """
+    state = app_backend._load_installed_generator_packs_state() or {}
+    for pack in state.get('packs') or []:
+        for item in pack.get('installed') or []:
+            return item
+    return {}
+
+
+def _stub_docker_arch(monkeypatch, architectures):
+    """Answer architecture probes without Docker or a registry."""
+    import json as _json
+
+    import scenarioforge.utils.image_architectures as ia
+
+    calls: list = []
+
+    def fake_run(cmd, timeout):
+        calls.append(list(cmd[:3]))
+        if 'manifest' in cmd:
+            return 0, _json.dumps({
+                'manifests': [{'platform': {'architecture': a}} for a in architectures]
+            })
+        return 1, ''
+
+    monkeypatch.setattr(ia, '_run', fake_run)
+    monkeypatch.setattr(ia, '_docker_available', lambda: True)
+    ia._arch_cache.clear()
+    return calls
+
+
+def test_generator_pack_import_records_architectures_when_validation_requested(tmp_path, monkeypatch):
+    """Validating an import records what each generator was built to run on."""
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(tmp_path / 'installed_generators'))
+    calls = _stub_docker_arch(monkeypatch, ['amd64', 'arm64'])
+    gen_id = 'pack_arch_scan_yes'
+
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    resp = client.post(
+        '/generator_packs/upload',
+        data={
+            'zip_file': (io.BytesIO(_arch_pack_zip(gen_id)), 'pack.zip'),
+            'validate_architectures': '1',
+        },
+        content_type='multipart/form-data',
+    )
+    assert resp.status_code in (200, 302, 303)
+
+    item = _installed_generator_item()
+    assert item, 'generator was not installed'
+    assert item['architectures'] == ['amd64', 'arm64']
+    assert item['architecture_source'] == 'registry'
+    assert calls, 'expected an architecture probe'
+
+
+def test_generator_pack_import_skips_architectures_when_declined(tmp_path, monkeypatch):
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(tmp_path / 'installed_generators'))
+    calls = _stub_docker_arch(monkeypatch, ['amd64'])
+    gen_id = 'pack_arch_scan_no'
+
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    resp = client.post(
+        '/generator_packs/upload',
+        data={
+            'zip_file': (io.BytesIO(_arch_pack_zip(gen_id)), 'pack.zip'),
+            'validate_architectures': '0',
+        },
+        content_type='multipart/form-data',
+    )
+    assert resp.status_code in (200, 302, 303)
+
+    item = _installed_generator_item()
+    assert item, 'generator was not installed'
+    assert item['architectures'] == []
+    assert item['architecture_source'] == 'unscanned'
+    assert calls == [], 'declining validation must not probe Docker or a registry'
+
+
+def test_generator_pack_import_defaults_to_no_scan(tmp_path, monkeypatch):
+    """Absent field keeps the historical behaviour: importing does not scan."""
+    monkeypatch.setenv('CORETG_INSTALLED_GENERATORS_DIR', str(tmp_path / 'installed_generators'))
+    monkeypatch.delenv('CORETG_GENERATOR_ARCH_SCAN', raising=False)
+    calls = _stub_docker_arch(monkeypatch, ['amd64'])
+    gen_id = 'pack_arch_scan_default'
+
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+    resp = client.post(
+        '/generator_packs/upload',
+        data={'zip_file': (io.BytesIO(_arch_pack_zip(gen_id)), 'pack.zip')},
+        content_type='multipart/form-data',
+    )
+    assert resp.status_code in (200, 302, 303)
+
+    assert _installed_generator_item().get('architecture_source') == 'unscanned'
+    assert calls == []
+
+
+def test_generator_architecture_scan_gate_precedence(monkeypatch):
+    from webapp.routes import generator_pack_routes as gpr
+
+    monkeypatch.delenv('CORETG_GENERATOR_ARCH_SCAN', raising=False)
+    assert app_backend._generator_pack_architecture_scan_enabled() is False
+
+    monkeypatch.setenv('CORETG_GENERATOR_ARCH_SCAN', '1')
+    assert app_backend._generator_pack_architecture_scan_enabled() is True
+
+    gpr.set_active_architecture_scan(False)
+    try:
+        assert app_backend._generator_pack_architecture_scan_enabled() is False
+    finally:
+        gpr.set_active_architecture_scan(None)
+    assert app_backend._generator_pack_architecture_scan_enabled() is True
+    assert gpr.active_architecture_scan() is None
+
+
+def _fake_sftp(remote_tree: dict):
+    """Minimal SFTP stand-in over a {dir: [(name, is_dir)]} map."""
+    import stat as _stat
+
+    class _Attr:
+        def __init__(self, name, is_dir):
+            self.filename = name
+            self.st_mode = (_stat.S_IFDIR | 0o755) if is_dir else (_stat.S_IFREG | 0o644)
+
+    class _Sftp:
+        def stat(self, path):
+            if path not in remote_tree:
+                raise IOError(f'no such remote path: {path}')
+            return _Attr(path, True)
+
+        def listdir_attr(self, path):
+            if path not in remote_tree:
+                raise IOError(f'no such remote path: {path}')
+            return [_Attr(name, is_dir) for name, is_dir in remote_tree[path]]
+
+        def close(self):
+            pass
+
+    return _Sftp()
+
+
+def _patch_remote(monkeypatch, remote_tree, removed):
+    class _Client:
+        def open_sftp(self):
+            return _fake_sftp(remote_tree)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_backend, '_core_config_for_request', lambda **kw: {'ssh_enabled': True})
+    monkeypatch.setattr(app_backend, '_require_core_ssh_credentials', lambda cfg: cfg)
+    monkeypatch.setattr(app_backend, '_open_ssh_client', lambda cfg: _Client())
+    monkeypatch.setattr(app_backend, '_remote_static_repo_dir', lambda sftp: '/remote/repo')
+    monkeypatch.setattr(app_backend, '_remote_remove_path', lambda client, path: removed.append(path))
+
+
+def _setup_reconcile(tmp_path, monkeypatch, removed):
+    """One generator installed locally, three on the CORE VM."""
+    install_root = tmp_path / 'outputs' / 'installed_generators'
+    (install_root / 'flag_generators' / 'p_keep__1').mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(app_backend, '_get_repo_root', lambda: str(tmp_path))
+    monkeypatch.setattr(app_backend, '_installed_generators_root', lambda: str(install_root))
+
+    remote_root = '/remote/repo/outputs/installed_generators'
+    remote_tree = {
+        '/remote/repo': [('outputs', True)],
+        remote_root: [('flag_generators', True)],
+        f'{remote_root}/flag_generators': [('p_keep__1', True), ('p_stale__2', True), ('p_persist__3', True)],
+    }
+    _patch_remote(monkeypatch, remote_tree, removed)
+
+
+def test_core_runtime_sync_removes_only_directories_absent_locally(tmp_path, monkeypatch):
+    removed: list[str] = []
+    _setup_reconcile(tmp_path, monkeypatch, removed)
+    result = app_backend._reconcile_remote_generator_runtime()
+
+    assert result['ok'] is True
+    assert result['checked'] == 3
+    assert result['kept'] == 1
+    assert sorted(result['removed']) == [
+        'flag_generators/p_persist__3',
+        'flag_generators/p_stale__2',
+    ]
+    # Persistent is not a shield here: it protects an item from image cleanup
+    # within a catalog, not a copy of a catalog this machine no longer has.
+    assert sorted(removed) == [
+        '/remote/repo/outputs/installed_generators/flag_generators/p_persist__3',
+        '/remote/repo/outputs/installed_generators/flag_generators/p_stale__2',
+    ]
+
+
+def test_core_runtime_sync_dry_run_deletes_nothing(tmp_path, monkeypatch):
+    removed: list[str] = []
+    _setup_reconcile(tmp_path, monkeypatch, removed)
+    result = app_backend._reconcile_remote_generator_runtime(dry_run=True)
+
+    assert result['ok'] is True
+    assert result['dry_run'] is True
+    assert len(result['removed']) == 2
+    assert removed == [], 'preview must not delete anything'
+
+
+def test_core_runtime_sync_route_reports_counts(tmp_path, monkeypatch):
+    removed: list[str] = []
+    _setup_reconcile(tmp_path, monkeypatch, removed)
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+
+    response = client.post('/api/generator_packs/sync_core', json={'dry_run': True})
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['ok'] is True
+    assert payload['dry_run'] is True
+    assert payload['checked'] == 3
+    assert payload['kept'] == 1
+    assert payload['removed_count'] == 2
+
+
+def test_core_runtime_sync_route_surfaces_unreachable_core_vm(monkeypatch):
+    monkeypatch.setattr(
+        app_backend,
+        '_reconcile_remote_generator_runtime',
+        lambda **kwargs: {'ok': False, 'error': 'CORE SSH configuration is required: no host'},
+    )
+    client = app.test_client()
+    client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
+
+    response = client.post('/api/generator_packs/sync_core', json={})
+    assert response.status_code == 502
+    assert 'CORE SSH configuration is required' in response.get_json()['error']

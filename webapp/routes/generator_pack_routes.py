@@ -1,12 +1,48 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any, Callable
 
 from flask import flash, jsonify, redirect, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
+
+
+# Resolving a generator's image architectures costs a `docker manifest inspect`
+# round trip per image the host has not pulled, which for a repository of ~80
+# generators is minutes of dead time inside the upload request. So it is off by
+# default here and the operator opts in per import from the Import dialog. The
+# install runs in the request thread, so a thread-local carries the choice down
+# to the installer without changing its signature.
+_ACTIVE = threading.local()
+
+
+def set_active_architecture_scan(enabled: bool | None) -> None:
+    """Per-import override for the generator architecture scan.
+
+    None restores the environment default.
+    """
+    _ACTIVE.architecture_scan = None if enabled is None else bool(enabled)
+
+
+def active_architecture_scan() -> bool | None:
+    return getattr(_ACTIVE, 'architecture_scan', None)
+
+
+def requested_architecture_scan() -> bool | None:
+    """The Import dialog's validation choice for this request.
+
+    None when the field is absent, so a scripted POST written before the dialog
+    keeps the configured default.
+    """
+    raw = str(request.form.get('validate_architectures') or '').strip().lower()
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    return None
 
 
 def register(
@@ -30,7 +66,8 @@ def register(
     io_module: Any,
     zipfile_module: Any,
     catalog_packs_for_export: Callable[[], list[dict[str, Any]]] | None = None,
-    cleanup_remote_pack: Callable[[dict[str, Any]], tuple[bool, str]] | None = None,
+    reconcile_remote_runtime: Callable[..., dict[str, Any]] | None = None,
+    require_builder_or_admin: Callable[[], None] | None = None,
 ) -> None:
     if not begin_route_registration(app, 'generator_pack_routes'):
         return
@@ -201,11 +238,15 @@ def register(
                 _repository_folder_to_zip(repo_files, repo_paths, tmp_path)
             else:
                 file_obj.save(tmp_path)
-            ok, note = install_generator_pack_or_bundle(
-                zip_path=tmp_path,
-                pack_label=label,
-                pack_origin=pack_origin,
-            )
+            set_active_architecture_scan(requested_architecture_scan())
+            try:
+                ok, note = install_generator_pack_or_bundle(
+                    zip_path=tmp_path,
+                    pack_label=label,
+                    pack_origin=pack_origin,
+                )
+            finally:
+                set_active_architecture_scan(None)
             if is_xhr:
                 if ok:
                     return jsonify(_latest_pack_success_payload(note)), 200
@@ -242,7 +283,11 @@ def register(
             try:
                 with open(tmp_path, 'wb') as fh:
                     fh.write(data)
-                ok, note = install_generator_pack_or_bundle(zip_path=tmp_path, pack_label=url, pack_origin='url')
+                set_active_architecture_scan(requested_architecture_scan())
+                try:
+                    ok, note = install_generator_pack_or_bundle(zip_path=tmp_path, pack_label=url, pack_origin='url')
+                finally:
+                    set_active_architecture_scan(None)
                 if is_xhr:
                     if ok:
                         return jsonify(_latest_pack_success_payload(note)), 200
@@ -294,20 +339,13 @@ def register(
         if not target:
             return _delete_response(ok=False, message='Pack not found.', status=404, pack_id=pid)
 
-        remote_cleanup_note = ''
-        if target.get('repo_local') is not True and cleanup_remote_pack is not None:
-            try:
-                remote_ok, remote_cleanup_note = cleanup_remote_pack(target)
-            except Exception as exc:
-                remote_ok, remote_cleanup_note = False, str(exc)
-            if not remote_ok:
-                return _delete_response(
-                    ok=False,
-                    message=f'Uninstall aborted: failed removing the CORE runtime copy: {remote_cleanup_note}',
-                    status=409,
-                    pack_id=pid,
-                    stage='remote_cleanup',
-                )
+        # Uninstall is deliberately local-only. Removing the CORE runtime copy
+        # inline used to gate the local delete, which fails in the two cases
+        # that matter most: native mode, where there may be no CORE VM at all,
+        # and after repointing at a different CORE VM, where the copies to
+        # clean live on a host this deployment no longer talks to. Neither is a
+        # reason to refuse to uninstall locally. Stale remote copies are
+        # reconciled on demand from "Sync CORE Runtime" instead.
 
         if isinstance(target, dict) and target.get('repo_local') is True:
             target = dict(target)
@@ -357,7 +395,7 @@ def register(
         if failures:
             message = f'Uninstalled pack {pid} with warnings: removed={removed}; {failures[0]}'
         else:
-            suffix = f'; {remote_cleanup_note}' if remote_cleanup_note else ''
+            suffix = ''
             message = f'Uninstalled pack {pid} (removed {removed} item(s)){suffix}'
         return _delete_response(
             ok=True,
@@ -365,7 +403,6 @@ def register(
             pack_id=pid,
             removed=removed,
             warnings=failures,
-            remote_cleanup=remote_cleanup_note,
         )
 
     @app.route('/generator_packs/download/<pack_id>')
@@ -424,5 +461,35 @@ def register(
         if token:
             resp.set_cookie('coretg_catalog_download_token', token, max_age=60, path='/', samesite='Lax')
         return resp
+
+    @app.route('/api/generator_packs/sync_core', methods=['POST'])
+    def generator_packs_sync_core():
+        """Remove CORE-runtime generator copies that no longer exist locally.
+
+        Uninstall is local-only, so this is how the CORE VM catches up. It is
+        also the repair path after repointing at a different CORE VM, which
+        inherits whatever the previous deployment left behind.
+        """
+        if require_builder_or_admin is not None:
+            require_builder_or_admin()
+        if reconcile_remote_runtime is None:
+            return jsonify({'ok': False, 'error': 'CORE runtime reconciliation is unavailable.'}), 501
+        payload = request.get_json(silent=True) or {}
+        dry_run = bool(payload.get('dry_run'))
+        try:
+            result = reconcile_remote_runtime(dry_run=dry_run)
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 502
+        if not result.get('ok'):
+            return jsonify({'ok': False, 'error': result.get('error') or 'CORE runtime sync failed.'}), 502
+        removed = list(result.get('removed') or [])
+        return jsonify({
+            'ok': True,
+            'dry_run': bool(result.get('dry_run')),
+            'checked': int(result.get('checked') or 0),
+            'kept': int(result.get('kept') or 0),
+            'removed_count': len(removed),
+            'removed': removed[:200],
+        })
 
     mark_routes_registered(app, 'generator_pack_routes')

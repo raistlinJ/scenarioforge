@@ -88,6 +88,13 @@
 
           <div class="card">
             <div class="card-body">
+              <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                <div class="small text-muted">
+                  Deleting a catalog removes it from this machine only. Use
+                  <strong>Sync CORE Runtime</strong> to remove the copies left on the CORE VM.
+                </div>
+                <button class="btn btn-sm btn-outline-secondary" type="button" id="vulnSyncCoreBtn">Sync CORE Runtime</button>
+              </div>
               <div class="table-responsive">
                 <table class="table table-sm align-middle">
                   <thead>
@@ -433,6 +440,72 @@
         </div>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- Vulnerability Sync CORE Runtime Confirmation Modal -->
+<div class="modal fade" id="vulnSyncCoreModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Sync CORE runtime with this catalog?</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">
+          This compares the vulnerability catalogs on the CORE VM against the ones installed here and
+          <strong>deletes every remote catalog that is not installed on this machine</strong>.
+        </p>
+        <div class="alert alert-warning py-2 mb-2 small">
+          Items marked <strong>Persistent</strong> are removed too if their catalog is not installed
+          here. Persistent protects an item from image cleanup <em>within</em> a catalog; it does not
+          protect a copy of a catalog this machine no longer has.
+        </div>
+        <p class="mb-0 small text-muted">
+          Deleting a catalog only removes it locally, so run this afterwards &mdash; or after pointing
+          the deployment at a different CORE VM, which still holds whatever the previous deployment
+          installed. Use <em>Preview</em> first to see what would be removed.
+        </p>
+        <pre id="vulnSyncCoreResult" class="small bg-body-tertiary border rounded p-2 mt-2 mb-0" style="display:none; max-height: 220px; overflow:auto;"></pre>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-outline-primary" id="vulnSyncCorePreviewBtn">Preview</button>
+        <button type="button" class="btn btn-danger" id="vulnSyncCoreConfirmBtn">Remove from CORE VM</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Vulnerability Pack Import Validation Choice Modal -->
+<div class="modal fade" id="vulnPackValidateModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Validate image architectures?</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">
+          Validation resolves the CPU architectures of every image in the catalog. Images this
+          host has already pulled are read locally; anything else costs a
+          <code>docker manifest inspect</code> call to the registry (Docker&nbsp;Hub for most
+          catalogs).
+        </p>
+        <p class="mb-2 small text-muted">
+          It downloads manifests only, never image layers &mdash; but for a large catalog it is
+          the slowest part of an import, and it counts against registry rate limits.
+        </p>
+        <p class="mb-0 small">
+          Skipping leaves each item's architecture <em>unscanned</em>. On an arm64 CORE VM that
+          is the check which warns you before an amd64-only stack runs under emulation.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" id="vulnPackValidateSkipBtn">Skip validation (faster)</button>
+        <button type="button" class="btn btn-primary" id="vulnPackValidateRunBtn">Validate (slower)</button>
+      </div>
     </div>
   </div>
 </div>
@@ -2613,6 +2686,66 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     // Vulnerability catalog folder/ZIP upload progress
+    (function attachVulnSyncCore() {
+      const btn = document.getElementById('vulnSyncCoreBtn');
+      const modalEl = document.getElementById('vulnSyncCoreModal');
+      if (!btn || !modalEl || !window.bootstrap) return;
+      const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+      const resultEl = document.getElementById('vulnSyncCoreResult');
+      const previewBtn = document.getElementById('vulnSyncCorePreviewBtn');
+      const confirmBtn = document.getElementById('vulnSyncCoreConfirmBtn');
+
+      function show(text) {
+        if (!resultEl) return;
+        resultEl.style.display = 'block';
+        resultEl.textContent = text;
+      }
+
+      async function run(dryRun) {
+        const active = dryRun ? previewBtn : confirmBtn;
+        const original = active.textContent;
+        previewBtn.disabled = true;
+        confirmBtn.disabled = true;
+        active.textContent = dryRun ? 'Checking…' : 'Removing…';
+        try {
+          const resp = await fetch('/api/vuln_catalog_packs/sync_core', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ dry_run: !!dryRun }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || data.ok === false) {
+            show(`Failed: ${data.error || `HTTP ${resp.status}`}`);
+            return;
+          }
+          const removed = Array.isArray(data.removed) ? data.removed : [];
+          const verb = data.dry_run ? 'Would remove' : 'Removed';
+          const lines = [
+            `Checked ${data.checked} remote catalog(s).`,
+            `Kept ${data.kept} still installed here.`,
+            `${verb} ${data.removed_count}.`,
+          ];
+          if (removed.length) lines.push('', ...removed.map((r) => `  - ${r}`));
+          if (data.removed_count > removed.length) lines.push(`  …and ${data.removed_count - removed.length} more`);
+          show(lines.join('\n'));
+        } catch (e) {
+          show(`Failed: ${e}`);
+        } finally {
+          previewBtn.disabled = false;
+          confirmBtn.disabled = false;
+          active.textContent = original;
+        }
+      }
+
+      btn.addEventListener('click', () => {
+        if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
+        modal.show();
+      });
+      previewBtn.addEventListener('click', () => run(true));
+      confirmBtn.addEventListener('click', () => run(false));
+    })();
+
     const importMethodSelect = document.getElementById('vulnPackImportMethod');
     const importSubmitButton = document.getElementById('vulnPackImportSubmit');
     const importMethodHelp = document.getElementById('vulnPackImportMethodHelp');
@@ -2642,6 +2775,7 @@
     let importStartedAt = 0;
     let elapsedTimer = null;
     let processingTimer = null;
+    let serverProgressTimer = null;
     let processingIndex = 0;
     const processingMessages = [
       'Extracting the catalog directory tree…',
@@ -2690,13 +2824,20 @@
       }, 1000);
     }
 
-    function beginVulnServerProcessing(detail) {
+    function beginVulnServerProcessing(detail, progressId) {
       setVulnImportStep('upload', 'complete');
       setVulnImportStep('process', 'running');
       const progressBar = document.getElementById('vulnPackUploadProgressBar');
       if (progressBar) { progressBar.style.width = '75%'; progressBar.textContent = 'Processing'; }
       appendVulnImportActivity('Transfer complete; server-side processing started.');
+
+      // Real server progress when the server is reporting it; the canned
+      // message rotation is only a fallback for the window before the first
+      // discovery item lands (extraction) or if polling fails outright.
+      let sawServerProgress = false;
+      let lastReported = '';
       const cycle = () => {
+        if (sawServerProgress) return;
         const message = processingMessages[processingIndex % processingMessages.length];
         processingIndex += 1;
         const progressText = document.getElementById('vulnPackUploadProgressText');
@@ -2707,13 +2848,49 @@
       cycle();
       if (processingTimer) window.clearInterval(processingTimer);
       processingTimer = window.setInterval(cycle, 4000);
+
+      if (!progressId) return;
+      if (serverProgressTimer) window.clearInterval(serverProgressTimer);
+      serverProgressTimer = window.setInterval(async () => {
+        let payload = null;
+        try {
+          const resp = await fetch(`/api/vuln-catalog-import-progress/${encodeURIComponent(progressId)}`, { cache: 'no-store' });
+          if (!resp.ok) return;
+          payload = await resp.json();
+        } catch (e) { return; }
+        if (!payload || payload.ok === false || payload.status === 'waiting') return;
+
+        const total = Number(payload.total) || 0;
+        const current = Number(payload.current) || 0;
+        const name = String(payload.detail || '');
+        const step = String(payload.step || 'Processing');
+        sawServerProgress = true;
+
+        const label = total > 0
+          ? `${step}: ${current} / ${total}${name ? ` — ${name}` : ''}`
+          : (name ? `${step}: ${name}` : step);
+        const progressText = document.getElementById('vulnPackUploadProgressText');
+        if (progressText) progressText.textContent = label;
+        if (progressBar && total > 0) {
+          // Server-side work occupies the 70-95% band; the upload owns 0-70%.
+          const pct = 70 + Math.round((current / total) * 25);
+          progressBar.style.width = `${pct}%`;
+          progressBar.textContent = `${Math.round((current / total) * 100)}%`;
+        }
+        if (label !== lastReported) {
+          appendVulnImportActivity(label);
+          lastReported = label;
+        }
+      }, 400);
     }
 
     function finishVulnDetailedImport(success, message) {
       if (elapsedTimer) window.clearInterval(elapsedTimer);
       if (processingTimer) window.clearInterval(processingTimer);
+      if (serverProgressTimer) window.clearInterval(serverProgressTimer);
       elapsedTimer = null;
       processingTimer = null;
+      serverProgressTimer = null;
       if (elapsedEl && importStartedAt) {
         elapsedEl.textContent = `Elapsed ${Math.max(0, Math.floor((Date.now() - importStartedAt) / 1000))}s`;
       }
@@ -2754,12 +2931,50 @@
     }
 
     if (importMethodSelect) importMethodSelect.addEventListener('change', syncVulnPackImportMethod);
+
+    // Whether this import should resolve image architectures. Chosen per
+    // import in the modal below, then sent with the upload; the server keeps
+    // its configured default when the field is absent.
+    let vulnPackValidateArchitectures = true;
+    const validateModalEl = document.getElementById('vulnPackValidateModal');
+    const validateModal = (validateModalEl && window.bootstrap)
+      ? window.bootstrap.Modal.getOrCreateInstance(validateModalEl)
+      : null;
+
+    function submitVulnPackImport() {
+      if (!importMethodSelect) return;
+      const selected = importMethods[importMethodSelect.value] ? importMethodSelect.value : 'folder';
+      const form = importMethods[selected].form;
+      if (form) form.requestSubmit();
+    }
+
     if (importSubmitButton) {
       importSubmitButton.addEventListener('click', () => {
         if (!importMethodSelect) return;
-        const selected = importMethods[importMethodSelect.value] ? importMethodSelect.value : 'folder';
-        const form = importMethods[selected].form;
-        if (form) form.requestSubmit();
+        // Ask before doing anything: the answer changes how long the import
+        // takes and whether it touches the network at all.
+        if (validateModal) {
+          validateModal.show();
+          return;
+        }
+        vulnPackValidateArchitectures = true;
+        submitVulnPackImport();
+      });
+    }
+    const validateRunBtn = document.getElementById('vulnPackValidateRunBtn');
+    const validateSkipBtn = document.getElementById('vulnPackValidateSkipBtn');
+    if (validateRunBtn) {
+      validateRunBtn.addEventListener('click', () => {
+        vulnPackValidateArchitectures = true;
+        if (validateModal) validateModal.hide();
+        submitVulnPackImport();
+      });
+    }
+    if (validateSkipBtn) {
+      validateSkipBtn.addEventListener('click', () => {
+        vulnPackValidateArchitectures = false;
+        if (validateModal) validateModal.hide();
+        submitVulnPackImport();
       });
     }
     syncVulnPackImportMethod();
@@ -2771,6 +2986,10 @@
       let file = fileInput && fileInput.files ? fileInput.files[0] : null;
       const folderFiles = folderInput ? Array.from(folderInput.files || []) : [];
       if (!file && !folderFiles.length) return;
+
+      const progressId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+        ? window.crypto.randomUUID().replaceAll('-', '')
+        : `vulnimport${Date.now()}${Math.random().toString(36).slice(2)}`;
 
       let fd = null;
       if (folderFiles.length) {
@@ -2793,6 +3012,8 @@
       } else {
         fd = new FormData(form);
       }
+      fd.append('import_progress_id', progressId);
+      fd.append('validate_architectures', vulnPackValidateArchitectures ? '1' : '0');
 
       const progressText = document.getElementById('vulnPackUploadProgressText');
       const progressBar = document.getElementById('vulnPackUploadProgressBar');
@@ -2829,7 +3050,7 @@
         if (progressBar) { progressBar.style.width = `${pct}%`; progressBar.textContent = `${pct}%`; }
         if (progressBytes) progressBytes.textContent = `${_fmtBytes(ev.loaded)} / ${_fmtBytes(ev.total)}`;
       };
-      xhr.upload.onload = () => beginVulnServerProcessing('Upload complete; discovering vulnerabilities…');
+      xhr.upload.onload = () => beginVulnServerProcessing('Upload complete; discovering vulnerabilities…', progressId);
 
       xhr.onreadystatechange = () => {
         if (xhr.readyState !== 4) return;
@@ -2926,11 +3147,13 @@
         beginVulnServerProcessing('Server is downloading the catalog ZIP…');
         uploadModal.show();
         try {
+          const urlBody = new URLSearchParams(new FormData(urlImportForm));
+          urlBody.set('validate_architectures', vulnPackValidateArchitectures ? '1' : '0');
           const response = await fetch(urlImportForm.action, {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
-            body: new URLSearchParams(new FormData(urlImportForm)),
+            body: urlBody,
           });
           const payload = await response.json().catch(() => ({}));
           if (!response.ok || payload.ok === false) throw new Error(String(payload.error || `HTTP ${response.status}`));

@@ -19,6 +19,7 @@ def register(
     write_vuln_catalog_csv_from_items: Callable[..., list[str]],
     vuln_catalog_pack_dir: Callable[[str], str],
     shutil_module: Any,
+    reconcile_remote_runtime: Callable[..., dict[str, Any]] | None = None,
 ) -> None:
     if not begin_route_registration(app, 'vuln_catalog_mutations_routes'):
         return
@@ -46,6 +47,34 @@ def register(
         write_vuln_catalogs_state(state)
         flash('Active vulnerability catalog updated.')
         return redirect(url_for('vuln_catalog_page'))
+
+    @app.route('/api/vuln_catalog_packs/sync_core', methods=['POST'])
+    def vuln_catalog_packs_sync_core():
+        """Remove CORE-runtime vulnerability catalogs that no longer exist locally.
+
+        Deleting a catalog is local-only, so this is how the CORE VM catches
+        up, and how a VM inherited from a different deployment is cleaned.
+        """
+        require_builder_or_admin()
+        if reconcile_remote_runtime is None:
+            return jsonify({'ok': False, 'error': 'CORE runtime reconciliation is unavailable.'}), 501
+        payload = request.get_json(silent=True) or {}
+        dry_run = bool(payload.get('dry_run'))
+        try:
+            result = reconcile_remote_runtime(dry_run=dry_run)
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 502
+        if not result.get('ok'):
+            return jsonify({'ok': False, 'error': result.get('error') or 'CORE runtime sync failed.'}), 502
+        removed = list(result.get('removed') or [])
+        return jsonify({
+            'ok': True,
+            'dry_run': bool(result.get('dry_run')),
+            'checked': int(result.get('checked') or 0),
+            'kept': int(result.get('kept') or 0),
+            'removed_count': len(removed),
+            'removed': removed[:200],
+        })
 
     @app.route('/vuln_catalog_packs/delete/<catalog_id>', methods=['POST'])
     def vuln_catalog_packs_delete(catalog_id: str):

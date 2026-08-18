@@ -686,6 +686,33 @@ Implementation notes:
 	- Packs and individual generators can be disabled.
 	- Disabled generators are hidden from Flow substitution and are rejected at preview/execute time.
 
+### Uninstall and the CORE runtime
+
+Uninstalling a pack or deleting a catalog removes it **from this machine only**.
+It used to also delete the CORE VM's copy inline and abort the local removal if
+that failed, which made uninstall impossible in native mode (no CORE VM to
+clean) and wrong after repointing at a different CORE VM (it cleaned the new VM
+while the old one kept every stale copy).
+
+Each catalog page has a **Sync CORE Runtime** action instead. It compares the
+CORE VM against what is installed locally and deletes remote directories with no
+local counterpart. **Preview** lists what would go without deleting anything.
+
+Run it after uninstalling, and after pointing the deployment at a different CORE
+VM — that VM still holds whatever the previous deployment installed.
+
+> Items marked **Persistent** are removed too when their pack or catalog is not
+> installed locally. Persistent protects an item from image cleanup *within* a
+> catalog; it says nothing about a copy of a catalog this machine no longer has.
+
+The stakes differ by catalog. A stale **generator** directory is live code:
+generators are discovered by walking directories and reading manifests, so a
+leftover is resolvable by a later run and its duplicate ids break discovery for
+the whole catalog. A stale **vulnerability catalog** is inert — vulnerabilities
+are addressed through the active catalog's state and CSV, never discovered by
+directory walk — so removing it is about reclaiming disk and keeping the VM
+accountable rather than about correctness.
+
 ## Flag sequencing (Flow) highlights
 - Initial/Goal facts steer sequencing (flag facts are filtered out); synthesized inputs like `seed`, `node_name`, and `flag_prefix` are treated as known inputs.
 - Sequencing uses goal-aware scoring with pruning/backtracking (bounded by a 30s timeout) to find feasible generator assignments.

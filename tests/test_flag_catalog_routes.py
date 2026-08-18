@@ -54,6 +54,19 @@ def test_flag_catalog_page_groups_installed_ids_by_kind(monkeypatch):
     assert 'packInstallSuccessAlert' in page
     assert 'id="packImportMethod"' in page
     assert 'id="packImportSubmit"' in page
+    # Import asks whether to resolve image architectures; that step is the only
+    # one that reaches a registry, and it records what a generator was built for.
+    assert 'id="packValidateModal"' in page
+    assert 'id="packValidateRunBtn"' in page
+    assert 'id="packValidateSkipBtn"' in page
+    # Uninstall is local-only; the CORE VM is reconciled on demand, and the
+    # dialog must say that persistent items are removed too.
+    assert 'id="packSyncCoreBtn"' in page
+    assert 'id="packSyncCoreModal"' in page
+    assert 'id="packSyncCorePreviewBtn"' in page
+    assert '/api/generator_packs/sync_core' in page
+    assert 'Persistent</strong> are removed too' in page
+    assert "data.append('validate_architectures'" in page
     assert 'data-pack-import-method="folder"' in page
     assert 'data-pack-import-method="zip"' in page
     assert 'data-pack-import-method="url"' in page

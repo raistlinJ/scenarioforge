@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
 import re
 import shutil
+import threading
+import time
 import zipfile
 from typing import Any, Callable
 
@@ -11,6 +14,113 @@ from webapp.routes._registration import begin_route_registration, mark_routes_re
 
 
 MAX_FOLDER_UPLOAD_FILES = 10000
+
+
+# Discovery walks every compose directory in the pack, which for a large
+# catalog is minutes of work inside one blocking POST. The client polls this
+# store so it can name the vulnerability being validated instead of cycling
+# canned messages. Mirrors the scenario-import progress store in
+# webapp/routes/xml_editor_io.py.
+_PROGRESS_LOCK = threading.Lock()
+_PROGRESS: dict[str, dict[str, Any]] = {}
+_PROGRESS_TTL_SECONDS = 15 * 60
+PROGRESS_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+
+# The discovery loop lives in app_backend, several frames below the route and
+# behind an injected callable that tests replace with their own fakes. A
+# thread-local sink lets it report progress without changing that signature.
+_ACTIVE = threading.local()
+
+
+def _expire_progress() -> None:
+    cutoff = time.time() - _PROGRESS_TTL_SECONDS
+    with _PROGRESS_LOCK:
+        for progress_id in list(_PROGRESS):
+            if float(_PROGRESS[progress_id].get('updated_at') or 0) < cutoff:
+                _PROGRESS.pop(progress_id, None)
+
+
+def update_progress(
+    progress_id: str,
+    *,
+    step: str,
+    detail: str = '',
+    current: int = 0,
+    total: int = 0,
+    status: str = 'running',
+) -> None:
+    if not progress_id or not PROGRESS_ID_RE.fullmatch(str(progress_id)):
+        return
+    now = time.time()
+    percent = 0
+    if total > 0:
+        percent = max(0, min(100, int(round((current / total) * 100))))
+    with _PROGRESS_LOCK:
+        _PROGRESS[progress_id] = {
+            'id': progress_id,
+            'step': str(step or ''),
+            'detail': str(detail or ''),
+            'current': int(current),
+            'total': int(total),
+            'percent': percent,
+            'status': status,
+            'updated_at': now,
+        }
+
+
+def progress_snapshot(progress_id: str) -> dict[str, Any] | None:
+    _expire_progress()
+    with _PROGRESS_LOCK:
+        state = _PROGRESS.get(progress_id)
+        return copy.deepcopy(state) if isinstance(state, dict) else None
+
+
+def set_active_progress_id(progress_id: str | None) -> None:
+    _ACTIVE.progress_id = progress_id if (progress_id and PROGRESS_ID_RE.fullmatch(str(progress_id))) else None
+
+
+def set_active_architecture_scan(enabled: bool | None) -> None:
+    """Per-import override for the architecture scan.
+
+    The scan resolves each image's architectures, falling back to a
+    `docker manifest inspect` registry round trip for anything this host has
+    not pulled. That is the slow part of an import -- minutes for a large
+    catalog -- so the operator chooses per import. None restores the
+    environment default.
+    """
+    _ACTIVE.architecture_scan = None if enabled is None else bool(enabled)
+
+
+def active_architecture_scan() -> bool | None:
+    return getattr(_ACTIVE, 'architecture_scan', None)
+
+
+def _requested_architecture_scan() -> bool | None:
+    """The Import dialog's validation choice for this request.
+
+    None when the field is absent, which keeps the deployment's configured
+    default and leaves scripted POSTs written before the dialog unaffected.
+    """
+    raw = str(request.form.get('validate_architectures') or '').strip().lower()
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    return None
+
+
+def report_discovery_item(current: int, total: int, name: str) -> None:
+    """Called from the discovery loop. A no-op when no import is being tracked."""
+    progress_id = getattr(_ACTIVE, 'progress_id', None)
+    if not progress_id:
+        return
+    update_progress(
+        progress_id,
+        step='Discovering and validating vulnerabilities',
+        detail=str(name or ''),
+        current=current,
+        total=total,
+    )
 
 
 def _folder_upload_path(raw_path: str) -> str:
@@ -68,6 +178,15 @@ def register(
     if not begin_route_registration(app, 'vuln_catalog_pack_ingest_routes'):
         return
 
+    @app.get('/api/vuln-catalog-import-progress/<progress_id>')
+    def vuln_catalog_import_progress(progress_id: str):
+        if not PROGRESS_ID_RE.fullmatch(str(progress_id or '')):
+            return jsonify({'ok': False, 'error': 'Invalid import progress id.'}), 400
+        snapshot = progress_snapshot(progress_id)
+        if snapshot is None:
+            return jsonify({'ok': True, 'status': 'waiting', 'percent': 0})
+        return jsonify({'ok': True, **snapshot})
+
     @app.route('/vuln_catalog_packs/upload', methods=['POST'])
     def vuln_catalog_packs_upload():
         require_builder_or_admin()
@@ -115,6 +234,12 @@ def register(
                 return jsonify({'ok': False, 'error': msg}), 413
             flash(msg)
             return redirect(url_for('vuln_catalog_page'))
+
+        progress_id = str(request.form.get('import_progress_id') or '').strip()
+        if not PROGRESS_ID_RE.fullmatch(progress_id):
+            progress_id = ''
+
+        validate_architectures = _requested_architecture_scan()
 
         if not upload_file and not repo_files:
             # A folder upload that reaches here sent a body the parser accepted
@@ -201,7 +326,26 @@ def register(
                 uploaded_file_count = 0
                 uploaded_compose_count = 0
 
-            entry = install_vuln_catalog_zip_file(zip_file_path=tmp_path, label=label, origin=origin)
+            set_active_progress_id(progress_id)
+            set_active_architecture_scan(validate_architectures)
+            update_progress(
+                progress_id,
+                step='Extracting catalog',
+                detail=f'{uploaded_file_count:,} file(s) received',
+            )
+            try:
+                entry = install_vuln_catalog_zip_file(zip_file_path=tmp_path, label=label, origin=origin)
+            finally:
+                set_active_progress_id(None)
+                set_active_architecture_scan(None)
+            update_progress(
+                progress_id,
+                step='Installing catalog',
+                detail='Writing catalog index',
+                current=1,
+                total=1,
+                status='complete',
+            )
             try:
                 os_module.remove(tmp_path)
             except Exception:
@@ -236,6 +380,9 @@ def register(
                 })
             flash(message)
         except Exception as exc:
+            set_active_progress_id(None)
+            set_active_architecture_scan(None)
+            update_progress(progress_id, step='Import failed', detail=str(exc), status='failed')
             try:
                 if tmp_path:
                     os_module.remove(tmp_path)
@@ -260,7 +407,11 @@ def register(
         try:
             data = download_zip_from_url(url)
             label = os_module.path.basename(urlparse_func(url).path) or 'vuln-catalog'
-            entry = install_vuln_catalog_zip_bytes(zip_bytes=data, label=label, origin=url)
+            set_active_architecture_scan(_requested_architecture_scan())
+            try:
+                entry = install_vuln_catalog_zip_bytes(zip_bytes=data, label=label, origin=url)
+            finally:
+                set_active_architecture_scan(None)
             bundle_count = int(entry.get('bundle_count') or 0)
             missing_count = int(entry.get('missing_required_file_count') or 0)
             message = 'Vulnerability catalog pack installed from URL.'

@@ -7,6 +7,13 @@ from webapp import app_backend
 from webapp.app_backend import app
 
 
+from catalog_guard import REQUIRES_REAL_CATALOG
+
+# Exercises preview/Flow against real vulnerabilities, so it reads the
+# machine's installed catalog rather than the isolated temp root.
+pytestmark = REQUIRES_REAL_CATALOG
+
+
 def _write_xml(tmpdir: str, *, scenario: str) -> str:
     xml = f"""<Scenarios>
   <Scenario name='{scenario}'>
