@@ -1,4 +1,5 @@
 import io
+import warnings
 import os
 import zipfile
 
@@ -1570,3 +1571,43 @@ def test_core_runtime_sync_route_surfaces_unreachable_core_vm(monkeypatch):
     response = client.post('/api/generator_packs/sync_core', json={})
     assert response.status_code == 502
     assert 'CORE SSH configuration is required' in response.get_json()['error']
+
+
+def test_generator_syntax_warnings_name_the_offending_file(tmp_path):
+    """A SyntaxWarning from a generator must identify which generator.
+
+    ast.parse defaults its filename to '<unknown>', so an unescaped regex in a
+    plain string (common in generators that embed sed/grep commands) reached the
+    operator's console with no way to tell which of hundreds of generators
+    produced it.
+    """
+    gen_dir = tmp_path / 'flag_generators' / 'warned'
+    gen_dir.mkdir(parents=True)
+    (gen_dir / 'manifest.yaml').write_text("""manifest_version: 1
+id: warned_generator
+kind: flag-generator
+name: "Warned"
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+inputs: []
+artifacts:
+  requires: []
+  produces:
+        - File(path)
+injects: []
+""")
+    (gen_dir / 'docker-compose.yml').write_text("services:\n  generator:\n    image: python:3.11-slim\n")
+    # An unescaped regex escape, exactly as a sed-embedding generator would have.
+    (gen_dir / 'generator.py').write_text('CMD = "sed -ri \'s/^#?X\\s+.*/Y/\' f"\n')
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        app_backend._validate_generator_pack_tree(str(tmp_path))
+
+    escapes = [w for w in caught if 'invalid escape' in str(w.message)]
+    assert escapes, 'expected the syntax check to surface the invalid escape'
+    reported = [str(w.filename) for w in escapes]
+    assert '<unknown>' not in reported, f'warning did not name the file: {reported}'
+    assert any(r.endswith('generator.py') for r in reported), reported

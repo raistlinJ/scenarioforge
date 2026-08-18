@@ -71,6 +71,21 @@ def test_vuln_catalog_page_renders_active_catalog(monkeypatch):
     assert 'id="vulnSyncCorePreviewBtn"' in page
     assert '/api/vuln_catalog_packs/sync_core' in page
     assert 'Persistent</strong> are removed too' in page
+    # Every architecture state gets a visible badge. Rendering nothing for an
+    # unresolvable item reads identically to the scan never having run, which
+    # is what made the feature look broken.
+    assert 'Arch unknown' in page
+    assert 'Not scanned' in page
+    # A build-only stack has no pinned image to disqualify it, so it inherits
+    # the build host's architecture -- that is not "unknown".
+    assert 'Built locally' in page
+    # Native reads as good and must not share the grey of the unknown states.
+    assert 'badge text-bg-success ms-2" title="Runs natively on:' in page
+    # Modals resolve Bootstrap at click time, not while the block is parsed --
+    # layout.html renders page content before loading the bundle, so an eager
+    # read yields undefined and the dialog silently never opens.
+    assert 'function getValidateModal()' in page
+    assert 'const getModal = () => (window.bootstrap' in page
     assert 'function vulnImportResultText(payload)' in page
     assert "urlImportForm.addEventListener('submit'" in page
 

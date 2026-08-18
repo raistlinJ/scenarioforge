@@ -2683,18 +2683,35 @@
   function generatorArchitectureBadge(g) {
     const archs = Array.isArray(g && g._architectures) ? g._architectures.filter(Boolean) : [];
     const source = String((g && g._architecture_source) || '').trim();
+    const unresolved = Array.isArray(g && g._architecture_unresolved) ? g._architecture_unresolved : [];
+    const extra = unresolved.length ? ` ${unresolved.length} image(s) could not be resolved.` : '';
     if (!archs.length) {
       if (source && source !== 'unscanned' && source !== 'unknown') {
         return `<span class="badge text-bg-warning ms-2" title="This generator's images share no common architecture, so at least one runs under emulation on any host.">Mixed Arch</span>`;
       }
-      return '';
+      // Say "not known" out loud, for the same reason as the vulnerability
+      // catalog: an empty cell reads identically to the scan never running.
+      if (source === 'unknown') {
+        // No image references at all means the stack builds its own image, so
+        // it inherits whatever architecture the CORE VM builds it on. That is
+        // not "unknown" -- there is simply nothing pinned that could disqualify
+        // it. Only a stack whose pinned images failed to resolve is unknown.
+        if (!unresolved.length) {
+          return `<span class="badge text-bg-light text-dark border ms-2" title="Builds its own image, so it runs natively wherever it is built. No pinned image to check.">Built locally</span>`;
+        }
+        return `<span class="badge text-bg-secondary ms-2" title="Architecture could not be determined: this generator's pinned images are neither cached locally nor resolvable from a registry.${escapeHtml(extra)}">Arch unknown</span>`;
+      }
+      return `<span class="badge text-bg-secondary ms-2" title="Not scanned. Re-import this pack and choose &quot;Validate&quot; to determine architectures.">Not scanned</span>`;
     }
     const hostArch = String(window.CORETG_HOST_ARCH || '').trim();
+    // Tri-state on purpose, matching the vulnerability catalog: null means the
+    // host architecture is unknown, which must not be reported as emulated.
+    const native = hostArch ? archs.includes(hostArch) : null;
     const label = escapeHtml(archs.join(', '));
-    if (hostArch && !archs.includes(hostArch)) {
-      return `<span class="badge text-bg-warning ms-2" title="Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation.">${label} (emulated)</span>`;
+    if (native === false) {
+      return `<span class="badge text-bg-warning ms-2" title="Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation, where heavy applications can segfault mid-boot.${escapeHtml(extra)}">${label} (emulated)</span>`;
     }
-    return `<span class="badge text-bg-light text-dark border ms-2" title="Runs natively on: ${label}.">${label}</span>`;
+    return `<span class="badge text-bg-success ms-2" title="Runs natively on: ${label}.${escapeHtml(extra)}">${label}</span>`;
   }
 
   function escapeHtml(str) {
@@ -4729,14 +4746,22 @@
     }
 
     const validateModalEl = document.getElementById('packValidateModal');
-    const validateModal = (validateModalEl && window.bootstrap)
-      ? window.bootstrap.Modal.getOrCreateInstance(validateModalEl)
-      : null;
+
+    // layout.html renders this page's content before it loads the Bootstrap
+    // bundle, so `window.bootstrap` does not exist while this block is being
+    // parsed. Resolve the modal when a button is actually clicked; reading it
+    // eagerly yielded null and silently skipped the prompt entirely.
+    function getValidateModal() {
+      if (!validateModalEl || !window.bootstrap) return null;
+      return window.bootstrap.Modal.getOrCreateInstance(validateModalEl);
+    }
+
     submitButton.addEventListener('click', () => {
       // Ask before uploading: the answer decides whether this import talks to
       // a registry at all, and how long it takes.
-      if (validateModal) {
-        validateModal.show();
+      const modal = getValidateModal();
+      if (modal) {
+        modal.show();
         return;
       }
       window.packValidateArchitectures = false;
@@ -4747,14 +4772,16 @@
     if (validateRunBtn) {
       validateRunBtn.addEventListener('click', () => {
         window.packValidateArchitectures = true;
-        if (validateModal) validateModal.hide();
+        const modal = getValidateModal();
+        if (modal) modal.hide();
         doSubmitImport();
       });
     }
     if (validateSkipBtn) {
       validateSkipBtn.addEventListener('click', () => {
         window.packValidateArchitectures = false;
-        if (validateModal) validateModal.hide();
+        const modal = getValidateModal();
+        if (modal) modal.hide();
         doSubmitImport();
       });
     }
@@ -4764,8 +4791,13 @@
   (function attachPackSyncCore() {
     const btn = document.getElementById('packSyncCoreBtn');
     const modalEl = document.getElementById('packSyncCoreModal');
-    if (!btn || !modalEl || !window.bootstrap) return;
-    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    if (!btn || !modalEl) return;
+    // Same reason as the validation dialog: Bootstrap is not loaded yet while
+    // this block is parsed, so resolve the modal at click time. Testing it
+    // here left the button inert.
+    const getModal = () => (window.bootstrap
+      ? window.bootstrap.Modal.getOrCreateInstance(modalEl)
+      : null);
     const resultEl = document.getElementById('packSyncCoreResult');
     const previewBtn = document.getElementById('packSyncCorePreviewBtn');
     const confirmBtn = document.getElementById('packSyncCoreConfirmBtn');
@@ -4815,7 +4847,8 @@
 
     btn.addEventListener('click', () => {
       if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
-      modal.show();
+      const modal = getModal();
+      if (modal) modal.show();
     });
     previewBtn.addEventListener('click', () => run(true));
     confirmBtn.addEventListener('click', () => run(false));

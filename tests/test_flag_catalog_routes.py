@@ -66,6 +66,27 @@ def test_flag_catalog_page_groups_installed_ids_by_kind(monkeypatch):
     assert 'id="packSyncCorePreviewBtn"' in page
     assert '/api/generator_packs/sync_core' in page
     assert 'Persistent</strong> are removed too' in page
+    # Every architecture state gets a visible badge. Rendering nothing for an
+    # unresolvable item reads identically to the scan never having run, which
+    # is what made the feature look broken.
+    assert 'Arch unknown' in page
+    assert 'Not scanned' in page
+    # A build-only stack has no pinned image to disqualify it, so it inherits
+    # the build host's architecture -- that is not "unknown".
+    assert 'Built locally' in page
+    # Native reads as good and must not share the grey of the unknown states.
+    assert 'badge text-bg-success ms-2" title="Runs natively on:' in page
+    # Same tri-state as the vulnerability catalog: an unknown host architecture
+    # must not be reported as emulated.
+    assert 'const native = hostArch ? archs.includes(hostArch) : null;' in page
+    # layout.html renders page content BEFORE loading the Bootstrap bundle, and
+    # this template's scripts are not wrapped in DOMContentLoaded. Reading
+    # window.bootstrap while the block is parsed therefore yields undefined:
+    # the Import dialog silently never appeared and the Sync button was inert.
+    # Both modals must resolve lazily, at click time.
+    assert 'function getValidateModal()' in page
+    assert 'const getModal = () => (window.bootstrap' in page
+    assert '!window.bootstrap) return;' not in page
     assert "data.append('validate_architectures'" in page
     assert 'data-pack-import-method="folder"' in page
     assert 'data-pack-import-method="zip"' in page

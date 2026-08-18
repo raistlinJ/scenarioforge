@@ -773,22 +773,34 @@
     const archs = Array.isArray(it && it.architectures) ? it.architectures.filter(Boolean) : [];
     const source = String((it && it.architecture_source) || '').trim();
     const unresolved = Array.isArray(it && it.architecture_unresolved) ? it.architecture_unresolved : [];
+    const extra = unresolved.length ? ` ${unresolved.length} image(s) could not be resolved.` : '';
     if (!archs.length) {
-      // Resolved but sharing no common architecture is a real finding; simply
-      // never scanned is not worth a badge.
+      // Resolved but sharing no common architecture is a real finding.
       if (source && source !== 'unscanned' && source !== 'unknown') {
         return `<span class="badge text-bg-warning ms-2" title="This item's images share no common architecture, so at least one of them runs under emulation on any host.">Mixed Arch</span>`;
       }
-      return '';
+      // Say "not known" out loud. Rendering nothing here is ambiguous: it reads
+      // the same as the scan never having run, so an operator cannot tell an
+      // unresolvable item from a missing feature.
+      if (source === 'unknown') {
+        // No image references at all means the stack builds its own image, so
+        // it inherits whatever architecture the CORE VM builds it on. That is
+        // not "unknown" -- there is simply nothing pinned that could disqualify
+        // it. Only a stack whose pinned images failed to resolve is unknown.
+        if (!unresolved.length) {
+          return `<span class="badge text-bg-light text-dark border ms-2" title="Builds its own image, so it runs natively wherever it is built. No pinned image to check.">Built locally</span>`;
+        }
+        return `<span class="badge text-bg-secondary ms-2" title="Architecture could not be determined: this item's pinned images are neither cached locally nor resolvable from a registry.${escapeHtml(extra)}">Arch unknown</span>`;
+      }
+      return `<span class="badge text-bg-secondary ms-2" title="Not scanned. Re-import this catalog and choose &quot;Validate&quot; to determine architectures.">Not scanned</span>`;
     }
     const hostArch = String(window.CORETG_HOST_ARCH || '').trim();
     const native = hostArch ? archs.includes(hostArch) : null;
     const label = escapeHtml(archs.join(', '));
-    const extra = unresolved.length ? ` ${unresolved.length} image(s) could not be resolved.` : '';
     if (native === false) {
       return `<span class="badge text-bg-warning ms-2" title="Built for ${label}; this host is ${escapeHtml(hostArch)}, so it runs only under qemu emulation, where heavy applications can segfault mid-boot.${escapeHtml(extra)}">${label} (emulated)</span>`;
     }
-    return `<span class="badge text-bg-light text-dark border ms-2" title="Runs natively on: ${label}.${escapeHtml(extra)}">${label}</span>`;
+    return `<span class="badge text-bg-success ms-2" title="Runs natively on: ${label}.${escapeHtml(extra)}">${label}</span>`;
   }
 
   function escapeHtml(s) {
@@ -2689,8 +2701,14 @@
     (function attachVulnSyncCore() {
       const btn = document.getElementById('vulnSyncCoreBtn');
       const modalEl = document.getElementById('vulnSyncCoreModal');
-      if (!btn || !modalEl || !window.bootstrap) return;
-      const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+      if (!btn || !modalEl) return;
+      // Resolve at click time. This block happens to run inside
+      // DOMContentLoaded, so Bootstrap is loaded -- but layout.html renders
+      // page content before its script bundle, so reading window.bootstrap
+      // while parsing is a trap for anyone who moves this code.
+      const getModal = () => (window.bootstrap
+        ? window.bootstrap.Modal.getOrCreateInstance(modalEl)
+        : null);
       const resultEl = document.getElementById('vulnSyncCoreResult');
       const previewBtn = document.getElementById('vulnSyncCorePreviewBtn');
       const confirmBtn = document.getElementById('vulnSyncCoreConfirmBtn');
@@ -2740,7 +2758,8 @@
 
       btn.addEventListener('click', () => {
         if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
-        modal.show();
+        const modal = getModal();
+        if (modal) modal.show();
       });
       previewBtn.addEventListener('click', () => run(true));
       confirmBtn.addEventListener('click', () => run(false));
@@ -2937,9 +2956,10 @@
     // its configured default when the field is absent.
     let vulnPackValidateArchitectures = true;
     const validateModalEl = document.getElementById('vulnPackValidateModal');
-    const validateModal = (validateModalEl && window.bootstrap)
-      ? window.bootstrap.Modal.getOrCreateInstance(validateModalEl)
-      : null;
+    function getValidateModal() {
+      if (!validateModalEl || !window.bootstrap) return null;
+      return window.bootstrap.Modal.getOrCreateInstance(validateModalEl);
+    }
 
     function submitVulnPackImport() {
       if (!importMethodSelect) return;
@@ -2953,8 +2973,9 @@
         if (!importMethodSelect) return;
         // Ask before doing anything: the answer changes how long the import
         // takes and whether it touches the network at all.
-        if (validateModal) {
-          validateModal.show();
+        const modal = getValidateModal();
+        if (modal) {
+          modal.show();
           return;
         }
         vulnPackValidateArchitectures = true;
@@ -2966,14 +2987,16 @@
     if (validateRunBtn) {
       validateRunBtn.addEventListener('click', () => {
         vulnPackValidateArchitectures = true;
-        if (validateModal) validateModal.hide();
+        const modal = getValidateModal();
+        if (modal) modal.hide();
         submitVulnPackImport();
       });
     }
     if (validateSkipBtn) {
       validateSkipBtn.addEventListener('click', () => {
         vulnPackValidateArchitectures = false;
-        if (validateModal) validateModal.hide();
+        const modal = getValidateModal();
+        if (modal) modal.hide();
         submitVulnPackImport();
       });
     }

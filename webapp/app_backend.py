@@ -48589,6 +48589,12 @@ def _build_installed_disable_maps() -> tuple[dict[str, dict[str, Any]], dict[tup
                 'cache_error': str(it.get('cache_error') or '').strip() or None,
                 'requires_build_network': bool(it.get('requires_build_network', False)),
                 'build_network_notes': [str(v) for v in it.get('build_network_notes')] if isinstance(it.get('build_network_notes'), list) else [],
+                # Carried through so the catalog can show what a generator was
+                # built to run on. Omitting these made every generator read as
+                # 'unscanned' in the UI no matter what the install recorded.
+                'architectures': [str(v) for v in it.get('architectures')] if isinstance(it.get('architectures'), list) else [],
+                'architecture_source': str(it.get('architecture_source') or '').strip() or None,
+                'architecture_unresolved': [str(v) for v in it.get('architecture_unresolved')] if isinstance(it.get('architecture_unresolved'), list) else [],
             }
 
             entries.append((kind, gid, _installed_generator_marker_source_id(it), info_obj))
@@ -51262,10 +51268,13 @@ def _validate_generator_pack_tree(extracted_dir: str) -> tuple[bool, str, list[d
                     compose_dependency_summary = {}
 
         # Basic Python syntax check for any .py file in the generator dir.
+        # Pass the path: ast.parse defaults to '<unknown>', so a SyntaxWarning
+        # from a generator (an unescaped regex in a plain string, say) reached
+        # the console with no indication of which file produced it.
         try:
             for py in gen_dir.rglob('*.py'):
                 if py.is_file():
-                    ast.parse(py.read_text('utf-8', errors='ignore'))
+                    ast.parse(py.read_text('utf-8', errors='ignore'), filename=str(py))
         except Exception as exc:
             errors.append(f'{mp}: python syntax error: {exc}')
             continue
