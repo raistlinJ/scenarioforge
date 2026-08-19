@@ -16,8 +16,11 @@ If you are using AI to create generators, use this minimal handoff packet:
 
 - `manifest.yaml` (or at least `id`, `kind`, `runtime`, `inputs`, `artifacts`, `injects`, `hint_levels`)
 - scaffolded `generator.py`
-- expected artifact keys (`requires`, `optional_requires`, `produces`)
-- explicit statement of required vs optional runtime inputs
+- expected artifact keys (`requires`, `optional_requires`, `produces`) drawn from the canonical ontology in [schemas/facts/fact_ontology_reference.yaml](../schemas/facts/fact_ontology_reference.yaml); fact keys are matched literally, so write `Credential(user,password)` with no space after the comma
+- the flag delivery contract when the flag is not a plain readable file: `FlagDelivery(mode)` (`file` | `embedded` | `none` | `unknown`) plus `FlagFile(path)` when the mode is `file`
+- the fact vocabulary the installed catalog actually uses: only require facts something enabled already produces (or that Flow synthesizes per step), and reuse the catalog's exact spelling. A require nothing satisfies drops the generator from every Flow candidate pool silently -- it is simply never selected. The Generator Builder now passes this vocabulary to the model automatically; when prompting elsewhere, paste the produced/required fact lists yourself.
+- explicit statement of required vs optional runtime inputs, with `default` and `description` on each input so builder forms and local tests do not guess values
+- optional `description_hints` (short author-facing phrases) to make the generator findable in the catalog
 - mark solver-facing start-step runtime inputs with `flow_supply_when_first: true` when participants must use the value before solving sequence 1 or the first step of a parallel branch
 - supplied start-step values are shown as `Seq N required` Initial Facts in Flow, in Participant/Facilitator guide fact tables, and as Sequence N required supplied-input hints for participants
 - `access_instructions` when participants need concrete mount/connect/read/exploit steps
@@ -207,15 +210,15 @@ If a generator produces files that should be safely mountable/copiable into othe
 How it works:
 
 - Generators should write files under `/outputs/artifacts/...`.
-- After the generator finishes, `scripts/run_flag_generator.py` stages **only** allowlisted items into `<out_dir>/injected/`.
-- If the generator produces a `docker-compose.yml`, the runner rewrites **relative bind mounts** to use a named volume and adds an **init-copy** service that copies allowlisted files into the volume before the main service runs.
+- After the generator finishes, `scripts/run_flag_generator.py` **validates** the allowlist: every entry must resolve to a file that exists under `/outputs` (or `/outputs/artifacts`), and the run fails if one does not. It does not pre-stage files or rewrite compose at generate/resolve time -- staging and the copy into target containers happen later, when Flow materializes the step.
+- If the generator produces a `docker-compose.yml`, relative bind mounts are rewritten to use a named volume with an **init-copy** service that copies allowlisted files into the volume before the main service runs.
 
 `injects` entries can be:
 
 - A relative path like `artifacts/my_binary` (prefix `artifacts/` is optional), or
 - An **output artifact key** like `File(path)` which is resolved via `outputs.json.outputs`.
 
-When using `File(path)` as an output key, the corresponding `outputs.json.outputs["File(path)"]` value should still be relative to `/outputs` (for example `artifacts/my_binary`), not `/outputs/artifacts/my_binary`.
+When using `File(path)` as an output key, the corresponding `outputs.json.outputs["File(path)"]` value **must** be relative to `/outputs` (for example `artifacts/my_binary`), not `/outputs/artifacts/my_binary`. An absolute value is not an injectable path: expansion drops the entry, so the run would otherwise succeed having staged nothing and the artifact would never reach a participant. The runner rejects it, and the Generator Builder catches the literal before it spends a container run.
 
 Optional destination directory syntax:
 

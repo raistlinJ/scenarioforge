@@ -1092,3 +1092,133 @@ def test_mcp_returns_error_for_missing_draft():
     error = response.get('error') or {}
     assert error.get('code') == -32001
     assert 'Unknown draft_id' in (error.get('message') or '')
+
+
+def _fake_flag_node_generator_catalog():
+    return (
+        [
+            {
+                'id': 'ssh_key_bastion',
+                'name': 'SSH: Key Bastion',
+                'description': 'Key-only SSH bastion that leaks an operator private key.',
+                'description_hints': ['bastion'],
+                'outputs': [{'name': 'Flag(flag_id)'}, {'name': 'FlagFile(path)'}],
+            },
+            {
+                'id': 'nfs_build_cache',
+                'name': 'NFS: Build Cache Share',
+                'description': 'Exported build cache share holding a stale artifact.',
+                'description_hints': [],
+                'outputs': [{'name': 'Flag(flag_id)'}, {'name': 'Directory(host, path)'}],
+            },
+        ],
+        [],
+    )
+
+
+def test_mcp_search_flag_node_generator_catalog_ranks_matches(monkeypatch):
+    import MCP.server as mcp_server
+
+    monkeypatch.setattr(
+        mcp_server.app_backend,
+        '_flag_node_generators_from_enabled_sources',
+        _fake_flag_node_generator_catalog,
+    )
+
+    server = ScenarioAuthoringMCPServer()
+    tools = (server.handle_message({
+        'jsonrpc': '2.0',
+        'id': 2,
+        'method': 'tools/list',
+        'params': {},
+    }).get('result') or {}).get('tools') or []
+    assert 'scenario.search_flag_node_generator_catalog' in {tool.get('name') for tool in tools}
+
+    result = _tool_call(server, 'scenario.search_flag_node_generator_catalog', {'query': 'ssh key leak'})
+
+    assert result.get('catalog_size') == 2
+    assert result.get('count') == 1
+    first = (result.get('results') or [])[0]
+    assert first.get('g_id') == 'ssh_key_bastion'
+    assert first.get('g_name') == 'SSH: Key Bastion'
+    assert 'Flag(flag_id)' in (first.get('produces') or [])
+
+    by_artifact = _tool_call(server, 'scenario.search_flag_node_generator_catalog', {
+        'query': 'share',
+        'produces': 'Directory(host, path)',
+    })
+    assert [item.get('g_id') for item in (by_artifact.get('results') or [])] == ['nfs_build_cache']
+
+
+def test_mcp_search_flag_node_generator_result_feeds_specific_row(monkeypatch):
+    import MCP.server as mcp_server
+
+    monkeypatch.setattr(
+        mcp_server.app_backend,
+        '_flag_node_generators_from_enabled_sources',
+        _fake_flag_node_generator_catalog,
+    )
+
+    server = ScenarioAuthoringMCPServer()
+    draft = _tool_call(server, 'scenario.create_draft', {})
+    draft_id = (draft.get('draft') or {}).get('draft_id')
+
+    search = _tool_call(server, 'scenario.search_flag_node_generator_catalog', {'query': 'nfs share'})
+    chosen = (search.get('results') or [])[0]
+
+    added = _tool_call(server, 'scenario.add_flag_node_generator_item', {
+        'draft_id': draft_id,
+        'selected': 'Specific',
+        'g_id': chosen.get('g_id'),
+        'count': 1,
+    })
+    assert added.get('added_item', {}).get('g_id') == 'nfs_build_cache'
+    assert added.get('added_item', {}).get('g_name') == 'NFS: Build Cache Share'
+
+
+def test_mcp_unknown_flag_node_generator_error_points_at_search(monkeypatch):
+    import MCP.server as mcp_server
+
+    monkeypatch.setattr(
+        mcp_server.app_backend,
+        '_flag_node_generators_from_enabled_sources',
+        _fake_flag_node_generator_catalog,
+    )
+
+    server = ScenarioAuthoringMCPServer()
+    draft = _tool_call(server, 'scenario.create_draft', {})
+    draft_id = (draft.get('draft') or {}).get('draft_id')
+
+    response = server.handle_message({
+        'jsonrpc': '2.0',
+        'id': 4,
+        'method': 'tools/call',
+        'params': {
+            'name': 'scenario.add_flag_node_generator_item',
+            'arguments': {'draft_id': draft_id, 'selected': 'Specific', 'g_id': 'made_up_generator'},
+        },
+    })
+    error_message = str((response.get('error') or {}).get('message') or '')
+    assert 'made_up_generator' in error_message
+    assert 'search_flag_node_generator_catalog' in error_message
+
+
+def test_mcp_flag_node_generator_catalog_survives_manifest_errors(monkeypatch):
+    import MCP.server as mcp_server
+
+    generators, _errors = _fake_flag_node_generator_catalog()
+    monkeypatch.setattr(
+        mcp_server.app_backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: (generators, [{'path': '/x/manifest.yaml', 'error': 'duplicate generator id: ssh_key_bastion'}]),
+    )
+
+    server = ScenarioAuthoringMCPServer()
+    result = _tool_call(server, 'scenario.search_flag_node_generator_catalog', {'query': 'ssh'})
+    assert result.get('count') == 1
+    assert result.get('catalog_errors')
+
+    schema = _tool_call(server, 'scenario.get_authoring_schema', {})
+    section = (schema.get('sections') or {}).get('Flag Node Generators') or {}
+    assert section.get('catalog_size') == 2
+    assert section.get('catalog_errors') == 1

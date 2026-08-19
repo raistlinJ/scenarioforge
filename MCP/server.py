@@ -151,8 +151,10 @@ class ScenarioAuthoringMCPServer:
         self._drafts = DraftStore()
         self._tools = self._build_tools()
         self._vulnerability_catalog: list[dict[str, str]] | None = None
-        self._flag_node_generator_catalog: list[dict[str, str]] | None = None
+        self._flag_node_generator_catalog: list[dict[str, Any]] | None = None
+        self._flag_node_generator_catalog_errors: list[str] = []
         self._last_vulnerability_search: dict[str, Any] | None = None
+        self._last_flag_node_generator_search: dict[str, Any] | None = None
 
     def _build_tools(self) -> dict[str, MCPTool]:
         return {
@@ -368,9 +370,22 @@ class ScenarioAuthoringMCPServer:
                     'additionalProperties': False,
                 },
             ),
+            'scenario.search_flag_node_generator_catalog': MCPTool(
+                name='scenario.search_flag_node_generator_catalog',
+                description='Search the enabled flag-node-generator catalog by free text over generator names, descriptions, and produced artifacts to find a concrete g_id the draft can reference.',
+                input_schema={
+                    'type': 'object',
+                    'properties': {
+                        'query': {'type': 'string'},
+                        'produces': {'type': 'string'},
+                        'limit': {'type': 'integer'},
+                    },
+                    'additionalProperties': False,
+                },
+            ),
             'scenario.add_flag_node_generator_item': MCPTool(
                 name='scenario.add_flag_node_generator_item',
-                description='Append one topology-level Flag Node Generators row. Use selected="Random" for a save-time catalog resolution, or selected="Specific" with an enabled generator g_id or g_name. These rows add Docker challenge nodes and do not consume Node Information Docker counts.',
+                description='Append one topology-level Flag Node Generators row. Use selected="Random" for a save-time catalog resolution, or selected="Specific" with an enabled generator g_id or g_name -- call search_flag_node_generator_catalog first and copy g_id from the chosen result. These rows add Docker challenge nodes and do not consume Node Information Docker counts.',
                 input_schema={
                     'type': 'object',
                     'properties': {
@@ -526,6 +541,8 @@ class ScenarioAuthoringMCPServer:
         if tool_name == 'scenario.add_vulnerability_item':
             draft = self._drafts.get(str(arguments.get('draft_id') or ''))
             return self._add_vulnerability_item(draft, arguments)
+        if tool_name == 'scenario.search_flag_node_generator_catalog':
+            return self._search_flag_node_generator_catalog(arguments)
         if tool_name == 'scenario.add_flag_node_generator_item':
             draft = self._drafts.get(str(arguments.get('draft_id') or ''))
             return self._add_flag_node_generator_item(draft, arguments)
@@ -816,7 +833,11 @@ class ScenarioAuthoringMCPServer:
                     'supports_random_selected': True,
                     'random_selected_values': ['Specific'],
                     'catalog_size': len(flag_node_generator_catalog),
-                    'catalog_entries': flag_node_generator_catalog,
+                    'catalog_entries': [
+                        {'id': entry.get('id'), 'name': entry.get('name')}
+                        for entry in flag_node_generator_catalog
+                    ],
+                    'catalog_errors': len(self._flag_node_generator_catalog_errors),
                     'section_fields': {
                         'density': field_schema(value_type='number', default=0.0, minimum=0),
                     },
@@ -835,6 +856,7 @@ class ScenarioAuthoringMCPServer:
                     'notes': [
                         'Rows are additive Docker challenge nodes, separate from Node Information Docker rows and vulnerability nodes.',
                         'Specific rows are validated against enabled installed flag-node-generators; Random rows resolve to an enabled generator when the XML is saved.',
+                        'Use search_flag_node_generator_catalog to find a concrete g_id before adding a Specific row.',
                     ],
                 },
                 'Segmentation': {
@@ -1187,17 +1209,20 @@ class ScenarioAuthoringMCPServer:
                 self._vulnerability_catalog = list(load_vuln_catalog(ROOT_DIR) or [])
         return self._vulnerability_catalog
 
-    def _load_flag_node_generator_catalog(self) -> list[dict[str, str]]:
+    def _load_flag_node_generator_catalog(self) -> list[dict[str, Any]]:
         if self._flag_node_generator_catalog is not None:
             return self._flag_node_generator_catalog
         try:
             generators, errors = app_backend._flag_node_generators_from_enabled_sources()
         except Exception as exc:
             raise ValueError(f'Unable to load enabled flag-node-generator catalog: {exc}') from exc
-        if errors:
-            details = '; '.join(str(item.get('error') or item) if isinstance(item, dict) else str(item) for item in errors)
-            raise ValueError(f'Enabled flag-node-generator catalog has manifest errors: {details}')
-        catalog: list[dict[str, str]] = []
+        # Per-manifest errors (a duplicate id, an unreadable manifest) must not hide every
+        # other enabled generator; they are reported alongside the results instead.
+        catalog_errors = [
+            str(item.get('error') or item) if isinstance(item, dict) else str(item)
+            for item in (errors or [])
+        ]
+        catalog: list[dict[str, Any]] = []
         seen: set[str] = set()
         for generator in generators or []:
             if not isinstance(generator, dict):
@@ -1206,8 +1231,28 @@ class ScenarioAuthoringMCPServer:
             if not generator_id or generator_id in seen:
                 continue
             seen.add(generator_id)
-            catalog.append({'id': generator_id, 'name': str(generator.get('name') or generator_id).strip() or generator_id})
+            produces = [
+                str(item.get('name') or '').strip()
+                for item in (generator.get('outputs') or [])
+                if isinstance(item, dict) and str(item.get('name') or '').strip()
+            ]
+            catalog.append({
+                'id': generator_id,
+                'name': str(generator.get('name') or generator_id).strip() or generator_id,
+                'description': str(generator.get('description') or '').strip(),
+                'description_hints': [
+                    str(hint or '').strip()
+                    for hint in (generator.get('description_hints') or [])
+                    if str(hint or '').strip()
+                ],
+                'produces': produces,
+            })
+        if not catalog and catalog_errors:
+            raise ValueError(
+                'Enabled flag-node-generator catalog has manifest errors: ' + '; '.join(catalog_errors)
+            )
         self._flag_node_generator_catalog = catalog
+        self._flag_node_generator_catalog_errors = catalog_errors
         return catalog
 
     def _resolve_flag_node_generator_catalog_entry(self, *, generator_id: Any = None, generator_name: Any = None) -> dict[str, str]:
@@ -1215,11 +1260,95 @@ class ScenarioAuthoringMCPServer:
         requested_name = str(generator_name or '').strip()
         for entry in self._load_flag_node_generator_catalog():
             if requested_id and entry['id'] == requested_id:
-                return entry
-            if requested_name and entry['name'].casefold() == requested_name.casefold():
-                return entry
+                return {'id': entry['id'], 'name': entry['name']}
+            if requested_name and str(entry['name']).casefold() == requested_name.casefold():
+                return {'id': entry['id'], 'name': entry['name']}
         requested = requested_id or requested_name or '(missing id)'
-        raise ValueError(f'Topology-selected flag-node-generator is not enabled: {requested}')
+        raise ValueError(
+            f'Topology-selected flag-node-generator is not enabled: {requested}. '
+            'Use search_flag_node_generator_catalog to find an enabled g_id.'
+        )
+
+    def _tokenize_flag_node_generator_query(self, query: str) -> list[str]:
+        raw_tokens = [token for token in re.findall(r'[a-z0-9]+', str(query or '').lower()) if token]
+        stopwords = {
+            'a', 'an', 'add', 'and', 'any', 'challenge', 'flag', 'find', 'for', 'from', 'generator',
+            'generators', 'in', 'into', 'node', 'nodes', 'of', 'on', 'or', 'related', 'some', 'that',
+            'the', 'these', 'this', 'to', 'use', 'with',
+        }
+        return [token for token in raw_tokens if token not in stopwords]
+
+    def _search_flag_node_generator_catalog(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        catalog = self._load_flag_node_generator_catalog()
+        query = str(
+            arguments.get('query')
+            or arguments.get('search')
+            or arguments.get('text')
+            or arguments.get('prompt')
+            or arguments.get('description')
+            or arguments.get('generator')
+            or arguments.get('g_name')
+            or ''
+        ).strip()
+        produces_filter = str(arguments.get('produces') or '').strip().lower()
+        try:
+            limit = int(arguments.get('limit') or 10)
+        except Exception:
+            limit = 10
+        limit = max(1, min(limit, 50))
+
+        query_tokens = self._tokenize_flag_node_generator_query(query)
+        matches: list[tuple[int, dict[str, Any]]] = []
+        for entry in catalog:
+            produces = [str(item or '') for item in (entry.get('produces') or [])]
+            produces_text = ' '.join(produces).lower()
+            if produces_filter and produces_filter not in produces_text:
+                continue
+
+            name_text = str(entry.get('name') or '').lower()
+            description_text = str(entry.get('description') or '').lower()
+            hints_text = ' '.join(str(hint or '') for hint in (entry.get('description_hints') or [])).lower()
+            haystack = ' '.join([name_text, description_text, hints_text, produces_text])
+            score = 0
+            if not query_tokens:
+                score = 1
+            else:
+                for token in query_tokens:
+                    if token in haystack:
+                        score += 2
+                    if token in name_text:
+                        score += 4
+                    if token in description_text:
+                        score += 2
+                    if token in hints_text:
+                        score += 2
+                    if token in produces_text:
+                        score += 1
+            if score > 0:
+                matches.append((score, entry))
+
+        matches.sort(key=lambda item: (-item[0], str(item[1].get('name') or '').lower(), str(item[1].get('id') or '')))
+        results = [
+            {
+                'g_id': str(entry.get('id') or ''),
+                'g_name': str(entry.get('name') or ''),
+                'description': str(entry.get('description') or ''),
+                'produces': [str(item or '') for item in (entry.get('produces') or [])],
+                'score': score,
+            }
+            for score, entry in matches[:limit]
+        ]
+        response = {
+            'query': query,
+            'produces': produces_filter,
+            'catalog_size': len(catalog),
+            'count': len(results),
+            'results': results,
+        }
+        if self._flag_node_generator_catalog_errors:
+            response['catalog_errors'] = list(self._flag_node_generator_catalog_errors)
+        self._last_flag_node_generator_search = deepcopy(response)
+        return response
 
     def _find_vulnerability_catalog_readme(self, entry: dict[str, Any]) -> str:
         raw_path = str(entry.get('Path') or '').strip()

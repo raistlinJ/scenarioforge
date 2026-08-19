@@ -28,6 +28,7 @@ Current tool surface:
 - `scenario.add_segmentation_item`
 - `scenario.search_vulnerability_catalog`
 - `scenario.add_vulnerability_item`
+- `scenario.search_flag_node_generator_catalog`
 - `scenario.add_flag_node_generator_item`
 - `scenario.preview_draft`
 - `scenario.save_xml`
@@ -62,16 +63,24 @@ Example draft flow:
 6. `scenario.add_segmentation_item`
 7. `scenario.search_vulnerability_catalog`
 8. `scenario.add_vulnerability_item`
-9. `scenario.add_flag_node_generator_item`
-9. `scenario.replace_section`
-10. `scenario.preview_draft`
-11. `scenario.save_xml`
+9. `scenario.search_flag_node_generator_catalog`
+10. `scenario.add_flag_node_generator_item`
+11. `scenario.replace_section`
+12. `scenario.preview_draft`
+13. `scenario.save_xml`
 
 Vulnerability authoring flow:
 
 1. Search with a vague request such as `mysql vulnerability` using `scenario.search_vulnerability_catalog`.
 2. Append the selected match to the draft via `scenario.add_vulnerability_item`.
 3. The tool writes a concrete `Specific` vulnerability row with `v_name` and `v_path`, which is compatible with the existing planner and XML save path.
+
+Flag-node-generator authoring flow:
+
+1. Search the enabled generator catalog with the user's wording, such as `nfs share` or `leaks an ssh key`, using `scenario.search_flag_node_generator_catalog`. Results carry `g_id`, `g_name`, `description`, and `produces`.
+2. Append the selected match via `scenario.add_flag_node_generator_item` with `selected="Specific"` and the `g_id` from the chosen result.
+3. Use `selected="Random"` when the request does not describe a particular generator; the enabled catalog resolves the row at save time.
+4. A `g_id` that is not enabled is rejected. Do not guess ids -- search first, or fall back to `Random`.
 
 Node and traffic authoring flow:
 

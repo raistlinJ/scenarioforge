@@ -136,16 +136,34 @@ def _extract_vulnerability_target_count(user_prompt: str) -> int:
     return 0
 
 
+_FLAG_NODE_GENERATOR_PHRASE = r'(?:flag[-\s]+node[-\s]*generators?|node[-\s]+flag[-\s]*generators?)'
+
+# Words that end the backwards scan for a count: a count before one of these
+# belongs to that other section ("3 routers and a flag node generator" is 1).
+_FLAG_NODE_GENERATOR_COUNT_BLOCKERS = {
+    'and', 'or', 'with', 'plus', 'router', 'routers', 'host', 'hosts', 'node', 'nodes',
+    'switch', 'switches', 'service', 'services', 'vulnerability', 'vulnerabilities', 'vuln', 'vulns',
+}
+
+
 def _extract_flag_node_generator_target_count(user_prompt: str) -> int:
     text = str(user_prompt or '').strip().lower().replace('_', '-')
     if not text:
         return 0
-    match = re.search(rf'\b({_COUNT_TOKEN_PATTERN})\s+(?:flag[-\s]+node[-\s]*generators?|node[-\s]+flag[-\s]*generators?)\b', text)
+    match = re.search(rf'\b({_COUNT_TOKEN_PATTERN})\s+{_FLAG_NODE_GENERATOR_PHRASE}\b', text)
     if match:
         return max(0, int(_parse_count_token(match.group(1)) or 0))
-    if re.search(r'\b(?:flag[-\s]+node[-\s]*generator|node[-\s]+flag[-\s]*generator)\b', text):
-        return 1
-    return 0
+    phrase_match = re.search(rf'\b{_FLAG_NODE_GENERATOR_PHRASE}\b', text)
+    if not phrase_match:
+        return 0
+    # A descriptor can sit between the count and the phrase ("two ssh flag node generators").
+    for word in reversed(text[:phrase_match.start()].split()[-3:]):
+        if word in _FLAG_NODE_GENERATOR_COUNT_BLOCKERS:
+            break
+        parsed = _parse_count_token(word)
+        if parsed is not None:
+            return max(0, int(parsed))
+    return 1
 
 
 def extract_vulnerability_target_count(user_prompt: str) -> int:
@@ -342,6 +360,110 @@ def search_vulnerability_catalog_for_prompt(
         if len(selected) >= max(1, limit):
             break
     return selected
+
+
+def extract_flag_node_generator_query_hint(user_prompt: str) -> str:
+    """Free-text query describing the flag-node-generator the prompt asks for.
+
+    Returns '' when the prompt has no flag-node-generator intent, or when it asks
+    for generators without describing one (those requests stay Random).
+    """
+    text = str(user_prompt or '').strip().lower()
+    if not text or _extract_flag_node_generator_target_count(text) <= 0:
+        return ''
+
+    filler = {
+        'a', 'an', 'the', 'some', 'of', 'pair', 'couple', 'random', 'another', 'more', 'new',
+        'add', 'build', 'create', 'generate', 'give', 'include', 'make', 'me', 'need', 'please',
+        'use', 'want',
+    }
+
+    descriptor_match = re.search(
+        rf'{_FLAG_NODE_GENERATOR_PHRASE}\s+(?:that|which|to|for|with)\s+([a-z0-9][a-z0-9\s,./-]{{0,60}})',
+        text,
+    )
+    if descriptor_match:
+        words = descriptor_match.group(1).split()
+        while words and words[0] in filler:
+            words.pop(0)
+        phrase = ' '.join(words).strip(' ,.')
+        if phrase:
+            return phrase[:60]
+
+    phrase_match = re.search(rf'\b{_FLAG_NODE_GENERATOR_PHRASE}\b', text)
+    if phrase_match:
+        # Walk back from the phrase collecting descriptor words, stopping at the
+        # count ("two ssh ...") or at a word that belongs to another section.
+        descriptor: list[str] = []
+        for word in reversed(text[:phrase_match.start()].split()):
+            if (
+                len(word) < 2
+                or word in filler
+                or word in _FLAG_NODE_GENERATOR_COUNT_BLOCKERS
+                or _parse_count_token(word) is not None
+            ):
+                break
+            descriptor.insert(0, word)
+            if len(descriptor) >= 4:
+                break
+        phrase = ' '.join(descriptor).strip(' ,.')
+        if phrase:
+            return phrase[:40]
+
+    return ''
+
+
+def search_flag_node_generator_catalog_for_prompt(
+    query: str,
+    *,
+    catalog: list[dict[str, Any]] | None = None,
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    """Rank enabled flag-node-generators against a free-text query.
+
+    The catalog is passed in: planning stays I/O-free and never reads the
+    installed generator directories itself.
+    """
+    query_text = str(query or '').strip().lower()
+    if not query_text:
+        return []
+
+    catalog_items = [entry for entry in (catalog or []) if isinstance(entry, dict)]
+    if not catalog_items:
+        return []
+
+    tokens = [token for token in re.findall(r'[a-z0-9]+', query_text) if token]
+    if not tokens:
+        return []
+
+    ranked: list[tuple[int, dict[str, str]]] = []
+    for entry in catalog_items:
+        generator_id = str(entry.get('id') or entry.get('g_id') or '').strip()
+        name = str(entry.get('name') or entry.get('g_name') or '').strip()
+        if not generator_id or not name:
+            continue
+        description = str(entry.get('description') or '').strip()
+        hints = ' '.join(str(hint or '') for hint in (entry.get('description_hints') or []))
+        produces = ' '.join(
+            str(item.get('name') or '') if isinstance(item, dict) else str(item or '')
+            for item in (entry.get('outputs') or entry.get('produces') or [])
+        )
+        name_lower = name.lower()
+        description_lower = description.lower()
+        haystack = ' '.join([name_lower, description_lower, hints.lower(), produces.lower()])
+        score = 0
+        for token in tokens:
+            if token in haystack:
+                score += 2
+            if token in name_lower:
+                score += 3
+            if token in description_lower:
+                score += 1
+        if score > 0:
+            ranked.append((score, {'id': generator_id, 'name': name}))
+
+    ranked.sort(key=lambda item: (-item[0], item[1]['name'].lower(), item[1]['id']))
+    return [entry for _score, entry in ranked[:max(1, limit)]]
 
 
 def extract_node_role_count_intent(user_prompt: str) -> dict[str, int]:

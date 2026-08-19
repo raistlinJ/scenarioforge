@@ -98,8 +98,24 @@
         }
       }
     },
+    "language": {"type": "string"},
     "hint_template": {"type": "string"},
     "hint_templates": {"type": "array", "items": {"type": "string"}},
+    "hint_levels": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Structured participant hints rendered by Flow. Each level holds one or more lines and may use {{NEXT_NODE_NAME}} / {{OUTPUT.Key}} placeholders.",
+      "properties": {
+        "low": {"type": "array", "items": {"type": "string"}},
+        "medium": {"type": "array", "items": {"type": "string"}},
+        "high": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "description_hints": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Short author-facing phrases used to describe/find this generator in the catalog."
+    },
     "injects": {"type": "array", "items": {"type": "string"}},
     "inject_candidate_paths": {"type": "array", "items": {"type": "string"}},
     "access_instructions": {

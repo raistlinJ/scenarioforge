@@ -5985,3 +5985,118 @@ def test_normalize_mcp_bridge_payload_does_not_default_server_path_when_servers_
 
     assert payload.get('servers_json_path') == ai_provider._DEFAULT_MCP_SERVERS_JSON_PATH
     assert payload.get('mcp_server_path') == ''
+
+
+def test_flag_node_generator_grounding_guidance_names_enabled_candidates(monkeypatch):
+    from webapp.routes import ai_provider
+
+    monkeypatch.setattr(
+        ai_provider,
+        '_search_flag_node_generator_catalog_for_prompt',
+        lambda query, limit=3: [{'id': 'ssh_key_bastion', 'name': 'SSH: Key Bastion'}],
+    )
+
+    guidance = ai_provider._build_flag_node_generator_grounding_guidance(
+        'add a flag node generator that leaks an ssh key'
+    )
+    joined = ' '.join(guidance)
+
+    assert 'scenario.search_flag_node_generator_catalog with query="leaks an ssh key"' in joined
+    assert 'g_id=ssh_key_bastion' in joined
+    assert 'Never invent a g_id' in joined
+
+    # Undescribed generator requests stay Random and get no search pressure.
+    assert ai_provider._build_flag_node_generator_grounding_guidance('add 3 flag node generators') == []
+    assert ai_provider._build_flag_node_generator_grounding_guidance('create a scenario with 4 routers') == []
+
+
+def test_flag_node_generator_grounding_guidance_falls_back_to_random(monkeypatch):
+    from webapp.routes import ai_provider
+
+    monkeypatch.setattr(
+        ai_provider,
+        '_search_flag_node_generator_catalog_for_prompt',
+        lambda query, limit=3: [],
+    )
+
+    guidance = ' '.join(ai_provider._build_flag_node_generator_grounding_guidance(
+        'add a flag node generator for a database challenge'
+    ))
+    assert 'fall back to selected="Random" rather than guessing a g_id' in guidance
+
+
+def test_unknown_flag_node_generator_tool_error_retries_through_catalog_search():
+    from webapp.routes import ai_provider
+
+    payload = json.loads(ai_provider._build_recoverable_mcp_bridge_tool_error(
+        'server.scenario.add_flag_node_generator_item',
+        {'selected': 'Specific', 'g_name': 'ssh key bastion', 'v_count': 2},
+        ai_provider.ProviderAdapterError(
+            'Topology-selected flag-node-generator is not enabled: ssh key bastion. '
+            'Use search_flag_node_generator_catalog to find an enabled g_id.',
+            status_code=400,
+        ),
+        enabled_tool_names=[
+            'server.scenario.add_flag_node_generator_item',
+            'server.scenario.search_flag_node_generator_catalog',
+        ],
+    ) or '{}')
+
+    assert payload.get('recoverable') is True
+    retry_hint = payload.get('retry_hint', {})
+    assert retry_hint.get('tool') == 'scenario.search_flag_node_generator_catalog'
+    assert retry_hint.get('query') == 'ssh key bastion'
+    assert retry_hint.get('limit') == 6
+    assert 'do not invent a specific flag-node-generator g_id' in str(payload.get('guidance') or '').lower()
+
+
+def test_unknown_flag_node_generator_tool_error_falls_back_to_random_without_search_tool():
+    from webapp.routes import ai_provider
+
+    payload = json.loads(ai_provider._build_recoverable_mcp_bridge_tool_error(
+        'server.scenario.add_flag_node_generator_item',
+        {'selected': 'Specific', 'g_id': 'made_up', 'v_count': 1},
+        ai_provider.ProviderAdapterError(
+            'Topology-selected flag-node-generator is not enabled: made_up',
+            status_code=400,
+        ),
+        enabled_tool_names=['server.scenario.add_flag_node_generator_item'],
+    ) or '{}')
+
+    retry_hint = payload.get('retry_hint', {})
+    assert retry_hint.get('tool') == 'scenario.add_flag_node_generator_item'
+    assert retry_hint.get('selected') == 'Random'
+
+
+def test_flag_node_generator_catalog_search_is_not_draft_scoped():
+    from webapp.routes import ai_provider
+
+    assert ai_provider._is_draft_scoped_mcp_bridge_tool(
+        'server.scenario.search_flag_node_generator_catalog'
+    ) is False
+    assert ai_provider._is_draft_scoped_mcp_bridge_tool(
+        'server.scenario.add_flag_node_generator_item'
+    ) is True
+
+
+def test_mcp_bridge_goal_prompt_mentions_generator_catalog_search(monkeypatch):
+    from webapp.routes import ai_provider
+
+    monkeypatch.setattr(
+        ai_provider,
+        '_search_flag_node_generator_catalog_for_prompt',
+        lambda query, limit=3: [{'id': 'nfs_build_cache', 'name': 'NFS: Build Cache Share'}],
+    )
+
+    prompt = ai_provider._build_mcp_bridge_goal_prompt(
+        draft_id='draft-gen-1',
+        enabled_tools=[
+            'server.scenario.add_flag_node_generator_item',
+            'server.scenario.search_flag_node_generator_catalog',
+        ],
+        scenario_name='GeneratorScenario',
+        user_prompt='add an nfs share flag node generator',
+    )
+
+    assert 'scenario.search_flag_node_generator_catalog' in prompt
+    assert 'g_id=nfs_build_cache' in prompt

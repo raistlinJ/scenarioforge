@@ -47608,14 +47608,18 @@ def _normalize_scaffold_hint_levels(value: Any) -> dict[str, list[str]]:
     return normalized
 
 
-def _default_scaffold_hint_levels(produces: list[str]) -> dict[str, list[str]]:
+def _default_scaffold_hint_levels(produces: list[str], *, plugin_type: str = '') -> dict[str, list[str]]:
     artifacts = [str(item or '').strip() for item in (produces or []) if str(item or '').strip()]
 
     def _compact(value: str) -> str:
         return re.sub(r'\s+', '', str(value or '')).lower()
 
+    # On flag-node-generators File(path) is the emitted docker-compose.yml, which Flow filters
+    # out of participant hints, so FlagFile(path) is the artifact worth pointing at.
+    node_kind = str(plugin_type or '').strip() == 'flag-node-generator'
     priority = (
-        'File(path)',
+        'FlagFile(path)',
+        *(() if node_kind else ('File(path)',)),
         'Credential(user,password)',
         'Credential(user, password)',
         'Credential(user)',
@@ -47633,7 +47637,18 @@ def _default_scaffold_hint_levels(produces: list[str]) -> dict[str, list[str]]:
         if chosen:
             break
     if not chosen:
-        chosen = next((item for item in artifacts if _compact(item) != _compact('Flag(flag_id)')), '')
+        # Flag/delivery-contract keys carry the answer or a bare mode string, so they never make a usable hint.
+        skip = {_compact('Flag(flag_id)'), _compact('FlagDelivery(mode)')}
+        if node_kind:
+            skip.add(_compact('File(path)'))
+        chosen = next(
+            (
+                item
+                for item in artifacts
+                if _compact(item) not in skip and not _compact(item).startswith('partialflag(')
+            ),
+            '',
+        )
 
     if chosen:
         medium = f"Artifact or service: {{{{OUTPUT.{chosen}}}}}"
@@ -47647,9 +47662,9 @@ def _default_scaffold_hint_levels(produces: list[str]) -> dict[str, list[str]]:
     }
 
 
-def _ensure_scaffold_hint_levels(value: Any, produces: list[str]) -> dict[str, list[str]]:
+def _ensure_scaffold_hint_levels(value: Any, produces: list[str], *, plugin_type: str = '') -> dict[str, list[str]]:
     normalized = _normalize_scaffold_hint_levels(value)
-    defaults = _default_scaffold_hint_levels(produces)
+    defaults = _default_scaffold_hint_levels(produces, plugin_type=plugin_type)
     for level in ('low', 'medium', 'high'):
         if not normalized.get(level):
             normalized[level] = list(defaults.get(level) or [])
@@ -47753,6 +47768,11 @@ def _normalize_runtime_inputs(raw_inputs: Any, *, plugin_type: str) -> list[dict
             }
             if item.get('sensitive') is True:
                 record['sensitive'] = True
+            if item.get('default') is not None:
+                record['default'] = item.get('default')
+            input_description = str(item.get('description') or '').strip()
+            if input_description:
+                record['description'] = input_description
             if _flow_truthy_flag(item.get('flow_supply_when_first')):
                 record['flow_supply_when_first'] = True
             normalized.append(record)
@@ -47772,6 +47792,11 @@ def _normalize_runtime_inputs(raw_inputs: Any, *, plugin_type: str) -> list[dict
         }
         if (meta or {}).get('sensitive') is True:
             record['sensitive'] = True
+        if (meta or {}).get('default') is not None:
+            record['default'] = (meta or {}).get('default')
+        meta_description = str((meta or {}).get('description') or '').strip()
+        if meta_description:
+            record['description'] = meta_description
         if _flow_truthy_flag((meta or {}).get('flow_supply_when_first')):
             record['flow_supply_when_first'] = True
         normalized.append(record)
@@ -47812,12 +47837,19 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
         produces = ['Flag(flag_id)'] + produces
     if plugin_type == 'flag-node-generator' and 'File(path)' not in produces:
         produces.append('File(path)')
-    hint_levels = _ensure_scaffold_hint_levels(hint_levels, produces)
+    hint_levels = _ensure_scaffold_hint_levels(hint_levels, produces, plugin_type=plugin_type)
 
     runtime_inputs_raw = payload.get('runtime_inputs')
     if runtime_inputs_raw is None:
         runtime_inputs_raw = payload.get('inputs')
     inputs_manifest = _normalize_runtime_inputs(runtime_inputs_raw, plugin_type=plugin_type)
+
+    manifest_version_value = str(payload.get('version') or '').strip() or '1.0'
+    description_hints = [
+        str(hint or '').strip()
+        for hint in (payload.get('description_hints') or [])
+        if str(hint or '').strip()
+    ] if isinstance(payload.get('description_hints'), list) else []
 
     manifest_yaml = (
         "manifest_version: 1\n"
@@ -47825,7 +47857,7 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
         f"kind: {plugin_type}\n"
         f"name: {display_name}\n"
         f"description: {description}\n"
-        "version: 1.0\n"
+        f"version: {json.dumps(manifest_version_value)}\n"
         "\n"
         "runtime:\n"
         "  type: docker-compose\n"
@@ -47846,6 +47878,11 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
                     manifest_yaml += f"    required: {'true' if bool(inp.get('required')) else 'false'}\n"
                 if inp.get('sensitive') is True:
                     manifest_yaml += "    sensitive: true\n"
+                if inp.get('default') is not None:
+                    manifest_yaml += f"    default: {json.dumps(inp.get('default'))}\n"
+                input_description = str(inp.get('description') or '').strip()
+                if input_description:
+                    manifest_yaml += f"    description: {json.dumps(input_description)}\n"
                 if inp.get('flow_supply_when_first') is True:
                     manifest_yaml += "    flow_supply_when_first: true\n"
             except Exception:
@@ -47882,6 +47919,11 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
             manifest_yaml += f"  {level}:\n"
             for value in values:
                 manifest_yaml += f"    - {json.dumps(str(value))}\n"
+
+    if description_hints:
+        manifest_yaml += "\ndescription_hints:\n"
+        for hint in description_hints:
+            manifest_yaml += f"  - {json.dumps(hint)}\n"
 
     # Injected artifacts allowlist for safe mounting.
     if inject_files:
@@ -48133,6 +48175,45 @@ def _validate_builder_scaffold_runtime_contract(scaffold_files: dict[str, str]) 
             f'but {manifest_path} does not declare them under inputs.'
         )
 
+    # An absolute /outputs/... value is not injectable: inject expansion drops the
+    # entry, so the run "succeeds" having staged nothing. Catch the literal here so
+    # the builder loop does not have to spend a container run to learn it.
+    declared_injects: set[str] = set()
+    manifest_injects = manifest_doc.get('injects') if isinstance(manifest_doc, dict) else None
+    if isinstance(manifest_injects, list):
+        for item in manifest_injects:
+            entry = str(item or '').strip()
+            if not entry:
+                continue
+            source = re.split(r'->|=>', entry, maxsplit=1)[0].strip()
+            if source:
+                declared_injects.add(source)
+
+    if declared_injects and parsed is not None:
+        absolute_output_keys: list[str] = []
+        for node in ast.walk(parsed):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key_node, value_node in zip(node.keys, node.values):
+                if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+                    continue
+                if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, str):
+                    continue
+                artifact_key = key_node.value.strip()
+                value_text = value_node.value.strip().replace('\\', '/')
+                if artifact_key not in declared_injects:
+                    continue
+                if value_text.startswith('/outputs/') and artifact_key not in absolute_output_keys:
+                    absolute_output_keys.append(artifact_key)
+        if absolute_output_keys:
+            joined = ', '.join(sorted(absolute_output_keys))
+            errors.append(
+                'Generated scaffold is inconsistent: '
+                f'{generator_path} writes absolute /outputs/... value(s) for injected artifact key(s) {joined}. '
+                'outputs.json values must be relative to /outputs (for example artifacts/my_file), '
+                'or the injected artifact is silently dropped at runtime.'
+            )
+
     levels = manifest_doc.get('hint_levels') if isinstance(manifest_doc, dict) else None
     missing_hint_levels: list[str] = []
     for level in ('low', 'medium', 'high'):
@@ -48160,6 +48241,8 @@ try:
         installed_generators_root=lambda: _installed_generators_root(),
         flag_generators_from_enabled_sources=lambda: _flag_generators_from_enabled_sources(),
         flag_node_generators_from_enabled_sources=lambda: _flag_node_generators_from_enabled_sources(),
+        generator_fact_contracts=lambda: _enabled_generator_fact_contracts(),
+        flow_synthesized_inputs=lambda: _flow_synthesized_inputs(),
         reserved_artifacts=_RESERVED_ARTIFACTS,
         load_custom_artifacts=lambda: _load_custom_artifacts(),
         upsert_custom_artifact=lambda *args, **kwargs: _upsert_custom_artifact(*args, **kwargs),
@@ -48347,6 +48430,59 @@ def _flag_node_generators_from_enabled_sources(*, scan_dependencies: bool = Fals
     return out, errors
 
 
+def _enabled_generator_fact_contracts() -> dict[str, list[dict[str, Any]]]:
+    """Fact contracts (requires/produces) for every enabled generator, by kind.
+
+    The generator *views* returned by the ``_from_enabled_sources`` helpers carry
+    produced artifacts but not ``requires`` -- that lives in the plugin contract --
+    so this pairs the two for callers that need the catalog's fact vocabulary.
+    """
+    contracts: dict[str, list[dict[str, Any]]] = {}
+    for kind in ('flag-generator', 'flag-node-generator'):
+        try:
+            generators, plugins_by_id, _errors = _flag_generators_from_manifests(kind=kind)
+        except Exception:
+            contracts[kind] = []
+            continue
+
+        items: list[dict[str, Any]] = []
+        for generator in (generators or []):
+            if not isinstance(generator, dict):
+                continue
+            if not _is_installed_generator_view(generator):
+                continue
+            generator_id = str(generator.get('id') or '').strip()
+            if not generator_id:
+                continue
+            if _is_installed_generator_disabled(kind=kind, generator_id=generator_id):
+                continue
+
+            plugin = plugins_by_id.get(generator_id) if isinstance(plugins_by_id, dict) else None
+            plugin = plugin if isinstance(plugin, dict) else {}
+
+            def _artifact_names(raw_items: Any) -> list[str]:
+                names: list[str] = []
+                for item in (raw_items or []):
+                    if isinstance(item, dict):
+                        name = str(item.get('artifact') or item.get('name') or '').strip()
+                    else:
+                        name = str(item or '').strip()
+                    if name:
+                        names.append(name)
+                return names
+
+            produces = _artifact_names(plugin.get('produces')) or _artifact_names(generator.get('outputs'))
+            items.append({
+                'id': generator_id,
+                'name': str(generator.get('name') or generator_id).strip() or generator_id,
+                'requires': _artifact_names(plugin.get('requires')),
+                'optional_requires': _artifact_names(plugin.get('optional_requires')),
+                'produces': produces,
+            })
+        contracts[kind] = items
+    return contracts
+
+
 def _flag_generators_from_all_installed_sources(*, scan_dependencies: bool = False) -> tuple[list[dict], list[dict]]:
     """Return all installed flag-generators regardless of disabled state (for catalog display)."""
     gens, _plugins_by_id, errors = _flag_generators_from_manifests(
@@ -48506,9 +48642,12 @@ def _is_installed_generator_view(gen: dict) -> bool:
 
         mp = str(gen.get('_source_path') or '').strip()
         if mp:
-            # Check if it's under outputs/installed_generators
-            installed_root = os.path.abspath(_installed_generators_root())
-            abs_mp = os.path.abspath(mp)
+            # Check if it's under the configured installed-generators root. Both sides
+            # are resolved: CORETG_INSTALLED_GENERATORS_DIR may point through a symlink
+            # (macOS /tmp and /var both do), and comparing one resolved path against one
+            # unresolved path makes every installed generator look uninstalled.
+            installed_root = os.path.realpath(_installed_generators_root())
+            abs_mp = os.path.realpath(mp)
             try:
                 if os.path.commonpath([installed_root, abs_mp]) == installed_root:
                     return True

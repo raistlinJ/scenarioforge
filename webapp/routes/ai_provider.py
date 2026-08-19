@@ -27,6 +27,7 @@ from scenarioforge.planning.ai_topology_intent import compile_ai_topology_intent
 from scenarioforge.planning.ai_topology_intent import explicit_host_role_count_total as _compiler_explicit_host_role_count_total
 from scenarioforge.planning.ai_topology_intent import extract_ai_topology_intent as _compiler_extract_ai_topology_intent
 from scenarioforge.planning.ai_topology_intent import extract_ai_topology_intent as _compiler_extract_ai_topology_intent
+from scenarioforge.planning.ai_topology_intent import extract_flag_node_generator_query_hint as _compiler_extract_flag_node_generator_query_hint
 from scenarioforge.planning.ai_topology_intent import extract_node_role_count_intent as _compiler_extract_node_role_count_intent
 from scenarioforge.planning.ai_topology_intent import extract_r2r_density_intent as _compiler_extract_r2r_density_intent
 from scenarioforge.planning.ai_topology_intent import extract_requested_traffic_patterns as _compiler_extract_requested_traffic_patterns
@@ -38,6 +39,7 @@ from scenarioforge.planning.ai_topology_intent import extract_vulnerability_quer
 from scenarioforge.planning.ai_topology_intent import extract_vulnerability_query_hint as _compiler_extract_vulnerability_query_hint
 from scenarioforge.planning.ai_topology_intent import extract_vulnerability_target_count as _compiler_extract_vulnerability_target_count
 from scenarioforge.planning.ai_topology_intent import has_low_r2r_intent as _compiler_has_low_r2r_intent
+from scenarioforge.planning.ai_topology_intent import search_flag_node_generator_catalog_for_prompt as _compiler_search_flag_node_generator_catalog_for_prompt
 from scenarioforge.planning.ai_topology_intent import search_vulnerability_catalog_for_prompt as _compiler_search_vulnerability_catalog_for_prompt
 from webapp import app_backend
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
@@ -200,6 +202,8 @@ def _infer_tool_parse_domain(source_prompt: str, *, exc: BaseException | None = 
     error_text = str(exc or '').lower()
     if _extract_vulnerability_target_count(source_prompt) > 0 or any(token in error_text for token in ['v_count', 'v_name', 'v_path', 'vulnerability', 'magento']):
         return 'vulnerability'
+    if _extract_flag_node_generator_query_hint(source_prompt) or 'g_id' in error_text:
+        return 'flag-node-generator'
     if _build_seeded_traffic_rows(source_prompt) or _extract_requested_traffic_patterns(source_prompt) or re.search(r'\b(?:tcp|udp|traffic\s+flows?|flows?|traffic\s+streams?|streams?)\b', text):
         return 'traffic'
     if re.search(r'\b(?:ospf|bgp|rip|routing|router|routers)\b', text):
@@ -221,6 +225,12 @@ def _build_one_tool_only_retry_lines(source_prompt: str, *, exc: BaseException |
             lines.append(f'Next turn: call only scenario.search_vulnerability_catalog with query="{query_hint}" and no other tool call.')
         else:
             lines.append('Next turn: call only scenario.search_vulnerability_catalog with a free-text vulnerability query from the user wording and no other tool call.')
+    elif domain == 'flag-node-generator':
+        query_hint = _extract_flag_node_generator_query_hint(source_prompt)
+        if query_hint:
+            lines.append(f'Next turn: call only scenario.search_flag_node_generator_catalog with query="{query_hint}" and no other tool call.')
+        else:
+            lines.append('Next turn: call only scenario.search_flag_node_generator_catalog with a free-text generator query from the user wording and no other tool call.')
     elif domain == 'traffic':
         lines.append('Next turn: call only one scenario.add_traffic_item row. Do not emit multiple traffic rows in one message.')
     elif domain == 'routing':
@@ -280,6 +290,20 @@ def _build_mcp_bridge_tool_parse_retry_prompt(
                     formatted_candidates.append(f'"{candidate_name}" -> "{candidate_path}"')
             if formatted_candidates:
                 retry_lines.append('Example concrete catalog matches: ' + '; '.join(formatted_candidates[:3]) + '.')
+    generator_query_hint = _extract_flag_node_generator_query_hint(source_prompt)
+    if generator_query_hint:
+        retry_lines.append(
+            f'For flag-node-generators, run scenario.search_flag_node_generator_catalog with query="{generator_query_hint}" before any add_flag_node_generator_item call, then copy g_id and g_name from the chosen result.'
+        )
+        generator_candidates = _search_flag_node_generator_catalog_for_prompt(generator_query_hint, limit=3)
+        formatted_generators = [
+            f'"{str(candidate.get("name") or "").strip()}" -> g_id="{str(candidate.get("id") or "").strip()}"'
+            for candidate in generator_candidates
+            if str(candidate.get('name') or '').strip() and str(candidate.get('id') or '').strip()
+        ]
+        if formatted_generators:
+            retry_lines.append('Example enabled generator matches: ' + '; '.join(formatted_generators[:3]) + '.')
+
     traffic_rows = _build_seeded_traffic_rows(source_prompt)
     requested_traffic_patterns = _extract_requested_traffic_patterns(source_prompt)
     if traffic_rows or requested_traffic_patterns or re.search(r'\b(?:tcp|udp|traffic\s+flows?|flows?|traffic\s+streams?|streams?)\b', source_prompt.lower()):
@@ -446,6 +470,57 @@ def _build_vulnerability_grounding_guidance(user_prompt: str) -> list[str]:
     return guidance
 
 
+def _extract_flag_node_generator_query_hint(user_prompt: str) -> str:
+    return _compiler_extract_flag_node_generator_query_hint(user_prompt)
+
+
+def _load_flag_node_generator_catalog_for_prompt() -> list[dict[str, Any]]:
+    loader = getattr(app_backend, '_flag_node_generators_from_enabled_sources', None)
+    if not callable(loader):
+        return []
+    try:
+        generators, _errors = loader()
+    except Exception:
+        return []
+    return [generator for generator in (generators or []) if isinstance(generator, dict)]
+
+
+def _search_flag_node_generator_catalog_for_prompt(query: str, *, limit: int = 3) -> list[dict[str, str]]:
+    return _compiler_search_flag_node_generator_catalog_for_prompt(
+        query,
+        catalog=_load_flag_node_generator_catalog_for_prompt(),
+        limit=limit,
+    )
+
+
+def _build_flag_node_generator_grounding_guidance(user_prompt: str) -> list[str]:
+    query_hint = _extract_flag_node_generator_query_hint(user_prompt)
+    if not query_hint:
+        return []
+
+    requested_count = max(1, _extract_flag_node_generator_target_count(user_prompt))
+    candidates = _search_flag_node_generator_catalog_for_prompt(query_hint, limit=requested_count)
+    guidance = [
+        f'The request describes the flag-node-generator it wants, so do not settle for selected="Random": call scenario.search_flag_node_generator_catalog with query="{query_hint}", then add a Specific row with g_id and g_name copied from the chosen result.',
+        'Do one focused generator search and stop once you have viable results. Never invent a g_id; only enabled catalog ids resolve.',
+    ]
+    if candidates:
+        candidate_text = ', '.join(
+            f'"{str(candidate.get("name") or "").strip()}" (g_id={str(candidate.get("id") or "").strip()})'
+            for candidate in candidates
+            if str(candidate.get('name') or '').strip() and str(candidate.get('id') or '').strip()
+        )
+        if candidate_text:
+            guidance.append(
+                f'Likely enabled matches for that query include: {candidate_text}. Prefer these before exploring unrelated generators.'
+            )
+    else:
+        guidance.append(
+            'If the search returns nothing close to that description, fall back to selected="Random" rather than guessing a g_id.'
+        )
+    return guidance
+
+
 def _has_low_r2r_intent(user_prompt: str) -> bool:
     return _compiler_has_low_r2r_intent(user_prompt)
 
@@ -472,6 +547,8 @@ def _build_mcp_bridge_execution_guidance(user_prompt: str) -> list[str]:
 
     if vulnerability_target_count > 0:
         guidance.extend(_build_vulnerability_grounding_guidance(user_prompt))
+
+    guidance.extend(_build_flag_node_generator_grounding_guidance(user_prompt))
 
     if derived_host_count is not None and vulnerability_target_count > 0:
         if explicit_host_total >= derived_host_count:
@@ -1198,7 +1275,7 @@ def _build_prompt_coverage_retry_prompt(prompt: str, mismatch: dict[str, Any]) -
             )
         elif target == 'Flag Node Generators':
             retry_lines.append(
-                'Add the missing Flag Node Generators rows before finishing. Use scenario.add_flag_node_generator_item with selected="Random" unless the user named a specific enabled generator; these are additive Docker challenge nodes, not Node Information Docker rows.'
+                'Add the missing Flag Node Generators rows before finishing. Use scenario.add_flag_node_generator_item with selected="Random" unless the user named or described the generator they want, in which case call scenario.search_flag_node_generator_catalog first and copy g_id from the chosen result; these are additive Docker challenge nodes, not Node Information Docker rows.'
             )
         elif target.startswith('Node Information:'):
             retry_lines.append(
@@ -1453,7 +1530,7 @@ def _classify_tool_repair(tool_response: str, *, qualified_tool_name: str) -> tu
         return 'traffic-tool-error', f'Auto-healing a traffic tool error for {qualified_tool_name}.'
     if tool_name in {'scenario.add_vulnerability_item', 'scenario.search_vulnerability_catalog'} or (tool_name == 'scenario.replace_section' and section_name == 'vulnerabilities'):
         return 'vulnerability-tool-error', f'Auto-healing a vulnerability tool error for {qualified_tool_name}.'
-    if tool_name == 'scenario.add_flag_node_generator_item' or (tool_name == 'scenario.replace_section' and section_name in {'flagnodegenerators', 'flagnodegenerator'}):
+    if tool_name in {'scenario.add_flag_node_generator_item', 'scenario.search_flag_node_generator_catalog'} or (tool_name == 'scenario.replace_section' and section_name in {'flagnodegenerators', 'flagnodegenerator'}):
         return 'flag-node-generator-tool-error', f'Auto-healing a flag-node-generator tool error for {qualified_tool_name}.'
     return category, status_message
 
@@ -1742,6 +1819,53 @@ def _build_recoverable_mcp_bridge_tool_error(
                 },
             })
         return None
+
+    generator_catalog_error = 'topology-selected flag-node-generator is not enabled' in message.lower()
+    if tool_name.endswith('scenario.add_flag_node_generator_item') and generator_catalog_error:
+        enabled = [str(name or '').strip() for name in (enabled_tool_names or []) if str(name or '').strip()]
+        search_available = any(name.endswith('scenario.search_flag_node_generator_catalog') for name in enabled)
+        raw_query = ' '.join(
+            part for part in [
+                str((tool_args or {}).get('query') or '').strip(),
+                str((tool_args or {}).get('g_name') or '').strip(),
+                str((tool_args or {}).get('g_id') or '').strip(),
+            ]
+            if part
+        ).strip()
+        try:
+            count = max(1, int((tool_args or {}).get('v_count') or (tool_args or {}).get('count') or 1))
+        except Exception:
+            count = 1
+
+        guidance = (
+            'Do not invent a Specific flag-node-generator g_id. '
+            'Search the enabled generator catalog with the user\'s wording, then add a Specific row with the '
+            'g_id and g_name copied from the chosen result. '
+            'If nothing matches the request, use selected="Random" instead.'
+        )
+
+        if search_available:
+            return json.dumps({
+                'error': message,
+                'recoverable': True,
+                'guidance': guidance,
+                'retry_hint': {
+                    'tool': 'scenario.search_flag_node_generator_catalog',
+                    'query': raw_query or 'flag node generator',
+                    'limit': max(5, count * 3),
+                },
+            })
+
+        return json.dumps({
+            'error': message,
+            'recoverable': True,
+            'guidance': guidance,
+            'retry_hint': {
+                'tool': 'scenario.add_flag_node_generator_item',
+                'selected': 'Random',
+                'v_count': count,
+            },
+        })
 
     vulnerability_catalog_error = 'specific vulnerability must match an enabled catalog entry by v_path or v_name' in message.lower()
     if tool_name.endswith('scenario.add_vulnerability_item') and vulnerability_catalog_error:
@@ -3432,6 +3556,8 @@ _LLM_TOOL_PROPERTY_ALLOWLISTS: dict[str, set[str]] = {
     },
     'scenario.add_segmentation_item': {'selected', 'count', 'factor', 'density'},
     'scenario.add_vulnerability_item': {'v_name', 'v_path', 'v_type', 'v_vector', 'v_count'},
+    'scenario.add_flag_node_generator_item': {'selected', 'g_id', 'g_name', 'count', 'v_count'},
+    'scenario.search_flag_node_generator_catalog': {'query', 'produces', 'limit'},
 }
 
 
@@ -3439,7 +3565,9 @@ def _is_draft_scoped_mcp_bridge_tool(qualified_tool_name: Any) -> bool:
     name = str(qualified_tool_name or '').strip()
     if not name or '.scenario.' not in name:
         return False
-    return not name.endswith('scenario.create_draft') and not name.endswith('scenario.search_vulnerability_catalog')
+    if name.endswith('scenario.create_draft'):
+        return False
+    return not name.endswith('scenario.search_vulnerability_catalog') and not name.endswith('scenario.search_flag_node_generator_catalog')
 
 
 def _build_llm_chat_tool_schema(qualified_tool_name: str, input_schema: dict[str, Any]) -> dict[str, Any]:
@@ -4219,6 +4347,20 @@ def _compact_tool_result_for_llm(qualified_tool_name: str, data: dict[str, Any])
     if isinstance(preview, dict):
         compact['preview'] = _compact_preview_payload_for_llm(preview)
 
+    if qualified_tool_name.endswith('search_flag_node_generator_catalog'):
+        results = compact.get('results')
+        if isinstance(results, list):
+            compact['results'] = [
+                {
+                    'g_id': result.get('g_id'),
+                    'g_name': result.get('g_name'),
+                    'description': result.get('description'),
+                    'score': result.get('score'),
+                }
+                for result in results[:5]
+                if isinstance(result, dict)
+            ]
+
     if qualified_tool_name.endswith('search_vulnerability_catalog'):
         results = compact.get('results')
         if isinstance(results, list):
@@ -4550,11 +4692,12 @@ def _build_mcp_bridge_goal_prompt(
         *_build_count_intent_guidance(user_prompt),
         *_build_mcp_bridge_execution_guidance(user_prompt),
         'If the user asks for routers without naming a protocol, use scenario.add_routing_item with protocol="OSPFv2" and the requested count when that tool is enabled; otherwise replace only the Routing section with a Count row selected="OSPFv2".',
-        'When dedicated tools are available, prefer scenario.add_node_role_item for host or Docker counts, scenario.add_routing_item for explicit router/protocol rows and routing edge hints, scenario.add_service_item for Services rows, scenario.add_traffic_item for TCP or UDP traffic, scenario.add_segmentation_item for Segmentation rows, and scenario.add_flag_node_generator_item for topology flag-node-generator rows.',
+        'When dedicated tools are available, prefer scenario.add_node_role_item for host or Docker counts, scenario.add_routing_item for explicit router/protocol rows and routing edge hints, scenario.add_service_item for Services rows, scenario.add_traffic_item for TCP or UDP traffic, scenario.add_segmentation_item for Segmentation rows, scenario.search_flag_node_generator_catalog to look up an enabled generator, and scenario.add_flag_node_generator_item for topology flag-node-generator rows.',
         'For vulnerabilities, prefer scenario.search_vulnerability_catalog first, then call scenario.add_vulnerability_item with explicit v_name and v_path from the chosen result. Do not pass factor. If the user asks for multiple different vulnerabilities, make separate add_vulnerability_item calls with v_count=1 for each chosen vulnerability.',
         'For broad vulnerability categories such as web-related, database, auth, or ssh-related vulnerabilities, do not invent a synthetic category row. Search the vulnerability catalog using the user\'s wording and available README-backed context, and do not pass v_type or v_vector filters unless the user explicitly requested those exact filters. Then choose concrete catalog results.',
-        'For topology flag-node-generators, use selected="Random" unless the user names a specific enabled generator. A Specific row requires g_id (and its catalog-backed g_name); these rows are additive Docker challenge nodes and never replace Node Information Docker rows or vulnerability rows.',
+        'For topology flag-node-generators, use selected="Random" unless the user describes or names the generator they want. When they do, call scenario.search_flag_node_generator_catalog first and copy g_id (and its catalog-backed g_name) from the chosen result into a Specific row; these rows are additive Docker challenge nodes and never replace Node Information Docker rows or vulnerability rows.',
         *_build_vulnerability_grounding_guidance(user_prompt),
+        *_build_flag_node_generator_grounding_guidance(user_prompt),
         'For services and segmentation, prefer schema-discovered values and the dedicated mutation tools; otherwise use replace_section with backend-compatible items.',
         'For traffic requests, ensure each Traffic row uses selected="TCP" or "UDP", a concrete content_type, and one exact pattern from: continuous, periodic, burst, poisson, or ramp. For varied traffic profiles, create multiple Traffic rows rather than vague free-text profile labels. Each Traffic row must also use either v_metric="Count" with v_count or a positive factor so preview flows materialize.',
         'Only use free-text fields where the schema explicitly expects them, such as notes or vulnerability identifiers like v_name/v_path.',

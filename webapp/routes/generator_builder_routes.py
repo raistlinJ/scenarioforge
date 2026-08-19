@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 
@@ -21,6 +22,10 @@ from webapp.routes._registration import begin_route_registration, mark_routes_re
 _GROUNDING_CACHE: dict[str, str] = {}
 _BUILD_GENERATOR_SCAFFOLD: Callable[[dict[str, Any]], tuple[dict[str, str], str, str]] | None = None
 _VALIDATE_BUILDER_SCAFFOLD: Callable[[dict[str, str]], list[str]] | None = None
+_GENERATOR_FACT_CONTRACTS: Callable[[], dict[str, list[dict[str, Any]]]] | None = None
+_CATALOG_FACT_CACHE: dict[str, Any] = {}
+_CATALOG_FACT_CACHE_TTL_SECONDS = 60.0
+_FLOW_SYNTHESIZED_INPUTS: Callable[[], set[str]] | None = None
 _BUILDER_PROVIDER_HEARTBEAT_SECONDS = 5.0
 
 
@@ -114,14 +119,18 @@ def _coerce_hint_levels(value: Any) -> dict[str, list[str]]:
     return result
 
 
-def _default_hint_levels_for_outputs(produces: Any) -> dict[str, list[str]]:
+def _default_hint_levels_for_outputs(produces: Any, *, plugin_type: str = '') -> dict[str, list[str]]:
     artifacts = _coerce_string_list(produces)
 
     def _compact(value: str) -> str:
         return re.sub(r'\s+', '', str(value or '')).lower()
 
+    # On flag-node-generators File(path) is the emitted docker-compose.yml, which Flow filters
+    # out of participant hints, so FlagFile(path) is the artifact worth pointing at.
+    node_kind = str(plugin_type or '').strip() == 'flag-node-generator'
     priority = (
-        'File(path)',
+        'FlagFile(path)',
+        *(() if node_kind else ('File(path)',)),
         'Credential(user,password)',
         'Credential(user, password)',
         'Credential(user)',
@@ -139,7 +148,18 @@ def _default_hint_levels_for_outputs(produces: Any) -> dict[str, list[str]]:
         if chosen:
             break
     if not chosen:
-        chosen = next((item for item in artifacts if _compact(item) != _compact('Flag(flag_id)')), '')
+        # Flag/delivery-contract keys carry the answer or a bare mode string, so they never make a usable hint.
+        skip = {_compact('Flag(flag_id)'), _compact('FlagDelivery(mode)')}
+        if node_kind:
+            skip.add(_compact('File(path)'))
+        chosen = next(
+            (
+                item
+                for item in artifacts
+                if _compact(item) not in skip and not _compact(item).startswith('partialflag(')
+            ),
+            '',
+        )
     medium = f"Artifact or service: {{{{OUTPUT.{chosen}}}}}" if chosen else 'Inspect the target service or generated artifact for the next clue.'
     return {
         'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
@@ -148,9 +168,9 @@ def _default_hint_levels_for_outputs(produces: Any) -> dict[str, list[str]]:
     }
 
 
-def _ensure_hint_levels(value: Any, produces: Any) -> dict[str, list[str]]:
+def _ensure_hint_levels(value: Any, produces: Any, *, plugin_type: str = '') -> dict[str, list[str]]:
     normalized = _coerce_hint_levels(value)
-    defaults = _default_hint_levels_for_outputs(produces)
+    defaults = _default_hint_levels_for_outputs(produces, plugin_type=plugin_type)
     for level in ('low', 'medium', 'high'):
         if not normalized.get(level):
             normalized[level] = list(defaults.get(level) or [])
@@ -269,6 +289,11 @@ def _coerce_runtime_inputs(value: Any) -> list[dict[str, Any]]:
         }
         if item.get('sensitive') is True:
             record['sensitive'] = True
+        if item.get('default') is not None:
+            record['default'] = item.get('default')
+        description = str(item.get('description') or '').strip()
+        if description:
+            record['description'] = description
         if _truthy_flag(item.get('flow_supply_when_first')):
             record['flow_supply_when_first'] = True
         normalized.append(record)
@@ -971,6 +996,163 @@ def _render_grounding_head(title: str, rel_path: str, *, max_lines: int = 80, ma
     ]
 
 
+def _fact_ontology_signatures() -> list[str]:
+    """Canonical fact signatures the sequencer chains on."""
+    text = _read_grounding_file('schemas/facts/fact_ontology_reference.yaml')
+    signatures: list[str] = []
+    for line in text.splitlines():
+        entry = line.split('#', 1)[0].strip()
+        if entry.endswith(')') and '(' in entry:
+            signatures.append(entry)
+    return signatures
+
+
+def _render_fact_ontology_lines(*, compact: bool = False) -> list[str]:
+    signatures = _fact_ontology_signatures()
+    if not signatures:
+        return []
+    if compact:
+        return [
+            'Canonical fact signatures (schemas/facts/fact_ontology_reference.yaml): ' + ', '.join(signatures),
+            '',
+        ]
+    return [
+        'Canonical fact signatures (schemas/facts/fact_ontology_reference.yaml):',
+        '```text',
+        *signatures,
+        '```',
+        '',
+    ]
+
+
+def _load_catalog_fact_contracts() -> dict[str, list[dict[str, Any]]]:
+    loader = _GENERATOR_FACT_CONTRACTS
+    if loader is None:
+        return {}
+    # Scanning both catalogs costs a manifest walk, and one request can build the
+    # prompt several times (create, repair, auto-heal), so hold the result briefly.
+    # A different loader object (a test stub, a re-register) bypasses the cache.
+    now = time.monotonic()
+    if (
+        _CATALOG_FACT_CACHE.get('loader') is loader
+        and (now - float(_CATALOG_FACT_CACHE.get('at') or 0.0)) < _CATALOG_FACT_CACHE_TTL_SECONDS
+    ):
+        return _CATALOG_FACT_CACHE.get('contracts') or {}
+    try:
+        contracts = loader()
+    except Exception:
+        return {}
+    if not isinstance(contracts, dict):
+        return {}
+    _CATALOG_FACT_CACHE.update({'loader': loader, 'at': now, 'contracts': contracts})
+    return contracts
+
+
+def _load_flow_synthesized_inputs() -> set[str]:
+    if _FLOW_SYNTHESIZED_INPUTS is None:
+        return set()
+    try:
+        return {str(item or '').strip() for item in (_FLOW_SYNTHESIZED_INPUTS() or set()) if str(item or '').strip()}
+    except Exception:
+        return set()
+
+
+def _summarize_catalog_facts(plugin_type: str) -> dict[str, Any]:
+    """What the enabled catalog produces and consumes, for prompt grounding.
+
+    A new generator only chains if its `requires` can be met by facts something
+    else already produces (or that Flow synthesizes), so the model needs the
+    catalog's real fact vocabulary, not just the canonical ontology.
+    """
+    contracts = _load_catalog_fact_contracts()
+    if not contracts:
+        return {}
+
+    same_kind = contracts.get(plugin_type) or []
+    all_items = [item for items in contracts.values() for item in (items or []) if isinstance(item, dict)]
+    if not all_items:
+        return {}
+
+    produced = Counter()
+    required = Counter()
+    for item in all_items:
+        for fact in (item.get('produces') or []):
+            fact_text = str(fact or '').strip()
+            if fact_text:
+                produced[fact_text] += 1
+    for item in all_items:
+        for fact in (item.get('requires') or []):
+            fact_text = str(fact or '').strip()
+            if fact_text:
+                required[fact_text] += 1
+
+    same_kind_required = Counter()
+    for item in same_kind:
+        if not isinstance(item, dict):
+            continue
+        for fact in (item.get('requires') or []):
+            fact_text = str(fact or '').strip()
+            if fact_text:
+                same_kind_required[fact_text] += 1
+
+    synthesized = _load_flow_synthesized_inputs()
+    unmet = [
+        fact
+        for fact, _count in required.most_common()
+        if fact not in produced and fact not in synthesized
+    ]
+
+    return {
+        'counts': {kind: len(items or []) for kind, items in contracts.items()},
+        'produced': produced,
+        'required': same_kind_required or required,
+        'unmet': unmet,
+        'synthesized': sorted(synthesized),
+    }
+
+
+def _format_fact_counts(counter: Counter, limit: int) -> str:
+    return ', '.join(f'{fact} (x{count})' for fact, count in counter.most_common(limit))
+
+
+def _render_catalog_fact_grounding_lines(plugin_type: str, *, compact: bool = False) -> list[str]:
+    summary = _summarize_catalog_facts(plugin_type)
+    if not summary:
+        return []
+
+    counts = summary.get('counts') or {}
+    installed_text = ', '.join(f'{count} {kind}s enabled' for kind, count in sorted(counts.items()) if count)
+    produced: Counter = summary.get('produced') or Counter()
+    required: Counter = summary.get('required') or Counter()
+    unmet: list[str] = summary.get('unmet') or []
+    synthesized: list[str] = summary.get('synthesized') or []
+
+    if compact:
+        lines = [f'Installed catalog fact vocabulary ({installed_text}):']
+        if produced:
+            lines.append(f'- Already produced by the catalog, so safe to require: {_format_fact_counts(produced, 12)}.')
+        if unmet:
+            lines.append(f'- Required by the catalog but produced by nothing enabled: {", ".join(unmet[:6])}.')
+        lines.append('')
+        return lines
+
+    lines = [
+        f'Installed catalog fact vocabulary ({installed_text}):',
+        '- The catalog is the real vocabulary; it uses facts beyond the canonical ontology, and the solver matches all of them literally.',
+    ]
+    if produced:
+        lines.append(f'- Facts the enabled catalog already produces, so a new generator can require them and still be schedulable: {_format_fact_counts(produced, 20)}.')
+    if required:
+        lines.append(f'- Facts enabled generators of this kind already require, so producing them makes this generator reusable: {_format_fact_counts(required, 15)}.')
+    if unmet:
+        lines.append(f'- Required somewhere in the catalog but produced by nothing enabled: {", ".join(unmet[:10])}. Producing one of these unblocks a chain that currently cannot be sequenced.')
+    if synthesized:
+        lines.append(f'- Flow synthesizes these per-step runtime inputs, so declare them under runtime_inputs and never as artifact requires: {", ".join(synthesized[:16])}.')
+    lines.append('- Requiring a fact that nothing produces and Flow does not synthesize leaves this generator out of every candidate pool: it will never be selected, with no error.')
+    lines.append('')
+    return lines
+
+
 def _build_generator_grounding_lines(plugin_type: str, *, compact: bool = False, ultra_compact: bool = False) -> list[str]:
     if plugin_type == 'flag-node-generator':
         template_base = 'generator_templates/flag-node-generator-python-compose'
@@ -988,11 +1170,19 @@ def _build_generator_grounding_lines(plugin_type: str, *, compact: bool = False,
         '- Mark runtime inputs with `flow_supply_when_first` when participants must use the value on sequence 1 or a parallel branch starter and cannot reasonably discover it yet.',
         '- Do not use `flow_supply_when_first` for purely internal entropy/config fields that participants never need, such as ordinary seeds.',
         '- Optionally include `access_instructions` in manifest to guide participants on artifact usage/exploitation.',
+        '- Draw requires/optional_requires/produces and outputs.json keys from the canonical fact ontology; invent a fact name only when nothing canonical fits the artifact.',
+        '- Prefer a fact spelling the installed catalog already uses over a new one, and only require facts the catalog produces or Flow synthesizes; an unsatisfiable require silently drops this generator from every Flow candidate pool.',
+        '- Fact keys are matched literally, so write `Credential(user,password)` with no space after the comma and keep the manifest, outputs.json, and hint placeholders byte-identical.',
+        '- Declare the flag delivery contract when the flag is not a plain file the participant reads: set `FlagDelivery(mode)` to file, embedded, none, or unknown, and add `FlagFile(path)` (relative to /outputs) whenever the mode is file.',
+        '- On a flag-node-generator, `File(path)` is the emitted docker-compose.yml, so hints must reference `{{OUTPUT.FlagFile(path)}}` instead; Flow drops hint lines that point at compose files, manifests, or READMEs.',
+        '- Runtime inputs may also carry `default` and `description`; supply them so builder forms, local tests, and Flow prefill sensible values instead of guessing.',
+        '- Optionally include `description_hints` (short author-facing phrases) to make the generator easier to find in the catalog.',
         '',
     ]
     if ultra_compact:
         lines.extend([
             'Ultra-compact grounding mode is active for this request: return only the requested JSON object and keep the scaffold minimal, deterministic, and valid.',
+            'Use canonical fact signatures such as Flag(flag_id), File(path), Credential(user,password), Knowledge(value) with no space after commas.',
             '',
         ])
         return lines
@@ -1006,6 +1196,8 @@ def _build_generator_grounding_lines(plugin_type: str, *, compact: bool = False,
         ))
         if plugin_type == 'flag-node-generator':
             lines.extend(_render_grounding_head('Reference template excerpt: docker-compose.yml', f'{template_base}/docker-compose.yml', max_lines=20, max_chars=900))
+        lines.extend(_render_fact_ontology_lines(compact=True))
+        lines.extend(_render_catalog_fact_grounding_lines(plugin_type, compact=True))
         lines.extend([
             'Compact grounding mode is active for this request: use the excerpts above as shape guidance and avoid depending on omitted catalog details.',
             '',
@@ -1016,6 +1208,24 @@ def _build_generator_grounding_lines(plugin_type: str, *, compact: bool = False,
         'docs/GENERATOR_AUTHORING.md',
         '## 0) AI scaffolding quickstart',
     ))
+    lines.extend(_render_fact_ontology_lines())
+    lines.extend(_render_catalog_fact_grounding_lines(plugin_type))
+    lines.extend(_render_grounding_excerpt(
+        'Reference docs excerpt: allowed runtime input types',
+        'docs/FLAG_GENERATORS_ALLOWED_INPUTS_OUTPUTS.md',
+        '## 1) Allowed Runtime Input Types (`inputs[].type`)',
+    ))
+    lines.extend(_render_grounding_excerpt(
+        'Reference docs excerpt: required and optional outputs.json keys',
+        'docs/FLAG_GENERATORS_ALLOWED_INPUTS_OUTPUTS.md',
+        '## 4) Required and Optional `outputs.json` Keys',
+    ))
+    if plugin_type == 'flag-node-generator':
+        lines.extend(_render_grounding_excerpt(
+            'Reference docs excerpt: compose runtime contract',
+            'docs/GENERATOR_AUTHORING.md',
+            '## 4.1) Compose runtime contract (flag-node-generators)',
+        ))
     lines.extend(_render_grounding_section('Reference template: generator.py', f'{template_base}/generator.py'))
     lines.extend(_render_grounding_section('Reference template: docker-compose.yml', f'{template_base}/docker-compose.yml'))
     return lines
@@ -1979,15 +2189,24 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '- If you declare inject_files, every inject entry must resolve to a real generated file path, not just an ontology key name.',
         '- If injected artifacts could land in plausible target directories, include inject_candidate_paths as absolute UI suggestions; default injection remains /flow_injects unless inject_files uses an explicit `source -> /dest` entry.',
         '- Include access_instructions when participants need to mount, connect to, exploit, or read generated services/files/credentials. Use title and steps with markdown instructions and optional vars mapping placeholders to output/input keys.',
+        '- Use canonical fact signatures from the ontology for requires, optional_requires, produces, and outputs.json keys; only invent a fact name when nothing canonical fits.',
+        '- Only require facts the installed catalog already produces or Flow synthesizes, and reuse the catalog spelling exactly; a require nothing satisfies drops this generator from every Flow candidate pool without an error.',
+        '- Fact keys are compared literally, so write Credential(user,password) with no space after commas and keep manifest, outputs.json, and hint placeholders byte-identical.',
+        '- Set FlagDelivery(mode) to file, embedded, none, or unknown whenever the flag is not simply read from a file, and add FlagFile(path) relative to /outputs when the mode is file.',
+        '- Give each runtime input a description, and a default when a sensible non-secret default exists, so builder forms and local tests do not have to guess values.',
+        '- Add description_hints (short author-facing phrases) when they help identify this generator in the catalog.',
     ]
     if plugin_type == 'flag-node-generator':
         kind_requirements.extend([
             '- Also write /outputs/docker-compose.yml.',
             '- Include File(path): docker-compose.yml in outputs.',
+            '- Point participant hints at FlagFile(path), not File(path): File(path) is the compose file, which Flow filters out of participant-facing hints.',
             '- Do not emit ${...} placeholders in docker-compose.yml.',
             '- Prefer explicit working_dir or absolute script paths in compose startup commands.',
             '- Avoid shell PID capture, trap cleanup, and doubled-dollar patterns in docker-compose.yml commands, for example $$, $!, $$!, trap, or backgrounded PID bookkeeping.',
             '- Prefer a single stable foreground command or a simple fallback such as `cmd || sleep infinity` instead of trap-based shell orchestration.',
+            '- Only the node-named service owns networking under CORE: do not rely on hostname, ports, expose, dns, extra_hosts, mac_address, or networks on any secondary service, because those keys are stripped before the stack runs.',
+            '- If generator.py templates values into a .py file it emits, parse them as JSON at runtime (json.loads) instead of pasting json.dumps output into Python source; true/false/null are not Python and the runner fails the run on emitted Python that will not import.',
         ])
     else:
         kind_requirements.extend([
@@ -2030,10 +2249,12 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '  "folder_name": "py_source_identifier",',
         '  "name": "Human-readable name",',
         '  "description": "One sentence summary",',
+        '  "version": "1.0",',
+        '  "description_hints": ["ssh credential challenge"],',
         '  "requires": [{"artifact": "Knowledge(ip)", "optional": false}],',
         '  "optional_requires": ["Knowledge(hostname)"],',
-        '  "produces": ["Flag(flag_id)", "Credential(user,password)"],',
-        '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true}, {"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true}],',
+        '  "produces": ["Flag(flag_id)", "Credential(user,password)", "FlagDelivery(mode)", "FlagFile(path)"],',
+        '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true, "description": "Deterministic run seed"}, {"name": "flag_prefix", "type": "string", "required": false, "default": "FLAG", "description": "Flag wrapper prefix"}, {"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true}],',
         '  "hint_levels": {"low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."], "medium": ["Service/artifact: {{OUTPUT.File(path):basename}}"], "high": ["Work through the access instructions for this step in order."]},',
         '  "inject_files": ["File(path)"],',
         '  "inject_candidate_paths": ["/opt/uploads", "/var/www/html"],',
@@ -2050,7 +2271,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         ]
     elif compact_grounding:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true}],"hint_levels":{"low":["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],"medium":["Artifact: {{OUTPUT.Flag(flag_id)}}"],"high":["Use the access instructions and README.md."]},"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","version":"1.0","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":["Knowledge(hostname)"],"produces":["Flag(flag_id)"],"runtime_inputs":[{"name":"seed","type":"string","required":true,"description":"Deterministic run seed"}],"hint_levels":{"low":["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],"medium":["Artifact: {{OUTPUT.Flag(flag_id)}}"],"high":["Use the access instructions and README.md."]},"inject_files":["File(path)"],"inject_candidate_paths":["/opt/uploads"],"access_instructions":{"title":"How to Access","steps":[{"step":1,"title":"Use the artifact","instructions":"Follow the generated hint."}]},"env":{"EXAMPLE":"value"},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text"}',
         ]
 
     current_scaffold = payload.get('current_scaffold_request') if isinstance(payload.get('current_scaffold_request'), dict) else None
@@ -2073,7 +2294,8 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         'Response contract:',
         '- Reply with exactly one JSON object.',
         '- Use requires as a list of {artifact, optional}.',
-        '- Use runtime_inputs as a list of {name, type, required, sensitive?, flow_supply_when_first?}.',
+        '- Use runtime_inputs as a list of {name, type, required, sensitive?, default?, description?, flow_supply_when_first?}.',
+        '- Use only canonical input types: string, int, float, number, boolean, json, file, string_list, file_list.',
         '- Include full generator_py_text.',
         '- Include compose_text when the default scaffold would be insufficient.',
         '- Keep manifest-facing artifact keys and outputs.json keys aligned.',
@@ -2081,6 +2303,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '- If inject_files references File(path), then produces must include File(path) and outputs.json.outputs["File(path)"] must point to a created file path relative to /outputs, not an absolute /outputs/... path.',
         '- Use inject_candidate_paths only as absolute suggested destinations; use explicit inject_files entries like `File(path) -> /dest` when runtime injection must target a non-default path.',
         '- Use access_instructions as a manifest-ready dict with title and steps when participants need concrete access guidance.',
+        '- Optionally set version (defaults to 1.0) and description_hints (list of short catalog phrases).',
         '',
         'JSON schema shape:',
         *schema_lines,
@@ -2269,7 +2492,7 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
         produces_for_hints.append('File(path)')
     if not produces_for_hints:
         produces_for_hints.append('Flag(flag_id)')
-    hint_levels = _ensure_hint_levels(hint_levels, produces_for_hints)
+    hint_levels = _ensure_hint_levels(hint_levels, produces_for_hints, plugin_type=plugin_type)
 
     return {
         'plugin_type': plugin_type,
@@ -2277,6 +2500,8 @@ def _normalize_ai_scaffold_payload(ai_payload: dict[str, Any], request_payload: 
         'folder_name': folder_name,
         'name': str(ai_payload.get('name') or request_payload.get('name_hint') or plugin_id).strip() or plugin_id,
         'description': str(ai_payload.get('description') or request_payload.get('prompt') or f'Generator {plugin_id}').strip(),
+        'version': str(ai_payload.get('version') or '').strip(),
+        'description_hints': _coerce_string_list(ai_payload.get('description_hints')),
         'requires': requires,
         'produces': produces,
         'runtime_inputs': runtime_inputs,
@@ -2323,6 +2548,10 @@ def _build_default_test_config(scaffold_payload: dict[str, Any]) -> dict[str, An
             continue
         name = str(item.get('name') or '').strip()
         if not name:
+            continue
+        declared_default = item.get('default')
+        if declared_default is not None and not (isinstance(declared_default, str) and not declared_default.strip()):
+            config[name] = declared_default
             continue
         config[name] = _default_test_value(name, str(item.get('type') or 'string'))
     return config
@@ -2450,6 +2679,8 @@ def register(
     flag_generators_from_enabled_sources: Callable[[], tuple[list[dict], list[dict]]],
     flag_node_generators_from_enabled_sources: Callable[[], tuple[list[dict], list[dict]]],
     reserved_artifacts: dict[str, dict[str, Any]],
+    generator_fact_contracts: Callable[[], dict[str, list[dict[str, Any]]]] | None = None,
+    flow_synthesized_inputs: Callable[[], set[str]] | None = None,
     load_custom_artifacts: Callable[[], dict[str, dict[str, Any]]],
     upsert_custom_artifact: Callable[..., dict[str, Any]],
     build_generator_scaffold: Callable[[dict[str, Any]], tuple[dict[str, str], str, str]],
@@ -2469,8 +2700,11 @@ def register(
     zipfile_module: Any,
 ) -> None:
     global _BUILD_GENERATOR_SCAFFOLD, _VALIDATE_BUILDER_SCAFFOLD
+    global _GENERATOR_FACT_CONTRACTS, _FLOW_SYNTHESIZED_INPUTS
     _BUILD_GENERATOR_SCAFFOLD = build_generator_scaffold
     _VALIDATE_BUILDER_SCAFFOLD = validate_builder_scaffold
+    _GENERATOR_FACT_CONTRACTS = generator_fact_contracts
+    _FLOW_SYNTHESIZED_INPUTS = flow_synthesized_inputs
     if not begin_route_registration(app, 'generator_builder_routes'):
         return
 

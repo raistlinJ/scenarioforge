@@ -248,3 +248,5 @@ injects:
 - Keep output file paths relative to `/outputs` conventions used by the runner.
 - Prefer ontology-defined fact keys for best compatibility with sequencing and validation.
 - `hint_levels` placeholders (for example `{{NEXT_NODE_NAME}}`, `{{OUTPUT.Key}}`) are supported by Flow rendering.
+- `hint_levels` and `description_hints` are first-class manifest keys and are described in `schemas/generators/generator_manifest_v1.schema.json`.
+- Do not point a hint at `FlagDelivery(mode)` (it renders a bare mode word), and on a `flag-node-generator` use `{{OUTPUT.FlagFile(path)}}` rather than `{{OUTPUT.File(path)}}`, which is the emitted compose file.

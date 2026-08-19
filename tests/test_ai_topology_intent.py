@@ -166,3 +166,58 @@ def test_compile_ai_topology_intent_compiles_listed_vulnerability_requests_as_mu
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'appweb/CVE-2018-8715', 'v_path': '/catalog/appweb/CVE-2018-8715/docker-compose.yml'},
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'aaa/random-demo', 'v_path': '/catalog/aaa/random-demo/docker-compose.yml'},
     ]
+
+def test_flag_node_generator_count_handles_plural_and_descriptor_prompts():
+    from scenarioforge.planning.ai_topology_intent import extract_ai_topology_intent
+
+    def count(prompt):
+        return extract_ai_topology_intent(prompt).flag_node_generator_target_count
+
+    assert count('add a flag node generator') == 1
+    # Plural with no count used to fall through to 0 and seed nothing.
+    assert count('add flag node generators') == 1
+    assert count('add two ssh flag node generators') == 2
+    assert count('add 3 routers and 2 flag node generators') == 2
+    # A count that belongs to another section must not be borrowed.
+    assert count('4 routers and a flag node generator') == 1
+    assert count('create a scenario with 4 routers') == 0
+
+
+def test_extract_flag_node_generator_query_hint_only_fires_on_descriptions():
+    from scenarioforge.planning.ai_topology_intent import extract_flag_node_generator_query_hint as hint
+
+    assert hint('add a flag node generator that leaks an ssh key') == 'leaks an ssh key'
+    assert hint('add a flag node generator for a database challenge') == 'database challenge'
+    assert hint('make an nfs flag node generator') == 'nfs'
+    assert hint('add two ssh flag node generators') == 'ssh'
+    # Undescribed requests stay Random rather than inventing a query.
+    assert hint('add 3 flag node generators') == ''
+    assert hint('add a random flag node generator') == ''
+    assert hint('add 3 routers and 2 flag node generators') == ''
+    assert hint('create a scenario with 4 routers') == ''
+
+
+def test_search_flag_node_generator_catalog_for_prompt_ranks_by_name_and_description():
+    from scenarioforge.planning.ai_topology_intent import search_flag_node_generator_catalog_for_prompt as search
+
+    catalog = [
+        {
+            'id': 'ssh_key_bastion',
+            'name': 'SSH: Key Bastion',
+            'description': 'Key-only SSH bastion.',
+            'outputs': [{'name': 'Flag(flag_id)'}],
+        },
+        {
+            'id': 'nfs_share',
+            'name': 'NFS: Build Cache Share',
+            'description': 'Exported build cache share.',
+            'outputs': [{'name': 'Directory(host, path)'}],
+        },
+        {'id': '', 'name': 'Broken entry', 'description': 'no id'},
+    ]
+
+    assert search('ssh key', catalog=catalog) == [{'id': 'ssh_key_bastion', 'name': 'SSH: Key Bastion'}]
+    assert [entry['id'] for entry in search('share', catalog=catalog)] == ['nfs_share']
+    assert search('postgres', catalog=catalog) == []
+    assert search('ssh', catalog=[]) == []
+    assert search('', catalog=catalog) == []

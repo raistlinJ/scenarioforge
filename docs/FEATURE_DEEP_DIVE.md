@@ -15,6 +15,7 @@
 	- `scenario.add_service_item`: add Services rows.
 	- `scenario.add_traffic_item`: add Traffic rows.
 	- `scenario.search_vulnerability_catalog` and `scenario.add_vulnerability_item`: select and add vulnerability rows.
+	- `scenario.search_flag_node_generator_catalog` and `scenario.add_flag_node_generator_item`: look up an enabled flag-node-generator by description and add Specific or Random rows.
 	- `scenario.replace_section`: replace an entire section with a backend-compatible payload.
 	- `scenario.preview_draft`: run the backend preview planner on the current draft.
 	- `scenario.save_xml`: persist the current draft to XML when explicitly needed.

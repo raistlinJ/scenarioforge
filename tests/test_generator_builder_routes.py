@@ -2238,3 +2238,335 @@ def test_generator_install_generated_detects_duplicates_in_configured_install_ro
     assert second_payload.get('renamed') is True
     assert second_payload.get('rename_note') == 'Duplicate generator id "live_smoke_demo" detected. Installed as "live_smoke_demo_2".'
     assert (second_payload.get('installed_as') or {}).get('plugin_id') == 'live_smoke_demo_2'
+
+def test_generator_builder_grounding_includes_full_capability_surface():
+    full_messages = generator_builder_routes._build_generator_builder_ai_messages({
+        'plugin_type': 'flag-node-generator',
+        'prompt': 'Build a deterministic demo node generator.',
+    })
+    compact_messages = generator_builder_routes._build_generator_builder_ai_messages({
+        'plugin_type': 'flag-node-generator',
+        'prompt': 'Build a deterministic demo node generator.',
+        'compact_grounding': True,
+    })
+
+    full_text = full_messages[1]['content']
+    compact_text = compact_messages[1]['content']
+
+    assert 'Canonical fact signatures (schemas/facts/fact_ontology_reference.yaml):' in full_text
+    assert 'Credential(user, password)' in full_text
+    assert 'Reference docs excerpt: allowed runtime input types' in full_text
+    assert 'Reference docs excerpt: required and optional outputs.json keys' in full_text
+    assert 'Reference docs excerpt: compose runtime contract' in full_text
+    assert 'FlagDelivery(mode)' in full_text
+    assert 'description_hints' in full_text
+    assert 'Only the node-named service owns networking under CORE' in full_text
+    assert 'Point participant hints at FlagFile(path), not File(path)' in full_text
+
+    assert 'Canonical fact signatures (schemas/facts/fact_ontology_reference.yaml): ' in compact_text
+    assert len(compact_text) < len(full_text)
+
+
+def test_generator_builder_ai_payload_keeps_input_defaults_and_catalog_metadata():
+    scaffold_payload = generator_builder_routes._normalize_ai_scaffold_payload(
+        {
+            'plugin_id': 'demo_defaults',
+            'name': 'Demo Defaults',
+            'description': 'Demo.',
+            'version': '2.1',
+            'description_hints': ['ssh credential challenge', '  '],
+            'produces': ['Flag(flag_id)', 'Credential(user,password)'],
+            'runtime_inputs': [
+                {'name': 'seed', 'type': 'string', 'required': True, 'description': 'Deterministic run seed'},
+                {'name': 'flag_prefix', 'type': 'string', 'required': False, 'default': 'FLAG'},
+            ],
+        },
+        {'plugin_type': 'flag-generator', 'prompt': 'Build a demo generator.'},
+    )
+
+    assert scaffold_payload['version'] == '2.1'
+    assert scaffold_payload['description_hints'] == ['ssh credential challenge']
+    assert scaffold_payload['runtime_inputs'][0]['description'] == 'Deterministic run seed'
+    assert scaffold_payload['runtime_inputs'][1]['default'] == 'FLAG'
+
+    test_config = generator_builder_routes._build_default_test_config(scaffold_payload)
+    assert test_config['flag_prefix'] == 'FLAG'
+
+
+def test_build_generator_scaffold_emits_input_defaults_version_and_hints():
+    _scaffold_files, manifest_yaml, _folder_path = backend._build_generator_scaffold({
+        'plugin_type': 'flag-generator',
+        'plugin_id': 'demo_defaults',
+        'name': 'Demo Defaults',
+        'description': 'Demo.',
+        'version': '2.1',
+        'description_hints': ['ssh credential challenge'],
+        'produces': ['Flag(flag_id)', 'FlagDelivery(mode)', 'FlagFile(path)'],
+        'runtime_inputs': [
+            {'name': 'seed', 'type': 'string', 'required': True, 'description': 'Deterministic run seed'},
+            {'name': 'flag_prefix', 'type': 'string', 'required': False, 'default': 'FLAG'},
+        ],
+    })
+
+    import yaml
+
+    doc = yaml.safe_load(manifest_yaml)
+    assert doc['version'] == '2.1'
+    assert doc['description_hints'] == ['ssh credential challenge']
+    assert doc['inputs'][0]['description'] == 'Deterministic run seed'
+    assert doc['inputs'][1]['default'] == 'FLAG'
+    assert doc['artifacts']['produces'] == ['Flag(flag_id)', 'FlagDelivery(mode)', 'FlagFile(path)']
+    # FlagDelivery(mode) is a delivery mode string, never a useful participant hint target.
+    assert 'FlagDelivery(mode)' not in json.dumps(doc['hint_levels'])
+    assert '{{OUTPUT.FlagFile(path)}}' in json.dumps(doc['hint_levels'])
+
+
+def test_default_hint_levels_skip_compose_file_for_node_generators():
+    node_levels = generator_builder_routes._default_hint_levels_for_outputs(
+        ['Flag(flag_id)', 'File(path)'],
+        plugin_type='flag-node-generator',
+    )
+    assert '{{OUTPUT.File(path)}}' not in json.dumps(node_levels)
+
+    node_levels_with_flag_file = generator_builder_routes._default_hint_levels_for_outputs(
+        ['Flag(flag_id)', 'File(path)', 'FlagFile(path)'],
+        plugin_type='flag-node-generator',
+    )
+    assert '{{OUTPUT.FlagFile(path)}}' in json.dumps(node_levels_with_flag_file)
+
+    flag_generator_levels = generator_builder_routes._default_hint_levels_for_outputs(
+        ['Flag(flag_id)', 'File(path)'],
+        plugin_type='flag-generator',
+    )
+    assert '{{OUTPUT.File(path)}}' in json.dumps(flag_generator_levels)
+
+
+def _stub_catalog_fact_contracts():
+    return {
+        'flag-generator': [
+            {
+                'id': 'ssh_creds',
+                'name': 'SSH Creds',
+                'requires': ['Knowledge(ip)'],
+                'optional_requires': [],
+                'produces': ['Flag(flag_id)', 'Credential(user,password)'],
+            },
+            {
+                'id': 'archive_drop',
+                'name': 'Archive Drop',
+                'requires': ['Credential(user,password)', 'BackupArchive(file)'],
+                'optional_requires': [],
+                'produces': ['Flag(flag_id)', 'File(path)'],
+            },
+        ],
+        'flag-node-generator': [
+            {
+                'id': 'ssh_node',
+                'name': 'SSH Node',
+                'requires': [],
+                'optional_requires': [],
+                'produces': ['Flag(flag_id)', 'File(path)', 'PortForward(host, port)'],
+            },
+        ],
+    }
+
+
+def _install_stub_catalog_facts(monkeypatch):
+    monkeypatch.setattr(generator_builder_routes, '_GENERATOR_FACT_CONTRACTS', _stub_catalog_fact_contracts)
+    monkeypatch.setattr(
+        generator_builder_routes,
+        '_FLOW_SYNTHESIZED_INPUTS',
+        lambda: {'seed', 'node_name', 'flag_prefix', 'Knowledge(ip)'},
+    )
+    monkeypatch.setattr(generator_builder_routes, '_CATALOG_FACT_CACHE', {})
+
+
+def test_catalog_fact_grounding_reports_produced_required_and_unmet(monkeypatch):
+    _install_stub_catalog_facts(monkeypatch)
+
+    lines = generator_builder_routes._render_catalog_fact_grounding_lines('flag-generator')
+    text = '\n'.join(lines)
+
+    assert '2 flag-generators enabled, 1 flag-node-generators enabled' in text
+    # Produced counts span both kinds: a flag-generator can chain onto node-generator facts.
+    assert 'Flag(flag_id) (x3)' in text
+    assert 'PortForward(host, port) (x1)' in text
+    # Required by the catalog, produced by nothing enabled, and not synthesized by Flow.
+    assert 'BackupArchive(file)' in text
+    assert 'Required somewhere in the catalog but produced by nothing enabled' in text
+    # Knowledge(ip) is required but Flow synthesizes it, so it is not an unmet fact.
+    unmet_line = next(line for line in lines if line.startswith('- Required somewhere'))
+    assert 'Knowledge(ip)' not in unmet_line
+    assert 'never as artifact requires' in text
+    assert 'out of every candidate pool' in text
+
+
+def test_catalog_fact_grounding_is_included_in_builder_prompts(monkeypatch):
+    _install_stub_catalog_facts(monkeypatch)
+
+    full_text = generator_builder_routes._build_generator_builder_ai_messages({
+        'plugin_type': 'flag-generator',
+        'prompt': 'Build a deterministic demo generator.',
+    })[1]['content']
+    compact_text = generator_builder_routes._build_generator_builder_ai_messages({
+        'plugin_type': 'flag-generator',
+        'prompt': 'Build a deterministic demo generator.',
+        'compact_grounding': True,
+    })[1]['content']
+    ultra_text = generator_builder_routes._build_generator_builder_ai_messages({
+        'plugin_type': 'flag-generator',
+        'prompt': 'Build a deterministic demo generator.',
+        'compact_grounding': True,
+        'ultra_compact_prompt': True,
+    })[1]['content']
+
+    assert 'Installed catalog fact vocabulary' in full_text
+    assert 'Only require facts the installed catalog already produces' in full_text
+    assert 'Already produced by the catalog, so safe to require' in compact_text
+    assert 'Installed catalog fact vocabulary' not in ultra_text
+    assert len(compact_text) < len(full_text)
+
+
+def test_catalog_fact_grounding_is_skipped_without_a_registered_catalog(monkeypatch):
+    monkeypatch.setattr(generator_builder_routes, '_GENERATOR_FACT_CONTRACTS', None)
+    monkeypatch.setattr(generator_builder_routes, '_CATALOG_FACT_CACHE', {})
+
+    assert generator_builder_routes._render_catalog_fact_grounding_lines('flag-generator') == []
+
+    def _boom():
+        raise RuntimeError('catalog unavailable')
+
+    monkeypatch.setattr(generator_builder_routes, '_GENERATOR_FACT_CONTRACTS', _boom)
+    assert generator_builder_routes._render_catalog_fact_grounding_lines('flag-generator') == []
+
+
+def test_enabled_generator_fact_contracts_pairs_views_with_plugin_requires(monkeypatch):
+    generator_view = {'id': 'demo_gen', 'name': 'Demo Gen', 'outputs': [{'name': 'Flag(flag_id)'}]}
+    plugins = {'demo_gen': {
+        'plugin_id': 'demo_gen',
+        'requires': [{'artifact': 'Knowledge(ip)'}],
+        'optional_requires': [{'artifact': 'Hostname(host)'}],
+        'produces': [{'artifact': 'Flag(flag_id)'}, {'artifact': 'Credential(user,password)'}],
+    }}
+
+    monkeypatch.setattr(
+        backend,
+        '_flag_generators_from_manifests',
+        lambda *, kind, scan_dependencies=False: (
+            ([generator_view], plugins, []) if kind == 'flag-generator' else ([], {}, [])
+        ),
+    )
+    monkeypatch.setattr(backend, '_is_installed_generator_view', lambda generator: True)
+    monkeypatch.setattr(backend, '_is_installed_generator_disabled', lambda *, kind, generator_id: False)
+
+    contracts = backend._enabled_generator_fact_contracts()
+    entry = contracts['flag-generator'][0]
+
+    assert entry['requires'] == ['Knowledge(ip)']
+    assert entry['optional_requires'] == ['Hostname(host)']
+    assert entry['produces'] == ['Flag(flag_id)', 'Credential(user,password)']
+    assert contracts['flag-node-generator'] == []
+
+
+def test_scaffold_validation_rejects_absolute_output_paths_for_injects():
+    scaffold_files, _manifest_yaml, _folder_path = backend._build_generator_scaffold({
+        'plugin_type': 'flag-generator',
+        'plugin_id': 'abs_path_inject',
+        'name': 'Absolute Path Inject',
+        'produces': ['Flag(flag_id)', 'File(path)'],
+        'inject_files': ['File(path)'],
+        'runtime_inputs': [{'name': 'seed', 'type': 'string', 'required': True}],
+        'generator_py_text': (
+            'import json\n'
+            'from pathlib import Path\n'
+            '\n'
+            '\n'
+            'def main() -> None:\n'
+            "    out = Path('/outputs/artifacts')\n"
+            '    out.mkdir(parents=True, exist_ok=True)\n'
+            "    (out / 'drop.txt').write_text('x', encoding='utf-8')\n"
+            '    outputs = {\n'
+            "        'generator_id': 'abs_path_inject',\n"
+            "        'outputs': {\n"
+            "            'Flag(flag_id)': 'FLAG{demo}',\n"
+            "            'File(path)': '/outputs/artifacts/drop.txt',\n"
+            '        },\n'
+            '    }\n'
+            "    Path('/outputs/outputs.json').write_text(json.dumps(outputs), encoding='utf-8')\n"
+            '\n'
+            '\n'
+            "if __name__ == '__main__':\n"
+            '    main()\n'
+        ),
+    })
+
+    errors = backend._validate_builder_scaffold_runtime_contract(scaffold_files)
+    joined = ' '.join(errors)
+
+    assert 'absolute /outputs/... value(s) for injected artifact key(s) File(path)' in joined
+    assert 'silently dropped at runtime' in joined
+
+
+def test_scaffold_validation_allows_relative_output_paths_for_injects():
+    scaffold_files, _manifest_yaml, _folder_path = backend._build_generator_scaffold({
+        'plugin_type': 'flag-generator',
+        'plugin_id': 'rel_path_inject',
+        'name': 'Relative Path Inject',
+        'produces': ['Flag(flag_id)', 'File(path)'],
+        'inject_files': ['File(path)'],
+        'runtime_inputs': [{'name': 'seed', 'type': 'string', 'required': True}],
+        'generator_py_text': (
+            'import json\n'
+            'from pathlib import Path\n'
+            '\n'
+            '\n'
+            'def main() -> None:\n'
+            "    out = Path('/outputs/artifacts')\n"
+            '    out.mkdir(parents=True, exist_ok=True)\n'
+            "    (out / 'drop.txt').write_text('x', encoding='utf-8')\n"
+            '    outputs = {\n'
+            "        'generator_id': 'rel_path_inject',\n"
+            "        'outputs': {\n"
+            "            'Flag(flag_id)': 'FLAG{demo}',\n"
+            "            'File(path)': 'artifacts/drop.txt',\n"
+            '        },\n'
+            '    }\n'
+            "    Path('/outputs/outputs.json').write_text(json.dumps(outputs), encoding='utf-8')\n"
+            '\n'
+            '\n'
+            "if __name__ == '__main__':\n"
+            '    main()\n'
+        ),
+    })
+
+    assert backend._validate_builder_scaffold_runtime_contract(scaffold_files) == []
+
+
+def test_installed_generator_view_survives_a_symlinked_catalog_root(tmp_path, monkeypatch):
+    # CORETG_INSTALLED_GENERATORS_DIR can point through a symlink (macOS /tmp and
+    # /var both do). Comparing a resolved manifest path against an unresolved root
+    # made every installed generator look uninstalled, so install reported success
+    # while the catalog stayed empty.
+    real_root = tmp_path / 'real' / 'installed_generators'
+    (real_root / 'flag_generators' / 'pack__1').mkdir(parents=True)
+    link_root = tmp_path / 'linked_generators'
+    link_root.symlink_to(real_root, target_is_directory=True)
+
+    monkeypatch.setattr(backend, '_installed_generators_root', lambda: str(link_root))
+
+    generator_view = {
+        'id': '1',
+        'name': 'Installed Demo',
+        'source': {'type': 'local-path', 'path': str((real_root / 'flag_generators' / 'pack__1').resolve())},
+        '_source_path': str((real_root / 'flag_generators' / 'pack__1' / 'manifest.yaml').resolve()),
+    }
+
+    assert backend._is_installed_generator_view(generator_view) is True
+
+    outside = {
+        'id': '2',
+        'name': 'Repo Demo',
+        'source': {'type': 'local-path', 'path': str(tmp_path / 'elsewhere')},
+        '_source_path': str(tmp_path / 'elsewhere' / 'manifest.yaml'),
+    }
+    assert backend._is_installed_generator_view(outside) is False
