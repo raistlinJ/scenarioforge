@@ -986,13 +986,18 @@ def test_ai_provider_catalog_includes_only_ollama_and_openai_compatible_bridge_c
         for entry in providers
         if isinstance(entry, dict)
     }
-    assert set(provider_map.keys()) == {'ollama', 'litellm'}
-    assert 'litellm' in provider_map
+    assert set(provider_map.keys()) == {'ollama', 'litellm', 'openai'}
     assert provider_map['litellm'].get('label') == 'OpenAI-Compatible'
     assert provider_map['litellm'].get('enabled') is True
     assert provider_map['litellm'].get('supports_mcp_bridge') is True
     assert provider_map['litellm'].get('default_base_url') == 'https://localhost:4000/v1'
     assert provider_map['ollama'].get('supports_mcp_bridge') is True
+    # `openai` is the same chat-completions adapter under a hosted-OpenAI default.
+    assert provider_map['openai'].get('label') == 'OpenAI'
+    assert provider_map['openai'].get('enabled') is True
+    assert provider_map['openai'].get('supports_mcp_bridge') is True
+    assert provider_map['openai'].get('requires_api_key') is True
+    assert provider_map['openai'].get('default_base_url') == 'https://api.openai.com/v1'
 
 
 def test_ai_provider_validate_skip_bridge_refreshes_openai_compatible_models_without_mcp(tmp_path, monkeypatch):

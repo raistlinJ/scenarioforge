@@ -6121,6 +6121,306 @@ def _run_preview_plan_phase(args: Any) -> int:
     return 0
 
 
+def _cli_acting_username(backend: Any, requested: str = '') -> str:
+    """Pick the local account the CLI acts as, validated against the user store.
+
+    The AI endpoint is session-guarded. The CLI drives it in-process on the
+    operator's own machine, so it seeds the session from a record that already
+    exists in the local user database rather than inventing an identity or
+    carrying a password in the environment. An unknown name falls back to the
+    first admin, and an empty store means no session at all.
+    """
+    try:
+        users = (backend._load_users() or {}).get('users') or []
+    except Exception:
+        users = []
+    wanted = str(requested or '').strip()
+    record = None
+    if wanted:
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('username') or '').strip() == wanted), None)
+    if record is None:
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('role') or '').strip() == 'admin'), None)
+    if record is None:
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('username') or '').strip()), None)
+    return str((record or {}).get('username') or '').strip()
+
+
+def _cli_authenticate_client(backend: Any, client: Any, username: str) -> bool:
+    """Seed a Flask session for `username` the same way the login route does."""
+    if not username:
+        return False
+    try:
+        users = (backend._load_users() or {}).get('users') or []
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('username') or '').strip() == username), None)
+        if record is None:
+            return False
+        try:
+            role = backend._normalize_role_value(record.get('role'))
+        except Exception:
+            role = str(record.get('role') or '')
+        with client.session_transaction() as flask_session:
+            flask_session['user'] = {'username': username, 'role': role}
+        return True
+    except Exception:
+        return False
+
+
+def _run_ai_phase(args: Any) -> int:
+    """Generate a scenario from a natural-language prompt and write it to XML.
+
+    Provider wiring comes from `.scenarioforge.env` (CORETG_AI_*) unless flags
+    override it, so the prompt is usually the only argument that changes between
+    runs. The generation itself goes through the same backend endpoint the Web UI
+    calls, including the MCP bridge, rather than a second implementation.
+    """
+    from webapp.ai_settings import (
+        ai_settings_as_payload,
+        ai_settings_from_env,
+        missing_ai_settings,
+        redact_ai_settings,
+        resolve_ai_settings,
+    )
+
+    xml_path = os.path.abspath(args.xml)
+    prompt = str(getattr(args, 'prompt', '') or '').strip()
+    if not prompt:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'error': '--prompt is required.'},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    existed_before = os.path.exists(xml_path)
+    if existed_before and not getattr(args, 'force', False):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'error': 'XML file already exists. Re-run with --force to overwrite it.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    backend = _load_web_backend_module()
+
+    overrides: dict[str, Any] = {}
+    for field, attr in (
+        ('provider', 'ai_provider'),
+        ('model', 'ai_model'),
+        ('base_url', 'ai_base_url'),
+        ('api_key', 'ai_api_key'),
+        ('credential_username', 'ai_credential_user'),
+        ('bridge_mode', 'ai_bridge_mode'),
+        ('timeout_seconds', 'ai_timeout_seconds'),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            overrides[field] = value
+
+    # A username configured by flag or by CORETG_AI_API_KEY_USER decides both which
+    # stored credential is read and which account the run acts as. Only when neither
+    # names one does the acting account fall back to an admin on record, and that
+    # fallback must not overwrite a configured credential username.
+    requested_credential_user = str(
+        overrides.get('credential_username')
+        or ai_settings_from_env().get('credential_username')
+        or ''
+    ).strip()
+    acting_username = _cli_acting_username(backend, requested_credential_user)
+    if not requested_credential_user and acting_username:
+        overrides['credential_username'] = acting_username
+
+    settings = resolve_ai_settings(
+        overrides,
+        stored_api_key_loader=lambda username, provider: (
+            (backend._load_ai_provider_credentials_for_user(username, provider) or {}).get('api_key_plain')
+        ),
+    )
+
+    missing = missing_ai_settings(settings)
+    if missing:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'error': (
+                    'Missing AI provider settings: ' + ', '.join(missing) + '. '
+                    'Set them in .scenarioforge.env or pass the matching --ai-* flags.'
+                ),
+                'settings': redact_ai_settings(settings),
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    scenario_name = str(getattr(args, 'scenario', '') or '').strip()
+    if not scenario_name:
+        try:
+            scenario_name = os.path.splitext(os.path.basename(xml_path))[0].strip()
+        except Exception:
+            scenario_name = ''
+    if not scenario_name:
+        scenario_name = 'Scenario 1'
+
+    payload = backend._default_scenarios_payload_for_names([scenario_name])
+    if not isinstance(payload, dict) or not isinstance(payload.get('scenarios'), list) or not payload['scenarios']:
+        payload = {'scenarios': [{'name': scenario_name, 'sections': {}}], 'core': {}}
+
+    request_payload = {
+        **ai_settings_as_payload(settings),
+        'prompt': prompt,
+        'scenarios': payload['scenarios'],
+        'scenario_index': 0,
+        # Reading a key must not rewrite it: the credential store is managed in
+        # the Web UI, not as a byproduct of a CLI run.
+        'persist_api_key': False,
+    }
+    if getattr(args, 'ai_skip_bridge', False):
+        request_payload['skip_bridge'] = True
+
+    app = backend.app
+    app.config['TESTING'] = True
+    client = app.test_client()
+    if not _cli_authenticate_client(backend, client, acting_username):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': (
+                    'No local user account to run as. Create one in the Web UI, or set '
+                    'CORETG_AI_API_KEY_USER to an existing username.'
+                ),
+                'settings': redact_ai_settings(settings),
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+    try:
+        response = client.post('/api/ai/generate_scenario_preview', json=request_payload)
+        data = response.get_json(silent=True) or {}
+    except Exception as exc:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'scenario': scenario_name,
+             'error': f'AI generation failed: {exc}', 'settings': redact_ai_settings(settings)},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    if response.status_code >= 400 or not data.get('success'):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'status': response.status_code,
+                'error': str(data.get('error') or f'AI generation failed (HTTP {response.status_code}).'),
+                'settings': redact_ai_settings(settings),
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    generated_scenario = data.get('generated_scenario') if isinstance(data.get('generated_scenario'), dict) else None
+    if not generated_scenario:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'scenario': scenario_name,
+             'error': 'AI response did not include a generated scenario.',
+             'settings': redact_ai_settings(settings)},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    generated_scenario.setdefault('name', scenario_name)
+    payload['scenarios'][0] = generated_scenario
+
+    if getattr(args, 'ai_preview_only', False):
+        _emit_phase_json(
+            {
+                'ok': True,
+                'phase': 'ai',
+                'xml_path': None,
+                'scenario': str(generated_scenario.get('name') or scenario_name),
+                'written': False,
+                'prompt': prompt,
+                'settings': redact_ai_settings(settings),
+                'generated_scenario': generated_scenario,
+                'preview': data.get('preview'),
+            },
+            output_path=args.plan_output,
+        )
+        return 0
+
+    try:
+        concretized = backend._concretize_scenarios_for_save([payload['scenarios'][0]], seed=args.seed)
+        if isinstance(concretized, list) and concretized:
+            payload['scenarios'][0] = concretized[0]
+    except Exception:
+        pass
+
+    try:
+        _write_scenarios_payload_xml(backend, payload, xml_path)
+    except Exception as exc:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'scenario': scenario_name,
+             'error': f'Failed to write generated XML: {exc}', 'settings': redact_ai_settings(settings)},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    effective_scenario_name = str(payload['scenarios'][0].get('name') or scenario_name)
+    _emit_phase_json(
+        {
+            'ok': True,
+            'phase': 'ai',
+            'xml_path': xml_path,
+            'scenario': effective_scenario_name,
+            'written': True,
+            'overwritten': bool(getattr(args, 'force', False) and existed_before),
+            'prompt': prompt,
+            'acting_user': acting_username,
+            'settings': redact_ai_settings(settings),
+            'applied_actions': data.get('applied_actions'),
+            'next_steps': [
+                'Review the generated sections in the Web UI or by hand.',
+                'Run preview-plan to persist PlanPreview.',
+                'Run flag-sequencing if you want Flow state embedded.',
+                'Run topo or execute against the same XML.',
+            ],
+        },
+        output_path=args.plan_output,
+    )
+    return 0
+
+
+def _write_scenarios_payload_xml(backend: Any, payload: dict[str, Any], xml_path: str) -> None:
+    """Write a scenarios payload to XML, pretty-printed when lxml is available."""
+    tree = backend._build_scenarios_xml(payload)
+    try:
+        from lxml import etree as LET  # type: ignore
+
+        raw = ET.tostring(tree.getroot(), encoding='utf-8')
+        lroot = LET.fromstring(raw)
+        pretty = LET.tostring(lroot, pretty_print=True, xml_declaration=True, encoding='utf-8')
+        with open(xml_path, 'wb') as handle:
+            handle.write(pretty)
+    except Exception:
+        tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+
+
 def _run_new_phase(args: Any) -> int:
     backend = _load_web_backend_module()
     xml_path = os.path.abspath(args.xml)
@@ -6723,17 +7023,7 @@ def _run_new_phase(args: Any) -> int:
         scenario_payload['hitl'] = scenario_hitl
 
     try:
-        tree = backend._build_scenarios_xml(payload)
-        try:
-            from lxml import etree as LET  # type: ignore
-
-            raw = ET.tostring(tree.getroot(), encoding='utf-8')
-            lroot = LET.fromstring(raw)
-            pretty = LET.tostring(lroot, pretty_print=True, xml_declaration=True, encoding='utf-8')
-            with open(xml_path, 'wb') as handle:
-                handle.write(pretty)
-        except Exception:
-            tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+        _write_scenarios_payload_xml(backend, payload, xml_path)
     except Exception as exc:
         _emit_phase_json(
             {
@@ -6962,7 +7252,7 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     return 0 if status_code < 400 else 1
 
 
-CLI_PHASES = ('execute', 'new', 'preview-plan', 'flag-sequencing', 'topo', 'check-artifacts', 'list-sessions')
+CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'topo', 'check-artifacts', 'list-sessions')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
     'Run "cli.py list-sessions" to see running CORE sessions with their scenario and XML, then '
@@ -7288,7 +7578,7 @@ def _add_cli_core_connection_args(container: Any) -> None:
 
 def _add_cli_new_args(container: Any) -> None:
     defaults = _cli_new_argument_defaults()
-    container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
+    container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new or ai phase')
     container.add_argument('--density-count', type=int, default=defaults['density_count'], help='Scenario-level Count for Density base host pool for density-based planning in the new phase')
     container.add_argument('--seed-role', dest='seed_roles', action='append', help=f'Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable). ROLE is one of: {_ALLOWED_ROLES_TEXT}. VulnerabilitySlot/FlagGenSlot reserve Docker-backed capacity for that challenge kind only')
     container.add_argument('--seed-routing', dest='seed_routing_specs', action='append', help='Seed a Routing row for the new phase (repeatable; density rows are equal-weighted, for example OSPFv2, BGP=density, or OSPFv2=3)')
@@ -7553,11 +7843,26 @@ def _add_cli_execute_topo_args(container: Any) -> None:
     )
 
 
+def _add_cli_ai_args(container: Any) -> None:
+    """Flags for the ai phase. Every provider flag falls back to `.scenarioforge.env`."""
+    container.add_argument('--prompt', help='Natural-language description of the scenario to generate (ai phase)')
+    container.add_argument('--ai-provider', dest='ai_provider', default=None, help='AI provider id (default: CORETG_AI_PROVIDER)')
+    container.add_argument('--ai-model', dest='ai_model', default=None, help='Model name (default: CORETG_AI_MODEL)')
+    container.add_argument('--ai-base-url', dest='ai_base_url', default=None, help='Provider base URL (default: CORETG_AI_BASE_URL)')
+    container.add_argument('--ai-api-key', dest='ai_api_key', default=None, help='API key (default: CORETG_AI_API_KEY, else the stored credential for CORETG_AI_API_KEY_USER)')
+    container.add_argument('--ai-credential-user', dest='ai_credential_user', default=None, help='Username whose stored provider credential supplies the API key (default: CORETG_AI_API_KEY_USER)')
+    container.add_argument('--ai-bridge-mode', dest='ai_bridge_mode', default=None, help='Bridge mode, for example mcp-python-sdk (default: CORETG_AI_BRIDGE_MODE)')
+    container.add_argument('--ai-timeout-seconds', dest='ai_timeout_seconds', type=float, default=None, help='Provider timeout in seconds (default: CORETG_AI_TIMEOUT_S)')
+    container.add_argument('--ai-skip-bridge', dest='ai_skip_bridge', action='store_true', help='Ask the provider for direct JSON generation instead of using the MCP bridge')
+    container.add_argument('--ai-preview-only', dest='ai_preview_only', action='store_true', help='Print the generated scenario and preview without writing XML')
+
+
 def _build_cli_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(formatter_class=_CliHelpFormatter)
     _add_cli_phase_arg(ap)
     _add_cli_common_args(ap)
     _add_cli_new_args(ap)
+    _add_cli_ai_args(ap)
     _add_cli_core_connection_args(ap)
     _add_cli_execute_topo_args(ap)
     _add_cli_flag_sequencing_args(ap)
@@ -7585,6 +7890,9 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     if phase == 'new':
         _add_cli_new_args(ap)
         _add_cli_core_connection_args(ap)
+    elif phase == 'ai':
+        _add_cli_ai_args(ap)
+        ap.add_argument('--force', action='store_true', help='Overwrite an existing XML file')
     elif phase == 'preview-plan':
         _add_cli_preview_plan_args(ap)
     elif phase == 'flag-sequencing':
@@ -7789,6 +8097,8 @@ def main():
         return _run_preview_plan_phase(args)
     if args.phase == 'new':
         return _run_new_phase(args)
+    if args.phase == 'ai':
+        return _run_ai_phase(args)
     if args.phase == 'flag-sequencing':
         return _run_flag_sequencing_phase(args)
 

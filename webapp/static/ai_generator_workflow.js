@@ -10,6 +10,12 @@
                     supportsBridge: true,
                 };
             }
+            if (key === 'openai') {
+                return {
+                    label: 'OpenAI',
+                    supportsBridge: true,
+                };
+            }
             return {
                 label: 'Ollama',
                 supportsBridge: true,
@@ -27,7 +33,8 @@
         function resolveAiGeneratorApiKey(aiState) {
             const provider = String((aiState && aiState.provider) || '').trim().toLowerCase();
             const raw = String((aiState && aiState.api_key) || '').trim();
-            if (provider !== 'litellm') {
+            // Both OpenAI-compatible providers keep their key in the encrypted store.
+            if (provider !== 'litellm' && provider !== 'openai') {
                 return raw;
             }
             if (!aiState || aiState.has_stored_api_key !== true) {

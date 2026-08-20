@@ -19,7 +19,24 @@
                 connectionSuccessLabel: 'Connected',
                 reachabilityLabel: 'Provider Reachable',
             },
+            openai: {
+                label: 'OpenAI',
+                baseUrlLabel: 'OpenAI Base URL',
+                baseUrlPlaceholder: 'https://api.openai.com/v1',
+                defaultBaseUrl: 'https://api.openai.com/v1',
+                supportsBridge: true,
+                connectionSuccessLabel: 'Connected',
+                reachabilityLabel: 'Provider Reachable',
+            },
         };
+
+        // Providers served by the OpenAI chat-completions adapter: they share the
+        // API-key field, the encrypted key store, and TLS enforcement.
+        const OPENAI_COMPATIBLE_PROVIDERS = ['litellm', 'openai'];
+
+        function isOpenAiCompatibleProvider(provider) {
+            return OPENAI_COMPATIBLE_PROVIDERS.indexOf(String(provider || '').trim().toLowerCase()) >= 0;
+        }
 
         function escapeHtml(value) {
             return (value ?? '').toString()
@@ -166,7 +183,7 @@
         function resolveAiGeneratorApiKey(aiState) {
             const provider = String((aiState && aiState.provider) || '').trim().toLowerCase();
             const raw = String((aiState && aiState.api_key) || '').trim();
-            if (provider !== 'litellm') {
+            if (!isOpenAiCompatibleProvider(provider)) {
                 return raw;
             }
             if (!aiState || aiState.has_stored_api_key !== true) {
@@ -231,7 +248,7 @@
             const supportsBridge = !!providerMeta.supportsBridge;
             const useBridge = supportsBridge && aiState.skip_bridge !== true;
             const providerLabel = providerMeta.label;
-            const usesSecureApiKeyStorage = provider === 'litellm';
+            const usesSecureApiKeyStorage = isOpenAiCompatibleProvider(provider);
             const hasStoredApiKey = !!aiState.has_stored_api_key;
             const apiKeyStoredAt = (aiState.api_key_stored_at || '').toString().trim();
             const apiKeyStatusLoaded = aiState.api_key_status_loaded === true && aiState.api_key_status_provider === provider;
@@ -409,7 +426,7 @@
                                 </details>`
                 : '';
 
-            const directProviderFields = provider === 'litellm'
+            const directProviderFields = isOpenAiCompatibleProvider(provider)
                 ? `
                                 <div class="mb-3">
                                     <label class="form-label">API Key <span class="text-muted">(optional)</span></label>
@@ -562,7 +579,7 @@
                     deps.persistAiGeneratorStateForScenario(scenario, idx, {
                         provider: nextProvider,
                         base_url: shouldResetBaseUrl ? nextMeta.defaultBaseUrl : currentBaseUrl,
-                        enforce_ssl: nextProvider === 'litellm' ? true : aiState.enforce_ssl,
+                        enforce_ssl: isOpenAiCompatibleProvider(nextProvider) ? true : aiState.enforce_ssl,
                         api_key: '',
                         api_key_dirty: false,
                         api_key_status_loaded: false,

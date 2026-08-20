@@ -42,6 +42,7 @@ from scenarioforge.planning.ai_topology_intent import has_low_r2r_intent as _com
 from scenarioforge.planning.ai_topology_intent import search_flag_node_generator_catalog_for_prompt as _compiler_search_flag_node_generator_catalog_for_prompt
 from scenarioforge.planning.ai_topology_intent import search_vulnerability_catalog_for_prompt as _compiler_search_vulnerability_catalog_for_prompt
 from webapp import app_backend
+from webapp.ai_settings import ai_settings_as_payload, resolve_ai_settings
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
 from scenarioforge.planning.node_plan import HOST_ROLE_DISPLAY_ORDER, is_docker_backed_role
 
@@ -5626,6 +5627,9 @@ class OllamaProviderAdapter(ProviderAdapter):
 
 
 class OpenAiCompatibleProviderAdapter(ProviderAdapter):
+    # Any endpoint speaking the OpenAI chat-completions API is served by this one
+    # adapter; the capability passed in decides how it is presented and which
+    # provider id its responses report.
     capability = ProviderCapability(
         provider='litellm',
         label='OpenAI-Compatible',
@@ -5637,6 +5641,14 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
         requires_api_key=False,
         supports_mcp_bridge=True,
     )
+
+    def __init__(self, capability: ProviderCapability | None = None):
+        if capability is not None:
+            self.capability = capability
+
+    @property
+    def provider_key(self) -> str:
+        return str(getattr(self.capability, 'provider', '') or 'litellm')
 
     def validate(self, payload: dict[str, Any], *, log: Any = None) -> dict[str, Any]:
         model = str(payload.get('model') or '').strip()
@@ -5673,7 +5685,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                 message = f'Reached OpenAI-compatible endpoint at {base_url}, but model {model!r} was not found.'
             return {
                 'success': True,
-                'provider': 'litellm',
+                'provider': self.provider_key,
                 'base_url': base_url,
                 'models': models,
                 'model': model,
@@ -5831,7 +5843,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                     message,
                     status_code=502,
                     details=_build_provider_generation_error_details(
-                        provider='litellm',
+                        provider=self.provider_key,
                         stage='direct_generate',
                         started_at=generation_started_at,
                         base_url=base_url,
@@ -5857,7 +5869,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                     f'Could not reach OpenAI-compatible endpoint at {base_url}: {reason}',
                     status_code=502,
                     details=_build_provider_generation_error_details(
-                        provider='litellm',
+                        provider=self.provider_key,
                         stage='direct_generate',
                         started_at=generation_started_at,
                         base_url=base_url,
@@ -5911,7 +5923,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                     },
                 )
             return {
-                'provider': 'litellm',
+                'provider': self.provider_key,
                 'base_url': base_url,
                 'model': model,
                 'prompt_used': prompt,
@@ -5931,7 +5943,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                 'Unexpected generation failure while contacting the OpenAI-compatible endpoint.',
                 status_code=500,
                 details=_build_provider_generation_error_details(
-                    provider='litellm',
+                    provider=self.provider_key,
                     stage='direct_generate',
                     started_at=generation_started_at,
                     base_url=base_url,
@@ -5946,15 +5958,17 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
 _PROVIDER_REGISTRY: dict[str, ProviderAdapter] = {
     'ollama': OllamaProviderAdapter(),
     'litellm': OpenAiCompatibleProviderAdapter(),
-    'openai': UnsupportedProviderAdapter(
+    'openai': OpenAiCompatibleProviderAdapter(
         ProviderCapability(
             provider='openai',
             label='OpenAI',
-            enabled=False,
+            enabled=True,
             mode='remote',
-            description='Planned adapter for hosted OpenAI chat or responses APIs.',
+            description='Hosted OpenAI chat-completions API, or any endpoint that speaks it.',
+            default_base_url='https://api.openai.com/v1',
             requires_model=True,
             requires_api_key=True,
+            supports_mcp_bridge=True,
         )
     ),
     'anthropic': UnsupportedProviderAdapter(
@@ -6016,9 +6030,26 @@ def register(
 
     def _resolve_payload_with_stored_api_key(payload: dict[str, Any]) -> dict[str, Any]:
         resolved = dict(payload or {})
+        # `.scenarioforge.env` fills in whatever the caller left out, so a headless
+        # or scripted request does not have to repeat the provider wiring the Web UI
+        # keeps in browser state. Anything the caller sent still wins.
+        env_defaults = ai_settings_as_payload(resolve_ai_settings())
+        for field, value in env_defaults.items():
+            # Only fill fields the caller left out. An explicitly empty value is a
+            # choice, not an omission: `model: ''` asks validate to discover one,
+            # and an empty api_key asks for the stored credential.
+            if field in resolved:
+                continue
+            resolved[field] = value
         provider_key = str(resolved.get('provider') or '').strip().lower()
         api_key = str(resolved.get('api_key') or '').strip()
         if api_key:
+            # The Web UI saves the key it was given so the next session inherits it.
+            # A headless caller opts out: a one-off --ai-api-key must not overwrite
+            # the account's stored credential as a side effect of one run.
+            persist_api_key = resolved.get('persist_api_key')
+            if persist_api_key is False:
+                return resolved
             if callable(save_ai_provider_credentials):
                 username = _current_username()
                 if username:
