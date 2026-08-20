@@ -8,6 +8,8 @@ from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
+import pytest
+
 from webapp.app_backend import app
 
 
@@ -4038,7 +4040,114 @@ def test_deterministic_mcp_bridge_seed_does_not_duplicate_vulnerability_seed_ops
     assert applied == ['Vulnerability jboss/CVE-2017-12149']
 
 
-def test_canonicalize_generated_routing_modes_title_cases_edge_modes():
+def test_deterministic_mcp_bridge_seed_arguments_are_accepted_by_the_real_tools(monkeypatch):
+    """Drive the seeding path against the real MCP server, not a mock.
+
+    Every other seed test asserts what the bridge *sends*, which is exactly the
+    blind spot that let `kind` survive: the argument dict looked deliberate and
+    nothing checked the tool would take it. Forwarding into the real server
+    fails on any argument-name drift in any branch, for the whole
+    scenario.add_*_item family at once.
+    """
+    from MCP.server import ScenarioAuthoringMCPServer
+    from webapp.routes import ai_provider
+
+    server = ScenarioAuthoringMCPServer()
+    created = server.handle_message({
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'tools/call',
+        'params': {'name': 'scenario.create_draft', 'arguments': {'name': 'SeedContractScenario'}},
+    })
+    draft_id = (((created.get('result') or {}).get('structuredContent') or {}).get('draft') or {}).get('draft_id')
+    assert draft_id
+
+    failures = []
+
+    async def forwarding_call_tool(client, qualified_tool_name, arguments):
+        tool_name = qualified_tool_name.split('.', 1)[1]
+        response = server.handle_message({
+            'jsonrpc': '2.0',
+            'id': 2,
+            'method': 'tools/call',
+            'params': {'name': tool_name, 'arguments': dict(arguments, draft_id=draft_id)},
+        })
+        result = (response or {}).get('result') or {}
+        if result.get('isError'):
+            failures.append((tool_name, dict(arguments), json.dumps(result.get('content'))[:300]))
+        return result.get('structuredContent') or {}
+
+    monkeypatch.setattr(ai_provider, '_mcp_bridge_call_tool', forwarding_call_tool)
+    monkeypatch.setattr(ai_provider, '_extract_vulnerability_target_count', lambda _prompt: 0)
+
+    asyncio.run(ai_provider._apply_deterministic_mcp_bridge_seed(
+        client=object(),
+        available_tools=[
+            'server.scenario.add_node_role_item',
+            'server.scenario.add_routing_item',
+            'server.scenario.add_service_item',
+            'server.scenario.add_traffic_item',
+            'server.scenario.add_segmentation_item',
+        ],
+        draft_id=draft_id,
+        user_prompt=(
+            'three routers, six docker hosts, ssh and http services, '
+            'tcp traffic, one firewall, and one NAT'
+        ),
+    ))
+
+    assert failures == [], f'seeded tool calls rejected by the real MCP server: {failures}'
+
+    fetched = server.handle_message({
+        'jsonrpc': '2.0',
+        'id': 3,
+        'method': 'tools/call',
+        'params': {'name': 'scenario.get_draft', 'arguments': {'draft_id': draft_id}},
+    })
+    draft = ((fetched.get('result') or {}).get('structuredContent') or {}).get('draft') or {}
+    sections = (draft.get('scenario') or {}).get('sections') or {}
+    segmentation_items = (sections.get('Segmentation') or {}).get('items') or []
+    assert [item.get('selected') for item in segmentation_items] == ['Firewall', 'NAT']
+
+
+def test_deterministic_mcp_bridge_seed_sends_segmentation_rows_as_selected(monkeypatch):
+    """The tool takes the row value as `selected`; `kind` is not in its schema.
+
+    A duplicate seeding block used to send `kind` here, leaving `selected`
+    unset, so the tool raised and the whole bridge run aborted with "selected
+    is required for segmentation items" before the model got a turn -- every
+    prompt naming a firewall or NAT failed. Driven through the real intent
+    compiler so it tracks whatever that actually emits.
+    """
+    from webapp.routes import ai_provider
+
+    calls = []
+
+    async def fake_call_tool(client, qualified_tool_name, arguments):
+        calls.append((qualified_tool_name, dict(arguments)))
+        return {'ok': True}
+
+    monkeypatch.setattr(ai_provider, '_mcp_bridge_call_tool', fake_call_tool)
+    monkeypatch.setattr(ai_provider, '_extract_vulnerability_target_count', lambda _prompt: 0)
+
+    applied = asyncio.run(ai_provider._apply_deterministic_mcp_bridge_seed(
+        client=object(),
+        available_tools=['server.scenario.add_segmentation_item'],
+        draft_id='draft-1',
+        user_prompt='two routers, four docker hosts, one firewall, and one NAT',
+    ))
+
+    segmentation_calls = [call for call in calls if call[0] == 'server.scenario.add_segmentation_item']
+    # Exactly one row per control: the compiled seed ops are the only source.
+    assert [call[1].get('selected') for call in segmentation_calls] == ['Firewall', 'NAT']
+    for _tool_name, arguments in segmentation_calls:
+        assert 'kind' not in arguments
+        assert arguments.get('count') == 1
+    assert applied.count('Segmentation Firewall=1') == 1
+    assert applied.count('Segmentation NAT=1') == 1
+
+
+def test_canonicalize_generated_routing_title_cases_edge_modes():
     from webapp.routes import ai_provider
 
     scenario = _scenario_payload('RoutingModeCanonicalizeScenario')
@@ -4056,7 +4165,7 @@ def test_canonicalize_generated_routing_modes_title_cases_edge_modes():
         ],
     }
 
-    canonical = ai_provider._canonicalize_generated_routing_modes(scenario)
+    canonical = ai_provider._canonicalize_generated_routing_or_raise(scenario)
     routing_item = canonical['sections']['Routing']['items'][0]
 
     assert routing_item['r2r_mode'] == 'Min'
@@ -6105,3 +6214,41 @@ def test_mcp_bridge_goal_prompt_mentions_generator_catalog_search(monkeypatch):
 
     assert 'scenario.search_flag_node_generator_catalog' in prompt
     assert 'g_id=nfs_build_cache' in prompt
+
+
+def test_generated_routing_rejects_section_keywords_as_protocols():
+    from webapp.routes import ai_provider
+
+    # "Specific" is the selection-mode keyword from the Vulnerabilities and Flag Node
+    # Generators sections. As a Routing protocol it saved and previewed cleanly, then
+    # CORE failed to instantiate the topology with "service does not exist Specific"
+    # and left the session stuck in configuration.
+    scenario = _scenario_payload('RoutingProtocolGuardScenario')
+    scenario['sections']['Routing'] = {
+        'density': 0.0,
+        'items': [{'selected': 'Specific', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 2}],
+    }
+
+    with pytest.raises(ai_provider.ProviderAdapterError) as excinfo:
+        ai_provider._canonicalize_generated_routing_or_raise(scenario)
+
+    message = str(getattr(excinfo.value, 'message', '') or excinfo.value)
+    assert 'RIP, RIPNG, BGP, OSPFv2, OSPFv3, or Random' in message
+    assert 'Specific' in message
+
+    for bad_value in ('', None, 'Random Protocol', 'quagga'):
+        broken = _scenario_payload('RoutingProtocolGuardScenario')
+        broken['sections']['Routing'] = {'density': 0.0, 'items': [{'selected': bad_value}]}
+        with pytest.raises(ai_provider.ProviderAdapterError):
+            ai_provider._canonicalize_generated_routing_or_raise(broken)
+
+
+def test_generated_routing_accepts_protocol_aliases_like_the_mcp_tools():
+    from webapp.routes import ai_provider
+
+    for raw, expected in (('ospf', 'OSPFv2'), ('OSPFV2', 'OSPFv2'), ('ospf3', 'OSPFv3'),
+                          ('bgp', 'BGP'), ('rip', 'RIP'), ('ripng', 'RIPNG'), ('random', 'Random')):
+        scenario = _scenario_payload('RoutingAliasScenario')
+        scenario['sections']['Routing'] = {'density': 0.0, 'items': [{'selected': raw}]}
+        canonical = ai_provider._canonicalize_generated_routing_or_raise(scenario)
+        assert canonical['sections']['Routing']['items'][0]['selected'] == expected

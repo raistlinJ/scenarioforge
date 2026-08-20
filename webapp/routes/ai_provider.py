@@ -2842,7 +2842,31 @@ def _canonicalize_generated_vulnerabilities_or_raise(scenario_payload: dict[str,
         raise ProviderAdapterError(str(exc), status_code=400) from exc
 
 
-def _canonicalize_generated_routing_modes(scenario_payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_generated_routing_protocol(value: Any) -> str:
+    """Canonical Routing protocol name, or '' when the value is not one.
+
+    Mirrors the MCP server's normalizer so both authoring paths accept the same
+    spellings and reject the same values.
+    """
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    normalized = ''.join(ch for ch in text.lower() if ch.isalnum())
+    aliases = {
+        'rip': 'RIP',
+        'ripng': 'RIPNG',
+        'bgp': 'BGP',
+        'ospf': 'OSPFv2',
+        'ospfv2': 'OSPFv2',
+        'ospf2': 'OSPFv2',
+        'ospfv3': 'OSPFv3',
+        'ospf3': 'OSPFv3',
+        'random': 'Random',
+    }
+    return aliases.get(normalized, '')
+
+
+def _canonicalize_generated_routing_or_raise(scenario_payload: dict[str, Any]) -> dict[str, Any]:
     sections = scenario_payload.get('sections') if isinstance(scenario_payload.get('sections'), dict) else {}
     routing_section = sections.get('Routing') if isinstance(sections.get('Routing'), dict) else None
     if not routing_section:
@@ -2864,6 +2888,21 @@ def _canonicalize_generated_routing_modes(scenario_payload: dict[str, Any]) -> d
             next_items.append(raw_item)
             continue
         item = deepcopy(raw_item)
+        # A Routing row's `selected` is a protocol, not a selection mode. Letting a
+        # section keyword such as "Specific" through produces XML that saves and
+        # previews cleanly, then dies inside CORE with "service does not exist
+        # Specific" and leaves the session stuck in configuration.
+        raw_selected = item.get('selected')
+        canonical_selected = _normalize_generated_routing_protocol(raw_selected)
+        if not canonical_selected:
+            raise ProviderAdapterError(
+                'Routing selected must be one of: RIP, RIPNG, BGP, OSPFv2, OSPFv3, or Random '
+                f'(got {str(raw_selected or "").strip() or "empty"}).',
+                status_code=400,
+            )
+        if canonical_selected != raw_selected:
+            item['selected'] = canonical_selected
+            changed = True
         for mode_key in ('r2r_mode', 'r2s_mode'):
             raw_mode = str(item.get(mode_key) or '').strip()
             canonical = canonical_modes.get(raw_mode.lower())
@@ -4575,10 +4614,13 @@ async def _apply_deterministic_mcp_bridge_seed(
     compiled = _compile_ai_intent(user_prompt)
     has_seeded_vulnerability_ops = any(op.get('kind') == 'vulnerability' for op in compiled.tool_seed_ops)
     for op in compiled.tool_seed_ops:
+        # Every scenario.add_*_item tool takes the row value as `selected`; sending a
+        # section-flavored alias (role/service/protocol/kind) fails the call outright
+        # and aborts the whole bridge run before the model gets a turn.
         if op.get('kind') == 'routing' and routing_tool:
             routing_args: dict[str, Any] = {
                 'draft_id': draft_id,
-                'protocol': op.get('protocol') or 'OSPFv2',
+                'selected': op.get('protocol') or op.get('selected') or 'OSPFv2',
                 'count': int(op.get('count') or 1),
             }
             if op.get('r2r_mode'):
@@ -4587,19 +4629,19 @@ async def _apply_deterministic_mcp_bridge_seed(
         elif op.get('kind') == 'node' and node_tool:
             await _mcp_bridge_call_tool(client, node_tool, {
                 'draft_id': draft_id,
-                'role': op.get('role'),
+                'selected': op.get('role') or op.get('selected'),
                 'count': int(op.get('count') or 1),
             })
         elif op.get('kind') == 'service' and service_tool:
             await _mcp_bridge_call_tool(client, service_tool, {
                 'draft_id': draft_id,
-                'service': op.get('service'),
+                'selected': op.get('service') or op.get('selected'),
                 'count': int(op.get('count') or 1),
             })
         elif op.get('kind') == 'traffic' and traffic_tool:
             await _mcp_bridge_call_tool(client, traffic_tool, {
                 'draft_id': draft_id,
-                'protocol': op.get('protocol'),
+                'selected': op.get('protocol') or op.get('selected'),
                 'count': int(op.get('count') or 1),
                 'pattern': op.get('pattern') or 'continuous',
                 'content_type': op.get('content_type') or 'text',
@@ -4607,7 +4649,7 @@ async def _apply_deterministic_mcp_bridge_seed(
         elif op.get('kind') == 'segmentation' and segmentation_tool:
             await _mcp_bridge_call_tool(client, segmentation_tool, {
                 'draft_id': draft_id,
-                'kind': op.get('selected'),
+                'selected': op.get('selected'),
                 'count': int(op.get('count') or 1),
             })
         elif op.get('kind') == 'flag-node-generator' and flag_node_generator_tool:
@@ -4621,17 +4663,6 @@ async def _apply_deterministic_mcp_bridge_seed(
     applied.extend(compiled.applied_actions)
 
     vulnerability_target_count = _extract_vulnerability_target_count(user_prompt)
-
-    if segmentation_tool:
-        for control, count in _extract_segmentation_control_count_intent(user_prompt).items():
-            if count <= 0:
-                continue
-            await _mcp_bridge_call_tool(client, segmentation_tool, {
-                'draft_id': draft_id,
-                'kind': control,
-                'count': count,
-            })
-            applied.append(f'Segmentation {control}={count}')
 
     if vuln_tool and vulnerability_target_count > 0 and not has_seeded_vulnerability_ops:
         query_hint = _extract_vulnerability_query_hint(user_prompt)
@@ -4832,7 +4863,7 @@ async def _mcp_bridge_generate(payload: dict[str, Any], *, current_scenario: dic
         try:
             scenario_payload = _canonicalize_generated_vulnerabilities_or_raise(scenario_payload)
             _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, scenario_payload)
-            scenario_payload = _canonicalize_generated_routing_modes(scenario_payload)
+            scenario_payload = _canonicalize_generated_routing_or_raise(scenario_payload)
             scenario_payload = app_backend._concretize_preview_placeholders(scenario_payload, seed=payload.get('seed'))
         except BaseException as exc:
             raise _augment_provider_error_for_bridge_stage(
@@ -5030,7 +5061,7 @@ async def _mcp_bridge_generate_with_events(
             scenario_payload = _restore_preserved_scenario_metadata(current_scenario, scenario_payload)
             scenario_payload = _overlay_compiled_intent_sections(scenario_payload, user_prompt)
             _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, scenario_payload)
-            scenario_payload = _canonicalize_generated_routing_modes(scenario_payload)
+            scenario_payload = _canonicalize_generated_routing_or_raise(scenario_payload)
             scenario_payload = app_backend._concretize_preview_placeholders(scenario_payload, seed=payload.get('seed'))
         except BaseException as exc:
             raise _augment_provider_error_for_bridge_stage(
@@ -5131,7 +5162,7 @@ def _build_stream_success_payload(
     merged_scenario = _overlay_compiled_intent_sections(merged_scenario, user_prompt)
     merged_scenario = _canonicalize_generated_vulnerabilities_or_raise(merged_scenario)
     _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, merged_scenario)
-    merged_scenario = _canonicalize_generated_routing_modes(merged_scenario)
+    merged_scenario = _canonicalize_generated_routing_or_raise(merged_scenario)
     merged_scenario = app_backend._concretize_preview_placeholders(merged_scenario, seed=payload.get('seed'))
     next_scenarios = deepcopy(scenarios)
     next_scenarios[scenario_index] = merged_scenario
@@ -6034,6 +6065,10 @@ def register(
         # or scripted request does not have to repeat the provider wiring the Web UI
         # keeps in browser state. Anything the caller sent still wins.
         env_defaults = ai_settings_as_payload(resolve_ai_settings())
+        # The key is held back from this pass: an account's stored credential must win
+        # over a key in the env file, or a Web UI request that omits api_key (asking for
+        # its stored key) would silently authenticate as whatever the dotfile holds.
+        env_api_key = str(env_defaults.pop('api_key', '') or '').strip()
         for field, value in env_defaults.items():
             # Only fill fields the caller left out. An explicitly empty value is a
             # choice, not an omission: `model: ''` asks validate to discover one,
@@ -6073,6 +6108,10 @@ def register(
             resolved['api_key_secret_id'] = stored_record.get('identifier')
             resolved['has_stored_api_key'] = True
             resolved['api_key_stored_at'] = stored_record.get('stored_at')
+        elif env_api_key and 'api_key' not in payload:
+            # No stored credential for this account: fall back to the env file, which is
+            # how a headless caller with no Web UI session authenticates at all.
+            resolved['api_key'] = env_api_key
         return resolved
 
     globals()['_resolve_payload_with_stored_api_key'] = _resolve_payload_with_stored_api_key
@@ -6352,7 +6391,7 @@ def register(
             merged_scenario = _overlay_compiled_intent_sections(merged_scenario, user_prompt)
             merged_scenario = _canonicalize_generated_vulnerabilities_or_raise(merged_scenario)
             _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, merged_scenario)
-            merged_scenario = _canonicalize_generated_routing_modes(merged_scenario)
+            merged_scenario = _canonicalize_generated_routing_or_raise(merged_scenario)
             merged_scenario = app_backend._concretize_preview_placeholders(merged_scenario, seed=payload.get('seed'))
             next_scenarios = deepcopy(scenarios)
             next_scenarios[scenario_index] = merged_scenario

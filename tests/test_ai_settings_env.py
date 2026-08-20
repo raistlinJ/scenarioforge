@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import scenarioforge.cli as cli
@@ -181,6 +182,9 @@ def _install_env(monkeypatch, **extra):
     monkeypatch.setenv('CORETG_AI_MODEL', 'env-model')
     monkeypatch.setenv('CORETG_AI_BASE_URL', 'https://env.example/v1')
     monkeypatch.setenv('CORETG_AI_API_KEY_USER', 'coreadmin')
+    # The suite loads the operator's real .scenarioforge.env, so a key configured
+    # there would stand in for the one under test.
+    monkeypatch.delenv('CORETG_AI_API_KEY', raising=False)
     for key, value in extra.items():
         monkeypatch.setenv(key, value)
 
@@ -453,3 +457,132 @@ def test_openai_validate_reports_its_own_provider_id(monkeypatch):
     assert result['provider'] == 'openai'
     assert result['models'] == ['gpt-4.1-mini']
     assert result['model_found'] is True
+
+
+def _fng_catalog(count):
+    return [{'id': f'gen_{i}', 'name': f'Generator {i}'} for i in range(count)]
+
+
+def test_random_flag_node_generator_row_resolves_to_distinct_generators(monkeypatch):
+    # Flow requires a distinct generator per challenge node. A Random row with
+    # v_count > 1 used to pin every node to one generator, so the chain failed with
+    # "No distinct compatible generator assignment could be made for every selected
+    # Flow node" and the scenario could never sequence.
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: (_fng_catalog(5), []),
+    )
+
+    scenario = {'name': 'RandomFng', 'sections': {'Flag Node Generators': {
+        'density': 0.0,
+        'items': [{'selected': 'Random', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 3}],
+    }}}
+
+    resolved = backend._concretize_scenarios_for_save([scenario], seed=4242)
+    items = resolved[0]['sections']['Flag Node Generators']['items']
+
+    assert len(items) == 3
+    assert all(item['selected'] == 'Specific' for item in items)
+    assert all(item['v_count'] == 1 for item in items)
+    assert len({item['g_id'] for item in items}) == 3
+    assert all(item['g_name'] for item in items)
+
+
+def test_random_flag_node_generator_row_is_deterministic_for_a_seed(monkeypatch):
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: (_fng_catalog(6), []),
+    )
+    scenario = {'name': 'RandomFng', 'sections': {'Flag Node Generators': {
+        'density': 0.0,
+        'items': [{'selected': 'Random', 'v_metric': 'Count', 'v_count': 2}],
+    }}}
+
+    first = backend._concretize_scenarios_for_save([deepcopy(scenario)], seed=99)
+    second = backend._concretize_scenarios_for_save([deepcopy(scenario)], seed=99)
+    other_seed = backend._concretize_scenarios_for_save([deepcopy(scenario)], seed=100)
+
+    ids = lambda payload: [i['g_id'] for i in payload[0]['sections']['Flag Node Generators']['items']]
+    assert ids(first) == ids(second)
+    assert len(set(ids(first))) == 2
+    # A different seed is free to draw a different pair; it must still be distinct.
+    assert len(set(ids(other_seed))) == 2
+
+
+def test_random_flag_node_generator_row_falls_back_when_catalog_is_smaller(monkeypatch):
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: (_fng_catalog(2), []),
+    )
+    scenario = {'name': 'RandomFng', 'sections': {'Flag Node Generators': {
+        'density': 0.0,
+        'items': [{'selected': 'Random', 'v_metric': 'Count', 'v_count': 4}],
+    }}}
+
+    resolved = backend._concretize_scenarios_for_save([scenario], seed=7)
+    items = resolved[0]['sections']['Flag Node Generators']['items']
+
+    # Asking for more nodes than the catalog can distinctly fill still produces the
+    # requested rows rather than dropping them; Flow reports what it cannot satisfy.
+    assert len(items) == 4
+    assert len({item['g_id'] for item in items}) == 2
+
+
+def test_specific_flag_node_generator_rows_are_left_alone(monkeypatch):
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: (_fng_catalog(4), []),
+    )
+    scenario = {'name': 'SpecificFng', 'sections': {'Flag Node Generators': {
+        'density': 0.0,
+        'items': [{'selected': 'Specific', 'g_id': 'gen_1', 'v_metric': 'Count', 'v_count': 2}],
+    }}}
+
+    resolved = backend._concretize_scenarios_for_save([scenario], seed=7)
+    items = resolved[0]['sections']['Flag Node Generators']['items']
+
+    # An explicit author choice is intent, not a draw: it is preserved as written.
+    assert len(items) == 1
+    assert items[0]['g_id'] == 'gen_1'
+    assert items[0]['v_count'] == 2
+
+
+def test_preview_placeholder_resolution_also_expands_random_rows(monkeypatch):
+    # Two code paths resolved Random rows: the save path and the preview-placeholder
+    # path the MCP bridge uses. Fixing only one left the bridge still emitting a
+    # single generator pinned to every node.
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(
+        backend,
+        '_flag_node_generators_from_enabled_sources',
+        lambda: (_fng_catalog(4), []),
+    )
+    scenario = {'name': 'RandomFng', 'sections': {'Flag Node Generators': {
+        'density': 0.0,
+        'items': [{'selected': 'Random', 'v_metric': 'Count', 'v_count': 2}],
+    }}}
+
+    previewed = backend._concretize_preview_placeholders(deepcopy(scenario), seed=777)
+    items = previewed['sections']['Flag Node Generators']['items']
+
+    assert len(items) == 2
+    assert len({item['g_id'] for item in items}) == 2
+    assert all(item['selected'] == 'Specific' and item['v_count'] == 1 for item in items)
+
+    # Both paths agree, so a bridge-authored draft and a saved scenario match.
+    saved = backend._concretize_scenarios_for_save([deepcopy(scenario)], seed=777)
+    saved_items = saved[0]['sections']['Flag Node Generators']['items']
+    assert [i['g_id'] for i in saved_items] == [i['g_id'] for i in items]

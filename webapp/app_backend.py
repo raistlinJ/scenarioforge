@@ -33260,6 +33260,103 @@ def _deterministic_pick(options: List[Any], seed_text: Any) -> Any:
     return options[idx]
 
 
+def _resolve_flag_node_generator_rows(
+    items: List[Any],
+    *,
+    catalog: List[Dict[str, Any]],
+    seed_int: Any,
+    scenario_name: str,
+    catalog_error: str = '',
+) -> List[Any]:
+    """Resolve Flag Node Generators rows to Specific, enabled generators.
+
+    A Random row asking for N nodes resolves to N *distinct* generators. Flow
+    requires a distinct generator per challenge node, so pinning one generator to a
+    whole row produced a chain that could never sequence -- it failed with "missing
+    flag assignments" long after the XML looked fine. An explicit Specific row is
+    author intent and is preserved as written.
+    """
+    resolved: List[Any] = []
+    for index, raw_item in enumerate(items or []):
+        if not isinstance(raw_item, dict):
+            resolved.append(raw_item)
+            continue
+
+        item = copy.deepcopy(raw_item)
+        selected = str(item.get('selected') or '').strip().lower()
+        requested_id = str(item.get('g_id') or '').strip()
+
+        if not selected or selected == 'random':
+            try:
+                requested_units = int(item.get('v_count') or 1)
+            except Exception:
+                requested_units = 1
+            requested_units = max(1, requested_units)
+
+            remaining = list(catalog)
+            picks: List[Dict[str, Any]] = []
+            for unit_index in range(requested_units):
+                if not remaining:
+                    # Fewer enabled generators than requested nodes: reuse the pool
+                    # rather than dropping rows, and let Flow report what it cannot
+                    # satisfy.
+                    remaining = list(catalog)
+                if not remaining:
+                    break
+                pick = _deterministic_pick(
+                    remaining,
+                    f'{seed_int}|{scenario_name}|Flag Node Generators|{index}|{unit_index}|g_id|save-xml',
+                )
+                if not isinstance(pick, dict):
+                    break
+                picks.append(pick)
+                pick_id = str(pick.get('id') or '').strip()
+                remaining = [
+                    candidate for candidate in remaining
+                    if str(candidate.get('id') or '').strip() != pick_id
+                ]
+
+            if not picks or not str((picks[0] or {}).get('id') or '').strip():
+                detail = f' ({catalog_error})' if catalog_error else ''
+                raise ValueError(
+                    'Flag Node Generators contains Random, but no enabled '
+                    f'flag-node-generators are available{detail}.'
+                )
+
+            for chosen in picks:
+                generator_id = str((chosen or {}).get('id') or '').strip()
+                if not generator_id:
+                    continue
+                expanded = copy.deepcopy(item)
+                expanded['selected'] = 'Specific'
+                expanded['g_id'] = generator_id
+                expanded['g_name'] = str((chosen or {}).get('name') or generator_id).strip() or generator_id
+                expanded['v_metric'] = 'Count'
+                expanded['v_count'] = 1
+                resolved.append(expanded)
+            continue
+
+        match = next(
+            (candidate for candidate in catalog if str(candidate.get('id') or '').strip() == requested_id),
+            None,
+        )
+        if not requested_id or not isinstance(match, dict):
+            raise ValueError(
+                'Topology-selected flag-node-generator is not enabled: '
+                f"{requested_id or item.get('g_name') or '(missing id)'}"
+            )
+        item['selected'] = 'Specific'
+        item['g_id'] = requested_id
+        item['g_name'] = str(match.get('name') or requested_id).strip() or requested_id
+        if str(item.get('v_metric') or '').strip() in {'', 'Weight'}:
+            item['v_metric'] = 'Count'
+        if item.get('v_count') in (None, '', 0):
+            item['v_count'] = 1
+        resolved.append(item)
+
+    return resolved
+
+
 def _coerce_numeric_placeholder(value: Any, *, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
     text = str(value or '').strip()
     if text.lower() == 'random':
@@ -33587,37 +33684,12 @@ def _concretize_preview_placeholders(scenario_payload: Any, *, seed: Any = None)
             continue
 
         if section_name == 'Flag Node Generators':
-            for index, raw_item in enumerate(items):
-                if not isinstance(raw_item, dict):
-                    continue
-                item = copy.deepcopy(raw_item)
-                selected = str(item.get('selected') or '').strip().lower()
-                requested_id = str(item.get('g_id') or '').strip()
-                if not selected or selected == 'random':
-                    chosen = _deterministic_pick(
-                        nodegen_catalog_items,
-                        f'{seed_int}|{scenario_name}|{section_name}|{index}|g_id|save-xml',
-                    )
-                    generator_id = str((chosen or {}).get('id') or '').strip()
-                    generator_name = str((chosen or {}).get('name') or '').strip()
-                    if not generator_id:
-                        raise ValueError('Flag Node Generators contains Random, but no enabled flag-node-generators are available.')
-                    item['selected'] = 'Specific'
-                    item['g_id'] = generator_id
-                    item['g_name'] = generator_name or generator_id
-                else:
-                    match = next((candidate for candidate in nodegen_catalog_items if str(candidate.get('id') or '').strip() == requested_id), None)
-                    if not requested_id or not isinstance(match, dict):
-                        raise ValueError(f"Topology-selected flag-node-generator is not enabled: {requested_id or item.get('g_name') or '(missing id)'}")
-                    item['selected'] = 'Specific'
-                    item['g_id'] = requested_id
-                    item['g_name'] = str(match.get('name') or requested_id).strip() or requested_id
-                if str(item.get('v_metric') or '').strip() in {'', 'Weight'}:
-                    item['v_metric'] = 'Count'
-                if item.get('v_count') in (None, '', 0):
-                    item['v_count'] = 1
-                next_items.append(item)
-            sec['items'] = next_items
+            sec['items'] = _resolve_flag_node_generator_rows(
+                items,
+                catalog=nodegen_catalog_items,
+                seed_int=seed_int,
+                scenario_name=scenario_name,
+            )
             sections[section_name] = sec
             continue
 
@@ -33845,51 +33917,13 @@ def _concretize_scenarios_for_save(scenarios_payload: Any, *, seed: Any = None) 
                 flag_node_generator_section = sections.get('Flag Node Generators') if isinstance(sections.get('Flag Node Generators'), dict) else None
                 flag_node_generator_items = flag_node_generator_section.get('items') if isinstance(flag_node_generator_section, dict) and isinstance(flag_node_generator_section.get('items'), list) else None
                 if isinstance(flag_node_generator_items, list):
-                    resolved_items: list[Any] = []
-                    for index, raw_item in enumerate(flag_node_generator_items):
-                        if not isinstance(raw_item, dict):
-                            resolved_items.append(raw_item)
-                            continue
-
-                        item = copy.deepcopy(raw_item)
-                        selected = str(item.get('selected') or '').strip().lower()
-                        requested_id = str(item.get('g_id') or '').strip()
-                        if not selected or selected == 'random':
-                            chosen = _deterministic_pick(
-                                nodegen_catalog_items,
-                                f'{seed_int}|{scenario_name}|Flag Node Generators|{index}|g_id|save-xml',
-                            )
-                            generator_id = str((chosen or {}).get('id') or '').strip()
-                            if not generator_id:
-                                detail = f' ({nodegen_catalog_error})' if nodegen_catalog_error else ''
-                                raise ValueError(
-                                    'Flag Node Generators contains Random, but no enabled '
-                                    f'flag-node-generators are available{detail}.'
-                                )
-                            item['selected'] = 'Specific'
-                            item['g_id'] = generator_id
-                            item['g_name'] = str((chosen or {}).get('name') or generator_id).strip() or generator_id
-                        else:
-                            match = next(
-                                (candidate for candidate in nodegen_catalog_items
-                                 if str(candidate.get('id') or '').strip() == requested_id),
-                                None,
-                            )
-                            if not requested_id or not isinstance(match, dict):
-                                raise ValueError(
-                                    'Topology-selected flag-node-generator is not enabled: '
-                                    f"{requested_id or item.get('g_name') or '(missing id)'}"
-                                )
-                            item['selected'] = 'Specific'
-                            item['g_id'] = requested_id
-                            item['g_name'] = str(match.get('name') or requested_id).strip() or requested_id
-
-                        if str(item.get('v_metric') or '').strip() in {'', 'Weight'}:
-                            item['v_metric'] = 'Count'
-                        if item.get('v_count') in (None, '', 0):
-                            item['v_count'] = 1
-                        resolved_items.append(item)
-
+                    resolved_items = _resolve_flag_node_generator_rows(
+                        flag_node_generator_items,
+                        catalog=nodegen_catalog_items,
+                        seed_int=seed_int,
+                        scenario_name=scenario_name,
+                        catalog_error=nodegen_catalog_error,
+                    )
                     flag_node_generator_section['items'] = resolved_items
                     sections['Flag Node Generators'] = flag_node_generator_section
                     next_scenario['sections'] = sections
