@@ -1694,7 +1694,7 @@ class ScenarioAuthoringMCPServer:
         items = routing_section.get('items') if isinstance(routing_section.get('items'), list) else []
 
         selected = self._normalize_routing_protocol(
-            arguments.get('selected')
+            arguments.get('selected') or arguments.get('protocol')
         )
         if not selected:
             raise ValueError('selected is required for routing items')

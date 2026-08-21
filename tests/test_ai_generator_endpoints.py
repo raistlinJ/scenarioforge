@@ -2822,7 +2822,86 @@ def test_repo_mcp_bridge_client_requires_tools_for_openai_compatible_requests(mo
     assert captured['payload'].get('tool_choice') == 'required'
     assert isinstance(captured['payload'].get('tools'), list)
     assert captured['payload']['tools']
+    assert captured['payload']['tools'][0]['function']['name'] == 'server__scenario__get_draft'
     assert captured['headers'] == {'Authorization': 'Bearer test-litellm-key'}
+
+
+def test_repo_mcp_bridge_client_disables_reasoning_for_openai_chat_tools(monkeypatch):
+    from webapp.routes import ai_provider
+
+    client = ai_provider._RepoMcpBridgeClient(
+        model='gpt-5.6-sol',
+        host='https://api.openai.com/v1',
+        provider='openai',
+        api_key='test-openai-key',
+    )
+    captured = {}
+
+    def fake_post_json(url, payload, *, timeout, headers=None, verify_ssl=True):
+        captured['payload'] = payload
+        return {'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]}
+
+    monkeypatch.setattr(ai_provider, '_post_json', fake_post_json)
+    monkeypatch.setattr(
+        client.tool_manager,
+        'get_enabled_tool_objects',
+        lambda: [_FakeTool('server.scenario.get_draft', 'Get draft', {'type': 'object'})],
+    )
+
+    client._post_chat(messages=[{'role': 'user', 'content': 'test prompt'}])
+
+    assert captured['payload']['reasoning_effort'] == 'none'
+
+
+def test_repo_mcp_bridge_client_decodes_openai_compatible_tool_name(monkeypatch):
+    from webapp.routes import ai_provider
+
+    client = ai_provider._RepoMcpBridgeClient(
+        model='gpt-5.6-sol',
+        host='https://api.openai.com/v1',
+        provider='openai',
+        api_key='test-openai-key',
+    )
+    client.sessions = {'server': {'session': object()}}
+    client.tool_manager.set_available_tools([
+        _FakeTool('server.scenario.get_draft', 'Get draft', {'type': 'object'}),
+    ])
+    client.tool_manager.set_tool_status('server.scenario.get_draft', True)
+    observed_tool_names = []
+    responses = [
+        {
+            'choices': [{
+                'message': {
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [{
+                        'id': 'call_1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'server__scenario__get_draft',
+                            'arguments': json.dumps({}),
+                        },
+                    }],
+                },
+            }],
+        },
+        {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+    ]
+
+    def fake_post_chat(*, messages):
+        return responses.pop(0)
+
+    async def fake_call_tool(client_obj, qualified_tool_name, arguments):
+        observed_tool_names.append(qualified_tool_name)
+        return {'ok': True}
+
+    monkeypatch.setattr(client, '_post_chat', fake_post_chat)
+    monkeypatch.setattr(ai_provider, '_mcp_bridge_call_tool', fake_call_tool)
+
+    result = asyncio.run(client._run_query('use MCP tools'))
+
+    assert result == 'done'
+    assert observed_tool_names == ['server.scenario.get_draft']
 
 
 def test_repo_mcp_bridge_client_uses_verify_ssl_flag_for_openai_compatible_requests(monkeypatch):

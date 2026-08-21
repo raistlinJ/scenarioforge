@@ -588,6 +588,47 @@ def test_mcp_add_routing_item_upserts_existing_count_row_for_same_protocol():
     assert items[0].get('r2s_edges') == 2
 
 
+def test_mcp_add_routing_item_accepts_protocol_as_an_alias_for_selected():
+    """The bridge's own guidance told models to send `protocol`.
+
+    That argument is on this tool's LLM allowlist, so it reached the tool and
+    was then ignored, and the call failed with "selected is required for
+    routing items" -- aborting the whole run for a model that did exactly what
+    it was instructed to do.
+    """
+    server = ScenarioAuthoringMCPServer()
+
+    created = _tool_call(server, 'scenario.create_draft', {'name': 'RoutingAliasScenario'})
+    draft_id = (created.get('draft') or {}).get('draft_id')
+
+    updated = _tool_call(server, 'scenario.add_routing_item', {
+        'draft_id': draft_id,
+        'protocol': 'OSPFv2',
+        'count': 3,
+    })
+
+    section = (((updated.get('draft') or {}).get('scenario') or {}).get('sections') or {}).get('Routing') or {}
+    items = section.get('items') or []
+    assert items
+    assert items[-1].get('selected') == 'OSPFv2'
+    assert items[-1].get('v_count') == 3
+
+
+def test_mcp_add_routing_item_still_prefers_selected_when_both_are_given():
+    server = ScenarioAuthoringMCPServer()
+    created = _tool_call(server, 'scenario.create_draft', {'name': 'RoutingBothScenario'})
+    draft_id = (created.get('draft') or {}).get('draft_id')
+
+    updated = _tool_call(server, 'scenario.add_routing_item', {
+        'draft_id': draft_id,
+        'selected': 'OSPFv3',
+        'protocol': 'OSPFv2',
+    })
+
+    section = (((updated.get('draft') or {}).get('scenario') or {}).get('sections') or {}).get('Routing') or {}
+    assert (section.get('items') or [])[-1].get('selected') == 'OSPFv3'
+
+
 def test_mcp_add_segmentation_item_appends_firewall_row_with_density_default():
     server = ScenarioAuthoringMCPServer()
 

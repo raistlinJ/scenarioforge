@@ -3791,6 +3791,8 @@ class _RepoMcpBridgeClient:
         self.timeout_seconds = 120.0
         self.query_debug_state: dict[str, Any] = {}
         self._exit_stack: AsyncExitStack | None = None
+        self._provider_tool_names: dict[str, str] = {}
+        self._internal_tool_names: dict[str, str] = {}
 
     def _set_query_debug_state(self, **kwargs: Any) -> None:
         state = dict(self.query_debug_state)
@@ -3872,10 +3874,11 @@ class _RepoMcpBridgeClient:
     def _build_chat_tools_payload(self) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
         for tool in self.tool_manager.get_enabled_tool_objects():
+            provider_tool_name = self._tool_name_for_provider(tool.name)
             payload.append({
                 'type': 'function',
                 'function': {
-                    'name': tool.name,
+                    'name': provider_tool_name,
                     'description': tool.description,
                     'parameters': _build_llm_chat_tool_schema(tool.name, tool.inputSchema if isinstance(tool.inputSchema, dict) else {}),
                 },
@@ -3884,6 +3887,38 @@ class _RepoMcpBridgeClient:
 
     def _uses_openai_chat_completions(self) -> bool:
         return self.provider in {'litellm', 'openai'}
+
+    def _tool_name_for_provider(self, tool_name: Any) -> str:
+        internal_name = str(tool_name or '').strip()
+        if not self._uses_openai_chat_completions() or not internal_name:
+            return internal_name
+        existing = self._internal_tool_names.get(internal_name)
+        if existing:
+            return existing
+        if internal_name in self._provider_tool_names:
+            return internal_name
+
+        # MCP uses dotted, qualified names. OpenAI function names permit only
+        # letters, digits, underscores, and hyphens, with a 64-character limit.
+        provider_name = internal_name.replace('.', '__')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', provider_name):
+            raise ProviderAdapterError(
+                f'MCP tool name cannot be represented as an OpenAI function name: {internal_name}',
+                status_code=500,
+            )
+        mapped_name = self._provider_tool_names.get(provider_name)
+        if mapped_name and mapped_name != internal_name:
+            raise ProviderAdapterError(
+                f'MCP tool names collide after OpenAI-compatible encoding: {mapped_name}, {internal_name}',
+                status_code=500,
+            )
+        self._provider_tool_names[provider_name] = internal_name
+        self._internal_tool_names[internal_name] = provider_name
+        return provider_name
+
+    def _tool_name_from_provider(self, tool_name: Any) -> str:
+        provider_name = str(tool_name or '').strip()
+        return self._provider_tool_names.get(provider_name, provider_name)
 
     def _chat_request_headers(self) -> dict[str, str] | None:
         if self._uses_openai_chat_completions() and self.api_key:
@@ -3913,7 +3948,7 @@ class _RepoMcpBridgeClient:
                             'id': str(tool_call.get('id') or f'call_{idx + 1}').strip(),
                             'type': 'function',
                             'function': {
-                                'name': str(((tool_call.get('function') or {}).get('name')) or '').strip(),
+                                'name': self._tool_name_for_provider((tool_call.get('function') or {}).get('name')),
                                 'arguments': json.dumps(((tool_call.get('function') or {}).get('arguments')) or {}, ensure_ascii=False),
                             },
                         }
@@ -3960,6 +3995,10 @@ class _RepoMcpBridgeClient:
                 }
                 if tools_payload:
                     payload['tools'] = tools_payload
+                    if self.provider == 'openai' and self.model.rsplit('/', 1)[-1].lower().startswith('gpt-5.6-sol'):
+                        # GPT-5.6-sol's Chat Completions endpoint supports
+                        # function tools only when reasoning is disabled.
+                        payload['reasoning_effort'] = 'none'
                     tool_choice = self._openai_tool_choice(tools_payload)
                     if tool_choice:
                         payload['tool_choice'] = tool_choice
@@ -4173,7 +4212,10 @@ class _RepoMcpBridgeClient:
                 if self._is_cancelled(cancel_check):
                     return final_text
                 function = tool_call.get('function') if isinstance(tool_call.get('function'), dict) else {}
-                qualified_tool_name = _normalize_mcp_bridge_tool_name(function.get('name'), known_server_names=list(self.sessions.keys()))
+                qualified_tool_name = _normalize_mcp_bridge_tool_name(
+                    self._tool_name_from_provider(function.get('name')),
+                    known_server_names=list(self.sessions.keys()),
+                )
                 tool_args = function.get('arguments') if isinstance(function.get('arguments'), dict) else {}
                 tool_definition = next((tool for tool in self.tool_manager.get_available_tools() if tool.name == qualified_tool_name), None)
                 tool_args = _sanitize_mcp_bridge_tool_arguments(
@@ -4723,7 +4765,7 @@ def _build_mcp_bridge_goal_prompt(
         'Interpret Routing fields precisely: v_count is router quantity, r2r_edges is router-to-router links per router, and r2s_edges with r2s_hosts_min or r2s_hosts_max describes router-to-segment or routed-host attachment density.',
         *_build_count_intent_guidance(user_prompt),
         *_build_mcp_bridge_execution_guidance(user_prompt),
-        'If the user asks for routers without naming a protocol, use scenario.add_routing_item with protocol="OSPFv2" and the requested count when that tool is enabled; otherwise replace only the Routing section with a Count row selected="OSPFv2".',
+        'If the user asks for routers without naming a protocol, use scenario.add_routing_item with selected="OSPFv2" and the requested count when that tool is enabled; otherwise replace only the Routing section with a Count row selected="OSPFv2".',
         'When dedicated tools are available, prefer scenario.add_node_role_item for host or Docker counts, scenario.add_routing_item for explicit router/protocol rows and routing edge hints, scenario.add_service_item for Services rows, scenario.add_traffic_item for TCP or UDP traffic, scenario.add_segmentation_item for Segmentation rows, scenario.search_flag_node_generator_catalog to look up an enabled generator, and scenario.add_flag_node_generator_item for topology flag-node-generator rows.',
         'For vulnerabilities, prefer scenario.search_vulnerability_catalog first, then call scenario.add_vulnerability_item with explicit v_name and v_path from the chosen result. Do not pass factor. If the user asks for multiple different vulnerabilities, make separate add_vulnerability_item calls with v_count=1 for each chosen vulnerability.',
         'For broad vulnerability categories such as web-related, database, auth, or ssh-related vulnerabilities, do not invent a synthetic category row. Search the vulnerability catalog using the user\'s wording and available README-backed context, and do not pass v_type or v_vector filters unless the user explicitly requested those exact filters. Then choose concrete catalog results.',
