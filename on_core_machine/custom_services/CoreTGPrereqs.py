@@ -158,6 +158,13 @@ if ! have python3; then
   maybe_install python3
 fi
 
+# HTTPS is a first-class ScenarioForge service. Its launcher uses OpenSSL for
+# the TLS listener and for a per-node self-signed certificate.
+if ! have openssl; then
+  log "openssl missing; attempting to install openssl"
+  maybe_install openssl
+fi
+
 # Ensure iptables + iproute tooling for segmentation scripts.
 if ! have iptables; then
   log "iptables missing; attempting to install iptables"

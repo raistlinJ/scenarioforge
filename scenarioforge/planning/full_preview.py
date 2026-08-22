@@ -40,6 +40,7 @@ from .node_plan import (  # internal normalization helper
 )
 from .preview_validation import validate_full_preview
 from ..utils.pivot_access import PIVOT_PROVIDER_METADATA_KEY, allow_rules_for_provider
+from ..utils.segmentation import segmentation_requested
 
 
 @dataclass
@@ -1511,7 +1512,7 @@ def build_full_preview(
     }
     segmentation_rules_preview: List[Dict[str, Any]] = []
     deep_segmentation_error: Optional[str] = None
-    if segmentation_density and segmentation_density > 0 and segmentation_items:
+    if segmentation_requested(segmentation_density, segmentation_items):
         try:
             # Convert raw segmentation items into SegmentationInfo objects (they should already be Random-resolved upstream)
             from ..types import SegmentationInfo, NodeInfo as _NI  # type: ignore

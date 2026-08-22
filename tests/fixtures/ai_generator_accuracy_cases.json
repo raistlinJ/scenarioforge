@@ -284,7 +284,7 @@
               "selected": "PC",
               "factor": 1.0,
               "v_metric": "Count",
-              "v_count": 9
+              "v_count": 7
             }
           ]
         },
@@ -317,7 +317,7 @@
               "selected": "PC",
               "factor": 1.0,
               "v_metric": "Count",
-              "v_count": 9
+              "v_count": 7
             }
           ]
         },
@@ -341,7 +341,7 @@
         }
       },
       "preview_counts": {
-        "hosts_count": 11,
+        "hosts_count": 9,
         "routers_count": 3
       }
     }

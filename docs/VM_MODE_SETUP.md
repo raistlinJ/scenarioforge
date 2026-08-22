@@ -95,7 +95,7 @@ Two things still have to happen on the CORE VM, both one-click actions on the
 and for the manual equivalents:
 
 - **Install custom services.** ScenarioForge's CORE services (segmentation,
-  traffic, per-node Docker Compose, default route) are versioned with this
+  traffic, HTTPS, per-node Docker Compose, default route) are versioned with this
   repository, not with CORE, so they are installed from the UI and re-installed
   after you pull repository updates. No installer provides them.
 - **Fix Docker daemon for CORE.** coreemu-minimal already writes

@@ -56,6 +56,9 @@ def test_mcp_initialize_and_list_tools():
     assert 'scenario.preview_draft' in tool_names
     assert 'scenario.save_xml' in tool_names
 
+    segmentation_tool = next(tool for tool in tools if tool.get('name') == 'scenario.add_segmentation_item')
+    assert set((segmentation_tool.get('inputSchema') or {}).get('required') or []) == {'draft_id', 'selected'}
+
     vuln_tool = next(tool for tool in tools if tool.get('name') == 'scenario.add_vulnerability_item')
     vuln_properties = (((vuln_tool.get('inputSchema') or {}).get('properties')) or {})
     assert 'factor' not in vuln_properties
@@ -307,7 +310,7 @@ def test_mcp_replace_section_rejects_unknown_service_selected_value():
     assert response is not None
     error = response.get('error') or {}
     assert error.get('code') == -32602
-    assert 'SSH, HTTP, DHCPClient, or Random' in str(error.get('message') or '')
+    assert 'SSH, HTTP, HTTPS, DHCPClient, or Random' in str(error.get('message') or '')
 
 
 def test_mcp_replace_section_rejects_removed_events_section():
@@ -732,7 +735,7 @@ def test_mcp_add_service_item_rejects_unknown_service_values():
     assert response is not None
     error = response.get('error') or {}
     assert error.get('code') == -32602
-    assert 'SSH, HTTP, DHCPClient, or Random' in str(error.get('message') or '')
+    assert 'SSH, HTTP, HTTPS, DHCPClient, or Random' in str(error.get('message') or '')
 
 
 def test_mcp_get_authoring_schema_can_filter_single_section():

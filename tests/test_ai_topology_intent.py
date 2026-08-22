@@ -77,15 +77,8 @@ def test_compile_ai_topology_intent_also_compiles_services_and_traffic_rows():
     ]
 
 
-def test_compile_ai_topology_intent_compiles_vulnerabilities_without_reserving_docker_slots():
-    """Vulnerability rows are compiled; Docker capacity for them is not.
-
-    The compiler used to reserve Docker slots inside the host budget for each
-    vulnerability target. That was removed (commit "add flag-nodes as a card")
-    so the host budget reflects what the user asked for, and the planner adds
-    the dedicated challenge hosts when it builds the topology -- the same split
-    that keeps a declared Docker count distinct from vulnerability targets.
-    """
+def test_compile_ai_topology_intent_reserves_vulnerability_slots_inside_total_node_budget():
+    """Planner-additive vulnerability nodes still consume an explicit total."""
     compiled = compile_ai_topology_intent(
         'Create a network with 12 nodes, 3 routers, and 2 web vulnerabilities.',
         vuln_catalog=[
@@ -98,10 +91,9 @@ def test_compile_ai_topology_intent_compiles_vulnerabilities_without_reserving_d
     vuln_items = compiled.section_payloads['Vulnerabilities']['items']
 
     assert compiled.locked_sections == ('Routing', 'Node Information', 'Vulnerabilities')
-    # 12 nodes - 3 routers = 9 hosts, all left as PC. No Docker row is reserved
-    # here for the 2 vulnerabilities; the planner allocates those hosts instead.
+    # 12 total - 3 routers - 2 planner-added vulnerability nodes = 7 PCs.
     assert node_items == [
-        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 9},
+        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 7},
     ]
     assert vuln_items == [
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'appweb/CVE-2018-8715', 'v_path': '/catalog/appweb/CVE-2018-8715/docker-compose.yml'},
@@ -158,7 +150,7 @@ def test_compile_ai_topology_intent_compiles_listed_vulnerability_requests_as_mu
         {'selected': 'RIP', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 4},
     ]
     assert compiled.section_payloads['Node Information']['items'] == [
-        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 13},
+        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 10},
         {'selected': 'Docker', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 3},
     ]
     assert compiled.section_payloads['Vulnerabilities']['items'] == [
@@ -167,6 +159,57 @@ def test_compile_ai_topology_intent_compiles_listed_vulnerability_requests_as_mu
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'aaa/random-demo', 'v_path': '/catalog/aaa/random-demo/docker-compose.yml'},
     ]
 
+
+def test_compile_ai_topology_intent_treats_vulnerable_hosts_as_subset_of_host_count():
+    compiled = compile_ai_topology_intent(
+        'two routers and five hosts where two hosts run vulnerable services',
+        vuln_catalog=[
+            {'Name': 'demo/one', 'Path': '/catalog/demo/one/docker-compose.yml'},
+            {'Name': 'demo/two', 'Path': '/catalog/demo/two/docker-compose.yml'},
+        ],
+    )
+
+    assert compiled.section_payloads['Routing']['items'][0]['v_count'] == 2
+    assert compiled.section_payloads['Node Information']['items'] == [
+        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 3},
+    ]
+    assert len(compiled.section_payloads['Vulnerabilities']['items']) == 2
+
+
+def test_compile_ai_topology_intent_preserves_unquantified_services_and_segmentation():
+    compiled = compile_ai_topology_intent(
+        'four routers and ten hosts running SSH and HTTP with a firewalled DMZ and a NAT gateway'
+    )
+
+    assert compiled.section_payloads['Services']['items'] == [
+        {'selected': 'SSH', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 10},
+        {'selected': 'HTTP', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 10},
+    ]
+    assert compiled.section_payloads['Segmentation']['items'] == [
+        {'selected': 'Firewall', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 1},
+        {'selected': 'NAT', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 1},
+    ]
+
+
+def test_compile_ai_topology_intent_keeps_https_distinct_and_seeds_background_traffic():
+    compiled = compile_ai_topology_intent(
+        'four routers and ten hosts running HTTP and HTTPS with background traffic'
+    )
+
+    assert compiled.section_payloads['Services']['items'] == [
+        {'selected': 'HTTP', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 10},
+        {'selected': 'HTTPS', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 10},
+    ]
+    assert compiled.section_payloads['Traffic']['items'] == [
+        {
+            'selected': 'TCP',
+            'factor': 1.0,
+            'v_metric': 'Count',
+            'v_count': 1,
+            'pattern': 'continuous',
+            'content_type': 'text',
+        },
+    ]
 def test_flag_node_generator_count_handles_plural_and_descriptor_prompts():
     from scenarioforge.planning.ai_topology_intent import extract_ai_topology_intent
 

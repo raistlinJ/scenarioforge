@@ -28272,6 +28272,10 @@ def _required_builtin_core_services_for_xml_input(
     concrete: set[str] = set()
     saw_random = False
     canonical_services = set(_RANDOM_OPTIONS_BY_SECTION.get('Services') or [])
+    # This preflight is specifically for CORE's built-ins. Explicit custom
+    # services (such as ScenarioForge HTTPS) are validated and installed by the
+    # custom-service preflight immediately above it.
+    canonical_services.difference_update(_local_custom_service_names())
 
     for raw_item in service_items:
         if not isinstance(raw_item, dict):
@@ -32926,7 +32930,7 @@ _PIVOT_PROVIDER_OPTIONS: List[str] = ['vulnerability', 'flag-node-generator', 's
 _RANDOM_OPTIONS_BY_SECTION: Dict[str, List[str]] = {
     'Node Information': ['Server', 'Workstation', 'PC', 'Docker'],
     'Routing': ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3'],
-    'Services': ['SSH', 'HTTP', 'DHCPClient'],
+    'Services': ['SSH', 'HTTP', 'HTTPS', 'DHCPClient'],
     'Traffic': ['TCP', 'UDP'],
     'Vulnerabilities': ['Specific'],
     'Flag Node Generators': ['Specific'],
@@ -33025,7 +33029,7 @@ def _normalize_service_item_selection(value: Any) -> str:
     aliases = {
         'ssh': 'SSH',
         'http': 'HTTP',
-        'https': 'HTTP',
+        'https': 'HTTPS',
         'web': 'HTTP',
         'dhcpclient': 'DHCPClient',
         'dhcp': 'DHCPClient',

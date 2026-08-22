@@ -25,6 +25,7 @@ import pytest
 from scenarioforge.parsers.segmentation import parse_segmentation_info
 from scenarioforge.types import NodeInfo, SegmentationInfo
 from scenarioforge.utils.segmentation import plan_and_apply_segmentation
+from scenarioforge.utils.segmentation import segmentation_requested
 
 
 SEGMENTATION_XML = """<Scenarios>
@@ -71,6 +72,16 @@ def test_counts_survive_serialisation(scenario_xml):
     by_name = {row['selected']: row for row in serial}
     assert by_name['Firewall']['abs_count'] == 2
     assert by_name['NAT']['abs_count'] == 1
+
+
+def test_zero_density_does_not_disable_explicit_count_rows(scenario_xml):
+    _density, items = parse_segmentation_info(scenario_xml, "S1")
+    assert segmentation_requested(0.0, items)
+
+
+def test_zero_density_without_counts_remains_disabled():
+    weighted = [SegmentationInfo(name="Firewall", factor=1.0, abs_count=0)]
+    assert not segmentation_requested(0.0, weighted)
 
 
 def _rebuild_like_full_preview(serial):

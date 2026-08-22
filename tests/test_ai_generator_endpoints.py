@@ -789,7 +789,7 @@ def test_ai_generate_scenario_preview_compiler_overrides_services_and_traffic_ro
     assert traffic_items[1].get('content_type') == 'text'
 
 
-def test_ai_generate_scenario_preview_compiler_keeps_vulnerability_targets_additive(tmp_path, monkeypatch):
+def test_ai_generate_scenario_preview_compiler_keeps_vulnerabilities_inside_total_budget(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)
 
@@ -863,7 +863,7 @@ def test_ai_generate_scenario_preview_compiler_keeps_vulnerability_targets_addit
     vuln_items = (((generated_scenario.get('sections') or {}).get('Vulnerabilities')) or {}).get('items') or []
 
     assert node_items == [
-        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 9},
+        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 7},
     ]
     assert vuln_items == [
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'appweb/CVE-2018-8715', 'v_path': '/catalog/appweb/CVE-2018-8715/docker-compose.yml'},
@@ -2738,6 +2738,53 @@ def test_repo_mcp_bridge_client_recovers_from_router_replace_section_error(monke
     assert 'Router counts belong in Routing' in str(tool_result_events[0].get('message') or '')
 
 
+def test_bounded_bridge_message_history_keeps_complete_recent_tool_groups():
+    from webapp.routes import ai_provider
+
+    messages = [{'role': 'user', 'content': 'build three vulnerable hosts'}]
+    for turn in range(4):
+        messages.extend([
+            {
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [{
+                    'id': f'call-{turn}',
+                    'function': {'name': 'server.scenario.get_draft', 'arguments': {}},
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': f'call-{turn}',
+                'content': json.dumps({'turn': turn}),
+            },
+        ])
+
+    bounded = ai_provider._bounded_bridge_message_history(
+        messages,
+        current_draft_id='draft-context-1',
+    )
+
+    assert bounded[0] == messages[0]
+    assert bounded[1]['role'] == 'user'
+    assert 'draft-context-1' in bounded[1]['content']
+    assert bounded[2:] == messages[-4:]
+    assert [message['role'] for message in bounded] == [
+        'user', 'user', 'assistant', 'tool', 'assistant', 'tool',
+    ]
+
+
+def test_bounded_bridge_message_history_leaves_short_conversations_unchanged():
+    from webapp.routes import ai_provider
+
+    messages = [
+        {'role': 'user', 'content': 'build it'},
+        {'role': 'assistant', 'content': '', 'tool_calls': []},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': '{}'},
+    ]
+
+    assert ai_provider._bounded_bridge_message_history(messages) is messages
+
+
 def test_repo_mcp_bridge_client_uses_openai_parser_for_openai_compatible_nonstream(monkeypatch):
     from webapp.routes import ai_provider
 
@@ -2824,6 +2871,46 @@ def test_repo_mcp_bridge_client_requires_tools_for_openai_compatible_requests(mo
     assert captured['payload']['tools']
     assert captured['payload']['tools'][0]['function']['name'] == 'server__scenario__get_draft'
     assert captured['headers'] == {'Authorization': 'Bearer test-litellm-key'}
+
+
+def test_repo_mcp_bridge_client_accumulates_provider_token_usage(monkeypatch):
+    from webapp.routes import ai_provider
+
+    client = ai_provider._RepoMcpBridgeClient(
+        model='qwen-test',
+        host='https://provider.example/v1',
+        provider='openai',
+        api_key='test-key',
+    )
+    responses = [
+        {
+            'choices': [{'message': {'role': 'assistant', 'content': 'first'}}],
+            'usage': {
+                'prompt_tokens': 100,
+                'completion_tokens': 20,
+                'total_tokens': 120,
+                'prompt_tokens_details': {'cached_tokens': 40},
+            },
+        },
+        {
+            'choices': [{'message': {'role': 'assistant', 'content': 'second'}}],
+            'usage': {'prompt_tokens': 150, 'completion_tokens': 30, 'total_tokens': 180},
+        },
+    ]
+
+    monkeypatch.setattr(ai_provider, '_post_json', lambda *args, **kwargs: responses.pop(0))
+
+    client._post_chat(messages=[{'role': 'user', 'content': 'first'}])
+    client._post_chat(messages=[{'role': 'user', 'content': 'second'}])
+
+    assert client.provider_usage == {
+        'request_count': 2,
+        'prompt_tokens': 250,
+        'completion_tokens': 50,
+        'total_tokens': 300,
+        'cached_tokens': 40,
+    }
+    assert len(client.provider_usage_requests) == 2
 
 
 def test_repo_mcp_bridge_client_disables_reasoning_for_openai_chat_tools(monkeypatch):
@@ -3595,7 +3682,7 @@ def test_build_tool_repair_decision_repairs_add_service_item_selection_error():
             'count': 3,
         },
         ai_provider.ProviderAdapterError(
-            'selected or service must be one of: SSH, HTTP, DHCPClient, or Random',
+            'selected or service must be one of: SSH, HTTP, HTTPS, DHCPClient, or Random',
             status_code=400,
         ),
         enabled_tool_names=['server.scenario.add_service_item'],
@@ -3604,9 +3691,49 @@ def test_build_tool_repair_decision_repairs_add_service_item_selection_error():
     assert decision.category == 'service-tool-error'
     assert decision.retryable is True
     assert 'scenario.add_service_item' in str(decision.tool_response or '')
-    assert '"selected": "HTTP"' in str(decision.tool_response or '')
+    assert '"selected": "HTTPS"' in str(decision.tool_response or '')
     assert '"count": 3' in str(decision.tool_response or '')
     assert 'service tool error' in str(decision.status_message or '').lower()
+
+
+def test_build_tool_repair_decision_recovers_redundant_node_call_missing_selected():
+    from webapp.routes import ai_provider
+
+    decision = ai_provider._build_tool_repair_decision(
+        'server.scenario.add_node_role_item',
+        {'draft_id': 'draft-1', 'count': 12},
+        ai_provider.ProviderAdapterError('selected is required for node role items'),
+        enabled_tool_names=['server.scenario.get_draft', 'server.scenario.add_node_role_item'],
+    )
+
+    payload = json.loads(decision.tool_response or '{}')
+    assert decision.retryable is True
+    assert payload.get('recoverable') is True
+    assert payload.get('retry_hint') == {
+        'tool': 'scenario.get_draft',
+        'draft_id': 'draft-1',
+    }
+    assert 'do not duplicate' in payload.get('guidance', '')
+
+
+def test_build_tool_repair_decision_recovers_unknown_synthetic_section():
+    from webapp.routes import ai_provider
+
+    decision = ai_provider._build_tool_repair_decision(
+        'server.scenario.replace_section',
+        {'draft_id': 'draft-2', 'section_name': 'Subnets', 'section_payload': {}},
+        ai_provider.ProviderAdapterError('Unknown section_name: Subnets'),
+        enabled_tool_names=['server.scenario.get_draft', 'server.scenario.replace_section'],
+    )
+
+    payload = json.loads(decision.tool_response or '{}')
+    assert decision.retryable is True
+    assert payload.get('recoverable') is True
+    assert payload.get('retry_hint') == {
+        'tool': 'scenario.get_draft',
+        'draft_id': 'draft-2',
+    }
+    assert 'no free-form Subnets or Topology section' in payload.get('guidance', '')
 
 
 def test_build_tool_repair_decision_repairs_services_replace_section_selection_error():
@@ -3623,7 +3750,7 @@ def test_build_tool_repair_decision_repairs_services_replace_section_selection_e
             },
         },
         ai_provider.ProviderAdapterError(
-            'selected or service must be one of: SSH, HTTP, DHCPClient, or Random',
+            'selected or service must be one of: SSH, HTTP, HTTPS, DHCPClient, or Random',
             status_code=400,
         ),
         enabled_tool_names=['server.scenario.replace_section'],

@@ -16,7 +16,8 @@ def compute_service_plan(services: List[ServiceSpec], base_host_pool: int) -> tu
     - Preserves original semantics for non-Random services.
     """
     import math as _math
-    # Web UI enumeration (excluding 'Random'): ["SSH", "HTTP", "DHCPClient", "Random"]
+    # Random remains limited to CORE's built-in services. HTTPS is explicit
+    # because it depends on ScenarioForge's custom TLS service being installed.
     DEFAULT_RANDOM_SERVICES = ["SSH", "HTTP", "DHCPClient"]
 
     # Aggregate Random placeholders

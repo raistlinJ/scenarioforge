@@ -126,6 +126,84 @@ def test_it_runs_before_the_wait_not_after() -> None:
     assert start_at < wait_at, src
 
 
+def test_sidecars_restart_after_a_dead_primary_is_recovered(monkeypatch) -> None:
+    waits = iter((
+        {'running': [], 'not_running': ['docker-13']},
+        {'running': ['docker-13'], 'not_running': []},
+    ))
+    sidecar_calls: list[list[str]] = []
+    metadata: dict = {}
+
+    monkeypatch.setattr(cli, '_wait_for_docker_running', lambda *_a, **_k: next(waits))
+    monkeypatch.setattr(
+        cli,
+        '_restart_not_running_docker_nodes',
+        lambda *_a, **_k: [{'node': 'docker-13', 'ok': True}],
+    )
+
+    def _sidecars(names):
+        sidecar_calls.append(list(names))
+        # The first call is the pre-wait attempt; the second follows recovery.
+        return [] if len(sidecar_calls) == 1 else [{'node': 'docker-13', 'rc': 0}]
+
+    monkeypatch.setattr(cli, '_start_namespace_sharing_sidecars', _sidecars)
+
+    result = cli._ensure_docker_nodes_running(
+        ['docker-13'], docker_wait_s=1.0, generation_meta=metadata,
+    )
+
+    assert result['not_running'] == []
+    assert sidecar_calls == [['docker-13'], ['docker-13']]
+    assert metadata['docker_sidecar_recovery_starts'][0]['rc'] == 0
+
+
+def test_sidecars_start_after_core_request_but_before_runtime_wait() -> None:
+    """A primary service can exit while CORE's runtime wait is still polling."""
+    import inspect
+
+    src = inspect.getsource(cli.main)
+    core_start_at = src.index('core.start_session(session)')
+    sidecar_at = src.index(
+        '_start_namespace_sharing_sidecars_after_core_start(', core_start_at
+    )
+    runtime_wait_at = src.index('_wait_for_core_runtime(', core_start_at)
+    assert core_start_at < sidecar_at < runtime_wait_at, src
+
+
+def test_configuration_recovery_retries_core_after_compose_runtime_repair() -> None:
+    """Restarting a dead primary is not enough; CORE must attach it again."""
+    import inspect
+
+    src = inspect.getsource(cli.main)
+    pending_at = src.index('configuration_state_pending_docker_validation = True')
+    docker_repair_at = src.index('_ensure_docker_nodes_running(', pending_at)
+    retry_log_at = src.index('CORE session start retry requested', docker_repair_at)
+    retry_wait_at = src.index('_wait_for_core_runtime(', retry_log_at)
+    route_pass_at = src.index('_ensure_docker_node_default_routes(', retry_wait_at)
+    assert docker_repair_at < retry_log_at < retry_wait_at < route_pass_at, src
+
+
+def test_early_sidecar_start_waits_for_the_primary_container(staged, monkeypatch) -> None:
+    compose_for, calls = staged
+    compose_for('docker-13', {
+        'docker-13': {'image': 'nginx'},
+        'php': {'image': 'php', 'network_mode': 'service:docker-13'},
+    })
+    states = iter((
+        {'running': False},
+        {'running': True},
+    ))
+    monkeypatch.setattr(cli, '_docker_container_state', lambda _name: next(states))
+    monkeypatch.setattr(cli.time, 'sleep', lambda _seconds: None)
+
+    started = cli._start_namespace_sharing_sidecars_after_core_start(
+        ['docker-13'], timeout_s=1.0, poll_s=0.05,
+    )
+
+    assert started and started[-1]['rc'] == 0
+    assert any('php' in call and '--no-deps' in call for call in calls), calls
+
+
 def test_the_command_uses_the_project_name_core_daemon_uses(staged) -> None:
     """core-daemon derives the project from the `<node>conf` directory it runs in.
 

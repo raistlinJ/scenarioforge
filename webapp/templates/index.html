@@ -9397,7 +9397,7 @@
         'Node Information': ['Server', 'Workstation', 'PC', 'Docker', 'VulnerabilitySlot', 'FlagGenSlot', 'Random'],
         // Added 'Random' entry so user can explicitly request a random routing protocol.
         'Routing': ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3', 'Random'],
-        'Services': ['SSH', 'HTTP', 'DHCPClient', 'Random'],
+        'Services': ['SSH', 'HTTP', 'HTTPS', 'DHCPClient', 'Random'],
         'Traffic': ['Random', 'TCP', 'UDP'],
         'Vulnerabilities': ['Random', 'Specific'],
         'Flag Node Generators': ['Random', 'Specific'],
@@ -17717,7 +17717,7 @@
                     options = ['RIP', 'RIPNG', 'BGP', 'OSPFv2', 'OSPFv3', 'Random'];
                     break;
                 case 'Services':
-                    options = ['SSH', 'HTTP', 'DHCPClient', 'Random'];
+                    options = ['SSH', 'HTTP', 'HTTPS', 'DHCPClient', 'Random'];
                     break;
                 case 'Traffic':
                     options = ['Random', 'TCP', 'UDP'];

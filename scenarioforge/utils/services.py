@@ -42,6 +42,7 @@ SERVICE_DEPENDENCIES: Dict[str, List[str]] = {
     "DockerDefaultRoute": ["CoreTGPrereqs"],
     "Segmentation": ["CoreTGPrereqs"],
     "Traffic": ["CoreTGPrereqs"],
+    "HTTPS": ["CoreTGPrereqs"],
 }
 
 

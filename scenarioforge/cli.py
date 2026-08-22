@@ -59,7 +59,7 @@ from .parsers.pivoting import parse_pivoting_info
 from .parsers.planning_metadata import parse_planning_metadata
 from .parsers.services import parse_services
 from .parsers.hitl import parse_hitl_info
-from .utils.segmentation import apply_preview_segmentation_rules
+from .utils.segmentation import apply_preview_segmentation_rules, segmentation_requested
 from .utils.allocation import compute_role_counts
 from .utils.tmp_staging import ensure_local_tmp_writable, is_tmp_staging_path
 from .builders.topology import (
@@ -1134,6 +1134,46 @@ def _docker_container_state(name: str) -> dict[str, Any]:
     }
 
 
+def _docker_compose_project_for_container(
+    name: str,
+    *,
+    fallback: str = '',
+) -> str:
+    """Return the Compose project that actually created ``name``."""
+    token = str(name or '').strip()
+    if not token or not shutil.which('docker'):
+        return str(fallback or '').strip()
+    try:
+        proc = _run_docker_cmd(
+            [
+                'docker', 'inspect', '--format',
+                '{{ index .Config.Labels "com.docker.compose.project" }}',
+                token,
+            ],
+            timeout_s=20.0,
+        )
+        value = str(proc.stdout or '').strip()
+        if proc.returncode == 0 and value and value != '<no value>':
+            return value
+    except Exception:
+        pass
+    return str(fallback or '').strip()
+
+
+def _docker_container_logs_tail(name: str, *, lines: int = 40) -> str:
+    token = str(name or '').strip()
+    if not token or not shutil.which('docker'):
+        return ''
+    try:
+        proc = _run_docker_cmd(
+            ['docker', 'logs', '--tail', str(max(1, int(lines))), token],
+            timeout_s=20.0,
+        )
+        return ((proc.stderr or '') + '\n' + (proc.stdout or '')).strip()[-4000:]
+    except Exception:
+        return ''
+
+
 def _docker_container_config(name: str) -> dict[str, Any]:
     """Best-effort docker inspect config for a container name."""
     name = str(name or '').strip()
@@ -1258,15 +1298,11 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
     during boot on an arm64 CORE VM).
 
     CORE names a Docker node's container after the node itself (`docker-N`),
-    and the generated compose file pins that same fixed `container_name:` --
-    it is not project-scoped. This call has no `-p` of its own, so without a
-    pre-clean step Compose derives its project name from the compose file's
-    directory, which does not match whatever project (if any) originally
-    created the container; Compose then tries to *create* a new container
-    under that fixed name and Docker refuses because the old, now-dead one by
-    that exact name is still present. The caller has already classified this
-    name as not-running before invoking recovery, so removing it first is safe
-    and turns the collision into a normal recreate.
+    and runs Compose under project `<node>conf`. Reuse that project name so
+    namespace-sharing sidecars can resolve `network_mode: service:<node>`
+    after recovery. The generated compose file also pins the same fixed
+    `container_name:`; remove the caller-confirmed dead container first so the
+    recreate cannot collide with its own corpse.
     """
     p = str(compose_path or '').strip()
     svc = str(service or '').strip()
@@ -1277,6 +1313,7 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
     if not shutil.which('docker'):
         return {'ok': False, 'error': 'docker not found', 'compose_path': p, 'service': svc}
 
+    project = _docker_compose_project_for_container(svc, fallback=f'{svc}conf')
     try:
         _run_docker_cmd(['docker', 'rm', '-f', svc], timeout_s=20.0, allow_sudo_retry=True)
     except Exception:
@@ -1285,7 +1322,10 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
         pass
 
     try:
-        cmd = ['docker', 'compose', '-f', p, 'up', '-d', svc]
+        cmd = [
+            'docker', 'compose', '-p', project, '-f', p,
+            'up', '-d', svc,
+        ]
         proc = _run_docker_cmd(cmd, timeout_s=float(timeout_s or 120.0), allow_sudo_retry=True)
     except Exception as exc:
         return {'ok': False, 'error': f'{exc.__class__.__name__}: {exc}', 'compose_path': p, 'service': svc, 'cmd': cmd}
@@ -1314,6 +1354,7 @@ def _restart_not_running_docker_nodes(
             continue
         compose_path = _docker_node_compose_path(name)
         before = _docker_container_state(name)
+        before_logs = _docker_container_logs_tail(name)
         result = _docker_compose_restart_service(
             compose_path,
             name,
@@ -1321,6 +1362,8 @@ def _restart_not_running_docker_nodes(
         )
         result['node'] = name
         result['before'] = before
+        if before_logs:
+            result['before_logs'] = before_logs
         try:
             result['after'] = _docker_container_state(name)
         except Exception:
@@ -1333,6 +1376,12 @@ def _restart_not_running_docker_nodes(
                     name,
                     compose_path,
                 )
+                if before_logs:
+                    logging.warning(
+                        'docker node %s logs before restart:\n%s',
+                        name,
+                        before_logs,
+                    )
             else:
                 logging.warning(
                     "Failed restarting not-running docker compose node=%s via %s: %s",
@@ -1401,7 +1450,10 @@ def _start_namespace_sharing_sidecars(names: list[str]) -> list[dict[str, Any]]:
         # sidecar then looks for `service:<node>` inside a project that has no
         # such container -- it fails, having touched nothing CORE owns.
         # `_docker_compose_preflight` forces the same name, for the same reason.
-        project = f'{name}conf'
+        project = _docker_compose_project_for_container(
+            name,
+            fallback=f'{name}conf',
+        )
         # `--no-deps` is not an optimisation, it is the whole safety of this.
         # Each sidecar declares `depends_on: [<node>]`, so without it compose
         # recreates and restarts the node CORE is already running -- which tears
@@ -1435,6 +1487,93 @@ def _start_namespace_sharing_sidecars(names: list[str]) -> list[dict[str, Any]]:
                 name, ', '.join(sidecars), rc, str(output)[-600:],
             )
     return started
+
+
+def _start_namespace_sharing_sidecars_after_core_start(
+    names: list[str],
+    *,
+    timeout_s: float = 20.0,
+    poll_s: float = 0.1,
+) -> list[dict[str, Any]]:
+    """Start sidecars during CORE startup, before waiting for runtime.
+
+    Some primary services exit almost immediately when their namespace-sharing
+    dependency is absent (the nginx parsing lab's PHP-FPM sidecar is one
+    example). Waiting for CORE to reach runtime before starting that sidecar
+    deadlocks the session in ``configuration``: CORE is waiting for the primary
+    node, while the primary node has already exited waiting for its sidecar.
+
+    Poll only nodes that actually declare namespace-sharing sidecars. As soon
+    as CORE's primary container is running, start those sidecars with the safe
+    ``--no-deps`` path above. The later runtime-validation call remains as an
+    idempotent fallback.
+    """
+    from scenarioforge.builders.topology import (
+        _compose_shared_namespace_services,
+        _docker_node_compose_path,
+    )
+
+    pending: set[str] = set()
+    for raw_name in names or []:
+        name = str(raw_name or '').strip()
+        if not name:
+            continue
+        compose_path = _docker_node_compose_path(name)
+        if not compose_path or not os.path.exists(compose_path):
+            continue
+        try:
+            if _compose_shared_namespace_services(compose_path, name):
+                pending.add(name)
+        except Exception:
+            continue
+
+    if not pending:
+        return []
+
+    deadline = time.monotonic() + max(0.1, float(timeout_s or 20.0))
+    attempts: list[dict[str, Any]] = []
+    while pending and time.monotonic() < deadline:
+        states = {
+            name: _docker_container_state(name)
+            for name in sorted(pending)
+        }
+        ready = [
+            name for name in sorted(pending)
+            if states[name].get('running') is True
+        ]
+        exited = [
+            name for name in sorted(pending)
+            if (
+                states[name].get('exists') is True
+                and states[name].get('running') is False
+            )
+        ]
+        if exited:
+            recovered = _restart_not_running_docker_nodes(
+                exited,
+                restart_timeout_s=max(20.0, float(timeout_s or 20.0)),
+            )
+            attempts.extend(recovered)
+            ready.extend(
+                name for name in exited
+                if _docker_container_state(name).get('running') is True
+            )
+            ready = sorted(set(ready))
+        if ready:
+            results = _start_namespace_sharing_sidecars(ready)
+            attempts.extend(results)
+            for result in results:
+                if int(result.get('rc', 1)) == 0:
+                    pending.discard(str(result.get('node') or '').strip())
+        if pending:
+            time.sleep(max(0.05, float(poll_s or 0.1)))
+
+    if pending:
+        logging.warning(
+            'Namespace-sharing sidecars were not ready during CORE startup for: %s',
+            ', '.join(sorted(pending)),
+        )
+    return attempts
 
 
 def _ensure_docker_nodes_running(
@@ -1489,6 +1628,22 @@ def _ensure_docker_nodes_running(
     except Exception:
         pass
     if any(bool(item.get('ok')) for item in restart_attempts):
+        # The restarted primary is the dependency of namespace-sharing
+        # sidecars, not their dependent, so ``compose up <primary>`` does not
+        # start them. Start them while the recovered primary is alive, before
+        # the second CORE start request tries to attach the node again.
+        try:
+            recovery_sidecars = _start_namespace_sharing_sidecars(
+                not_running_names,
+            )
+            if recovery_sidecars and generation_meta is not None:
+                generation_meta.setdefault(
+                    'docker_sidecar_recovery_starts', recovery_sidecars,
+                )
+        except Exception as exc:
+            logging.warning(
+                'Namespace-sharing sidecar recovery startup skipped: %s', exc,
+            )
         docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
     return docker_runtime
 
@@ -6326,6 +6481,8 @@ def _run_ai_phase(args: Any) -> int:
                 'status': response.status_code,
                 'error': str(data.get('error') or f'AI generation failed (HTTP {response.status_code}).'),
                 'settings': redact_ai_settings(settings),
+                'provider_usage': data.get('provider_usage') or {},
+                'provider_usage_requests': data.get('provider_usage_requests') or [],
             },
             output_path=args.plan_output,
             stream=sys.stderr,
@@ -6356,6 +6513,8 @@ def _run_ai_phase(args: Any) -> int:
                 'written': False,
                 'prompt': prompt,
                 'settings': redact_ai_settings(settings),
+                'provider_usage': data.get('provider_usage') or {},
+                'provider_usage_requests': data.get('provider_usage_requests') or [],
                 'generated_scenario': generated_scenario,
                 'preview': data.get('preview'),
             },
@@ -6393,6 +6552,8 @@ def _run_ai_phase(args: Any) -> int:
             'prompt': prompt,
             'acting_user': acting_username,
             'settings': redact_ai_settings(settings),
+            'provider_usage': data.get('provider_usage') or {},
+            'provider_usage_requests': data.get('provider_usage_requests') or [],
             'applied_actions': data.get('applied_actions'),
             'next_steps': [
                 'Review the generated sections in the Web UI or by hand.',
@@ -9133,7 +9294,7 @@ def main():
                 )
         else:
             seg_settings = _seg_settings(args)
-        if (seg_density and seg_density > 0 and seg_items) or seg_planned_rules:
+        if segmentation_requested(seg_density, seg_items, seg_planned_rules):
             try:
                 from .utils.segmentation import plan_and_apply_segmentation
                 seg_summary = plan_and_apply_segmentation(
@@ -10140,13 +10301,20 @@ def main():
         if session_id is not None:
             logging.info("CORE_SESSION_ID: %s", session_id)
 
+        docker_names2 = _docker_compose_node_names(docker_by_name)
+
         if start_ok:
             # CORE client expects the session object (uses session.to_proto()).
             core_daemon_journal_started_at = time.time()
             core.start_session(session)
             logging.info("CORE session start requested")
-
-        docker_names2 = _docker_compose_node_names(docker_by_name)
+            early_sidecar_starts = _start_namespace_sharing_sidecars_after_core_start(
+                docker_names2,
+            )
+            if early_sidecar_starts and isinstance(generation_meta, dict):
+                generation_meta.setdefault(
+                    'docker_sidecar_early_starts', early_sidecar_starts,
+                )
         configuration_state_pending_docker_validation = False
 
         # Validate that CORE reaches runtime.
@@ -10188,6 +10356,43 @@ def main():
                     if reason:
                         start_error = f"{start_error} ({reason})"
 
+            # A sidecar-dependent primary can exit during CORE's first start
+            # request. The recovery above recreates the primary and starts its
+            # namespace-sharing sidecars, but CORE has already abandoned that
+            # first instantiation attempt and remains in configuration. Reissue
+            # start_session now that the compose runtime is healthy so CORE can
+            # attach interfaces to the recovered containers.
+            if (
+                start_ok
+                and configuration_state_pending_docker_validation
+                and session_id is not None
+                and docker_names2
+                and not (docker_runtime or {}).get('not_running')
+            ):
+                logging.warning(
+                    'Retrying CORE session start after Docker sidecar recovery: %s',
+                    ', '.join(docker_names2),
+                )
+                core.start_session(session)
+                logging.info('CORE session start retry requested')
+                retry_ok_runtime, retry_state = _wait_for_core_runtime(
+                    core,
+                    int(session_id),
+                    timeout_s=core_start_timeout_s,
+                    poll_s=0.5,
+                )
+                session_state = retry_state
+                if retry_ok_runtime:
+                    configuration_state_pending_docker_validation = False
+                    logging.info(
+                        'CORE session reached runtime after Docker sidecar recovery'
+                    )
+                else:
+                    logging.warning(
+                        'CORE session retry remained outside runtime (state=%s)',
+                        retry_state or 'unknown',
+                    )
+
             # Install default routes from the host once interfaces exist. The
             # in-node DockerDefaultRoute service needs `ip`, NET_ADMIN, a shell
             # and the service to be assigned; the host needs none of that, so
@@ -10204,7 +10409,7 @@ def main():
             # `_ensure_docker_nodes_serving`. Reported, never fatal: a node that
             # is slow rather than stuck would otherwise start failing runs that
             # pass today, and the phases below already decide the verdict.
-            if (start_ok or configuration_state_pending_docker_validation) and docker_names2:
+            if start_ok and not configuration_state_pending_docker_validation and docker_names2:
                 try:
                     serving_wait_s = float(os.getenv('CORETG_DOCKER_SERVING_WAIT_S') or 180.0)
                 except Exception:

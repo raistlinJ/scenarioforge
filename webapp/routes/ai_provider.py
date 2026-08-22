@@ -855,7 +855,8 @@ def _extract_prompt_coverage_intent(user_prompt: str) -> dict[str, dict[str, Any
         canonical
         for pattern, canonical in (
             (r'\bssh\b', 'SSH'),
-            (r'\bhttps?\b|\bweb\b', 'HTTP'),
+            (r'\bhttps\b', 'HTTPS'),
+            (r'\bhttp\b|\bweb\b', 'HTTP'),
             (r'\bdhcp\b', 'DHCPClient'),
         )
         if re.search(pattern, text)
@@ -1135,7 +1136,7 @@ def _get_prompt_coverage_mismatch(user_prompt: str, scenario_payload: dict[str, 
     }
     for role in HOST_ROLE_DISPLAY_ORDER:
         actual[f'Node Information:{role}'] = _count_node_role_rows(scenario_payload, role)
-    for service in ('SSH', 'HTTP', 'DHCPClient'):
+    for service in ('SSH', 'HTTP', 'HTTPS', 'DHCPClient'):
         actual[f'Services:{service}'] = _count_section_selected_rows(
             scenario_payload,
             'Services',
@@ -1746,7 +1747,9 @@ def _build_recoverable_mcp_bridge_tool_error(
             if normalized:
                 return normalized
         message_lower = message.lower()
-        if 'https' in message_lower or 'http' in message_lower or 'web' in message_lower:
+        if 'https' in message_lower:
+            return 'HTTPS'
+        if 'http' in message_lower or 'web' in message_lower:
             return 'HTTP'
         if 'dhcp' in message_lower:
             return 'DHCPClient'
@@ -1754,11 +1757,51 @@ def _build_recoverable_mcp_bridge_tool_error(
             return 'SSH'
         return 'HTTP'
 
+    if tool_name.endswith('scenario.replace_section') and message.lower().startswith('unknown section_name:'):
+        return json.dumps({
+            'error': message,
+            'recoverable': True,
+            'guidance': (
+                'No mutation was applied. ScenarioForge has no free-form Subnets or Topology section. '
+                'Explicit router and host counts are already seeded into Routing and Node Information; '
+                'subnet layout is derived by the topology planner. Inspect the current draft and continue. '
+                'Only replace a section whose exact name is returned by the authoring schema.'
+            ),
+            'retry_hint': {
+                'tool': 'scenario.get_draft',
+                'draft_id': str((tool_args or {}).get('draft_id') or '').strip(),
+            },
+        })
+
+    missing_selected_tools = {
+        'scenario.add_node_role_item': 'node role',
+        'scenario.add_service_item': 'service',
+        'scenario.add_segmentation_item': 'segmentation',
+        'scenario.add_traffic_item': 'traffic',
+    }
+    for tool_suffix, item_label in missing_selected_tools.items():
+        if tool_name.endswith(tool_suffix) and f'selected is required for {item_label} items' in message.lower():
+            return json.dumps({
+                'error': message,
+                'recoverable': True,
+                'guidance': (
+                    'No mutation was applied. The deterministic intent compiler seeds explicit requested '
+                    'rows before model tool calls, so first inspect the current draft and do not duplicate an '
+                    'already-present row. Only retry this mutation if the row is still absent, and then supply '
+                    'the tool schema\'s exact canonical selected value.'
+                ),
+                'retry_hint': {
+                    'tool': 'scenario.get_draft',
+                    'draft_id': str((tool_args or {}).get('draft_id') or '').strip(),
+                },
+            })
+
     service_selection_error = any(fragment in message.lower() for fragment in (
         'selected or service must be one of:',
         'services selected must be one of:',
         'service must be one of:',
         'selected must be one of: ssh, http, dhcpclient, or random',
+        'selected must be one of: ssh, http, https, dhcpclient, or random',
     ))
     service_replace_error = tool_name.endswith('scenario.replace_section') and str((tool_args or {}).get('section_name') or '').strip().lower() == 'services' and service_selection_error
     service_add_error = tool_name.endswith('scenario.add_service_item') and service_selection_error
@@ -1784,8 +1827,8 @@ def _build_recoverable_mcp_bridge_tool_error(
             count = 1
 
         guidance = (
-            'Services rows must use one exact canonical label: SSH, HTTP, or DHCPClient. '
-            'Normalize aliases such as https/web to HTTP and dhcp to DHCPClient. '
+            'Services rows must use one exact canonical label: SSH, HTTP, HTTPS, or DHCPClient. '
+            'Keep HTTPS distinct from HTTP; normalize web to HTTP and dhcp to DHCPClient. '
             f'Retry with selected="{retry_service}" and count={count}. '
             'Do not use free-text service labels or generic placeholders inside the Services section.'
         )
@@ -3134,6 +3177,12 @@ def _build_bridge_query_state_details(client: Any) -> dict[str, Any]:
     current_draft_id = str(state.get('current_draft_id') or '').strip()
     if current_draft_id:
         details['bridge_current_draft_id'] = current_draft_id
+    provider_usage = getattr(client, 'provider_usage', None)
+    if isinstance(provider_usage, dict):
+        details['provider_usage'] = deepcopy(provider_usage)
+    provider_usage_requests = getattr(client, 'provider_usage_requests', None)
+    if isinstance(provider_usage_requests, list):
+        details['provider_usage_requests'] = deepcopy(provider_usage_requests)
     return details
 
 
@@ -3790,6 +3839,14 @@ class _RepoMcpBridgeClient:
         self.loop_limit = 8
         self.timeout_seconds = 120.0
         self.query_debug_state: dict[str, Any] = {}
+        self.provider_usage: dict[str, int] = {
+            'request_count': 0,
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'cached_tokens': 0,
+        }
+        self.provider_usage_requests: list[dict[str, int]] = []
         self._exit_stack: AsyncExitStack | None = None
         self._provider_tool_names: dict[str, str] = {}
         self._internal_tool_names: dict[str, str] = {}
@@ -3978,6 +4035,57 @@ class _RepoMcpBridgeClient:
         except Exception:
             return False
 
+    def _record_provider_usage(self, response: dict[str, Any]) -> None:
+        """Accumulate provider-reported tokens across MCP tool-call turns."""
+        if not isinstance(response, dict):
+            return
+        raw_usage = response.get('usage') if isinstance(response.get('usage'), dict) else {}
+        prompt_details = (
+            raw_usage.get('prompt_tokens_details')
+            if isinstance(raw_usage.get('prompt_tokens_details'), dict)
+            else {}
+        )
+
+        def token_count(*values: Any) -> int:
+            for value in values:
+                try:
+                    return max(0, int(value))
+                except (TypeError, ValueError):
+                    continue
+            return 0
+
+        prompt_tokens = token_count(
+            raw_usage.get('prompt_tokens'),
+            raw_usage.get('input_tokens'),
+            response.get('prompt_eval_count'),
+        )
+        completion_tokens = token_count(
+            raw_usage.get('completion_tokens'),
+            raw_usage.get('output_tokens'),
+            response.get('eval_count'),
+        )
+        total_tokens = token_count(
+            raw_usage.get('total_tokens'),
+            prompt_tokens + completion_tokens,
+        )
+        cached_tokens = token_count(
+            prompt_details.get('cached_tokens'),
+            raw_usage.get('cached_tokens'),
+        )
+        if not raw_usage and not any((prompt_tokens, completion_tokens, total_tokens, cached_tokens)):
+            return
+
+        request_usage = {
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_tokens': total_tokens,
+            'cached_tokens': cached_tokens,
+        }
+        self.provider_usage_requests.append(request_usage)
+        self.provider_usage['request_count'] += 1
+        for key, value in request_usage.items():
+            self.provider_usage[key] += value
+
     def _post_chat(self, *, messages: list[dict[str, Any]]) -> dict[str, Any]:
         self._set_query_debug_state(
             phase='awaiting_llm_response',
@@ -4002,14 +4110,16 @@ class _RepoMcpBridgeClient:
                     tool_choice = self._openai_tool_choice(tools_payload)
                     if tool_choice:
                         payload['tool_choice'] = tool_choice
-                return _post_json(
+                response = _post_json(
                     _openai_compatible_chat_completions_url(self.host),
                     payload,
                     timeout=self.timeout_seconds,
                     headers=self._chat_request_headers(),
                     verify_ssl=self.verify_ssl,
                 )
-            return _post_json(
+                self._record_provider_usage(response)
+                return response
+            response = _post_json(
                 f'{self.host}/api/chat',
                 {
                     'model': self.model,
@@ -4022,6 +4132,8 @@ class _RepoMcpBridgeClient:
                 headers=self._chat_request_headers(),
                 verify_ssl=self.verify_ssl,
             )
+            self._record_provider_usage(response)
+            return response
         except HTTPError as exc:
             detail = ''
             try:
@@ -4159,6 +4271,10 @@ class _RepoMcpBridgeClient:
         for iteration in range(max(1, int(self.loop_limit or 8))):
             if self._is_cancelled(cancel_check):
                 return final_text
+            messages = _bounded_bridge_message_history(
+                messages,
+                current_draft_id=current_draft_id,
+            )
             self._set_query_debug_state(
                 phase='starting_iteration',
                 iteration=iteration + 1,
@@ -4398,6 +4514,48 @@ async def _mcp_bridge_process_query_server_side(
             if emit is not None and repair.status_message:
                 emit('status', message=repair.status_message)
             current_prompt = repair.retry_prompt or current_prompt
+
+
+def _bounded_bridge_message_history(
+    messages: list[dict[str, Any]],
+    *,
+    current_draft_id: str = '',
+    retained_assistant_turns: int = 2,
+) -> list[dict[str, Any]]:
+    """Keep long tool-use conversations inside local-model context windows.
+
+    The draft is server-side state, so replaying every prior draft mutation is
+    unnecessary. Keep the user's original request and the latest complete
+    assistant/tool groups; a short continuation note tells the model where the
+    omitted work lives. Groups are removed atomically so OpenAI-compatible APIs
+    never receive orphaned ``tool`` messages.
+    """
+    if len(messages) <= 1:
+        return messages
+
+    assistant_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if str(message.get('role') or '').strip().lower() == 'assistant'
+    ]
+    keep_turns = max(1, int(retained_assistant_turns or 1))
+    if len(assistant_indexes) <= keep_turns:
+        return messages
+
+    tail_index = assistant_indexes[-keep_turns]
+    initial = dict(messages[0])
+    draft_hint = str(current_draft_id or '').strip()
+    continuation = (
+        'Earlier MCP tool turns were compacted to stay within the model context window. '
+        'Their changes are already stored in the ScenarioForge draft.'
+    )
+    if draft_hint:
+        continuation += f' Continue with draft_id {draft_hint}; inspect that draft if more context is needed.'
+    return [
+        initial,
+        {'role': 'user', 'content': continuation},
+        *messages[tail_index:],
+    ]
 
 
 def _compact_draft_payload_for_llm(draft: dict[str, Any]) -> dict[str, Any]:
@@ -4763,6 +4921,7 @@ def _build_mcp_bridge_goal_prompt(
         'For router-to-router or router-to-host ratio/connectivity requests, use Routing r2r_* and r2s_* fields. Those fields describe connectivity density, not router count. There is no r2h field; router-to-host requests map to r2s_* because hosts attach to routed segments.',
         'Never place Router, Routing, gateway, or protocol rows under Node Information; router counts always belong in Routing.',
         'Interpret Routing fields precisely: v_count is router quantity, r2r_edges is router-to-router links per router, and r2s_edges with r2s_hosts_min or r2s_hosts_max describes router-to-segment or routed-host attachment density.',
+        'There is no Subnets or Topology authoring section. Never call replace_section for either name; express requested counts through Routing and Node Information and let the topology planner derive subnet layout.',
         *_build_count_intent_guidance(user_prompt),
         *_build_mcp_bridge_execution_guidance(user_prompt),
         'If the user asks for routers without naming a protocol, use scenario.add_routing_item with selected="OSPFv2" and the requested count when that tool is enabled; otherwise replace only the Routing section with a Count row selected="OSPFv2".',
@@ -4945,6 +5104,8 @@ async def _mcp_bridge_generate(payload: dict[str, Any], *, current_scenario: dic
             ],
             'enabled_tools': enabled_tools,
             'draft_id': draft_id,
+            'provider_usage': deepcopy(getattr(client, 'provider_usage', {})),
+            'provider_usage_requests': deepcopy(getattr(client, 'provider_usage_requests', [])),
         }
     finally:
         await client.cleanup()
@@ -5143,6 +5304,8 @@ async def _mcp_bridge_generate_with_events(
             ],
             'enabled_tools': enabled_tools,
             'draft_id': draft_id,
+            'provider_usage': deepcopy(getattr(client, 'provider_usage', {})),
+            'provider_usage_requests': deepcopy(getattr(client, 'provider_usage_requests', [])),
         }
     finally:
         await client.cleanup()
@@ -5175,6 +5338,8 @@ def _build_stream_success_payload(
             'model': generation_result.get('model') or '',
             'prompt_used': generation_result.get('prompt_used') or '',
             'provider_response': generation_result.get('provider_response') or '',
+            'provider_usage': generation_result.get('provider_usage') or {},
+            'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
             'count_intent_mismatch': generation_result.get('count_intent_mismatch'),
             'count_intent_retry_used': bool(generation_result.get('count_intent_retry_used')),
             'prompt_coverage_mismatch': generation_result.get('prompt_coverage_mismatch'),
@@ -5236,6 +5401,8 @@ def _build_stream_success_payload(
         'prompt_used': prompt,
         'provider_response': raw_generation,
         'provider_attempts': generation_result.get('provider_attempts') or [],
+        'provider_usage': generation_result.get('provider_usage') or {},
+        'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
         'generated_scenario': merged_scenario,
         'generated_scenarios': next_scenarios,
         'preview': preview_json.get('full_preview') or {},
@@ -6349,6 +6516,8 @@ def register(
                 'model': generation_result.get('model') or model,
                 'prompt_used': generation_result.get('prompt_used') or '',
                 'provider_response': generation_result.get('provider_response') or '',
+                'provider_usage': generation_result.get('provider_usage') or {},
+                'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
                 'count_intent_mismatch': generation_result.get('count_intent_mismatch'),
                 'count_intent_retry_used': bool(generation_result.get('count_intent_retry_used')),
                 'prompt_coverage_mismatch': generation_result.get('prompt_coverage_mismatch'),
@@ -6402,6 +6571,8 @@ def register(
                     'model': generation_result.get('model') or model,
                     'prompt_used': generation_result.get('prompt_used') or '',
                     'provider_response': generation_result.get('provider_response') or '',
+                    'provider_usage': generation_result.get('provider_usage') or {},
+                    'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
                     'count_intent_mismatch': generation_result.get('count_intent_mismatch'),
                     'count_intent_retry_used': bool(generation_result.get('count_intent_retry_used')),
                     'prompt_coverage_mismatch': generation_result.get('prompt_coverage_mismatch'),
@@ -6463,6 +6634,8 @@ def register(
                 'prompt_used': prompt,
                 'provider_response': raw_generation,
                 'provider_attempts': generation_result.get('provider_attempts') or [],
+                'provider_usage': generation_result.get('provider_usage') or {},
+                'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
                 'generated_scenario': merged_scenario,
                 'generated_scenarios': next_scenarios,
                 'preview': preview_json.get('full_preview') or {},

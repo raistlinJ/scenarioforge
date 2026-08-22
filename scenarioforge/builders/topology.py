@@ -933,7 +933,12 @@ def _wrap_node_command_with_retry(
             "    echo \"[coretg] node app exhausted retries rc=$rc\" >&2\n"
             "    exit \"$rc\"\n"
             "  fi\n"
-            "  attempt=$((attempt+1))\n"
+            # Avoid POSIX arithmetic expansion here. CORE renders the Compose
+            # file through Mako before Compose performs its own interpolation;
+            # the two-pass path can leave ``$$(...)`` in the container, where
+            # BusyBox expands ``$$`` as its PID and reports an unexpected `(`.
+            # Backtick substitution survives both renderers without that token.
+            "  attempt=`expr \"$attempt\" + 1`\n"
             f"  sleep {_NODE_APP_RETRY_SLEEP_S}\n"
             "done\n"
         )

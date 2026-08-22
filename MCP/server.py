@@ -337,7 +337,7 @@ class ScenarioAuthoringMCPServer:
                         'density': {'type': 'number'},
                         'v_metric': {'type': 'string'},
                     },
-                    'required': ['draft_id'],
+                    'required': ['draft_id', 'selected'],
                     'additionalProperties': False,
                 },
             ),
@@ -739,7 +739,7 @@ class ScenarioAuthoringMCPServer:
                 'Services': {
                     'parser_backed': True,
                     'section_aliases': ['service', 'servicesinfo'],
-                    'ui_selected_values': ['SSH', 'HTTP', 'DHCPClient', 'Random'],
+                    'ui_selected_values': ['SSH', 'HTTP', 'HTTPS', 'DHCPClient', 'Random'],
                     'selected_values': service_suggestions,
                     'random_selected_values': service_suggestions,
                     'supports_random_selected': True,
@@ -1031,7 +1031,7 @@ class ScenarioAuthoringMCPServer:
         aliases = {
             'ssh': 'SSH',
             'http': 'HTTP',
-            'https': 'HTTP',
+            'https': 'HTTPS',
             'web': 'HTTP',
             'dhcpclient': 'DHCPClient',
             'dhcp': 'DHCPClient',
@@ -1103,7 +1103,7 @@ class ScenarioAuthoringMCPServer:
             elif section_name == 'Services':
                 selected = self._normalize_service_name(item.get('selected'))
                 if not selected:
-                    raise ValueError('Services selected must be one of: SSH, HTTP, DHCPClient, or Random')
+                    raise ValueError('Services selected must be one of: SSH, HTTP, HTTPS, DHCPClient, or Random')
                 item['selected'] = selected
             elif section_name == 'Traffic':
                 selected = self._normalize_traffic_protocol(item.get('selected'))
@@ -1642,7 +1642,7 @@ class ScenarioAuthoringMCPServer:
         raw_selected = arguments.get('selected')
         selected = self._normalize_service_name(raw_selected)
         if not selected:
-            raise ValueError('selected must be one of: SSH, HTTP, DHCPClient, or Random')
+            raise ValueError('selected must be one of: SSH, HTTP, HTTPS, DHCPClient, or Random')
 
         count_raw = arguments.get('count')
         if count_raw in (None, ''):

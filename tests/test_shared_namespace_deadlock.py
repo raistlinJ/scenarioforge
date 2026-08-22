@@ -141,7 +141,8 @@ def test_supervisor_shell_variables_survive_compose_interpolation(tmpdir_path) -
     for variable in ('attempt', 'child', 'rc'):
         assert f'$${variable}' in script, script
         assert f'${variable}' not in script.replace(f'$${variable}', ''), script
-    assert '$$((' in script, script
+    assert '$$((' not in script, script
+    assert 'attempt=`expr "$$attempt" + 1`' in script, script
 
 
 def test_docker_compose_accepts_the_supervisor_without_variable_warnings(tmpdir_path) -> None:

@@ -38,6 +38,38 @@ SERVICE_ENABLE_MAP: Dict[str, str] = {
     # CUSTOM is plugin-defined; don't force-enable a specific service here
 }
 
+
+def segmentation_requested(
+    density: object,
+    items: Sequence[object] | None,
+    planned_rules: Sequence[object] | None = None,
+) -> bool:
+    """Return whether segmentation has work even when density is zero.
+
+    Density controls weighted rows, but an explicit Count row is authoritative
+    on its own.  The preview and execute gates historically checked only
+    ``density > 0``, which discarded AI-authored ``Firewall Count=1`` and
+    ``NAT Count=1`` rows before the count-aware planner could see them.
+    """
+    if planned_rules:
+        return True
+    try:
+        if float(density or 0) > 0:
+            return bool(items)
+    except (TypeError, ValueError):
+        pass
+    for item in items or []:
+        if isinstance(item, dict):
+            raw_count = item.get('abs_count', item.get('v_count', 0))
+        else:
+            raw_count = getattr(item, 'abs_count', 0)
+        try:
+            if int(raw_count or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
 def reuse_preview_segmentation(preview_dir: str, runtime_dir: str = "/tmp/segmentation") -> Dict[str, object]:
     """Copy segmentation scripts and summary from a preview directory into the runtime directory.
 

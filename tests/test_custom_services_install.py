@@ -440,6 +440,28 @@ def test_required_builtin_core_services_for_xml_input_expands_random_service_fro
     assert required == {"SSH", "HTTP", "DHCPClient"}
 
 
+def test_required_builtin_core_services_excludes_custom_https_service():
+    session_xml = """
+<Scenarios>
+    <Scenario name="Scenario HTTPS">
+        <ScenarioEditor>
+            <section name="Services" density="0.0">
+                <item selected="HTTPS" factor="1.0" v_metric="Count" v_count="1" />
+            </section>
+        </ScenarioEditor>
+    </Scenario>
+</Scenarios>
+""".strip()
+
+    required = backend._required_builtin_core_services_for_xml_input(
+        None,
+        session_xml,
+        scenario_name="Scenario HTTPS",
+    )
+
+    assert required == set()
+
+
 def test_required_builtin_core_services_for_xml_input_ignores_zero_density_and_factor(tmp_path):
     xml_path = tmp_path / "scenario.xml"
     xml_path.write_text(
