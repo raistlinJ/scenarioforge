@@ -42,6 +42,7 @@ from scenarioforge.planning.ai_topology_intent import has_low_r2r_intent as _com
 from scenarioforge.planning.ai_topology_intent import search_flag_node_generator_catalog_for_prompt as _compiler_search_flag_node_generator_catalog_for_prompt
 from scenarioforge.planning.ai_topology_intent import search_vulnerability_catalog_for_prompt as _compiler_search_vulnerability_catalog_for_prompt
 from webapp import app_backend
+from webapp.ai_settings import ai_settings_as_payload, resolve_ai_settings
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
 from scenarioforge.planning.node_plan import HOST_ROLE_DISPLAY_ORDER, is_docker_backed_role
 
@@ -854,7 +855,8 @@ def _extract_prompt_coverage_intent(user_prompt: str) -> dict[str, dict[str, Any
         canonical
         for pattern, canonical in (
             (r'\bssh\b', 'SSH'),
-            (r'\bhttps?\b|\bweb\b', 'HTTP'),
+            (r'\bhttps\b', 'HTTPS'),
+            (r'\bhttp\b|\bweb\b', 'HTTP'),
             (r'\bdhcp\b', 'DHCPClient'),
         )
         if re.search(pattern, text)
@@ -1134,7 +1136,7 @@ def _get_prompt_coverage_mismatch(user_prompt: str, scenario_payload: dict[str, 
     }
     for role in HOST_ROLE_DISPLAY_ORDER:
         actual[f'Node Information:{role}'] = _count_node_role_rows(scenario_payload, role)
-    for service in ('SSH', 'HTTP', 'DHCPClient'):
+    for service in ('SSH', 'HTTP', 'HTTPS', 'DHCPClient'):
         actual[f'Services:{service}'] = _count_section_selected_rows(
             scenario_payload,
             'Services',
@@ -1745,7 +1747,9 @@ def _build_recoverable_mcp_bridge_tool_error(
             if normalized:
                 return normalized
         message_lower = message.lower()
-        if 'https' in message_lower or 'http' in message_lower or 'web' in message_lower:
+        if 'https' in message_lower:
+            return 'HTTPS'
+        if 'http' in message_lower or 'web' in message_lower:
             return 'HTTP'
         if 'dhcp' in message_lower:
             return 'DHCPClient'
@@ -1753,11 +1757,51 @@ def _build_recoverable_mcp_bridge_tool_error(
             return 'SSH'
         return 'HTTP'
 
+    if tool_name.endswith('scenario.replace_section') and message.lower().startswith('unknown section_name:'):
+        return json.dumps({
+            'error': message,
+            'recoverable': True,
+            'guidance': (
+                'No mutation was applied. ScenarioForge has no free-form Subnets or Topology section. '
+                'Explicit router and host counts are already seeded into Routing and Node Information; '
+                'subnet layout is derived by the topology planner. Inspect the current draft and continue. '
+                'Only replace a section whose exact name is returned by the authoring schema.'
+            ),
+            'retry_hint': {
+                'tool': 'scenario.get_draft',
+                'draft_id': str((tool_args or {}).get('draft_id') or '').strip(),
+            },
+        })
+
+    missing_selected_tools = {
+        'scenario.add_node_role_item': 'node role',
+        'scenario.add_service_item': 'service',
+        'scenario.add_segmentation_item': 'segmentation',
+        'scenario.add_traffic_item': 'traffic',
+    }
+    for tool_suffix, item_label in missing_selected_tools.items():
+        if tool_name.endswith(tool_suffix) and f'selected is required for {item_label} items' in message.lower():
+            return json.dumps({
+                'error': message,
+                'recoverable': True,
+                'guidance': (
+                    'No mutation was applied. The deterministic intent compiler seeds explicit requested '
+                    'rows before model tool calls, so first inspect the current draft and do not duplicate an '
+                    'already-present row. Only retry this mutation if the row is still absent, and then supply '
+                    'the tool schema\'s exact canonical selected value.'
+                ),
+                'retry_hint': {
+                    'tool': 'scenario.get_draft',
+                    'draft_id': str((tool_args or {}).get('draft_id') or '').strip(),
+                },
+            })
+
     service_selection_error = any(fragment in message.lower() for fragment in (
         'selected or service must be one of:',
         'services selected must be one of:',
         'service must be one of:',
         'selected must be one of: ssh, http, dhcpclient, or random',
+        'selected must be one of: ssh, http, https, dhcpclient, or random',
     ))
     service_replace_error = tool_name.endswith('scenario.replace_section') and str((tool_args or {}).get('section_name') or '').strip().lower() == 'services' and service_selection_error
     service_add_error = tool_name.endswith('scenario.add_service_item') and service_selection_error
@@ -1783,8 +1827,8 @@ def _build_recoverable_mcp_bridge_tool_error(
             count = 1
 
         guidance = (
-            'Services rows must use one exact canonical label: SSH, HTTP, or DHCPClient. '
-            'Normalize aliases such as https/web to HTTP and dhcp to DHCPClient. '
+            'Services rows must use one exact canonical label: SSH, HTTP, HTTPS, or DHCPClient. '
+            'Keep HTTPS distinct from HTTP; normalize web to HTTP and dhcp to DHCPClient. '
             f'Retry with selected="{retry_service}" and count={count}. '
             'Do not use free-text service labels or generic placeholders inside the Services section.'
         )
@@ -2841,7 +2885,31 @@ def _canonicalize_generated_vulnerabilities_or_raise(scenario_payload: dict[str,
         raise ProviderAdapterError(str(exc), status_code=400) from exc
 
 
-def _canonicalize_generated_routing_modes(scenario_payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_generated_routing_protocol(value: Any) -> str:
+    """Canonical Routing protocol name, or '' when the value is not one.
+
+    Mirrors the MCP server's normalizer so both authoring paths accept the same
+    spellings and reject the same values.
+    """
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    normalized = ''.join(ch for ch in text.lower() if ch.isalnum())
+    aliases = {
+        'rip': 'RIP',
+        'ripng': 'RIPNG',
+        'bgp': 'BGP',
+        'ospf': 'OSPFv2',
+        'ospfv2': 'OSPFv2',
+        'ospf2': 'OSPFv2',
+        'ospfv3': 'OSPFv3',
+        'ospf3': 'OSPFv3',
+        'random': 'Random',
+    }
+    return aliases.get(normalized, '')
+
+
+def _canonicalize_generated_routing_or_raise(scenario_payload: dict[str, Any]) -> dict[str, Any]:
     sections = scenario_payload.get('sections') if isinstance(scenario_payload.get('sections'), dict) else {}
     routing_section = sections.get('Routing') if isinstance(sections.get('Routing'), dict) else None
     if not routing_section:
@@ -2863,6 +2931,21 @@ def _canonicalize_generated_routing_modes(scenario_payload: dict[str, Any]) -> d
             next_items.append(raw_item)
             continue
         item = deepcopy(raw_item)
+        # A Routing row's `selected` is a protocol, not a selection mode. Letting a
+        # section keyword such as "Specific" through produces XML that saves and
+        # previews cleanly, then dies inside CORE with "service does not exist
+        # Specific" and leaves the session stuck in configuration.
+        raw_selected = item.get('selected')
+        canonical_selected = _normalize_generated_routing_protocol(raw_selected)
+        if not canonical_selected:
+            raise ProviderAdapterError(
+                'Routing selected must be one of: RIP, RIPNG, BGP, OSPFv2, OSPFv3, or Random '
+                f'(got {str(raw_selected or "").strip() or "empty"}).',
+                status_code=400,
+            )
+        if canonical_selected != raw_selected:
+            item['selected'] = canonical_selected
+            changed = True
         for mode_key in ('r2r_mode', 'r2s_mode'):
             raw_mode = str(item.get(mode_key) or '').strip()
             canonical = canonical_modes.get(raw_mode.lower())
@@ -3094,6 +3177,12 @@ def _build_bridge_query_state_details(client: Any) -> dict[str, Any]:
     current_draft_id = str(state.get('current_draft_id') or '').strip()
     if current_draft_id:
         details['bridge_current_draft_id'] = current_draft_id
+    provider_usage = getattr(client, 'provider_usage', None)
+    if isinstance(provider_usage, dict):
+        details['provider_usage'] = deepcopy(provider_usage)
+    provider_usage_requests = getattr(client, 'provider_usage_requests', None)
+    if isinstance(provider_usage_requests, list):
+        details['provider_usage_requests'] = deepcopy(provider_usage_requests)
     return details
 
 
@@ -3750,7 +3839,17 @@ class _RepoMcpBridgeClient:
         self.loop_limit = 8
         self.timeout_seconds = 120.0
         self.query_debug_state: dict[str, Any] = {}
+        self.provider_usage: dict[str, int] = {
+            'request_count': 0,
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'cached_tokens': 0,
+        }
+        self.provider_usage_requests: list[dict[str, int]] = []
         self._exit_stack: AsyncExitStack | None = None
+        self._provider_tool_names: dict[str, str] = {}
+        self._internal_tool_names: dict[str, str] = {}
 
     def _set_query_debug_state(self, **kwargs: Any) -> None:
         state = dict(self.query_debug_state)
@@ -3832,10 +3931,11 @@ class _RepoMcpBridgeClient:
     def _build_chat_tools_payload(self) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
         for tool in self.tool_manager.get_enabled_tool_objects():
+            provider_tool_name = self._tool_name_for_provider(tool.name)
             payload.append({
                 'type': 'function',
                 'function': {
-                    'name': tool.name,
+                    'name': provider_tool_name,
                     'description': tool.description,
                     'parameters': _build_llm_chat_tool_schema(tool.name, tool.inputSchema if isinstance(tool.inputSchema, dict) else {}),
                 },
@@ -3844,6 +3944,38 @@ class _RepoMcpBridgeClient:
 
     def _uses_openai_chat_completions(self) -> bool:
         return self.provider in {'litellm', 'openai'}
+
+    def _tool_name_for_provider(self, tool_name: Any) -> str:
+        internal_name = str(tool_name or '').strip()
+        if not self._uses_openai_chat_completions() or not internal_name:
+            return internal_name
+        existing = self._internal_tool_names.get(internal_name)
+        if existing:
+            return existing
+        if internal_name in self._provider_tool_names:
+            return internal_name
+
+        # MCP uses dotted, qualified names. OpenAI function names permit only
+        # letters, digits, underscores, and hyphens, with a 64-character limit.
+        provider_name = internal_name.replace('.', '__')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', provider_name):
+            raise ProviderAdapterError(
+                f'MCP tool name cannot be represented as an OpenAI function name: {internal_name}',
+                status_code=500,
+            )
+        mapped_name = self._provider_tool_names.get(provider_name)
+        if mapped_name and mapped_name != internal_name:
+            raise ProviderAdapterError(
+                f'MCP tool names collide after OpenAI-compatible encoding: {mapped_name}, {internal_name}',
+                status_code=500,
+            )
+        self._provider_tool_names[provider_name] = internal_name
+        self._internal_tool_names[internal_name] = provider_name
+        return provider_name
+
+    def _tool_name_from_provider(self, tool_name: Any) -> str:
+        provider_name = str(tool_name or '').strip()
+        return self._provider_tool_names.get(provider_name, provider_name)
 
     def _chat_request_headers(self) -> dict[str, str] | None:
         if self._uses_openai_chat_completions() and self.api_key:
@@ -3873,7 +4005,7 @@ class _RepoMcpBridgeClient:
                             'id': str(tool_call.get('id') or f'call_{idx + 1}').strip(),
                             'type': 'function',
                             'function': {
-                                'name': str(((tool_call.get('function') or {}).get('name')) or '').strip(),
+                                'name': self._tool_name_for_provider((tool_call.get('function') or {}).get('name')),
                                 'arguments': json.dumps(((tool_call.get('function') or {}).get('arguments')) or {}, ensure_ascii=False),
                             },
                         }
@@ -3903,6 +4035,57 @@ class _RepoMcpBridgeClient:
         except Exception:
             return False
 
+    def _record_provider_usage(self, response: dict[str, Any]) -> None:
+        """Accumulate provider-reported tokens across MCP tool-call turns."""
+        if not isinstance(response, dict):
+            return
+        raw_usage = response.get('usage') if isinstance(response.get('usage'), dict) else {}
+        prompt_details = (
+            raw_usage.get('prompt_tokens_details')
+            if isinstance(raw_usage.get('prompt_tokens_details'), dict)
+            else {}
+        )
+
+        def token_count(*values: Any) -> int:
+            for value in values:
+                try:
+                    return max(0, int(value))
+                except (TypeError, ValueError):
+                    continue
+            return 0
+
+        prompt_tokens = token_count(
+            raw_usage.get('prompt_tokens'),
+            raw_usage.get('input_tokens'),
+            response.get('prompt_eval_count'),
+        )
+        completion_tokens = token_count(
+            raw_usage.get('completion_tokens'),
+            raw_usage.get('output_tokens'),
+            response.get('eval_count'),
+        )
+        total_tokens = token_count(
+            raw_usage.get('total_tokens'),
+            prompt_tokens + completion_tokens,
+        )
+        cached_tokens = token_count(
+            prompt_details.get('cached_tokens'),
+            raw_usage.get('cached_tokens'),
+        )
+        if not raw_usage and not any((prompt_tokens, completion_tokens, total_tokens, cached_tokens)):
+            return
+
+        request_usage = {
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_tokens': total_tokens,
+            'cached_tokens': cached_tokens,
+        }
+        self.provider_usage_requests.append(request_usage)
+        self.provider_usage['request_count'] += 1
+        for key, value in request_usage.items():
+            self.provider_usage[key] += value
+
     def _post_chat(self, *, messages: list[dict[str, Any]]) -> dict[str, Any]:
         self._set_query_debug_state(
             phase='awaiting_llm_response',
@@ -3920,17 +4103,23 @@ class _RepoMcpBridgeClient:
                 }
                 if tools_payload:
                     payload['tools'] = tools_payload
+                    if self.provider == 'openai' and self.model.rsplit('/', 1)[-1].lower().startswith('gpt-5.6-sol'):
+                        # GPT-5.6-sol's Chat Completions endpoint supports
+                        # function tools only when reasoning is disabled.
+                        payload['reasoning_effort'] = 'none'
                     tool_choice = self._openai_tool_choice(tools_payload)
                     if tool_choice:
                         payload['tool_choice'] = tool_choice
-                return _post_json(
+                response = _post_json(
                     _openai_compatible_chat_completions_url(self.host),
                     payload,
                     timeout=self.timeout_seconds,
                     headers=self._chat_request_headers(),
                     verify_ssl=self.verify_ssl,
                 )
-            return _post_json(
+                self._record_provider_usage(response)
+                return response
+            response = _post_json(
                 f'{self.host}/api/chat',
                 {
                     'model': self.model,
@@ -3943,6 +4132,8 @@ class _RepoMcpBridgeClient:
                 headers=self._chat_request_headers(),
                 verify_ssl=self.verify_ssl,
             )
+            self._record_provider_usage(response)
+            return response
         except HTTPError as exc:
             detail = ''
             try:
@@ -4080,6 +4271,10 @@ class _RepoMcpBridgeClient:
         for iteration in range(max(1, int(self.loop_limit or 8))):
             if self._is_cancelled(cancel_check):
                 return final_text
+            messages = _bounded_bridge_message_history(
+                messages,
+                current_draft_id=current_draft_id,
+            )
             self._set_query_debug_state(
                 phase='starting_iteration',
                 iteration=iteration + 1,
@@ -4133,7 +4328,10 @@ class _RepoMcpBridgeClient:
                 if self._is_cancelled(cancel_check):
                     return final_text
                 function = tool_call.get('function') if isinstance(tool_call.get('function'), dict) else {}
-                qualified_tool_name = _normalize_mcp_bridge_tool_name(function.get('name'), known_server_names=list(self.sessions.keys()))
+                qualified_tool_name = _normalize_mcp_bridge_tool_name(
+                    self._tool_name_from_provider(function.get('name')),
+                    known_server_names=list(self.sessions.keys()),
+                )
                 tool_args = function.get('arguments') if isinstance(function.get('arguments'), dict) else {}
                 tool_definition = next((tool for tool in self.tool_manager.get_available_tools() if tool.name == qualified_tool_name), None)
                 tool_args = _sanitize_mcp_bridge_tool_arguments(
@@ -4316,6 +4514,48 @@ async def _mcp_bridge_process_query_server_side(
             if emit is not None and repair.status_message:
                 emit('status', message=repair.status_message)
             current_prompt = repair.retry_prompt or current_prompt
+
+
+def _bounded_bridge_message_history(
+    messages: list[dict[str, Any]],
+    *,
+    current_draft_id: str = '',
+    retained_assistant_turns: int = 2,
+) -> list[dict[str, Any]]:
+    """Keep long tool-use conversations inside local-model context windows.
+
+    The draft is server-side state, so replaying every prior draft mutation is
+    unnecessary. Keep the user's original request and the latest complete
+    assistant/tool groups; a short continuation note tells the model where the
+    omitted work lives. Groups are removed atomically so OpenAI-compatible APIs
+    never receive orphaned ``tool`` messages.
+    """
+    if len(messages) <= 1:
+        return messages
+
+    assistant_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if str(message.get('role') or '').strip().lower() == 'assistant'
+    ]
+    keep_turns = max(1, int(retained_assistant_turns or 1))
+    if len(assistant_indexes) <= keep_turns:
+        return messages
+
+    tail_index = assistant_indexes[-keep_turns]
+    initial = dict(messages[0])
+    draft_hint = str(current_draft_id or '').strip()
+    continuation = (
+        'Earlier MCP tool turns were compacted to stay within the model context window. '
+        'Their changes are already stored in the ScenarioForge draft.'
+    )
+    if draft_hint:
+        continuation += f' Continue with draft_id {draft_hint}; inspect that draft if more context is needed.'
+    return [
+        initial,
+        {'role': 'user', 'content': continuation},
+        *messages[tail_index:],
+    ]
 
 
 def _compact_draft_payload_for_llm(draft: dict[str, Any]) -> dict[str, Any]:
@@ -4574,10 +4814,13 @@ async def _apply_deterministic_mcp_bridge_seed(
     compiled = _compile_ai_intent(user_prompt)
     has_seeded_vulnerability_ops = any(op.get('kind') == 'vulnerability' for op in compiled.tool_seed_ops)
     for op in compiled.tool_seed_ops:
+        # Every scenario.add_*_item tool takes the row value as `selected`; sending a
+        # section-flavored alias (role/service/protocol/kind) fails the call outright
+        # and aborts the whole bridge run before the model gets a turn.
         if op.get('kind') == 'routing' and routing_tool:
             routing_args: dict[str, Any] = {
                 'draft_id': draft_id,
-                'protocol': op.get('protocol') or 'OSPFv2',
+                'selected': op.get('protocol') or op.get('selected') or 'OSPFv2',
                 'count': int(op.get('count') or 1),
             }
             if op.get('r2r_mode'):
@@ -4586,19 +4829,19 @@ async def _apply_deterministic_mcp_bridge_seed(
         elif op.get('kind') == 'node' and node_tool:
             await _mcp_bridge_call_tool(client, node_tool, {
                 'draft_id': draft_id,
-                'role': op.get('role'),
+                'selected': op.get('role') or op.get('selected'),
                 'count': int(op.get('count') or 1),
             })
         elif op.get('kind') == 'service' and service_tool:
             await _mcp_bridge_call_tool(client, service_tool, {
                 'draft_id': draft_id,
-                'service': op.get('service'),
+                'selected': op.get('service') or op.get('selected'),
                 'count': int(op.get('count') or 1),
             })
         elif op.get('kind') == 'traffic' and traffic_tool:
             await _mcp_bridge_call_tool(client, traffic_tool, {
                 'draft_id': draft_id,
-                'protocol': op.get('protocol'),
+                'selected': op.get('protocol') or op.get('selected'),
                 'count': int(op.get('count') or 1),
                 'pattern': op.get('pattern') or 'continuous',
                 'content_type': op.get('content_type') or 'text',
@@ -4606,7 +4849,7 @@ async def _apply_deterministic_mcp_bridge_seed(
         elif op.get('kind') == 'segmentation' and segmentation_tool:
             await _mcp_bridge_call_tool(client, segmentation_tool, {
                 'draft_id': draft_id,
-                'kind': op.get('selected'),
+                'selected': op.get('selected'),
                 'count': int(op.get('count') or 1),
             })
         elif op.get('kind') == 'flag-node-generator' and flag_node_generator_tool:
@@ -4620,17 +4863,6 @@ async def _apply_deterministic_mcp_bridge_seed(
     applied.extend(compiled.applied_actions)
 
     vulnerability_target_count = _extract_vulnerability_target_count(user_prompt)
-
-    if segmentation_tool:
-        for control, count in _extract_segmentation_control_count_intent(user_prompt).items():
-            if count <= 0:
-                continue
-            await _mcp_bridge_call_tool(client, segmentation_tool, {
-                'draft_id': draft_id,
-                'kind': control,
-                'count': count,
-            })
-            applied.append(f'Segmentation {control}={count}')
 
     if vuln_tool and vulnerability_target_count > 0 and not has_seeded_vulnerability_ops:
         query_hint = _extract_vulnerability_query_hint(user_prompt)
@@ -4689,9 +4921,10 @@ def _build_mcp_bridge_goal_prompt(
         'For router-to-router or router-to-host ratio/connectivity requests, use Routing r2r_* and r2s_* fields. Those fields describe connectivity density, not router count. There is no r2h field; router-to-host requests map to r2s_* because hosts attach to routed segments.',
         'Never place Router, Routing, gateway, or protocol rows under Node Information; router counts always belong in Routing.',
         'Interpret Routing fields precisely: v_count is router quantity, r2r_edges is router-to-router links per router, and r2s_edges with r2s_hosts_min or r2s_hosts_max describes router-to-segment or routed-host attachment density.',
+        'There is no Subnets or Topology authoring section. Never call replace_section for either name; express requested counts through Routing and Node Information and let the topology planner derive subnet layout.',
         *_build_count_intent_guidance(user_prompt),
         *_build_mcp_bridge_execution_guidance(user_prompt),
-        'If the user asks for routers without naming a protocol, use scenario.add_routing_item with protocol="OSPFv2" and the requested count when that tool is enabled; otherwise replace only the Routing section with a Count row selected="OSPFv2".',
+        'If the user asks for routers without naming a protocol, use scenario.add_routing_item with selected="OSPFv2" and the requested count when that tool is enabled; otherwise replace only the Routing section with a Count row selected="OSPFv2".',
         'When dedicated tools are available, prefer scenario.add_node_role_item for host or Docker counts, scenario.add_routing_item for explicit router/protocol rows and routing edge hints, scenario.add_service_item for Services rows, scenario.add_traffic_item for TCP or UDP traffic, scenario.add_segmentation_item for Segmentation rows, scenario.search_flag_node_generator_catalog to look up an enabled generator, and scenario.add_flag_node_generator_item for topology flag-node-generator rows.',
         'For vulnerabilities, prefer scenario.search_vulnerability_catalog first, then call scenario.add_vulnerability_item with explicit v_name and v_path from the chosen result. Do not pass factor. If the user asks for multiple different vulnerabilities, make separate add_vulnerability_item calls with v_count=1 for each chosen vulnerability.',
         'For broad vulnerability categories such as web-related, database, auth, or ssh-related vulnerabilities, do not invent a synthetic category row. Search the vulnerability catalog using the user\'s wording and available README-backed context, and do not pass v_type or v_vector filters unless the user explicitly requested those exact filters. Then choose concrete catalog results.',
@@ -4831,7 +5064,7 @@ async def _mcp_bridge_generate(payload: dict[str, Any], *, current_scenario: dic
         try:
             scenario_payload = _canonicalize_generated_vulnerabilities_or_raise(scenario_payload)
             _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, scenario_payload)
-            scenario_payload = _canonicalize_generated_routing_modes(scenario_payload)
+            scenario_payload = _canonicalize_generated_routing_or_raise(scenario_payload)
             scenario_payload = app_backend._concretize_preview_placeholders(scenario_payload, seed=payload.get('seed'))
         except BaseException as exc:
             raise _augment_provider_error_for_bridge_stage(
@@ -4871,6 +5104,8 @@ async def _mcp_bridge_generate(payload: dict[str, Any], *, current_scenario: dic
             ],
             'enabled_tools': enabled_tools,
             'draft_id': draft_id,
+            'provider_usage': deepcopy(getattr(client, 'provider_usage', {})),
+            'provider_usage_requests': deepcopy(getattr(client, 'provider_usage_requests', [])),
         }
     finally:
         await client.cleanup()
@@ -5029,7 +5264,7 @@ async def _mcp_bridge_generate_with_events(
             scenario_payload = _restore_preserved_scenario_metadata(current_scenario, scenario_payload)
             scenario_payload = _overlay_compiled_intent_sections(scenario_payload, user_prompt)
             _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, scenario_payload)
-            scenario_payload = _canonicalize_generated_routing_modes(scenario_payload)
+            scenario_payload = _canonicalize_generated_routing_or_raise(scenario_payload)
             scenario_payload = app_backend._concretize_preview_placeholders(scenario_payload, seed=payload.get('seed'))
         except BaseException as exc:
             raise _augment_provider_error_for_bridge_stage(
@@ -5069,6 +5304,8 @@ async def _mcp_bridge_generate_with_events(
             ],
             'enabled_tools': enabled_tools,
             'draft_id': draft_id,
+            'provider_usage': deepcopy(getattr(client, 'provider_usage', {})),
+            'provider_usage_requests': deepcopy(getattr(client, 'provider_usage_requests', [])),
         }
     finally:
         await client.cleanup()
@@ -5101,6 +5338,8 @@ def _build_stream_success_payload(
             'model': generation_result.get('model') or '',
             'prompt_used': generation_result.get('prompt_used') or '',
             'provider_response': generation_result.get('provider_response') or '',
+            'provider_usage': generation_result.get('provider_usage') or {},
+            'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
             'count_intent_mismatch': generation_result.get('count_intent_mismatch'),
             'count_intent_retry_used': bool(generation_result.get('count_intent_retry_used')),
             'prompt_coverage_mismatch': generation_result.get('prompt_coverage_mismatch'),
@@ -5130,7 +5369,7 @@ def _build_stream_success_payload(
     merged_scenario = _overlay_compiled_intent_sections(merged_scenario, user_prompt)
     merged_scenario = _canonicalize_generated_vulnerabilities_or_raise(merged_scenario)
     _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, merged_scenario)
-    merged_scenario = _canonicalize_generated_routing_modes(merged_scenario)
+    merged_scenario = _canonicalize_generated_routing_or_raise(merged_scenario)
     merged_scenario = app_backend._concretize_preview_placeholders(merged_scenario, seed=payload.get('seed'))
     next_scenarios = deepcopy(scenarios)
     next_scenarios[scenario_index] = merged_scenario
@@ -5162,6 +5401,8 @@ def _build_stream_success_payload(
         'prompt_used': prompt,
         'provider_response': raw_generation,
         'provider_attempts': generation_result.get('provider_attempts') or [],
+        'provider_usage': generation_result.get('provider_usage') or {},
+        'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
         'generated_scenario': merged_scenario,
         'generated_scenarios': next_scenarios,
         'preview': preview_json.get('full_preview') or {},
@@ -5626,6 +5867,9 @@ class OllamaProviderAdapter(ProviderAdapter):
 
 
 class OpenAiCompatibleProviderAdapter(ProviderAdapter):
+    # Any endpoint speaking the OpenAI chat-completions API is served by this one
+    # adapter; the capability passed in decides how it is presented and which
+    # provider id its responses report.
     capability = ProviderCapability(
         provider='litellm',
         label='OpenAI-Compatible',
@@ -5637,6 +5881,14 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
         requires_api_key=False,
         supports_mcp_bridge=True,
     )
+
+    def __init__(self, capability: ProviderCapability | None = None):
+        if capability is not None:
+            self.capability = capability
+
+    @property
+    def provider_key(self) -> str:
+        return str(getattr(self.capability, 'provider', '') or 'litellm')
 
     def validate(self, payload: dict[str, Any], *, log: Any = None) -> dict[str, Any]:
         model = str(payload.get('model') or '').strip()
@@ -5673,7 +5925,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                 message = f'Reached OpenAI-compatible endpoint at {base_url}, but model {model!r} was not found.'
             return {
                 'success': True,
-                'provider': 'litellm',
+                'provider': self.provider_key,
                 'base_url': base_url,
                 'models': models,
                 'model': model,
@@ -5831,7 +6083,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                     message,
                     status_code=502,
                     details=_build_provider_generation_error_details(
-                        provider='litellm',
+                        provider=self.provider_key,
                         stage='direct_generate',
                         started_at=generation_started_at,
                         base_url=base_url,
@@ -5857,7 +6109,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                     f'Could not reach OpenAI-compatible endpoint at {base_url}: {reason}',
                     status_code=502,
                     details=_build_provider_generation_error_details(
-                        provider='litellm',
+                        provider=self.provider_key,
                         stage='direct_generate',
                         started_at=generation_started_at,
                         base_url=base_url,
@@ -5911,7 +6163,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                     },
                 )
             return {
-                'provider': 'litellm',
+                'provider': self.provider_key,
                 'base_url': base_url,
                 'model': model,
                 'prompt_used': prompt,
@@ -5931,7 +6183,7 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
                 'Unexpected generation failure while contacting the OpenAI-compatible endpoint.',
                 status_code=500,
                 details=_build_provider_generation_error_details(
-                    provider='litellm',
+                    provider=self.provider_key,
                     stage='direct_generate',
                     started_at=generation_started_at,
                     base_url=base_url,
@@ -5946,15 +6198,17 @@ class OpenAiCompatibleProviderAdapter(ProviderAdapter):
 _PROVIDER_REGISTRY: dict[str, ProviderAdapter] = {
     'ollama': OllamaProviderAdapter(),
     'litellm': OpenAiCompatibleProviderAdapter(),
-    'openai': UnsupportedProviderAdapter(
+    'openai': OpenAiCompatibleProviderAdapter(
         ProviderCapability(
             provider='openai',
             label='OpenAI',
-            enabled=False,
+            enabled=True,
             mode='remote',
-            description='Planned adapter for hosted OpenAI chat or responses APIs.',
+            description='Hosted OpenAI chat-completions API, or any endpoint that speaks it.',
+            default_base_url='https://api.openai.com/v1',
             requires_model=True,
             requires_api_key=True,
+            supports_mcp_bridge=True,
         )
     ),
     'anthropic': UnsupportedProviderAdapter(
@@ -6016,9 +6270,30 @@ def register(
 
     def _resolve_payload_with_stored_api_key(payload: dict[str, Any]) -> dict[str, Any]:
         resolved = dict(payload or {})
+        # `.scenarioforge.env` fills in whatever the caller left out, so a headless
+        # or scripted request does not have to repeat the provider wiring the Web UI
+        # keeps in browser state. Anything the caller sent still wins.
+        env_defaults = ai_settings_as_payload(resolve_ai_settings())
+        # The key is held back from this pass: an account's stored credential must win
+        # over a key in the env file, or a Web UI request that omits api_key (asking for
+        # its stored key) would silently authenticate as whatever the dotfile holds.
+        env_api_key = str(env_defaults.pop('api_key', '') or '').strip()
+        for field, value in env_defaults.items():
+            # Only fill fields the caller left out. An explicitly empty value is a
+            # choice, not an omission: `model: ''` asks validate to discover one,
+            # and an empty api_key asks for the stored credential.
+            if field in resolved:
+                continue
+            resolved[field] = value
         provider_key = str(resolved.get('provider') or '').strip().lower()
         api_key = str(resolved.get('api_key') or '').strip()
         if api_key:
+            # The Web UI saves the key it was given so the next session inherits it.
+            # A headless caller opts out: a one-off --ai-api-key must not overwrite
+            # the account's stored credential as a side effect of one run.
+            persist_api_key = resolved.get('persist_api_key')
+            if persist_api_key is False:
+                return resolved
             if callable(save_ai_provider_credentials):
                 username = _current_username()
                 if username:
@@ -6042,6 +6317,10 @@ def register(
             resolved['api_key_secret_id'] = stored_record.get('identifier')
             resolved['has_stored_api_key'] = True
             resolved['api_key_stored_at'] = stored_record.get('stored_at')
+        elif env_api_key and 'api_key' not in payload:
+            # No stored credential for this account: fall back to the env file, which is
+            # how a headless caller with no Web UI session authenticates at all.
+            resolved['api_key'] = env_api_key
         return resolved
 
     globals()['_resolve_payload_with_stored_api_key'] = _resolve_payload_with_stored_api_key
@@ -6237,6 +6516,8 @@ def register(
                 'model': generation_result.get('model') or model,
                 'prompt_used': generation_result.get('prompt_used') or '',
                 'provider_response': generation_result.get('provider_response') or '',
+                'provider_usage': generation_result.get('provider_usage') or {},
+                'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
                 'count_intent_mismatch': generation_result.get('count_intent_mismatch'),
                 'count_intent_retry_used': bool(generation_result.get('count_intent_retry_used')),
                 'prompt_coverage_mismatch': generation_result.get('prompt_coverage_mismatch'),
@@ -6290,6 +6571,8 @@ def register(
                     'model': generation_result.get('model') or model,
                     'prompt_used': generation_result.get('prompt_used') or '',
                     'provider_response': generation_result.get('provider_response') or '',
+                    'provider_usage': generation_result.get('provider_usage') or {},
+                    'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
                     'count_intent_mismatch': generation_result.get('count_intent_mismatch'),
                     'count_intent_retry_used': bool(generation_result.get('count_intent_retry_used')),
                     'prompt_coverage_mismatch': generation_result.get('prompt_coverage_mismatch'),
@@ -6321,7 +6604,7 @@ def register(
             merged_scenario = _overlay_compiled_intent_sections(merged_scenario, user_prompt)
             merged_scenario = _canonicalize_generated_vulnerabilities_or_raise(merged_scenario)
             _ensure_explicit_vulnerability_query_matches_or_raise(user_prompt, merged_scenario)
-            merged_scenario = _canonicalize_generated_routing_modes(merged_scenario)
+            merged_scenario = _canonicalize_generated_routing_or_raise(merged_scenario)
             merged_scenario = app_backend._concretize_preview_placeholders(merged_scenario, seed=payload.get('seed'))
             next_scenarios = deepcopy(scenarios)
             next_scenarios[scenario_index] = merged_scenario
@@ -6351,6 +6634,8 @@ def register(
                 'prompt_used': prompt,
                 'provider_response': raw_generation,
                 'provider_attempts': generation_result.get('provider_attempts') or [],
+                'provider_usage': generation_result.get('provider_usage') or {},
+                'provider_usage_requests': generation_result.get('provider_usage_requests') or [],
                 'generated_scenario': merged_scenario,
                 'generated_scenarios': next_scenarios,
                 'preview': preview_json.get('full_preview') or {},

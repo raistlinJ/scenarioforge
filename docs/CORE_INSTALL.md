@@ -70,6 +70,7 @@ The service modules live in this repository under
 | `CoreTGPrereqs.py` | Installs tool prerequisites inside each node's namespace/container, and a process-wide Mako template lock that keeps concurrent node boots from hitting a spurious recursion error on some Python 3.11 releases. The other services depend on it. |
 | `Segmentation.py` | Applies the scenario's per-node segmentation rules. |
 | `TrafficService.py` | Starts the background traffic agents on nodes that generate traffic. |
+| `HTTPS.py` | Starts a real TLS listener on port 443 with a per-node self-signed certificate for explicit HTTPS service assignments. |
 | `DockerComposeService.py` | Brings up the per-node compose file at `/tmp/vulns/docker-compose-<node>.yml` — this is how vulnerability targets start. |
 | `DockerDefaultRoute.py` | Default-route service using absolute script paths, replacing CORE's built-in `DefaultRoute` whose relative paths fail when a Docker node's working directory differs. |
 

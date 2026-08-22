@@ -27,7 +27,8 @@ def test_ai_generator_panel_renders_openai_compatible_controls_from_catalog_back
     text = AI_PANEL_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
-        "provider === 'litellm'",
+        'isOpenAiCompatibleProvider(provider)',
+        "OPENAI_COMPATIBLE_PROVIDERS = ['litellm', 'openai']",
         'id="aiGeneratorApiKeyInput"',
         'id="aiGeneratorSaveApiKeyBtn"',
         'id="aiGeneratorClearApiKeyBtn"',

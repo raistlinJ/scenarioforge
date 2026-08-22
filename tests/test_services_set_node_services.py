@@ -88,6 +88,15 @@ def test_ensure_service_adds_coretgprereqs_for_host_traffic() -> None:
     assert set(session.services.get(1002)) == {"CoreTGPrereqs", "Traffic"}
 
 
+def test_ensure_service_adds_coretgprereqs_for_https() -> None:
+    session = _Session()
+    node = SimpleNamespace(id=1005, type="DEFAULT")
+
+    ok = ensure_service(session, 1005, "HTTPS", node_obj=node)
+    assert ok is True
+    assert set(session.services.get(1005)) == {"CoreTGPrereqs", "HTTPS"}
+
+
 def test_ensure_service_adds_coretgprereqs_for_segmentation_without_node_obj() -> None:
     session = _Session()
     node = SimpleNamespace(id=1003)

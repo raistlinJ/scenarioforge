@@ -8,6 +8,8 @@ from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
+import pytest
+
 from webapp.app_backend import app
 
 
@@ -787,7 +789,7 @@ def test_ai_generate_scenario_preview_compiler_overrides_services_and_traffic_ro
     assert traffic_items[1].get('content_type') == 'text'
 
 
-def test_ai_generate_scenario_preview_compiler_keeps_vulnerability_targets_additive(tmp_path, monkeypatch):
+def test_ai_generate_scenario_preview_compiler_keeps_vulnerabilities_inside_total_budget(tmp_path, monkeypatch):
     client = app.test_client()
     _login(client)
 
@@ -861,7 +863,7 @@ def test_ai_generate_scenario_preview_compiler_keeps_vulnerability_targets_addit
     vuln_items = (((generated_scenario.get('sections') or {}).get('Vulnerabilities')) or {}).get('items') or []
 
     assert node_items == [
-        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 9},
+        {'selected': 'PC', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 7},
     ]
     assert vuln_items == [
         {'selected': 'Specific', 'v_metric': 'Count', 'v_count': 1, 'v_name': 'appweb/CVE-2018-8715', 'v_path': '/catalog/appweb/CVE-2018-8715/docker-compose.yml'},
@@ -986,13 +988,18 @@ def test_ai_provider_catalog_includes_only_ollama_and_openai_compatible_bridge_c
         for entry in providers
         if isinstance(entry, dict)
     }
-    assert set(provider_map.keys()) == {'ollama', 'litellm'}
-    assert 'litellm' in provider_map
+    assert set(provider_map.keys()) == {'ollama', 'litellm', 'openai'}
     assert provider_map['litellm'].get('label') == 'OpenAI-Compatible'
     assert provider_map['litellm'].get('enabled') is True
     assert provider_map['litellm'].get('supports_mcp_bridge') is True
     assert provider_map['litellm'].get('default_base_url') == 'https://localhost:4000/v1'
     assert provider_map['ollama'].get('supports_mcp_bridge') is True
+    # `openai` is the same chat-completions adapter under a hosted-OpenAI default.
+    assert provider_map['openai'].get('label') == 'OpenAI'
+    assert provider_map['openai'].get('enabled') is True
+    assert provider_map['openai'].get('supports_mcp_bridge') is True
+    assert provider_map['openai'].get('requires_api_key') is True
+    assert provider_map['openai'].get('default_base_url') == 'https://api.openai.com/v1'
 
 
 def test_ai_provider_validate_skip_bridge_refreshes_openai_compatible_models_without_mcp(tmp_path, monkeypatch):
@@ -2731,6 +2738,53 @@ def test_repo_mcp_bridge_client_recovers_from_router_replace_section_error(monke
     assert 'Router counts belong in Routing' in str(tool_result_events[0].get('message') or '')
 
 
+def test_bounded_bridge_message_history_keeps_complete_recent_tool_groups():
+    from webapp.routes import ai_provider
+
+    messages = [{'role': 'user', 'content': 'build three vulnerable hosts'}]
+    for turn in range(4):
+        messages.extend([
+            {
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [{
+                    'id': f'call-{turn}',
+                    'function': {'name': 'server.scenario.get_draft', 'arguments': {}},
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': f'call-{turn}',
+                'content': json.dumps({'turn': turn}),
+            },
+        ])
+
+    bounded = ai_provider._bounded_bridge_message_history(
+        messages,
+        current_draft_id='draft-context-1',
+    )
+
+    assert bounded[0] == messages[0]
+    assert bounded[1]['role'] == 'user'
+    assert 'draft-context-1' in bounded[1]['content']
+    assert bounded[2:] == messages[-4:]
+    assert [message['role'] for message in bounded] == [
+        'user', 'user', 'assistant', 'tool', 'assistant', 'tool',
+    ]
+
+
+def test_bounded_bridge_message_history_leaves_short_conversations_unchanged():
+    from webapp.routes import ai_provider
+
+    messages = [
+        {'role': 'user', 'content': 'build it'},
+        {'role': 'assistant', 'content': '', 'tool_calls': []},
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': '{}'},
+    ]
+
+    assert ai_provider._bounded_bridge_message_history(messages) is messages
+
+
 def test_repo_mcp_bridge_client_uses_openai_parser_for_openai_compatible_nonstream(monkeypatch):
     from webapp.routes import ai_provider
 
@@ -2815,7 +2869,126 @@ def test_repo_mcp_bridge_client_requires_tools_for_openai_compatible_requests(mo
     assert captured['payload'].get('tool_choice') == 'required'
     assert isinstance(captured['payload'].get('tools'), list)
     assert captured['payload']['tools']
+    assert captured['payload']['tools'][0]['function']['name'] == 'server__scenario__get_draft'
     assert captured['headers'] == {'Authorization': 'Bearer test-litellm-key'}
+
+
+def test_repo_mcp_bridge_client_accumulates_provider_token_usage(monkeypatch):
+    from webapp.routes import ai_provider
+
+    client = ai_provider._RepoMcpBridgeClient(
+        model='qwen-test',
+        host='https://provider.example/v1',
+        provider='openai',
+        api_key='test-key',
+    )
+    responses = [
+        {
+            'choices': [{'message': {'role': 'assistant', 'content': 'first'}}],
+            'usage': {
+                'prompt_tokens': 100,
+                'completion_tokens': 20,
+                'total_tokens': 120,
+                'prompt_tokens_details': {'cached_tokens': 40},
+            },
+        },
+        {
+            'choices': [{'message': {'role': 'assistant', 'content': 'second'}}],
+            'usage': {'prompt_tokens': 150, 'completion_tokens': 30, 'total_tokens': 180},
+        },
+    ]
+
+    monkeypatch.setattr(ai_provider, '_post_json', lambda *args, **kwargs: responses.pop(0))
+
+    client._post_chat(messages=[{'role': 'user', 'content': 'first'}])
+    client._post_chat(messages=[{'role': 'user', 'content': 'second'}])
+
+    assert client.provider_usage == {
+        'request_count': 2,
+        'prompt_tokens': 250,
+        'completion_tokens': 50,
+        'total_tokens': 300,
+        'cached_tokens': 40,
+    }
+    assert len(client.provider_usage_requests) == 2
+
+
+def test_repo_mcp_bridge_client_disables_reasoning_for_openai_chat_tools(monkeypatch):
+    from webapp.routes import ai_provider
+
+    client = ai_provider._RepoMcpBridgeClient(
+        model='gpt-5.6-sol',
+        host='https://api.openai.com/v1',
+        provider='openai',
+        api_key='test-openai-key',
+    )
+    captured = {}
+
+    def fake_post_json(url, payload, *, timeout, headers=None, verify_ssl=True):
+        captured['payload'] = payload
+        return {'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]}
+
+    monkeypatch.setattr(ai_provider, '_post_json', fake_post_json)
+    monkeypatch.setattr(
+        client.tool_manager,
+        'get_enabled_tool_objects',
+        lambda: [_FakeTool('server.scenario.get_draft', 'Get draft', {'type': 'object'})],
+    )
+
+    client._post_chat(messages=[{'role': 'user', 'content': 'test prompt'}])
+
+    assert captured['payload']['reasoning_effort'] == 'none'
+
+
+def test_repo_mcp_bridge_client_decodes_openai_compatible_tool_name(monkeypatch):
+    from webapp.routes import ai_provider
+
+    client = ai_provider._RepoMcpBridgeClient(
+        model='gpt-5.6-sol',
+        host='https://api.openai.com/v1',
+        provider='openai',
+        api_key='test-openai-key',
+    )
+    client.sessions = {'server': {'session': object()}}
+    client.tool_manager.set_available_tools([
+        _FakeTool('server.scenario.get_draft', 'Get draft', {'type': 'object'}),
+    ])
+    client.tool_manager.set_tool_status('server.scenario.get_draft', True)
+    observed_tool_names = []
+    responses = [
+        {
+            'choices': [{
+                'message': {
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [{
+                        'id': 'call_1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'server__scenario__get_draft',
+                            'arguments': json.dumps({}),
+                        },
+                    }],
+                },
+            }],
+        },
+        {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+    ]
+
+    def fake_post_chat(*, messages):
+        return responses.pop(0)
+
+    async def fake_call_tool(client_obj, qualified_tool_name, arguments):
+        observed_tool_names.append(qualified_tool_name)
+        return {'ok': True}
+
+    monkeypatch.setattr(client, '_post_chat', fake_post_chat)
+    monkeypatch.setattr(ai_provider, '_mcp_bridge_call_tool', fake_call_tool)
+
+    result = asyncio.run(client._run_query('use MCP tools'))
+
+    assert result == 'done'
+    assert observed_tool_names == ['server.scenario.get_draft']
 
 
 def test_repo_mcp_bridge_client_uses_verify_ssl_flag_for_openai_compatible_requests(monkeypatch):
@@ -3509,7 +3682,7 @@ def test_build_tool_repair_decision_repairs_add_service_item_selection_error():
             'count': 3,
         },
         ai_provider.ProviderAdapterError(
-            'selected or service must be one of: SSH, HTTP, DHCPClient, or Random',
+            'selected or service must be one of: SSH, HTTP, HTTPS, DHCPClient, or Random',
             status_code=400,
         ),
         enabled_tool_names=['server.scenario.add_service_item'],
@@ -3518,9 +3691,49 @@ def test_build_tool_repair_decision_repairs_add_service_item_selection_error():
     assert decision.category == 'service-tool-error'
     assert decision.retryable is True
     assert 'scenario.add_service_item' in str(decision.tool_response or '')
-    assert '"selected": "HTTP"' in str(decision.tool_response or '')
+    assert '"selected": "HTTPS"' in str(decision.tool_response or '')
     assert '"count": 3' in str(decision.tool_response or '')
     assert 'service tool error' in str(decision.status_message or '').lower()
+
+
+def test_build_tool_repair_decision_recovers_redundant_node_call_missing_selected():
+    from webapp.routes import ai_provider
+
+    decision = ai_provider._build_tool_repair_decision(
+        'server.scenario.add_node_role_item',
+        {'draft_id': 'draft-1', 'count': 12},
+        ai_provider.ProviderAdapterError('selected is required for node role items'),
+        enabled_tool_names=['server.scenario.get_draft', 'server.scenario.add_node_role_item'],
+    )
+
+    payload = json.loads(decision.tool_response or '{}')
+    assert decision.retryable is True
+    assert payload.get('recoverable') is True
+    assert payload.get('retry_hint') == {
+        'tool': 'scenario.get_draft',
+        'draft_id': 'draft-1',
+    }
+    assert 'do not duplicate' in payload.get('guidance', '')
+
+
+def test_build_tool_repair_decision_recovers_unknown_synthetic_section():
+    from webapp.routes import ai_provider
+
+    decision = ai_provider._build_tool_repair_decision(
+        'server.scenario.replace_section',
+        {'draft_id': 'draft-2', 'section_name': 'Subnets', 'section_payload': {}},
+        ai_provider.ProviderAdapterError('Unknown section_name: Subnets'),
+        enabled_tool_names=['server.scenario.get_draft', 'server.scenario.replace_section'],
+    )
+
+    payload = json.loads(decision.tool_response or '{}')
+    assert decision.retryable is True
+    assert payload.get('recoverable') is True
+    assert payload.get('retry_hint') == {
+        'tool': 'scenario.get_draft',
+        'draft_id': 'draft-2',
+    }
+    assert 'no free-form Subnets or Topology section' in payload.get('guidance', '')
 
 
 def test_build_tool_repair_decision_repairs_services_replace_section_selection_error():
@@ -3537,7 +3750,7 @@ def test_build_tool_repair_decision_repairs_services_replace_section_selection_e
             },
         },
         ai_provider.ProviderAdapterError(
-            'selected or service must be one of: SSH, HTTP, DHCPClient, or Random',
+            'selected or service must be one of: SSH, HTTP, HTTPS, DHCPClient, or Random',
             status_code=400,
         ),
         enabled_tool_names=['server.scenario.replace_section'],
@@ -4033,7 +4246,114 @@ def test_deterministic_mcp_bridge_seed_does_not_duplicate_vulnerability_seed_ops
     assert applied == ['Vulnerability jboss/CVE-2017-12149']
 
 
-def test_canonicalize_generated_routing_modes_title_cases_edge_modes():
+def test_deterministic_mcp_bridge_seed_arguments_are_accepted_by_the_real_tools(monkeypatch):
+    """Drive the seeding path against the real MCP server, not a mock.
+
+    Every other seed test asserts what the bridge *sends*, which is exactly the
+    blind spot that let `kind` survive: the argument dict looked deliberate and
+    nothing checked the tool would take it. Forwarding into the real server
+    fails on any argument-name drift in any branch, for the whole
+    scenario.add_*_item family at once.
+    """
+    from MCP.server import ScenarioAuthoringMCPServer
+    from webapp.routes import ai_provider
+
+    server = ScenarioAuthoringMCPServer()
+    created = server.handle_message({
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'tools/call',
+        'params': {'name': 'scenario.create_draft', 'arguments': {'name': 'SeedContractScenario'}},
+    })
+    draft_id = (((created.get('result') or {}).get('structuredContent') or {}).get('draft') or {}).get('draft_id')
+    assert draft_id
+
+    failures = []
+
+    async def forwarding_call_tool(client, qualified_tool_name, arguments):
+        tool_name = qualified_tool_name.split('.', 1)[1]
+        response = server.handle_message({
+            'jsonrpc': '2.0',
+            'id': 2,
+            'method': 'tools/call',
+            'params': {'name': tool_name, 'arguments': dict(arguments, draft_id=draft_id)},
+        })
+        result = (response or {}).get('result') or {}
+        if result.get('isError'):
+            failures.append((tool_name, dict(arguments), json.dumps(result.get('content'))[:300]))
+        return result.get('structuredContent') or {}
+
+    monkeypatch.setattr(ai_provider, '_mcp_bridge_call_tool', forwarding_call_tool)
+    monkeypatch.setattr(ai_provider, '_extract_vulnerability_target_count', lambda _prompt: 0)
+
+    asyncio.run(ai_provider._apply_deterministic_mcp_bridge_seed(
+        client=object(),
+        available_tools=[
+            'server.scenario.add_node_role_item',
+            'server.scenario.add_routing_item',
+            'server.scenario.add_service_item',
+            'server.scenario.add_traffic_item',
+            'server.scenario.add_segmentation_item',
+        ],
+        draft_id=draft_id,
+        user_prompt=(
+            'three routers, six docker hosts, ssh and http services, '
+            'tcp traffic, one firewall, and one NAT'
+        ),
+    ))
+
+    assert failures == [], f'seeded tool calls rejected by the real MCP server: {failures}'
+
+    fetched = server.handle_message({
+        'jsonrpc': '2.0',
+        'id': 3,
+        'method': 'tools/call',
+        'params': {'name': 'scenario.get_draft', 'arguments': {'draft_id': draft_id}},
+    })
+    draft = ((fetched.get('result') or {}).get('structuredContent') or {}).get('draft') or {}
+    sections = (draft.get('scenario') or {}).get('sections') or {}
+    segmentation_items = (sections.get('Segmentation') or {}).get('items') or []
+    assert [item.get('selected') for item in segmentation_items] == ['Firewall', 'NAT']
+
+
+def test_deterministic_mcp_bridge_seed_sends_segmentation_rows_as_selected(monkeypatch):
+    """The tool takes the row value as `selected`; `kind` is not in its schema.
+
+    A duplicate seeding block used to send `kind` here, leaving `selected`
+    unset, so the tool raised and the whole bridge run aborted with "selected
+    is required for segmentation items" before the model got a turn -- every
+    prompt naming a firewall or NAT failed. Driven through the real intent
+    compiler so it tracks whatever that actually emits.
+    """
+    from webapp.routes import ai_provider
+
+    calls = []
+
+    async def fake_call_tool(client, qualified_tool_name, arguments):
+        calls.append((qualified_tool_name, dict(arguments)))
+        return {'ok': True}
+
+    monkeypatch.setattr(ai_provider, '_mcp_bridge_call_tool', fake_call_tool)
+    monkeypatch.setattr(ai_provider, '_extract_vulnerability_target_count', lambda _prompt: 0)
+
+    applied = asyncio.run(ai_provider._apply_deterministic_mcp_bridge_seed(
+        client=object(),
+        available_tools=['server.scenario.add_segmentation_item'],
+        draft_id='draft-1',
+        user_prompt='two routers, four docker hosts, one firewall, and one NAT',
+    ))
+
+    segmentation_calls = [call for call in calls if call[0] == 'server.scenario.add_segmentation_item']
+    # Exactly one row per control: the compiled seed ops are the only source.
+    assert [call[1].get('selected') for call in segmentation_calls] == ['Firewall', 'NAT']
+    for _tool_name, arguments in segmentation_calls:
+        assert 'kind' not in arguments
+        assert arguments.get('count') == 1
+    assert applied.count('Segmentation Firewall=1') == 1
+    assert applied.count('Segmentation NAT=1') == 1
+
+
+def test_canonicalize_generated_routing_title_cases_edge_modes():
     from webapp.routes import ai_provider
 
     scenario = _scenario_payload('RoutingModeCanonicalizeScenario')
@@ -4051,7 +4371,7 @@ def test_canonicalize_generated_routing_modes_title_cases_edge_modes():
         ],
     }
 
-    canonical = ai_provider._canonicalize_generated_routing_modes(scenario)
+    canonical = ai_provider._canonicalize_generated_routing_or_raise(scenario)
     routing_item = canonical['sections']['Routing']['items'][0]
 
     assert routing_item['r2r_mode'] == 'Min'
@@ -6100,3 +6420,41 @@ def test_mcp_bridge_goal_prompt_mentions_generator_catalog_search(monkeypatch):
 
     assert 'scenario.search_flag_node_generator_catalog' in prompt
     assert 'g_id=nfs_build_cache' in prompt
+
+
+def test_generated_routing_rejects_section_keywords_as_protocols():
+    from webapp.routes import ai_provider
+
+    # "Specific" is the selection-mode keyword from the Vulnerabilities and Flag Node
+    # Generators sections. As a Routing protocol it saved and previewed cleanly, then
+    # CORE failed to instantiate the topology with "service does not exist Specific"
+    # and left the session stuck in configuration.
+    scenario = _scenario_payload('RoutingProtocolGuardScenario')
+    scenario['sections']['Routing'] = {
+        'density': 0.0,
+        'items': [{'selected': 'Specific', 'factor': 1.0, 'v_metric': 'Count', 'v_count': 2}],
+    }
+
+    with pytest.raises(ai_provider.ProviderAdapterError) as excinfo:
+        ai_provider._canonicalize_generated_routing_or_raise(scenario)
+
+    message = str(getattr(excinfo.value, 'message', '') or excinfo.value)
+    assert 'RIP, RIPNG, BGP, OSPFv2, OSPFv3, or Random' in message
+    assert 'Specific' in message
+
+    for bad_value in ('', None, 'Random Protocol', 'quagga'):
+        broken = _scenario_payload('RoutingProtocolGuardScenario')
+        broken['sections']['Routing'] = {'density': 0.0, 'items': [{'selected': bad_value}]}
+        with pytest.raises(ai_provider.ProviderAdapterError):
+            ai_provider._canonicalize_generated_routing_or_raise(broken)
+
+
+def test_generated_routing_accepts_protocol_aliases_like_the_mcp_tools():
+    from webapp.routes import ai_provider
+
+    for raw, expected in (('ospf', 'OSPFv2'), ('OSPFV2', 'OSPFv2'), ('ospf3', 'OSPFv3'),
+                          ('bgp', 'BGP'), ('rip', 'RIP'), ('ripng', 'RIPNG'), ('random', 'Random')):
+        scenario = _scenario_payload('RoutingAliasScenario')
+        scenario['sections']['Routing'] = {'density': 0.0, 'items': [{'selected': raw}]}
+        canonical = ai_provider._canonicalize_generated_routing_or_raise(scenario)
+        assert canonical['sections']['Routing']['items'][0]['selected'] == expected

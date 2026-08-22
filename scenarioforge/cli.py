@@ -59,7 +59,7 @@ from .parsers.pivoting import parse_pivoting_info
 from .parsers.planning_metadata import parse_planning_metadata
 from .parsers.services import parse_services
 from .parsers.hitl import parse_hitl_info
-from .utils.segmentation import apply_preview_segmentation_rules
+from .utils.segmentation import apply_preview_segmentation_rules, segmentation_requested
 from .utils.allocation import compute_role_counts
 from .utils.tmp_staging import ensure_local_tmp_writable, is_tmp_staging_path
 from .builders.topology import (
@@ -1134,6 +1134,46 @@ def _docker_container_state(name: str) -> dict[str, Any]:
     }
 
 
+def _docker_compose_project_for_container(
+    name: str,
+    *,
+    fallback: str = '',
+) -> str:
+    """Return the Compose project that actually created ``name``."""
+    token = str(name or '').strip()
+    if not token or not shutil.which('docker'):
+        return str(fallback or '').strip()
+    try:
+        proc = _run_docker_cmd(
+            [
+                'docker', 'inspect', '--format',
+                '{{ index .Config.Labels "com.docker.compose.project" }}',
+                token,
+            ],
+            timeout_s=20.0,
+        )
+        value = str(proc.stdout or '').strip()
+        if proc.returncode == 0 and value and value != '<no value>':
+            return value
+    except Exception:
+        pass
+    return str(fallback or '').strip()
+
+
+def _docker_container_logs_tail(name: str, *, lines: int = 40) -> str:
+    token = str(name or '').strip()
+    if not token or not shutil.which('docker'):
+        return ''
+    try:
+        proc = _run_docker_cmd(
+            ['docker', 'logs', '--tail', str(max(1, int(lines))), token],
+            timeout_s=20.0,
+        )
+        return ((proc.stderr or '') + '\n' + (proc.stdout or '')).strip()[-4000:]
+    except Exception:
+        return ''
+
+
 def _docker_container_config(name: str) -> dict[str, Any]:
     """Best-effort docker inspect config for a container name."""
     name = str(name or '').strip()
@@ -1258,15 +1298,11 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
     during boot on an arm64 CORE VM).
 
     CORE names a Docker node's container after the node itself (`docker-N`),
-    and the generated compose file pins that same fixed `container_name:` --
-    it is not project-scoped. This call has no `-p` of its own, so without a
-    pre-clean step Compose derives its project name from the compose file's
-    directory, which does not match whatever project (if any) originally
-    created the container; Compose then tries to *create* a new container
-    under that fixed name and Docker refuses because the old, now-dead one by
-    that exact name is still present. The caller has already classified this
-    name as not-running before invoking recovery, so removing it first is safe
-    and turns the collision into a normal recreate.
+    and runs Compose under project `<node>conf`. Reuse that project name so
+    namespace-sharing sidecars can resolve `network_mode: service:<node>`
+    after recovery. The generated compose file also pins the same fixed
+    `container_name:`; remove the caller-confirmed dead container first so the
+    recreate cannot collide with its own corpse.
     """
     p = str(compose_path or '').strip()
     svc = str(service or '').strip()
@@ -1277,6 +1313,7 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
     if not shutil.which('docker'):
         return {'ok': False, 'error': 'docker not found', 'compose_path': p, 'service': svc}
 
+    project = _docker_compose_project_for_container(svc, fallback=f'{svc}conf')
     try:
         _run_docker_cmd(['docker', 'rm', '-f', svc], timeout_s=20.0, allow_sudo_retry=True)
     except Exception:
@@ -1285,7 +1322,10 @@ def _docker_compose_restart_service(compose_path: str, service: str, *, timeout_
         pass
 
     try:
-        cmd = ['docker', 'compose', '-f', p, 'up', '-d', svc]
+        cmd = [
+            'docker', 'compose', '-p', project, '-f', p,
+            'up', '-d', svc,
+        ]
         proc = _run_docker_cmd(cmd, timeout_s=float(timeout_s or 120.0), allow_sudo_retry=True)
     except Exception as exc:
         return {'ok': False, 'error': f'{exc.__class__.__name__}: {exc}', 'compose_path': p, 'service': svc, 'cmd': cmd}
@@ -1314,6 +1354,7 @@ def _restart_not_running_docker_nodes(
             continue
         compose_path = _docker_node_compose_path(name)
         before = _docker_container_state(name)
+        before_logs = _docker_container_logs_tail(name)
         result = _docker_compose_restart_service(
             compose_path,
             name,
@@ -1321,6 +1362,8 @@ def _restart_not_running_docker_nodes(
         )
         result['node'] = name
         result['before'] = before
+        if before_logs:
+            result['before_logs'] = before_logs
         try:
             result['after'] = _docker_container_state(name)
         except Exception:
@@ -1333,6 +1376,12 @@ def _restart_not_running_docker_nodes(
                     name,
                     compose_path,
                 )
+                if before_logs:
+                    logging.warning(
+                        'docker node %s logs before restart:\n%s',
+                        name,
+                        before_logs,
+                    )
             else:
                 logging.warning(
                     "Failed restarting not-running docker compose node=%s via %s: %s",
@@ -1401,7 +1450,10 @@ def _start_namespace_sharing_sidecars(names: list[str]) -> list[dict[str, Any]]:
         # sidecar then looks for `service:<node>` inside a project that has no
         # such container -- it fails, having touched nothing CORE owns.
         # `_docker_compose_preflight` forces the same name, for the same reason.
-        project = f'{name}conf'
+        project = _docker_compose_project_for_container(
+            name,
+            fallback=f'{name}conf',
+        )
         # `--no-deps` is not an optimisation, it is the whole safety of this.
         # Each sidecar declares `depends_on: [<node>]`, so without it compose
         # recreates and restarts the node CORE is already running -- which tears
@@ -1435,6 +1487,93 @@ def _start_namespace_sharing_sidecars(names: list[str]) -> list[dict[str, Any]]:
                 name, ', '.join(sidecars), rc, str(output)[-600:],
             )
     return started
+
+
+def _start_namespace_sharing_sidecars_after_core_start(
+    names: list[str],
+    *,
+    timeout_s: float = 20.0,
+    poll_s: float = 0.1,
+) -> list[dict[str, Any]]:
+    """Start sidecars during CORE startup, before waiting for runtime.
+
+    Some primary services exit almost immediately when their namespace-sharing
+    dependency is absent (the nginx parsing lab's PHP-FPM sidecar is one
+    example). Waiting for CORE to reach runtime before starting that sidecar
+    deadlocks the session in ``configuration``: CORE is waiting for the primary
+    node, while the primary node has already exited waiting for its sidecar.
+
+    Poll only nodes that actually declare namespace-sharing sidecars. As soon
+    as CORE's primary container is running, start those sidecars with the safe
+    ``--no-deps`` path above. The later runtime-validation call remains as an
+    idempotent fallback.
+    """
+    from scenarioforge.builders.topology import (
+        _compose_shared_namespace_services,
+        _docker_node_compose_path,
+    )
+
+    pending: set[str] = set()
+    for raw_name in names or []:
+        name = str(raw_name or '').strip()
+        if not name:
+            continue
+        compose_path = _docker_node_compose_path(name)
+        if not compose_path or not os.path.exists(compose_path):
+            continue
+        try:
+            if _compose_shared_namespace_services(compose_path, name):
+                pending.add(name)
+        except Exception:
+            continue
+
+    if not pending:
+        return []
+
+    deadline = time.monotonic() + max(0.1, float(timeout_s or 20.0))
+    attempts: list[dict[str, Any]] = []
+    while pending and time.monotonic() < deadline:
+        states = {
+            name: _docker_container_state(name)
+            for name in sorted(pending)
+        }
+        ready = [
+            name for name in sorted(pending)
+            if states[name].get('running') is True
+        ]
+        exited = [
+            name for name in sorted(pending)
+            if (
+                states[name].get('exists') is True
+                and states[name].get('running') is False
+            )
+        ]
+        if exited:
+            recovered = _restart_not_running_docker_nodes(
+                exited,
+                restart_timeout_s=max(20.0, float(timeout_s or 20.0)),
+            )
+            attempts.extend(recovered)
+            ready.extend(
+                name for name in exited
+                if _docker_container_state(name).get('running') is True
+            )
+            ready = sorted(set(ready))
+        if ready:
+            results = _start_namespace_sharing_sidecars(ready)
+            attempts.extend(results)
+            for result in results:
+                if int(result.get('rc', 1)) == 0:
+                    pending.discard(str(result.get('node') or '').strip())
+        if pending:
+            time.sleep(max(0.05, float(poll_s or 0.1)))
+
+    if pending:
+        logging.warning(
+            'Namespace-sharing sidecars were not ready during CORE startup for: %s',
+            ', '.join(sorted(pending)),
+        )
+    return attempts
 
 
 def _ensure_docker_nodes_running(
@@ -1489,6 +1628,22 @@ def _ensure_docker_nodes_running(
     except Exception:
         pass
     if any(bool(item.get('ok')) for item in restart_attempts):
+        # The restarted primary is the dependency of namespace-sharing
+        # sidecars, not their dependent, so ``compose up <primary>`` does not
+        # start them. Start them while the recovered primary is alive, before
+        # the second CORE start request tries to attach the node again.
+        try:
+            recovery_sidecars = _start_namespace_sharing_sidecars(
+                not_running_names,
+            )
+            if recovery_sidecars and generation_meta is not None:
+                generation_meta.setdefault(
+                    'docker_sidecar_recovery_starts', recovery_sidecars,
+                )
+        except Exception as exc:
+            logging.warning(
+                'Namespace-sharing sidecar recovery startup skipped: %s', exc,
+            )
         docker_runtime = _wait_for_docker_running(names, timeout_s=docker_wait_s, poll_s=poll_s)
     return docker_runtime
 
@@ -6121,6 +6276,312 @@ def _run_preview_plan_phase(args: Any) -> int:
     return 0
 
 
+def _cli_acting_username(backend: Any, requested: str = '') -> str:
+    """Pick the local account the CLI acts as, validated against the user store.
+
+    The AI endpoint is session-guarded. The CLI drives it in-process on the
+    operator's own machine, so it seeds the session from a record that already
+    exists in the local user database rather than inventing an identity or
+    carrying a password in the environment. An unknown name falls back to the
+    first admin, and an empty store means no session at all.
+    """
+    try:
+        users = (backend._load_users() or {}).get('users') or []
+    except Exception:
+        users = []
+    wanted = str(requested or '').strip()
+    record = None
+    if wanted:
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('username') or '').strip() == wanted), None)
+    if record is None:
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('role') or '').strip() == 'admin'), None)
+    if record is None:
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('username') or '').strip()), None)
+    return str((record or {}).get('username') or '').strip()
+
+
+def _cli_authenticate_client(backend: Any, client: Any, username: str) -> bool:
+    """Seed a Flask session for `username` the same way the login route does."""
+    if not username:
+        return False
+    try:
+        users = (backend._load_users() or {}).get('users') or []
+        record = next((u for u in users if isinstance(u, dict) and str(u.get('username') or '').strip() == username), None)
+        if record is None:
+            return False
+        try:
+            role = backend._normalize_role_value(record.get('role'))
+        except Exception:
+            role = str(record.get('role') or '')
+        with client.session_transaction() as flask_session:
+            flask_session['user'] = {'username': username, 'role': role}
+        return True
+    except Exception:
+        return False
+
+
+def _run_ai_phase(args: Any) -> int:
+    """Generate a scenario from a natural-language prompt and write it to XML.
+
+    Provider wiring comes from `.scenarioforge.env` (CORETG_AI_*) unless flags
+    override it, so the prompt is usually the only argument that changes between
+    runs. The generation itself goes through the same backend endpoint the Web UI
+    calls, including the MCP bridge, rather than a second implementation.
+    """
+    from webapp.ai_settings import (
+        ai_settings_as_payload,
+        ai_settings_from_env,
+        missing_ai_settings,
+        redact_ai_settings,
+        resolve_ai_settings,
+    )
+
+    xml_path = os.path.abspath(args.xml)
+    prompt = str(getattr(args, 'prompt', '') or '').strip()
+    if not prompt:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'error': '--prompt is required.'},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    existed_before = os.path.exists(xml_path)
+    if existed_before and not getattr(args, 'force', False):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'error': 'XML file already exists. Re-run with --force to overwrite it.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    backend = _load_web_backend_module()
+
+    overrides: dict[str, Any] = {}
+    for field, attr in (
+        ('provider', 'ai_provider'),
+        ('model', 'ai_model'),
+        ('base_url', 'ai_base_url'),
+        ('api_key', 'ai_api_key'),
+        ('credential_username', 'ai_credential_user'),
+        ('bridge_mode', 'ai_bridge_mode'),
+        ('timeout_seconds', 'ai_timeout_seconds'),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            overrides[field] = value
+
+    # A username configured by flag or by CORETG_AI_API_KEY_USER decides both which
+    # stored credential is read and which account the run acts as. Only when neither
+    # names one does the acting account fall back to an admin on record, and that
+    # fallback must not overwrite a configured credential username.
+    requested_credential_user = str(
+        overrides.get('credential_username')
+        or ai_settings_from_env().get('credential_username')
+        or ''
+    ).strip()
+    acting_username = _cli_acting_username(backend, requested_credential_user)
+    if not requested_credential_user and acting_username:
+        overrides['credential_username'] = acting_username
+
+    settings = resolve_ai_settings(
+        overrides,
+        stored_api_key_loader=lambda username, provider: (
+            (backend._load_ai_provider_credentials_for_user(username, provider) or {}).get('api_key_plain')
+        ),
+    )
+
+    missing = missing_ai_settings(settings)
+    if missing:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'error': (
+                    'Missing AI provider settings: ' + ', '.join(missing) + '. '
+                    'Set them in .scenarioforge.env or pass the matching --ai-* flags.'
+                ),
+                'settings': redact_ai_settings(settings),
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    scenario_name = str(getattr(args, 'scenario', '') or '').strip()
+    if not scenario_name:
+        try:
+            scenario_name = os.path.splitext(os.path.basename(xml_path))[0].strip()
+        except Exception:
+            scenario_name = ''
+    if not scenario_name:
+        scenario_name = 'Scenario 1'
+
+    payload = backend._default_scenarios_payload_for_names([scenario_name])
+    if not isinstance(payload, dict) or not isinstance(payload.get('scenarios'), list) or not payload['scenarios']:
+        payload = {'scenarios': [{'name': scenario_name, 'sections': {}}], 'core': {}}
+
+    request_payload = {
+        **ai_settings_as_payload(settings),
+        'prompt': prompt,
+        'scenarios': payload['scenarios'],
+        'scenario_index': 0,
+        # Reading a key must not rewrite it: the credential store is managed in
+        # the Web UI, not as a byproduct of a CLI run.
+        'persist_api_key': False,
+    }
+    if getattr(args, 'ai_skip_bridge', False):
+        request_payload['skip_bridge'] = True
+
+    app = backend.app
+    app.config['TESTING'] = True
+    client = app.test_client()
+    if not _cli_authenticate_client(backend, client, acting_username):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': (
+                    'No local user account to run as. Create one in the Web UI, or set '
+                    'CORETG_AI_API_KEY_USER to an existing username.'
+                ),
+                'settings': redact_ai_settings(settings),
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+    try:
+        response = client.post('/api/ai/generate_scenario_preview', json=request_payload)
+        data = response.get_json(silent=True) or {}
+    except Exception as exc:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'scenario': scenario_name,
+             'error': f'AI generation failed: {exc}', 'settings': redact_ai_settings(settings)},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    if response.status_code >= 400 or not data.get('success'):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'ai',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'status': response.status_code,
+                'error': str(data.get('error') or f'AI generation failed (HTTP {response.status_code}).'),
+                'settings': redact_ai_settings(settings),
+                'provider_usage': data.get('provider_usage') or {},
+                'provider_usage_requests': data.get('provider_usage_requests') or [],
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    generated_scenario = data.get('generated_scenario') if isinstance(data.get('generated_scenario'), dict) else None
+    if not generated_scenario:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'scenario': scenario_name,
+             'error': 'AI response did not include a generated scenario.',
+             'settings': redact_ai_settings(settings)},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    generated_scenario.setdefault('name', scenario_name)
+    payload['scenarios'][0] = generated_scenario
+
+    if getattr(args, 'ai_preview_only', False):
+        _emit_phase_json(
+            {
+                'ok': True,
+                'phase': 'ai',
+                'xml_path': None,
+                'scenario': str(generated_scenario.get('name') or scenario_name),
+                'written': False,
+                'prompt': prompt,
+                'settings': redact_ai_settings(settings),
+                'provider_usage': data.get('provider_usage') or {},
+                'provider_usage_requests': data.get('provider_usage_requests') or [],
+                'generated_scenario': generated_scenario,
+                'preview': data.get('preview'),
+            },
+            output_path=args.plan_output,
+        )
+        return 0
+
+    try:
+        concretized = backend._concretize_scenarios_for_save([payload['scenarios'][0]], seed=args.seed)
+        if isinstance(concretized, list) and concretized:
+            payload['scenarios'][0] = concretized[0]
+    except Exception:
+        pass
+
+    try:
+        _write_scenarios_payload_xml(backend, payload, xml_path)
+    except Exception as exc:
+        _emit_phase_json(
+            {'ok': False, 'phase': 'ai', 'xml_path': xml_path, 'scenario': scenario_name,
+             'error': f'Failed to write generated XML: {exc}', 'settings': redact_ai_settings(settings)},
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    effective_scenario_name = str(payload['scenarios'][0].get('name') or scenario_name)
+    _emit_phase_json(
+        {
+            'ok': True,
+            'phase': 'ai',
+            'xml_path': xml_path,
+            'scenario': effective_scenario_name,
+            'written': True,
+            'overwritten': bool(getattr(args, 'force', False) and existed_before),
+            'prompt': prompt,
+            'acting_user': acting_username,
+            'settings': redact_ai_settings(settings),
+            'provider_usage': data.get('provider_usage') or {},
+            'provider_usage_requests': data.get('provider_usage_requests') or [],
+            'applied_actions': data.get('applied_actions'),
+            'next_steps': [
+                'Review the generated sections in the Web UI or by hand.',
+                'Run preview-plan to persist PlanPreview.',
+                'Run flag-sequencing if you want Flow state embedded.',
+                'Run topo or execute against the same XML.',
+            ],
+        },
+        output_path=args.plan_output,
+    )
+    return 0
+
+
+def _write_scenarios_payload_xml(backend: Any, payload: dict[str, Any], xml_path: str) -> None:
+    """Write a scenarios payload to XML, pretty-printed when lxml is available."""
+    tree = backend._build_scenarios_xml(payload)
+    try:
+        from lxml import etree as LET  # type: ignore
+
+        raw = ET.tostring(tree.getroot(), encoding='utf-8')
+        lroot = LET.fromstring(raw)
+        pretty = LET.tostring(lroot, pretty_print=True, xml_declaration=True, encoding='utf-8')
+        with open(xml_path, 'wb') as handle:
+            handle.write(pretty)
+    except Exception:
+        tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+
+
 def _run_new_phase(args: Any) -> int:
     backend = _load_web_backend_module()
     xml_path = os.path.abspath(args.xml)
@@ -6723,17 +7184,7 @@ def _run_new_phase(args: Any) -> int:
         scenario_payload['hitl'] = scenario_hitl
 
     try:
-        tree = backend._build_scenarios_xml(payload)
-        try:
-            from lxml import etree as LET  # type: ignore
-
-            raw = ET.tostring(tree.getroot(), encoding='utf-8')
-            lroot = LET.fromstring(raw)
-            pretty = LET.tostring(lroot, pretty_print=True, xml_declaration=True, encoding='utf-8')
-            with open(xml_path, 'wb') as handle:
-                handle.write(pretty)
-        except Exception:
-            tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+        _write_scenarios_payload_xml(backend, payload, xml_path)
     except Exception as exc:
         _emit_phase_json(
             {
@@ -6962,7 +7413,7 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     return 0 if status_code < 400 else 1
 
 
-CLI_PHASES = ('execute', 'new', 'preview-plan', 'flag-sequencing', 'topo', 'check-artifacts', 'list-sessions')
+CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'topo', 'check-artifacts', 'list-sessions')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
     'Run "cli.py list-sessions" to see running CORE sessions with their scenario and XML, then '
@@ -7288,7 +7739,7 @@ def _add_cli_core_connection_args(container: Any) -> None:
 
 def _add_cli_new_args(container: Any) -> None:
     defaults = _cli_new_argument_defaults()
-    container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new phase')
+    container.add_argument('--force', action='store_true', help='Overwrite an existing XML file when used with the new or ai phase')
     container.add_argument('--density-count', type=int, default=defaults['density_count'], help='Scenario-level Count for Density base host pool for density-based planning in the new phase')
     container.add_argument('--seed-role', dest='seed_roles', action='append', help=f'Seed a Node Information count row as ROLE=COUNT for the new phase (repeatable). ROLE is one of: {_ALLOWED_ROLES_TEXT}. VulnerabilitySlot/FlagGenSlot reserve Docker-backed capacity for that challenge kind only')
     container.add_argument('--seed-routing', dest='seed_routing_specs', action='append', help='Seed a Routing row for the new phase (repeatable; density rows are equal-weighted, for example OSPFv2, BGP=density, or OSPFv2=3)')
@@ -7553,11 +8004,26 @@ def _add_cli_execute_topo_args(container: Any) -> None:
     )
 
 
+def _add_cli_ai_args(container: Any) -> None:
+    """Flags for the ai phase. Every provider flag falls back to `.scenarioforge.env`."""
+    container.add_argument('--prompt', help='Natural-language description of the scenario to generate (ai phase)')
+    container.add_argument('--ai-provider', dest='ai_provider', default=None, help='AI provider id (default: CORETG_AI_PROVIDER)')
+    container.add_argument('--ai-model', dest='ai_model', default=None, help='Model name (default: CORETG_AI_MODEL)')
+    container.add_argument('--ai-base-url', dest='ai_base_url', default=None, help='Provider base URL (default: CORETG_AI_BASE_URL)')
+    container.add_argument('--ai-api-key', dest='ai_api_key', default=None, help='API key (default: CORETG_AI_API_KEY, else the stored credential for CORETG_AI_API_KEY_USER)')
+    container.add_argument('--ai-credential-user', dest='ai_credential_user', default=None, help='Username whose stored provider credential supplies the API key (default: CORETG_AI_API_KEY_USER)')
+    container.add_argument('--ai-bridge-mode', dest='ai_bridge_mode', default=None, help='Bridge mode, for example mcp-python-sdk (default: CORETG_AI_BRIDGE_MODE)')
+    container.add_argument('--ai-timeout-seconds', dest='ai_timeout_seconds', type=float, default=None, help='Provider timeout in seconds (default: CORETG_AI_TIMEOUT_S)')
+    container.add_argument('--ai-skip-bridge', dest='ai_skip_bridge', action='store_true', help='Ask the provider for direct JSON generation instead of using the MCP bridge')
+    container.add_argument('--ai-preview-only', dest='ai_preview_only', action='store_true', help='Print the generated scenario and preview without writing XML')
+
+
 def _build_cli_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(formatter_class=_CliHelpFormatter)
     _add_cli_phase_arg(ap)
     _add_cli_common_args(ap)
     _add_cli_new_args(ap)
+    _add_cli_ai_args(ap)
     _add_cli_core_connection_args(ap)
     _add_cli_execute_topo_args(ap)
     _add_cli_flag_sequencing_args(ap)
@@ -7585,6 +8051,9 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     if phase == 'new':
         _add_cli_new_args(ap)
         _add_cli_core_connection_args(ap)
+    elif phase == 'ai':
+        _add_cli_ai_args(ap)
+        ap.add_argument('--force', action='store_true', help='Overwrite an existing XML file')
     elif phase == 'preview-plan':
         _add_cli_preview_plan_args(ap)
     elif phase == 'flag-sequencing':
@@ -7789,6 +8258,8 @@ def main():
         return _run_preview_plan_phase(args)
     if args.phase == 'new':
         return _run_new_phase(args)
+    if args.phase == 'ai':
+        return _run_ai_phase(args)
     if args.phase == 'flag-sequencing':
         return _run_flag_sequencing_phase(args)
 
@@ -8823,7 +9294,7 @@ def main():
                 )
         else:
             seg_settings = _seg_settings(args)
-        if (seg_density and seg_density > 0 and seg_items) or seg_planned_rules:
+        if segmentation_requested(seg_density, seg_items, seg_planned_rules):
             try:
                 from .utils.segmentation import plan_and_apply_segmentation
                 seg_summary = plan_and_apply_segmentation(
@@ -9830,13 +10301,20 @@ def main():
         if session_id is not None:
             logging.info("CORE_SESSION_ID: %s", session_id)
 
+        docker_names2 = _docker_compose_node_names(docker_by_name)
+
         if start_ok:
             # CORE client expects the session object (uses session.to_proto()).
             core_daemon_journal_started_at = time.time()
             core.start_session(session)
             logging.info("CORE session start requested")
-
-        docker_names2 = _docker_compose_node_names(docker_by_name)
+            early_sidecar_starts = _start_namespace_sharing_sidecars_after_core_start(
+                docker_names2,
+            )
+            if early_sidecar_starts and isinstance(generation_meta, dict):
+                generation_meta.setdefault(
+                    'docker_sidecar_early_starts', early_sidecar_starts,
+                )
         configuration_state_pending_docker_validation = False
 
         # Validate that CORE reaches runtime.
@@ -9878,6 +10356,43 @@ def main():
                     if reason:
                         start_error = f"{start_error} ({reason})"
 
+            # A sidecar-dependent primary can exit during CORE's first start
+            # request. The recovery above recreates the primary and starts its
+            # namespace-sharing sidecars, but CORE has already abandoned that
+            # first instantiation attempt and remains in configuration. Reissue
+            # start_session now that the compose runtime is healthy so CORE can
+            # attach interfaces to the recovered containers.
+            if (
+                start_ok
+                and configuration_state_pending_docker_validation
+                and session_id is not None
+                and docker_names2
+                and not (docker_runtime or {}).get('not_running')
+            ):
+                logging.warning(
+                    'Retrying CORE session start after Docker sidecar recovery: %s',
+                    ', '.join(docker_names2),
+                )
+                core.start_session(session)
+                logging.info('CORE session start retry requested')
+                retry_ok_runtime, retry_state = _wait_for_core_runtime(
+                    core,
+                    int(session_id),
+                    timeout_s=core_start_timeout_s,
+                    poll_s=0.5,
+                )
+                session_state = retry_state
+                if retry_ok_runtime:
+                    configuration_state_pending_docker_validation = False
+                    logging.info(
+                        'CORE session reached runtime after Docker sidecar recovery'
+                    )
+                else:
+                    logging.warning(
+                        'CORE session retry remained outside runtime (state=%s)',
+                        retry_state or 'unknown',
+                    )
+
             # Install default routes from the host once interfaces exist. The
             # in-node DockerDefaultRoute service needs `ip`, NET_ADMIN, a shell
             # and the service to be assigned; the host needs none of that, so
@@ -9894,7 +10409,7 @@ def main():
             # `_ensure_docker_nodes_serving`. Reported, never fatal: a node that
             # is slow rather than stuck would otherwise start failing runs that
             # pass today, and the phases below already decide the verdict.
-            if (start_ok or configuration_state_pending_docker_validation) and docker_names2:
+            if start_ok and not configuration_state_pending_docker_validation and docker_names2:
                 try:
                     serving_wait_s = float(os.getenv('CORETG_DOCKER_SERVING_WAIT_S') or 180.0)
                 except Exception:

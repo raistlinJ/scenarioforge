@@ -216,6 +216,26 @@ That combination is much more stable than relying on the LLM alone.
 - `tests/test_ai_topology_intent.py`
 - `tests/test_ai_generator_endpoints.py`
 
+## Headless / CLI generation
+
+The generation path is not Web-UI-only. Two headless entry points exist:
+
+- `python -m scenarioforge.cli ai --xml <path> --prompt "..."` runs the same
+  `/api/ai/generate_scenario_preview` backend path in-process (MCP bridge
+  included) and writes scenario XML. Provider wiring comes from `CORETG_AI_*` in
+  `.scenarioforge.env`; `--ai-provider/--ai-model/--ai-base-url/--ai-api-key`
+  override it per run, and `--ai-preview-only` prints the generated scenario and
+  preview without writing a file.
+  - The API key is read from the encrypted per-user credential store for
+    `CORETG_AI_API_KEY_USER`, so it does not have to be written into the env file.
+  - The endpoint is session-guarded, so the phase seeds a session from an account
+    that already exists in the local user database (the named user, otherwise an
+    admin on record). With no local accounts it refuses to run rather than
+    inventing an identity.
+- `MCP/server.py` speaks JSON-RPC on stdin/stdout, so any MCP client can drive
+  `scenario.create_draft` -> `add_*` -> `search_*_catalog` -> `preview_draft` ->
+  `save_xml` from a terminal with no Flask server at all.
+
 ## Practical summary
 
 The AI Generator is more accurate now because explicit prompt structure is compiled into authoritative scenario seeds, model output is checked against that intent, and invalid or incomplete drafts are repaired before the user sees the final preview.

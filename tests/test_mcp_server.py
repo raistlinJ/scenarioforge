@@ -56,6 +56,9 @@ def test_mcp_initialize_and_list_tools():
     assert 'scenario.preview_draft' in tool_names
     assert 'scenario.save_xml' in tool_names
 
+    segmentation_tool = next(tool for tool in tools if tool.get('name') == 'scenario.add_segmentation_item')
+    assert set((segmentation_tool.get('inputSchema') or {}).get('required') or []) == {'draft_id', 'selected'}
+
     vuln_tool = next(tool for tool in tools if tool.get('name') == 'scenario.add_vulnerability_item')
     vuln_properties = (((vuln_tool.get('inputSchema') or {}).get('properties')) or {})
     assert 'factor' not in vuln_properties
@@ -307,7 +310,7 @@ def test_mcp_replace_section_rejects_unknown_service_selected_value():
     assert response is not None
     error = response.get('error') or {}
     assert error.get('code') == -32602
-    assert 'SSH, HTTP, DHCPClient, or Random' in str(error.get('message') or '')
+    assert 'SSH, HTTP, HTTPS, DHCPClient, or Random' in str(error.get('message') or '')
 
 
 def test_mcp_replace_section_rejects_removed_events_section():
@@ -588,6 +591,47 @@ def test_mcp_add_routing_item_upserts_existing_count_row_for_same_protocol():
     assert items[0].get('r2s_edges') == 2
 
 
+def test_mcp_add_routing_item_accepts_protocol_as_an_alias_for_selected():
+    """The bridge's own guidance told models to send `protocol`.
+
+    That argument is on this tool's LLM allowlist, so it reached the tool and
+    was then ignored, and the call failed with "selected is required for
+    routing items" -- aborting the whole run for a model that did exactly what
+    it was instructed to do.
+    """
+    server = ScenarioAuthoringMCPServer()
+
+    created = _tool_call(server, 'scenario.create_draft', {'name': 'RoutingAliasScenario'})
+    draft_id = (created.get('draft') or {}).get('draft_id')
+
+    updated = _tool_call(server, 'scenario.add_routing_item', {
+        'draft_id': draft_id,
+        'protocol': 'OSPFv2',
+        'count': 3,
+    })
+
+    section = (((updated.get('draft') or {}).get('scenario') or {}).get('sections') or {}).get('Routing') or {}
+    items = section.get('items') or []
+    assert items
+    assert items[-1].get('selected') == 'OSPFv2'
+    assert items[-1].get('v_count') == 3
+
+
+def test_mcp_add_routing_item_still_prefers_selected_when_both_are_given():
+    server = ScenarioAuthoringMCPServer()
+    created = _tool_call(server, 'scenario.create_draft', {'name': 'RoutingBothScenario'})
+    draft_id = (created.get('draft') or {}).get('draft_id')
+
+    updated = _tool_call(server, 'scenario.add_routing_item', {
+        'draft_id': draft_id,
+        'selected': 'OSPFv3',
+        'protocol': 'OSPFv2',
+    })
+
+    section = (((updated.get('draft') or {}).get('scenario') or {}).get('sections') or {}).get('Routing') or {}
+    assert (section.get('items') or [])[-1].get('selected') == 'OSPFv3'
+
+
 def test_mcp_add_segmentation_item_appends_firewall_row_with_density_default():
     server = ScenarioAuthoringMCPServer()
 
@@ -691,7 +735,7 @@ def test_mcp_add_service_item_rejects_unknown_service_values():
     assert response is not None
     error = response.get('error') or {}
     assert error.get('code') == -32602
-    assert 'SSH, HTTP, DHCPClient, or Random' in str(error.get('message') or '')
+    assert 'SSH, HTTP, HTTPS, DHCPClient, or Random' in str(error.get('message') or '')
 
 
 def test_mcp_get_authoring_schema_can_filter_single_section():

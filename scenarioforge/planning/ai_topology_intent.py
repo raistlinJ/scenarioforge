@@ -36,13 +36,21 @@ _COUNT_WORDS: dict[str, int] = {
     'ten': 10,
     'eleven': 11,
     'twelve': 12,
+    'thirteen': 13,
+    'fourteen': 14,
+    'fifteen': 15,
+    'sixteen': 16,
+    'seventeen': 17,
+    'eighteen': 18,
+    'nineteen': 19,
+    'twenty': 20,
     'pair of': 2,
     'a pair of': 2,
     'couple of': 2,
     'a couple of': 2,
 }
 
-_COUNT_TOKEN_PATTERN = r'\d+|a\s+pair\s+of|pair\s+of|a\s+couple\s+of|couple\s+of|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve'
+_COUNT_TOKEN_PATTERN = r'\d+|a\s+pair\s+of|pair\s+of|a\s+couple\s+of|couple\s+of|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty'
 
 _ROLE_PATTERNS: tuple[tuple[str, str], ...] = (
     ('Server', rf'\b({_COUNT_TOKEN_PATTERN})\s+servers?\b'),
@@ -86,23 +94,24 @@ def _extract_count_intent(user_prompt: str) -> dict[str, int]:
 
     count_intent: dict[str, int] = {}
 
-    total_nodes_match = re.search(r'\b(?:topology|scenario|network)\s+with\s+(\d+)\s+nodes?\b', text)
+    count_token = rf'({_COUNT_TOKEN_PATTERN})'
+    total_nodes_match = re.search(rf'\b(?:topology|scenario|network)\s+with\s+{count_token}\s+nodes?\b', text)
     if not total_nodes_match:
-        total_nodes_match = re.search(r'\b(\d+)\s+total\s+nodes?\b', text)
+        total_nodes_match = re.search(rf'\b{count_token}\s+total\s+nodes?\b', text)
     if not total_nodes_match:
-        total_nodes_match = re.search(r'\b(\d+)\s+nodes?\b', text)
+        total_nodes_match = re.search(rf'\b{count_token}\s+nodes?\b', text)
     if total_nodes_match:
-        try:
-            count_intent['total_nodes'] = max(0, int(total_nodes_match.group(1)))
-        except Exception:
-            pass
+        parsed = _parse_count_token(total_nodes_match.group(1))
+        if parsed is not None:
+            count_intent['total_nodes'] = max(0, parsed)
 
-    router_match = re.search(r'\b(\d+)\s+routers?\b', text)
-    if router_match:
-        try:
-            count_intent['router_count'] = max(0, int(router_match.group(1)))
-        except Exception:
-            pass
+    router_total = 0
+    for router_match in re.finditer(rf'\b{count_token}\s+(?:[a-z][a-z0-9-]*\s+){{0,2}}routers?(?![a-z0-9-])', text):
+        parsed = _parse_count_token(router_match.group(1))
+        if parsed is not None:
+            router_total += max(0, parsed)
+    if router_total > 0:
+        count_intent['router_count'] = router_total
 
     if count_intent.get('total_nodes') is not None and count_intent.get('router_count') is not None:
         count_intent['derived_host_count'] = max(0, count_intent['total_nodes'] - count_intent['router_count'])
@@ -115,12 +124,20 @@ def _extract_vulnerability_target_count(user_prompt: str) -> int:
     if not text:
         return 0
 
-    match = re.search(r'\b(\d+)\s+(?:[a-z][a-z0-9-]*\s+){0,3}vulnerabilit(?:y|ies)\b', text)
-    if match:
-        try:
-            return max(0, int(match.group(1)))
-        except Exception:
-            return 0
+    count_token = rf'({_COUNT_TOKEN_PATTERN})'
+    target_patterns = (
+        rf'\b{count_token}\s+(?:[a-z][a-z0-9-]*\s+){{0,3}}vulnerabilit(?:y|ies)\b',
+        rf'\b{count_token}\s+vulnerable\s+(?:services?|applications?|apps?|targets?|hosts?|nodes?|containers?)\b',
+        rf'\b{count_token}\s+(?:hosts?|nodes?|containers?)\s+(?:that\s+|which\s+)?(?:run|runs|running|host|hosts|hosting|with)\s+(?:an?\s+)?vulnerable\s+(?:[a-z][a-z0-9-]*\s+){{0,2}}(?:services?|applications?|apps?)\b',
+        rf'\b{count_token}\s+of\s+them\s+(?:run|runs|running|host|hosts|hosting|with)\s+(?:an?\s+)?vulnerable\s+(?:[a-z][a-z0-9-]*\s+){{0,2}}(?:services?|applications?|apps?)\b',
+    )
+    for pattern in target_patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        parsed = _parse_count_token(match.group(1))
+        if parsed is not None:
+            return max(0, parsed)
 
     docker_target_match = re.search(rf'\b({_COUNT_TOKEN_PATTERN})\s+vulnerable\s+docker\s+(?:targets?|hosts?|nodes?|containers?)\b', text)
     if docker_target_match:
@@ -471,10 +488,20 @@ def extract_node_role_count_intent(user_prompt: str) -> dict[str, int]:
     if not text:
         return {}
 
+    # References such as "five hosts where two hosts run vulnerable services"
+    # describe a subset of the five hosts, not two additional PC nodes. Remove
+    # those subset phrases before collecting ordinary host-role quantities.
+    count_token = rf'(?:{_COUNT_TOKEN_PATTERN})'
+    role_text = re.sub(
+        rf'\b{count_token}\s+(?:hosts?|nodes?)\s+(?:that\s+|which\s+)?(?:run|runs|running|host|hosts|hosting|with)\s+(?:an?\s+)?vulnerable\s+(?:[a-z][a-z0-9-]*\s+){{0,2}}(?:services?|applications?|apps?)\b',
+        ' vulnerability-targets ',
+        text,
+    )
+
     counts: dict[str, int] = {}
     for role, pattern in _ROLE_PATTERNS:
         total = 0
-        for match in re.finditer(pattern, text):
+        for match in re.finditer(pattern, role_text):
             for group in match.groups():
                 if group is None:
                     continue
@@ -557,16 +584,32 @@ def extract_service_count_intent(user_prompt: str) -> dict[str, int]:
     if not text:
         return {}
 
-    return _extract_shared_suffix_count_intent(
+    counts = _extract_shared_suffix_count_intent(
         text,
         suffix_pattern=r'services?',
         label_patterns=(
             ('SSH', r'ssh'),
-            ('HTTP', r'http|https|web'),
+            ('HTTPS', r'https'),
+            ('HTTP', r'http|web'),
             ('DHCPClient', r'dhcp'),
         ),
         qualifier_max_words=3,
     )
+
+    # Service presence is explicit even when the user does not quantify each
+    # service ("six hosts running SSH and HTTP"). Seed every named service so a
+    # model cannot silently drop one while filling the rest of the topology.
+    host_counts = extract_node_role_count_intent(text)
+    default_count = max(1, sum(host_counts.values()))
+    for canonical, pattern in (
+        ('SSH', r'\bssh\b'),
+        ('HTTPS', r'\bhttps\b'),
+        ('HTTP', r'\bhttp\b|\bweb\s+(?:server|service)\b'),
+        ('DHCPClient', r'\bdhcp(?:\s+client)?\b'),
+    ):
+        if canonical not in counts and re.search(pattern, text):
+            counts[canonical] = default_count
+    return counts
 
 
 def extract_traffic_protocol_count_intent(user_prompt: str) -> dict[str, int]:
@@ -627,6 +670,8 @@ def extract_requested_traffic_patterns(user_prompt: str) -> list[str]:
 def build_seeded_traffic_rows(user_prompt: str) -> list[dict[str, Any]]:
     protocol_counts = extract_traffic_protocol_count_intent(user_prompt)
     pattern_counts = extract_traffic_pattern_count_intent(user_prompt)
+    if not protocol_counts and re.search(r'\bbackground\s+traffic\b', str(user_prompt or '').lower()):
+        protocol_counts = {'TCP': 1}
     if not protocol_counts:
         return []
 
@@ -689,22 +734,26 @@ def extract_segmentation_control_count_intent(user_prompt: str) -> dict[str, int
     if not text:
         return {}
 
-    count_token = rf'({_COUNT_TOKEN_PATTERN})'
-    qualifier_words = r'(?:[a-z][a-z0-9-]*\s+){0,3}'
-    patterns = (
-        ('Firewall', rf'\b{count_token}\s+{qualifier_words}(?:firewalls?|fw)(?:\s+(?:segments?|rules?|controls?))?\b'),
-        ('NAT', rf'\b{count_token}\s+{qualifier_words}(?:nat|snat|dnat)(?:\s+(?:segments?|rules?|controls?))?\b'),
-    )
-
     counts: dict[str, int] = {}
-    for control, pattern in patterns:
-        total = 0
-        for match in re.finditer(pattern, text):
-            number = _parse_count_token(match.group(1))
-            if number is not None:
-                total += number
-        if total > 0:
-            counts[control] = total
+    count_token = rf'({_COUNT_TOKEN_PATTERN})'
+    firewall_match = re.search(
+        rf'\b{count_token}\s+(?:stateful\s+)?(?:firewalls?|firewalled\s+(?:segments?|subnets?|zones?))\b',
+        text,
+    )
+    if firewall_match:
+        parsed = _parse_count_token(firewall_match.group(1))
+        if parsed is not None:
+            counts['Firewall'] = parsed
+    elif re.search(r'\bfirewalls?\b|\bfirewalled\b|\bfw\b', text):
+        counts['Firewall'] = 1
+
+    nat_match = re.search(rf'\b{count_token}\s+(?:nat|snat|dnat)(?:\s+(?:gateways?|segments?|rules?|controls?))?\b', text)
+    if nat_match:
+        parsed = _parse_count_token(nat_match.group(1))
+        if parsed is not None:
+            counts['NAT'] = parsed
+    elif re.search(r'\b(?:nat|snat|dnat)(?:\s+gateway)?\b', text):
+        counts['NAT'] = 1
     return counts
 
 
@@ -778,12 +827,21 @@ def compile_ai_topology_intent(
 
     node_role_counts = dict(intent.node_role_counts)
     host_budget = intent.derived_host_count if intent.derived_host_count is not None else intent.total_nodes
-    # Vulnerability and flag-node-generator challenge hosts are additive
-    # topology slots.  Do not consume the user's requested host budget here.
+    vulnerability_slots_to_reserve = max(0, int(intent.vulnerability_target_count or 0))
     if host_budget is not None:
-        remaining_hosts = max(0, int(host_budget) - sum(node_role_counts.values()))
+        # Vulnerability rows become additive Docker nodes in the planner, but an
+        # explicit total-node budget includes those nodes. Reserve their slots
+        # here so the final topology, rather than only Node Information, matches
+        # the stated total.
+        node_information_budget = max(0, int(host_budget) - vulnerability_slots_to_reserve)
+        remaining_hosts = max(0, node_information_budget - sum(node_role_counts.values()))
         if remaining_hosts > 0:
             node_role_counts['PC'] = node_role_counts.get('PC', 0) + remaining_hosts
+    elif vulnerability_slots_to_reserve > 0 and node_role_counts.get('PC', 0) > 0:
+        # A generic host quantity is inclusive when the prompt says some of
+        # those hosts are vulnerable. The planner supplies that subset as Docker
+        # challenge nodes, so reduce only the flexible PC row.
+        node_role_counts['PC'] = max(0, node_role_counts['PC'] - vulnerability_slots_to_reserve)
 
     if node_role_counts:
         node_items: list[dict[str, Any]] = []
@@ -804,9 +862,7 @@ def compile_ai_topology_intent(
             })
             applied_actions.append(f'Node {role}={count}')
         if node_items:
-            host_total = host_budget
-            if host_total is None:
-                host_total = sum(item['v_count'] for item in node_items)
+            host_total = sum(item['v_count'] for item in node_items)
             section_payloads['Node Information'] = {
                 'density': 0,
                 'total_nodes': max(0, int(host_total or 0)),
@@ -816,7 +872,7 @@ def compile_ai_topology_intent(
 
     if intent.service_counts:
         service_items: list[dict[str, Any]] = []
-        for service_name in ('SSH', 'HTTP', 'DHCPClient'):
+        for service_name in ('SSH', 'HTTP', 'HTTPS', 'DHCPClient'):
             count = int(intent.service_counts.get(service_name) or 0)
             if count <= 0:
                 continue

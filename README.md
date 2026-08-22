@@ -139,6 +139,18 @@ Key runtime variables in [.scenarioforge.env.example](.scenarioforge.env.example
 - `CORETG_FLOW_SEQUENCE_TIMEOUT_S` – minimum browser-side timeout (seconds, default `300`) for the Flag Sequencing **Sequence** step.
 - `CORETG_FLOW_EXECUTE_TIMEOUT_S` – upper cap (seconds, default `3600`) on the browser-side timeout for the Flag Sequencing **Resolve** step, which scales with chain length up to this value.
 - `CORETG_NGINX_PROXY_READ_TIMEOUT_S` – nginx `proxy_read_timeout` (seconds, default `3700`) for the Docker Compose deployment only. Keep it at or above `CORETG_FLOW_EXECUTE_TIMEOUT_S` so nginx doesn't cut a long Resolve/Execute request before the browser's own timeout would. Not used for direct Python launches.
+- `CORETG_AI_PROVIDER` / `CORETG_AI_MODEL` / `CORETG_AI_BASE_URL` – AI provider wiring for scenario generation. The Web UI keeps these in browser state; setting them here is what lets the `ai` CLI phase (and any scripted request) generate without the browser.
+- `CORETG_AI_API_KEY_USER` – username whose stored provider credential supplies the API key. Prefer this over `CORETG_AI_API_KEY`, which puts the key in a plaintext file instead of the encrypted per-user credential store.
+- `CORETG_AI_BRIDGE_MODE` / `CORETG_AI_MCP_SERVER_PATH` / `CORETG_AI_TIMEOUT_S` / `CORETG_AI_VERIFY_SSL` – optional overrides for tool-driven authoring, the MCP server path, and provider request behavior.
+
+Generate a scenario from a prompt once those are set:
+
+```bash
+python -m scenarioforge.cli ai --xml outputs/demo.xml \
+    --prompt "3 routers, 2 docker hosts, and an nfs flag node generator"
+```
+
+The phase runs the same backend generation path as the Web UI (including the MCP bridge), writes the scenario XML, and prints phase JSON. Add `--ai-preview-only` to inspect the generated scenario and preview without writing a file; `--ai-*` flags override the environment for a single run.
 
 The timeout settings bound client-side waits; they do not change the Flow data model. Flow first saves the scenario XML, then embeds the generated `PlanPreview` and Flow state in that same XML. Sequence and Resolve use that exact XML path rather than a separate JSON plan file. Long Sequence and Resolve responses stream whitespace heartbeats and use request IDs so a transient browser retry attaches to the original work instead of starting duplicate generator runs.
 

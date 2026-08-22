@@ -43,4 +43,4 @@ def test_templates_define_anonymous_current_user_fallback() -> None:
 def test_services_dropdown_includes_http_option() -> None:
     index_text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
-    assert "'Services': ['SSH', 'HTTP', 'DHCPClient', 'Random']" in index_text
+    assert "'Services': ['SSH', 'HTTP', 'HTTPS', 'DHCPClient', 'Random']" in index_text
