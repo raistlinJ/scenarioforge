@@ -1,11 +1,20 @@
-# DeployForge
+# DeployForge / Proxmox deployment
 
-A ready-to-deploy DeployForge file for the recommended ScenarioForge VM-mode lab is coming soon.
+The first automated deployment target is now available as the
+[Proxmox three-VM installer](../scripts/proxmox/README.md). Run it in the shell
+of a single Proxmox VE node to provision:
 
-The planned deployment target is the three-role Proxmox layout described in the README:
+- A ScenarioForge Ubuntu application VM.
+- A Debian 12 CORE VM installed from [our CORE fork](https://github.com/raistlinJ/core)
+  through the `coreemu-minimal --from-source` path.
+- A minimal Debian 12 participant VM.
+- Separate management, participant/HITL, and uplink networks.
 
-- ScenarioForge application host
-- CORE 9.2 VM, installed from [our CORE fork](https://github.com/raistlinJ/core) (or vanilla CORE with the [ScenarioForge updates applied](CORE_INSTALL.md))
-- Participant machine or Kali VM
+The installer uses Proxmox Cloud-Init rather than a separate DeployForge file.
+It includes a dry-run, refuses to overwrite existing VMIDs, verifies cloud-image
+checksums, generates credentials, installs ScenarioForge's custom CORE services,
+and waits for guest-side health markers.
 
-Until the DeployForge file lands, configure VM mode with `.scenarioforge.env.example` and the README setup steps.
+See [VM Mode Setup](VM_MODE_SETUP.md) for the architecture and
+[the installer guide](../scripts/proxmox/README.md) for requirements, options,
+failure recovery, and security notes.
