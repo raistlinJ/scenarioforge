@@ -59,8 +59,10 @@ Run on the target Proxmox node as `root`. The node needs:
 
 All three VMs use standard virtual VGA while retaining a serial port for
 diagnostics. Their XFCE login screens are therefore available through the
-Proxmox **Console** / noVNC view after provisioning. The installer refuses to
-overwrite an existing VMID. Adding the two portless
+Proxmox **Console** / noVNC view after provisioning, with the VNC clipboard
+enabled by default for copy and paste. Proxmox notes that VNC clipboard mode
+prevents live migration when a VM uses a QEMU machine version older than 10.1.
+The installer refuses to overwrite an existing VMID. Adding the two portless
 bridges applies the Proxmox node's pending network configuration. Run from a
 local console while changing node networking. The installer refuses to proceed
 when it detects pre-existing unapplied network changes, so it cannot accidentally
@@ -240,6 +242,8 @@ Use the VM usernames and passwords printed at completion. The CORE desktop has a
 **CORE Network Emulator** launcher that runs `core-gui`; `core-daemon` starts
 automatically in the background. The app and participant desktops start through
 LightDM as soon as their bootstrap completes, without an additional VM reboot.
+The noVNC clipboard control is available because each VM is created with
+`vga: std,clipboard=vnc`.
 The APP desktop includes Epiphany and a **ScenarioForge** launcher that opens
 `https://localhost/`; the self-signed certificate produces an expected warning.
 

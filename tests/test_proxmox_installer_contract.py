@@ -58,7 +58,7 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "docker compose --env-file .scenarioforge.env up -d" not in source
     assert "command -v core-gui" in source
     assert "systemctl enable --now lightdm" in source
-    assert "--serial0 socket --vga std" in source
+    assert "--serial0 socket --vga std,clipboard=vnc" in source
     assert "/var/lib/scenarioforge/participant-ready" in source
     assert 'qm set "$PARTICIPANT_VMID" --delete net1' in source
     assert "report_guest_activity CORE" in source

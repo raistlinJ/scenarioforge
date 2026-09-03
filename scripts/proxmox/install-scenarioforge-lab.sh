@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.6.0"
+SCRIPT_VERSION="0.6.1"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -1438,7 +1438,7 @@ create_vm() {
     log "Creating VM $vmid ($name)"
     run qm create "$vmid" --name "$name" --memory "$memory" --cores "$cores" \
         --cpu host --ostype l26 --scsihw virtio-scsi-single --agent enabled=1,fstrim_cloned_disks=1 \
-        --serial0 socket --vga std --onboot 1 "$@"
+        --serial0 socket --vga std,clipboard=vnc --onboot 1 "$@"
     run qm set "$vmid" --scsi0 "$VM_STORAGE:0,import-from=$image,discard=on,iothread=1,ssd=1"
     run qm resize "$vmid" scsi0 "${disk}G"
     run qm set "$vmid" --ide2 "$VM_STORAGE:cloudinit" --boot order=scsi0
@@ -1915,7 +1915,7 @@ show_completion_credentials() {
         "$PARTICIPANT_VMID" "$(plain_ip "$PARTICIPANT_CIDR")" "$PARTICIPANT_PASSWORD"
     printf '  WEB ADMIN       URL %s | username coreadmin | password %s\n' \
         "$web_url" "$SCENARIOFORGE_ADMIN_PASSWORD"
-    printf '  DESKTOPS       Open Proxmox Console/noVNC for XFCE on each VM; no post-install reboot is required\n'
+    printf '  DESKTOPS       Open Proxmox Console/noVNC for XFCE; VNC clipboard is enabled by default\n'
     printf '  APP BROWSER    Epiphany is installed with a ScenarioForge launcher on the XFCE desktop\n'
     printf '  APP SERVICE     Native systemd units: scenarioforge-web and nginx (no app-side Docker Compose)\n'
     printf '  Stored at       %s (root-only, mode 0600)\n' "$CREDENTIALS_FILE"
