@@ -38,6 +38,7 @@ def test_installer_help_does_not_require_proxmox() -> None:
 
 def test_installer_preserves_required_network_separation_and_core_install_path() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
+    install_body = source.split("perform_install() {", maxsplit=1)[1]
 
     assert "sfmgmt0" in source
     assert "sfhitl0" in source
@@ -53,6 +54,9 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "guest_progress_text" in source
     assert "set_bootstrap_status 'installing system packages and building CORE from source'" in source
     assert "set_bootstrap_status 'building ScenarioForge and nginx container images'" in source
+    assert 'shell_assignment INSTALL_PHASE' in source
+    assert 'printf \'  Host installer:' in source
+    assert install_body.index("write_state") < install_body.index("download_verified_image")
 
 
 def test_status_watch_waits_for_fresh_install_state(tmp_path: Path) -> None:
@@ -74,7 +78,8 @@ watch_status
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "Waiting for the installer to write state" in result.stdout
+    assert "Waiting for installer state" in result.stdout
+    assert "check the install shell's preflight output" in result.stdout
     assert "Installer state detected" in result.stdout
     assert "status-observed" in result.stdout
 

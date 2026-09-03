@@ -3,10 +3,12 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.2.1"
+SCRIPT_VERSION="0.2.2"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
+STATE_TEMP_FILE="$STATE_FILE.new"
+CREDENTIALS_TEMP_FILE="$CREDENTIALS_FILE.new"
 
 VM_STORAGE="${SF_VM_STORAGE:-local-lvm}"
 SNIPPET_STORAGE="${SF_SNIPPET_STORAGE:-local}"
@@ -69,6 +71,7 @@ TOTAL_STEPS=8
 LAST_CORE_ACTIVITY=""
 LAST_APP_ACTIVITY=""
 INSTALL_COMPLETE=""
+INSTALL_PHASE=""
 CLEANUP_STATE_FOUND=0
 declare -a CLEANUP_VMIDS=()
 declare -a CLEANUP_LABELS=()
@@ -92,6 +95,7 @@ log() {
 progress() {
     CURRENT_STEP=$((CURRENT_STEP + 1))
     emit PROGRESS "[$CURRENT_STEP/$TOTAL_STEPS] $*"
+    record_install_phase "$*"
 }
 
 verbose() {
@@ -411,15 +415,29 @@ ensure_isolated_bridge() {
         else
             CREATED_HITL_BRIDGE=0
         fi
-        return
+        if [[ -f "$STATE_FILE" ]]; then
+            write_state
+        fi
+        return 0
     fi
     log "Creating isolated bridge $bridge"
+    if [[ "$bridge" == "$MANAGEMENT_BRIDGE" ]]; then
+        CREATED_MANAGEMENT_BRIDGE=creating
+    else
+        CREATED_HITL_BRIDGE=creating
+    fi
+    if [[ -f "$STATE_FILE" ]]; then
+        write_state
+    fi
     run pvesh create "/nodes/$PVE_NODE/network" \
         --iface "$bridge" --type bridge --autostart 1 --comments "$description"
     if [[ "$bridge" == "$MANAGEMENT_BRIDGE" ]]; then
         CREATED_MANAGEMENT_BRIDGE=1
     else
         CREATED_HITL_BRIDGE=1
+    fi
+    if [[ -f "$STATE_FILE" ]]; then
+        write_state
     fi
     NETWORK_CHANGES=1
 }
@@ -522,6 +540,13 @@ random_mac() {
 
 shell_assignment() {
     printf '%s=%q\n' "$1" "$2"
+}
+
+record_install_phase() {
+    INSTALL_PHASE="$*"
+    if [[ "$COMMAND" == "install" && "$DRY_RUN" -eq 0 && -f "$STATE_FILE" ]]; then
+        write_state
+    fi
 }
 
 encode_file() {
@@ -909,6 +934,7 @@ write_state() {
     chmod 0700 "$STATE_DIR"
     {
         shell_assignment INSTALLER_VERSION "$SCRIPT_VERSION"
+        shell_assignment INSTALLER_PID "$$"
         shell_assignment PVE_NODE "$PVE_NODE"
         shell_assignment VM_STORAGE "$VM_STORAGE"
         shell_assignment SNIPPET_STORAGE "$SNIPPET_STORAGE"
@@ -923,13 +949,14 @@ write_state() {
         shell_assignment CORE_NAME "$CORE_NAME"
         shell_assignment APP_NAME "$APP_NAME"
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
-        shell_assignment INSTALL_COMPLETE 0
+        shell_assignment INSTALL_COMPLETE "${INSTALL_COMPLETE:-0}"
+        shell_assignment INSTALL_PHASE "${INSTALL_PHASE:-Preparing installer state}"
         shell_assignment CORE_MANAGEMENT_CIDR "$CORE_MANAGEMENT_CIDR"
         shell_assignment APP_MANAGEMENT_CIDR "$APP_MANAGEMENT_CIDR"
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
         shell_assignment PARTICIPANT_CIDR "$PARTICIPANT_CIDR"
         shell_assignment APP_NET0_MAC "$APP_NET0_MAC"
-    } > "$STATE_FILE"
+    } > "$STATE_TEMP_FILE"
     {
         shell_assignment CORE_VM_USERNAME corevm
         shell_assignment CORE_VM_PASSWORD "$CORE_PASSWORD"
@@ -939,13 +966,17 @@ write_state() {
         shell_assignment PARTICIPANT_VM_PASSWORD "$PARTICIPANT_PASSWORD"
         shell_assignment SCENARIOFORGE_ADMIN_USERNAME coreadmin
         shell_assignment SCENARIOFORGE_ADMIN_PASSWORD "$SCENARIOFORGE_ADMIN_PASSWORD"
-    } > "$CREDENTIALS_FILE"
-    chmod 0600 "$STATE_FILE" "$CREDENTIALS_FILE"
+    } > "$CREDENTIALS_TEMP_FILE"
+    chmod 0600 "$STATE_TEMP_FILE" "$CREDENTIALS_TEMP_FILE"
+    mv -f -- "$CREDENTIALS_TEMP_FILE" "$CREDENTIALS_FILE"
+    mv -f -- "$STATE_TEMP_FILE" "$STATE_FILE"
 }
 
 mark_install_complete() {
     [[ "$DRY_RUN" -eq 0 && -f "$STATE_FILE" ]] || return
-    shell_assignment INSTALL_COMPLETE 1 >> "$STATE_FILE"
+    INSTALL_COMPLETE=1
+    INSTALL_PHASE="Installation complete"
+    write_state
 }
 
 guest_marker_exists() {
@@ -1063,11 +1094,18 @@ vm_status_line() {
 }
 
 show_status() {
+    local host_state="installer process not detected"
     [[ -f "$STATE_FILE" ]] \
         || die "no installer state found at $STATE_FILE; if an install is running, use: $0 status --watch"
     # shellcheck disable=SC1090
     source "$STATE_FILE"
+    if [[ "${INSTALL_COMPLETE:-0}" == "1" ]]; then
+        host_state="complete"
+    elif [[ "${INSTALLER_PID:-}" =~ ^[0-9]+$ ]] && kill -0 "$INSTALLER_PID" 2>/dev/null; then
+        host_state="active (PID $INSTALLER_PID)"
+    fi
     printf 'ScenarioForge Proxmox lab on %s\n' "$PVE_NODE"
+    printf '  Host installer:  %s - %s\n' "$host_state" "${INSTALL_PHASE:-phase unavailable}"
     vm_status_line CORE "$CORE_VMID" /var/lib/scenarioforge/core-ready
     vm_status_line APP "$APP_VMID" /var/lib/scenarioforge/app-ready
     vm_status_line PARTICIPANT "$PARTICIPANT_VMID" -
@@ -1088,7 +1126,7 @@ show_status() {
 watch_status() {
     emit INFO "Watching provisioning every $STATUS_INTERVAL seconds; press Ctrl-C to stop"
     while [[ ! -f "$STATE_FILE" ]]; do
-        emit INFO "Waiting for the installer to write state at $STATE_FILE"
+        emit INFO "Waiting for installer state at $STATE_FILE (check the install shell's preflight output or INSTALL prompt)"
         sleep "$STATUS_INTERVAL"
     done
     emit INFO "Installer state detected; beginning VM and guest bootstrap status"
@@ -1200,7 +1238,7 @@ bridge_owned_by_installer() {
     if [[ "$recorded_created" == "0" ]]; then
         return 1
     fi
-    [[ "$recorded_created" == "1" || -z "$recorded_created" ]]
+    [[ "$recorded_created" == "1" || "$recorded_created" == "creating" || -z "$recorded_created" ]]
 }
 
 discover_cleanup_bridges() {
@@ -1238,8 +1276,8 @@ confirm_cleanup() {
     done
     [[ "${#CLEANUP_SNIPPETS[@]}" -eq 0 ]] || log "  Cloud-Init snippets: ${#CLEANUP_SNIPPETS[@]} installer files"
     [[ "${#CLEANUP_BRIDGES[@]}" -eq 0 ]] || log "  Installer-created bridges: ${CLEANUP_BRIDGES[*]}"
-    [[ "$CLEANUP_STATE_FOUND" -eq 0 && ! -f "$CREDENTIALS_FILE" ]] \
-        || log "  Saved installer state and credentials: $STATE_DIR"
+    cleanup_metadata_exists \
+        && log "  Saved installer state and credentials: $STATE_DIR"
 
     if cleanup_is_healthy_running_lab; then
         [[ "$FORCE_CLEANUP" -eq 1 ]] \
@@ -1321,15 +1359,22 @@ remove_cleanup_bridges() {
     fi
 }
 
+cleanup_metadata_exists() {
+    [[ -e "$STATE_FILE" || -L "$STATE_FILE" \
+        || -e "$CREDENTIALS_FILE" || -L "$CREDENTIALS_FILE" \
+        || -e "$STATE_TEMP_FILE" || -L "$STATE_TEMP_FILE" \
+        || -e "$CREDENTIALS_TEMP_FILE" || -L "$CREDENTIALS_TEMP_FILE" ]]
+}
+
 remove_cleanup_files() {
     local path
     for path in "${CLEANUP_SNIPPETS[@]}"; do
         log "Removing Cloud-Init snippet $path"
         run rm -f -- "$path"
     done
-    if [[ "$CLEANUP_STATE_FOUND" -eq 1 || -f "$CREDENTIALS_FILE" ]]; then
+    if cleanup_metadata_exists; then
         log "Removing saved installer state and credentials"
-        run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE"
+        run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE" "$STATE_TEMP_FILE" "$CREDENTIALS_TEMP_FILE"
         if [[ "$DRY_RUN" -eq 1 ]]; then
             run rmdir "$STATE_DIR"
         elif [[ -d "$STATE_DIR" ]] && ! run rmdir "$STATE_DIR" 2>/dev/null; then
@@ -1344,10 +1389,11 @@ perform_cleanup() {
     discover_cleanup_snippets
     discover_cleanup_bridges
     if [[ "${#CLEANUP_VMIDS[@]}" -eq 0 && "${#CLEANUP_SNIPPETS[@]}" -eq 0 \
-        && "${#CLEANUP_BRIDGES[@]}" -eq 0 && "$CLEANUP_STATE_FOUND" -eq 0 \
-        && ! -f "$CREDENTIALS_FILE" ]]; then
-        log "No partial or installer-owned ScenarioForge lab resources were found"
-        return
+        && "${#CLEANUP_BRIDGES[@]}" -eq 0 && "$CLEANUP_STATE_FOUND" -eq 0 ]]; then
+        if ! cleanup_metadata_exists; then
+            log "No partial or installer-owned ScenarioForge lab resources were found"
+            return
+        fi
     fi
     confirm_cleanup
     stop_and_destroy_cleanup_vms
@@ -1379,6 +1425,11 @@ perform_install() {
     APP_NET0_MAC="$(random_mac)"
     APP_NET1_MAC="$(random_mac)"
     PARTICIPANT_NET0_MAC="$(random_mac)"
+    INSTALL_COMPLETE=0
+    INSTALL_PHASE="Preflight complete; preparing Proxmox resources"
+    CREATED_MANAGEMENT_BRIDGE=pending
+    CREATED_HITL_BRIDGE=pending
+    write_state
 
     progress "Creating or validating the isolated management and HITL bridges"
     ensure_isolated_bridge "$MANAGEMENT_BRIDGE" "ScenarioForge isolated CORE management"
@@ -1400,11 +1451,10 @@ perform_install() {
     download_verified_image "$DEBIAN_IMAGE_URL" "$DEBIAN_SUMS_URL" sha512 "$DEBIAN_IMAGE"
     download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha256 "$UBUNTU_IMAGE"
 
-    progress "Generating credentials, guest bootstrap scripts, and Cloud-Init data"
+    progress "Generating guest bootstrap scripts and Cloud-Init data"
     write_guest_bootstraps
     write_cloud_init_files
     install_snippets
-    write_state
 
     progress "Creating the CORE, ScenarioForge, and participant VMs"
     create_vms

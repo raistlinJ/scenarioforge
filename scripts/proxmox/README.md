@@ -104,11 +104,12 @@ sudo scripts/proxmox/install-scenarioforge-lab.sh status --watch
 ```
 
 It reports each VM's power state, QEMU guest-agent availability, readiness
-marker, explicit bootstrap phase, and latest available guest/Cloud-Init log
-activity. The default refresh interval is 10 seconds; change it with
-`--interval 5`. If the install has not written its state file yet—for example,
-while it is downloading the first cloud images—the watcher reports that it is
-waiting and begins VM status automatically when state becomes available. Stop
+marker, current host-installer phase, explicit guest bootstrap phase, and latest
+available guest/Cloud-Init log activity. The installer writes state immediately
+after a successful preflight and confirmation, before creating bridges or
+downloading images. Until that happens, the watcher reports that it is waiting;
+it begins detailed status automatically when state becomes available. The
+default refresh interval is 10 seconds; change it with `--interval 5`. Stop
 watching with `Ctrl-C`; this does not stop provisioning.
 
 Bootstrap logs are available inside the guests:
