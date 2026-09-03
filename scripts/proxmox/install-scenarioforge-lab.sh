@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.3.5"
+SCRIPT_VERSION="0.4.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -74,6 +74,8 @@ LAST_CORE_ACTIVITY=""
 LAST_APP_ACTIVITY=""
 INSTALL_COMPLETE=""
 INSTALL_PHASE=""
+INSTALL_PERCENT=0
+INSTALL_STARTED_EPOCH=""
 RUNTIME_TRACKING=0
 CLEANUP_STATE_FOUND=0
 declare -a CLEANUP_VMIDS=()
@@ -104,8 +106,11 @@ log() {
 }
 
 progress() {
+    local percent="$1"
+    shift
     CURRENT_STEP=$((CURRENT_STEP + 1))
-    emit PROGRESS "[$CURRENT_STEP/$TOTAL_STEPS] $*"
+    INSTALL_PERCENT="$percent"
+    emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] [$CURRENT_STEP/$TOTAL_STEPS] $*"
     if [[ "$RUNTIME_TRACKING" -eq 1 ]]; then
         write_runtime_status running "$*" ""
     fi
@@ -607,6 +612,7 @@ write_runtime_status() {
     if ! {
         shell_assignment RUNTIME_PID "$$"
         shell_assignment RUNTIME_STATE "$runtime_state"
+        shell_assignment RUNTIME_PERCENT "${INSTALL_PERCENT:-0}"
         shell_assignment RUNTIME_PHASE "$phase"
         shell_assignment RUNTIME_DETAIL "$detail"
         shell_assignment RUNTIME_UPDATED "$(timestamp)"
@@ -647,29 +653,34 @@ source /etc/scenarioforge-installer.env
 
 install -d -m 0755 /var/lib/scenarioforge
 set_bootstrap_status() {
+    local percent="$1"
+    shift
+    printf '%s\n' "$percent" > /var/lib/scenarioforge/bootstrap-percent
     printf '%s\n' "$*" > /var/lib/scenarioforge/bootstrap-status
-    printf 'BOOTSTRAP: %s\n' "$*"
+    printf 'BOOTSTRAP [%s%%]: %s\n' "$percent" "$*"
 }
 on_bootstrap_error() {
-    local exit_code="$1" line="$2"
+    local exit_code="$1" line="$2" percent=0
     trap - ERR
-    set_bootstrap_status "failed (exit $exit_code at bootstrap line $line)"
+    [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
+        || read -r percent < /var/lib/scenarioforge/bootstrap-percent
+    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
     exit "$exit_code"
 }
 trap 'on_bootstrap_error "$?" "$LINENO"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
-set_bootstrap_status 'preparing coreemu-minimal source installer'
+set_bootstrap_status 5 'preparing coreemu-minimal source installer'
 install -d -m 0755 /opt/bootstrap
 if [[ ! -d /opt/bootstrap/coreemu-minimal/.git ]]; then
     git clone --branch "$CORE_MINIMAL_REF" "$CORE_MINIMAL_URL" /opt/bootstrap/coreemu-minimal
 fi
 
 cd /opt/bootstrap/coreemu-minimal/9.2.1
-set_bootstrap_status 'installing system packages and building CORE from source'
+set_bootstrap_status 10 'installing system packages and building CORE from source'
 printf 'n\n' | ./setup-coreemu9.2.1.sh --from-source "$CORE_REPO_URL" "$CORE_REPO_REF"
 
-set_bootstrap_status 'configuring Docker for CORE networking'
+set_bootstrap_status 70 'configuring Docker for CORE networking'
 install -d -m 0755 /etc/docker
 if [[ -s /etc/docker/daemon.json ]]; then
     jq '. + {"bridge":"none","iptables":false}' /etc/docker/daemon.json > /etc/docker/daemon.json.new
@@ -679,7 +690,7 @@ fi
 install -m 0644 /etc/docker/daemon.json.new /etc/docker/daemon.json
 rm -f /etc/docker/daemon.json.new
 
-set_bootstrap_status 'installing ScenarioForge custom CORE services'
+set_bootstrap_status 75 'installing ScenarioForge custom CORE services'
 if [[ ! -d /opt/scenarioforge-services/.git ]]; then
     git clone --branch "$SCENARIOFORGE_REF" "$SCENARIOFORGE_URL" /opt/scenarioforge-services
 else
@@ -704,7 +715,7 @@ else
     printf 'custom_services_dir = /opt/core/custom_services\n' >> "$CORE_CONF"
 fi
 
-set_bootstrap_status 'restarting Docker and core-daemon'
+set_bootstrap_status 85 'restarting Docker and core-daemon'
 systemctl restart docker
 systemctl is-active --quiet docker
 systemctl restart core-daemon
@@ -713,7 +724,7 @@ grpc_ready() {
     ss -H -4 -lnt | awk '$4 == "0.0.0.0:50051" || $4 == "*:50051" { found=1 } END { exit !found }'
 }
 
-set_bootstrap_status 'waiting for core-daemon gRPC on 0.0.0.0:50051'
+set_bootstrap_status 90 'waiting for core-daemon gRPC on 0.0.0.0:50051'
 core_ready=0
 for attempt in $(seq 1 60); do
     if systemctl is-active --quiet core-daemon && grpc_ready; then
@@ -733,14 +744,14 @@ if [[ "$core_ready" -ne 1 ]]; then
     exit 1
 fi
 
-set_bootstrap_status 'verifying the CORE HITL interface'
+set_bootstrap_status 97 'verifying the CORE HITL interface'
 if ip -4 addr show dev ens19 | grep -q 'inet '; then
     echo 'ens19 unexpectedly has an IPv4 address' >&2
     exit 1
 fi
 
 touch /var/lib/scenarioforge/core-ready
-set_bootstrap_status 'ready'
+set_bootstrap_status 100 'ready'
 echo 'CORE provisioning complete.'
 CORE_SCRIPT
 
@@ -752,19 +763,24 @@ source /etc/scenarioforge-installer.env
 
 install -d -m 0755 /var/lib/scenarioforge
 set_bootstrap_status() {
+    local percent="$1"
+    shift
+    printf '%s\n' "$percent" > /var/lib/scenarioforge/bootstrap-percent
     printf '%s\n' "$*" > /var/lib/scenarioforge/bootstrap-status
-    printf 'BOOTSTRAP: %s\n' "$*"
+    printf 'BOOTSTRAP [%s%%]: %s\n' "$percent" "$*"
 }
 on_bootstrap_error() {
-    local exit_code="$1" line="$2"
+    local exit_code="$1" line="$2" percent=0
     trap - ERR
-    set_bootstrap_status "failed (exit $exit_code at bootstrap line $line)"
+    [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
+        || read -r percent < /var/lib/scenarioforge/bootstrap-percent
+    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
     exit "$exit_code"
 }
 trap 'on_bootstrap_error "$?" "$LINENO"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
-set_bootstrap_status 'installing Docker Engine'
+set_bootstrap_status 5 'installing Docker Engine'
 if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
     sh /tmp/get-docker.sh
@@ -773,7 +789,7 @@ fi
 systemctl enable --now docker
 usermod -aG docker scenarioforge
 
-set_bootstrap_status 'cloning the ScenarioForge repository'
+set_bootstrap_status 25 'cloning the ScenarioForge repository'
 if [[ ! -d /opt/scenarioforge/.git ]]; then
     git clone --branch "$SCENARIOFORGE_REF" "$SCENARIOFORGE_URL" /opt/scenarioforge
 else
@@ -802,17 +818,17 @@ ENV_FILE
 chmod 0600 /opt/scenarioforge/.scenarioforge.env
 
 cd /opt/scenarioforge
-set_bootstrap_status 'building ScenarioForge and nginx container images'
+set_bootstrap_status 35 'building ScenarioForge and nginx container images'
 docker compose --env-file .scenarioforge.env build
-set_bootstrap_status 'creating the ScenarioForge administrator account'
+set_bootstrap_status 75 'creating the ScenarioForge administrator account'
 install -d -m 0700 outputs/users
 docker compose --env-file .scenarioforge.env run --rm --no-deps \
     -e SF_BOOTSTRAP_ADMIN_PASSWORD="$SCENARIOFORGE_ADMIN_PASSWORD" \
     web python -c 'import json, os; from pathlib import Path; from werkzeug.security import generate_password_hash; p=Path("/app/outputs/users/users.json"); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps({"users":[{"username":"coreadmin","password_hash":generate_password_hash(os.environ["SF_BOOTSTRAP_ADMIN_PASSWORD"]),"role":"admin"}]}, indent=2))'
-set_bootstrap_status 'starting ScenarioForge services'
+set_bootstrap_status 82 'starting ScenarioForge services'
 docker compose --env-file .scenarioforge.env up -d
 
-set_bootstrap_status 'waiting for the ScenarioForge HTTPS health check'
+set_bootstrap_status 90 'waiting for the ScenarioForge HTTPS health check'
 for attempt in $(seq 1 60); do
     if curl -kfsS https://127.0.0.1/healthz >/dev/null; then
         break
@@ -826,7 +842,7 @@ for attempt in $(seq 1 60); do
 done
 
 touch /var/lib/scenarioforge/app-ready
-set_bootstrap_status 'ready'
+set_bootstrap_status 100 'ready'
 echo 'ScenarioForge provisioning complete.'
 APP_SCRIPT
     chmod 0755 "$WORK_DIR/core-bootstrap.sh" "$WORK_DIR/app-bootstrap.sh"
@@ -1067,6 +1083,8 @@ write_state() {
         shell_assignment APP_NAME "$APP_NAME"
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
         shell_assignment INSTALL_COMPLETE "${INSTALL_COMPLETE:-0}"
+        shell_assignment INSTALL_PERCENT "${INSTALL_PERCENT:-0}"
+        shell_assignment INSTALL_STARTED_EPOCH "${INSTALL_STARTED_EPOCH:-}"
         shell_assignment INSTALL_PHASE "${INSTALL_PHASE:-Preparing installer state}"
         shell_assignment CORE_MANAGEMENT_CIDR "$CORE_MANAGEMENT_CIDR"
         shell_assignment APP_MANAGEMENT_CIDR "$APP_MANAGEMENT_CIDR"
@@ -1092,8 +1110,10 @@ write_state() {
 mark_install_complete() {
     [[ "$DRY_RUN" -eq 0 && -f "$STATE_FILE" ]] || return
     INSTALL_COMPLETE=1
+    INSTALL_PERCENT=100
     INSTALL_PHASE="Installation complete"
     write_state
+    emit PROGRESS "[100%] ScenarioForge lab installation complete"
 }
 
 guest_marker_exists() {
@@ -1123,8 +1143,52 @@ guest_last_log_line() {
     guest_command_output "$1" tail -n 1 "$2"
 }
 
+guest_bootstrap_percent() {
+    local vmid="$1" marker="$2" current
+    if [[ "$marker" != "-" ]] && guest_marker_exists "$vmid" "$marker"; then
+        printf '100\n'
+        return
+    fi
+    current="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-percent)"
+    if [[ "$current" =~ ^[0-9]+$ ]] && (( current >= 0 && current <= 100 )); then
+        printf '%s\n' "$current"
+    else
+        printf '0\n'
+    fi
+}
+
+format_elapsed() {
+    local started="$1" now elapsed hours minutes seconds
+    [[ "$started" =~ ^[0-9]+$ ]] || { printf 'unknown'; return; }
+    now="$(date +%s)"
+    elapsed=$(( now - started ))
+    (( elapsed >= 0 )) || elapsed=0
+    hours=$(( elapsed / 3600 ))
+    minutes=$(( (elapsed % 3600) / 60 ))
+    seconds=$(( elapsed % 60 ))
+    printf '%02dh:%02dm:%02ds' "$hours" "$minutes" "$seconds"
+}
+
+current_install_percent() {
+    local current="${INSTALL_PERCENT:-0}" core_percent app_percent weighted
+    [[ "$current" =~ ^[0-9]+$ ]] || current=0
+    if [[ "${INSTALL_COMPLETE:-0}" == "1" ]]; then
+        printf '100\n'
+        return
+    fi
+    if (( current >= 55 )); then
+        core_percent="$(guest_bootstrap_percent "$CORE_VMID" /var/lib/scenarioforge/core-ready)"
+        app_percent="$(guest_bootstrap_percent "$APP_VMID" /var/lib/scenarioforge/app-ready)"
+        weighted=$(( 55 + (core_percent + app_percent) * 44 / 200 ))
+        (( weighted > 99 )) && weighted=99
+        (( weighted > current )) && current="$weighted"
+    fi
+    printf '%s\n' "$current"
+}
+
 guest_progress_text() {
-    local vmid="$1" bootstrap_log="$2" current
+    local vmid="$1" bootstrap_log="$2" marker="$3" current percent
+    percent="$(guest_bootstrap_percent "$vmid" "$marker")"
     current="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
     if [[ -z "$current" ]]; then
         current="$(guest_last_log_line "$vmid" "$bootstrap_log")"
@@ -1132,7 +1196,7 @@ guest_progress_text() {
     if [[ -z "$current" ]]; then
         current="$(guest_last_log_line "$vmid" /var/log/cloud-init-output.log)"
     fi
-    printf '%s\n' "${current:-waiting for guest agent / Cloud-Init}"
+    printf '[%3d%%] %s\n' "$percent" "${current:-waiting for guest agent / Cloud-Init}"
 }
 
 report_guest_activity() {
@@ -1153,7 +1217,7 @@ report_guest_activity() {
 }
 
 wait_for_provisioning() {
-    local deadline now core_ready=0 app_ready=0
+    local deadline now core_ready=0 app_ready=0 core_percent app_percent elapsed
     deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
     log "Waiting up to $WAIT_MINUTES minutes for CORE and ScenarioForge provisioning"
     while :; do
@@ -1161,7 +1225,13 @@ wait_for_provisioning() {
         guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready && app_ready=1
         report_guest_activity CORE "$CORE_VMID" /var/log/scenarioforge-core-bootstrap.log
         report_guest_activity APP "$APP_VMID" /var/log/scenarioforge-app-bootstrap.log
-        log "Bootstrap status: CORE=$([[ $core_ready -eq 1 ]] && echo ready || echo working) APP=$([[ $app_ready -eq 1 ]] && echo ready || echo working)"
+        core_percent="$(guest_bootstrap_percent "$CORE_VMID" /var/lib/scenarioforge/core-ready)"
+        app_percent="$(guest_bootstrap_percent "$APP_VMID" /var/lib/scenarioforge/app-ready)"
+        INSTALL_PERCENT=$(( 55 + (core_percent + app_percent) * 44 / 200 ))
+        (( INSTALL_PERCENT > 99 )) && INSTALL_PERCENT=99
+        elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
+        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Guest bootstrap heartbeat (elapsed $elapsed): CORE=${core_percent}% $([[ $core_ready -eq 1 ]] && echo ready || echo working), APP=${app_percent}% $([[ $app_ready -eq 1 ]] && echo ready || echo working)"
+        write_runtime_status running "$INSTALL_PHASE" "guest bootstrap heartbeat; elapsed $elapsed"
         if [[ "$core_ready" -eq 1 && "$app_ready" -eq 1 ]]; then
             return 0
         fi
@@ -1219,7 +1289,7 @@ vm_status_line() {
 }
 
 show_status() {
-    local host_state="installer process not detected"
+    local host_state="installer process not detected" display_percent elapsed
     [[ -f "$STATE_FILE" ]] \
         || die "no installer state found at $STATE_FILE; if an install is running, use: $0 status --watch"
     # shellcheck disable=SC1090
@@ -1229,13 +1299,16 @@ show_status() {
     elif [[ "${INSTALLER_PID:-}" =~ ^[0-9]+$ ]] && kill -0 "$INSTALLER_PID" 2>/dev/null; then
         host_state="active (PID $INSTALLER_PID)"
     fi
+    display_percent="$(current_install_percent)"
+    elapsed="$(format_elapsed "${INSTALL_STARTED_EPOCH:-}")"
     printf 'ScenarioForge Proxmox lab on %s\n' "$PVE_NODE"
+    printf '  Install progress: %s%% (elapsed %s)\n' "$display_percent" "$elapsed"
     printf '  Host installer:  %s - %s\n' "$host_state" "${INSTALL_PHASE:-phase unavailable}"
     vm_status_line CORE "$CORE_VMID" /var/lib/scenarioforge/core-ready
     vm_status_line APP "$APP_VMID" /var/lib/scenarioforge/app-ready
     vm_status_line PARTICIPANT "$PARTICIPANT_VMID" -
-    printf '  CORE progress:    %s\n' "$(guest_progress_text "$CORE_VMID" /var/log/scenarioforge-core-bootstrap.log)"
-    printf '  APP progress:     %s\n' "$(guest_progress_text "$APP_VMID" /var/log/scenarioforge-app-bootstrap.log)"
+    printf '  CORE progress:    %s\n' "$(guest_progress_text "$CORE_VMID" /var/log/scenarioforge-core-bootstrap.log /var/lib/scenarioforge/core-ready)"
+    printf '  APP progress:     %s\n' "$(guest_progress_text "$APP_VMID" /var/log/scenarioforge-app-bootstrap.log /var/lib/scenarioforge/app-ready)"
     printf '  CORE management: %s (SSH 22, gRPC 50051)\n' "$CORE_MANAGEMENT_CIDR"
     printf '  Participant:     %s on %s\n' "$PARTICIPANT_CIDR" "$HITL_BRIDGE"
     local app_ip
@@ -1249,7 +1322,7 @@ show_status() {
 }
 
 show_prestate_runtime_status() {
-    local mode="" RUNTIME_PID="" RUNTIME_STATE="" RUNTIME_PHASE="" RUNTIME_DETAIL="" RUNTIME_UPDATED=""
+    local mode="" RUNTIME_PID="" RUNTIME_STATE="" RUNTIME_PERCENT="0" RUNTIME_PHASE="" RUNTIME_DETAIL="" RUNTIME_UPDATED=""
     [[ -f "$RUNTIME_STATUS_FILE" ]] || return 1
     if [[ -L "$RUNTIME_STATUS_FILE" || ! -O "$RUNTIME_STATUS_FILE" ]]; then
         warn "ignoring runtime status that is a symlink or is not owned by root: $RUNTIME_STATUS_FILE"
@@ -1262,7 +1335,7 @@ show_prestate_runtime_status() {
     fi
     # shellcheck disable=SC1090
     source "$RUNTIME_STATUS_FILE"
-    emit INFO "Host installer ${RUNTIME_STATE:-unknown} (PID ${RUNTIME_PID:-unknown}, updated ${RUNTIME_UPDATED:-unknown}): ${RUNTIME_PHASE:-phase unavailable}"
+    emit INFO "Host installer ${RUNTIME_STATE:-unknown} [${RUNTIME_PERCENT:-0}%] (PID ${RUNTIME_PID:-unknown}, updated ${RUNTIME_UPDATED:-unknown}): ${RUNTIME_PHASE:-phase unavailable}"
     if [[ "${RUNTIME_STATE:-}" == "failed" ]]; then
         warn "Installer error: ${RUNTIME_DETAIL:-no error detail was recorded}"
         return 2
@@ -1588,7 +1661,8 @@ perform_cleanup() {
 }
 
 perform_install() {
-    progress "Validating Proxmox, storage, VMIDs, and requested networks"
+    INSTALL_STARTED_EPOCH="$(date +%s)"
+    progress 2 "Validating Proxmox, storage, VMIDs, and requested networks"
     validate_install_inputs
     preflight_proxmox
     confirm_install
@@ -1612,7 +1686,7 @@ perform_install() {
     CREATED_HITL_BRIDGE=pending
     write_state
 
-    progress "Creating or validating the isolated management and HITL bridges"
+    progress 7 "Creating or validating the isolated management and HITL bridges"
     ensure_isolated_bridge "$MANAGEMENT_BRIDGE" "ScenarioForge isolated CORE management"
     ensure_isolated_bridge "$HITL_BRIDGE" "ScenarioForge isolated participant HITL"
     apply_network_changes
@@ -1623,35 +1697,35 @@ perform_install() {
             || die "HITL bridge did not appear after applying network configuration"
     fi
 
-    progress "Preparing Cloud-Init snippet storage"
+    progress 12 "Preparing Cloud-Init snippet storage"
     ensure_snippet_storage
 
-    progress "Downloading and verifying Debian and Ubuntu cloud images"
+    progress 18 "Downloading and verifying Debian and Ubuntu cloud images"
     DEBIAN_IMAGE="$IMAGE_CACHE/debian-12-genericcloud-amd64.qcow2"
     UBUNTU_IMAGE="$IMAGE_CACHE/noble-server-cloudimg-amd64.img"
     download_verified_image "$DEBIAN_IMAGE_URL" "$DEBIAN_SUMS_URL" sha512 "$DEBIAN_IMAGE"
     download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha256 "$UBUNTU_IMAGE"
 
-    progress "Generating guest bootstrap scripts and Cloud-Init data"
+    progress 28 "Generating guest bootstrap scripts and Cloud-Init data"
     write_guest_bootstraps
     write_cloud_init_files
     install_snippets
 
-    progress "Creating the CORE, ScenarioForge, and participant VMs"
+    progress 38 "Creating the CORE, ScenarioForge, and participant VMs"
     create_vms
 
-    progress "Starting all three VMs"
+    progress 50 "Starting all three VMs"
     run qm start "$CORE_VMID"
     run qm start "$APP_VMID"
     run qm start "$PARTICIPANT_VMID"
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        progress "Dry-run validation finished"
+        progress 100 "Dry-run validation finished"
         log "Dry run complete; no resources were changed"
         return
     fi
     if [[ "$WAIT_FOR_BOOTSTRAP" -eq 1 ]]; then
-        progress "Waiting for CORE and ScenarioForge guest provisioning"
+        progress 55 "Waiting for CORE and ScenarioForge guest provisioning"
         if ! wait_for_provisioning; then
             warn "Provisioning did not finish before the timeout. VMs were left intact for diagnosis."
             warn "Run: $0 status"
@@ -1661,7 +1735,7 @@ perform_install() {
         fi
         mark_install_complete
     else
-        progress "Guest provisioning started in the background (--no-wait)"
+        progress 55 "Guest provisioning started in the background (--no-wait)"
     fi
     show_status
     write_runtime_status complete "${INSTALL_PHASE:-Host installation complete}" ""

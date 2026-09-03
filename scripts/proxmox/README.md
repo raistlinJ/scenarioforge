@@ -83,6 +83,14 @@ Proxmox task activity, and the latest available bootstrap-log line from each
 guest. Verbose mode deliberately does not enable shell tracing because tracing
 could expose generated passwords.
 
+Progress output includes an overall percentage and elapsed time. Percentages
+represent completed milestones rather than an estimated finish time: host VM
+and network preparation accounts for the first 55%, then the parallel CORE and
+ScenarioForge bootstraps contribute the remainder. Each guest reports its own
+percentage and named phase. During long source or container-image builds, the
+installer emits a heartbeat every 20 seconds even when the milestone percentage
+has not changed, making it clear that readiness monitoring is still active.
+
 To use different VMIDs, storage, uplink, and an SSH public key:
 
 ```bash
@@ -110,8 +118,9 @@ sudo scripts/proxmox/install-scenarioforge-lab.sh status --watch
 ```
 
 It reports each VM's power state, QEMU guest-agent availability, readiness
-marker, current host-installer phase, explicit guest bootstrap phase, and latest
-available guest/Cloud-Init log activity. The installer writes state immediately
+marker, overall and per-guest percentage, elapsed time, current host-installer
+phase, explicit guest bootstrap phase, and latest available guest/Cloud-Init log
+activity. The installer writes state immediately
 after a successful preflight and confirmation, before creating bridges or
 downloading images. Until that happens, the watcher reports that it is waiting;
 it reads a root-only runtime status under `/run` to show the active installer

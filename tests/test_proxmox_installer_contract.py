@@ -52,9 +52,12 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "report_guest_activity CORE" in source
     assert "on_unexpected_error" in source
     assert "guest_progress_text" in source
-    assert "set_bootstrap_status 'installing system packages and building CORE from source'" in source
-    assert "set_bootstrap_status 'building ScenarioForge and nginx container images'" in source
-    assert 'set_bootstrap_status "failed (exit $exit_code at bootstrap line $line)"' in source
+    assert "set_bootstrap_status 10 'installing system packages and building CORE from source'" in source
+    assert "set_bootstrap_status 35 'building ScenarioForge and nginx container images'" in source
+    assert 'set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"' in source
+    assert "/var/lib/scenarioforge/bootstrap-percent" in source
+    assert "Guest bootstrap heartbeat (elapsed $elapsed)" in source
+    assert "Install progress:" in source
     assert 'bootstrap="in-progress"' in source
     assert 'agent="optional"' in source
     assert "for attempt in $(seq 1 60)" in source
@@ -64,6 +67,37 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert 'shell_assignment INSTALL_PHASE' in source
     assert 'printf \'  Host installer:' in source
     assert install_body.index("write_state") < install_body.index("download_verified_image")
+
+
+def test_progress_output_and_parallel_guest_weighting() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+COMMAND=status
+CURRENT_STEP=0
+TOTAL_STEPS=8
+progress 18 'Downloading images'
+INSTALL_PERCENT=55
+INSTALL_COMPLETE=0
+CORE_VMID=9401
+APP_VMID=9402
+guest_marker_exists() {{ return 1; }}
+guest_command_output() {{
+    case "$1" in
+        9401) printf '10\\n' ;;
+        9402) printf '35\\n' ;;
+    esac
+}}
+printf 'combined=%s\\n' "$(current_install_percent)"
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PROGRESS [ 18%] [1/8] Downloading images" in result.stdout
+    assert "combined=64" in result.stdout
 
 
 def test_status_watch_waits_for_fresh_install_state(tmp_path: Path) -> None:
