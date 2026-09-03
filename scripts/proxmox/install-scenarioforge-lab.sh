@@ -305,12 +305,32 @@ validate_install_inputs() {
 }
 
 storage_config() {
-    pvesm config "$1" 2>/dev/null || die "Proxmox storage not found: $1"
+    local payload
+    payload="$(pvesh get "/storage/$1" --output-format json 2>/dev/null)" \
+        || die "Proxmox storage not found: $1"
+    [[ -n "$payload" ]] || die "Proxmox returned an empty configuration for storage: $1"
+    printf '%s\n' "$payload"
+}
+
+storage_field() {
+    local config="$1" field="$2"
+    python3 -c '
+import json
+import sys
+payload = json.load(sys.stdin)
+if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+    payload = payload["data"]
+value = payload.get(sys.argv[1], "") if isinstance(payload, dict) else ""
+if isinstance(value, bool):
+    print(1 if value else 0)
+else:
+    print(value)
+' "$field" <<<"$config"
 }
 
 storage_has_content() {
     local config="$1" wanted="$2" content
-    content="$(awk '$1 == "content" {print $2}' <<<"$config")"
+    content="$(storage_field "$config" content)"
     [[ ",$content," == *",$wanted,"* ]]
 }
 
@@ -328,10 +348,12 @@ preflight_proxmox() {
     fi
 
     config="$(storage_config "$VM_STORAGE")"
+    [[ "$(storage_field "$config" disable)" != "1" ]] || die "storage '$VM_STORAGE' is disabled"
     storage_has_content "$config" images || die "storage '$VM_STORAGE' does not allow VM images"
 
     config="$(storage_config "$SNIPPET_STORAGE")"
-    [[ "$(awk 'NR == 1 {gsub(":", "", $1); print $1}' <<<"$config")" == "dir" ]] \
+    [[ "$(storage_field "$config" disable)" != "1" ]] || die "storage '$SNIPPET_STORAGE' is disabled"
+    [[ "$(storage_field "$config" type)" == "dir" ]] \
         || die "snippet storage '$SNIPPET_STORAGE' must be directory-backed"
     verbose "Preflight passed: VMIDs are free, uplink exists, and storage capabilities are compatible"
 }
@@ -409,8 +431,8 @@ print(value.get("data", "") if isinstance(value, dict) else value)
 ensure_snippet_storage() {
     local config content path new_content
     config="$(storage_config "$SNIPPET_STORAGE")"
-    content="$(awk '$1 == "content" {print $2}' <<<"$config")"
-    path="$(awk '$1 == "path" {print $2}' <<<"$config")"
+    content="$(storage_field "$config" content)"
+    path="$(storage_field "$config" path)"
     [[ -n "$path" ]] || die "could not resolve directory path for snippet storage '$SNIPPET_STORAGE'"
     if ! storage_has_content "$config" snippets; then
         new_content="${content:+$content,}snippets"

@@ -48,6 +48,36 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "on_unexpected_error" in source
 
 
+def test_storage_probe_uses_proxmox_api_json() -> None:
+    probe = f"""
+source {INSTALLER!s}
+pvesh() {{
+    case "$2" in
+        /storage/local-lvm)
+            printf '%s\\n' '{{"storage":"local-lvm","type":"lvmthin","content":"rootdir,images"}}'
+            ;;
+        /storage/local)
+            printf '%s\\n' '{{"storage":"local","type":"dir","content":"iso,vztmpl,backup","path":"/var/lib/vz"}}'
+            ;;
+        *) return 1 ;;
+    esac
+}}
+vm_config="$(storage_config local-lvm)"
+snippet_config="$(storage_config local)"
+storage_has_content "$vm_config" images
+[[ "$(storage_field "$vm_config" type)" == lvmthin ]]
+[[ "$(storage_field "$snippet_config" type)" == dir ]]
+[[ "$(storage_field "$snippet_config" path)" == /var/lib/vz ]]
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path) -> None:
     render = f"""
 source {INSTALLER!s}
