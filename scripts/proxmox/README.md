@@ -116,6 +116,13 @@ automatically when state becomes available. The default refresh interval is 10
 seconds; change it with `--interval 5`. Stop watching with `Ctrl-C`; this does
 not stop provisioning.
 
+For CORE and the app, `bootstrap=in-progress` means the ready marker has not
+been written and no explicit bootstrap failure has been recorded;
+`bootstrap=failed` is accompanied by a `CORE progress` or `APP progress` line
+containing the exit code and guest-script line. The participant has no required
+bootstrap workload, so its guest agent may be reported as `optional` while its
+bootstrap state remains `n/a`.
+
 Bootstrap logs are available inside the guests:
 
 ```text

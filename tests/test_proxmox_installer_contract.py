@@ -54,6 +54,9 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "guest_progress_text" in source
     assert "set_bootstrap_status 'installing system packages and building CORE from source'" in source
     assert "set_bootstrap_status 'building ScenarioForge and nginx container images'" in source
+    assert 'set_bootstrap_status "failed (exit $exit_code at bootstrap line $line)"' in source
+    assert 'bootstrap="in-progress"' in source
+    assert 'agent="optional"' in source
     assert 'shell_assignment INSTALL_PHASE' in source
     assert 'printf \'  Host installer:' in source
     assert install_body.index("write_state") < install_body.index("download_verified_image")

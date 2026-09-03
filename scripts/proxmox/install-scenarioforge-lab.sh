@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.3.1"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -611,6 +611,13 @@ set_bootstrap_status() {
     printf '%s\n' "$*" > /var/lib/scenarioforge/bootstrap-status
     printf 'BOOTSTRAP: %s\n' "$*"
 }
+on_bootstrap_error() {
+    local exit_code="$1" line="$2"
+    trap - ERR
+    set_bootstrap_status "failed (exit $exit_code at bootstrap line $line)"
+    exit "$exit_code"
+}
+trap 'on_bootstrap_error "$?" "$LINENO"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
 set_bootstrap_status 'preparing coreemu-minimal source installer'
@@ -685,6 +692,13 @@ set_bootstrap_status() {
     printf '%s\n' "$*" > /var/lib/scenarioforge/bootstrap-status
     printf 'BOOTSTRAP: %s\n' "$*"
 }
+on_bootstrap_error() {
+    local exit_code="$1" line="$2"
+    trap - ERR
+    set_bootstrap_status "failed (exit $exit_code at bootstrap line $line)"
+    exit "$exit_code"
+}
+trap 'on_bootstrap_error "$?" "$LINENO"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
 set_bootstrap_status 'installing Docker Engine'
@@ -1116,17 +1130,25 @@ for interface in interfaces:
 }
 
 vm_status_line() {
-    local label="$1" vmid="$2" marker="$3" status="missing" bootstrap="unknown" agent="n/a"
+    local label="$1" vmid="$2" marker="$3" status="missing" bootstrap="unknown" agent="n/a" phase=""
     if qm status "$vmid" >/dev/null 2>&1; then
         status="$(qm status "$vmid" | awk '{print $2}')"
         if [[ "$status" == "running" ]]; then
-            if qm agent "$vmid" ping >/dev/null 2>&1; then agent="ready"; else agent="waiting"; fi
             if [[ "$marker" == "-" ]]; then
+                if qm agent "$vmid" ping >/dev/null 2>&1; then agent="ready"; else agent="optional"; fi
                 bootstrap="n/a"
-            elif guest_marker_exists "$vmid" "$marker"; then
-                bootstrap="ready"
             else
-                bootstrap="working/failed"
+                if qm agent "$vmid" ping >/dev/null 2>&1; then agent="ready"; else agent="waiting"; fi
+                if guest_marker_exists "$vmid" "$marker"; then
+                    bootstrap="ready"
+                else
+                    phase="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
+                    if [[ "$phase" == failed* ]]; then
+                        bootstrap="failed"
+                    else
+                        bootstrap="in-progress"
+                    fi
+                fi
             fi
         fi
     fi
