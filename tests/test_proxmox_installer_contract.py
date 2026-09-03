@@ -1,5 +1,6 @@
 from pathlib import Path
 import base64
+import shlex
 import subprocess
 
 import yaml
@@ -31,6 +32,8 @@ def test_installer_help_does_not_require_proxmox() -> None:
     assert "--verbose" in result.stdout
     assert "--watch" in result.stdout
     assert "--from-source" in result.stdout
+    assert "cleanup [--dry-run] [--force] [--yes]" in result.stdout
+    assert "--cleanup" in result.stdout
 
 
 def test_installer_preserves_required_network_separation_and_core_install_path() -> None:
@@ -80,6 +83,120 @@ storage_has_content "$vm_config" images
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_cleanup_is_identity_scoped_and_protects_a_healthy_lab() -> None:
+    source = INSTALLER.read_text(encoding="utf-8")
+
+    assert 'Type CLEANUP to permanently remove the resources listed above' in source
+    assert 'rerun cleanup with --force to remove it' in source
+    assert 'vm_owned_by_installer "$vmid" "$expected_name" "$snippet_name"' in source
+    assert 'qm shutdown "$vmid" --timeout 60' in source
+    assert 'qm destroy "$vmid" --purge 1 --destroy-unreferenced-disks 1' in source
+    assert 'command -v pct' in source
+    assert 'preserving installer-created bridge' in source
+    assert 'cached base images were preserved for reuse' in source
+
+
+def test_cleanup_dry_run_preserves_a_recorded_vmid_with_wrong_identity(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    snippet_dir = tmp_path / "snippets"
+    state_dir.mkdir()
+    snippet_dir.mkdir()
+    state_file = state_dir / "state.env"
+    state_file.write_text(
+        """\
+PVE_NODE=testnode
+SNIPPET_STORAGE=local
+MANAGEMENT_BRIDGE=sfmgmt0
+HITL_BRIDGE=sfhitl0
+CREATED_MANAGEMENT_BRIDGE=1
+CREATED_HITL_BRIDGE=1
+CORE_VMID=9401
+APP_VMID=9402
+PARTICIPANT_VMID=9403
+CORE_NAME=scenarioforge-core
+APP_NAME=scenarioforge-app
+PARTICIPANT_NAME=scenarioforge-participant
+INSTALL_COMPLETE=0
+""",
+        encoding="utf-8",
+    )
+    state_file.chmod(0o600)
+    (snippet_dir / "scenarioforge-core-user.yaml").touch()
+
+    probe = f"""
+SCENARIOFORGE_LAB_STATE_DIR={shlex.quote(str(state_dir))}
+source {shlex.quote(str(INSTALLER))}
+PVE_NODE=testnode
+DRY_RUN=1
+ASSUME_YES=1
+qm() {{
+    case "$1" in
+        status) printf 'status: running\\n' ;;
+        config)
+            case "$2" in
+                9401) printf 'name: scenarioforge-core\\n' ;;
+                9402) printf 'name: unrelated-reused-vmid\\n' ;;
+                9403) printf 'name: scenarioforge-participant\\n' ;;
+            esac
+            ;;
+        guest) return 1 ;;
+        list)
+            printf ' VMID NAME\\n9401 scenarioforge-core\\n9402 unrelated\\n9403 scenarioforge-participant\\n'
+            ;;
+    esac
+}}
+pvesh() {{
+    case "$2" in
+        /storage/local)
+            printf '%s\\n' {shlex.quote('{"type":"dir","path":"' + str(tmp_path) + '"}')}
+            ;;
+        /nodes/testnode/network/sfmgmt0)
+            printf '%s\\n' '{{"type":"bridge","comments":"ScenarioForge isolated CORE management"}}'
+            ;;
+        /nodes/testnode/network/sfhitl0)
+            printf '%s\\n' '{{"type":"bridge","comments":"ScenarioForge isolated participant HITL"}}'
+            ;;
+        *) return 1 ;;
+    esac
+}}
+perform_cleanup
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "qm destroy 9401" in result.stdout
+    assert "qm destroy 9403" in result.stdout
+    assert "qm destroy 9402" not in result.stdout
+    assert "preserving VMID 9402" in result.stderr
+    assert "pvesh delete /nodes/testnode/network/sfmgmt0" in result.stdout
+    assert "scenarioforge-core-user.yaml" in result.stdout
+
+
+def test_cleanup_requires_force_for_a_complete_running_lab() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+PVE_NODE=testnode
+DRY_RUN=1
+CLEANUP_VMIDS=(9401 9402 9403)
+CLEANUP_LABELS=(CORE APP PARTICIPANT)
+INSTALL_COMPLETE=1
+qm() {{ printf 'status: running\\n'; }}
+confirm_cleanup
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "rerun cleanup with --force" in result.stderr
 
 
 def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path) -> None:

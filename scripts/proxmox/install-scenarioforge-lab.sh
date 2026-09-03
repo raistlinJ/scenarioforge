@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.2.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -57,14 +57,23 @@ WAIT_FOR_BOOTSTRAP=1
 VERBOSE="${SF_VERBOSE:-0}"
 STATUS_WATCH=0
 STATUS_INTERVAL="${SF_STATUS_INTERVAL:-10}"
+FORCE_CLEANUP=0
 COMMAND="install"
 PVE_NODE=""
 WORK_DIR=""
 NETWORK_CHANGES=0
+CREATED_MANAGEMENT_BRIDGE=""
+CREATED_HITL_BRIDGE=""
 CURRENT_STEP=0
 TOTAL_STEPS=8
 LAST_CORE_ACTIVITY=""
 LAST_APP_ACTIVITY=""
+INSTALL_COMPLETE=""
+CLEANUP_STATE_FOUND=0
+declare -a CLEANUP_VMIDS=()
+declare -a CLEANUP_LABELS=()
+declare -a CLEANUP_SNIPPETS=()
+declare -a CLEANUP_BRIDGES=()
 
 timestamp() {
     date '+%Y-%m-%d %H:%M:%S'
@@ -102,7 +111,9 @@ die() {
 on_unexpected_error() {
     local line="$1" exit_code="$2"
     emit ERROR "unexpected installer failure at line $line (exit $exit_code)" >&2
-    if [[ -f "$STATE_FILE" ]]; then
+    if [[ "$COMMAND" == "cleanup" ]]; then
+        emit WARN "cleanup stopped; any resources not yet reported as removed were left intact" >&2
+    elif [[ -f "$STATE_FILE" ]]; then
         emit WARN "VMs and saved credentials were left intact; inspect with: $0 status" >&2
     elif [[ "$NETWORK_CHANGES" -eq 1 ]]; then
         emit WARN "network bridge changes may be staged or applied; review the Proxmox node network configuration" >&2
@@ -114,6 +125,8 @@ usage() {
 Usage:
   install-scenarioforge-lab.sh install [options]
   install-scenarioforge-lab.sh status [--watch] [--interval SECONDS]
+  install-scenarioforge-lab.sh cleanup [--dry-run] [--force] [--yes]
+  install-scenarioforge-lab.sh --cleanup [--dry-run] [--force] [--yes]
   install-scenarioforge-lab.sh --help
 
 Provision three cloud-image VMs on the current Proxmox VE node:
@@ -136,8 +149,10 @@ Important options:
   --verbose                    Show detailed progress and guest bootstrap activity
   --watch                      Keep printing status until CORE and the app are ready
   --interval SECONDS           Status watch interval (default: 10, minimum: 2)
-  --yes                        Do not ask for installation confirmation
+  --yes                        Do not ask for confirmation
   --dry-run                    Validate and print mutations without applying them
+  --cleanup                    Alias for the cleanup command
+  --force                      Allow cleanup of a healthy, running completed lab
 
 Network/address overrides:
   --app-management-cidr CIDR   Default: 172.31.250.2/24
@@ -188,13 +203,16 @@ parse_args() {
             --interval) STATUS_INTERVAL="${2:?missing value for --interval}"; shift 2 ;;
             --yes) ASSUME_YES=1; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
+            --cleanup) COMMAND="cleanup"; shift ;;
+            --force) FORCE_CLEANUP=1; shift ;;
             *) die "unknown argument: $1" ;;
         esac
     done
 
-    [[ "$COMMAND" == "install" || "$COMMAND" == "status" ]] || die "unknown command: $COMMAND"
+    [[ "$COMMAND" == "install" || "$COMMAND" == "status" || "$COMMAND" == "cleanup" ]] || die "unknown command: $COMMAND"
     [[ "$VERBOSE" == "0" || "$VERBOSE" == "1" ]] || die "SF_VERBOSE must be 0 or 1"
     [[ "$STATUS_WATCH" -eq 0 || "$COMMAND" == "status" ]] || die "--watch is only valid with the status command"
+    [[ "$FORCE_CLEANUP" -eq 0 || "$COMMAND" == "cleanup" ]] || die "--force is only valid with the cleanup command"
     validate_integer "status interval" "$STATUS_INTERVAL" 2
 }
 
@@ -388,11 +406,21 @@ ensure_isolated_bridge() {
     if ip link show "$bridge" >/dev/null 2>&1; then
         [[ -d "/sys/class/net/$bridge/bridge" ]] || die "$bridge exists but is not a Linux bridge"
         log "Using existing bridge $bridge"
+        if [[ "$bridge" == "$MANAGEMENT_BRIDGE" ]]; then
+            CREATED_MANAGEMENT_BRIDGE=0
+        else
+            CREATED_HITL_BRIDGE=0
+        fi
         return
     fi
     log "Creating isolated bridge $bridge"
     run pvesh create "/nodes/$PVE_NODE/network" \
         --iface "$bridge" --type bridge --autostart 1 --comments "$description"
+    if [[ "$bridge" == "$MANAGEMENT_BRIDGE" ]]; then
+        CREATED_MANAGEMENT_BRIDGE=1
+    else
+        CREATED_HITL_BRIDGE=1
+    fi
     NETWORK_CHANGES=1
 }
 
@@ -421,7 +449,7 @@ apply_network_changes() {
         run pvesh set "/nodes/$PVE_NODE/network"
         return
     fi
-    log "Applying the two isolated bridge additions"
+    log "Applying ScenarioForge bridge changes"
     local task_payload upid
     task_payload="$(pvesh set "/nodes/$PVE_NODE/network" --output-format json)"
     upid="$(python3 -c '
@@ -432,8 +460,6 @@ print(value.get("data", "") if isinstance(value, dict) else value)
 ' <<<"$task_payload")"
     [[ -n "$upid" ]] || die "Proxmox did not return a task ID while applying network configuration"
     wait_for_pve_task "$upid"
-    ip link show "$MANAGEMENT_BRIDGE" >/dev/null 2>&1 || die "management bridge did not appear after applying network configuration"
-    ip link show "$HITL_BRIDGE" >/dev/null 2>&1 || die "HITL bridge did not appear after applying network configuration"
 }
 
 ensure_snippet_storage() {
@@ -889,9 +915,15 @@ write_state() {
         shell_assignment UPLINK_BRIDGE "$UPLINK_BRIDGE"
         shell_assignment MANAGEMENT_BRIDGE "$MANAGEMENT_BRIDGE"
         shell_assignment HITL_BRIDGE "$HITL_BRIDGE"
+        shell_assignment CREATED_MANAGEMENT_BRIDGE "${CREATED_MANAGEMENT_BRIDGE:-0}"
+        shell_assignment CREATED_HITL_BRIDGE "${CREATED_HITL_BRIDGE:-0}"
         shell_assignment CORE_VMID "$CORE_VMID"
         shell_assignment APP_VMID "$APP_VMID"
         shell_assignment PARTICIPANT_VMID "$PARTICIPANT_VMID"
+        shell_assignment CORE_NAME "$CORE_NAME"
+        shell_assignment APP_NAME "$APP_NAME"
+        shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
+        shell_assignment INSTALL_COMPLETE 0
         shell_assignment CORE_MANAGEMENT_CIDR "$CORE_MANAGEMENT_CIDR"
         shell_assignment APP_MANAGEMENT_CIDR "$APP_MANAGEMENT_CIDR"
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
@@ -909,6 +941,11 @@ write_state() {
         shell_assignment SCENARIOFORGE_ADMIN_PASSWORD "$SCENARIOFORGE_ADMIN_PASSWORD"
     } > "$CREDENTIALS_FILE"
     chmod 0600 "$STATE_FILE" "$CREDENTIALS_FILE"
+}
+
+mark_install_complete() {
+    [[ "$DRY_RUN" -eq 0 && -f "$STATE_FILE" ]] || return
+    shell_assignment INSTALL_COMPLETE 1 >> "$STATE_FILE"
 }
 
 guest_marker_exists() {
@@ -1064,6 +1101,262 @@ watch_status() {
     done
 }
 
+cleanup_target_selected() {
+    local wanted="$1" vmid
+    for vmid in "${CLEANUP_VMIDS[@]}"; do
+        [[ "$vmid" == "$wanted" ]] && return 0
+    done
+    return 1
+}
+
+vm_owned_by_installer() {
+    local vmid="$1" expected_name="$2" snippet_name="$3" config actual_name
+    config="$(qm config "$vmid" 2>/dev/null)" || return 1
+    actual_name="$(awk -F': ' '$1 == "name" {print $2; exit}' <<<"$config")"
+    [[ "$actual_name" == "$expected_name" || "$config" == *"$snippet_name"* ]]
+}
+
+add_cleanup_vm_if_owned() {
+    local label="$1" vmid="$2" expected_name="$3" snippet_name="$4"
+    if ! qm status "$vmid" >/dev/null 2>&1; then
+        verbose "$label VMID $vmid does not exist"
+        return
+    fi
+    if ! vm_owned_by_installer "$vmid" "$expected_name" "$snippet_name"; then
+        warn "preserving VMID $vmid: its name and Cloud-Init data do not identify it as the installer-created $label VM"
+        return
+    fi
+    CLEANUP_LABELS+=("$label")
+    CLEANUP_VMIDS+=("$vmid")
+}
+
+load_cleanup_scope() {
+    local current_node="$PVE_NODE" mode
+    if [[ -f "$STATE_FILE" ]]; then
+        [[ ! -L "$STATE_FILE" && -O "$STATE_FILE" ]] \
+            || die "refusing to source cleanup state that is a symlink or is not owned by root: $STATE_FILE"
+        mode="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mode & 0o022)' "$STATE_FILE")"
+        [[ "$mode" == "0" ]] \
+            || die "refusing to source group/world-writable cleanup state: $STATE_FILE"
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        [[ "$PVE_NODE" == "$current_node" ]] \
+            || die "saved lab belongs to Proxmox node '$PVE_NODE', not '$current_node'"
+        CLEANUP_STATE_FOUND=1
+        log "Using installer state from $STATE_FILE"
+    else
+        warn "no installer state found; recovery is limited to exact ScenarioForge VM identities and bridge comments"
+    fi
+
+    validate_integer "CORE VMID" "$CORE_VMID" 100
+    validate_integer "ScenarioForge VMID" "$APP_VMID" 100
+    validate_integer "participant VMID" "$PARTICIPANT_VMID" 100
+    [[ "$CORE_VMID" != "$APP_VMID" && "$CORE_VMID" != "$PARTICIPANT_VMID" && "$APP_VMID" != "$PARTICIPANT_VMID" ]] \
+        || die "cleanup VMIDs must be unique"
+    validate_name "CORE VM name" "$CORE_NAME"
+    validate_name "ScenarioForge VM name" "$APP_NAME"
+    validate_name "participant VM name" "$PARTICIPANT_NAME"
+    validate_name "snippet storage" "$SNIPPET_STORAGE"
+    validate_bridge_name "$MANAGEMENT_BRIDGE"
+    validate_bridge_name "$HITL_BRIDGE"
+
+    add_cleanup_vm_if_owned CORE "$CORE_VMID" "$CORE_NAME" scenarioforge-core-user.yaml
+    add_cleanup_vm_if_owned APP "$APP_VMID" "$APP_NAME" scenarioforge-app-user.yaml
+    add_cleanup_vm_if_owned PARTICIPANT "$PARTICIPANT_VMID" "$PARTICIPANT_NAME" scenarioforge-participant-user.yaml
+}
+
+discover_cleanup_snippets() {
+    local config path filename
+    if ! config="$(pvesh get "/storage/$SNIPPET_STORAGE" --output-format json 2>/dev/null)"; then
+        warn "cannot inspect snippet storage '$SNIPPET_STORAGE'; its files will be preserved"
+        return
+    fi
+    if [[ "$(storage_field "$config" type)" != "dir" ]]; then
+        warn "snippet storage '$SNIPPET_STORAGE' is not directory-backed; its files will be preserved"
+        return
+    fi
+    path="$(storage_field "$config" path)"
+    if [[ -z "$path" || "$path" != /* || "$path" == "/" ]]; then
+        warn "snippet storage '$SNIPPET_STORAGE' returned an unsafe path; its files will be preserved"
+        return
+    fi
+    for filename in \
+        scenarioforge-core-user.yaml scenarioforge-core-network.yaml \
+        scenarioforge-app-user.yaml scenarioforge-app-network.yaml \
+        scenarioforge-participant-user.yaml scenarioforge-participant-network.yaml; do
+        [[ -e "$path/snippets/$filename" ]] && CLEANUP_SNIPPETS+=("$path/snippets/$filename")
+    done
+    return 0
+}
+
+bridge_owned_by_installer() {
+    local bridge="$1" recorded_created="$2" expected_comment="$3" config
+    config="$(pvesh get "/nodes/$PVE_NODE/network/$bridge" --output-format json 2>/dev/null)" || return 1
+    [[ "$(storage_field "$config" type)" == "bridge" ]] || return 1
+    [[ "$(storage_field "$config" comments)" == "$expected_comment" ]] || return 1
+    if [[ "$recorded_created" == "0" ]]; then
+        return 1
+    fi
+    [[ "$recorded_created" == "1" || -z "$recorded_created" ]]
+}
+
+discover_cleanup_bridges() {
+    if bridge_owned_by_installer "$MANAGEMENT_BRIDGE" "${CREATED_MANAGEMENT_BRIDGE:-}" \
+        "ScenarioForge isolated CORE management"; then
+        CLEANUP_BRIDGES+=("$MANAGEMENT_BRIDGE")
+    fi
+    if bridge_owned_by_installer "$HITL_BRIDGE" "${CREATED_HITL_BRIDGE:-}" \
+        "ScenarioForge isolated participant HITL"; then
+        CLEANUP_BRIDGES+=("$HITL_BRIDGE")
+    fi
+    return 0
+}
+
+cleanup_is_healthy_running_lab() {
+    local vmid status
+    [[ "${#CLEANUP_VMIDS[@]}" -eq 3 ]] || return 1
+    for vmid in "$CORE_VMID" "$APP_VMID" "$PARTICIPANT_VMID"; do
+        cleanup_target_selected "$vmid" || return 1
+        status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}')"
+        [[ "$status" == "running" ]] || return 1
+    done
+    if [[ "${INSTALL_COMPLETE:-}" == "1" ]]; then
+        return 0
+    fi
+    guest_marker_exists "$CORE_VMID" /var/lib/scenarioforge/core-ready \
+        && guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready
+}
+
+confirm_cleanup() {
+    local index response
+    log "Cleanup scope on Proxmox node $PVE_NODE:"
+    for index in "${!CLEANUP_VMIDS[@]}"; do
+        log "  VM: ${CLEANUP_LABELS[$index]} VMID ${CLEANUP_VMIDS[$index]} (including its disks)"
+    done
+    [[ "${#CLEANUP_SNIPPETS[@]}" -eq 0 ]] || log "  Cloud-Init snippets: ${#CLEANUP_SNIPPETS[@]} installer files"
+    [[ "${#CLEANUP_BRIDGES[@]}" -eq 0 ]] || log "  Installer-created bridges: ${CLEANUP_BRIDGES[*]}"
+    [[ "$CLEANUP_STATE_FOUND" -eq 0 && ! -f "$CREDENTIALS_FILE" ]] \
+        || log "  Saved installer state and credentials: $STATE_DIR"
+
+    if cleanup_is_healthy_running_lab; then
+        [[ "$FORCE_CLEANUP" -eq 1 ]] \
+            || die "the lab is complete and all three VMs are running; rerun cleanup with --force to remove it"
+        warn "--force permits removal of a complete, healthy running lab"
+    fi
+    if [[ "$DRY_RUN" -eq 1 || "$ASSUME_YES" -eq 1 ]]; then
+        return
+    fi
+    printf 'Type CLEANUP to permanently remove the resources listed above: '
+    read -r response
+    [[ "$response" == "CLEANUP" ]] || die "cleanup cancelled"
+}
+
+stop_and_destroy_cleanup_vms() {
+    local index label vmid status
+    for index in "${!CLEANUP_VMIDS[@]}"; do
+        label="${CLEANUP_LABELS[$index]}"
+        vmid="${CLEANUP_VMIDS[$index]}"
+        status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}')"
+        if [[ "$status" == "running" ]]; then
+            log "Requesting a graceful shutdown of $label VMID $vmid (timeout: 60 seconds)"
+            if ! run qm shutdown "$vmid" --timeout 60; then
+                warn "$label VMID $vmid did not shut down gracefully"
+            fi
+            status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}')"
+            if [[ "$status" == "running" ]]; then
+                warn "forcing $label VMID $vmid to stop"
+                run qm stop "$vmid"
+            fi
+        fi
+        log "Destroying installer-owned $label VMID $vmid and its disks"
+        run qm destroy "$vmid" --purge 1 --destroy-unreferenced-disks 1
+    done
+}
+
+config_uses_bridge() {
+    local config="$1" bridge="$2"
+    [[ "$config" == *"bridge=$bridge,"* || "$config" == *"bridge=$bridge"$'\n'* || "$config" == *"bridge=$bridge" ]]
+}
+
+bridge_in_use_after_cleanup() {
+    local bridge="$1" guest_id config
+    while read -r guest_id; do
+        [[ -n "$guest_id" ]] || continue
+        cleanup_target_selected "$guest_id" && continue
+        config="$(qm config "$guest_id" 2>/dev/null || true)"
+        config_uses_bridge "$config" "$bridge" && return 0
+    done < <(qm list 2>/dev/null | awk 'NR > 1 {print $1}')
+    if command -v pct >/dev/null 2>&1; then
+        while read -r guest_id; do
+            [[ -n "$guest_id" ]] || continue
+            config="$(pct config "$guest_id" 2>/dev/null || true)"
+            config_uses_bridge "$config" "$bridge" && return 0
+        done < <(pct list 2>/dev/null | awk 'NR > 1 {print $1}')
+    fi
+    return 1
+}
+
+remove_cleanup_bridges() {
+    local bridge
+    local -a removed=()
+    for bridge in "${CLEANUP_BRIDGES[@]}"; do
+        if bridge_in_use_after_cleanup "$bridge"; then
+            warn "preserving installer-created bridge $bridge because another VM or container still uses it"
+            continue
+        fi
+        log "Removing installer-created bridge $bridge"
+        run pvesh delete "/nodes/$PVE_NODE/network/$bridge"
+        NETWORK_CHANGES=1
+        removed+=("$bridge")
+    done
+    apply_network_changes
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        for bridge in "${removed[@]}"; do
+            ip link show "$bridge" >/dev/null 2>&1 \
+                && die "bridge $bridge still exists after applying its removal"
+        done
+    fi
+}
+
+remove_cleanup_files() {
+    local path
+    for path in "${CLEANUP_SNIPPETS[@]}"; do
+        log "Removing Cloud-Init snippet $path"
+        run rm -f -- "$path"
+    done
+    if [[ "$CLEANUP_STATE_FOUND" -eq 1 || -f "$CREDENTIALS_FILE" ]]; then
+        log "Removing saved installer state and credentials"
+        run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            run rmdir "$STATE_DIR"
+        elif [[ -d "$STATE_DIR" ]] && ! run rmdir "$STATE_DIR" 2>/dev/null; then
+            warn "preserving non-empty state directory $STATE_DIR"
+        fi
+    fi
+}
+
+perform_cleanup() {
+    [[ "$STATE_DIR" == /* && "$STATE_DIR" != "/" ]] || die "cleanup state directory must be an absolute, non-root path"
+    load_cleanup_scope
+    discover_cleanup_snippets
+    discover_cleanup_bridges
+    if [[ "${#CLEANUP_VMIDS[@]}" -eq 0 && "${#CLEANUP_SNIPPETS[@]}" -eq 0 \
+        && "${#CLEANUP_BRIDGES[@]}" -eq 0 && "$CLEANUP_STATE_FOUND" -eq 0 \
+        && ! -f "$CREDENTIALS_FILE" ]]; then
+        log "No partial or installer-owned ScenarioForge lab resources were found"
+        return
+    fi
+    confirm_cleanup
+    stop_and_destroy_cleanup_vms
+    remove_cleanup_bridges
+    remove_cleanup_files
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "Cleanup dry run complete; no resources were changed"
+    else
+        log "ScenarioForge Proxmox lab cleanup complete; cached base images were preserved for reuse"
+    fi
+}
+
 perform_install() {
     progress "Validating Proxmox, storage, VMIDs, and requested networks"
     validate_install_inputs
@@ -1088,6 +1381,12 @@ perform_install() {
     ensure_isolated_bridge "$MANAGEMENT_BRIDGE" "ScenarioForge isolated CORE management"
     ensure_isolated_bridge "$HITL_BRIDGE" "ScenarioForge isolated participant HITL"
     apply_network_changes
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        ip link show "$MANAGEMENT_BRIDGE" >/dev/null 2>&1 \
+            || die "management bridge did not appear after applying network configuration"
+        ip link show "$HITL_BRIDGE" >/dev/null 2>&1 \
+            || die "HITL bridge did not appear after applying network configuration"
+    fi
 
     progress "Preparing Cloud-Init snippet storage"
     ensure_snippet_storage
@@ -1125,6 +1424,7 @@ perform_install() {
             warn "Guest logs: /var/log/scenarioforge-{core,app}-bootstrap.log"
             exit 2
         fi
+        mark_install_complete
     else
         progress "Guest provisioning started in the background (--no-wait)"
     fi
@@ -1136,15 +1436,17 @@ main() {
     parse_args "$@"
     trap 'exit_code=$?; on_unexpected_error "$LINENO" "$exit_code"' ERR
     require_root_and_pve
-    if [[ "$COMMAND" == "status" ]]; then
-        if [[ "$STATUS_WATCH" -eq 1 ]]; then
-            watch_status
-        else
-            show_status
-        fi
-    else
-        perform_install
-    fi
+    case "$COMMAND" in
+        status)
+            if [[ "$STATUS_WATCH" -eq 1 ]]; then
+                watch_status
+            else
+                show_status
+            fi
+            ;;
+        cleanup) perform_cleanup ;;
+        install) perform_install ;;
+    esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

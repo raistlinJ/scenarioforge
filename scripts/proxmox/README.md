@@ -158,17 +158,38 @@ Repository and image URLs can also be overridden with
 
 ## Failure behavior and cleanup
 
-The installer intentionally leaves created VMs and logs intact after a guest
-bootstrap failure. It does not offer an automatic destroy command: VM disks and
-network configuration are material resources and should not be removed based on
-a guessed recovery decision.
+The installer intentionally leaves created VMs and guest logs intact after a
+bootstrap failure so the failure can be inspected. To preview and then remove a
+partial, stopped, or incomplete installation, run:
 
-Inspect the failure, then remove explicitly selected VMs with `qm destroy` if
-you want a clean retry. Remove `sfmgmt0` and `sfhitl0` through the Proxmox UI or
-node network API only after confirming no VM still uses them. Cloud-Init
-snippets are named `scenarioforge-*.yaml` in the configured snippet storage.
-After removing the selected VMs, remove `/etc/scenarioforge-lab` yourself to
-acknowledge that its saved state and credentials are no longer needed.
+```bash
+sudo scripts/proxmox/install-scenarioforge-lab.sh cleanup --dry-run
+sudo scripts/proxmox/install-scenarioforge-lab.sh cleanup
+```
+
+`--cleanup` is an alias for the `cleanup` command. Cleanup displays its exact
+scope and requires typing `CLEANUP`; use `--yes` for unattended recovery. It
+gracefully shuts down running target VMs, force-stops them only when needed,
+then removes their disks, the six installer Cloud-Init snippets, saved state and
+credentials, and installer-created bridges that no other VM or container uses.
+Downloaded Debian and Ubuntu base images remain cached for a faster retry.
+
+Deletion is intentionally identity-checked. With a state file, each recorded
+VMID must still have its expected ScenarioForge name or installer Cloud-Init
+snippet. Without a state file, cleanup only recognizes the configured VMIDs
+when their names exactly match `scenarioforge-core`, `scenarioforge-app`, and
+`scenarioforge-participant` (or the corresponding `SF_*_NAME` overrides).
+Unrelated VMs and pre-existing bridges are preserved.
+
+A complete lab with all three VMs running is protected from ordinary cleanup.
+To intentionally remove one, supply `--force` in addition to the normal
+confirmation (or `--yes`):
+
+```bash
+sudo scripts/proxmox/install-scenarioforge-lab.sh cleanup --force
+```
+
+Cleanup is permanent. Always inspect `cleanup --dry-run` before using `--yes`.
 
 ## Security notes
 
