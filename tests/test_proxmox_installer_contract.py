@@ -66,7 +66,15 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "set_bootstrap_status 10 'installing system packages and building CORE from source'" in source
     assert "set_bootstrap_status 30 'creating the native ScenarioForge Python environment'" in source
     assert "set_bootstrap_status 25 'installing the minimal XFCE desktop'" in source
-    assert 'set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"' in source
+    assert 'set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line: $command)"' in source
+    assert 'trap \'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"\' ERR' in source
+    assert "xserver-xorg-input-all xserver-xorg-video-all" in source
+    assert "restarting and verifying the CORE XFCE graphical login" in source
+    assert "verifying the APP XFCE graphical login" in source
+    assert "APP XFCE graphical login did not become active" in source
+    assert "participant XFCE graphical login did not become active" in source
+    assert "journalctl -u lightdm -n 100 --no-pager" in source
+    assert "Permit status/watch to recognize a manually completed recovery" in source
     assert "/var/lib/scenarioforge/bootstrap-percent" in source
     assert "Guest bootstrap heartbeat (elapsed $elapsed)" in source
     assert "Install progress:" in source

@@ -171,6 +171,25 @@ Bootstrap logs are available inside the guests:
 /var/log/cloud-init-output.log
 ```
 
+If APP provisioning reaches the HTTPS health check and then reports exit code
+`3` from `systemctl is-active --quiet lightdm`, the native web application is
+already healthy but the XFCE display manager is inactive. Installer version
+0.5.1 explicitly installs the X.Org input/video drivers, retries LightDM, and
+includes its service journal and Xorg log when it still cannot start. Inspect an
+existing affected VM with:
+
+```bash
+qm guest exec 9402 -- bash -lc '
+systemctl status lightdm --no-pager -l || true
+journalctl -u lightdm -n 100 --no-pager || true
+tail -n 100 /var/log/lightdm/lightdm.log /var/log/lightdm/x-0.log 2>/dev/null || true
+'
+```
+
+After repairing a failed guest and writing its normal readiness marker, a
+manually removed participant `net1` is recognized by `status` even though the
+failed host installer did not get to update its saved state.
+
 ## Graphical consoles and native services
 
 Open any VM in the Proxmox GUI and select **Console** to reach its XFCE login.

@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.5.0"
+SCRIPT_VERSION="0.5.1"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -666,11 +666,11 @@ set_bootstrap_status() {
     printf 'BOOTSTRAP [%s%%]: %s\n' "$percent" "$*"
 }
 on_bootstrap_error() {
-    local exit_code="$1" line="$2" percent=0
+    local exit_code="$1" line="$2" command="${3:-unknown command}" percent=0
     trap - ERR
     [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
         || read -r percent < /var/lib/scenarioforge/bootstrap-percent
-    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
+    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line: $command)"
     exit "$exit_code"
 }
 fail_bootstrap() {
@@ -681,7 +681,7 @@ fail_bootstrap() {
     printf 'ERROR: %s\n' "$*" >&2
     exit 1
 }
-trap 'on_bootstrap_error "$?" "$LINENO"' ERR
+trap 'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
 set_bootstrap_status 5 'preparing coreemu-minimal source installer'
@@ -780,7 +780,21 @@ set_bootstrap_status 97 'verifying the CORE HITL interface'
 if ip -4 addr show dev ens19 | grep -q 'inet '; then
     fail_bootstrap 'ens19 unexpectedly has an IPv4 address'
 fi
-systemctl is-active --quiet lightdm
+if ! systemctl is-active --quiet lightdm; then
+    set_bootstrap_status 98 'restarting and verifying the CORE XFCE graphical login'
+    systemctl reset-failed lightdm || true
+    systemctl restart lightdm || true
+    for attempt in $(seq 1 15); do
+        systemctl is-active --quiet lightdm && break
+        sleep 2
+    done
+fi
+if ! systemctl is-active --quiet lightdm; then
+    systemctl status lightdm --no-pager -l || true
+    journalctl -u lightdm -n 100 --no-pager || true
+    tail -n 100 /var/log/lightdm/lightdm.log /var/log/lightdm/x-0.log 2>/dev/null || true
+    fail_bootstrap 'CORE XFCE graphical login did not become active'
+fi
 command -v core-gui >/dev/null
 
 touch /var/lib/scenarioforge/core-ready
@@ -803,11 +817,11 @@ set_bootstrap_status() {
     printf 'BOOTSTRAP [%s%%]: %s\n' "$percent" "$*"
 }
 on_bootstrap_error() {
-    local exit_code="$1" line="$2" percent=0
+    local exit_code="$1" line="$2" command="${3:-unknown command}" percent=0
     trap - ERR
     [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
         || read -r percent < /var/lib/scenarioforge/bootstrap-percent
-    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
+    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line: $command)"
     exit "$exit_code"
 }
 fail_bootstrap() {
@@ -818,14 +832,15 @@ fail_bootstrap() {
     printf 'ERROR: %s\n' "$*" >&2
     exit 1
 }
-trap 'on_bootstrap_error "$?" "$LINENO"' ERR
+trap 'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
 set_bootstrap_status 5 'installing XFCE and native ScenarioForge system packages'
 apt-get update
 apt-get install -y --no-install-recommends \
     build-essential dbus-x11 graphviz lightdm lightdm-gtk-greeter nginx \
-    openssl python3-dev python3-full python3-venv xfce4 xorg xterm
+    openssl python3-dev python3-full python3-venv xfce4 xorg \
+    xserver-xorg-input-all xserver-xorg-video-all xterm
 systemctl set-default graphical.target
 systemctl enable --now lightdm
 
@@ -970,7 +985,21 @@ for attempt in $(seq 1 60); do
     sleep 5
 done
 
-systemctl is-active --quiet lightdm
+set_bootstrap_status 95 'verifying the APP XFCE graphical login'
+if ! systemctl is-active --quiet lightdm; then
+    systemctl reset-failed lightdm || true
+    systemctl restart lightdm || true
+    for attempt in $(seq 1 15); do
+        systemctl is-active --quiet lightdm && break
+        sleep 2
+    done
+fi
+if ! systemctl is-active --quiet lightdm; then
+    systemctl status lightdm --no-pager -l || true
+    journalctl -u lightdm -n 100 --no-pager || true
+    tail -n 100 /var/log/lightdm/lightdm.log /var/log/lightdm/x-0.log 2>/dev/null || true
+    fail_bootstrap 'APP XFCE graphical login did not become active'
+fi
 touch /var/lib/scenarioforge/app-ready
 set_bootstrap_status 100 'ready'
 echo 'ScenarioForge provisioning complete.'
@@ -990,25 +1019,47 @@ set_bootstrap_status() {
     printf 'BOOTSTRAP [%s%%]: %s\n' "$percent" "$*"
 }
 on_bootstrap_error() {
-    local exit_code="$1" line="$2" percent=0
+    local exit_code="$1" line="$2" command="${3:-unknown command}" percent=0
     trap - ERR
     [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
         || read -r percent < /var/lib/scenarioforge/bootstrap-percent
-    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
+    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line: $command)"
     exit "$exit_code"
 }
-trap 'on_bootstrap_error "$?" "$LINENO"' ERR
+fail_bootstrap() {
+    local percent=0
+    [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
+        || read -r percent < /var/lib/scenarioforge/bootstrap-percent
+    set_bootstrap_status "$percent" "failed: $*"
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
+trap 'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
 set_bootstrap_status 10 'updating Debian package metadata'
 apt-get update
 set_bootstrap_status 25 'installing the minimal XFCE desktop'
 apt-get install -y --no-install-recommends \
-    dbus-x11 lightdm lightdm-gtk-greeter xfce4 xorg xterm
+    dbus-x11 lightdm lightdm-gtk-greeter xfce4 xorg \
+    xserver-xorg-input-all xserver-xorg-video-all xterm
 set_bootstrap_status 85 'enabling the XFCE graphical login'
 systemctl set-default graphical.target
 systemctl enable --now lightdm
-systemctl is-active --quiet lightdm
+if ! systemctl is-active --quiet lightdm; then
+    systemctl reset-failed lightdm || true
+    systemctl restart lightdm || true
+    for attempt in $(seq 1 15); do
+        systemctl is-active --quiet lightdm && break
+        sleep 2
+    done
+fi
+if ! systemctl is-active --quiet lightdm; then
+    systemctl status lightdm --no-pager -l || true
+    journalctl -u lightdm -n 100 --no-pager || true
+    tail -n 100 /var/log/lightdm/lightdm.log /var/log/lightdm/x-0.log 2>/dev/null || true
+    fail_bootstrap 'participant XFCE graphical login did not become active'
+fi
 
 touch /var/lib/scenarioforge/participant-ready
 set_bootstrap_status 100 'ready'
@@ -1583,6 +1634,12 @@ show_status() {
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
     # shellcheck disable=SC1090
     source "$STATE_FILE"
+    if [[ "${PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED:-0}" == "1" ]] \
+        && ! qm config "$PARTICIPANT_VMID" 2>/dev/null | grep -q '^net1:'; then
+        # Permit status/watch to recognize a manually completed recovery even
+        # when the failed host installer did not get to rewrite state.env.
+        PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
+    fi
     if [[ "$PARTICIPANT_BOOTSTRAP_REQUIRED" == "1" ]]; then
         participant_marker=/var/lib/scenarioforge/participant-ready
     fi

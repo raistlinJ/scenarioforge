@@ -14,7 +14,7 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.1.1"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 VMRUN_TYPE="ws"
 
