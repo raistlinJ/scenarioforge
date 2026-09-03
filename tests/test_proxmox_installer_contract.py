@@ -63,7 +63,9 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "for attempt in $(seq 1 60)" in source
     assert "journalctl -u core-daemon -n 100 --no-pager" in source
     assert 'waiting for core-daemon gRPC on 0.0.0.0:50051' in source
-    assert '$4 == "0.0.0.0:50051" || $4 == "*:50051"' in source
+    assert "timeout 2 bash -c '</dev/tcp/'\"$CORE_MANAGEMENT_IP\"'/50051'" in source
+    assert "guest_bootstrap_failure_text" in source
+    assert "cloud-final failed while bootstrap phase was" in source
     assert 'shell_assignment INSTALL_PHASE' in source
     assert 'printf \'  Host installer:' in source
     assert install_body.index("write_state") < install_body.index("download_verified_image")
@@ -98,6 +100,33 @@ printf 'combined=%s\\n' "$(current_install_percent)"
     assert result.returncode == 0, result.stderr
     assert "PROGRESS [ 18%] [1/8] Downloading images" in result.stdout
     assert "combined=64" in result.stdout
+
+
+def test_guest_cloud_init_failure_is_reported_from_a_stale_phase() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+guest_command_output() {{
+    shift
+    case "$*" in
+        'cat /var/lib/scenarioforge/bootstrap-status')
+            printf '%s\\n' 'waiting for core-daemon gRPC on 0.0.0.0:50051'
+            ;;
+        'systemctl show cloud-final --property ActiveState --value')
+            printf '%s\\n' failed
+            ;;
+    esac
+}}
+guest_bootstrap_failure_text 9401
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "cloud-final failed while bootstrap phase was" in result.stdout
+    assert "waiting for core-daemon gRPC" in result.stdout
 
 
 def test_status_watch_waits_for_fresh_install_state(tmp_path: Path) -> None:

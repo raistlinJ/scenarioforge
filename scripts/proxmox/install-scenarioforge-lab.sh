@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.4.0"
+SCRIPT_VERSION="0.4.1"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -76,6 +76,7 @@ INSTALL_COMPLETE=""
 INSTALL_PHASE=""
 INSTALL_PERCENT=0
 INSTALL_STARTED_EPOCH=""
+PROVISIONING_FAILURE_DETAIL=""
 RUNTIME_TRACKING=0
 CLEANUP_STATE_FOUND=0
 declare -a CLEANUP_VMIDS=()
@@ -667,6 +668,14 @@ on_bootstrap_error() {
     set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
     exit "$exit_code"
 }
+fail_bootstrap() {
+    local percent=0
+    [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
+        || read -r percent < /var/lib/scenarioforge/bootstrap-percent
+    set_bootstrap_status "$percent" "failed: $*"
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
 trap 'on_bootstrap_error "$?" "$LINENO"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
@@ -721,7 +730,7 @@ systemctl is-active --quiet docker
 systemctl restart core-daemon
 
 grpc_ready() {
-    ss -H -4 -lnt | awk '$4 == "0.0.0.0:50051" || $4 == "*:50051" { found=1 } END { exit !found }'
+    timeout 2 bash -c '</dev/tcp/'"$CORE_MANAGEMENT_IP"'/50051' 2>/dev/null
 }
 
 set_bootstrap_status 90 'waiting for core-daemon gRPC on 0.0.0.0:50051'
@@ -737,17 +746,16 @@ for attempt in $(seq 1 60); do
     sleep 2
 done
 if [[ "$core_ready" -ne 1 ]]; then
-    echo 'core-daemon did not become ready on 0.0.0.0:50051' >&2
+    echo "core-daemon did not accept IPv4 TCP connections at $CORE_MANAGEMENT_IP:50051" >&2
     systemctl status core-daemon --no-pager -l || true
     journalctl -u core-daemon -n 100 --no-pager || true
     ss -lntp || true
-    exit 1
+    fail_bootstrap "core-daemon did not accept IPv4 TCP connections at $CORE_MANAGEMENT_IP:50051"
 fi
 
 set_bootstrap_status 97 'verifying the CORE HITL interface'
 if ip -4 addr show dev ens19 | grep -q 'inet '; then
-    echo 'ens19 unexpectedly has an IPv4 address' >&2
-    exit 1
+    fail_bootstrap 'ens19 unexpectedly has an IPv4 address'
 fi
 
 touch /var/lib/scenarioforge/core-ready
@@ -776,6 +784,14 @@ on_bootstrap_error() {
         || read -r percent < /var/lib/scenarioforge/bootstrap-percent
     set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
     exit "$exit_code"
+}
+fail_bootstrap() {
+    local percent=0
+    [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
+        || read -r percent < /var/lib/scenarioforge/bootstrap-percent
+    set_bootstrap_status "$percent" "failed: $*"
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
 }
 trap 'on_bootstrap_error "$?" "$LINENO"' ERR
 
@@ -836,7 +852,7 @@ for attempt in $(seq 1 60); do
     if [[ "$attempt" -eq 60 ]]; then
         docker compose --env-file .scenarioforge.env ps
         docker compose --env-file .scenarioforge.env logs --tail=100
-        exit 1
+        fail_bootstrap 'ScenarioForge HTTPS health check did not pass within five minutes'
     fi
     sleep 5
 done
@@ -863,6 +879,7 @@ write_cloud_init_files() {
         shell_assignment CORE_REPO_REF "$CORE_REPO_REF"
         shell_assignment SCENARIOFORGE_URL "$SCENARIOFORGE_URL"
         shell_assignment SCENARIOFORGE_REF "$SCENARIOFORGE_REF"
+        shell_assignment CORE_MANAGEMENT_IP "$(plain_ip "$CORE_MANAGEMENT_CIDR")"
     } > "$WORK_DIR/core-installer.env"
     {
         shell_assignment SCENARIOFORGE_URL "$SCENARIOFORGE_URL"
@@ -1157,6 +1174,19 @@ guest_bootstrap_percent() {
     fi
 }
 
+guest_bootstrap_failure_text() {
+    local vmid="$1" phase cloud_state
+    phase="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
+    if [[ "$phase" == failed* ]]; then
+        printf '%s\n' "$phase"
+        return
+    fi
+    cloud_state="$(guest_command_output "$vmid" systemctl show cloud-final --property ActiveState --value)"
+    if [[ "$cloud_state" == "failed" ]]; then
+        printf 'cloud-final failed while bootstrap phase was: %s\n' "${phase:-unknown}"
+    fi
+}
+
 format_elapsed() {
     local started="$1" now elapsed hours minutes seconds
     [[ "$started" =~ ^[0-9]+$ ]] || { printf 'unknown'; return; }
@@ -1187,9 +1217,14 @@ current_install_percent() {
 }
 
 guest_progress_text() {
-    local vmid="$1" bootstrap_log="$2" marker="$3" current percent
+    local vmid="$1" bootstrap_log="$2" marker="$3" current percent failure
     percent="$(guest_bootstrap_percent "$vmid" "$marker")"
     current="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
+    failure="$(guest_bootstrap_failure_text "$vmid")"
+    if [[ -n "$failure" ]]; then
+        printf '[%3d%%] FAILED: %s\n' "$percent" "$failure"
+        return
+    fi
     if [[ -z "$current" ]]; then
         current="$(guest_last_log_line "$vmid" "$bootstrap_log")"
     fi
@@ -1217,12 +1252,21 @@ report_guest_activity() {
 }
 
 wait_for_provisioning() {
-    local deadline now core_ready=0 app_ready=0 core_percent app_percent elapsed
+    local deadline now core_ready=0 app_ready=0 core_percent app_percent elapsed core_failure app_failure
     deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
     log "Waiting up to $WAIT_MINUTES minutes for CORE and ScenarioForge provisioning"
     while :; do
         guest_marker_exists "$CORE_VMID" /var/lib/scenarioforge/core-ready && core_ready=1
         guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready && app_ready=1
+        core_failure=""
+        app_failure=""
+        [[ "$core_ready" -eq 1 ]] || core_failure="$(guest_bootstrap_failure_text "$CORE_VMID")"
+        [[ "$app_ready" -eq 1 ]] || app_failure="$(guest_bootstrap_failure_text "$APP_VMID")"
+        if [[ -n "$core_failure" || -n "$app_failure" ]]; then
+            PROVISIONING_FAILURE_DETAIL="CORE=${core_failure:-not failed}; APP=${app_failure:-not failed}"
+            warn "Guest provisioning failed: $PROVISIONING_FAILURE_DETAIL"
+            return 1
+        fi
         report_guest_activity CORE "$CORE_VMID" /var/log/scenarioforge-core-bootstrap.log
         report_guest_activity APP "$APP_VMID" /var/log/scenarioforge-app-bootstrap.log
         core_percent="$(guest_bootstrap_percent "$CORE_VMID" /var/lib/scenarioforge/core-ready)"
@@ -1263,7 +1307,7 @@ for interface in interfaces:
 }
 
 vm_status_line() {
-    local label="$1" vmid="$2" marker="$3" status="missing" bootstrap="unknown" agent="n/a" phase=""
+    local label="$1" vmid="$2" marker="$3" status="missing" bootstrap="unknown" agent="n/a" phase="" failure=""
     if qm status "$vmid" >/dev/null 2>&1; then
         status="$(qm status "$vmid" | awk '{print $2}')"
         if [[ "$status" == "running" ]]; then
@@ -1275,8 +1319,9 @@ vm_status_line() {
                 if guest_marker_exists "$vmid" "$marker"; then
                     bootstrap="ready"
                 else
+                    failure="$(guest_bootstrap_failure_text "$vmid")"
                     phase="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
-                    if [[ "$phase" == failed* ]]; then
+                    if [[ -n "$failure" || "$phase" == failed* ]]; then
                         bootstrap="failed"
                     else
                         bootstrap="in-progress"
@@ -1727,10 +1772,15 @@ perform_install() {
     if [[ "$WAIT_FOR_BOOTSTRAP" -eq 1 ]]; then
         progress 55 "Waiting for CORE and ScenarioForge guest provisioning"
         if ! wait_for_provisioning; then
-            warn "Provisioning did not finish before the timeout. VMs were left intact for diagnosis."
+            if [[ -n "$PROVISIONING_FAILURE_DETAIL" ]]; then
+                warn "Provisioning stopped after an explicit guest failure. VMs were left intact for diagnosis."
+                write_runtime_status failed "Guest provisioning failed" "$PROVISIONING_FAILURE_DETAIL"
+            else
+                warn "Provisioning did not finish before the timeout. VMs were left intact for diagnosis."
+                write_runtime_status failed "Guest provisioning timed out" "CORE or ScenarioForge did not become ready within $WAIT_MINUTES minutes"
+            fi
             warn "Run: $0 status"
             warn "Guest logs: /var/log/scenarioforge-{core,app}-bootstrap.log"
-            write_runtime_status failed "Guest provisioning timed out" "CORE or ScenarioForge did not become ready within $WAIT_MINUTES minutes"
             exit 2
         fi
         mark_install_complete
