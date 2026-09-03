@@ -166,6 +166,9 @@ def test_cleanup_is_identity_scoped_and_protects_a_healthy_lab() -> None:
     assert "validate_network_reload" in source
     assert "Proxmox rejected the network reload" in source
     assert "preflight_cleanup_network" in source
+    assert "sanitize_host_environment" in source
+    assert 'PATH="/usr/sbin:/usr/bin:/sbin:/bin"' in source
+    assert "unset PYTHONHOME PYTHONPATH" in source
     assert 'cached base images were preserved for reuse' in source
 
 

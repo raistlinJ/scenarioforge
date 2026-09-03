@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.3.4"
+SCRIPT_VERSION="0.3.5"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -80,6 +80,14 @@ declare -a CLEANUP_VMIDS=()
 declare -a CLEANUP_LABELS=()
 declare -a CLEANUP_SNIPPETS=()
 declare -a CLEANUP_BRIDGES=()
+
+sanitize_host_environment() {
+    # Proxmox host tools and Debian Python modules must not inherit Conda/venv
+    # command paths or module overrides from an interactive root shell.
+    PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+    unset PYTHONHOME PYTHONPATH
+    export PATH
+}
 
 timestamp() {
     date '+%Y-%m-%d %H:%M:%S'
@@ -1661,6 +1669,7 @@ perform_install() {
 }
 
 main() {
+    sanitize_host_environment
     parse_args "$@"
     trap 'exit_code=$?; on_unexpected_error "$LINENO" "$exit_code"' ERR
     if [[ "$COMMAND" == "install" && "$DRY_RUN" -eq 0 ]]; then
