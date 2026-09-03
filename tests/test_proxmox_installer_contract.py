@@ -29,6 +29,7 @@ def test_installer_help_does_not_require_proxmox() -> None:
     assert result.returncode == 0, result.stderr
     assert "--dry-run" in result.stdout
     assert "--verbose" in result.stdout
+    assert "--watch" in result.stdout
     assert "--from-source" in result.stdout
 
 
@@ -46,6 +47,9 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "docker compose --env-file .scenarioforge.env up -d" in source
     assert "report_guest_activity CORE" in source
     assert "on_unexpected_error" in source
+    assert "guest_progress_text" in source
+    assert "set_bootstrap_status 'installing system packages and building CORE from source'" in source
+    assert "set_bootstrap_status 'building ScenarioForge and nginx container images'" in source
 
 
 def test_storage_probe_uses_proxmox_api_json() -> None:

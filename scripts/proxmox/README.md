@@ -96,6 +96,18 @@ Use `--no-wait` to return after starting the VMs. Check progress later with:
 sudo scripts/proxmox/install-scenarioforge-lab.sh status
 ```
 
+For a continuously updating view in a second Proxmox shell—even while the
+original installer is still running—use:
+
+```bash
+sudo scripts/proxmox/install-scenarioforge-lab.sh status --watch
+```
+
+It reports each VM's power state, QEMU guest-agent availability, readiness
+marker, explicit bootstrap phase, and latest available guest/Cloud-Init log
+activity. The default refresh interval is 10 seconds; change it with
+`--interval 5`. Stop watching with `Ctrl-C`; this does not stop provisioning.
+
 Bootstrap logs are available inside the guests:
 
 ```text
@@ -137,6 +149,7 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_SCENARIOFORGE_REF` | `main` |
 | `SF_WAIT_MINUTES` | `90` |
 | `SF_VERBOSE` | `0` (`1` enables verbose diagnostics) |
+| `SF_STATUS_INTERVAL` | `10` seconds |
 
 Repository and image URLs can also be overridden with
 `SF_CORE_MINIMAL_URL`, `SF_CORE_REPO_URL`, `SF_SCENARIOFORGE_URL`,

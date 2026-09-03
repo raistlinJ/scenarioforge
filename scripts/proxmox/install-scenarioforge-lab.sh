@@ -55,6 +55,8 @@ DRY_RUN=0
 ASSUME_YES=0
 WAIT_FOR_BOOTSTRAP=1
 VERBOSE="${SF_VERBOSE:-0}"
+STATUS_WATCH=0
+STATUS_INTERVAL="${SF_STATUS_INTERVAL:-10}"
 COMMAND="install"
 PVE_NODE=""
 WORK_DIR=""
@@ -111,7 +113,7 @@ usage() {
     cat <<'EOF'
 Usage:
   install-scenarioforge-lab.sh install [options]
-  install-scenarioforge-lab.sh status
+  install-scenarioforge-lab.sh status [--watch] [--interval SECONDS]
   install-scenarioforge-lab.sh --help
 
 Provision three cloud-image VMs on the current Proxmox VE node:
@@ -132,6 +134,8 @@ Important options:
   --wait-minutes N             Bootstrap timeout (default: 90)
   --no-wait                    Start VMs and return without waiting for provisioning
   --verbose                    Show detailed progress and guest bootstrap activity
+  --watch                      Keep printing status until CORE and the app are ready
+  --interval SECONDS           Status watch interval (default: 10, minimum: 2)
   --yes                        Do not ask for installation confirmation
   --dry-run                    Validate and print mutations without applying them
 
@@ -180,6 +184,8 @@ parse_args() {
             --scenarioforge-ref) SCENARIOFORGE_REF="${2:?missing value for --scenarioforge-ref}"; shift 2 ;;
             --no-wait) WAIT_FOR_BOOTSTRAP=0; shift ;;
             --verbose) VERBOSE=1; shift ;;
+            --watch) STATUS_WATCH=1; shift ;;
+            --interval) STATUS_INTERVAL="${2:?missing value for --interval}"; shift 2 ;;
             --yes) ASSUME_YES=1; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
             *) die "unknown argument: $1" ;;
@@ -188,6 +194,8 @@ parse_args() {
 
     [[ "$COMMAND" == "install" || "$COMMAND" == "status" ]] || die "unknown command: $COMMAND"
     [[ "$VERBOSE" == "0" || "$VERBOSE" == "1" ]] || die "SF_VERBOSE must be 0 or 1"
+    [[ "$STATUS_WATCH" -eq 0 || "$COMMAND" == "status" ]] || die "--watch is only valid with the status command"
+    validate_integer "status interval" "$STATUS_INTERVAL" 2
 }
 
 require_root_and_pve() {
@@ -507,15 +515,24 @@ set -Eeuo pipefail
 exec > >(tee -a /var/log/scenarioforge-core-bootstrap.log) 2>&1
 source /etc/scenarioforge-installer.env
 
+install -d -m 0755 /var/lib/scenarioforge
+set_bootstrap_status() {
+    printf '%s\n' "$*" > /var/lib/scenarioforge/bootstrap-status
+    printf 'BOOTSTRAP: %s\n' "$*"
+}
+
 export DEBIAN_FRONTEND=noninteractive
+set_bootstrap_status 'preparing coreemu-minimal source installer'
 install -d -m 0755 /opt/bootstrap
 if [[ ! -d /opt/bootstrap/coreemu-minimal/.git ]]; then
     git clone --branch "$CORE_MINIMAL_REF" "$CORE_MINIMAL_URL" /opt/bootstrap/coreemu-minimal
 fi
 
 cd /opt/bootstrap/coreemu-minimal/9.2.1
+set_bootstrap_status 'installing system packages and building CORE from source'
 printf 'n\n' | ./setup-coreemu9.2.1.sh --from-source "$CORE_REPO_URL" "$CORE_REPO_REF"
 
+set_bootstrap_status 'configuring Docker for CORE networking'
 install -d -m 0755 /etc/docker
 if [[ -s /etc/docker/daemon.json ]]; then
     jq '. + {"bridge":"none","iptables":false}' /etc/docker/daemon.json > /etc/docker/daemon.json.new
@@ -525,6 +542,7 @@ fi
 install -m 0644 /etc/docker/daemon.json.new /etc/docker/daemon.json
 rm -f /etc/docker/daemon.json.new
 
+set_bootstrap_status 'installing ScenarioForge custom CORE services'
 if [[ ! -d /opt/scenarioforge-services/.git ]]; then
     git clone --branch "$SCENARIOFORGE_REF" "$SCENARIOFORGE_URL" /opt/scenarioforge-services
 else
@@ -549,6 +567,7 @@ else
     printf 'custom_services_dir = /opt/core/custom_services\n' >> "$CORE_CONF"
 fi
 
+set_bootstrap_status 'restarting and verifying Docker and core-daemon'
 systemctl restart docker
 systemctl restart core-daemon
 systemctl is-active --quiet docker
@@ -559,8 +578,8 @@ if ip -4 addr show dev ens19 | grep -q 'inet '; then
     exit 1
 fi
 
-install -d -m 0755 /var/lib/scenarioforge
 touch /var/lib/scenarioforge/core-ready
+set_bootstrap_status 'ready'
 echo 'CORE provisioning complete.'
 CORE_SCRIPT
 
@@ -570,7 +589,14 @@ set -Eeuo pipefail
 exec > >(tee -a /var/log/scenarioforge-app-bootstrap.log) 2>&1
 source /etc/scenarioforge-installer.env
 
+install -d -m 0755 /var/lib/scenarioforge
+set_bootstrap_status() {
+    printf '%s\n' "$*" > /var/lib/scenarioforge/bootstrap-status
+    printf 'BOOTSTRAP: %s\n' "$*"
+}
+
 export DEBIAN_FRONTEND=noninteractive
+set_bootstrap_status 'installing Docker Engine'
 if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
     sh /tmp/get-docker.sh
@@ -579,6 +605,7 @@ fi
 systemctl enable --now docker
 usermod -aG docker scenarioforge
 
+set_bootstrap_status 'cloning the ScenarioForge repository'
 if [[ ! -d /opt/scenarioforge/.git ]]; then
     git clone --branch "$SCENARIOFORGE_REF" "$SCENARIOFORGE_URL" /opt/scenarioforge
 else
@@ -607,13 +634,17 @@ ENV_FILE
 chmod 0600 /opt/scenarioforge/.scenarioforge.env
 
 cd /opt/scenarioforge
+set_bootstrap_status 'building ScenarioForge and nginx container images'
 docker compose --env-file .scenarioforge.env build
+set_bootstrap_status 'creating the ScenarioForge administrator account'
 install -d -m 0700 outputs/users
 docker compose --env-file .scenarioforge.env run --rm --no-deps \
     -e SF_BOOTSTRAP_ADMIN_PASSWORD="$SCENARIOFORGE_ADMIN_PASSWORD" \
     web python -c 'import json, os; from pathlib import Path; from werkzeug.security import generate_password_hash; p=Path("/app/outputs/users/users.json"); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps({"users":[{"username":"coreadmin","password_hash":generate_password_hash(os.environ["SF_BOOTSTRAP_ADMIN_PASSWORD"]),"role":"admin"}]}, indent=2))'
+set_bootstrap_status 'starting ScenarioForge services'
 docker compose --env-file .scenarioforge.env up -d
 
+set_bootstrap_status 'waiting for the ScenarioForge HTTPS health check'
 for attempt in $(seq 1 60); do
     if curl -kfsS https://127.0.0.1/healthz >/dev/null; then
         break
@@ -626,8 +657,8 @@ for attempt in $(seq 1 60); do
     sleep 5
 done
 
-install -d -m 0755 /var/lib/scenarioforge
 touch /var/lib/scenarioforge/app-ready
+set_bootstrap_status 'ready'
 echo 'ScenarioForge provisioning complete.'
 APP_SCRIPT
     chmod 0755 "$WORK_DIR/core-bootstrap.sh" "$WORK_DIR/app-bootstrap.sh"
@@ -886,9 +917,10 @@ guest_marker_exists() {
     grep -Eq '"exitcode"[[:space:]]*:[[:space:]]*0' <<<"$output"
 }
 
-guest_last_log_line() {
-    local vmid="$1" path="$2" output
-    output="$(qm guest exec "$vmid" -- tail -n 1 "$path" 2>/dev/null || true)"
+guest_command_output() {
+    local vmid="$1" output
+    shift
+    output="$(qm guest exec "$vmid" -- "$@" 2>/dev/null || true)"
     [[ -n "$output" ]] || return 0
     python3 -c '
 import json
@@ -900,6 +932,22 @@ except Exception:
 if payload.get("exitcode") == 0:
     print(str(payload.get("out-data", "")).strip())
 ' <<<"$output" 2>/dev/null || true
+}
+
+guest_last_log_line() {
+    guest_command_output "$1" tail -n 1 "$2"
+}
+
+guest_progress_text() {
+    local vmid="$1" bootstrap_log="$2" current
+    current="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
+    if [[ -z "$current" ]]; then
+        current="$(guest_last_log_line "$vmid" "$bootstrap_log")"
+    fi
+    if [[ -z "$current" ]]; then
+        current="$(guest_last_log_line "$vmid" /var/log/cloud-init-output.log)"
+    fi
+    printf '%s\n' "${current:-waiting for guest agent / Cloud-Init}"
 }
 
 report_guest_activity() {
@@ -960,10 +1008,11 @@ for interface in interfaces:
 }
 
 vm_status_line() {
-    local label="$1" vmid="$2" marker="$3" status="missing" bootstrap="unknown"
+    local label="$1" vmid="$2" marker="$3" status="missing" bootstrap="unknown" agent="n/a"
     if qm status "$vmid" >/dev/null 2>&1; then
         status="$(qm status "$vmid" | awk '{print $2}')"
         if [[ "$status" == "running" ]]; then
+            if qm agent "$vmid" ping >/dev/null 2>&1; then agent="ready"; else agent="waiting"; fi
             if [[ "$marker" == "-" ]]; then
                 bootstrap="n/a"
             elif guest_marker_exists "$vmid" "$marker"; then
@@ -973,7 +1022,7 @@ vm_status_line() {
             fi
         fi
     fi
-    printf '  %-13s VMID %-6s %-8s bootstrap=%s\n' "$label" "$vmid" "$status" "$bootstrap"
+    printf '  %-13s VMID %-6s %-8s agent=%-7s bootstrap=%s\n' "$label" "$vmid" "$status" "$agent" "$bootstrap"
 }
 
 show_status() {
@@ -984,6 +1033,8 @@ show_status() {
     vm_status_line CORE "$CORE_VMID" /var/lib/scenarioforge/core-ready
     vm_status_line APP "$APP_VMID" /var/lib/scenarioforge/app-ready
     vm_status_line PARTICIPANT "$PARTICIPANT_VMID" -
+    printf '  CORE progress:    %s\n' "$(guest_progress_text "$CORE_VMID" /var/log/scenarioforge-core-bootstrap.log)"
+    printf '  APP progress:     %s\n' "$(guest_progress_text "$APP_VMID" /var/log/scenarioforge-app-bootstrap.log)"
     printf '  CORE management: %s (SSH 22, gRPC 50051)\n' "$CORE_MANAGEMENT_CIDR"
     printf '  Participant:     %s on %s\n' "$PARTICIPANT_CIDR" "$HITL_BRIDGE"
     local app_ip
@@ -994,6 +1045,23 @@ show_status() {
         printf '  ScenarioForge:   query with: qm guest cmd %s network-get-interfaces\n' "$APP_VMID"
     fi
     printf '  Credentials:     %s (root-readable)\n' "$CREDENTIALS_FILE"
+}
+
+watch_status() {
+    [[ -f "$STATE_FILE" ]] || die "no installer state found at $STATE_FILE"
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+    emit INFO "Watching provisioning every $STATUS_INTERVAL seconds; press Ctrl-C to stop"
+    while :; do
+        printf '\n'
+        show_status
+        if guest_marker_exists "$CORE_VMID" /var/lib/scenarioforge/core-ready \
+            && guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready; then
+            emit INFO "CORE and ScenarioForge provisioning are ready"
+            return
+        fi
+        sleep "$STATUS_INTERVAL"
+    done
 }
 
 perform_install() {
@@ -1069,7 +1137,11 @@ main() {
     trap 'exit_code=$?; on_unexpected_error "$LINENO" "$exit_code"' ERR
     require_root_and_pve
     if [[ "$COMMAND" == "status" ]]; then
-        show_status
+        if [[ "$STATUS_WATCH" -eq 1 ]]; then
+            watch_status
+        else
+            show_status
+        fi
     else
         perform_install
     fi
