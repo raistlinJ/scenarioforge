@@ -4,10 +4,13 @@
 lab on one Proxmox VE node:
 
 - Debian 12 with CORE built from `raistlinJ/core` by the
-  `coreemu-minimal --from-source` path.
-- Ubuntu 24.04 with `raistlinJ/scenarioforge` running behind its Docker Compose
-  nginx service.
-- A minimal Debian 12 participant machine connected only to the HITL network.
+  `coreemu-minimal --from-source` path, including its XFCE desktop and
+  `core-gui` graphical client.
+- Ubuntu 24.04 with an XFCE desktop and `raistlinJ/scenarioforge` installed
+  natively in a Python virtual environment, managed by systemd, and published
+  through the distribution nginx service.
+- Debian 12 with a minimal XFCE participant desktop, connected only to the
+  HITL network after provisioning.
 
 The installer uses official Debian and Ubuntu cloud images, Proxmox Cloud-Init,
 and VirtIO interfaces. It supports amd64 Proxmox hosts in this first release.
@@ -28,8 +31,13 @@ sfhitl0 (new isolated bridge)
 └── Participant   net0 / ens18  10.254.200.10/24
 ```
 
-The CORE management and participant networks are deliberately separate. The
-participant cannot reach CORE SSH/gRPC or ScenarioForge management data.
+The CORE management and participant networks are deliberately separate. After
+provisioning, the participant cannot reach CORE SSH/gRPC or ScenarioForge
+management data.
+While the participant downloads XFCE packages, it temporarily has `net1` on
+the uplink bridge. The installer removes that virtual NIC before declaring the
+lab complete. Even with `--no-wait`, it waits for this isolation-critical step;
+only the longer CORE and app provisioning continue in the background.
 
 ## Before running
 
@@ -48,7 +56,10 @@ Run on the target Proxmox node as `root`. The node needs:
 - About 14 GiB of guest RAM and 140 GiB of provisioned guest storage with the
   defaults. Thin-provisioned storage does not consume all of that immediately.
 
-The installer refuses to overwrite an existing VMID. Adding the two portless
+All three VMs use standard virtual VGA while retaining a serial port for
+diagnostics. Their XFCE login screens are therefore available through the
+Proxmox **Console** / noVNC view after provisioning. The installer refuses to
+overwrite an existing VMID. Adding the two portless
 bridges applies the Proxmox node's pending network configuration. Run from a
 local console while changing node networking. The installer refuses to proceed
 when it detects pre-existing unapplied network changes, so it cannot accidentally
@@ -73,13 +84,13 @@ sudo scripts/proxmox/install-scenarioforge-lab.sh install --verbose
 ```
 
 The confirmation prompt requires typing `INSTALL`. Use `--yes` for an
-unattended invocation. CORE and ScenarioForge build concurrently and commonly
-take 20–60 minutes depending on the node and Internet connection. The default
-timeout is 90 minutes.
+unattended invocation. CORE, ScenarioForge, and the participant desktop build
+concurrently and commonly take 20–60 minutes depending on the node and Internet
+connection. The default timeout is 90 minutes.
 
 Output is timestamped and classified as `PROGRESS`, `INFO`, `WARN`, `ERROR`,
 `DEBUG`, or `DRY-RUN`. Normal mode reports every major stage, image download,
-VM creation, and the recurring CORE/ScenarioForge readiness state. Add
+VM creation, and the recurring readiness state of all three guests. Add
 `--verbose` to also show safe command diagnostics, repository/checksum details,
 Proxmox task activity, and the latest available bootstrap-log line from each
 guest. Verbose mode deliberately does not enable shell tracing because tracing
@@ -87,11 +98,12 @@ could expose generated passwords.
 
 Progress output includes an overall percentage and elapsed time. Percentages
 represent completed milestones rather than an estimated finish time: host VM
-and network preparation accounts for the first 55%, then the parallel CORE and
-ScenarioForge bootstraps contribute the remainder. Each guest reports its own
-percentage and named phase. During long source or container-image builds, the
-installer emits a heartbeat every 20 seconds even when the milestone percentage
-has not changed, making it clear that readiness monitoring is still active.
+and network preparation accounts for the first 55%, then the parallel CORE,
+ScenarioForge, and participant bootstraps contribute the remainder. Each guest
+reports its own percentage and named phase. During long source builds and Python
+dependency installs, the installer emits a heartbeat every 20 seconds even when
+the milestone percentage has not changed, making it clear that readiness
+monitoring is still active.
 
 To use different VMIDs, storage, uplink, and an SSH public key:
 
@@ -106,7 +118,9 @@ sudo scripts/proxmox/install-scenarioforge-lab.sh install \
   --ssh-public-key /root/.ssh/id_ed25519.pub
 ```
 
-Use `--no-wait` to return after starting the VMs. Check progress later with:
+Use `--no-wait` to return after the participant desktop is installed and its
+temporary uplink is removed, without waiting for CORE and ScenarioForge to
+finish. Check progress later with:
 
 ```bash
 sudo scripts/proxmox/install-scenarioforge-lab.sh status
@@ -133,12 +147,11 @@ automatically when state becomes available. The default refresh interval is 10
 seconds; change it with `--interval 5`. Stop watching with `Ctrl-C`; this does
 not stop provisioning.
 
-For CORE and the app, `bootstrap=in-progress` means the ready marker has not
-been written and no explicit bootstrap failure has been recorded;
-`bootstrap=failed` is accompanied by a `CORE progress` or `APP progress` line
-containing the exit code and guest-script line. The participant has no required
-bootstrap workload, so its guest agent may be reported as `optional` while its
-bootstrap state remains `n/a`.
+For each guest, `bootstrap=in-progress` means the ready marker has not been
+written and no explicit bootstrap failure has been recorded;
+`bootstrap=failed` is accompanied by its progress line containing the exit code
+and guest-script line. The participant is not ready until LightDM is running;
+its temporary uplink is then removed from the VM hardware.
 
 After restarting `core-daemon`, the CORE bootstrap waits up to two minutes for
 an actual IPv4 TCP connection to the CORE management address on port 50051.
@@ -154,8 +167,37 @@ Bootstrap logs are available inside the guests:
 ```text
 /var/log/scenarioforge-core-bootstrap.log
 /var/log/scenarioforge-app-bootstrap.log
+/var/log/scenarioforge-participant-bootstrap.log
 /var/log/cloud-init-output.log
 ```
+
+## Graphical consoles and native services
+
+Open any VM in the Proxmox GUI and select **Console** to reach its XFCE login.
+Use the VM usernames and passwords printed at completion. The CORE desktop has a
+**CORE Network Emulator** launcher that runs `core-gui`; `core-daemon` starts
+automatically in the background. The app and participant desktops start through
+LightDM as soon as their bootstrap completes, without an additional VM reboot.
+
+ScenarioForge itself is not containerized on the app VM. Its source and Python
+environment live under `/opt/scenarioforge`; systemd starts the backend on
+`127.0.0.1:9090`, and native nginx publishes HTTPS on port 443. Useful checks
+inside that VM are:
+
+```bash
+sudo systemctl status scenarioforge-web nginx
+sudo journalctl -u scenarioforge-web -u nginx -n 100 --no-pager
+curl -k https://127.0.0.1/healthz
+```
+
+The TLS certificate is self-signed, so browsers show a trust warning until it is
+replaced with a certificate trusted by the operator's environment.
+
+These desktop and native-service changes apply when the VMs are created. A
+`git pull` does not retrofit an already-installed serial-console/Docker lab. Use
+the documented cleanup flow and run a fresh install to adopt the complete new
+layout. Changing only an existing VM's Proxmox VGA hardware would also require a
+full VM stop/start and would not migrate the app out of Docker.
 
 Generated VM and Web UI passwords are persisted only in:
 
@@ -251,6 +293,8 @@ Cleanup is permanent. Always inspect `cleanup --dry-run` before using `--yes`.
 ## Security notes
 
 - The participant has no uplink or management NIC.
+- The participant receives a temporary uplink only while installing XFCE; the
+  installer removes it before successful completion.
 - CORE gRPC listens on `0.0.0.0`, but only on the isolated management bridge.
 - The Web UI listens on the ScenarioForge VM's uplink so an operator can reach
   it. Protect that LAN and use the generated admin password.

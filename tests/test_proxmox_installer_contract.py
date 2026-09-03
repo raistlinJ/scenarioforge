@@ -48,12 +48,24 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert '"bridge":"none","iptables":false' in source
     assert "/opt/core/custom_services" in source
     assert "this installer never overwrites VMs" in source
-    assert "docker compose --env-file .scenarioforge.env up -d" in source
+    assert "ExecStart=/opt/scenarioforge/.venv/bin/python -m webapp.app_backend" in source
+    assert "systemctl enable scenarioforge-web nginx" in source
+    assert "systemctl restart nginx" in source
+    assert "systemctl start scenarioforge-web" in source
+    assert "proxy_pass http://127.0.0.1:9090" in source
+    assert "docker compose --env-file .scenarioforge.env up -d" not in source
+    assert "command -v core-gui" in source
+    assert "systemctl enable --now lightdm" in source
+    assert "--serial0 socket --vga std" in source
+    assert "/var/lib/scenarioforge/participant-ready" in source
+    assert 'qm set "$PARTICIPANT_VMID" --delete net1' in source
     assert "report_guest_activity CORE" in source
+    assert "report_guest_activity PARTICIPANT" in source
     assert "on_unexpected_error" in source
     assert "guest_progress_text" in source
     assert "set_bootstrap_status 10 'installing system packages and building CORE from source'" in source
-    assert "set_bootstrap_status 35 'building ScenarioForge and nginx container images'" in source
+    assert "set_bootstrap_status 30 'creating the native ScenarioForge Python environment'" in source
+    assert "set_bootstrap_status 25 'installing the minimal XFCE desktop'" in source
     assert 'set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"' in source
     assert "/var/lib/scenarioforge/bootstrap-percent" in source
     assert "Guest bootstrap heartbeat (elapsed $elapsed)" in source
@@ -84,11 +96,13 @@ INSTALL_PERCENT=55
 INSTALL_COMPLETE=0
 CORE_VMID=9401
 APP_VMID=9402
+PARTICIPANT_VMID=9403
 guest_marker_exists() {{ return 1; }}
 guest_command_output() {{
     case "$1" in
         9401) printf '10\\n' ;;
         9402) printf '35\\n' ;;
+        9403) printf '55\\n' ;;
     esac
 }}
 printf 'combined=%s\\n' "$(current_install_percent)"
@@ -101,7 +115,7 @@ printf 'combined=%s\\n' "$(current_install_percent)"
     )
     assert result.returncode == 0, result.stderr
     assert "PROGRESS [ 18%] [1/8] Downloading images" in result.stdout
-    assert "combined=64" in result.stdout
+    assert "combined=69" in result.stdout
 
 
 def test_initial_progress_does_not_rewrite_existing_lab_state(tmp_path: Path) -> None:
@@ -163,6 +177,8 @@ show_completion_credentials
         "WEB ADMIN",
         "web-secret",
         "https://192.0.2.25/",
+        "Proxmox Console/noVNC",
+        "scenarioforge-web and nginx",
         str(credentials_file),
         "root-only, mode 0600",
     ):
@@ -463,6 +479,7 @@ CORE_NET2_MAC=02:00:00:00:00:12
 APP_NET0_MAC=02:00:00:00:00:20
 APP_NET1_MAC=02:00:00:00:00:21
 PARTICIPANT_NET0_MAC=02:00:00:00:00:30
+PARTICIPANT_NET1_MAC=02:00:00:00:00:31
 write_guest_bootstraps
 write_cloud_init_files
 """
@@ -478,7 +495,7 @@ write_cloud_init_files
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert isinstance(payload, dict), path.name
 
-    for user_data_name in ("core-user.yaml", "app-user.yaml"):
+    for user_data_name in ("core-user.yaml", "app-user.yaml", "participant-user.yaml"):
         payload = yaml.safe_load((tmp_path / user_data_name).read_text(encoding="utf-8"))
         written_files = {entry["path"]: entry for entry in payload["write_files"]}
         bootstrap = next(value for key, value in written_files.items() if key.startswith("/usr/local/sbin/"))

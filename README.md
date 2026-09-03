@@ -44,7 +44,7 @@ Replay-only packages and plain XML do not run generators during import.
 - [Highlights](#highlights)
 - [Screenshots](docs/screenshots.md)
 - [VM-mode setup](#vm-mode-setup-recommended)
-- [Proxmox three-VM installer](scripts/proxmox/README.md)
+- [Proxmox three-VM installer](scripts/proxmox/README.md) — graphical XFCE guests and native ScenarioForge service
 - [Other operating modes](#other-operating-modes)
 - [CORE install](docs/CORE_INSTALL.md)
 - [Quick start](docs/QUICK_START.md)
@@ -103,7 +103,7 @@ Full step-by-step setup guides:
 
 - [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md) – install CORE from our fork ([github.com/raistlinJ/core](https://github.com/raistlinJ/core)), which ships the fixes and updates ScenarioForge depends on — most easily via the [coreemu-minimal](https://github.com/raistlinJ/coreemu-minimal) installer — or apply those updates to a vanilla CORE install.
 - [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md) – building the CORE VM, the three-interface layout (management, HITL/participant, uplink), wiring the three machines on any hypervisor, and the complete VM-mode `.scenarioforge.env` reference.
-- [scripts/proxmox/README.md](scripts/proxmox/README.md) – provision the complete CORE, ScenarioForge, and participant VM layout from a Proxmox shell.
+- [scripts/proxmox/README.md](scripts/proxmox/README.md) – provision the complete graphical CORE, native ScenarioForge, and XFCE participant VM layout from a Proxmox shell.
 - [docs/NATIVE_MODE_SETUP.md](docs/NATIVE_MODE_SETUP.md) – local and remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox **VM / Access** workflow (credentials, required API privileges, CORE VM selection, HITL bridge apply).
 
 ### Recommended Lab Layout

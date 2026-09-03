@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.4.4"
+SCRIPT_VERSION="0.5.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -62,6 +62,8 @@ VERBOSE="${SF_VERBOSE:-0}"
 STATUS_WATCH=0
 STATUS_INTERVAL="${SF_STATUS_INTERVAL:-10}"
 FORCE_CLEANUP=0
+PARTICIPANT_BOOTSTRAP_REQUIRED=1
+PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
 COMMAND="install"
 PVE_NODE=""
 WORK_DIR=""
@@ -72,6 +74,7 @@ CURRENT_STEP=0
 TOTAL_STEPS=8
 LAST_CORE_ACTIVITY=""
 LAST_APP_ACTIVITY=""
+LAST_PARTICIPANT_ACTIVITY=""
 INSTALL_COMPLETE=""
 INSTALL_PHASE=""
 INSTALL_PERCENT=0
@@ -161,9 +164,9 @@ Usage:
   install-scenarioforge-lab.sh --help
 
 Provision three cloud-image VMs on the current Proxmox VE node:
-  - Debian 12 + CORE from raistlinJ/core via coreemu-minimal --from-source
-  - Ubuntu 24.04 + ScenarioForge via Docker Compose
-  - A minimal Debian 12 participant VM
+  - Debian 12 + CORE GUI/XFCE from raistlinJ/core via coreemu-minimal --from-source
+  - Ubuntu 24.04 + XFCE and a native ScenarioForge Python service behind nginx
+  - Debian 12 + a minimal XFCE participant desktop
 
 Important options:
   --storage ID                 VM disk storage (default: local-lvm)
@@ -176,9 +179,9 @@ Important options:
   --participant-vmid ID        Participant VMID (default: 9403)
   --ssh-public-key FILE        Add one OpenSSH public key to all guest users
   --wait-minutes N             Bootstrap timeout (default: 90)
-  --no-wait                    Start VMs and return without waiting for provisioning
+  --no-wait                    Return after the participant's temporary uplink is removed
   --verbose                    Show detailed progress and guest bootstrap activity
-  --watch                      Keep printing status until CORE and the app are ready
+  --watch                      Keep printing status until all three guests are ready
   --interval SECONDS           Status watch interval (default: 10, minimum: 2)
   --yes                        Do not ask for confirmation
   --dry-run                    Validate and print mutations without applying them
@@ -691,6 +694,24 @@ cd /opt/bootstrap/coreemu-minimal/9.2.1
 set_bootstrap_status 10 'installing system packages and building CORE from source'
 printf 'n\n' | ./setup-coreemu9.2.1.sh --from-source "$CORE_REPO_URL" "$CORE_REPO_REF"
 
+set_bootstrap_status 65 'configuring the CORE XFCE desktop and graphical client'
+command -v core-gui >/dev/null
+systemctl set-default graphical.target
+systemctl enable --now lightdm
+install -d -o corevm -g corevm -m 0755 /home/corevm/Desktop
+cat > /home/corevm/Desktop/core-gui.desktop <<'CORE_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=CORE Network Emulator
+Comment=Create and run CORE network scenarios
+Exec=/usr/bin/core-gui
+Icon=applications-engineering
+Terminal=false
+Categories=Education;Network;
+CORE_DESKTOP
+chown corevm:corevm /home/corevm/Desktop/core-gui.desktop
+chmod 0755 /home/corevm/Desktop/core-gui.desktop
+
 set_bootstrap_status 70 'configuring Docker for CORE networking'
 install -d -m 0755 /etc/docker
 if [[ -s /etc/docker/daemon.json ]]; then
@@ -759,6 +780,8 @@ set_bootstrap_status 97 'verifying the CORE HITL interface'
 if ip -4 addr show dev ens19 | grep -q 'inet '; then
     fail_bootstrap 'ens19 unexpectedly has an IPv4 address'
 fi
+systemctl is-active --quiet lightdm
+command -v core-gui >/dev/null
 
 touch /var/lib/scenarioforge/core-ready
 set_bootstrap_status 100 'ready'
@@ -798,16 +821,15 @@ fail_bootstrap() {
 trap 'on_bootstrap_error "$?" "$LINENO"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
-set_bootstrap_status 5 'installing Docker Engine'
-if ! command -v docker >/dev/null 2>&1; then
-    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-    sh /tmp/get-docker.sh
-    rm -f /tmp/get-docker.sh
-fi
-systemctl enable --now docker
-usermod -aG docker scenarioforge
+set_bootstrap_status 5 'installing XFCE and native ScenarioForge system packages'
+apt-get update
+apt-get install -y --no-install-recommends \
+    build-essential dbus-x11 graphviz lightdm lightdm-gtk-greeter nginx \
+    openssl python3-dev python3-full python3-venv xfce4 xorg xterm
+systemctl set-default graphical.target
+systemctl enable --now lightdm
 
-set_bootstrap_status 25 'cloning the ScenarioForge repository'
+set_bootstrap_status 20 'cloning the ScenarioForge repository'
 if [[ ! -d /opt/scenarioforge/.git ]]; then
     git clone --branch "$SCENARIOFORGE_REF" "$SCENARIOFORGE_URL" /opt/scenarioforge
 else
@@ -817,6 +839,13 @@ else
 fi
 chown -R scenarioforge:scenarioforge /opt/scenarioforge
 
+set_bootstrap_status 30 'creating the native ScenarioForge Python environment'
+runuser -u scenarioforge -- python3 -m venv /opt/scenarioforge/.venv
+runuser -u scenarioforge -- /opt/scenarioforge/.venv/bin/python -m pip install --upgrade pip
+runuser -u scenarioforge -- /opt/scenarioforge/.venv/bin/python -m pip install \
+    -r /opt/scenarioforge/webapp/requirements.txt
+
+flask_secret="$(openssl rand -hex 32)"
 cat > /opt/scenarioforge/.scenarioforge.env <<ENV_FILE
 CORE_HOST=$CORE_MANAGEMENT_IP
 CORE_PORT=50051
@@ -830,45 +859,168 @@ CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19
 CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router
 CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION=ScenarioForge participant network
 CORETG_HITL_CORE_IFX_IPV4=$CORE_HITL_CIDR
-CORETG_PUBLISH_HOST=0.0.0.0
+CORETG_HOST=127.0.0.1
+CORETG_PORT=9090
 CORETG_USE_RELOADER=0
+CORETG_SECRETS_DIR=/home/scenarioforge/.scenarioforge/secrets
+FLASK_SECRET=$flask_secret
 ENV_FILE
+chown scenarioforge:scenarioforge /opt/scenarioforge/.scenarioforge.env
 chmod 0600 /opt/scenarioforge/.scenarioforge.env
 
 cd /opt/scenarioforge
-set_bootstrap_status 35 'building ScenarioForge and nginx container images'
-docker compose --env-file .scenarioforge.env build
-set_bootstrap_status 75 'creating the ScenarioForge administrator account'
-install -d -m 0700 outputs/users
-docker compose --env-file .scenarioforge.env run --rm --no-deps \
-    -e SF_BOOTSTRAP_ADMIN_PASSWORD="$SCENARIOFORGE_ADMIN_PASSWORD" \
-    web python -c 'import json, os; from pathlib import Path; from werkzeug.security import generate_password_hash; p=Path("/app/outputs/users/users.json"); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps({"users":[{"username":"coreadmin","password_hash":generate_password_hash(os.environ["SF_BOOTSTRAP_ADMIN_PASSWORD"]),"role":"admin"}]}, indent=2))'
-set_bootstrap_status 82 'starting ScenarioForge services'
-docker compose --env-file .scenarioforge.env up -d
+set_bootstrap_status 65 'creating the ScenarioForge administrator account'
+install -d -o scenarioforge -g scenarioforge -m 0700 \
+    outputs/users /home/scenarioforge/.scenarioforge /home/scenarioforge/.scenarioforge/secrets
+runuser -u scenarioforge -- env SF_BOOTSTRAP_ADMIN_PASSWORD="$SCENARIOFORGE_ADMIN_PASSWORD" \
+    /opt/scenarioforge/.venv/bin/python -c 'import json, os; from pathlib import Path; from werkzeug.security import generate_password_hash; p=Path("outputs/users/users.json"); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps({"users":[{"username":"coreadmin","password_hash":generate_password_hash(os.environ["SF_BOOTSTRAP_ADMIN_PASSWORD"]),"role":"admin"}]}, indent=2))'
 
-set_bootstrap_status 90 'waiting for the ScenarioForge HTTPS health check'
+set_bootstrap_status 72 'configuring the native ScenarioForge systemd service'
+cat > /etc/systemd/system/scenarioforge-web.service <<'APP_SERVICE'
+[Unit]
+Description=ScenarioForge Web Application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=scenarioforge
+Group=scenarioforge
+WorkingDirectory=/opt/scenarioforge
+Environment=HOME=/home/scenarioforge
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/scenarioforge/.scenarioforge.env
+ExecStart=/opt/scenarioforge/.venv/bin/python -m webapp.app_backend
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+APP_SERVICE
+
+set_bootstrap_status 78 'configuring native nginx and TLS'
+install -d -m 0700 /etc/nginx/scenarioforge
+openssl req -x509 -nodes -newkey rsa:3072 -days 365 \
+    -keyout /etc/nginx/scenarioforge/server.key \
+    -out /etc/nginx/scenarioforge/server.crt \
+    -subj "/CN=$HOSTNAME"
+chmod 0600 /etc/nginx/scenarioforge/server.key
+cat > /etc/nginx/sites-available/scenarioforge <<'NGINX_CONFIG'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    client_max_body_size 1024m;
+
+    ssl_certificate /etc/nginx/scenarioforge/server.crt;
+    ssl_certificate_key /etc/nginx/scenarioforge/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location /healthz {
+        access_log off;
+        return 200 'ok';
+        add_header Content-Type text/plain;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:9090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 3700s;
+        proxy_read_timeout 3700s;
+    }
+}
+NGINX_CONFIG
+rm -f /etc/nginx/sites-enabled/default
+ln -sfn /etc/nginx/sites-available/scenarioforge /etc/nginx/sites-enabled/scenarioforge
+nginx -t
+
+set_bootstrap_status 85 'starting native ScenarioForge and nginx services'
+systemctl daemon-reload
+systemctl enable scenarioforge-web nginx
+systemctl restart nginx
+systemctl start scenarioforge-web
+
+set_bootstrap_status 90 'waiting for the native ScenarioForge HTTPS health check'
 for attempt in $(seq 1 60); do
-    if curl -kfsS https://127.0.0.1/healthz >/dev/null; then
+    if systemctl is-active --quiet scenarioforge-web \
+        && curl -fsS http://127.0.0.1:9090/healthz >/dev/null \
+        && curl -kfsS https://127.0.0.1/healthz >/dev/null; then
         break
     fi
     if [[ "$attempt" -eq 60 ]]; then
-        docker compose --env-file .scenarioforge.env ps
-        docker compose --env-file .scenarioforge.env logs --tail=100
-        fail_bootstrap 'ScenarioForge HTTPS health check did not pass within five minutes'
+        systemctl status scenarioforge-web nginx --no-pager -l || true
+        journalctl -u scenarioforge-web -u nginx -n 100 --no-pager || true
+        fail_bootstrap 'native ScenarioForge HTTPS health check did not pass within five minutes'
     fi
     sleep 5
 done
 
+systemctl is-active --quiet lightdm
 touch /var/lib/scenarioforge/app-ready
 set_bootstrap_status 100 'ready'
 echo 'ScenarioForge provisioning complete.'
 APP_SCRIPT
-    chmod 0755 "$WORK_DIR/core-bootstrap.sh" "$WORK_DIR/app-bootstrap.sh"
+
+    cat > "$WORK_DIR/participant-bootstrap.sh" <<'PARTICIPANT_SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec > >(tee -a /var/log/scenarioforge-participant-bootstrap.log) 2>&1
+
+install -d -m 0755 /var/lib/scenarioforge
+set_bootstrap_status() {
+    local percent="$1"
+    shift
+    printf '%s\n' "$percent" > /var/lib/scenarioforge/bootstrap-percent
+    printf '%s\n' "$*" > /var/lib/scenarioforge/bootstrap-status
+    printf 'BOOTSTRAP [%s%%]: %s\n' "$percent" "$*"
+}
+on_bootstrap_error() {
+    local exit_code="$1" line="$2" percent=0
+    trap - ERR
+    [[ ! -f /var/lib/scenarioforge/bootstrap-percent ]] \
+        || read -r percent < /var/lib/scenarioforge/bootstrap-percent
+    set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line)"
+    exit "$exit_code"
+}
+trap 'on_bootstrap_error "$?" "$LINENO"' ERR
+
+export DEBIAN_FRONTEND=noninteractive
+set_bootstrap_status 10 'updating Debian package metadata'
+apt-get update
+set_bootstrap_status 25 'installing the minimal XFCE desktop'
+apt-get install -y --no-install-recommends \
+    dbus-x11 lightdm lightdm-gtk-greeter xfce4 xorg xterm
+set_bootstrap_status 85 'enabling the XFCE graphical login'
+systemctl set-default graphical.target
+systemctl enable --now lightdm
+systemctl is-active --quiet lightdm
+
+touch /var/lib/scenarioforge/participant-ready
+set_bootstrap_status 100 'ready'
+echo 'Participant XFCE provisioning complete.'
+PARTICIPANT_SCRIPT
+    chmod 0755 "$WORK_DIR/core-bootstrap.sh" "$WORK_DIR/app-bootstrap.sh" \
+        "$WORK_DIR/participant-bootstrap.sh"
 }
 
 write_cloud_init_files() {
     local core_password_hash app_password_hash participant_password_hash public_key
-    local core_script_b64 app_script_b64 core_config_b64 app_config_b64
+    local core_script_b64 app_script_b64 participant_script_b64 core_config_b64 app_config_b64
     core_password_hash="$(openssl passwd -6 "$CORE_PASSWORD")"
     app_password_hash="$(openssl passwd -6 "$APP_PASSWORD")"
     participant_password_hash="$(openssl passwd -6 "$PARTICIPANT_PASSWORD")"
@@ -895,6 +1047,7 @@ write_cloud_init_files() {
 
     core_script_b64="$(encode_file "$WORK_DIR/core-bootstrap.sh")"
     app_script_b64="$(encode_file "$WORK_DIR/app-bootstrap.sh")"
+    participant_script_b64="$(encode_file "$WORK_DIR/participant-bootstrap.sh")"
     core_config_b64="$(encode_file "$WORK_DIR/core-installer.env")"
     app_config_b64="$(encode_file "$WORK_DIR/app-installer.env")"
 
@@ -985,8 +1138,18 @@ users:
 $public_key
 chpasswd:
   expire: false
-package_update: false
-final_message: Participant VM is ready
+package_update: true
+packages: [qemu-guest-agent]
+write_files:
+  - path: /usr/local/sbin/scenarioforge-participant-bootstrap
+    owner: root:root
+    permissions: '0700'
+    encoding: b64
+    content: $participant_script_b64
+runcmd:
+  - [systemctl, enable, --now, qemu-guest-agent]
+  - [bash, /usr/local/sbin/scenarioforge-participant-bootstrap]
+final_message: Participant XFCE VM is ready
 EOF
 
     cat > "$WORK_DIR/core-network.yaml" <<EOF
@@ -1034,6 +1197,11 @@ ethernets:
     dhcp4: false
     dhcp6: false
     accept-ra: false
+  bootstrap-uplink:
+    match: {macaddress: '$PARTICIPANT_NET1_MAC'}
+    set-name: ens19
+    dhcp4: true
+    dhcp6: false
 EOF
 }
 
@@ -1051,7 +1219,7 @@ create_vm() {
     log "Creating VM $vmid ($name)"
     run qm create "$vmid" --name "$name" --memory "$memory" --cores "$cores" \
         --cpu host --ostype l26 --scsihw virtio-scsi-single --agent enabled=1,fstrim_cloned_disks=1 \
-        --serial0 socket --vga serial0 --onboot 1 "$@"
+        --serial0 socket --vga std --onboot 1 "$@"
     run qm set "$vmid" --scsi0 "$VM_STORAGE:0,import-from=$image,discard=on,iothread=1,ssd=1"
     run qm resize "$vmid" scsi0 "${disk}G"
     run qm set "$vmid" --ide2 "$VM_STORAGE:cloudinit" --boot order=scsi0
@@ -1075,7 +1243,8 @@ create_vms() {
 
     create_vm "$PARTICIPANT_VMID" "$PARTICIPANT_NAME" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DISK_GB" "$DEBIAN_IMAGE" \
         --startup order=30,up=15 \
-        --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE"
+        --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE" \
+        --net1 "virtio=$PARTICIPANT_NET1_MAC,bridge=$UPLINK_BRIDGE"
     run qm set "$PARTICIPANT_VMID" --cicustom \
         "user=$SNIPPET_STORAGE:snippets/scenarioforge-participant-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-participant-network.yaml"
 }
@@ -1102,6 +1271,8 @@ write_state() {
         shell_assignment APP_NAME "$APP_NAME"
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
         shell_assignment INSTALL_COMPLETE "${INSTALL_COMPLETE:-0}"
+        shell_assignment PARTICIPANT_BOOTSTRAP_REQUIRED "$PARTICIPANT_BOOTSTRAP_REQUIRED"
+        shell_assignment PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED"
         shell_assignment INSTALL_PERCENT "${INSTALL_PERCENT:-0}"
         shell_assignment INSTALL_STARTED_EPOCH "${INSTALL_STARTED_EPOCH:-}"
         shell_assignment INSTALL_PHASE "${INSTALL_PHASE:-Preparing installer state}"
@@ -1203,7 +1374,7 @@ format_elapsed() {
 }
 
 current_install_percent() {
-    local current="${INSTALL_PERCENT:-0}" core_percent app_percent weighted
+    local current="${INSTALL_PERCENT:-0}" core_percent app_percent participant_percent weighted
     [[ "$current" =~ ^[0-9]+$ ]] || current=0
     if [[ "${INSTALL_COMPLETE:-0}" == "1" ]]; then
         printf '100\n'
@@ -1212,8 +1383,22 @@ current_install_percent() {
     if (( current >= 55 )); then
         core_percent="$(guest_bootstrap_percent "$CORE_VMID" /var/lib/scenarioforge/core-ready)"
         app_percent="$(guest_bootstrap_percent "$APP_VMID" /var/lib/scenarioforge/app-ready)"
-        weighted=$(( 55 + (core_percent + app_percent) * 44 / 200 ))
-        (( weighted > 99 )) && weighted=99
+        if [[ "${PARTICIPANT_BOOTSTRAP_REQUIRED:-0}" == "1" ]]; then
+            participant_percent="$(guest_bootstrap_percent "$PARTICIPANT_VMID" /var/lib/scenarioforge/participant-ready)"
+            if (( core_percent == 100 && app_percent == 100 && participant_percent == 100 )) \
+                && [[ "${PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED:-0}" != "1" ]]; then
+                weighted=100
+            else
+                weighted=$(( 55 + (core_percent + app_percent + participant_percent) * 44 / 300 ))
+            fi
+        else
+            if (( core_percent == 100 && app_percent == 100 )); then
+                weighted=100
+            else
+                weighted=$(( 55 + (core_percent + app_percent) * 44 / 200 ))
+            fi
+        fi
+        (( weighted > 100 )) && weighted=100
         (( weighted > current )) && current="$weighted"
     fi
     printf '%s\n' "$current"
@@ -1242,44 +1427,98 @@ report_guest_activity() {
     local label="$1" vmid="$2" path="$3" current previous
     current="$(guest_last_log_line "$vmid" "$path")"
     [[ -n "$current" ]] || return 0
-    if [[ "$label" == "CORE" ]]; then
-        previous="$LAST_CORE_ACTIVITY"
-        LAST_CORE_ACTIVITY="$current"
-    else
-        previous="$LAST_APP_ACTIVITY"
-        LAST_APP_ACTIVITY="$current"
-    fi
+    case "$label" in
+        CORE)
+            previous="$LAST_CORE_ACTIVITY"
+            LAST_CORE_ACTIVITY="$current"
+            ;;
+        APP)
+            previous="$LAST_APP_ACTIVITY"
+            LAST_APP_ACTIVITY="$current"
+            ;;
+        PARTICIPANT)
+            previous="$LAST_PARTICIPANT_ACTIVITY"
+            LAST_PARTICIPANT_ACTIVITY="$current"
+            ;;
+    esac
     if [[ "$current" != "$previous" ]]; then
         emit DEBUG "$label guest: $current"
     fi
 }
 
-wait_for_provisioning() {
-    local deadline now core_ready=0 app_ready=0 core_percent app_percent elapsed core_failure app_failure
+wait_for_participant_bootstrap() {
+    local deadline failure percent elapsed
     deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
-    log "Waiting up to $WAIT_MINUTES minutes for CORE and ScenarioForge provisioning"
+    log "Waiting for the participant XFCE install before removing its temporary uplink"
+    while :; do
+        if guest_marker_exists "$PARTICIPANT_VMID" /var/lib/scenarioforge/participant-ready; then
+            return 0
+        fi
+        failure="$(guest_bootstrap_failure_text "$PARTICIPANT_VMID")"
+        if [[ -n "$failure" ]]; then
+            PROVISIONING_FAILURE_DETAIL="PARTICIPANT=$failure"
+            warn "Participant provisioning failed: $failure"
+            return 1
+        fi
+        report_guest_activity PARTICIPANT "$PARTICIPANT_VMID" /var/log/scenarioforge-participant-bootstrap.log
+        percent="$(guest_bootstrap_percent "$PARTICIPANT_VMID" /var/lib/scenarioforge/participant-ready)"
+        elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
+        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Participant bootstrap heartbeat (elapsed $elapsed): ${percent}% working"
+        write_runtime_status running "$INSTALL_PHASE" "participant desktop bootstrap; elapsed $elapsed"
+        (( $(date +%s) < deadline )) || return 1
+        sleep 20
+    done
+}
+
+detach_participant_bootstrap_uplink() {
+    if ! qm config "$PARTICIPANT_VMID" 2>/dev/null | grep -q '^net1:'; then
+        PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
+        write_state
+        return
+    fi
+    log "Removing the participant VM's temporary package-download uplink"
+    run qm set "$PARTICIPANT_VMID" --delete net1
+    if qm config "$PARTICIPANT_VMID" 2>/dev/null | grep -q '^net1:'; then
+        die "participant temporary uplink net1 is still attached; remove it with: qm set $PARTICIPANT_VMID --delete net1"
+    fi
+    PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
+    write_state
+}
+
+wait_for_provisioning() {
+    local deadline now core_ready=0 app_ready=0 participant_ready=0
+    local core_percent app_percent participant_percent elapsed
+    local core_failure app_failure participant_failure
+    deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+    log "Waiting up to $WAIT_MINUTES minutes for all three guests to finish provisioning"
     while :; do
         guest_marker_exists "$CORE_VMID" /var/lib/scenarioforge/core-ready && core_ready=1
         guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready && app_ready=1
+        guest_marker_exists "$PARTICIPANT_VMID" /var/lib/scenarioforge/participant-ready && participant_ready=1
         core_failure=""
         app_failure=""
+        participant_failure=""
         [[ "$core_ready" -eq 1 ]] || core_failure="$(guest_bootstrap_failure_text "$CORE_VMID")"
         [[ "$app_ready" -eq 1 ]] || app_failure="$(guest_bootstrap_failure_text "$APP_VMID")"
-        if [[ -n "$core_failure" || -n "$app_failure" ]]; then
-            PROVISIONING_FAILURE_DETAIL="CORE=${core_failure:-not failed}; APP=${app_failure:-not failed}"
+        [[ "$participant_ready" -eq 1 ]] \
+            || participant_failure="$(guest_bootstrap_failure_text "$PARTICIPANT_VMID")"
+        if [[ -n "$core_failure" || -n "$app_failure" || -n "$participant_failure" ]]; then
+            PROVISIONING_FAILURE_DETAIL="CORE=${core_failure:-not failed}; APP=${app_failure:-not failed}; PARTICIPANT=${participant_failure:-not failed}"
             warn "Guest provisioning failed: $PROVISIONING_FAILURE_DETAIL"
             return 1
         fi
         report_guest_activity CORE "$CORE_VMID" /var/log/scenarioforge-core-bootstrap.log
         report_guest_activity APP "$APP_VMID" /var/log/scenarioforge-app-bootstrap.log
+        report_guest_activity PARTICIPANT "$PARTICIPANT_VMID" /var/log/scenarioforge-participant-bootstrap.log
         core_percent="$(guest_bootstrap_percent "$CORE_VMID" /var/lib/scenarioforge/core-ready)"
         app_percent="$(guest_bootstrap_percent "$APP_VMID" /var/lib/scenarioforge/app-ready)"
-        INSTALL_PERCENT=$(( 55 + (core_percent + app_percent) * 44 / 200 ))
+        participant_percent="$(guest_bootstrap_percent "$PARTICIPANT_VMID" /var/lib/scenarioforge/participant-ready)"
+        INSTALL_PERCENT=$(( 55 + (core_percent + app_percent + participant_percent) * 44 / 300 ))
         (( INSTALL_PERCENT > 99 )) && INSTALL_PERCENT=99
         elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
-        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Guest bootstrap heartbeat (elapsed $elapsed): CORE=${core_percent}% $([[ $core_ready -eq 1 ]] && echo ready || echo working), APP=${app_percent}% $([[ $app_ready -eq 1 ]] && echo ready || echo working)"
+        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Guest bootstrap heartbeat (elapsed $elapsed): CORE=${core_percent}% $([[ $core_ready -eq 1 ]] && echo ready || echo working), APP=${app_percent}% $([[ $app_ready -eq 1 ]] && echo ready || echo working), PARTICIPANT=${participant_percent}% $([[ $participant_ready -eq 1 ]] && echo ready || echo working)"
         write_runtime_status running "$INSTALL_PHASE" "guest bootstrap heartbeat; elapsed $elapsed"
-        if [[ "$core_ready" -eq 1 && "$app_ready" -eq 1 ]]; then
+        if [[ "$core_ready" -eq 1 && "$app_ready" -eq 1 && "$participant_ready" -eq 1 ]]; then
             return 0
         fi
         now="$(date +%s)"
@@ -1337,26 +1576,40 @@ vm_status_line() {
 }
 
 show_status() {
-    local host_state="installer process not detected" display_percent elapsed
+    local host_state="installer process not detected" display_percent elapsed participant_marker="-"
     [[ -f "$STATE_FILE" ]] \
         || die "no installer state found at $STATE_FILE; if an install is running, use: $0 status --watch"
+    PARTICIPANT_BOOTSTRAP_REQUIRED=0
+    PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
     # shellcheck disable=SC1090
     source "$STATE_FILE"
+    if [[ "$PARTICIPANT_BOOTSTRAP_REQUIRED" == "1" ]]; then
+        participant_marker=/var/lib/scenarioforge/participant-ready
+    fi
     if [[ "${INSTALL_COMPLETE:-0}" == "1" ]]; then
         host_state="complete"
     elif [[ "${INSTALLER_PID:-}" =~ ^[0-9]+$ ]] && kill -0 "$INSTALLER_PID" 2>/dev/null; then
         host_state="active (PID $INSTALLER_PID)"
     fi
     display_percent="$(current_install_percent)"
+    if [[ "$display_percent" == "100" && "${INSTALL_COMPLETE:-0}" != "1" ]]; then
+        host_state="guest provisioning complete"
+    fi
     elapsed="$(format_elapsed "${INSTALL_STARTED_EPOCH:-}")"
     printf 'ScenarioForge Proxmox lab on %s\n' "$PVE_NODE"
     printf '  Install progress: %s%% (elapsed %s)\n' "$display_percent" "$elapsed"
     printf '  Host installer:  %s - %s\n' "$host_state" "${INSTALL_PHASE:-phase unavailable}"
     vm_status_line CORE "$CORE_VMID" /var/lib/scenarioforge/core-ready
     vm_status_line APP "$APP_VMID" /var/lib/scenarioforge/app-ready
-    vm_status_line PARTICIPANT "$PARTICIPANT_VMID" -
+    vm_status_line PARTICIPANT "$PARTICIPANT_VMID" "$participant_marker"
     printf '  CORE progress:    %s\n' "$(guest_progress_text "$CORE_VMID" /var/log/scenarioforge-core-bootstrap.log /var/lib/scenarioforge/core-ready)"
     printf '  APP progress:     %s\n' "$(guest_progress_text "$APP_VMID" /var/log/scenarioforge-app-bootstrap.log /var/lib/scenarioforge/app-ready)"
+    if [[ "$PARTICIPANT_BOOTSTRAP_REQUIRED" == "1" ]]; then
+        printf '  PARTICIPANT:      %s\n' "$(guest_progress_text "$PARTICIPANT_VMID" /var/log/scenarioforge-participant-bootstrap.log /var/lib/scenarioforge/participant-ready)"
+    fi
+    if [[ "${PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED:-0}" == "1" ]]; then
+        printf '  Participant NIC: temporary uplink net1 remains attached until XFCE provisioning finishes\n'
+    fi
     printf '  CORE management: %s (SSH 22, gRPC 50051)\n' "$CORE_MANAGEMENT_CIDR"
     printf '  Participant:     %s on %s\n' "$PARTICIPANT_CIDR" "$HITL_BRIDGE"
     local app_ip
@@ -1389,6 +1642,8 @@ show_completion_credentials() {
         "$PARTICIPANT_VMID" "$(plain_ip "$PARTICIPANT_CIDR")" "$PARTICIPANT_PASSWORD"
     printf '  WEB ADMIN       URL %s | username coreadmin | password %s\n' \
         "$web_url" "$SCENARIOFORGE_ADMIN_PASSWORD"
+    printf '  DESKTOPS       Open Proxmox Console/noVNC for XFCE on each VM; no post-install reboot is required\n'
+    printf '  APP SERVICE     Native systemd units: scenarioforge-web and nginx (no app-side Docker Compose)\n'
     printf '  Stored at       %s (root-only, mode 0600)\n' "$CREDENTIALS_FILE"
     printf '  Security        This completion output contains secrets; protect terminal logs and captures.\n\n'
 }
@@ -1438,9 +1693,13 @@ watch_status() {
     while :; do
         printf '\n'
         show_status
-        if guest_marker_exists "$CORE_VMID" /var/lib/scenarioforge/core-ready \
-            && guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready; then
-            emit INFO "CORE and ScenarioForge provisioning are ready"
+        if [[ "${INSTALL_COMPLETE:-0}" == "1" ]] \
+            || { guest_marker_exists "$CORE_VMID" /var/lib/scenarioforge/core-ready \
+                && guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready \
+                && [[ "${PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED:-0}" != "1" ]] \
+                && { [[ "$PARTICIPANT_BOOTSTRAP_REQUIRED" != "1" ]] \
+                    || guest_marker_exists "$PARTICIPANT_VMID" /var/lib/scenarioforge/participant-ready; }; }; then
+            emit INFO "All required guest provisioning is ready"
             return
         fi
         sleep "$STATUS_INTERVAL"
@@ -1586,8 +1845,11 @@ cleanup_is_healthy_running_lab() {
     if [[ "${INSTALL_COMPLETE:-}" == "1" ]]; then
         return 0
     fi
+    [[ "${PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED:-0}" != "1" ]] || return 1
     guest_marker_exists "$CORE_VMID" /var/lib/scenarioforge/core-ready \
-        && guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready
+        && guest_marker_exists "$APP_VMID" /var/lib/scenarioforge/app-ready \
+        && { [[ "${PARTICIPANT_BOOTSTRAP_REQUIRED:-0}" != "1" ]] \
+            || guest_marker_exists "$PARTICIPANT_VMID" /var/lib/scenarioforge/participant-ready; }
 }
 
 confirm_cleanup() {
@@ -1754,6 +2016,8 @@ perform_install() {
     APP_NET0_MAC="$(random_mac)"
     APP_NET1_MAC="$(random_mac)"
     PARTICIPANT_NET0_MAC="$(random_mac)"
+    PARTICIPANT_NET1_MAC="$(random_mac)"
+    PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=1
     INSTALL_COMPLETE=0
     INSTALL_PHASE="Preflight complete; preparing Proxmox resources"
     CREATED_MANAGEMENT_BRIDGE=pending
@@ -1799,27 +2063,42 @@ perform_install() {
         return
     fi
     if [[ "$WAIT_FOR_BOOTSTRAP" -eq 1 ]]; then
-        progress 55 "Waiting for CORE and ScenarioForge guest provisioning"
+        progress 55 "Waiting for CORE, ScenarioForge, and participant guest provisioning"
         if ! wait_for_provisioning; then
             if [[ -n "$PROVISIONING_FAILURE_DETAIL" ]]; then
                 warn "Provisioning stopped after an explicit guest failure. VMs were left intact for diagnosis."
                 write_runtime_status failed "Guest provisioning failed" "$PROVISIONING_FAILURE_DETAIL"
             else
                 warn "Provisioning did not finish before the timeout. VMs were left intact for diagnosis."
-                write_runtime_status failed "Guest provisioning timed out" "CORE or ScenarioForge did not become ready within $WAIT_MINUTES minutes"
+                write_runtime_status failed "Guest provisioning timed out" "one or more guests did not become ready within $WAIT_MINUTES minutes"
             fi
             warn "Run: $0 status"
-            warn "Guest logs: /var/log/scenarioforge-{core,app}-bootstrap.log"
+            warn "Guest logs: /var/log/scenarioforge-{core,app,participant}-bootstrap.log"
             exit 2
         fi
+        detach_participant_bootstrap_uplink
         mark_install_complete
     else
-        progress 55 "Guest provisioning started in the background (--no-wait)"
+        progress 55 "Waiting for participant isolation before leaving CORE and the app in the background"
+        if ! wait_for_participant_bootstrap; then
+            warn "The participant's temporary uplink was left attached for diagnosis because its desktop bootstrap did not finish."
+            write_runtime_status failed "Participant provisioning failed" "${PROVISIONING_FAILURE_DETAIL:-participant did not become ready within $WAIT_MINUTES minutes}"
+            warn "Run: $0 status"
+            warn "Guest log: /var/log/scenarioforge-participant-bootstrap.log"
+            exit 2
+        fi
+        detach_participant_bootstrap_uplink
+        record_install_phase "CORE and ScenarioForge provisioning continue in the background (--no-wait)"
     fi
     show_status
     show_completion_credentials
-    write_runtime_status complete "${INSTALL_PHASE:-Host installation complete}" ""
-    log "Installation complete. Credentials were shown above and saved at $CREDENTIALS_FILE"
+    if [[ "$WAIT_FOR_BOOTSTRAP" -eq 1 ]]; then
+        write_runtime_status complete "${INSTALL_PHASE:-Installation complete}" ""
+        log "Installation complete. Credentials were shown above and saved at $CREDENTIALS_FILE"
+    else
+        write_runtime_status complete "Host setup complete; guest provisioning continues" ""
+        log "Host setup complete; CORE and ScenarioForge provisioning continue in the background. Credentials were shown above and saved at $CREDENTIALS_FILE"
+    fi
 }
 
 main() {
