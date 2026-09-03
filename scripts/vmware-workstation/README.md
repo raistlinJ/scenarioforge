@@ -6,12 +6,16 @@ x86_64 Linux workstation:
 | VM | Operating system and software | Interfaces |
 |---|---|---|
 | CORE | Debian 12, XFCE, CORE GUI, CORE 9.2.1 built from `raistlinJ/core` with `coreemu-minimal --from-source`, Docker | `ens18` management, `ens19` isolated HITL with no IP, `ens20` NAT uplink |
-| APP | Ubuntu 24.04, XFCE, native ScenarioForge systemd service, nginx/TLS | `ens18` NAT uplink, `ens19` management |
+| APP | Ubuntu 24.04, XFCE, Epiphany browser, native ScenarioForge systemd service, nginx/TLS | `ens18` NAT uplink, `ens19` management |
 | PARTICIPANT | Debian 12, minimal XFCE | `ens18` isolated HITL; temporary NAT `ens19` is removed after XFCE installs |
 
 The APP VM receives a private `.scenarioforge.env` configured with the CORE
 VM's management address, SSH credentials, gRPC port `50051`, and CORE's HITL
 interface name `ens19`. ScenarioForge is installed natively, not with Docker.
+
+The APP desktop has a **ScenarioForge** launcher that opens the local Web GUI
+in Epiphany at `https://localhost/`. Its self-signed certificate causes an
+expected browser warning; no VM restart is required after provisioning.
 
 ## Requirements
 
@@ -90,6 +94,41 @@ Default VM files are stored in:
 
 Change that location with `--lab-dir /absolute/path` or
 `SF_VMWARE_LAB_DIR=/absolute/path`.
+
+### Optional flag-generator and Vulhub catalogs
+
+Populate a fresh APP VM from the private `raistlinJ/flag-generators`
+repository with either or both flags:
+
+```bash
+./install-scenarioforge-lab.sh --flag-generators
+./install-scenarioforge-lab.sh --vulnhub
+./install-scenarioforge-lab.sh --flag-generators --vulnhub
+```
+
+Authenticate GitHub on the Linux host first. The default HTTPS URL uses the
+host's existing Git credential helper; for SSH, set:
+
+```bash
+export SF_FLAG_GENERATORS_URL=git@github.com:raistlinJ/flag-generators.git
+```
+
+Never embed a token or password in that URL. The installer rejects HTTPS URLs
+containing credentials, clones into its private temporary directory, sends
+only the selected content with a generated one-time SSH key, and removes that
+key from APP after verification. GitHub credentials are not copied into any
+guest.
+
+`--flag-generators` places the flag and flag-node generator catalogs under
+`/opt/scenarioforge`. `--vulnhub` imports the repository's pinned `vulnhub/`
+snapshot through ScenarioForge's catalog importer and makes it active on a
+fresh install. Use `--flag-generators-ref REF` or
+`SF_FLAG_GENERATORS_REF=REF` to pin another revision. Both options add install
+time and disk usage.
+
+The optional repository contains intentionally vulnerable recipes and
+challenge key material. Run this content only in the isolated, trusted lab
+network described above.
 
 ### Observe a running installation
 
@@ -174,6 +213,8 @@ The commonly useful settings are:
 | `SF_CORE_MINIMAL_URL` / `SF_CORE_MINIMAL_REF` | `raistlinJ/coreemu-minimal.git` / `main` |
 | `SF_CORE_REPO_URL` / `SF_CORE_REPO_REF` | `raistlinJ/core.git` / `master` |
 | `SF_SCENARIOFORGE_URL` / `SF_SCENARIOFORGE_REF` | `raistlinJ/scenarioforge.git` / `main` |
+| `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
+| `SF_FLAG_GENERATORS_URL` / `SF_FLAG_GENERATORS_REF` | `raistlinJ/flag-generators.git` / `main` |
 
 Image and checksum URLs can also be pinned with `SF_DEBIAN_IMAGE_URL`,
 `SF_DEBIAN_SUMS_URL`, `SF_UBUNTU_IMAGE_URL`, and `SF_UBUNTU_SUMS_URL`.

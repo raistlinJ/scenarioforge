@@ -44,8 +44,8 @@ Replay-only packages and plain XML do not run generators during import.
 - [Highlights](#highlights)
 - [Screenshots](docs/screenshots.md)
 - [VM-mode setup](#vm-mode-setup-recommended)
-- [Proxmox three-VM installer](scripts/proxmox/README.md) — graphical XFCE guests and native ScenarioForge service
-- [VMware Workstation Linux three-VM installer](scripts/vmware-workstation/README.md) — the same graphical lab on an x86_64 Linux desktop
+- [Proxmox three-VM installer](scripts/proxmox/README.md) — graphical XFCE guests, a browser, native ScenarioForge, and optional generator/Vulhub catalogs
+- [VMware Workstation Linux three-VM installer](scripts/vmware-workstation/README.md) — the same graphical lab and optional catalogs on an x86_64 Linux desktop
 - [Other operating modes](#other-operating-modes)
 - [CORE install](docs/CORE_INSTALL.md)
 - [Quick start](docs/QUICK_START.md)
@@ -104,8 +104,8 @@ Full step-by-step setup guides:
 
 - [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md) – install CORE from our fork ([github.com/raistlinJ/core](https://github.com/raistlinJ/core)), which ships the fixes and updates ScenarioForge depends on — most easily via the [coreemu-minimal](https://github.com/raistlinJ/coreemu-minimal) installer — or apply those updates to a vanilla CORE install.
 - [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md) – building the CORE VM, the three-interface layout (management, HITL/participant, uplink), wiring the three machines on any hypervisor, and the complete VM-mode `.scenarioforge.env` reference.
-- [scripts/proxmox/README.md](scripts/proxmox/README.md) – provision the complete graphical CORE, native ScenarioForge, and XFCE participant VM layout from a Proxmox shell.
-- [scripts/vmware-workstation/README.md](scripts/vmware-workstation/README.md) – provision the same three graphical VMs with VMware Workstation on an x86_64 Linux host.
+- [scripts/proxmox/README.md](scripts/proxmox/README.md) – provision the complete graphical CORE, browser-equipped native ScenarioForge, and XFCE participant VM layout from a Proxmox shell; optional flags install the private generator and Vulhub catalogs.
+- [scripts/vmware-workstation/README.md](scripts/vmware-workstation/README.md) – provision the same three graphical VMs and optional catalogs with VMware Workstation on an x86_64 Linux host.
 - [docs/NATIVE_MODE_SETUP.md](docs/NATIVE_MODE_SETUP.md) – local and remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox **VM / Access** workflow (credentials, required API privileges, CORE VM selection, HITL bridge apply).
 
 ### Recommended Lab Layout

@@ -8,7 +8,8 @@ lab on one Proxmox VE node:
   `core-gui` graphical client.
 - Ubuntu 24.04 with an XFCE desktop and `raistlinJ/scenarioforge` installed
   natively in a Python virtual environment, managed by systemd, and published
-  through the distribution nginx service.
+  through the distribution nginx service. The desktop includes the native
+  Epiphany browser and a launcher for the local ScenarioForge Web GUI.
 - Debian 12 with a minimal XFCE participant desktop, connected only to the
   HITL network after provisioning.
 
@@ -118,6 +119,48 @@ sudo scripts/proxmox/install-scenarioforge-lab.sh install \
   --ssh-public-key /root/.ssh/id_ed25519.pub
 ```
 
+### Optional flag-generator and Vulhub catalogs
+
+The installer can populate a fresh APP VM from the private
+`raistlinJ/flag-generators` repository:
+
+```bash
+# Install flag and flag-node generator catalogs.
+sudo scripts/proxmox/install-scenarioforge-lab.sh --flag-generators
+
+# Import the repository's pinned Vulhub recipe snapshot into ScenarioForge.
+sudo scripts/proxmox/install-scenarioforge-lab.sh --vulnhub
+
+# Install both optional content sets.
+sudo scripts/proxmox/install-scenarioforge-lab.sh --flag-generators --vulnhub
+```
+
+Authenticate GitHub on the Proxmox host before running one of these options.
+An existing Git credential helper works with the default HTTPS URL, or use an
+SSH identity and URL:
+
+```bash
+export SF_FLAG_GENERATORS_URL=git@github.com:raistlinJ/flag-generators.git
+```
+
+Do not place a token or password in `SF_FLAG_GENERATORS_URL`; the installer
+rejects credentials embedded in an HTTPS URL. It clones the private repository
+only into its root-only temporary work area, packages just the requested
+directories, and sends them to APP with a generated one-time SSH key. GitHub
+credentials are never copied into a VM, and the transfer key is removed from
+APP after the archive is verified.
+
+`--flag-generators` installs both `flag_generators/` and
+`flag_node_generators/` under `/opt/scenarioforge`. `--vulnhub` imports the
+repository's `vulnhub/` snapshot through ScenarioForge's catalog importer; on
+a fresh VM that catalog becomes the active vulnerability catalog. These flags
+add download, transfer, disk, and import time. They can be pinned with
+`--flag-generators-ref REF` or `SF_FLAG_GENERATORS_REF`.
+
+The optional repository contains deliberately vulnerable recipes and challenge
+key material. Use it only in an isolated, trusted lab, and do not expose the
+participant or CORE exercise network to untrusted networks.
+
 Use `--no-wait` to return after the participant desktop is installed and its
 temporary uplink is removed, without waiting for CORE and ScenarioForge to
 finish. Check progress later with:
@@ -197,6 +240,8 @@ Use the VM usernames and passwords printed at completion. The CORE desktop has a
 **CORE Network Emulator** launcher that runs `core-gui`; `core-daemon` starts
 automatically in the background. The app and participant desktops start through
 LightDM as soon as their bootstrap completes, without an additional VM reboot.
+The APP desktop includes Epiphany and a **ScenarioForge** launcher that opens
+`https://localhost/`; the self-signed certificate produces an expected warning.
 
 ScenarioForge itself is not containerized on the app VM. Its source and Python
 environment live under `/opt/scenarioforge`; systemd starts the backend on
@@ -255,14 +300,17 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_CORE_MINIMAL_REF` | `main` |
 | `SF_CORE_REPO_REF` | `master` |
 | `SF_SCENARIOFORGE_REF` | `main` |
+| `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
+| `SF_FLAG_GENERATORS_URL` | `https://github.com/raistlinJ/flag-generators.git` |
+| `SF_FLAG_GENERATORS_REF` | `main` |
 | `SF_WAIT_MINUTES` | `90` |
 | `SF_VERBOSE` | `0` (`1` enables verbose diagnostics) |
 | `SF_STATUS_INTERVAL` | `10` seconds |
 
 Repository and image URLs can also be overridden with
 `SF_CORE_MINIMAL_URL`, `SF_CORE_REPO_URL`, `SF_SCENARIOFORGE_URL`,
-`SF_DEBIAN_IMAGE_URL`, `SF_DEBIAN_SUMS_URL`, `SF_UBUNTU_IMAGE_URL`, and
-`SF_UBUNTU_SUMS_URL`.
+`SF_FLAG_GENERATORS_URL`, `SF_DEBIAN_IMAGE_URL`, `SF_DEBIAN_SUMS_URL`,
+`SF_UBUNTU_IMAGE_URL`, and `SF_UBUNTU_SUMS_URL`.
 
 ## Failure behavior and cleanup
 
@@ -322,3 +370,5 @@ Cleanup is permanent. Always inspect `cleanup --dry-run` before using `--yes`.
   output does not reveal them.
 - Pin repository refs to release tags or stable branches if you need a
   frozen deployment. The defaults follow the maintained branches.
+- Treat content installed by `--flag-generators` and `--vulnhub` as sensitive,
+  intentionally unsafe lab material. Keep it on isolated, trusted systems.

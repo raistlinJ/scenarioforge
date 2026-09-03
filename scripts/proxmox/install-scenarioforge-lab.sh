@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.5.1"
+SCRIPT_VERSION="0.6.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -46,6 +46,10 @@ CORE_REPO_URL="${SF_CORE_REPO_URL:-https://github.com/raistlinJ/core.git}"
 CORE_REPO_REF="${SF_CORE_REPO_REF:-master}"
 SCENARIOFORGE_URL="${SF_SCENARIOFORGE_URL:-https://github.com/raistlinJ/scenarioforge.git}"
 SCENARIOFORGE_REF="${SF_SCENARIOFORGE_REF:-main}"
+FLAG_GENERATORS_URL="${SF_FLAG_GENERATORS_URL:-https://github.com/raistlinJ/flag-generators.git}"
+FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-main}"
+INSTALL_FLAG_GENERATORS="${SF_INSTALL_FLAG_GENERATORS:-0}"
+INSTALL_VULNHUB="${SF_INSTALL_VULNHUB:-0}"
 
 DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2}"
 DEBIAN_SUMS_URL="${SF_DEBIAN_SUMS_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS}"
@@ -81,6 +85,10 @@ INSTALL_PERCENT=0
 INSTALL_STARTED_EPOCH=""
 INSTALL_STATE_INITIALIZED=0
 PROVISIONING_FAILURE_DETAIL=""
+OPTIONAL_CONTENT_ARCHIVE=""
+OPTIONAL_CONTENT_SHA256=""
+CATALOG_TRANSFER_KEY=""
+CATALOG_TRANSFER_PUBLIC_KEY_FILE=""
 RUNTIME_TRACKING=0
 CLEANUP_STATE_FOUND=0
 declare -a CLEANUP_VMIDS=()
@@ -178,6 +186,8 @@ Important options:
   --app-vmid ID                ScenarioForge VMID (default: 9402)
   --participant-vmid ID        Participant VMID (default: 9403)
   --ssh-public-key FILE        Add one OpenSSH public key to all guest users
+  --flag-generators            Install raistlinJ/flag-generators catalogs on APP
+  --vulnhub                    Install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N             Bootstrap timeout (default: 90)
   --no-wait                    Return after the participant's temporary uplink is removed
   --verbose                    Show detailed progress and guest bootstrap activity
@@ -198,6 +208,7 @@ Repository overrides:
   --core-minimal-ref REF       Default: main
   --core-ref REF               Default: master
   --scenarioforge-ref REF      Default: main
+  --flag-generators-ref REF    Default: main
 
 Environment variables with the SF_ prefix can set every default; see
 scripts/proxmox/README.md for the complete list.
@@ -223,6 +234,8 @@ parse_args() {
             --app-vmid) APP_VMID="${2:?missing value for --app-vmid}"; shift 2 ;;
             --participant-vmid) PARTICIPANT_VMID="${2:?missing value for --participant-vmid}"; shift 2 ;;
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
+            --flag-generators) INSTALL_FLAG_GENERATORS=1; shift ;;
+            --vulnhub) INSTALL_VULNHUB=1; shift ;;
             --wait-minutes) WAIT_MINUTES="${2:?missing value for --wait-minutes}"; shift 2 ;;
             --app-management-cidr) APP_MANAGEMENT_CIDR="${2:?missing value for --app-management-cidr}"; shift 2 ;;
             --core-management-cidr) CORE_MANAGEMENT_CIDR="${2:?missing value for --core-management-cidr}"; shift 2 ;;
@@ -231,6 +244,7 @@ parse_args() {
             --core-minimal-ref) CORE_MINIMAL_REF="${2:?missing value for --core-minimal-ref}"; shift 2 ;;
             --core-ref) CORE_REPO_REF="${2:?missing value for --core-ref}"; shift 2 ;;
             --scenarioforge-ref) SCENARIOFORGE_REF="${2:?missing value for --scenarioforge-ref}"; shift 2 ;;
+            --flag-generators-ref) FLAG_GENERATORS_REF="${2:?missing value for --flag-generators-ref}"; shift 2 ;;
             --no-wait) WAIT_FOR_BOOTSTRAP=0; shift ;;
             --verbose) VERBOSE=1; shift ;;
             --watch) STATUS_WATCH=1; shift ;;
@@ -245,6 +259,10 @@ parse_args() {
 
     [[ "$COMMAND" == "install" || "$COMMAND" == "status" || "$COMMAND" == "cleanup" ]] || die "unknown command: $COMMAND"
     [[ "$VERBOSE" == "0" || "$VERBOSE" == "1" ]] || die "SF_VERBOSE must be 0 or 1"
+    [[ "$INSTALL_FLAG_GENERATORS" == "0" || "$INSTALL_FLAG_GENERATORS" == "1" ]] \
+        || die "SF_INSTALL_FLAG_GENERATORS must be 0 or 1"
+    [[ "$INSTALL_VULNHUB" == "0" || "$INSTALL_VULNHUB" == "1" ]] \
+        || die "SF_INSTALL_VULNHUB must be 0 or 1"
     [[ "$STATUS_WATCH" -eq 0 || "$COMMAND" == "status" ]] || die "--watch is only valid with the status command"
     [[ "$FORCE_CLEANUP" -eq 0 || "$COMMAND" == "cleanup" ]] || die "--force is only valid with the cleanup command"
     validate_integer "status interval" "$STATUS_INTERVAL" 2
@@ -352,8 +370,12 @@ validate_install_inputs() {
     validate_ref "coreemu-minimal ref" "$CORE_MINIMAL_REF"
     validate_ref "CORE ref" "$CORE_REPO_REF"
     validate_ref "ScenarioForge ref" "$SCENARIOFORGE_REF"
+    validate_ref "flag-generators ref" "$FLAG_GENERATORS_REF"
     [[ "$CORE_MINIMAL_URL" == https://* && "$CORE_REPO_URL" == https://* && "$SCENARIOFORGE_URL" == https://* ]] \
         || die "repository URLs must use HTTPS"
+    [[ "$FLAG_GENERATORS_URL" == https://* || "$FLAG_GENERATORS_URL" == ssh://* \
+        || "$FLAG_GENERATORS_URL" == git@*:* ]] \
+        || die "flag-generators URL must use HTTPS or SSH"
     validate_networks
 
     if [[ -n "$SSH_PUBLIC_KEY_FILE" ]]; then
@@ -441,6 +463,9 @@ confirm_install() {
     log "Bridges:            uplink=$UPLINK_BRIDGE management=$MANAGEMENT_BRIDGE HITL=$HITL_BRIDGE"
     log "Addresses:          app=$APP_MANAGEMENT_CIDR core=$CORE_MANAGEMENT_CIDR participant=$PARTICIPANT_CIDR"
     verbose "Repositories: coreemu-minimal=$CORE_MINIMAL_REF CORE=$CORE_REPO_REF ScenarioForge=$SCENARIOFORGE_REF"
+    if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
+        log "Optional content:     flag-generators=$INSTALL_FLAG_GENERATORS vulnhub=$INSTALL_VULNHUB (ref $FLAG_GENERATORS_REF)"
+    fi
     if [[ "$DRY_RUN" -eq 1 || "$ASSUME_YES" -eq 1 ]]; then
         return
     fi
@@ -589,6 +614,47 @@ download_verified_image() {
     mv "$temporary" "$destination"
 }
 
+prepare_optional_content() {
+    [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]] || return 0
+    local command_name source_dir staging_dir
+    for command_name in git tar ssh-keygen ssh scp; do
+        command -v "$command_name" >/dev/null 2>&1 \
+            || die "--flag-generators/--vulnhub requires host command: $command_name"
+    done
+    [[ "$FLAG_GENERATORS_URL" != https://*@* ]] \
+        || die "do not embed credentials in SF_FLAG_GENERATORS_URL; configure the host Git credential helper or use an SSH URL"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        emit DRY-RUN "clone authenticated flag-generators ref $FLAG_GENERATORS_REF and prepare the requested APP payload"
+        return 0
+    fi
+
+    source_dir="$WORK_DIR/flag-generators-source"
+    staging_dir="$WORK_DIR/optional-content"
+    log "Cloning the private flag-generators repository on the installer host (ref $FLAG_GENERATORS_REF)"
+    if ! git clone --quiet --depth 1 --branch "$FLAG_GENERATORS_REF" \
+        "$FLAG_GENERATORS_URL" "$source_dir"; then
+        die "could not clone flag-generators; authenticate GitHub on the installer host or set SF_FLAG_GENERATORS_URL to an authorized SSH URL"
+    fi
+    install -d -m 0700 "$staging_dir"
+    if [[ "$INSTALL_FLAG_GENERATORS" == "1" ]]; then
+        [[ -d "$source_dir/flag_generators" && -d "$source_dir/flag_node_generators" ]] \
+            || die "flag-generators ref $FLAG_GENERATORS_REF is missing its generator catalog directories"
+        cp -a -- "$source_dir/flag_generators" "$source_dir/flag_node_generators" "$staging_dir/"
+    fi
+    if [[ "$INSTALL_VULNHUB" == "1" ]]; then
+        [[ -d "$source_dir/vulnhub/content" ]] \
+            || die "flag-generators ref $FLAG_GENERATORS_REF is missing vulnhub/content"
+        cp -a -- "$source_dir/vulnhub" "$staging_dir/"
+    fi
+    OPTIONAL_CONTENT_ARCHIVE="$WORK_DIR/scenarioforge-optional-content.tar.gz"
+    tar -C "$staging_dir" -czf "$OPTIONAL_CONTENT_ARCHIVE" .
+    OPTIONAL_CONTENT_SHA256="$(sha256sum "$OPTIONAL_CONTENT_ARCHIVE" | awk '{print $1}')"
+    CATALOG_TRANSFER_KEY="$WORK_DIR/catalog-transfer-key"
+    ssh-keygen -q -t ed25519 -N '' -C scenarioforge-installer-transfer -f "$CATALOG_TRANSFER_KEY"
+    CATALOG_TRANSFER_PUBLIC_KEY_FILE="$CATALOG_TRANSFER_KEY.pub"
+    log "Prepared requested optional content ($(du -h "$OPTIONAL_CONTENT_ARCHIVE" | awk '{print $1}')) without embedding GitHub credentials in a guest"
+}
+
 random_password() {
     openssl rand -hex 16
 }
@@ -645,9 +711,19 @@ encode_file() {
 }
 
 public_key_yaml() {
-    if [[ -n "$SSH_PUBLIC_KEY_FILE" ]]; then
-        printf '    ssh_authorized_keys:\n      - '\''%s'\''\n' "$(<"$SSH_PUBLIC_KEY_FILE")"
+    local include_transfer_key="${1:-0}" key_file wrote_header=0
+    local -a key_files=("$SSH_PUBLIC_KEY_FILE")
+    if [[ "$include_transfer_key" == "1" ]]; then
+        key_files+=("$CATALOG_TRANSFER_PUBLIC_KEY_FILE")
     fi
+    for key_file in "${key_files[@]}"; do
+        [[ -n "$key_file" ]] || continue
+        if [[ "$wrote_header" -eq 0 ]]; then
+            printf '    ssh_authorized_keys:\n'
+            wrote_header=1
+        fi
+        printf '      - '\''%s'\''\n' "$(<"$key_file")"
+    done
 }
 
 write_guest_bootstraps() {
@@ -838,11 +914,25 @@ export DEBIAN_FRONTEND=noninteractive
 set_bootstrap_status 5 'installing XFCE and native ScenarioForge system packages'
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential dbus-x11 graphviz lightdm lightdm-gtk-greeter nginx \
+    build-essential dbus-x11 epiphany-browser graphviz lightdm lightdm-gtk-greeter nginx \
     openssl python3-dev python3-full python3-venv xfce4 xorg \
     xserver-xorg-input-all xserver-xorg-video-all xterm
 systemctl set-default graphical.target
 systemctl enable --now lightdm
+command -v epiphany >/dev/null
+install -d -o scenarioforge -g scenarioforge -m 0755 /home/scenarioforge/Desktop
+cat > /home/scenarioforge/Desktop/scenarioforge.desktop <<'SCENARIOFORGE_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=ScenarioForge
+Comment=Open the local ScenarioForge Web GUI
+Exec=epiphany https://localhost/
+Icon=web-browser
+Terminal=false
+Categories=Education;Network;WebBrowser;
+SCENARIOFORGE_DESKTOP
+chown scenarioforge:scenarioforge /home/scenarioforge/Desktop/scenarioforge.desktop
+chmod 0755 /home/scenarioforge/Desktop/scenarioforge.desktop
 
 set_bootstrap_status 20 'cloning the ScenarioForge repository'
 if [[ ! -d /opt/scenarioforge/.git ]]; then
@@ -859,6 +949,80 @@ runuser -u scenarioforge -- python3 -m venv /opt/scenarioforge/.venv
 runuser -u scenarioforge -- /opt/scenarioforge/.venv/bin/python -m pip install --upgrade pip
 runuser -u scenarioforge -- /opt/scenarioforge/.venv/bin/python -m pip install \
     -r /opt/scenarioforge/webapp/requirements.txt
+
+install_optional_content() {
+    [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]] || return 0
+    local archive=/tmp/scenarioforge-optional-content.tar.gz payload_dir vulnhub_zip
+    set_bootstrap_status 45 'waiting for requested generator/vulnerability content from the installer host'
+    for attempt in $(seq 1 180); do
+        [[ -f "$archive" ]] && break
+        [[ "$attempt" -ne 180 ]] || fail_bootstrap 'optional content transfer did not arrive within 15 minutes'
+        sleep 5
+    done
+    [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$OPTIONAL_CONTENT_SHA256" ]] \
+        || fail_bootstrap 'optional content archive checksum mismatch'
+    if [[ -f /home/scenarioforge/.ssh/authorized_keys ]]; then
+        sed -i '/[[:space:]]scenarioforge-installer-transfer$/d' \
+            /home/scenarioforge/.ssh/authorized_keys
+    fi
+    payload_dir="$(mktemp -d /tmp/scenarioforge-optional.XXXXXX)"
+    tar -xzf "$archive" -C "$payload_dir"
+    rm -f -- "$archive"
+
+    if [[ "$INSTALL_FLAG_GENERATORS" == "1" ]]; then
+        set_bootstrap_status 50 'installing flag-generator and flag-node-generator catalogs'
+        [[ -d "$payload_dir/flag_generators" && -d "$payload_dir/flag_node_generators" ]] \
+            || fail_bootstrap 'optional payload is missing generator catalogs'
+        rm -rf -- /opt/scenarioforge/flag_generators /opt/scenarioforge/flag_node_generators
+        cp -a -- "$payload_dir/flag_generators" "$payload_dir/flag_node_generators" /opt/scenarioforge/
+        find /opt/scenarioforge/flag_generators /opt/scenarioforge/flag_node_generators \
+            -name manifest.yaml -print -quit | grep -q . \
+            || fail_bootstrap 'no generator manifests were installed'
+    fi
+
+    if [[ "$INSTALL_VULNHUB" == "1" ]]; then
+        set_bootstrap_status 55 'installing the pinned Vulhub vulnerability catalog snapshot'
+        [[ -d "$payload_dir/vulnhub/content" ]] \
+            || fail_bootstrap 'optional payload is missing the Vulhub catalog'
+        vulnhub_zip=/tmp/scenarioforge-vulnhub-catalog.zip
+        python3 - "$payload_dir/vulnhub" "$vulnhub_zip" <<'VULNHUB_ZIP'
+from pathlib import Path
+import sys
+import zipfile
+
+source = Path(sys.argv[1])
+with zipfile.ZipFile(sys.argv[2], "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    for path in source.rglob("*"):
+        if path.is_file():
+            archive.write(path, (Path("vulnhub") / path.relative_to(source)).as_posix())
+VULNHUB_ZIP
+        chown scenarioforge:scenarioforge "$vulnhub_zip"
+        runuser -u scenarioforge -- env \
+            HOME=/home/scenarioforge PYTHONPATH=/opt/scenarioforge \
+            CORETG_CATALOG_ARCH_SCAN_REGISTRY=0 \
+            /opt/scenarioforge/.venv/bin/python - "$vulnhub_zip" <<'VULNHUB_INSTALL'
+import sys
+from webapp import app_backend
+
+entry = app_backend._install_vuln_catalog_zip_file(
+    zip_file_path=sys.argv[1],
+    label="raistlinJ/flag-generators Vulhub snapshot",
+    origin="https://github.com/raistlinJ/flag-generators",
+)
+if int(entry.get("compose_count") or 0) < 1:
+    raise SystemExit("Vulhub import produced an empty catalog")
+print(f"Installed Vulhub catalog {entry['id']} with {entry['compose_count']} recipes")
+VULNHUB_INSTALL
+        rm -f -- "$vulnhub_zip"
+    fi
+    chown -R scenarioforge:scenarioforge \
+        /opt/scenarioforge/flag_generators /opt/scenarioforge/flag_node_generators \
+        /opt/scenarioforge/outputs/installed_vuln_catalogs 2>/dev/null || true
+    rm -rf -- "$payload_dir"
+    set_bootstrap_status 60 'requested generator/vulnerability content is installed'
+}
+
+install_optional_content
 
 flask_secret="$(openssl rand -hex 32)"
 cat > /opt/scenarioforge/.scenarioforge.env <<ENV_FILE
@@ -1070,12 +1234,13 @@ PARTICIPANT_SCRIPT
 }
 
 write_cloud_init_files() {
-    local core_password_hash app_password_hash participant_password_hash public_key
+    local core_password_hash app_password_hash participant_password_hash standard_public_key app_public_key
     local core_script_b64 app_script_b64 participant_script_b64 core_config_b64 app_config_b64
     core_password_hash="$(openssl passwd -6 "$CORE_PASSWORD")"
     app_password_hash="$(openssl passwd -6 "$APP_PASSWORD")"
     participant_password_hash="$(openssl passwd -6 "$PARTICIPANT_PASSWORD")"
-    public_key="$(public_key_yaml)"
+    standard_public_key="$(public_key_yaml 0)"
+    app_public_key="$(public_key_yaml 1)"
 
     {
         shell_assignment CORE_MINIMAL_URL "$CORE_MINIMAL_URL"
@@ -1093,6 +1258,9 @@ write_cloud_init_files() {
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
         shell_assignment CORE_PASSWORD "$CORE_PASSWORD"
         shell_assignment SCENARIOFORGE_ADMIN_PASSWORD "$SCENARIOFORGE_ADMIN_PASSWORD"
+        shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
+        shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
+        shell_assignment OPTIONAL_CONTENT_SHA256 "$OPTIONAL_CONTENT_SHA256"
     } > "$WORK_DIR/app-installer.env"
     chmod 0600 "$WORK_DIR/core-installer.env" "$WORK_DIR/app-installer.env"
 
@@ -1116,7 +1284,7 @@ users:
     sudo: ALL=(ALL) ALL
     lock_passwd: false
     passwd: '$core_password_hash'
-$public_key
+$standard_public_key
 chpasswd:
   expire: false
 package_update: true
@@ -1151,7 +1319,7 @@ users:
     sudo: ALL=(ALL) ALL
     lock_passwd: false
     passwd: '$app_password_hash'
-$public_key
+$app_public_key
 chpasswd:
   expire: false
 package_update: true
@@ -1186,7 +1354,7 @@ users:
     sudo: ALL=(ALL) ALL
     lock_passwd: false
     passwd: '$participant_password_hash'
-$public_key
+$standard_public_key
 chpasswd:
   expire: false
 package_update: true
@@ -1332,6 +1500,9 @@ write_state() {
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
         shell_assignment PARTICIPANT_CIDR "$PARTICIPANT_CIDR"
         shell_assignment APP_NET0_MAC "$APP_NET0_MAC"
+        shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
+        shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
+        shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
     } > "$STATE_TEMP_FILE"
     {
         shell_assignment CORE_VM_USERNAME corevm
@@ -1599,6 +1770,47 @@ for interface in interfaces:
 ' "$APP_NET0_MAC" <<<"$payload" 2>/dev/null || true
 }
 
+transfer_optional_content_to_app() {
+    [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]] || return 0
+    [[ -f "$OPTIONAL_CONTENT_ARCHIVE" && -f "$CATALOG_TRANSFER_KEY" ]] \
+        || die "optional content payload or one-time transfer key is missing"
+    local deadline app_ip="" elapsed remote_archive=/tmp/scenarioforge-optional-content.tar.gz
+    local -a ssh_options=(
+        -i "$CATALOG_TRANSFER_KEY"
+        -o BatchMode=yes
+        -o ConnectTimeout=5
+        -o IdentitiesOnly=yes
+        -o LogLevel=ERROR
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+    )
+    deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+    log "Waiting for the APP guest agent and one-time SSH content-transfer access"
+    while :; do
+        app_ip="$(app_uplink_ip)"
+        if [[ -n "$app_ip" ]] \
+            && ssh "${ssh_options[@]}" "scenarioforge@$app_ip" true >/dev/null 2>&1; then
+            break
+        fi
+        elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
+        emit PROGRESS "[ 53%] Optional-content transfer waiting for APP SSH (elapsed $elapsed)"
+        (( $(date +%s) < deadline )) \
+            || die "timed out waiting for APP SSH while installing optional catalogs"
+        sleep 10
+    done
+    log "Transferring requested generator/vulnerability content to APP at $app_ip"
+    scp -q "${ssh_options[@]}" "$OPTIONAL_CONTENT_ARCHIVE" \
+        "scenarioforge@$app_ip:$remote_archive.part"
+    local remote_sha
+    remote_sha="$(ssh "${ssh_options[@]}" "scenarioforge@$app_ip" \
+        "sha256sum /tmp/scenarioforge-optional-content.tar.gz.part | cut -d ' ' -f 1")"
+    [[ "$remote_sha" == "$OPTIONAL_CONTENT_SHA256" ]] \
+        || die "APP optional-content transfer checksum verification failed"
+    ssh "${ssh_options[@]}" "scenarioforge@$app_ip" \
+        "mv -f -- /tmp/scenarioforge-optional-content.tar.gz.part /tmp/scenarioforge-optional-content.tar.gz"
+    log "Optional content transfer verified; APP will install it before starting ScenarioForge"
+}
+
 vm_status_line() {
     local label="$1" vmid="$2" marker="$3" status="missing" bootstrap="unknown" agent="n/a" phase="" failure=""
     if qm status "$vmid" >/dev/null 2>&1; then
@@ -1667,6 +1879,10 @@ show_status() {
     if [[ "${PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED:-0}" == "1" ]]; then
         printf '  Participant NIC: temporary uplink net1 remains attached until XFCE provisioning finishes\n'
     fi
+    if [[ "${INSTALL_FLAG_GENERATORS:-0}" == "1" || "${INSTALL_VULNHUB:-0}" == "1" ]]; then
+        printf '  Optional content: flag-generators=%s vulnhub=%s\n' \
+            "${INSTALL_FLAG_GENERATORS:-0}" "${INSTALL_VULNHUB:-0}"
+    fi
     printf '  CORE management: %s (SSH 22, gRPC 50051)\n' "$CORE_MANAGEMENT_CIDR"
     printf '  Participant:     %s on %s\n' "$PARTICIPANT_CIDR" "$HITL_BRIDGE"
     local app_ip
@@ -1700,6 +1916,7 @@ show_completion_credentials() {
     printf '  WEB ADMIN       URL %s | username coreadmin | password %s\n' \
         "$web_url" "$SCENARIOFORGE_ADMIN_PASSWORD"
     printf '  DESKTOPS       Open Proxmox Console/noVNC for XFCE on each VM; no post-install reboot is required\n'
+    printf '  APP BROWSER    Epiphany is installed with a ScenarioForge launcher on the XFCE desktop\n'
     printf '  APP SERVICE     Native systemd units: scenarioforge-web and nginx (no app-side Docker Compose)\n'
     printf '  Stored at       %s (root-only, mode 0600)\n' "$CREDENTIALS_FILE"
     printf '  Security        This completion output contains secrets; protect terminal logs and captures.\n\n'
@@ -2063,6 +2280,11 @@ perform_install() {
     WORK_DIR="$(mktemp -d /tmp/scenarioforge-pve.XXXXXX)"
     trap '[[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]] && rm -rf "$WORK_DIR"' EXIT
 
+    if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
+        progress 4 "Authenticating and preparing requested APP catalogs"
+        prepare_optional_content
+    fi
+
     CORE_PASSWORD="$(random_password)"
     APP_PASSWORD="$(random_password)"
     PARTICIPANT_PASSWORD="$(random_password)"
@@ -2119,6 +2341,7 @@ perform_install() {
         log "Dry run complete; no resources were changed"
         return
     fi
+    transfer_optional_content_to_app
     if [[ "$WAIT_FOR_BOOTSTRAP" -eq 1 ]]; then
         progress 55 "Waiting for CORE, ScenarioForge, and participant guest provisioning"
         if ! wait_for_provisioning; then

@@ -14,7 +14,7 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
-SCRIPT_VERSION="0.1.1"
+SCRIPT_VERSION="0.2.0"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 VMRUN_TYPE="ws"
 
@@ -141,6 +141,8 @@ Important options:
   --management-vmnet NAME     APP/CORE management network (default: vmnet1)
   --hitl-vmnet NAME           isolated CORE/participant network (default: vmnet2)
   --ssh-public-key FILE       add an OpenSSH public key to all guest users
+  --flag-generators           install raistlinJ flag-generator catalogs on APP
+  --vulnhub                   install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N            bootstrap timeout (default: 90)
   --no-wait                   return after participant isolation is complete
   --headless                  start VMs without opening Workstation windows
@@ -162,6 +164,7 @@ Repository overrides:
   --core-minimal-ref REF       default: main
   --core-ref REF               default: master
   --scenarioforge-ref REF      default: main
+  --flag-generators-ref REF    default: main
 
 Before installation, create vmnet2 in Workstation's Virtual Network Editor as a
 custom network with DHCP, NAT, and the host virtual adapter disabled. See the
@@ -181,6 +184,8 @@ parse_args() {
             --management-vmnet) MANAGEMENT_VMNET="${2:?missing value for --management-vmnet}"; shift 2 ;;
             --hitl-vmnet) HITL_VMNET="${2:?missing value for --hitl-vmnet}"; shift 2 ;;
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
+            --flag-generators) INSTALL_FLAG_GENERATORS=1; shift ;;
+            --vulnhub) INSTALL_VULNHUB=1; shift ;;
             --wait-minutes) WAIT_MINUTES="${2:?missing value for --wait-minutes}"; shift 2 ;;
             --no-wait) WAIT_FOR_BOOTSTRAP=0; shift ;;
             --headless) HEADLESS=1; shift ;;
@@ -197,6 +202,7 @@ parse_args() {
             --core-minimal-ref) CORE_MINIMAL_REF="${2:?missing value}"; shift 2 ;;
             --core-ref) CORE_REPO_REF="${2:?missing value}"; shift 2 ;;
             --scenarioforge-ref) SCENARIOFORGE_REF="${2:?missing value}"; shift 2 ;;
+            --flag-generators-ref) FLAG_GENERATORS_REF="${2:?missing value}"; shift 2 ;;
             *) die "unknown option: $1" ;;
         esac
     done
@@ -285,6 +291,14 @@ validate_inputs() {
     validate_name "management vmnet" "$MANAGEMENT_VMNET"
     validate_name "HITL vmnet" "$HITL_VMNET"
     [[ "$MANAGEMENT_VMNET" != "$HITL_VMNET" ]] || die "management and HITL vmnets must be different"
+    [[ "$INSTALL_FLAG_GENERATORS" == "0" || "$INSTALL_FLAG_GENERATORS" == "1" ]] \
+        || die "SF_INSTALL_FLAG_GENERATORS must be 0 or 1"
+    [[ "$INSTALL_VULNHUB" == "0" || "$INSTALL_VULNHUB" == "1" ]] \
+        || die "SF_INSTALL_VULNHUB must be 0 or 1"
+    validate_ref "flag-generators ref" "$FLAG_GENERATORS_REF"
+    [[ "$FLAG_GENERATORS_URL" == https://* || "$FLAG_GENERATORS_URL" == ssh://* \
+        || "$FLAG_GENERATORS_URL" == git@*:* ]] \
+        || die "flag-generators URL must use HTTPS or SSH"
     validate_uint "wait minutes" "$WAIT_MINUTES" 1
     validate_uint "status interval" "$STATUS_INTERVAL" 2
     validate_uint "CORE memory" "$CORE_MEMORY_MB" 2048
@@ -312,6 +326,9 @@ confirm_install() {
     log "  Management: $MANAGEMENT_VMNET (APP $APP_MANAGEMENT_CIDR <-> CORE $CORE_MANAGEMENT_CIDR)"
     log "  HITL: $HITL_VMNET (CORE ens19, no IP <-> participant $PARTICIPANT_CIDR)"
     log "  Uplink: VMware NAT for CORE and APP; temporary for participant provisioning"
+    if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
+        log "  Optional content: flag-generators=$INSTALL_FLAG_GENERATORS vulnhub=$INSTALL_VULNHUB (ref $FLAG_GENERATORS_REF)"
+    fi
     [[ "$ASSUME_YES" -eq 1 || "$DRY_RUN" -eq 1 ]] && return
     local response
     printf 'Type INSTALL to create the three VMs: '
@@ -362,6 +379,9 @@ write_state() {
         shell_assignment INSTALL_PHASE "$INSTALL_PHASE"
         shell_assignment INSTALL_COMPLETE "$INSTALL_COMPLETE"
         shell_assignment HEADLESS "$HEADLESS"
+        shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
+        shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
+        shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
     } > "$temp"
     {
         shell_assignment CORE_VM_USERNAME corevm
@@ -649,6 +669,46 @@ vm_power_text() { vm_running "$1" && printf running || printf stopped; }
 app_ip() {
     timeout 15 vmrun -T "$VMRUN_TYPE" getGuestIPAddress "$APP_VMX" -wait 2>/dev/null | tail -n 1 || true
 }
+transfer_optional_content_to_app() {
+    [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]] || return 0
+    [[ -f "$OPTIONAL_CONTENT_ARCHIVE" && -f "$CATALOG_TRANSFER_KEY" ]] \
+        || die "optional content payload or one-time transfer key is missing"
+    local deadline address="" elapsed remote_archive=/tmp/scenarioforge-optional-content.tar.gz
+    local -a ssh_options=(
+        -i "$CATALOG_TRANSFER_KEY"
+        -o BatchMode=yes
+        -o ConnectTimeout=5
+        -o IdentitiesOnly=yes
+        -o LogLevel=ERROR
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+    )
+    deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+    log "Waiting for VMware Tools and one-time APP SSH content-transfer access"
+    while :; do
+        address="$(app_ip)"
+        if [[ -n "$address" ]] \
+            && ssh "${ssh_options[@]}" "scenarioforge@$address" true >/dev/null 2>&1; then
+            break
+        fi
+        elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
+        emit PROGRESS "[ 58%] Optional-content transfer waiting for APP SSH (elapsed $elapsed)"
+        (( $(date +%s) < deadline )) \
+            || die "timed out waiting for APP SSH while installing optional catalogs"
+        sleep 10
+    done
+    log "Transferring requested generator/vulnerability content to APP at $address"
+    scp -q "${ssh_options[@]}" "$OPTIONAL_CONTENT_ARCHIVE" \
+        "scenarioforge@$address:$remote_archive.part"
+    local remote_sha
+    remote_sha="$(ssh "${ssh_options[@]}" "scenarioforge@$address" \
+        "sha256sum /tmp/scenarioforge-optional-content.tar.gz.part | cut -d ' ' -f 1")"
+    [[ "$remote_sha" == "$OPTIONAL_CONTENT_SHA256" ]] \
+        || die "APP optional-content transfer checksum verification failed"
+    ssh "${ssh_options[@]}" "scenarioforge@$address" \
+        "mv -f -- /tmp/scenarioforge-optional-content.tar.gz.part /tmp/scenarioforge-optional-content.tar.gz"
+    log "Optional content transfer verified; APP will install it before starting ScenarioForge"
+}
 show_credentials() {
     local address
     address="$(app_ip)"
@@ -658,6 +718,7 @@ show_credentials() {
     printf '  PARTICIPANT VM: participant / %s\n' "$PARTICIPANT_VM_PASSWORD"
     printf '  ScenarioForge:  coreadmin / %s\n' "$SCENARIOFORGE_ADMIN_PASSWORD"
     [[ -z "$address" ]] || printf '  Web GUI:         https://%s/\n' "$address"
+    printf '  APP browser:     Epiphany with a ScenarioForge desktop launcher\n'
     printf '  Stored securely: %s (mode 0600)\n\n' "$CREDENTIALS_FILE"
 }
 
@@ -688,6 +749,10 @@ show_status_once() {
     printf '  Management: APP %s <-> CORE %s on %s\n' "$APP_MANAGEMENT_CIDR" "$CORE_MANAGEMENT_CIDR" "$MANAGEMENT_VMNET"
     printf '  HITL:       CORE ens19 <-> participant %s on %s\n' "$PARTICIPANT_CIDR" "$HITL_VMNET"
     printf '  Temp NAT:   %s\n' "$([[ "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED" == 1 ]] && echo attached || echo removed)"
+    if [[ "${INSTALL_FLAG_GENERATORS:-0}" == "1" || "${INSTALL_VULNHUB:-0}" == "1" ]]; then
+        printf '  Optional:   flag-generators=%s vulnhub=%s\n' \
+            "${INSTALL_FLAG_GENERATORS:-0}" "${INSTALL_VULNHUB:-0}"
+    fi
     [[ -z "$address" ]] || printf '  Web GUI:    https://%s/\n' "$address"
     printf '  Credentials: %s\n' "$CREDENTIALS_FILE"
 }
@@ -786,12 +851,17 @@ perform_install() {
     validate_inputs
     confirm_install
     if [[ "$DRY_RUN" -eq 1 ]]; then
+        prepare_optional_content
         emit PROGRESS "[100%] Dry-run validation complete; no resources were changed"
         return
     fi
 
     WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scenarioforge-vmware.XXXXXX")"
     trap '[[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]] && rm -rf -- "$WORK_DIR"' EXIT
+    if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
+        progress 4 "Authenticating and preparing requested APP catalogs"
+        prepare_optional_content
+    fi
     CORE_PASSWORD="$(random_password)"
     APP_PASSWORD="$(random_password)"
     PARTICIPANT_PASSWORD="$(random_password)"
@@ -821,6 +891,7 @@ perform_install() {
     start_vm "$APP_VMX"
     start_vm "$PARTICIPANT_VMX"
 
+    transfer_optional_content_to_app
     INSTALL_PHASE="Waiting for Cloud-Init and guest bootstrap"
     INSTALL_PERCENT=60
     write_state

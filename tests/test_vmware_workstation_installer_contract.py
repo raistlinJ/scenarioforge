@@ -46,6 +46,8 @@ def test_help_does_not_require_linux_or_vmware() -> None:
         "--management-vmnet",
         "--hitl-vmnet",
         "--headless",
+        "--flag-generators",
+        "--vulnhub",
         "--verbose",
         "--watch",
         "--cleanup",
@@ -72,12 +74,16 @@ def test_topology_native_app_and_graphical_guest_contracts() -> None:
     assert 'deleteNetworkAdapter "$PARTICIPANT_VMX" 1' in source
     assert 'scenarioforge.install.owner = "$INSTALLER_OWNER"' in source
     assert "open-vm-tools, open-vm-tools-desktop" in source
+    assert "transfer_optional_content_to_app" in source
 
     assert '--from-source "$CORE_REPO_URL" "$CORE_REPO_REF"' in shared
     assert "CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19" in shared
     assert "ExecStart=/opt/scenarioforge/.venv/bin/python -m webapp.app_backend" in shared
     assert "systemctl enable --now lightdm" in shared
     assert "command -v core-gui" in shared
+    assert "epiphany-browser" in shared
+    assert "Exec=epiphany https://localhost/" in shared
+    assert "_install_vuln_catalog_zip_file" in shared
     assert "docker compose --env-file .scenarioforge.env up -d" not in shared
 
 

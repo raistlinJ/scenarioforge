@@ -32,6 +32,8 @@ def test_installer_help_does_not_require_proxmox() -> None:
     assert "--verbose" in result.stdout
     assert "--watch" in result.stdout
     assert "--from-source" in result.stdout
+    assert "--flag-generators" in result.stdout
+    assert "--vulnhub" in result.stdout
     assert "cleanup [--dry-run] [--force] [--yes]" in result.stdout
     assert "--cleanup" in result.stdout
 
@@ -75,6 +77,15 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "participant XFCE graphical login did not become active" in source
     assert "journalctl -u lightdm -n 100 --no-pager" in source
     assert "Permit status/watch to recognize a manually completed recovery" in source
+    assert "epiphany-browser" in source
+    assert "Exec=epiphany https://localhost/" in source
+    assert "prepare_optional_content" in source
+    assert "transfer_optional_content_to_app" in source
+    assert "INSTALL_FLAG_GENERATORS" in source
+    assert "INSTALL_VULNHUB" in source
+    assert "_install_vuln_catalog_zip_file" in source
+    assert "PYTHONPATH=/opt/scenarioforge" in source
+    assert "do not embed credentials in SF_FLAG_GENERATORS_URL" in source
     assert "/var/lib/scenarioforge/bootstrap-percent" in source
     assert "Guest bootstrap heartbeat (elapsed $elapsed)" in source
     assert "Install progress:" in source
@@ -473,10 +484,18 @@ confirm_cleanup
 
 
 def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path) -> None:
+    user_key = tmp_path / "user.pub"
+    transfer_key = tmp_path / "transfer.pub"
+    user_key.write_text("ssh-ed25519 AAAAuser operator\n", encoding="utf-8")
+    transfer_key.write_text(
+        "ssh-ed25519 AAAAtransfer scenarioforge-installer-transfer\n",
+        encoding="utf-8",
+    )
     render = f"""
 source {INSTALLER!s}
 WORK_DIR={tmp_path!s}
-SSH_PUBLIC_KEY_FILE=
+SSH_PUBLIC_KEY_FILE={shlex.quote(str(user_key))}
+CATALOG_TRANSFER_PUBLIC_KEY_FILE={shlex.quote(str(transfer_key))}
 CORE_PASSWORD=core-password-for-test
 APP_PASSWORD=app-password-for-test
 PARTICIPANT_PASSWORD=participant-password-for-test
@@ -499,6 +518,20 @@ write_cloud_init_files
     )
     assert result.returncode == 0, result.stderr
 
+    core_user = yaml.safe_load((tmp_path / "core-user.yaml").read_text(encoding="utf-8"))
+    app_user = yaml.safe_load((tmp_path / "app-user.yaml").read_text(encoding="utf-8"))
+    participant_user = yaml.safe_load(
+        (tmp_path / "participant-user.yaml").read_text(encoding="utf-8")
+    )
+    assert core_user["users"][0]["ssh_authorized_keys"] == ["ssh-ed25519 AAAAuser operator"]
+    assert participant_user["users"][0]["ssh_authorized_keys"] == [
+        "ssh-ed25519 AAAAuser operator"
+    ]
+    assert app_user["users"][0]["ssh_authorized_keys"] == [
+        "ssh-ed25519 AAAAuser operator",
+        "ssh-ed25519 AAAAtransfer scenarioforge-installer-transfer",
+    ]
+
     for path in tmp_path.glob("*.yaml"):
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert isinstance(payload, dict), path.name
@@ -517,3 +550,96 @@ write_cloud_init_files
             check=False,
         )
         assert syntax.returncode == 0, syntax.stderr
+
+    app_script = (tmp_path / "app-bootstrap.sh").read_text(encoding="utf-8")
+    for start, end in (
+        ("<<'VULNHUB_ZIP'\n", "\nVULNHUB_ZIP"),
+        ("<<'VULNHUB_INSTALL'\n", "\nVULNHUB_INSTALL"),
+    ):
+        python_source = app_script.split(start, maxsplit=1)[1].split(end, maxsplit=1)[0]
+        compile(python_source, "app-bootstrap-heredoc", "exec")
+
+
+def test_optional_catalog_payload_contains_only_requested_content(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source"
+    work_dir = tmp_path / "work"
+    for relative in (
+        "flag_generators/demo/manifest.yaml",
+        "flag_node_generators/demo/manifest.yaml",
+        "vulnhub/content/demo/docker-compose.yml",
+    ):
+        path = source_repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("test: true\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(source_repo)], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=ScenarioForge Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    work_dir.mkdir()
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+WORK_DIR={shlex.quote(str(work_dir))}
+FLAG_GENERATORS_URL={shlex.quote(str(source_repo))}
+FLAG_GENERATORS_REF=main
+INSTALL_FLAG_GENERATORS=1
+INSTALL_VULNHUB=0
+prepare_optional_content
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    archive = work_dir / "scenarioforge-optional-content.tar.gz"
+    assert archive.is_file()
+    listing = subprocess.run(
+        ["tar", "-tzf", str(archive)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "flag_generators/demo/manifest.yaml" in listing
+    assert "flag_node_generators/demo/manifest.yaml" in listing
+    assert "vulnhub/" not in listing
+    assert (work_dir / "catalog-transfer-key").is_file()
+    assert (work_dir / "catalog-transfer-key.pub").is_file()
+
+    vulnhub_work_dir = tmp_path / "work-vulnhub"
+    vulnhub_work_dir.mkdir()
+    vulnhub_probe = f"""
+source {shlex.quote(str(INSTALLER))}
+WORK_DIR={shlex.quote(str(vulnhub_work_dir))}
+FLAG_GENERATORS_URL={shlex.quote(str(source_repo))}
+FLAG_GENERATORS_REF=main
+INSTALL_FLAG_GENERATORS=0
+INSTALL_VULNHUB=1
+prepare_optional_content
+"""
+    result = subprocess.run(
+        ["bash", "-c", vulnhub_probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    vulnhub_listing = subprocess.run(
+        ["tar", "-tzf", str(vulnhub_work_dir / "scenarioforge-optional-content.tar.gz")],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "vulnhub/content/demo/docker-compose.yml" in vulnhub_listing
+    assert "flag_generators/" not in vulnhub_listing
+    assert "flag_node_generators/" not in vulnhub_listing
