@@ -3,12 +3,14 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.2.2"
+SCRIPT_VERSION="0.3.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
 STATE_TEMP_FILE="$STATE_FILE.new"
 CREDENTIALS_TEMP_FILE="$CREDENTIALS_FILE.new"
+RUNTIME_STATUS_FILE="${SCENARIOFORGE_LAB_RUNTIME_STATUS_FILE:-/run/scenarioforge-lab-install.status}"
+RUNTIME_STATUS_TEMP_FILE="$RUNTIME_STATUS_FILE.new"
 
 VM_STORAGE="${SF_VM_STORAGE:-local-lvm}"
 SNIPPET_STORAGE="${SF_SNIPPET_STORAGE:-local}"
@@ -72,6 +74,7 @@ LAST_CORE_ACTIVITY=""
 LAST_APP_ACTIVITY=""
 INSTALL_COMPLETE=""
 INSTALL_PHASE=""
+RUNTIME_TRACKING=0
 CLEANUP_STATE_FOUND=0
 declare -a CLEANUP_VMIDS=()
 declare -a CLEANUP_LABELS=()
@@ -95,6 +98,9 @@ log() {
 progress() {
     CURRENT_STEP=$((CURRENT_STEP + 1))
     emit PROGRESS "[$CURRENT_STEP/$TOTAL_STEPS] $*"
+    if [[ "$RUNTIME_TRACKING" -eq 1 ]]; then
+        write_runtime_status running "$*" ""
+    fi
     record_install_phase "$*"
 }
 
@@ -109,12 +115,18 @@ warn() {
 
 die() {
     emit ERROR "$@" >&2
+    if [[ "$RUNTIME_TRACKING" -eq 1 ]]; then
+        write_runtime_status failed "Installer stopped" "$*"
+    fi
     exit 1
 }
 
 on_unexpected_error() {
     local line="$1" exit_code="$2"
     emit ERROR "unexpected installer failure at line $line (exit $exit_code)" >&2
+    if [[ "$RUNTIME_TRACKING" -eq 1 ]]; then
+        write_runtime_status failed "Installer stopped unexpectedly" "line $line, exit $exit_code"
+    fi
     if [[ "$COMMAND" == "cleanup" ]]; then
         emit WARN "cleanup stopped; any resources not yet reported as removed were left intact" >&2
     elif [[ -f "$STATE_FILE" ]]; then
@@ -540,6 +552,34 @@ random_mac() {
 
 shell_assignment() {
     printf '%s=%q\n' "$1" "$2"
+}
+
+write_runtime_status() {
+    local runtime_state="$1" phase="$2" detail="$3" runtime_dir
+    runtime_dir="${RUNTIME_STATUS_FILE%/*}"
+    if [[ "$RUNTIME_STATUS_FILE" != /* || -z "$runtime_dir" || "$runtime_dir" == "/" ]]; then
+        warn "cannot write runtime status to unsafe path: $RUNTIME_STATUS_FILE"
+        return 0
+    fi
+    if ! install -d -m 0755 "$runtime_dir"; then
+        warn "cannot create runtime status directory: $runtime_dir"
+        return 0
+    fi
+    if ! {
+        shell_assignment RUNTIME_PID "$$"
+        shell_assignment RUNTIME_STATE "$runtime_state"
+        shell_assignment RUNTIME_PHASE "$phase"
+        shell_assignment RUNTIME_DETAIL "$detail"
+        shell_assignment RUNTIME_UPDATED "$(timestamp)"
+    } > "$RUNTIME_STATUS_TEMP_FILE"; then
+        warn "cannot write runtime status: $RUNTIME_STATUS_TEMP_FILE"
+        return 0
+    fi
+    if ! chmod 0600 "$RUNTIME_STATUS_TEMP_FILE" \
+        || ! mv -f -- "$RUNTIME_STATUS_TEMP_FILE" "$RUNTIME_STATUS_FILE"; then
+        warn "cannot publish runtime status: $RUNTIME_STATUS_FILE"
+    fi
+    return 0
 }
 
 record_install_phase() {
@@ -1123,10 +1163,45 @@ show_status() {
     printf '  Credentials:     %s (root-readable)\n' "$CREDENTIALS_FILE"
 }
 
+show_prestate_runtime_status() {
+    local mode="" RUNTIME_PID="" RUNTIME_STATE="" RUNTIME_PHASE="" RUNTIME_DETAIL="" RUNTIME_UPDATED=""
+    [[ -f "$RUNTIME_STATUS_FILE" ]] || return 1
+    if [[ -L "$RUNTIME_STATUS_FILE" || ! -O "$RUNTIME_STATUS_FILE" ]]; then
+        warn "ignoring runtime status that is a symlink or is not owned by root: $RUNTIME_STATUS_FILE"
+        return 2
+    fi
+    mode="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mode & 0o022)' "$RUNTIME_STATUS_FILE")"
+    if [[ "$mode" != "0" ]]; then
+        warn "ignoring group/world-writable runtime status: $RUNTIME_STATUS_FILE"
+        return 2
+    fi
+    # shellcheck disable=SC1090
+    source "$RUNTIME_STATUS_FILE"
+    emit INFO "Host installer ${RUNTIME_STATE:-unknown} (PID ${RUNTIME_PID:-unknown}, updated ${RUNTIME_UPDATED:-unknown}): ${RUNTIME_PHASE:-phase unavailable}"
+    if [[ "${RUNTIME_STATE:-}" == "failed" ]]; then
+        warn "Installer error: ${RUNTIME_DETAIL:-no error detail was recorded}"
+        return 2
+    fi
+    if [[ ! "${RUNTIME_PID:-}" =~ ^[0-9]+$ ]] || ! kill -0 "$RUNTIME_PID" 2>/dev/null; then
+        warn "no active installer process owns this status; inspect the install shell before waiting longer"
+        return 2
+    fi
+    return 0
+}
+
 watch_status() {
+    local runtime_result
     emit INFO "Watching provisioning every $STATUS_INTERVAL seconds; press Ctrl-C to stop"
     while [[ ! -f "$STATE_FILE" ]]; do
-        emit INFO "Waiting for installer state at $STATE_FILE (check the install shell's preflight output or INSTALL prompt)"
+        if show_prestate_runtime_status; then
+            emit INFO "Waiting for installer state at $STATE_FILE"
+        else
+            runtime_result=$?
+            if [[ "$runtime_result" -eq 2 ]]; then
+                return 0
+            fi
+            emit INFO "No active install status found; start 'install' in another shell, or verify that shell has not exited"
+        fi
         sleep "$STATUS_INTERVAL"
     done
     emit INFO "Installer state detected; beginning VM and guest bootstrap status"
@@ -1277,7 +1352,7 @@ confirm_cleanup() {
     [[ "${#CLEANUP_SNIPPETS[@]}" -eq 0 ]] || log "  Cloud-Init snippets: ${#CLEANUP_SNIPPETS[@]} installer files"
     [[ "${#CLEANUP_BRIDGES[@]}" -eq 0 ]] || log "  Installer-created bridges: ${CLEANUP_BRIDGES[*]}"
     cleanup_metadata_exists \
-        && log "  Saved installer state and credentials: $STATE_DIR"
+        && log "  Saved installer/runtime state and credentials"
 
     if cleanup_is_healthy_running_lab; then
         [[ "$FORCE_CLEANUP" -eq 1 ]] \
@@ -1363,7 +1438,9 @@ cleanup_metadata_exists() {
     [[ -e "$STATE_FILE" || -L "$STATE_FILE" \
         || -e "$CREDENTIALS_FILE" || -L "$CREDENTIALS_FILE" \
         || -e "$STATE_TEMP_FILE" || -L "$STATE_TEMP_FILE" \
-        || -e "$CREDENTIALS_TEMP_FILE" || -L "$CREDENTIALS_TEMP_FILE" ]]
+        || -e "$CREDENTIALS_TEMP_FILE" || -L "$CREDENTIALS_TEMP_FILE" \
+        || -e "$RUNTIME_STATUS_FILE" || -L "$RUNTIME_STATUS_FILE" \
+        || -e "$RUNTIME_STATUS_TEMP_FILE" || -L "$RUNTIME_STATUS_TEMP_FILE" ]]
 }
 
 remove_cleanup_files() {
@@ -1373,8 +1450,9 @@ remove_cleanup_files() {
         run rm -f -- "$path"
     done
     if cleanup_metadata_exists; then
-        log "Removing saved installer state and credentials"
-        run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE" "$STATE_TEMP_FILE" "$CREDENTIALS_TEMP_FILE"
+        log "Removing saved installer state, runtime status, and credentials"
+        run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE" "$STATE_TEMP_FILE" "$CREDENTIALS_TEMP_FILE" \
+            "$RUNTIME_STATUS_FILE" "$RUNTIME_STATUS_TEMP_FILE"
         if [[ "$DRY_RUN" -eq 1 ]]; then
             run rmdir "$STATE_DIR"
         elif [[ -d "$STATE_DIR" ]] && ! run rmdir "$STATE_DIR" 2>/dev/null; then
@@ -1475,6 +1553,7 @@ perform_install() {
             warn "Provisioning did not finish before the timeout. VMs were left intact for diagnosis."
             warn "Run: $0 status"
             warn "Guest logs: /var/log/scenarioforge-{core,app}-bootstrap.log"
+            write_runtime_status failed "Guest provisioning timed out" "CORE or ScenarioForge did not become ready within $WAIT_MINUTES minutes"
             exit 2
         fi
         mark_install_complete
@@ -1482,12 +1561,17 @@ perform_install() {
         progress "Guest provisioning started in the background (--no-wait)"
     fi
     show_status
+    write_runtime_status complete "${INSTALL_PHASE:-Host installation complete}" ""
     log "Installation complete. Retrieve generated passwords from $CREDENTIALS_FILE"
 }
 
 main() {
     parse_args "$@"
     trap 'exit_code=$?; on_unexpected_error "$LINENO" "$exit_code"' ERR
+    if [[ "$COMMAND" == "install" && "$DRY_RUN" -eq 0 ]]; then
+        RUNTIME_TRACKING=1
+        write_runtime_status running "Starting installer checks" ""
+    fi
     require_root_and_pve
     case "$COMMAND" in
         status)

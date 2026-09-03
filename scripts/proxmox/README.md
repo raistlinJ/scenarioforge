@@ -108,9 +108,13 @@ marker, current host-installer phase, explicit guest bootstrap phase, and latest
 available guest/Cloud-Init log activity. The installer writes state immediately
 after a successful preflight and confirmation, before creating bridges or
 downloading images. Until that happens, the watcher reports that it is waiting;
-it begins detailed status automatically when state becomes available. The
-default refresh interval is 10 seconds; change it with `--interval 5`. Stop
-watching with `Ctrl-C`; this does not stop provisioning.
+it reads a root-only runtime status under `/run` to show the active installer
+PID and preflight phase. If the installer exits before creating state, the
+watcher displays the recorded error—or warns that no installer process is
+active—instead of waiting indefinitely. It begins detailed VM status
+automatically when state becomes available. The default refresh interval is 10
+seconds; change it with `--interval 5`. Stop watching with `Ctrl-C`; this does
+not stop provisioning.
 
 Bootstrap logs are available inside the guests:
 

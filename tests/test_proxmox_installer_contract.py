@@ -78,10 +78,42 @@ watch_status
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "Waiting for installer state" in result.stdout
-    assert "check the install shell's preflight output" in result.stdout
+    assert "No active install status found" in result.stdout
     assert "Installer state detected" in result.stdout
     assert "status-observed" in result.stdout
+
+
+def test_status_watch_surfaces_prestate_installer_failure(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    runtime_status = tmp_path / "install.status"
+    state_dir.mkdir()
+    runtime_status.write_text(
+        """\
+RUNTIME_PID=99999999
+RUNTIME_STATE=failed
+RUNTIME_PHASE=Installer\\ stopped
+RUNTIME_DETAIL=storage\\ preflight\\ failed
+RUNTIME_UPDATED=now
+""",
+        encoding="utf-8",
+    )
+    runtime_status.chmod(0o600)
+    probe = f"""
+SCENARIOFORGE_LAB_STATE_DIR={shlex.quote(str(state_dir))}
+SCENARIOFORGE_LAB_RUNTIME_STATUS_FILE={shlex.quote(str(runtime_status))}
+source {shlex.quote(str(INSTALLER))}
+STATUS_INTERVAL=0.05
+watch_status
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Host installer failed" in result.stdout
+    assert "Installer error: storage preflight failed" in result.stderr
 
 
 def test_storage_probe_uses_proxmox_api_json() -> None:
