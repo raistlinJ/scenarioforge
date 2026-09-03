@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.3.3"
+SCRIPT_VERSION="0.3.4"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -388,6 +388,7 @@ preflight_proxmox() {
     if [[ -f /etc/network/interfaces.new ]] && ! cmp -s /etc/network/interfaces /etc/network/interfaces.new; then
         die "Proxmox has unapplied network changes; review or revert them before this installer adds bridges"
     fi
+    validate_network_reload
 
     config="$(storage_config "$VM_STORAGE")"
     [[ "$(storage_field "$config" disable)" != "1" ]] || die "storage '$VM_STORAGE' is disabled"
@@ -398,6 +399,20 @@ preflight_proxmox() {
     [[ "$(storage_field "$config" type)" == "dir" ]] \
         || die "snippet storage '$SNIPPET_STORAGE' must be directory-backed"
     verbose "Preflight passed: VMIDs are free, uplink exists, and storage capabilities are compatible"
+}
+
+validate_network_reload() {
+    local version_output
+    command -v ifreload >/dev/null 2>&1 \
+        || die "ifupdown2 is required to apply bridge changes without rebooting; install it from the configured Proxmox repositories"
+    if ! version_output="$(ifreload -V 2>&1)"; then
+        die "could not query ifupdown2 with 'ifreload -V': ${version_output:-no output}"
+    fi
+    [[ "$version_output" == *ifupdown2:* ]] \
+        || die "ifreload did not report an ifupdown2 version: $version_output"
+    [[ "$version_output" =~ (pve|pmx|proxmox) ]] \
+        || die "incompatible ifupdown2 build '$version_output'; install the supported package from the configured Proxmox repositories"
+    verbose "Compatible network reload tool detected: $version_output"
 }
 
 confirm_install() {
@@ -480,8 +495,24 @@ apply_network_changes() {
         return
     fi
     log "Applying ScenarioForge bridge changes"
-    local task_payload upid
-    task_payload="$(pvesh set "/nodes/$PVE_NODE/network" --output-format json)"
+    local task_payload upid error_file line apply_exit
+    error_file="$(mktemp /tmp/scenarioforge-network-apply.XXXXXX)"
+    if task_payload="$(pvesh set "/nodes/$PVE_NODE/network" --output-format json 2>"$error_file")"; then
+        while IFS= read -r line; do
+            [[ -z "$line" ]] || verbose "Proxmox network apply: $line"
+        done < "$error_file"
+    else
+        apply_exit=$?
+        while IFS= read -r line; do
+            [[ -z "$line" ]] || warn "Proxmox network apply: $line"
+        done <<<"$task_payload"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] || warn "Proxmox network apply: $line"
+        done < "$error_file"
+        rm -f -- "$error_file"
+        die "Proxmox rejected the network reload (exit $apply_exit); staged changes remain unapplied"
+    fi
+    rm -f -- "$error_file"
     upid="$(python3 -c '
 import json
 import sys
@@ -1374,6 +1405,23 @@ discover_cleanup_bridges() {
     return 0
 }
 
+cleanup_may_change_network() {
+    [[ "${#CLEANUP_BRIDGES[@]}" -gt 0 ]] && return 0
+    [[ "${CREATED_MANAGEMENT_BRIDGE:-0}" != "0" ]] \
+        && ip link show "$MANAGEMENT_BRIDGE" >/dev/null 2>&1 \
+        && return 0
+    [[ "${CREATED_HITL_BRIDGE:-0}" != "0" ]] \
+        && ip link show "$HITL_BRIDGE" >/dev/null 2>&1
+}
+
+preflight_cleanup_network() {
+    cleanup_may_change_network || return 0
+    if [[ -f /etc/network/interfaces.new ]] && ! cmp -s /etc/network/interfaces /etc/network/interfaces.new; then
+        die "Proxmox has unapplied network changes; inspect 'diff -u /etc/network/interfaces /etc/network/interfaces.new', then apply or revert them before retrying cleanup"
+    fi
+    validate_network_reload
+}
+
 cleanup_is_healthy_running_lab() {
     local vmid status
     [[ "${#CLEANUP_VMIDS[@]}" -eq 3 ]] || return 1
@@ -1512,6 +1560,7 @@ perform_cleanup() {
     load_cleanup_scope
     discover_cleanup_snippets
     discover_cleanup_bridges
+    preflight_cleanup_network
     if [[ "${#CLEANUP_VMIDS[@]}" -eq 0 && "${#CLEANUP_SNIPPETS[@]}" -eq 0 \
         && "${#CLEANUP_BRIDGES[@]}" -eq 0 && "$CLEANUP_STATE_FOUND" -eq 0 ]]; then
         if ! cleanup_metadata_exists; then

@@ -163,7 +163,34 @@ def test_cleanup_is_identity_scoped_and_protects_a_healthy_lab() -> None:
     assert 'qm destroy "$vmid" --purge 1 --destroy-unreferenced-disks 1' in source
     assert 'command -v pct' in source
     assert 'preserving installer-created bridge' in source
+    assert "validate_network_reload" in source
+    assert "Proxmox rejected the network reload" in source
+    assert "preflight_cleanup_network" in source
     assert 'cached base images were preserved for reuse' in source
+
+
+def test_network_apply_surfaces_captured_proxmox_errors(tmp_path: Path) -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+PVE_NODE=testnode
+NETWORK_CHANGES=1
+pvesh() {{
+    printf '%s\\n' "proxy handler failed: incompatible ifupdown2 package"
+    printf '%s\\n' "info: executing ifreload -V" >&2
+    return 1
+}}
+apply_network_changes
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "proxy handler failed: incompatible ifupdown2 package" in result.stderr
+    assert "info: executing ifreload -V" in result.stderr
+    assert "staged changes remain unapplied" in result.stderr
 
 
 def test_cleanup_dry_run_preserves_a_recorded_vmid_with_wrong_identity(tmp_path: Path) -> None:
@@ -229,6 +256,7 @@ pvesh() {{
         *) return 1 ;;
     esac
 }}
+ifreload() {{ printf '%s\n' 'ifupdown2:3.2.0-1+pmx1'; }}
 perform_cleanup
 """
     result = subprocess.run(

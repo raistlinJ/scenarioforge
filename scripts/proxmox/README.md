@@ -36,6 +36,9 @@ participant cannot reach CORE SSH/gRPC or ScenarioForge management data.
 Run on the target Proxmox node as `root`. The node needs:
 
 - Proxmox VE with `qm`, `pvesh`, and Cloud-Init support.
+- The Proxmox-packaged `ifupdown2`, used for safe live bridge reloads. An
+  upstream or otherwise incompatible `ifupdown2` build is rejected before the
+  installer changes the node.
 - An existing uplink bridge, normally `vmbr0`, providing DHCP and Internet
   access to the CORE and ScenarioForge VMs.
 - VM storage that accepts `images`, normally `local-lvm`.
@@ -194,6 +197,14 @@ gracefully shuts down running target VMs, force-stops them only when needed,
 then removes their disks, the six installer Cloud-Init snippets, saved state and
 credentials, and installer-created bridges that no other VM or container uses.
 Downloaded Debian and Ubuntu base images remain cached for a faster retry.
+
+Cleanup refuses to make further changes when Proxmox already has an unapplied
+`/etc/network/interfaces.new`, including after a failed live reload. Inspect
+the staged diff and explicitly apply or revert it in Proxmox before retrying;
+the installer keeps its state and credentials until bridge removal succeeds.
+Network reload errors include both output streams so package-version and
+configuration failures are visible instead of appearing as a generic line
+number.
 
 Deletion is intentionally identity-checked. With a state file, each recorded
 VMID must still have its expected ScenarioForge name or installer Cloud-Init
