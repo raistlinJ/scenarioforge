@@ -55,6 +55,30 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "set_bootstrap_status 'building ScenarioForge and nginx container images'" in source
 
 
+def test_status_watch_waits_for_fresh_install_state(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    probe = f"""
+SCENARIOFORGE_LAB_STATE_DIR={shlex.quote(str(state_dir))}
+source {shlex.quote(str(INSTALLER))}
+STATUS_INTERVAL=0.05
+show_status() {{ printf 'status-observed\\n'; }}
+guest_marker_exists() {{ return 0; }}
+(sleep 0.1; touch "$STATE_FILE") &
+watch_status
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Waiting for the installer to write state" in result.stdout
+    assert "Installer state detected" in result.stdout
+    assert "status-observed" in result.stdout
+
+
 def test_storage_probe_uses_proxmox_api_json() -> None:
     probe = f"""
 source {INSTALLER!s}

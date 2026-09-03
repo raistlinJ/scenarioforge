@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.2.1"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -1063,7 +1063,8 @@ vm_status_line() {
 }
 
 show_status() {
-    [[ -f "$STATE_FILE" ]] || die "no installer state found at $STATE_FILE"
+    [[ -f "$STATE_FILE" ]] \
+        || die "no installer state found at $STATE_FILE; if an install is running, use: $0 status --watch"
     # shellcheck disable=SC1090
     source "$STATE_FILE"
     printf 'ScenarioForge Proxmox lab on %s\n' "$PVE_NODE"
@@ -1085,10 +1086,12 @@ show_status() {
 }
 
 watch_status() {
-    [[ -f "$STATE_FILE" ]] || die "no installer state found at $STATE_FILE"
-    # shellcheck disable=SC1090
-    source "$STATE_FILE"
     emit INFO "Watching provisioning every $STATUS_INTERVAL seconds; press Ctrl-C to stop"
+    while [[ ! -f "$STATE_FILE" ]]; do
+        emit INFO "Waiting for the installer to write state at $STATE_FILE"
+        sleep "$STATUS_INTERVAL"
+    done
+    emit INFO "Installer state detected; beginning VM and guest bootstrap status"
     while :; do
         printf '\n'
         show_status
