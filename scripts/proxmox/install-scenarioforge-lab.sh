@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.3.1"
+SCRIPT_VERSION="0.3.2"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -665,12 +665,36 @@ else
     printf 'custom_services_dir = /opt/core/custom_services\n' >> "$CORE_CONF"
 fi
 
-set_bootstrap_status 'restarting and verifying Docker and core-daemon'
+set_bootstrap_status 'restarting Docker and core-daemon'
 systemctl restart docker
-systemctl restart core-daemon
 systemctl is-active --quiet docker
-systemctl is-active --quiet core-daemon
-ss -lnt | grep -q ':50051 '
+systemctl restart core-daemon
+
+grpc_ready() {
+    ss -H -lnt | awk '$4 == "0.0.0.0:50051" { found=1 } END { exit !found }'
+}
+
+set_bootstrap_status 'waiting for core-daemon gRPC on 0.0.0.0:50051'
+core_ready=0
+for attempt in $(seq 1 60); do
+    if systemctl is-active --quiet core-daemon && grpc_ready; then
+        core_ready=1
+        break
+    fi
+    if systemctl is-failed --quiet core-daemon; then
+        break
+    fi
+    sleep 2
+done
+if [[ "$core_ready" -ne 1 ]]; then
+    echo 'core-daemon did not become ready on 0.0.0.0:50051' >&2
+    systemctl status core-daemon --no-pager -l || true
+    journalctl -u core-daemon -n 100 --no-pager || true
+    ss -lntp || true
+    exit 1
+fi
+
+set_bootstrap_status 'verifying the CORE HITL interface'
 if ip -4 addr show dev ens19 | grep -q 'inet '; then
     echo 'ens19 unexpectedly has an IPv4 address' >&2
     exit 1
