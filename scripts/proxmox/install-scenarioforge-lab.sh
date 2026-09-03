@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.3.2"
+SCRIPT_VERSION="0.3.3"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -671,7 +671,7 @@ systemctl is-active --quiet docker
 systemctl restart core-daemon
 
 grpc_ready() {
-    ss -H -lnt | awk '$4 == "0.0.0.0:50051" { found=1 } END { exit !found }'
+    ss -H -4 -lnt | awk '$4 == "0.0.0.0:50051" || $4 == "*:50051" { found=1 } END { exit !found }'
 }
 
 set_bootstrap_status 'waiting for core-daemon gRPC on 0.0.0.0:50051'

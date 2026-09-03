@@ -124,9 +124,10 @@ bootstrap workload, so its guest agent may be reported as `optional` while its
 bootstrap state remains `n/a`.
 
 After restarting `core-daemon`, the CORE bootstrap waits up to two minutes for
-gRPC to listen on `0.0.0.0:50051`. If it cannot become ready, the bootstrap log
-includes the systemd status, recent `core-daemon` journal, and listening sockets
-instead of failing on a one-shot startup race.
+gRPC to listen on the IPv4 wildcard port 50051 (`ss` may render this as either
+`0.0.0.0:50051` or `*:50051`). If it cannot become ready, the bootstrap log
+includes the systemd status, recent `core-daemon` journal, and listening
+sockets instead of failing on a one-shot startup race.
 
 Bootstrap logs are available inside the guests:
 

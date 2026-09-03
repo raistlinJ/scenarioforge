@@ -60,6 +60,7 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "for attempt in $(seq 1 60)" in source
     assert "journalctl -u core-daemon -n 100 --no-pager" in source
     assert 'waiting for core-daemon gRPC on 0.0.0.0:50051' in source
+    assert '$4 == "0.0.0.0:50051" || $4 == "*:50051"' in source
     assert 'shell_assignment INSTALL_PHASE' in source
     assert 'printf \'  Host installer:' in source
     assert install_body.index("write_state") < install_body.index("download_verified_image")
