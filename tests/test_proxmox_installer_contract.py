@@ -102,6 +102,29 @@ printf 'combined=%s\\n' "$(current_install_percent)"
     assert "combined=64" in result.stdout
 
 
+def test_initial_progress_does_not_rewrite_existing_lab_state(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_file = state_dir / "state.env"
+    state_file.write_text("EXISTING_LAB_STATE=preserve-me\n", encoding="utf-8")
+    probe = f"""
+SCENARIOFORGE_LAB_STATE_DIR={shlex.quote(str(state_dir))}
+source {shlex.quote(str(INSTALLER))}
+COMMAND=install
+DRY_RUN=0
+RUNTIME_TRACKING=0
+progress 2 'Validating Proxmox'
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert state_file.read_text(encoding="utf-8") == "EXISTING_LAB_STATE=preserve-me\n"
+
+
 def test_guest_cloud_init_failure_is_reported_from_a_stale_phase() -> None:
     probe = f"""
 source {shlex.quote(str(INSTALLER))}

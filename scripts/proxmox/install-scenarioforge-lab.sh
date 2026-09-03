@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.4.1"
+SCRIPT_VERSION="0.4.2"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -76,6 +76,7 @@ INSTALL_COMPLETE=""
 INSTALL_PHASE=""
 INSTALL_PERCENT=0
 INSTALL_STARTED_EPOCH=""
+INSTALL_STATE_INITIALIZED=0
 PROVISIONING_FAILURE_DETAIL=""
 RUNTIME_TRACKING=0
 CLEANUP_STATE_FOUND=0
@@ -630,7 +631,8 @@ write_runtime_status() {
 
 record_install_phase() {
     INSTALL_PHASE="$*"
-    if [[ "$COMMAND" == "install" && "$DRY_RUN" -eq 0 && -f "$STATE_FILE" ]]; then
+    if [[ "$COMMAND" == "install" && "$DRY_RUN" -eq 0 \
+        && "$INSTALL_STATE_INITIALIZED" -eq 1 && -f "$STATE_FILE" ]]; then
         write_state
     fi
 }
@@ -1122,6 +1124,7 @@ write_state() {
     chmod 0600 "$STATE_TEMP_FILE" "$CREDENTIALS_TEMP_FILE"
     mv -f -- "$CREDENTIALS_TEMP_FILE" "$CREDENTIALS_FILE"
     mv -f -- "$STATE_TEMP_FILE" "$STATE_FILE"
+    INSTALL_STATE_INITIALIZED=1
 }
 
 mark_install_complete() {

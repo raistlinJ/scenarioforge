@@ -55,6 +55,8 @@ when it detects pre-existing unapplied network changes, so it cannot accidentall
 apply another administrator's staged edit along with its bridge additions.
 Only one installer-managed lab is supported per node state directory; an
 existing `/etc/scenarioforge-lab/state.env` also stops a new installation.
+The initial progress event never rewrites an existing lab state; preflight
+reports it and directs the operator to status or explicit cleanup.
 The installer isolates host-tool execution from activated Conda environments,
 virtual environments, `PYTHONHOME`, and `PYTHONPATH`, because Proxmox network
 tools must load Debian's system Python modules.
