@@ -214,6 +214,8 @@ gracefully shuts down running target VMs, force-stops them only when needed,
 then removes their disks, the six installer Cloud-Init snippets, saved state and
 credentials, and installer-created bridges that no other VM or container uses.
 Downloaded Debian and Ubuntu base images remain cached for a faster retry.
+Successful bridge absence is treated as cleanup success, so a metadata-only
+retry can finish safely after an interrupted or older cleanup run.
 
 Cleanup refuses to make further changes when Proxmox already has an unapplied
 `/etc/network/interfaces.new`, including after a failed live reload. Inspect

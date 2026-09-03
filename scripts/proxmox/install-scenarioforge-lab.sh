@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.4.2"
+SCRIPT_VERSION="0.4.3"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -1651,10 +1651,12 @@ remove_cleanup_bridges() {
     apply_network_changes
     if [[ "$DRY_RUN" -eq 0 ]]; then
         for bridge in "${removed[@]}"; do
-            ip link show "$bridge" >/dev/null 2>&1 \
-                && die "bridge $bridge still exists after applying its removal"
+            if ip link show "$bridge" >/dev/null 2>&1; then
+                die "bridge $bridge still exists after applying its removal"
+            fi
         done
     fi
+    return 0
 }
 
 cleanup_metadata_exists() {

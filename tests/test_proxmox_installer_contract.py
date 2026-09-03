@@ -282,6 +282,26 @@ apply_network_changes
     assert "staged changes remain unapplied" in result.stderr
 
 
+def test_cleanup_bridge_absence_is_success() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+DRY_RUN=0
+CLEANUP_BRIDGES=(sfmgmt0 sfhitl0)
+bridge_in_use_after_cleanup() {{ return 1; }}
+run() {{ return 0; }}
+apply_network_changes() {{ return 0; }}
+ip() {{ return 1; }}
+remove_cleanup_bridges
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_cleanup_dry_run_preserves_a_recorded_vmid_with_wrong_identity(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     snippet_dir = tmp_path / "snippets"
