@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.4.3"
+SCRIPT_VERSION="0.4.4"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -1369,6 +1369,30 @@ show_status() {
     printf '  Credentials:     %s (root-readable)\n' "$CREDENTIALS_FILE"
 }
 
+show_completion_credentials() {
+    local app_ip app_address web_url
+    app_ip="$(app_uplink_ip)"
+    if [[ -n "$app_ip" ]]; then
+        app_address="$app_ip"
+        web_url="https://$app_ip/"
+    else
+        app_address="DHCP address pending (VMID $APP_VMID)"
+        web_url="DHCP address pending; rerun the status command"
+    fi
+
+    printf '\nScenarioForge lab credentials\n'
+    printf '  CORE VM         VMID %s | address %s | username corevm | password %s\n' \
+        "$CORE_VMID" "$(plain_ip "$CORE_MANAGEMENT_CIDR")" "$CORE_PASSWORD"
+    printf '  APP VM          VMID %s | address %s | username scenarioforge | password %s\n' \
+        "$APP_VMID" "$app_address" "$APP_PASSWORD"
+    printf '  PARTICIPANT VM  VMID %s | address %s | username participant | password %s\n' \
+        "$PARTICIPANT_VMID" "$(plain_ip "$PARTICIPANT_CIDR")" "$PARTICIPANT_PASSWORD"
+    printf '  WEB ADMIN       URL %s | username coreadmin | password %s\n' \
+        "$web_url" "$SCENARIOFORGE_ADMIN_PASSWORD"
+    printf '  Stored at       %s (root-only, mode 0600)\n' "$CREDENTIALS_FILE"
+    printf '  Security        This completion output contains secrets; protect terminal logs and captures.\n\n'
+}
+
 show_prestate_runtime_status() {
     local mode="" RUNTIME_PID="" RUNTIME_STATE="" RUNTIME_PERCENT="0" RUNTIME_PHASE="" RUNTIME_DETAIL="" RUNTIME_UPDATED=""
     [[ -f "$RUNTIME_STATUS_FILE" ]] || return 1
@@ -1793,8 +1817,9 @@ perform_install() {
         progress 55 "Guest provisioning started in the background (--no-wait)"
     fi
     show_status
+    show_completion_credentials
     write_runtime_status complete "${INSTALL_PHASE:-Host installation complete}" ""
-    log "Installation complete. Retrieve generated passwords from $CREDENTIALS_FILE"
+    log "Installation complete. Credentials were shown above and saved at $CREDENTIALS_FILE"
 }
 
 main() {

@@ -157,7 +157,7 @@ Bootstrap logs are available inside the guests:
 /var/log/cloud-init-output.log
 ```
 
-Generated VM and Web UI passwords are written only to:
+Generated VM and Web UI passwords are persisted only in:
 
 ```text
 /etc/scenarioforge-lab/credentials.env
@@ -166,6 +166,12 @@ Generated VM and Web UI passwords are written only to:
 The file and its containing directory are root-only. The ScenarioForge VM also
 stores the CORE SSH password in `/opt/scenarioforge/.scenarioforge.env`, mode
 `0600`, because the current remote execution path uses password authentication.
+At successful installer completion, a one-time summary prints the CORE VM, app
+VM, participant VM, and web-admin usernames and passwords together with their
+addresses and VMIDs. The same summary identifies the root-only credentials file
+above. Subsequent `status` commands show only its path and do not reprint the
+secrets; use `sudo cat /etc/scenarioforge-lab/credentials.env` when they must be
+retrieved again.
 
 ## Important options and environment variables
 
@@ -248,7 +254,8 @@ Cleanup is permanent. Always inspect `cleanup --dry-run` before using `--yes`.
 - CORE gRPC listens on `0.0.0.0`, but only on the isolated management bridge.
 - The Web UI listens on the ScenarioForge VM's uplink so an operator can reach
   it. Protect that LAN and use the generated admin password.
-- Passwords are randomly generated for each run and are not printed to normal
-  command output.
+- Passwords are randomly generated for each run and printed once at successful
+  installer completion. Protect terminal logs and output captures. Later status
+  output does not reveal them.
 - Pin repository refs to release tags or stable branches if you need a
   frozen deployment. The defaults follow the maintained branches.

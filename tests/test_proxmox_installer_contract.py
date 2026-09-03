@@ -58,6 +58,8 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "/var/lib/scenarioforge/bootstrap-percent" in source
     assert "Guest bootstrap heartbeat (elapsed $elapsed)" in source
     assert "Install progress:" in source
+    assert "show_completion_credentials" in source
+    assert "Credentials were shown above and saved at" in source
     assert 'bootstrap="in-progress"' in source
     assert 'agent="optional"' in source
     assert "for attempt in $(seq 1 60)" in source
@@ -123,6 +125,48 @@ progress 2 'Validating Proxmox'
     )
     assert result.returncode == 0, result.stderr
     assert state_file.read_text(encoding="utf-8") == "EXISTING_LAB_STATE=preserve-me\n"
+
+
+def test_completion_prints_every_generated_credential_and_storage_path(tmp_path: Path) -> None:
+    credentials_file = tmp_path / "credentials.env"
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+CREDENTIALS_FILE={shlex.quote(str(credentials_file))}
+CORE_VMID=9401
+APP_VMID=9402
+PARTICIPANT_VMID=9403
+CORE_MANAGEMENT_CIDR=172.31.250.3/24
+PARTICIPANT_CIDR=10.254.200.10/24
+CORE_PASSWORD=core-secret
+APP_PASSWORD=app-secret
+PARTICIPANT_PASSWORD=participant-secret
+SCENARIOFORGE_ADMIN_PASSWORD=web-secret
+app_uplink_ip() {{ printf '192.0.2.25\\n'; }}
+show_completion_credentials
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    for expected in (
+        "CORE VM",
+        "corevm",
+        "core-secret",
+        "APP VM",
+        "scenarioforge",
+        "app-secret",
+        "PARTICIPANT VM",
+        "participant-secret",
+        "WEB ADMIN",
+        "web-secret",
+        "https://192.0.2.25/",
+        str(credentials_file),
+        "root-only, mode 0600",
+    ):
+        assert expected in result.stdout
 
 
 def test_guest_cloud_init_failure_is_reported_from_a_stale_phase() -> None:
