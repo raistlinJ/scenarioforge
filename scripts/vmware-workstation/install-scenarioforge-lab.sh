@@ -29,7 +29,7 @@ VMWARE_NETWORK_EDITOR_NAME="${VMWARE_NETWORK_EDITOR_NAME:-Virtual Network Editor
 HOST_VALIDATION_LABEL="${HOST_VALIDATION_LABEL:-Linux, VMware Workstation, networks, paths, and resources}"
 DEBIAN_GUEST_OS="${DEBIAN_GUEST_OS:-debian12-64}"
 UBUNTU_GUEST_OS="${UBUNTU_GUEST_OS:-ubuntu-64}"
-DEBIAN_IMAGE_CACHE_NAME="${DEBIAN_IMAGE_CACHE_NAME:-debian-12-genericcloud-amd64.qcow2}"
+DEBIAN_IMAGE_CACHE_NAME="${DEBIAN_IMAGE_CACHE_NAME:-debian-12-generic-amd64.qcow2}"
 UBUNTU_IMAGE_CACHE_NAME="${UBUNTU_IMAGE_CACHE_NAME:-noble-server-cloudimg-amd64.img}"
 
 LAB_DIR="${SF_VMWARE_LAB_DIR:-${HOME}/vmware/ScenarioForge-Lab}"
@@ -78,7 +78,7 @@ CORE_REPO_REF="${SF_CORE_REPO_REF:-master}"
 SCENARIOFORGE_URL="${SF_SCENARIOFORGE_URL:-https://github.com/raistlinJ/scenarioforge.git}"
 SCENARIOFORGE_REF="${SF_SCENARIOFORGE_REF:-main}"
 
-DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2}"
+DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2}"
 DEBIAN_SUMS_URL="${SF_DEBIAN_SUMS_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS}"
 UBUNTU_IMAGE_URL="${SF_UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 UBUNTU_SUMS_URL="${SF_UBUNTU_SUMS_URL:-https://cloud-images.ubuntu.com/noble/current/SHA256SUMS}"
@@ -601,6 +601,28 @@ create_seed_iso() {
         genisoimage -quiet -output "$output" -volid cidata -joliet -rock \
             "$seed_dir/user-data" "$seed_dir/meta-data" "$seed_dir/network-config"
     fi
+    chmod 0600 "$output"
+}
+
+append_guestinfo_cloud_init() {
+    local vmx="$1" role="$2" seed_dir metadata_file metadata_encoded userdata_encoded
+    seed_dir="$WORK_DIR/seed-$role"
+    metadata_file="$seed_dir/vmware-meta-data"
+    {
+        cat "$seed_dir/meta-data"
+        printf 'network:\n'
+        sed 's/^/  /' "$seed_dir/network-config"
+        printf 'redact:\n  - userdata\n'
+    } > "$metadata_file"
+    metadata_encoded="$(gzip -c9 "$metadata_file" | openssl base64 -A)"
+    userdata_encoded="$(gzip -c9 "$seed_dir/user-data" | openssl base64 -A)"
+    {
+        printf 'guestinfo.metadata = "%s"\n' "$metadata_encoded"
+        printf 'guestinfo.metadata.encoding = "gzip+base64"\n'
+        printf 'guestinfo.userdata = "%s"\n' "$userdata_encoded"
+        printf 'guestinfo.userdata.encoding = "gzip+base64"\n'
+    } >> "$vmx"
+    chmod 0600 "$vmx"
 }
 
 prepare_disk() {
@@ -700,6 +722,7 @@ create_vms() {
     create_seed_iso core "$CORE_NAME" "$CORE_DIR/$CORE_NAME-cidata.iso"
     create_vmx "$CORE_VMX" "$CORE_NAME" "$DEBIAN_GUEST_OS" "$CORE_MEMORY_MB" "$CORE_CORES" \
         "$CORE_DIR/$CORE_NAME.vmdk" "$CORE_DIR/$CORE_NAME-cidata.iso"
+    append_guestinfo_cloud_init "$CORE_VMX" core
     append_nic "$CORE_VMX" 0 custom "$MANAGEMENT_VMNET" "$CORE_NET0_MAC"
     append_nic "$CORE_VMX" 1 custom "$HITL_VMNET" "$CORE_NET1_MAC"
     append_nic "$CORE_VMX" 2 nat "" "$CORE_NET2_MAC"
@@ -708,6 +731,7 @@ create_vms() {
     create_seed_iso app "$APP_NAME" "$APP_DIR/$APP_NAME-cidata.iso"
     create_vmx "$APP_VMX" "$APP_NAME" "$UBUNTU_GUEST_OS" "$APP_MEMORY_MB" "$APP_CORES" \
         "$APP_DIR/$APP_NAME.vmdk" "$APP_DIR/$APP_NAME-cidata.iso"
+    append_guestinfo_cloud_init "$APP_VMX" app
     append_nic "$APP_VMX" 0 nat "" "$APP_NET0_MAC"
     append_nic "$APP_VMX" 1 custom "$MANAGEMENT_VMNET" "$APP_NET1_MAC"
 
@@ -716,6 +740,7 @@ create_vms() {
     create_vmx "$PARTICIPANT_VMX" "$PARTICIPANT_NAME" "$DEBIAN_GUEST_OS" \
         "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" \
         "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
+    append_guestinfo_cloud_init "$PARTICIPANT_VMX" participant
     append_nic "$PARTICIPANT_VMX" 0 custom "$HITL_VMNET" "$PARTICIPANT_NET0_MAC"
     append_nic "$PARTICIPANT_VMX" 1 nat "" "$PARTICIPANT_NET1_MAC"
 }

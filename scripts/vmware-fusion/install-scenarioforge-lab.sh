@@ -51,9 +51,9 @@ HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
     arm64)
         GUEST_ARCH="arm64"
-        DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2}"
+        DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-arm64.qcow2}"
         UBUNTU_IMAGE_URL="${SF_UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img}"
-        DEBIAN_IMAGE_CACHE_NAME="debian-12-genericcloud-arm64.qcow2"
+        DEBIAN_IMAGE_CACHE_NAME="debian-12-generic-arm64.qcow2"
         UBUNTU_IMAGE_CACHE_NAME="noble-server-cloudimg-arm64.img"
         DEBIAN_GUEST_OS="arm-debian12-64"
         UBUNTU_GUEST_OS="arm-ubuntu-64"
@@ -65,9 +65,9 @@ case "$HOST_ARCH" in
         ;;
     x86_64)
         GUEST_ARCH="amd64"
-        DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2}"
+        DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2}"
         UBUNTU_IMAGE_URL="${SF_UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
-        DEBIAN_IMAGE_CACHE_NAME="debian-12-genericcloud-amd64.qcow2"
+        DEBIAN_IMAGE_CACHE_NAME="debian-12-generic-amd64.qcow2"
         UBUNTU_IMAGE_CACHE_NAME="noble-server-cloudimg-amd64.img"
         DEBIAN_GUEST_OS="debian12-64"
         UBUNTU_GUEST_OS="ubuntu-64"

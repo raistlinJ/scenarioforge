@@ -1,3 +1,5 @@
+import base64
+import gzip
 from pathlib import Path
 import re
 import shlex
@@ -144,6 +146,8 @@ def test_topology_native_app_and_graphical_guest_contracts() -> None:
 
     assert 'MANAGEMENT_VMNET="${SF_VMWARE_MANAGEMENT_VMNET:-vmnet1}"' in source
     assert 'HITL_VMNET="${SF_VMWARE_HITL_VMNET:-vmnet2}"' in source
+    assert "debian-12-generic-amd64.qcow2" in source
+    assert "genericcloud" not in source
     assert 'append_nic "$CORE_VMX" 0 custom "$MANAGEMENT_VMNET"' in source
     assert 'append_nic "$CORE_VMX" 1 custom "$HITL_VMNET"' in source
     assert 'append_nic "$CORE_VMX" 2 nat' in source
@@ -153,6 +157,9 @@ def test_topology_native_app_and_graphical_guest_contracts() -> None:
     assert 'append_nic "$PARTICIPANT_VMX" 1 nat' in source
     assert 'deleteNetworkAdapter "$PARTICIPANT_VMX" 1' in source
     assert 'scenarioforge.install.owner = "$INSTALLER_OWNER"' in source
+    assert 'append_guestinfo_cloud_init "$CORE_VMX" core' in source
+    assert 'append_guestinfo_cloud_init "$APP_VMX" app' in source
+    assert 'append_guestinfo_cloud_init "$PARTICIPANT_VMX" participant' in source
     assert "open-vm-tools, open-vm-tools-desktop" in source
     assert "transfer_optional_content_to_app" in source
 
@@ -172,6 +179,44 @@ def test_topology_native_app_and_graphical_guest_contracts() -> None:
     assert "/opt/scenarioforge/outputs/installed_generators" in shared
     assert "_install_vuln_catalog_zip_file" in shared
     assert "docker compose --env-file .scenarioforge.env up -d" not in shared
+
+
+def test_vmware_guestinfo_contains_compressed_cloud_init_and_network(tmp_path: Path) -> None:
+    seed_dir = tmp_path / "seed-core"
+    seed_dir.mkdir()
+    (seed_dir / "meta-data").write_text(
+        "instance-id: test-1\nlocal-hostname: test-core\n", encoding="utf-8"
+    )
+    (seed_dir / "network-config").write_text(
+        "version: 2\nethernets:\n  test:\n    dhcp4: true\n", encoding="utf-8"
+    )
+    (seed_dir / "user-data").write_text(
+        "#cloud-config\nhostname: test-core\n", encoding="utf-8"
+    )
+    vmx = tmp_path / "test.vmx"
+    vmx.write_text('.encoding = "UTF-8"\n', encoding="utf-8")
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+WORK_DIR={shlex.quote(str(tmp_path))}
+append_guestinfo_cloud_init {shlex.quote(str(vmx))} core
+"""
+    result = run_bash(probe)
+    assert result.returncode == 0, result.stderr
+    generated = vmx.read_text(encoding="utf-8")
+    assert 'guestinfo.metadata.encoding = "gzip+base64"' in generated
+    assert 'guestinfo.userdata.encoding = "gzip+base64"' in generated
+    assert vmx.stat().st_mode & 0o077 == 0
+    values = {
+        line.split(" = ", 1)[0]: line.split('"', 2)[1]
+        for line in generated.splitlines()
+        if line.startswith("guestinfo.")
+    }
+    metadata = gzip.decompress(base64.b64decode(values["guestinfo.metadata"])).decode()
+    userdata = gzip.decompress(base64.b64decode(values["guestinfo.userdata"])).decode()
+    assert "local-hostname: test-core" in metadata
+    assert "network:\n  version: 2" in metadata
+    assert "redact:\n  - userdata" in metadata
+    assert userdata == "#cloud-config\nhostname: test-core\n"
 
 
 def test_vmx_generator_emits_safe_owner_hardware_and_networks(tmp_path: Path) -> None:

@@ -74,7 +74,7 @@ printf 'VALUES|%s|%s|%s|%s\\n' \
     result = run_bash(probe)
     assert result.returncode == 0, result.stderr
     values_line = next(line for line in result.stdout.splitlines() if line.startswith("VALUES|"))
-    assert "debian-12-genericcloud-arm64.qcow2" in values_line
+    assert "debian-12-generic-arm64.qcow2" in values_line
     assert "noble-server-cloudimg-arm64.img" in values_line
     assert values_line.endswith("|arm-debian12-64|nvme")
 
@@ -112,7 +112,7 @@ printf 'VALUES|%s|%s|%s\\n' "$DEBIAN_IMAGE_URL" "$DEBIAN_GUEST_OS" "$VMWARE_DISK
     result = run_bash(probe)
     assert result.returncode == 0, result.stderr
     values_line = next(line for line in result.stdout.splitlines() if line.startswith("VALUES|"))
-    assert "debian-12-genericcloud-amd64.qcow2" in values_line
+    assert "debian-12-generic-amd64.qcow2" in values_line
     assert values_line.endswith("|debian12-64|scsi")
     generated = vmx.read_text(encoding="utf-8")
     assert 'scsi0:0.fileName = "disk.vmdk"' in generated

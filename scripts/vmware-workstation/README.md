@@ -80,8 +80,9 @@ cd scripts/vmware-workstation
 
 The script asks for an `INSTALL` confirmation. Use `--yes` for unattended host
 setup. It downloads and verifies current Debian 12 and Ubuntu 24.04 cloud
-images, converts them to VMDKs, creates NoCloud seed ISOs and VMX files, starts
-the VMs, and prints percentage heartbeats while Cloud-Init works. This can take
+images, converts them to VMDKs, creates VMX files, and supplies Cloud-Init
+through both VMware GuestInfo and fallback NoCloud seed ISOs. It starts the
+VMs and prints percentage heartbeats while Cloud-Init works. This can take
 well over an hour when CORE is built from source.
 
 VMware Workstation windows open by default so each XFCE desktop is visible. Use

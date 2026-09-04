@@ -20,8 +20,9 @@ integration, and clipboard support.
 
 - VMware Fusion 13 or newer, installed in `/Applications/VMware Fusion.app`.
   Set `SF_FUSION_APP` when using a differently named application bundle.
-- Apple silicon uses the Debian and Ubuntu ARM64 cloud images, the Fusion ARM
-  guest types, UEFI, NVMe disks, and `vmxnet3` adapters.
+- Apple silicon uses Debian's hardware-compatible generic ARM64 image and the
+  Ubuntu ARM64 cloud image, the Fusion ARM guest types, UEFI, NVMe disks, and
+  `vmxnet3` adapters.
 - Intel Macs use AMD64 cloud images and SCSI disks.
 - About 140 GB of free space for the default expanded disks, plus enough RAM to
   run the selected guests. Defaults are 8 GB CORE, 4 GB APP, and 2 GB
@@ -98,7 +99,8 @@ cd scripts/vmware-fusion
 
 The installer asks you to type `INSTALL`. Add `--yes` for unattended setup. It
 downloads and verifies the correct cloud-image architecture, creates three
-`.vmwarevm` bundles and Cloud-Init seed ISOs, starts the graphical VMs, and
+`.vmwarevm` bundles, and supplies Cloud-Init through both VMware GuestInfo and
+fallback seed ISOs. It then starts the graphical VMs and
 prints percentage heartbeats while provisioning. Building CORE from source can
 take well over an hour.
 
