@@ -14,7 +14,7 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.3.0"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 VMRUN_TYPE="ws"
 
@@ -141,6 +141,10 @@ Important options:
   --management-vmnet NAME     APP/CORE management network (default: vmnet1)
   --hitl-vmnet NAME           isolated CORE/participant network (default: vmnet2)
   --ssh-public-key FILE       add an OpenSSH public key to all guest users
+  --core-password PASSWORD    set the corevm password (default: generated)
+  --app-password PASSWORD     set the scenarioforge VM password (default: generated)
+  --participant-password PASS set the participant password (default: generated)
+  --web-admin-password PASS   set the coreadmin Web UI password (default: generated)
   --flag-generators           install raistlinJ flag-generator catalogs on APP
   --vulnhub                   install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N            bootstrap timeout (default: 90)
@@ -184,6 +188,10 @@ parse_args() {
             --management-vmnet) MANAGEMENT_VMNET="${2:?missing value for --management-vmnet}"; shift 2 ;;
             --hitl-vmnet) HITL_VMNET="${2:?missing value for --hitl-vmnet}"; shift 2 ;;
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
+            --core-password) REQUESTED_CORE_PASSWORD="${2:?missing value for --core-password}"; shift 2 ;;
+            --app-password) REQUESTED_APP_PASSWORD="${2:?missing value for --app-password}"; shift 2 ;;
+            --participant-password) REQUESTED_PARTICIPANT_PASSWORD="${2:?missing value for --participant-password}"; shift 2 ;;
+            --web-admin-password) REQUESTED_WEB_ADMIN_PASSWORD="${2:?missing value for --web-admin-password}"; shift 2 ;;
             --flag-generators) INSTALL_FLAG_GENERATORS=1; shift ;;
             --vulnhub) INSTALL_VULNHUB=1; shift ;;
             --wait-minutes) WAIT_MINUTES="${2:?missing value for --wait-minutes}"; shift 2 ;;
@@ -296,6 +304,10 @@ validate_inputs() {
     [[ "$INSTALL_VULNHUB" == "0" || "$INSTALL_VULNHUB" == "1" ]] \
         || die "SF_INSTALL_VULNHUB must be 0 or 1"
     validate_ref "flag-generators ref" "$FLAG_GENERATORS_REF"
+    validate_password_override "CORE password" "$REQUESTED_CORE_PASSWORD"
+    validate_password_override "APP password" "$REQUESTED_APP_PASSWORD"
+    validate_password_override "participant password" "$REQUESTED_PARTICIPANT_PASSWORD"
+    validate_password_override "Web administrator password" "$REQUESTED_WEB_ADMIN_PASSWORD"
     [[ "$FLAG_GENERATORS_URL" == https://* || "$FLAG_GENERATORS_URL" == ssh://* \
         || "$FLAG_GENERATORS_URL" == git@*:* ]] \
         || die "flag-generators URL must use HTTPS or SSH"
@@ -862,10 +874,15 @@ perform_install() {
         progress 4 "Authenticating and preparing requested APP catalogs"
         prepare_optional_content
     fi
-    CORE_PASSWORD="$(random_password)"
-    APP_PASSWORD="$(random_password)"
-    PARTICIPANT_PASSWORD="$(random_password)"
-    SCENARIOFORGE_ADMIN_PASSWORD="$(random_password)"
+    CORE_PASSWORD="$REQUESTED_CORE_PASSWORD"
+    APP_PASSWORD="$REQUESTED_APP_PASSWORD"
+    PARTICIPANT_PASSWORD="$REQUESTED_PARTICIPANT_PASSWORD"
+    SCENARIOFORGE_ADMIN_PASSWORD="$REQUESTED_WEB_ADMIN_PASSWORD"
+    [[ -n "$CORE_PASSWORD" ]] || CORE_PASSWORD="$(random_password)"
+    [[ -n "$APP_PASSWORD" ]] || APP_PASSWORD="$(random_password)"
+    [[ -n "$PARTICIPANT_PASSWORD" ]] || PARTICIPANT_PASSWORD="$(random_password)"
+    [[ -n "$SCENARIOFORGE_ADMIN_PASSWORD" ]] \
+        || SCENARIOFORGE_ADMIN_PASSWORD="$(random_password)"
     CORE_NET0_MAC="$(random_vmware_mac)"
     CORE_NET1_MAC="$(random_vmware_mac)"
     CORE_NET2_MAC="$(random_vmware_mac)"

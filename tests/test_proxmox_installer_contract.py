@@ -34,6 +34,10 @@ def test_installer_help_does_not_require_proxmox() -> None:
     assert "--from-source" in result.stdout
     assert "--flag-generators" in result.stdout
     assert "--vulnhub" in result.stdout
+    assert "--core-password" in result.stdout
+    assert "--app-password" in result.stdout
+    assert "--participant-password" in result.stdout
+    assert "--web-admin-password" in result.stdout
     assert "cleanup [--dry-run] [--force] [--yes]" in result.stdout
     assert "--cleanup" in result.stdout
 
@@ -86,6 +90,7 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "_install_vuln_catalog_zip_file" in source
     assert "PYTHONPATH=/opt/scenarioforge" in source
     assert "do not embed credentials in SF_FLAG_GENERATORS_URL" in source
+    assert "openssl passwd -6 -stdin" in source
     assert "/var/lib/scenarioforge/bootstrap-percent" in source
     assert "Guest bootstrap heartbeat (elapsed $elapsed)" in source
     assert "Install progress:" in source
@@ -102,6 +107,30 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert 'shell_assignment INSTALL_PHASE' in source
     assert 'printf \'  Host installer:' in source
     assert install_body.index("write_state") < install_body.index("download_verified_image")
+
+
+def test_password_override_flags_preserve_exact_values() -> None:
+    values = (
+        "core value !$",
+        "app value #2",
+        "participant value &3",
+        "web value (4)",
+    )
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+parse_args install \
+  --core-password {shlex.quote(values[0])} \
+  --app-password {shlex.quote(values[1])} \
+  --participant-password {shlex.quote(values[2])} \
+  --web-admin-password {shlex.quote(values[3])}
+printf '%s\n' "$REQUESTED_CORE_PASSWORD" "$REQUESTED_APP_PASSWORD" \
+  "$REQUESTED_PARTICIPANT_PASSWORD" "$REQUESTED_WEB_ADMIN_PASSWORD"
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == list(values)
 
 
 def test_progress_output_and_parallel_guest_weighting() -> None:

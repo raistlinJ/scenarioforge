@@ -48,12 +48,33 @@ def test_help_does_not_require_linux_or_vmware() -> None:
         "--headless",
         "--flag-generators",
         "--vulnhub",
+        "--core-password",
+        "--app-password",
+        "--participant-password",
+        "--web-admin-password",
         "--verbose",
         "--watch",
         "--cleanup",
         "cleanup [--dry-run] [--force] [--yes]",
     ):
         assert expected in result.stdout
+
+
+def test_password_override_flags_preserve_exact_values() -> None:
+    values = ("core one", "app two", "participant three", "web four")
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+parse_args install \
+  --core-password {shlex.quote(values[0])} \
+  --app-password {shlex.quote(values[1])} \
+  --participant-password {shlex.quote(values[2])} \
+  --web-admin-password {shlex.quote(values[3])}
+printf '%s\n' "$REQUESTED_CORE_PASSWORD" "$REQUESTED_APP_PASSWORD" \
+  "$REQUESTED_PARTICIPANT_PASSWORD" "$REQUESTED_WEB_ADMIN_PASSWORD"
+"""
+    result = run_bash(probe)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == list(values)
 
 
 def test_topology_native_app_and_graphical_guest_contracts() -> None:

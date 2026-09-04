@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.6.1"
+SCRIPT_VERSION="0.7.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -50,6 +50,10 @@ FLAG_GENERATORS_URL="${SF_FLAG_GENERATORS_URL:-https://github.com/raistlinJ/flag
 FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-main}"
 INSTALL_FLAG_GENERATORS="${SF_INSTALL_FLAG_GENERATORS:-0}"
 INSTALL_VULNHUB="${SF_INSTALL_VULNHUB:-0}"
+REQUESTED_CORE_PASSWORD="${SF_CORE_PASSWORD:-}"
+REQUESTED_APP_PASSWORD="${SF_APP_PASSWORD:-}"
+REQUESTED_PARTICIPANT_PASSWORD="${SF_PARTICIPANT_PASSWORD:-}"
+REQUESTED_WEB_ADMIN_PASSWORD="${SF_WEB_ADMIN_PASSWORD:-}"
 
 DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2}"
 DEBIAN_SUMS_URL="${SF_DEBIAN_SUMS_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS}"
@@ -186,6 +190,10 @@ Important options:
   --app-vmid ID                ScenarioForge VMID (default: 9402)
   --participant-vmid ID        Participant VMID (default: 9403)
   --ssh-public-key FILE        Add one OpenSSH public key to all guest users
+  --core-password PASSWORD     Set the corevm password (default: generated)
+  --app-password PASSWORD      Set the scenarioforge VM password (default: generated)
+  --participant-password PASS  Set the participant password (default: generated)
+  --web-admin-password PASS    Set the coreadmin Web UI password (default: generated)
   --flag-generators            Install raistlinJ/flag-generators catalogs on APP
   --vulnhub                    Install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N             Bootstrap timeout (default: 90)
@@ -234,6 +242,10 @@ parse_args() {
             --app-vmid) APP_VMID="${2:?missing value for --app-vmid}"; shift 2 ;;
             --participant-vmid) PARTICIPANT_VMID="${2:?missing value for --participant-vmid}"; shift 2 ;;
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
+            --core-password) REQUESTED_CORE_PASSWORD="${2:?missing value for --core-password}"; shift 2 ;;
+            --app-password) REQUESTED_APP_PASSWORD="${2:?missing value for --app-password}"; shift 2 ;;
+            --participant-password) REQUESTED_PARTICIPANT_PASSWORD="${2:?missing value for --participant-password}"; shift 2 ;;
+            --web-admin-password) REQUESTED_WEB_ADMIN_PASSWORD="${2:?missing value for --web-admin-password}"; shift 2 ;;
             --flag-generators) INSTALL_FLAG_GENERATORS=1; shift ;;
             --vulnhub) INSTALL_VULNHUB=1; shift ;;
             --wait-minutes) WAIT_MINUTES="${2:?missing value for --wait-minutes}"; shift 2 ;;
@@ -322,6 +334,14 @@ validate_ref() {
     [[ "$value" =~ ^[A-Za-z0-9._/-]+$ ]] || die "$label contains unsupported characters"
 }
 
+validate_password_override() {
+    local label="$1" value="$2"
+    [[ -n "$value" ]] || return 0
+    (( ${#value} <= 256 )) || die "$label must not exceed 256 characters"
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] \
+        || die "$label must not contain newline characters"
+}
+
 plain_ip() {
     printf '%s\n' "${1%/*}"
 }
@@ -371,6 +391,10 @@ validate_install_inputs() {
     validate_ref "CORE ref" "$CORE_REPO_REF"
     validate_ref "ScenarioForge ref" "$SCENARIOFORGE_REF"
     validate_ref "flag-generators ref" "$FLAG_GENERATORS_REF"
+    validate_password_override "CORE password" "$REQUESTED_CORE_PASSWORD"
+    validate_password_override "APP password" "$REQUESTED_APP_PASSWORD"
+    validate_password_override "participant password" "$REQUESTED_PARTICIPANT_PASSWORD"
+    validate_password_override "Web administrator password" "$REQUESTED_WEB_ADMIN_PASSWORD"
     [[ "$CORE_MINIMAL_URL" == https://* && "$CORE_REPO_URL" == https://* && "$SCENARIOFORGE_URL" == https://* ]] \
         || die "repository URLs must use HTTPS"
     [[ "$FLAG_GENERATORS_URL" == https://* || "$FLAG_GENERATORS_URL" == ssh://* \
@@ -1236,9 +1260,9 @@ PARTICIPANT_SCRIPT
 write_cloud_init_files() {
     local core_password_hash app_password_hash participant_password_hash standard_public_key app_public_key
     local core_script_b64 app_script_b64 participant_script_b64 core_config_b64 app_config_b64
-    core_password_hash="$(openssl passwd -6 "$CORE_PASSWORD")"
-    app_password_hash="$(openssl passwd -6 "$APP_PASSWORD")"
-    participant_password_hash="$(openssl passwd -6 "$PARTICIPANT_PASSWORD")"
+    core_password_hash="$(printf '%s\n' "$CORE_PASSWORD" | openssl passwd -6 -stdin)"
+    app_password_hash="$(printf '%s\n' "$APP_PASSWORD" | openssl passwd -6 -stdin)"
+    participant_password_hash="$(printf '%s\n' "$PARTICIPANT_PASSWORD" | openssl passwd -6 -stdin)"
     standard_public_key="$(public_key_yaml 0)"
     app_public_key="$(public_key_yaml 1)"
 
@@ -2285,10 +2309,15 @@ perform_install() {
         prepare_optional_content
     fi
 
-    CORE_PASSWORD="$(random_password)"
-    APP_PASSWORD="$(random_password)"
-    PARTICIPANT_PASSWORD="$(random_password)"
-    SCENARIOFORGE_ADMIN_PASSWORD="$(random_password)"
+    CORE_PASSWORD="$REQUESTED_CORE_PASSWORD"
+    APP_PASSWORD="$REQUESTED_APP_PASSWORD"
+    PARTICIPANT_PASSWORD="$REQUESTED_PARTICIPANT_PASSWORD"
+    SCENARIOFORGE_ADMIN_PASSWORD="$REQUESTED_WEB_ADMIN_PASSWORD"
+    [[ -n "$CORE_PASSWORD" ]] || CORE_PASSWORD="$(random_password)"
+    [[ -n "$APP_PASSWORD" ]] || APP_PASSWORD="$(random_password)"
+    [[ -n "$PARTICIPANT_PASSWORD" ]] || PARTICIPANT_PASSWORD="$(random_password)"
+    [[ -n "$SCENARIOFORGE_ADMIN_PASSWORD" ]] \
+        || SCENARIOFORGE_ADMIN_PASSWORD="$(random_password)"
     CORE_NET0_MAC="$(random_mac)"
     CORE_NET1_MAC="$(random_mac)"
     CORE_NET2_MAC="$(random_mac)"
