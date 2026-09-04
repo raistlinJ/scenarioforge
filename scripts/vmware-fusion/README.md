@@ -22,7 +22,9 @@ integration, and clipboard support.
   Set `SF_FUSION_APP` when using a differently named application bundle.
 - Apple silicon uses Debian's hardware-compatible generic ARM64 image and the
   Ubuntu ARM64 cloud image, the Fusion ARM guest types, UEFI, NVMe disks, and
-  `vmxnet3` adapters.
+  `vmxnet3` adapters. The ARM64 CORE guest installs static QEMU user emulation
+  and an amd64 `binfmt_misc` handler so Docker can execute images that publish
+  only `linux/amd64`.
 - Intel Macs use AMD64 cloud images and SCSI disks.
 - About 140 GB of free space for the default expanded disks, plus enough RAM to
   run the selected guests. Defaults are 8 GB CORE, 4 GB APP, and 2 GB
@@ -36,10 +38,12 @@ brew install qemu
 
 Fusion cannot run x86 guests on Apple silicon, so this installer selects ARM64
 guests there. CORE and ScenarioForge themselves are installed natively for that
-architecture. The optional catalog metadata can also be installed, but some
-Vulhub recipes or third-party container images are x86-only and may not execute
-on Apple silicon. VMware documents the architecture restriction and recommends
-UEFI, NVMe, and `vmxnet3` for ARM Linux guests in its
+architecture. The optional catalog metadata can also be installed; amd64-only
+(x86-only) container processes run through QEMU and are slower than native
+ARM64 images. Some workloads can still depend on architecture-specific kernel
+or hardware behavior and remain incompatible. VMware documents the guest
+architecture restriction and recommends UEFI, NVMe, and `vmxnet3` for ARM Linux
+guests in its
 [Apple-silicon compatibility guidance](https://knowledge.broadcom.com/external/article/315602/compatibility-considerations-for-arm-gue.html).
 
 ## Automatic isolated network setup

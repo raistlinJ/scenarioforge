@@ -74,6 +74,11 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "on_unexpected_error" in source
     assert "guest_progress_text" in source
     assert "set_bootstrap_status 10 'installing system packages and building CORE from source'" in source
+    assert '"$(dpkg --print-architecture)" == arm64' in source
+    assert "qemu-user-static binfmt-support" in source
+    assert "update-binfmts --enable qemu-x86_64" in source
+    assert "/proc/sys/fs/binfmt_misc/qemu-x86_64" in source
+    assert "grep -q '^flags:.*F'" in source
     assert "set_bootstrap_status 27 'installing uv for ScenarioForge dependency management'" in source
     assert "/opt/uv/bin/python -m pip install --disable-pip-version-check --no-cache-dir --upgrade uv" in source
     assert "ln -sfn /opt/uv/bin/uv /usr/local/bin/uv" in source

@@ -977,6 +977,22 @@ cd /opt/bootstrap/coreemu-minimal/9.2.1
 set_bootstrap_status 10 'installing system packages and building CORE from source'
 printf 'n\n' | ./setup-coreemu9.2.1.sh --from-source "$CORE_REPO_URL" "$CORE_REPO_REF"
 
+if [[ "$(dpkg --print-architecture)" == arm64 ]]; then
+    set_bootstrap_status 60 'installing amd64 container emulation with QEMU/binfmt'
+    apt-get update
+    apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+    systemctl restart systemd-binfmt.service
+    if command -v update-binfmts >/dev/null 2>&1; then
+        update-binfmts --enable qemu-x86_64
+    fi
+    systemctl restart binfmt-support.service || true
+    command -v qemu-x86_64-static >/dev/null
+    if [[ ! -r /proc/sys/fs/binfmt_misc/qemu-x86_64 ]] \
+        || ! grep -q '^flags:.*F' /proc/sys/fs/binfmt_misc/qemu-x86_64; then
+        fail_bootstrap 'amd64 QEMU binfmt handler is unavailable or missing the fix-binary flag'
+    fi
+fi
+
 set_bootstrap_status 65 'configuring the CORE XFCE desktop and graphical client'
 command -v core-gui >/dev/null
 systemctl set-default graphical.target

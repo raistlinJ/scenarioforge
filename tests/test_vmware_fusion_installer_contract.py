@@ -356,6 +356,10 @@ def test_fusion_contract_reuses_graphical_guest_provisioning() -> None:
     assert 'append_nic "$CORE_VMX" 1 custom "$HITL_VMNET"' in workstation
     assert 'deleteNetworkAdapter "$PARTICIPANT_VMX" 1' in workstation
     assert "open-vm-tools, open-vm-tools-desktop" in workstation
+    assert '"$(dpkg --print-architecture)" == arm64' in shared
+    assert "qemu-user-static binfmt-support" in shared
+    assert "update-binfmts --enable qemu-x86_64" in shared
+    assert "grep -q '^flags:.*F'" in shared
     assert '--from-source "$CORE_REPO_URL" "$CORE_REPO_REF"' in shared
     assert "CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19" in shared
     assert "ExecStart=/opt/scenarioforge/.venv/bin/python -m webapp.app_backend" in shared
