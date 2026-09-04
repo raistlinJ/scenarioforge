@@ -23,9 +23,13 @@ core_hitl_cidr=10.254.200.3/24
 participant_cidr=10.254.200.10/24
 
 ssh_public_key=
+# CORE VM login username: corevm
 core_password=
+# APP VM login username: scenarioforge
 app_password=
+# Participant VM login username: participant
 participant_password=
+# ScenarioForge Web UI administrator username: coreadmin
 web_admin_password=
 
 core_minimal_ref=main
