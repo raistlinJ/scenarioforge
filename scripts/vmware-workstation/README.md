@@ -143,11 +143,16 @@ guest.
 `--flag-generators` imports the flag and flag-node generator catalogs through
 ScenarioForge's pack importer. Their files and pack state live under
 `/opt/scenarioforge/outputs/installed_generators`, and provisioning verifies
-that both catalog kinds are visible. `--vulnhub` imports the repository's
-pinned `vulnhub/` snapshot through the vulnerability-catalog importer and
-makes it active on a fresh install. Use `--flag-generators-ref REF` or
-`SF_FLAG_GENERATORS_REF=REF` to pin another revision. Both options add install
-time and disk usage.
+that both catalog kinds are visible. The default revision is the previously
+tested snapshot `22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3`; the installer
+enables and records success for its 147 generators with saved successful test
+results, leaving the one untested generator imported but disabled and without
+an override. `--vulnhub`
+imports the same snapshot through the vulnerability-catalog importer, makes it
+active, and enables/records success for all 306 recipes with saved successful
+results. A custom `--flag-generators-ref REF` or
+`SF_FLAG_GENERATORS_REF=REF` is imported without known-good overrides. Both
+options add install time and disk usage.
 
 The optional repository contains intentionally vulnerable recipes and
 challenge key material. Run this content only in the isolated, trusted lab
@@ -238,7 +243,7 @@ The commonly useful settings are:
 | `SF_CORE_REPO_URL` / `SF_CORE_REPO_REF` | `raistlinJ/core.git` / `master` |
 | `SF_SCENARIOFORGE_URL` / `SF_SCENARIOFORGE_REF` | `raistlinJ/scenarioforge.git` / `main` |
 | `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
-| `SF_FLAG_GENERATORS_URL` / `SF_FLAG_GENERATORS_REF` | `raistlinJ/flag-generators.git` / `main` |
+| `SF_FLAG_GENERATORS_URL` / `SF_FLAG_GENERATORS_REF` | `raistlinJ/flag-generators.git` / `22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3` (tested snapshot) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
 

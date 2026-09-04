@@ -113,6 +113,31 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert install_body.index("write_state") < install_body.index("download_verified_image")
 
 
+def test_optional_catalogs_default_to_and_apply_only_the_tested_snapshot() -> None:
+    source = INSTALLER.read_text(encoding="utf-8")
+
+    tested_commit = "22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3"
+    expected_snippets = [
+        f'KNOWN_GOOD_FLAG_GENERATORS_COMMIT="{tested_commit}"',
+        'FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$KNOWN_GOOD_FLAG_GENERATORS_COMMIT}"',
+        'git -C "$source_dir" fetch --quiet --depth 1 origin "$FLAG_GENERATORS_REF"',
+        'FLAG_GENERATORS_RESOLVED_COMMIT="$(git -C "$source_dir" rev-parse HEAD)"',
+        "if resolved_commit == known_good_commit:",
+        'if source_id == "http_support_ticket_portal":',
+        'item["disabled"] = True',
+        "if overridden != 147:",
+        "if len(items) != 306:",
+        'item["validated_ok"] = True',
+        'item["validated_incomplete"] = False',
+        'item["validation_override_source"] = f"known-good@{known_good_commit}"',
+        "Skipped known-good generator overrides because the requested ref resolved",
+        "Skipped known-good Vulhub overrides because the requested ref resolved",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in source]
+    assert not missing, "Missing known-good catalog provisioning: " + "; ".join(missing)
+
+
 def test_password_override_flags_preserve_exact_values() -> None:
     values = (
         "core value !$",
@@ -647,11 +672,19 @@ FLAG_GENERATORS_REF=main
 INSTALL_FLAG_GENERATORS=1
 INSTALL_VULNHUB=0
 prepare_optional_content
+printf 'resolved=%s\n' "$FLAG_GENERATORS_RESOLVED_COMMIT"
 """
     result = subprocess.run(
         ["bash", "-c", probe], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
+    expected_commit = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert f"resolved={expected_commit}" in result.stdout
     archive = work_dir / "scenarioforge-optional-content.tar.gz"
     assert archive.is_file()
     listing = subprocess.run(

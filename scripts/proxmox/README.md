@@ -181,12 +181,21 @@ APP after the archive is verified.
 `flag_node_generators/` through ScenarioForge's pack importer. The resulting
 catalog and pack state live under
 `/opt/scenarioforge/outputs/installed_generators`; APP provisioning fails
-instead of claiming readiness unless both catalog kinds are visible.
+instead of claiming readiness unless both catalog kinds are visible. The
+default repository revision is the previously tested snapshot
+`22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3`. On that exact snapshot, the
+installer enables and records a success override for the 147 generators with
+saved successful test results; `http_support_ticket_portal`, whose saved test
+state is still untested, is imported but disabled and receives no success
+override.
 `--vulnhub` similarly imports the repository's `vulnhub/` snapshot through
 ScenarioForge's vulnerability-catalog importer; on a fresh VM that catalog
-becomes active. These flags add download, transfer, disk, and import time. They
-can be pinned with `--flag-generators-ref REF` or
-`SF_FLAG_GENERATORS_REF`.
+becomes active. On the tested snapshot, all 306 recipes with saved successful
+results are enabled and recorded as successful. A custom
+`--flag-generators-ref REF` or `SF_FLAG_GENERATORS_REF` is still imported, but
+the installer deliberately skips these known-good overrides because that
+content revision was not the one tested. These flags add download, transfer,
+disk, and import time.
 
 The optional repository contains deliberately vulnerable recipes and challenge
 key material. Use it only in an isolated, trusted lab, and do not expose the
@@ -335,7 +344,7 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_SCENARIOFORGE_REF` | `main` |
 | `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
 | `SF_FLAG_GENERATORS_URL` | `https://github.com/raistlinJ/flag-generators.git` |
-| `SF_FLAG_GENERATORS_REF` | `main` |
+| `SF_FLAG_GENERATORS_REF` | `22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3` (tested snapshot) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
 | `SF_WAIT_MINUTES` | `90` |

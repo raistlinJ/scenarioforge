@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.7.2"
+SCRIPT_VERSION="0.7.3"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -47,7 +47,9 @@ CORE_REPO_REF="${SF_CORE_REPO_REF:-master}"
 SCENARIOFORGE_URL="${SF_SCENARIOFORGE_URL:-https://github.com/raistlinJ/scenarioforge.git}"
 SCENARIOFORGE_REF="${SF_SCENARIOFORGE_REF:-main}"
 FLAG_GENERATORS_URL="${SF_FLAG_GENERATORS_URL:-https://github.com/raistlinJ/flag-generators.git}"
-FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-main}"
+KNOWN_GOOD_FLAG_GENERATORS_COMMIT="22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3"
+FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$KNOWN_GOOD_FLAG_GENERATORS_COMMIT}"
+FLAG_GENERATORS_RESOLVED_COMMIT=""
 INSTALL_FLAG_GENERATORS="${SF_INSTALL_FLAG_GENERATORS:-0}"
 INSTALL_VULNHUB="${SF_INSTALL_VULNHUB:-0}"
 REQUESTED_CORE_PASSWORD="${SF_CORE_PASSWORD:-}"
@@ -216,7 +218,7 @@ Repository overrides:
   --core-minimal-ref REF       Default: main
   --core-ref REF               Default: master
   --scenarioforge-ref REF      Default: main
-  --flag-generators-ref REF    Default: main
+  --flag-generators-ref REF    Default: tested snapshot 22f74b4cc5cb
 
 Environment variables with the SF_ prefix can set every default; see
 scripts/proxmox/README.md for the complete list.
@@ -655,9 +657,18 @@ prepare_optional_content() {
     source_dir="$WORK_DIR/flag-generators-source"
     staging_dir="$WORK_DIR/optional-content"
     log "Cloning the private flag-generators repository on the installer host (ref $FLAG_GENERATORS_REF)"
-    if ! git clone --quiet --depth 1 --branch "$FLAG_GENERATORS_REF" \
-        "$FLAG_GENERATORS_URL" "$source_dir"; then
+    git init --quiet "$source_dir"
+    git -C "$source_dir" remote add origin "$FLAG_GENERATORS_URL"
+    if ! git -C "$source_dir" fetch --quiet --depth 1 origin "$FLAG_GENERATORS_REF" \
+        || ! git -C "$source_dir" checkout --quiet --detach FETCH_HEAD; then
         die "could not clone flag-generators; authenticate GitHub on the installer host or set SF_FLAG_GENERATORS_URL to an authorized SSH URL"
+    fi
+    FLAG_GENERATORS_RESOLVED_COMMIT="$(git -C "$source_dir" rev-parse HEAD)"
+    log "Resolved flag-generators ref to $FLAG_GENERATORS_RESOLVED_COMMIT"
+    if [[ "$FLAG_GENERATORS_RESOLVED_COMMIT" == "$KNOWN_GOOD_FLAG_GENERATORS_COMMIT" ]]; then
+        log "The optional content matches the tested snapshot; known-good success overrides will be applied"
+    else
+        warn "The optional content does not match the tested snapshot; it will be imported without known-good success overrides"
     fi
     install -d -m 0700 "$staging_dir"
     if [[ "$INSTALL_FLAG_GENERATORS" == "1" ]]; then
@@ -1018,8 +1029,11 @@ GENERATOR_ZIP
         chown scenarioforge:scenarioforge "$generator_zip"
         runuser -u scenarioforge -- env \
             HOME=/home/scenarioforge PYTHONPATH=/opt/scenarioforge \
-            /opt/scenarioforge/.venv/bin/python - "$generator_zip" <<'GENERATOR_INSTALL'
+            /opt/scenarioforge/.venv/bin/python - "$generator_zip" \
+            "$FLAG_GENERATORS_RESOLVED_COMMIT" "$KNOWN_GOOD_FLAG_GENERATORS_COMMIT" <<'GENERATOR_INSTALL'
+import json
 import sys
+from pathlib import Path
 from webapp import app_backend
 
 ok, note = app_backend._install_generator_pack_or_bundle(
@@ -1029,6 +1043,60 @@ ok, note = app_backend._install_generator_pack_or_bundle(
 )
 if not ok:
     raise SystemExit(f"Generator catalog import failed: {note}")
+
+resolved_commit = str(sys.argv[2] or "").strip()
+known_good_commit = str(sys.argv[3] or "").strip()
+overridden = 0
+if resolved_commit == known_good_commit:
+    state = app_backend._load_installed_generator_packs_state()
+    packs = state.get("packs") if isinstance(state, dict) else []
+    target_pack = next(
+        (
+            pack
+            for pack in reversed(packs or [])
+            if isinstance(pack, dict)
+            and str(pack.get("origin") or "")
+            == "https://github.com/raistlinJ/flag-generators"
+        ),
+        None,
+    )
+    if target_pack is None:
+        raise SystemExit("Could not find the imported generator pack for overrides")
+    installed = target_pack.get("installed")
+    if not isinstance(installed, list) or len(installed) != 148:
+        raise SystemExit(
+            "Known-good generator snapshot did not import the expected 148 generators"
+        )
+    target_pack["disabled"] = False
+    for item in installed:
+        marker_path = Path(str(item.get("path") or "")) / ".coretg_pack.json"
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        source_id = str(marker.get("source_generator_id") or "").strip()
+        if not source_id:
+            raise SystemExit(f"Installed generator is missing a source id: {marker_path}")
+        # This is the sole item without a successful result in the saved batch.
+        if source_id == "http_support_ticket_portal":
+            item["disabled"] = True
+            continue
+        item["disabled"] = False
+        item["disabled_due_to_missing_files"] = False
+        item["validated_ok"] = True
+        item["validated_incomplete"] = False
+        item["validated_at"] = app_backend._local_timestamp_display()
+        item["validation_override_source"] = f"known-good@{known_good_commit}"
+        overridden += 1
+    if overridden != 147:
+        raise SystemExit(
+            f"Expected to override 147 known-good generators, updated {overridden}"
+        )
+    state["packs"] = packs
+    app_backend._save_installed_generator_packs_state(state)
+    print(f"Enabled and marked {overridden} previously tested generators successful")
+else:
+    print(
+        "Skipped known-good generator overrides because the requested ref resolved "
+        f"to {resolved_commit}, not tested snapshot {known_good_commit}"
+    )
 
 flag_generators, flag_errors = app_backend._flag_generators_from_all_installed_sources()
 node_generators, node_errors = app_backend._flag_node_generators_from_all_installed_sources()
@@ -1066,7 +1134,8 @@ VULNHUB_ZIP
         runuser -u scenarioforge -- env \
             HOME=/home/scenarioforge PYTHONPATH=/opt/scenarioforge \
             CORETG_CATALOG_ARCH_SCAN_REGISTRY=0 \
-            /opt/scenarioforge/.venv/bin/python - "$vulnhub_zip" <<'VULNHUB_INSTALL'
+            /opt/scenarioforge/.venv/bin/python - "$vulnhub_zip" \
+            "$FLAG_GENERATORS_RESOLVED_COMMIT" "$KNOWN_GOOD_FLAG_GENERATORS_COMMIT" <<'VULNHUB_INSTALL'
 import sys
 from webapp import app_backend
 
@@ -1077,6 +1146,50 @@ entry = app_backend._install_vuln_catalog_zip_file(
 )
 if int(entry.get("compose_count") or 0) < 1:
     raise SystemExit("Vulhub import produced an empty catalog")
+resolved_commit = str(sys.argv[2] or "").strip()
+known_good_commit = str(sys.argv[3] or "").strip()
+overridden = 0
+if resolved_commit == known_good_commit:
+    state = app_backend._load_vuln_catalogs_state()
+    catalogs = state.get("catalogs") if isinstance(state, dict) else []
+    target = next(
+        (
+            catalog
+            for catalog in catalogs or []
+            if isinstance(catalog, dict)
+            and str(catalog.get("id") or "") == str(entry.get("id") or "")
+        ),
+        None,
+    )
+    if target is None:
+        raise SystemExit("Could not find the imported Vulhub catalog for overrides")
+    items = app_backend._normalize_vuln_catalog_items(target)
+    if len(items) != 306:
+        raise SystemExit(
+            "Known-good Vulhub snapshot did not import the expected 306 recipes"
+        )
+    for item in items:
+        item["disabled"] = False
+        item["disabled_due_to_missing_files"] = False
+        item["validated_ok"] = True
+        item["validated_incomplete"] = False
+        item["validated_at"] = app_backend._local_timestamp_display()
+        item["validation_override_source"] = f"known-good@{known_good_commit}"
+        overridden += 1
+    target["compose_items"] = items
+    target["compose_count"] = len(items)
+    target["csv_paths"] = app_backend._write_vuln_catalog_csv_from_items(
+        catalog_id=str(target.get("id") or ""),
+        items=items,
+    )
+    state["catalogs"] = catalogs
+    app_backend._write_vuln_catalogs_state(state)
+    print(f"Enabled and marked {overridden} previously tested Vulhub recipes successful")
+else:
+    print(
+        "Skipped known-good Vulhub overrides because the requested ref resolved "
+        f"to {resolved_commit}, not tested snapshot {known_good_commit}"
+    )
 print(f"Installed Vulhub catalog {entry['id']} with {entry['compose_count']} recipes")
 VULNHUB_INSTALL
         rm -f -- "$vulnhub_zip"
@@ -1327,6 +1440,8 @@ write_cloud_init_files() {
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
         shell_assignment OPTIONAL_CONTENT_SHA256 "$OPTIONAL_CONTENT_SHA256"
+        shell_assignment FLAG_GENERATORS_RESOLVED_COMMIT "$FLAG_GENERATORS_RESOLVED_COMMIT"
+        shell_assignment KNOWN_GOOD_FLAG_GENERATORS_COMMIT "$KNOWN_GOOD_FLAG_GENERATORS_COMMIT"
     } > "$WORK_DIR/app-installer.env"
     chmod 0600 "$WORK_DIR/core-installer.env" "$WORK_DIR/app-installer.env"
 
@@ -1569,6 +1684,7 @@ write_state() {
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
         shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
+        shell_assignment FLAG_GENERATORS_RESOLVED_COMMIT "$FLAG_GENERATORS_RESOLVED_COMMIT"
     } > "$STATE_TEMP_FILE"
     {
         shell_assignment CORE_VM_USERNAME corevm
