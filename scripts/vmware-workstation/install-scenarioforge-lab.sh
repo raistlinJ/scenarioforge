@@ -23,6 +23,7 @@ VMWARE_NETWORKING_FILE="${VMWARE_NETWORKING_FILE:-/etc/vmware/networking}"
 VMWARE_VIRTUAL_HW_VERSION="${VMWARE_VIRTUAL_HW_VERSION:-20}"
 VMWARE_DISK_BUS="${VMWARE_DISK_BUS:-scsi}"
 VMWARE_ENABLE_3D="${VMWARE_ENABLE_3D:-FALSE}"
+VMWARE_SOUND_DEVICE="${VMWARE_SOUND_DEVICE:-}"
 VMWARE_PRODUCT_NAME="${VMWARE_PRODUCT_NAME:-VMware Workstation}"
 VMWARE_NETWORK_EDITOR_NAME="${VMWARE_NETWORK_EDITOR_NAME:-Virtual Network Editor}"
 HOST_VALIDATION_LABEL="${HOST_VALIDATION_LABEL:-Linux, VMware Workstation, networks, paths, and resources}"
@@ -658,12 +659,18 @@ usb.present = "TRUE"
 ehci.present = "TRUE"
 usb_xhci.present = "TRUE"
 sound.present = "TRUE"
-sound.autodetect = "TRUE"
+sound.autoDetect = "TRUE"
 mks.enable3d = "$VMWARE_ENABLE_3D"
 tools.syncTime = "TRUE"
 scenarioforge.install.owner = "$INSTALLER_OWNER"
 scenarioforge.install.role = "$name"
 EOF
+    if [[ -n "$VMWARE_SOUND_DEVICE" ]]; then
+        {
+            printf 'sound.virtualDev = "%s"\n' "$VMWARE_SOUND_DEVICE"
+            printf 'sound.fileName = "-1"\n'
+        } >> "$vmx"
+    fi
     case "$VMWARE_DISK_BUS" in
         nvme)
             {

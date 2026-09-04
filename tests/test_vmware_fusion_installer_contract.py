@@ -85,6 +85,9 @@ printf 'VALUES|%s|%s|%s|%s\\n' \
         'firmware = "efi"',
         'nvme0.present = "TRUE"',
         'nvme0:0.fileName = "disk.vmdk"',
+        'sound.autoDetect = "TRUE"',
+        'sound.virtualDev = "hdaudio"',
+        'sound.fileName = "-1"',
         'scenarioforge.install.owner = "scenarioforge-vmware-fusion-v1"',
     ):
         assert expected in generated
@@ -113,6 +116,7 @@ printf 'VALUES|%s|%s|%s\\n' "$DEBIAN_IMAGE_URL" "$DEBIAN_GUEST_OS" "$VMWARE_DISK
     assert values_line.endswith("|debian12-64|scsi")
     generated = vmx.read_text(encoding="utf-8")
     assert 'scsi0:0.fileName = "disk.vmdk"' in generated
+    assert 'sound.virtualDev = "hdaudio"' in generated
     assert "nvme0:0.fileName" not in generated
 
 

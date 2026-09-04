@@ -22,6 +22,10 @@ VMWARE_PRODUCT_NAME="VMware Fusion"
 VMWARE_NETWORK_EDITOR_NAME="VMware Fusion Network settings"
 HOST_VALIDATION_LABEL="macOS, VMware Fusion, networks, paths, and resources"
 VM_BUNDLE_SUFFIX=".vmwarevm"
+# Fusion 13 on Apple silicon rejects the legacy es1371 device it otherwise
+# chooses for a VMX that only enables sound. hdaudio is supported by Fusion on
+# both host architectures and is what Fusion emits for newly created ARM VMs.
+VMWARE_SOUND_DEVICE="hdaudio"
 VMWARE_NETWORKING_FILE="${SF_FUSION_NETWORKING_FILE:-/Library/Preferences/VMware Fusion/networking}"
 FUSION_APP="${SF_FUSION_APP:-/Applications/VMware Fusion.app}"
 FUSION_VMRUN="$FUSION_APP/Contents/Library/vmrun"
