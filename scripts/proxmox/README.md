@@ -9,7 +9,9 @@ lab on one Proxmox VE node:
 - Ubuntu 24.04 with an XFCE desktop and `raistlinJ/scenarioforge` installed
   natively in a Python virtual environment, managed by systemd, and published
   through the distribution nginx service. The desktop includes the native
-  Epiphany browser and a launcher for the local ScenarioForge Web GUI.
+  Epiphany browser and a launcher for the local ScenarioForge Web GUI, plus
+  Terminator, Evince for PDFs, xdot for Graphviz files, and Mousepad/`jq` for
+  graphical and terminal JSON inspection.
 - Debian 12 with a minimal XFCE participant desktop, connected only to the
   HITL network after provisioning.
 
@@ -322,6 +324,9 @@ The noVNC clipboard control is available because each VM is created with
 `vga: std,clipboard=vnc`.
 The APP desktop includes Epiphany and a **ScenarioForge** launcher that opens
 `https://localhost/`; the self-signed certificate produces an expected warning.
+It also includes Terminator, the Evince PDF viewer, the xdot Graphviz viewer,
+and a **JSON Viewer** application backed by Mousepad. The `jq` command is
+available for structured JSON inspection in a terminal.
 
 ScenarioForge itself is not containerized on the app VM. A complete Git clone
 and its Python environment live under `/opt/scenarioforge`; systemd starts the

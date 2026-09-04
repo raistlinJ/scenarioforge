@@ -91,6 +91,13 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "Permit status/watch to recognize a manually completed recovery" in source
     assert "epiphany-browser" in source
     assert "Exec=epiphany https://localhost/" in source
+    assert "evince graphviz jq" in source
+    assert "mousepad nginx" in source
+    assert "terminator xdot xfce4" in source
+    assert "scenarioforge-json-viewer.desktop" in source
+    assert "Exec=mousepad %F" in source
+    assert "MimeType=application/json;application/ld+json;" in source
+    assert "for desktop_command in epiphany evince jq mousepad terminator xdot" in source
     assert "prepare_optional_content" in source
     assert "transfer_optional_content_to_app" in source
     assert "INSTALL_FLAG_GENERATORS" in source

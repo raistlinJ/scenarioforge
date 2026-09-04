@@ -780,6 +780,7 @@ show_credentials() {
     printf '  ScenarioForge:  coreadmin / %s\n' "$SCENARIOFORGE_ADMIN_PASSWORD"
     [[ -z "$address" ]] || printf '  Web GUI:         https://%s/\n' "$address"
     printf '  APP browser:     Epiphany with a ScenarioForge desktop launcher\n'
+    printf '  APP tools:       Terminator, Evince (PDF), xdot (Graphviz), and Mousepad/jq (JSON)\n'
     printf '  Stored securely: %s (mode 0600)\n\n' "$CREDENTIALS_FILE"
 }
 

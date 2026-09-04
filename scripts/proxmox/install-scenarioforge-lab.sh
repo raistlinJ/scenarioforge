@@ -1111,12 +1111,26 @@ export DEBIAN_FRONTEND=noninteractive
 set_bootstrap_status 5 'installing XFCE and native ScenarioForge system packages'
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential dbus-x11 epiphany-browser graphviz lightdm lightdm-gtk-greeter nginx \
-    openssl python3-dev python3-full python3-venv xfce4 xorg \
+    build-essential dbus-x11 epiphany-browser evince graphviz jq lightdm lightdm-gtk-greeter \
+    mousepad nginx openssl python3-dev python3-full python3-venv terminator xdot xfce4 xorg \
     xserver-xorg-input-all xserver-xorg-video-all xterm
 systemctl set-default graphical.target
 systemctl enable --now lightdm
-command -v epiphany >/dev/null
+for desktop_command in epiphany evince jq mousepad terminator xdot; do
+    command -v "$desktop_command" >/dev/null
+done
+cat > /usr/share/applications/scenarioforge-json-viewer.desktop <<'JSON_VIEWER_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=JSON Viewer
+Comment=View JSON files in the lightweight Mousepad editor
+Exec=mousepad %F
+Icon=text-x-json
+Terminal=false
+MimeType=application/json;application/ld+json;
+Categories=Utility;TextEditor;
+StartupNotify=true
+JSON_VIEWER_DESKTOP
 install -d -o scenarioforge -g scenarioforge -m 0755 /home/scenarioforge/Desktop
 cat > /home/scenarioforge/Desktop/scenarioforge.desktop <<'SCENARIOFORGE_DESKTOP'
 [Desktop Entry]
@@ -2221,6 +2235,7 @@ show_completion_credentials() {
         "$web_url" "$SCENARIOFORGE_ADMIN_PASSWORD"
     printf '  DESKTOPS       Open Proxmox Console/noVNC for XFCE; VNC clipboard is enabled by default\n'
     printf '  APP BROWSER    Epiphany is installed with a ScenarioForge launcher on the XFCE desktop\n'
+    printf '  APP TOOLS      Terminator, Evince (PDF), xdot (Graphviz), and Mousepad/jq (JSON)\n'
     printf '  APP SERVICE     Native systemd units: scenarioforge-web and nginx (no app-side Docker Compose)\n'
     printf '  Stored at       %s (root-only, mode 0600)\n' "$CREDENTIALS_FILE"
     printf '  Security        This completion output contains secrets; protect terminal logs and captures.\n\n'

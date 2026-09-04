@@ -6,7 +6,7 @@ x86_64 Linux workstation:
 | VM | Operating system and software | Interfaces |
 |---|---|---|
 | CORE | Debian 12, XFCE, CORE GUI, CORE 9.2.1 built from `raistlinJ/core` with `coreemu-minimal --from-source`, Docker | `ens18` management, `ens19` isolated HITL with no IP, `ens20` NAT uplink |
-| APP | Ubuntu 24.04, XFCE, Epiphany browser, native ScenarioForge systemd service, nginx/TLS | `ens18` NAT uplink, `ens19` management |
+| APP | Ubuntu 24.04, XFCE, Epiphany, Terminator, PDF/DOT/JSON viewers, native ScenarioForge systemd service, nginx/TLS | `ens18` NAT uplink, `ens19` management |
 | PARTICIPANT | Debian 12, minimal XFCE | `ens18` isolated HITL; temporary NAT `ens19` is removed after XFCE installs |
 
 The APP VM receives a private `.scenarioforge.env` configured with the CORE
@@ -16,6 +16,8 @@ interface name `ens19`. ScenarioForge is installed natively, not with Docker.
 The APP desktop has a **ScenarioForge** launcher that opens the local Web GUI
 in Epiphany at `https://localhost/`. Its self-signed certificate causes an
 expected browser warning; no VM restart is required after provisioning.
+The desktop also includes Terminator, Evince for PDFs, xdot for Graphviz files,
+and a **JSON Viewer** backed by Mousepad; `jq` is available in the terminal.
 
 ## Requirements
 

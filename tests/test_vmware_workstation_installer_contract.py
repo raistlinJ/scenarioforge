@@ -163,6 +163,11 @@ def test_topology_native_app_and_graphical_guest_contracts() -> None:
     assert "command -v core-gui" in shared
     assert "epiphany-browser" in shared
     assert "Exec=epiphany https://localhost/" in shared
+    assert "evince graphviz jq" in shared
+    assert "mousepad nginx" in shared
+    assert "terminator xdot xfce4" in shared
+    assert "scenarioforge-json-viewer.desktop" in shared
+    assert "Exec=mousepad %F" in shared
     assert "_install_generator_pack_or_bundle" in shared
     assert "/opt/scenarioforge/outputs/installed_generators" in shared
     assert "_install_vuln_catalog_zip_file" in shared
