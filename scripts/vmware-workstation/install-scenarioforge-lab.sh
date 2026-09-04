@@ -16,7 +16,20 @@ source "$PROXMOX_INSTALLER"
 
 SCRIPT_VERSION="0.5.0"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
+EXPECTED_INSTALLER_OWNER="$INSTALLER_OWNER"
 VMRUN_TYPE="ws"
+VM_BUNDLE_SUFFIX="${VM_BUNDLE_SUFFIX:-}"
+VMWARE_NETWORKING_FILE="${VMWARE_NETWORKING_FILE:-/etc/vmware/networking}"
+VMWARE_VIRTUAL_HW_VERSION="${VMWARE_VIRTUAL_HW_VERSION:-20}"
+VMWARE_DISK_BUS="${VMWARE_DISK_BUS:-scsi}"
+VMWARE_ENABLE_3D="${VMWARE_ENABLE_3D:-FALSE}"
+VMWARE_PRODUCT_NAME="${VMWARE_PRODUCT_NAME:-VMware Workstation}"
+VMWARE_NETWORK_EDITOR_NAME="${VMWARE_NETWORK_EDITOR_NAME:-Virtual Network Editor}"
+HOST_VALIDATION_LABEL="${HOST_VALIDATION_LABEL:-Linux, VMware Workstation, networks, paths, and resources}"
+DEBIAN_GUEST_OS="${DEBIAN_GUEST_OS:-debian12-64}"
+UBUNTU_GUEST_OS="${UBUNTU_GUEST_OS:-ubuntu-64}"
+DEBIAN_IMAGE_CACHE_NAME="${DEBIAN_IMAGE_CACHE_NAME:-debian-12-genericcloud-amd64.qcow2}"
+UBUNTU_IMAGE_CACHE_NAME="${UBUNTU_IMAGE_CACHE_NAME:-noble-server-cloudimg-amd64.img}"
 
 LAB_DIR="${SF_VMWARE_LAB_DIR:-${HOME}/vmware/ScenarioForge-Lab}"
 STATE_DIR="${SCENARIOFORGE_VMWARE_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/scenarioforge-vmware-lab}"
@@ -31,9 +44,9 @@ HITL_VMNET="${SF_VMWARE_HITL_VMNET:-vmnet2}"
 CORE_NAME="${SF_CORE_NAME:-scenarioforge-core}"
 APP_NAME="${SF_APP_NAME:-scenarioforge-app}"
 PARTICIPANT_NAME="${SF_PARTICIPANT_NAME:-scenarioforge-participant}"
-CORE_DIR="$LAB_DIR/$CORE_NAME"
-APP_DIR="$LAB_DIR/$APP_NAME"
-PARTICIPANT_DIR="$LAB_DIR/$PARTICIPANT_NAME"
+CORE_DIR="$LAB_DIR/$CORE_NAME$VM_BUNDLE_SUFFIX"
+APP_DIR="$LAB_DIR/$APP_NAME$VM_BUNDLE_SUFFIX"
+PARTICIPANT_DIR="$LAB_DIR/$PARTICIPANT_NAME$VM_BUNDLE_SUFFIX"
 CORE_VMX="$CORE_DIR/$CORE_NAME.vmx"
 APP_VMX="$APP_DIR/$APP_NAME.vmx"
 PARTICIPANT_VMX="$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmx"
@@ -264,9 +277,9 @@ parse_args() {
     done
     case "$COMMAND" in install|status|cleanup) ;; *) die "unknown command: $COMMAND" ;; esac
 
-    CORE_DIR="$LAB_DIR/$CORE_NAME"
-    APP_DIR="$LAB_DIR/$APP_NAME"
-    PARTICIPANT_DIR="$LAB_DIR/$PARTICIPANT_NAME"
+    CORE_DIR="$LAB_DIR/$CORE_NAME$VM_BUNDLE_SUFFIX"
+    APP_DIR="$LAB_DIR/$APP_NAME$VM_BUNDLE_SUFFIX"
+    PARTICIPANT_DIR="$LAB_DIR/$PARTICIPANT_NAME$VM_BUNDLE_SUFFIX"
     CORE_VMX="$CORE_DIR/$CORE_NAME.vmx"
     APP_VMX="$APP_DIR/$APP_NAME.vmx"
     PARTICIPANT_VMX="$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmx"
@@ -300,6 +313,14 @@ validate_paths() {
     esac
 }
 
+file_owner_uid() {
+    stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"
+}
+
+file_mode_octal() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
 require_workstation_runtime() {
     [[ "$(uname -s)" == Linux ]] || die "this installer requires an x86_64 Linux host; use the platform-specific installer on other hosts"
     [[ "$(uname -m)" == x86_64 ]] || die "this first release supports x86_64/amd64 Linux hosts only"
@@ -322,19 +343,19 @@ host_network_exists() {
         | awk '$2 ~ /^vmnet[0-9]+$/ {print $2}' | grep -Fxq -- "$1"
 }
 validate_hitl_isolation() {
-    local number config=/etc/vmware/networking network_row
+    local number config="$VMWARE_NETWORKING_FILE" network_row
     number="${HITL_VMNET#vmnet}"
     [[ "$number" =~ ^[0-9]+$ ]] || die "HITL network must be named vmnetN, got: $HITL_VMNET"
     network_row="$(vmrun -T "$VMRUN_TYPE" listHostNetworks 2>/dev/null \
         | awk -v wanted="$HITL_VMNET" '$2 == wanted {print; exit}')"
     [[ -n "$network_row" ]] || die "could not inspect $HITL_VMNET"
     [[ "$(awk '{print $4}' <<<"$network_row")" == false ]] \
-        || die "$HITL_VMNET has DHCP enabled; disable it in Virtual Network Editor"
+        || die "$HITL_VMNET has DHCP enabled; disable it in $VMWARE_NETWORK_EDITOR_NAME"
     [[ "$(awk '{print $3}' <<<"$network_row")" != nat && "$(awk '{print $3}' <<<"$network_row")" != bridged ]] \
         || die "$HITL_VMNET is not an isolated custom/host-only network"
     if [[ -r "$config" ]]; then
         if grep -Eq "^[[:space:]]*answer[[:space:]]+VNET_${number}_(DHCP|NAT|VIRTUAL_ADAPTER)[[:space:]]+yes([[:space:]]|$)" "$config"; then
-            die "$HITL_VMNET is not isolated; disable its DHCP, NAT, and host virtual adapter in Virtual Network Editor"
+            die "$HITL_VMNET is not isolated; disable its DHCP, NAT, and host virtual adapter in $VMWARE_NETWORK_EDITOR_NAME"
         fi
         verbose "Verified no DHCP, NAT, or host adapter is enabled for $HITL_VMNET"
     else
@@ -375,8 +396,8 @@ validate_inputs() {
     for vmx in "$CORE_VMX" "$APP_VMX" "$PARTICIPANT_VMX"; do
         [[ ! -e "$vmx" ]] || die "VM already exists: $vmx"
     done
-    host_network_exists "$MANAGEMENT_VMNET" || die "management network $MANAGEMENT_VMNET was not found in VMware Workstation"
-    host_network_exists "$HITL_VMNET" || die "HITL network $HITL_VMNET was not found; create it in Virtual Network Editor first"
+    host_network_exists "$MANAGEMENT_VMNET" || die "management network $MANAGEMENT_VMNET was not found in $VMWARE_PRODUCT_NAME"
+    host_network_exists "$HITL_VMNET" || die "HITL network $HITL_VMNET was not found; create it in $VMWARE_NETWORK_EDITOR_NAME first"
     validate_hitl_isolation
 }
 
@@ -465,26 +486,26 @@ write_state_if_present() {
 
 load_state() {
     [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die "no safe installer state found at $STATE_FILE"
-    [[ "$(stat -c '%u' "$STATE_FILE")" == "$UID" ]] || die "state file is not owned by the current user: $STATE_FILE"
-    (( (8#$(stat -c '%a' "$STATE_FILE") & 8#022) == 0 )) || die "state file is group/world writable: $STATE_FILE"
+    [[ "$(file_owner_uid "$STATE_FILE")" == "$UID" ]] || die "state file is not owned by the current user: $STATE_FILE"
+    (( (8#$(file_mode_octal "$STATE_FILE") & 8#022) == 0 )) || die "state file is group/world writable: $STATE_FILE"
     # shellcheck disable=SC1090
     source "$STATE_FILE"
-    [[ "${INSTALLER_OWNER:-}" == "scenarioforge-vmware-linux-v1" ]] || die "state file belongs to a different installer"
+    [[ "${INSTALLER_OWNER:-}" == "$EXPECTED_INSTALLER_OWNER" ]] || die "state file belongs to a different installer"
     [[ "${INSTALLER_UID:-}" == "$UID" ]] || die "saved lab belongs to a different user"
     validate_name "CORE VM name" "$CORE_NAME"
     validate_name "APP VM name" "$APP_NAME"
     validate_name "participant VM name" "$PARTICIPANT_NAME"
-    CORE_DIR="$LAB_DIR/$CORE_NAME"
-    APP_DIR="$LAB_DIR/$APP_NAME"
-    PARTICIPANT_DIR="$LAB_DIR/$PARTICIPANT_NAME"
+    CORE_DIR="$LAB_DIR/$CORE_NAME$VM_BUNDLE_SUFFIX"
+    APP_DIR="$LAB_DIR/$APP_NAME$VM_BUNDLE_SUFFIX"
+    PARTICIPANT_DIR="$LAB_DIR/$PARTICIPANT_NAME$VM_BUNDLE_SUFFIX"
     validate_paths
     [[ "$CORE_VMX" == "$CORE_DIR/$CORE_NAME.vmx" \
         && "$APP_VMX" == "$APP_DIR/$APP_NAME.vmx" \
         && "$PARTICIPANT_VMX" == "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmx" ]] \
         || die "saved VM paths do not match the guarded lab layout"
     if [[ -f "$CREDENTIALS_FILE" && ! -L "$CREDENTIALS_FILE" ]]; then
-        [[ "$(stat -c '%u' "$CREDENTIALS_FILE")" == "$UID" ]] || die "credentials file is not owned by the current user"
-        (( (8#$(stat -c '%a' "$CREDENTIALS_FILE") & 8#077) == 0 )) || die "credentials file permissions must be 0600"
+        [[ "$(file_owner_uid "$CREDENTIALS_FILE")" == "$UID" ]] || die "credentials file is not owned by the current user"
+        (( (8#$(file_mode_octal "$CREDENTIALS_FILE") & 8#077) == 0 )) || die "credentials file permissions must be 0600"
         # shellcheck disable=SC1090
         source "$CREDENTIALS_FILE"
         CORE_PASSWORD="${CORE_VM_PASSWORD:-}"
@@ -581,17 +602,26 @@ create_vmx() {
     cat > "$vmx" <<EOF
 .encoding = "UTF-8"
 config.version = "8"
-virtualHW.version = "20"
+virtualHW.version = "$VMWARE_VIRTUAL_HW_VERSION"
+pciBridge0.present = "TRUE"
+pciBridge4.present = "TRUE"
+pciBridge4.virtualDev = "pcieRootPort"
+pciBridge4.functions = "8"
+pciBridge5.present = "TRUE"
+pciBridge5.virtualDev = "pcieRootPort"
+pciBridge5.functions = "8"
+pciBridge6.present = "TRUE"
+pciBridge6.virtualDev = "pcieRootPort"
+pciBridge6.functions = "8"
+pciBridge7.present = "TRUE"
+pciBridge7.virtualDev = "pcieRootPort"
+pciBridge7.functions = "8"
 displayName = "$name"
 guestOS = "$guest_os"
 firmware = "efi"
 memsize = "$memory"
 numvcpus = "$cores"
 cpuid.coresPerSocket = "$cores"
-scsi0.present = "TRUE"
-scsi0.virtualDev = "lsilogic"
-scsi0:0.present = "TRUE"
-scsi0:0.fileName = "$(basename "$disk")"
 sata0.present = "TRUE"
 sata0:1.present = "TRUE"
 sata0:1.deviceType = "cdrom-image"
@@ -599,23 +629,42 @@ sata0:1.fileName = "$(basename "$seed")"
 sata0:1.startConnected = "TRUE"
 usb.present = "TRUE"
 ehci.present = "TRUE"
+usb_xhci.present = "TRUE"
 sound.present = "TRUE"
 sound.autodetect = "TRUE"
-mks.enable3d = "FALSE"
+mks.enable3d = "$VMWARE_ENABLE_3D"
 tools.syncTime = "TRUE"
 scenarioforge.install.owner = "$INSTALLER_OWNER"
 scenarioforge.install.role = "$name"
 EOF
+    case "$VMWARE_DISK_BUS" in
+        nvme)
+            {
+                printf 'nvme0.present = "TRUE"\n'
+                printf 'nvme0:0.present = "TRUE"\n'
+                printf 'nvme0:0.fileName = "%s"\n' "$(basename "$disk")"
+            } >> "$vmx"
+            ;;
+        scsi)
+            {
+                printf 'scsi0.present = "TRUE"\n'
+                printf 'scsi0.virtualDev = "lsilogic"\n'
+                printf 'scsi0:0.present = "TRUE"\n'
+                printf 'scsi0:0.fileName = "%s"\n' "$(basename "$disk")"
+            } >> "$vmx"
+            ;;
+        *) die "unsupported VMware disk bus: $VMWARE_DISK_BUS" ;;
+    esac
 }
 
 create_vms() {
-    local debian="$IMAGE_CACHE/debian-12-genericcloud-amd64.qcow2"
-    local ubuntu="$IMAGE_CACHE/noble-server-cloudimg-amd64.img"
+    local debian="$IMAGE_CACHE/$DEBIAN_IMAGE_CACHE_NAME"
+    local ubuntu="$IMAGE_CACHE/$UBUNTU_IMAGE_CACHE_NAME"
     install -d -m 0755 "$CORE_DIR" "$APP_DIR" "$PARTICIPANT_DIR"
 
     prepare_disk "$debian" "$CORE_DIR/$CORE_NAME.vmdk" "$CORE_DISK_GB"
     create_seed_iso core "$CORE_NAME" "$CORE_DIR/$CORE_NAME-cidata.iso"
-    create_vmx "$CORE_VMX" "$CORE_NAME" debian12-64 "$CORE_MEMORY_MB" "$CORE_CORES" \
+    create_vmx "$CORE_VMX" "$CORE_NAME" "$DEBIAN_GUEST_OS" "$CORE_MEMORY_MB" "$CORE_CORES" \
         "$CORE_DIR/$CORE_NAME.vmdk" "$CORE_DIR/$CORE_NAME-cidata.iso"
     append_nic "$CORE_VMX" 0 custom "$MANAGEMENT_VMNET" "$CORE_NET0_MAC"
     append_nic "$CORE_VMX" 1 custom "$HITL_VMNET" "$CORE_NET1_MAC"
@@ -623,14 +672,14 @@ create_vms() {
 
     prepare_disk "$ubuntu" "$APP_DIR/$APP_NAME.vmdk" "$APP_DISK_GB"
     create_seed_iso app "$APP_NAME" "$APP_DIR/$APP_NAME-cidata.iso"
-    create_vmx "$APP_VMX" "$APP_NAME" ubuntu-64 "$APP_MEMORY_MB" "$APP_CORES" \
+    create_vmx "$APP_VMX" "$APP_NAME" "$UBUNTU_GUEST_OS" "$APP_MEMORY_MB" "$APP_CORES" \
         "$APP_DIR/$APP_NAME.vmdk" "$APP_DIR/$APP_NAME-cidata.iso"
     append_nic "$APP_VMX" 0 nat "" "$APP_NET0_MAC"
     append_nic "$APP_VMX" 1 custom "$MANAGEMENT_VMNET" "$APP_NET1_MAC"
 
     prepare_disk "$debian" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" "$PARTICIPANT_DISK_GB"
     create_seed_iso participant "$PARTICIPANT_NAME" "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
-    create_vmx "$PARTICIPANT_VMX" "$PARTICIPANT_NAME" debian12-64 \
+    create_vmx "$PARTICIPANT_VMX" "$PARTICIPANT_NAME" "$DEBIAN_GUEST_OS" \
         "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" \
         "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
     append_nic "$PARTICIPANT_VMX" 0 custom "$HITL_VMNET" "$PARTICIPANT_NET0_MAC"
@@ -682,7 +731,7 @@ detach_participant_uplink() {
     fi
     vmrun -T "$VMRUN_TYPE" deleteNetworkAdapter "$PARTICIPANT_VMX" 1
     if vmrun -T "$VMRUN_TYPE" listNetworkAdapters "$PARTICIPANT_VMX" 2>/dev/null | grep -Eq '^1[[:space:]]'; then
-        die "participant NAT adapter is still attached; remove ethernet1 in Workstation before using the lab"
+        die "participant NAT adapter is still attached; remove ethernet1 in $VMWARE_PRODUCT_NAME before using the lab"
     fi
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
     write_state
@@ -825,8 +874,8 @@ show_status() {
     log "Watching every $STATUS_INTERVAL seconds; press Ctrl-C to stop"
     while [[ ! -f "$STATE_FILE" ]]; do
         if [[ -f "$RUNTIME_STATUS_FILE" && ! -L "$RUNTIME_STATUS_FILE" \
-            && "$(stat -c '%u' "$RUNTIME_STATUS_FILE")" == "$UID" \
-            && $(( 8#$(stat -c '%a' "$RUNTIME_STATUS_FILE") & 8#022 )) -eq 0 ]]; then
+            && "$(file_owner_uid "$RUNTIME_STATUS_FILE")" == "$UID" \
+            && $(( 8#$(file_mode_octal "$RUNTIME_STATUS_FILE") & 8#022 )) -eq 0 ]]; then
             # shellcheck disable=SC1090
             source "$RUNTIME_STATUS_FILE"
             emit INFO "Installer ${RUNTIME_STATE:-unknown} [${RUNTIME_PERCENT:-0}%]: ${RUNTIME_PHASE:-starting}"
@@ -845,7 +894,8 @@ show_status() {
 }
 
 vmx_owned() {
-    [[ -f "$1" && ! -L "$1" ]] && grep -Fqx 'scenarioforge.install.owner = "scenarioforge-vmware-linux-v1"' "$1"
+    [[ -f "$1" && ! -L "$1" ]] \
+        && grep -Fqx "scenarioforge.install.owner = \"$INSTALLER_OWNER\"" "$1"
 }
 safe_vm_dir() {
     local directory="$1" expected="$2"
@@ -914,7 +964,7 @@ perform_install() {
     else
         configure_install_progress 6
     fi
-    progress 2 "Validating Linux, VMware Workstation, networks, paths, and resources"
+    progress 2 "Validating $HOST_VALIDATION_LABEL"
     require_linux_workstation
     validate_inputs
     confirm_install
@@ -953,8 +1003,8 @@ perform_install() {
     write_state
 
     progress 10 "Downloading and verifying Debian 12 and Ubuntu 24.04 cloud images"
-    download_verified_image "$DEBIAN_IMAGE_URL" "$DEBIAN_SUMS_URL" sha512 "$IMAGE_CACHE/debian-12-genericcloud-amd64.qcow2"
-    download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha256 "$IMAGE_CACHE/noble-server-cloudimg-amd64.img"
+    download_verified_image "$DEBIAN_IMAGE_URL" "$DEBIAN_SUMS_URL" sha512 "$IMAGE_CACHE/$DEBIAN_IMAGE_CACHE_NAME"
+    download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha256 "$IMAGE_CACHE/$UBUNTU_IMAGE_CACHE_NAME"
 
     progress 25 "Generating CORE, native ScenarioForge, participant, XFCE, and Cloud-Init configuration"
     write_vmware_cloud_init_files
