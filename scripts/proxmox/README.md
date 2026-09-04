@@ -182,22 +182,30 @@ APP after the archive is verified.
 catalog and pack state live under
 `/opt/scenarioforge/outputs/installed_generators`; APP provisioning fails
 instead of claiming readiness unless both catalog kinds are visible. The
-default repository revision is the previously tested snapshot
-`22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3`. On that exact snapshot, the
-installer enables and records a success override for the 147 generators with
-saved successful test results; `http_support_ticket_portal`, whose saved test
-state is still untested, is imported but disabled and receives no success
-override.
+default repository revision is the tested metadata snapshot
+`cabfbaa33c256310156740fa8636b11c4e7d111e`. Its `pack.json` travels through
+the normal pack importer and records 147 successfully tested generators. The
+enabled catalog contains 144 generators overall and exactly the 85 enabled
+flag-node generators exercised by the paper and resolved dataset. Three working
+`Sample:` generators remain catalog-disabled, while
+`http_support_ticket_portal` remains disabled and unvalidated because no
+successful test evidence is recorded.
 `--vulnhub` similarly imports the repository's `vulnhub/` snapshot through
 ScenarioForge's vulnerability-catalog importer; on a fresh VM that catalog
-becomes active. On the tested snapshot, 295 recipes with saved successful
-results are enabled and recorded as successful. The importer keeps 11 recipes
-disabled: 10 require build-time Internet access, and one additional recipe is
-missing required files. They receive no success override. A custom
-`--flag-generators-ref REF` or `SF_FLAG_GENERATORS_REF` is still imported, but
-the installer deliberately skips these known-good overrides because that
-content revision was not the one tested. These flags add download, transfer,
-disk, and import time.
+becomes active. Its `.scenarioforge/catalog_items.json` metadata enables and
+records success for the 294 self-contained recipes represented by the IEEE TPS
+paper and `scenarioforge-dataset`. Twelve recipes remain disabled and
+unvalidated: 10 require build-time Internet access, one has missing required
+paths, and one is outside the validated research catalog. Authored notes explain
+each exception. A custom `--flag-generators-ref REF` or
+`SF_FLAG_GENERATORS_REF` imports whatever portable metadata that revision
+contains; it is never silently granted the tested snapshot's status. These
+flags add download, transfer, disk, and import time.
+
+Catalog downloads preserve validation status, enabled/disabled state,
+provenance, and operator-authored notes (including note color). Re-importing
+either a generator pack or a vulnerability catalog therefore retains both the
+repository's defaults and later user curation.
 
 The optional repository contains deliberately vulnerable recipes and challenge
 key material. Use it only in an isolated, trusted lab, and do not expose the
@@ -346,7 +354,7 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_SCENARIOFORGE_REF` | `main` |
 | `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
 | `SF_FLAG_GENERATORS_URL` | `https://github.com/raistlinJ/flag-generators.git` |
-| `SF_FLAG_GENERATORS_REF` | `22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3` (tested snapshot) |
+| `SF_FLAG_GENERATORS_REF` | `cabfbaa33c256310156740fa8636b11c4e7d111e` (tested metadata snapshot) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
 | `SF_WAIT_MINUTES` | `90` |

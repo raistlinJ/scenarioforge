@@ -49093,6 +49093,7 @@ def _set_generator_validation_state(
     validated_incomplete: bool = False,
     log_path: str | None = None,
     log_filename: str | None = None,
+    validation_source: str | None = None,
 ) -> tuple[bool, str]:
     gid = str(generator_id or '').strip()
     if not gid:
@@ -49116,6 +49117,10 @@ def _set_generator_validation_state(
         item['validated_ok'] = bool(validated_ok)
     item['validated_incomplete'] = bool(validated_incomplete)
     item['validated_at'] = _local_timestamp_display()
+    item['validation_source'] = (
+        str(validation_source or '').strip()
+        or ('ScenarioForge catalog test' if (log_path or log_filename) else 'ScenarioForge operator override')
+    )
     if isinstance(log_path, str) and log_path.strip():
         item['last_test_log_path'] = str(log_path).strip()
     if isinstance(log_filename, str) and log_filename.strip():
@@ -49155,6 +49160,7 @@ def _persist_generator_test_result(
         validated_incomplete=validated_incomplete,
         log_path=copied_log_path,
         log_filename=copied_log_name,
+        validation_source='ScenarioForge catalog test',
     )
 
 
@@ -49558,6 +49564,36 @@ def _vuln_category_from_rel_dir(value: Any) -> str:
     return _normalize_vuln_category_path('/'.join(parts[:-1]))
 
 
+def _portable_catalog_item_state(raw: Any) -> dict[str, Any]:
+    """Normalize portable catalog curation and validation metadata.
+
+    Runtime-only fields such as local log paths and cache status deliberately do
+    not travel. A source repository or downloaded catalog may carry these
+    fields, and both vulnerability and generator imports use this representation.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    state: dict[str, Any] = {}
+    for key in (
+        'disabled',
+        'disabled_by_operator',
+        'disabled_by_catalog',
+        'persistent',
+        'validated_incomplete',
+    ):
+        if key in raw:
+            state[key] = bool(raw.get(key))
+    if 'validated_ok' in raw:
+        value = raw.get('validated_ok')
+        if value is None or isinstance(value, bool):
+            state['validated_ok'] = value
+    for key in ('validated_at', 'validation_source', 'disabled_reason'):
+        if key in raw:
+            value = str(raw.get(key) or '').strip()
+            state[key] = value[:4000] or None
+    return state
+
+
 def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, origin: str) -> dict:
     os.makedirs(_installed_vuln_catalogs_root(), exist_ok=True)
     catalog_id = _local_timestamp_safe() + '-' + secrets.token_hex(3)
@@ -49572,6 +49608,7 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
     imported_notes_by_compose_rel: dict[str, dict[str, str]] = {}
     imported_categories_by_compose_rel: dict[str, str] = {}
     imported_architectures_by_compose_rel: dict[str, dict[str, Any]] = {}
+    imported_item_defaults: dict[str, Any] = {}
     imported_item_state_by_compose_rel: dict[str, dict[str, Any]] = {}
     try:
         # Extract the entire ZIP directory tree so compose directories (and their
@@ -49624,6 +49661,9 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 raw_items = archive.read('.scenarioforge/catalog_items.json').decode('utf-8', errors='ignore')
             items_doc = json.loads(raw_items or '{}')
             item_entries = items_doc.get('items') if isinstance(items_doc, dict) else []
+            imported_item_defaults = _portable_catalog_item_state(
+                items_doc.get('defaults') if isinstance(items_doc, dict) else None
+            )
             if isinstance(item_entries, list):
                 for raw_entry in item_entries:
                     if not isinstance(raw_entry, dict):
@@ -49643,12 +49683,7 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                                 if str(u or '').strip()
                             ],
                         }
-                    state: dict[str, Any] = {}
-                    if 'disabled' in raw_entry:
-                        state['disabled'] = bool(raw_entry.get('disabled'))
-                        state['disabled_by_operator'] = bool(raw_entry.get('disabled_by_operator'))
-                    if 'persistent' in raw_entry:
-                        state['persistent'] = bool(raw_entry.get('persistent'))
+                    state = _portable_catalog_item_state(raw_entry)
                     if state:
                         imported_item_state_by_compose_rel[compose_rel] = state
         except KeyError:
@@ -49785,8 +49820,9 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             if imported_note:
                 item['note'] = imported_note['note']
                 item['note_color'] = imported_note['note_color'] or None
-            imported_state = imported_item_state_by_compose_rel.get(compose_rel)
-            if isinstance(imported_state, dict):
+            imported_state = dict(imported_item_defaults)
+            imported_state.update(imported_item_state_by_compose_rel.get(compose_rel) or {})
+            if imported_state:
                 # An operator's own enable/disable decision travels with the
                 # export and must survive the round trip. It can only ever be
                 # more restrictive than this install's own findings: a catalog
@@ -49795,8 +49831,18 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
                 if 'disabled' in imported_state:
                     item['disabled'] = bool(item['disabled']) or bool(imported_state.get('disabled'))
                     item['disabled_by_operator'] = bool(imported_state.get('disabled_by_operator'))
+                    item['disabled_by_catalog'] = bool(imported_state.get('disabled_by_catalog'))
                 if imported_state.get('persistent') is not None:
                     item['persistent'] = bool(imported_state.get('persistent'))
+                for key in (
+                    'validated_ok',
+                    'validated_incomplete',
+                    'validated_at',
+                    'validation_source',
+                    'disabled_reason',
+                ):
+                    if key in imported_state:
+                        item[key] = imported_state.get(key)
             compose_items.append(item)
 
         # Generate a catalog CSV from discovered compose directories.
@@ -50118,6 +50164,13 @@ def _normalize_vuln_catalog_items(entry: dict) -> list[dict[str, Any]]:
         # Records that an operator turned this off by hand, as opposed to the
         # installer auto-disabling it, so the two survive a round trip apart.
         it['disabled_by_operator'] = bool(it.get('disabled_by_operator', False))
+        it['disabled_by_catalog'] = bool(it.get('disabled_by_catalog', False))
+        if 'validated_ok' in it and it.get('validated_ok') is not None:
+            it['validated_ok'] = bool(it.get('validated_ok'))
+        it['validated_incomplete'] = bool(it.get('validated_incomplete', False))
+        it['validated_at'] = str(it.get('validated_at') or '').strip() or None
+        it['validation_source'] = str(it.get('validation_source') or '').strip() or None
+        it['disabled_reason'] = str(it.get('disabled_reason') or '').strip() or None
         it['verify_path'] = str(it.get('verify_path') or '').strip()
         it['verify_expect'] = str(it.get('verify_expect') or '').strip()
         out.append(it)
@@ -51089,6 +51142,7 @@ def _stop_vuln_test_meta(meta: dict, user_ok: bool | None):
                         it['validated_incomplete'] = False
                         it['validated_ok'] = bool(user_ok)
                     it['validated_at'] = _local_timestamp_display()
+                    it['validation_source'] = 'ScenarioForge catalog test'
                     if copied_log_path:
                         it['last_test_log_path'] = copied_log_path
                     if copied_log_name:
@@ -51611,6 +51665,8 @@ def _install_generator_pack_payload(
     pack_origin: str,
     next_numeric: int,
     imported_catalog_notes: list[dict[str, Any]] | None = None,
+    imported_catalog_items: list[dict[str, Any]] | None = None,
+    imported_catalog_item_defaults: dict[str, Any] | None = None,
 ) -> tuple[bool, str, list[dict[str, Any]], int, list[dict[str, Any]]]:
     """Install a pack zip payload and return installed items.
 
@@ -51641,6 +51697,16 @@ def _install_generator_pack_payload(
                 'note': note_text,
                 'note_color': note_color,
             }
+    imported_item_defaults = _portable_catalog_item_state(imported_catalog_item_defaults)
+    imported_item_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw_item in (imported_catalog_items or []):
+        if not isinstance(raw_item, dict):
+            continue
+        item_kind = str(raw_item.get('kind') or '').strip().lower().replace('_', '-')
+        item_generator_id = str(raw_item.get('generator_id') or raw_item.get('id') or '').strip()
+        item_state = _portable_catalog_item_state(raw_item)
+        if item_kind in {'flag-generator', 'flag-node-generator'} and item_generator_id and item_state:
+            imported_item_map[(item_kind, item_generator_id)] = item_state
     tmp_dir = tempfile.mkdtemp(prefix='coretg_pack_')
     staging_root = tempfile.mkdtemp(prefix='.coretg-generator-stage-', dir=root)
     staged_pairs: list[tuple[str, str]] = []
@@ -51792,6 +51858,33 @@ def _install_generator_pack_payload(
                 if needs_build_network:
                     installed_item['disabled'] = True
                     installed_item['disabled_due_to_build_network'] = True
+            imported_item_state = dict(imported_item_defaults)
+            imported_item_state.update(imported_item_map.get((kind, source_gid)) or {})
+            if imported_item_state:
+                # Source/download metadata may preserve curation and prior test
+                # evidence. An imported enable cannot overrule a dependency
+                # failure discovered from the files on this machine.
+                if 'disabled' in imported_item_state:
+                    installed_item['disabled'] = bool(installed_item.get('disabled')) or bool(
+                        imported_item_state.get('disabled')
+                    )
+                    installed_item['disabled_by_operator'] = bool(
+                        imported_item_state.get('disabled_by_operator')
+                    )
+                    installed_item['disabled_by_catalog'] = bool(
+                        imported_item_state.get('disabled_by_catalog')
+                    )
+                if 'persistent' in imported_item_state:
+                    installed_item['persistent'] = bool(imported_item_state.get('persistent'))
+                for key in (
+                    'validated_ok',
+                    'validated_incomplete',
+                    'validated_at',
+                    'validation_source',
+                    'disabled_reason',
+                ):
+                    if key in imported_item_state:
+                        installed_item[key] = imported_item_state.get(key)
             # Architectures this generator's images can run on, recorded for the
             # same reason as vulnerabilities: an amd64-only image on an arm64
             # CORE VM runs only under emulation.
@@ -51907,6 +52000,8 @@ def _install_generator_pack(*, zip_path: str, pack_label: str, pack_origin: str)
 
         source_meta = _read_generator_pack_zip_metadata(zip_path)
         imported_catalog_notes = source_meta.get('catalog_notes') if isinstance(source_meta.get('catalog_notes'), list) else []
+        imported_catalog_items = source_meta.get('catalog_items') if isinstance(source_meta.get('catalog_items'), list) else []
+        imported_catalog_item_defaults = source_meta.get('catalog_item_defaults') if isinstance(source_meta.get('catalog_item_defaults'), dict) else {}
         ok, note, installed, _next, warnings = _install_generator_pack_payload(
             zip_path=zip_path,
             pack_id=pack_id,
@@ -51914,6 +52009,8 @@ def _install_generator_pack(*, zip_path: str, pack_label: str, pack_origin: str)
             pack_origin=pack_origin,
             next_numeric=next_numeric,
             imported_catalog_notes=imported_catalog_notes,
+            imported_catalog_items=imported_catalog_items,
+            imported_catalog_item_defaults=imported_catalog_item_defaults,
         )
         if not ok:
             return False, note
@@ -52056,6 +52153,8 @@ def _install_generator_pack_or_bundle(*, zip_path: str, pack_label: str, pack_or
                             pack_origin=inner_origin,
                             next_numeric=next_numeric,
                             imported_catalog_notes=source_meta.get('catalog_notes') if isinstance(source_meta.get('catalog_notes'), list) else [],
+                            imported_catalog_items=source_meta.get('catalog_items') if isinstance(source_meta.get('catalog_items'), list) else [],
+                            imported_catalog_item_defaults=source_meta.get('catalog_item_defaults') if isinstance(source_meta.get('catalog_item_defaults'), dict) else {},
                         )
                         if ok_inner:
                             if isinstance(warnings_inner, list) and warnings_inner:
@@ -52346,6 +52445,7 @@ def _set_generator_disabled_state(*, kind: str, generator_id: str, disabled: boo
         return False, 'Installed generator not found'
     it['disabled'] = bool(disabled)
     it['disabled_due_to_missing_files'] = False
+    it['disabled_by_operator'] = True
     state['packs'] = packs
     _save_installed_generator_packs_state(state)
     return True, ('Disabled' if disabled else 'Enabled') + f' {k} {gid}'
@@ -52485,6 +52585,7 @@ def _pack_to_zip_bytes(pack: dict) -> bytes:
         catalog_notes = state.get('catalog_notes') if isinstance(state, dict) else {}
         catalog_notes = catalog_notes if isinstance(catalog_notes, dict) else {}
         exported_notes: list[dict[str, str]] = []
+        exported_items: list[dict[str, Any]] = []
         for item in (installed or []):
             if not isinstance(item, dict) or item.get('uninstalled') is True:
                 continue
@@ -52492,8 +52593,9 @@ def _pack_to_zip_bytes(pack: dict) -> bytes:
             generator_id = str(item.get('id') or '').strip()
             if kind not in {'flag-generator', 'flag-node-generator'} or not generator_id:
                 continue
+            source_generator_id = _installed_generator_marker_source_id(item) or generator_id
             note_data = None
-            for candidate_id in (generator_id, _installed_generator_marker_source_id(item)):
+            for candidate_id in (generator_id, source_generator_id):
                 candidate = catalog_notes.get(f'{kind}:{candidate_id}') if candidate_id else None
                 if isinstance(candidate, dict):
                     note_data = candidate
@@ -52504,13 +52606,39 @@ def _pack_to_zip_bytes(pack: dict) -> bytes:
             if note_text or note_color:
                 exported_notes.append({
                     'kind': kind,
-                    'generator_id': generator_id,
+                    'generator_id': source_generator_id,
                     'note': note_text,
                     'note_color': note_color,
                 })
+            item_metadata: dict[str, Any] = {
+                'kind': kind,
+                'generator_id': source_generator_id,
+            }
+            for bool_key in (
+                'disabled',
+                'disabled_by_operator',
+                'disabled_by_catalog',
+                'persistent',
+                'validated_incomplete',
+            ):
+                if bool_key in item:
+                    item_metadata[bool_key] = bool(item.get(bool_key))
+            if 'validated_ok' in item:
+                item_metadata['validated_ok'] = (
+                    bool(item.get('validated_ok'))
+                    if item.get('validated_ok') is not None
+                    else None
+                )
+            for text_key in ('validated_at', 'validation_source', 'disabled_reason'):
+                value = str(item.get(text_key) or '').strip()
+                if value:
+                    item_metadata[text_key] = value
+            exported_items.append(item_metadata)
         export_meta = dict(pack)
         export_meta['catalog_notes'] = exported_notes
         export_meta['catalog_notes_format'] = 1
+        export_meta['catalog_items'] = exported_items
+        export_meta['catalog_items_format'] = 1
         meta = json.dumps(export_meta, indent=2)
         z.writestr('pack.json', meta + '\n')
 

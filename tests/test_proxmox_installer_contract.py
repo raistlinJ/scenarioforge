@@ -113,33 +113,27 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert install_body.index("write_state") < install_body.index("download_verified_image")
 
 
-def test_optional_catalogs_default_to_and_apply_only_the_tested_snapshot() -> None:
+def test_optional_catalogs_default_to_and_verify_portable_metadata_snapshot() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
 
-    tested_commit = "22f74b4cc5cbfc5dcf6add2cb9685ee5470b88d3"
+    tested_commit = "cabfbaa33c256310156740fa8636b11c4e7d111e"
     expected_snippets = [
-        f'KNOWN_GOOD_FLAG_GENERATORS_COMMIT="{tested_commit}"',
-        'FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$KNOWN_GOOD_FLAG_GENERATORS_COMMIT}"',
+        f'TESTED_FLAG_GENERATORS_COMMIT="{tested_commit}"',
+        'FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$TESTED_FLAG_GENERATORS_COMMIT}"',
         'git -C "$source_dir" fetch --quiet --depth 1 origin "$FLAG_GENERATORS_REF"',
         'FLAG_GENERATORS_RESOLVED_COMMIT="$(git -C "$source_dir" rev-parse HEAD)"',
-        "if resolved_commit == known_good_commit:",
-        'if source_id == "http_support_ticket_portal":',
-        'item["disabled"] = True',
-        "if overridden != 147:",
-        "if len(items) != 306:",
-        'bool(item.get("disabled_due_to_build_network"))',
-        'bool(item.get("disabled_due_to_missing_files"))',
-        "if overridden != 295 or safety_disabled != 11:",
-        "kept {safety_disabled} dependency-incompatible recipes disabled",
-        'item["validated_ok"] = True',
-        'item["validated_incomplete"] = False',
-        'item["validation_override_source"] = f"known-good@{known_good_commit}"',
-        "Skipped known-good generator overrides because the requested ref resolved",
-        "Skipped known-good Vulhub overrides because the requested ref resolved",
+        'metadata = source / "pack.json"',
+        'archive.write(metadata, "pack.json")',
+        'len(installed) != 148 or validated != 147 or disabled != 4 or enabled_node != 85',
+        '"Imported portable generator metadata:',
+        'archive.write(path, path.relative_to(source).as_posix())',
+        'len(items) != 306 or validated != 294 or disabled != 12',
+        '"Imported portable Vulhub metadata:',
+        "its own portable catalog metadata, if present, will be imported",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in source]
-    assert not missing, "Missing known-good catalog provisioning: " + "; ".join(missing)
+    assert not missing, "Missing portable catalog provisioning: " + "; ".join(missing)
 
 
 def test_password_override_flags_preserve_exact_values() -> None:
@@ -670,8 +664,10 @@ def test_optional_catalog_payload_contains_only_requested_content(tmp_path: Path
     source_repo = tmp_path / "source"
     work_dir = tmp_path / "work"
     for relative in (
+        "pack.json",
         "flag_generators/demo/manifest.yaml",
         "flag_node_generators/demo/manifest.yaml",
+        "vulnhub/.scenarioforge/catalog_items.json",
         "vulnhub/content/demo/docker-compose.yml",
     ):
         path = source_repo / relative
@@ -726,6 +722,7 @@ printf 'resolved=%s\n' "$FLAG_GENERATORS_RESOLVED_COMMIT"
     ).stdout
     assert "flag_generators/demo/manifest.yaml" in listing
     assert "flag_node_generators/demo/manifest.yaml" in listing
+    assert "pack.json" in listing
     assert "vulnhub/" not in listing
     assert (work_dir / "catalog-transfer-key").is_file()
     assert (work_dir / "catalog-transfer-key.pub").is_file()
@@ -754,6 +751,7 @@ prepare_optional_content
         text=True,
         check=True,
     ).stdout
+    assert "vulnhub/.scenarioforge/catalog_items.json" in vulnhub_listing
     assert "vulnhub/content/demo/docker-compose.yml" in vulnhub_listing
     assert "flag_generators/" not in vulnhub_listing
     assert "flag_node_generators/" not in vulnhub_listing

@@ -49,6 +49,55 @@ ScenarioForge does not ship a starter generator catalog in the source tree. Gene
 
 Use [generator_templates](../generator_templates) when authoring new packs, then package and import the resulting ZIP.
 
+#### Portable catalog status and notes
+
+A repository-level `pack.json` can ship curation and prior test evidence keyed
+by the stable source ID. `catalog_item_defaults` applies to every generator;
+entries in `catalog_items` override only the fields they declare:
+
+```json
+{
+  "catalog_item_defaults": {
+    "disabled": false,
+    "persistent": true,
+    "validated_ok": true,
+    "validated_incomplete": false,
+    "validated_at": "2026-08-12",
+    "validation_source": "catalog test dataset"
+  },
+  "catalog_items": [
+    {
+      "kind": "flag-node-generator",
+      "generator_id": "example_unvalidated",
+      "disabled": true,
+      "disabled_by_catalog": true,
+      "validated_ok": null,
+      "disabled_reason": "No successful test evidence is recorded."
+    }
+  ],
+  "catalog_notes": [
+    {
+      "kind": "flag-node-generator",
+      "generator_id": "example_unvalidated",
+      "note": "Keep disabled until it passes the catalog test.",
+      "note_color": "red"
+    }
+  ]
+}
+```
+
+ScenarioForge applies this metadata during import and writes current values back
+to `pack.json` when the pack is downloaded. Validation results,
+enabled/disabled state, persistence, and user-authored notes and note colors
+therefore survive an export/import round trip. Local missing-file or build-time
+network checks remain authoritative: imported metadata cannot enable a
+generator that the destination detects as unrunnable.
+
+Vulnerability catalogs use the same portable fields in
+`.scenarioforge/catalog_items.json`, keyed by `compose_rel`; their notes live in
+`.scenarioforge/catalog_notes.json`. Catalog defaults may be declared in the
+top-level `defaults` object, with per-recipe exceptions in `items`.
+
 ### Installed generators (Web UI + Flow)
 The Web UI treats **installed generators** as the source of truth.
 

@@ -14,7 +14,7 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
-SCRIPT_VERSION="0.3.5"
+SCRIPT_VERSION="0.4.0"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 VMRUN_TYPE="ws"
 
@@ -169,7 +169,7 @@ Repository overrides:
   --core-minimal-ref REF       default: main
   --core-ref REF               default: master
   --scenarioforge-ref REF      default: main
-  --flag-generators-ref REF    default: tested snapshot 22f74b4cc5cb
+  --flag-generators-ref REF    default: tested metadata snapshot cabfbaa33c25
 
 Before installation, create vmnet2 in Workstation's Virtual Network Editor as a
 custom network with DHCP, NAT, and the host virtual adapter disabled. See the

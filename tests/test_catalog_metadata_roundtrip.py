@@ -69,7 +69,13 @@ def curated_catalog():
             "architecture_unresolved": ["some/other:img"],
             "disabled": True,
             "disabled_by_operator": True,
+            "disabled_by_catalog": False,
             "persistent": True,
+            "validated_ok": True,
+            "validated_incomplete": False,
+            "validated_at": "2026-08-12T00:00:00Z",
+            "validation_source": "scenarioforge-dataset@7373958",
+            "disabled_reason": "operator chose to retain but disable this recipe",
         }],
     }
 
@@ -89,7 +95,13 @@ def test_export_carries_architecture_and_curation(curated_catalog, source_zip):
     assert entry["architecture_unresolved"] == ["some/other:img"]
     assert entry["disabled"] is True
     assert entry["disabled_by_operator"] is True
+    assert entry["disabled_by_catalog"] is False
     assert entry["persistent"] is True
+    assert entry["validated_ok"] is True
+    assert entry["validated_incomplete"] is False
+    assert entry["validated_at"] == "2026-08-12T00:00:00Z"
+    assert entry["validation_source"] == "scenarioforge-dataset@7373958"
+    assert entry["disabled_reason"] == "operator chose to retain but disable this recipe"
 
 
 def test_export_still_carries_notes_and_layout(curated_catalog, source_zip):
@@ -175,6 +187,46 @@ def test_import_restores_operator_disable(tmp_path, monkeypatch):
     }])
     assert item["disabled"] is True
     assert item["disabled_by_operator"] is True
+
+
+def test_import_applies_validation_defaults_and_item_exceptions(tmp_path, monkeypatch):
+    item = _install(tmp_path, monkeypatch, items_metadata=[], arch_scan="0")
+    assert item.get("validated_ok") is None
+
+    zip_path = tmp_path / "defaults.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr(COMPOSE_REL, "services:\n  web:\n    image: nginx:1\n")
+        z.writestr(
+            ".scenarioforge/catalog_items.json",
+            json.dumps({
+                "version": 1,
+                "defaults": {
+                    "validated_ok": True,
+                    "validated_incomplete": False,
+                    "validation_source": "dataset-and-paper",
+                },
+                "items": [{
+                    "compose_rel": COMPOSE_REL,
+                    "disabled": True,
+                    "disabled_by_catalog": True,
+                    "validated_ok": None,
+                    "disabled_reason": "not in the validated research catalog",
+                }],
+            }),
+        )
+    monkeypatch.setattr(backend, "_outputs_dir", lambda: str(tmp_path / "default-outputs"))
+    monkeypatch.setenv("CORETG_CATALOG_ARCH_SCAN", "0")
+    backend._install_vuln_catalog_zip_file_single(
+        zip_file_path=str(zip_path), label="defaults.zip", origin="test"
+    )
+    state = backend._load_vuln_catalogs_state()
+    restored = backend._normalize_vuln_catalog_items(state["catalogs"][-1])[0]
+    assert restored["disabled"] is True
+    assert restored["disabled_by_catalog"] is True
+    assert restored["validated_ok"] is None
+    assert restored["validated_incomplete"] is False
+    assert restored["validation_source"] == "dataset-and-paper"
+    assert restored["disabled_reason"] == "not in the validated research catalog"
 
 
 def test_import_pins_new_items_persistent_by_default(tmp_path, monkeypatch):
@@ -272,7 +324,13 @@ def test_export_then_import_preserves_everything(tmp_path, monkeypatch, curated_
     assert item["architecture_unresolved"] == ["some/other:img"]
     assert item["disabled"] is True
     assert item["disabled_by_operator"] is True
+    assert item["disabled_by_catalog"] is False
     assert item["persistent"] is True
+    assert item["validated_ok"] is True
+    assert item["validated_incomplete"] is False
+    assert item["validated_at"] == "2026-08-12T00:00:00Z"
+    assert item["validation_source"] == "scenarioforge-dataset@7373958"
+    assert item["disabled_reason"] == "operator chose to retain but disable this recipe"
     assert item["note"] == "hand-checked"
     assert item["note_color"] == "green"
     assert item["category"] == "web/proxy"

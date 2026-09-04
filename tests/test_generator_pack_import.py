@@ -1,4 +1,5 @@
 import io
+import json
 import warnings
 import os
 import zipfile
@@ -39,6 +40,86 @@ artifacts:
 """,
         f"{base}/docker-compose.yml": "services:\n  generator:\n    image: python:3.11-slim\n",
     }
+
+
+def test_generator_source_metadata_and_user_notes_survive_export_import(
+    tmp_path, monkeypatch
+):
+    first_root = tmp_path / "first-install"
+    monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(first_root))
+    metadata = {
+        "catalog_items_format": 1,
+        "catalog_item_defaults": {
+            "validated_ok": True,
+            "validated_incomplete": False,
+            "validation_source": "scenarioforge-dataset@7373958",
+        },
+        "catalog_items": [{
+            "kind": "flag-node-generator",
+            "generator_id": "portable-disabled",
+            "disabled": True,
+            "disabled_by_catalog": True,
+            "validated_ok": None,
+            "disabled_reason": "not part of the validated research catalog",
+        }],
+        "catalog_notes": [{
+            "kind": "flag-node-generator",
+            "generator_id": "portable-disabled",
+            "note": "Keep disabled until it has dataset execution evidence.",
+            "note_color": "yellow",
+        }],
+    }
+    source_zip = tmp_path / "source.zip"
+    source_zip.write_bytes(_make_zip({
+        "pack.json": json.dumps(metadata),
+        **_minimal_generator_files("portable-success"),
+        **_minimal_generator_files("portable-disabled", kind="flag-node-generator"),
+    }))
+
+    ok, note = app_backend._install_generator_pack(
+        zip_path=str(source_zip), pack_label="portable", pack_origin="test"
+    )
+    assert ok is True, note
+    first_state = app_backend._load_installed_generator_packs_state()
+    first_pack = first_state["packs"][-1]
+    first_items = {
+        app_backend._installed_generator_marker_source_id(item): item
+        for item in first_pack["installed"]
+    }
+    assert first_items["portable-success"]["validated_ok"] is True
+    assert first_items["portable-success"]["validation_source"] == "scenarioforge-dataset@7373958"
+    assert first_items["portable-disabled"]["disabled"] is True
+    assert first_items["portable-disabled"]["disabled_by_catalog"] is True
+    assert first_items["portable-disabled"]["validated_ok"] is None
+    assert first_items["portable-disabled"]["note"] == "Keep disabled until it has dataset execution evidence."
+
+    exported = app_backend._pack_to_zip_bytes(first_pack)
+    with zipfile.ZipFile(io.BytesIO(exported), "r") as archive:
+        exported_metadata = json.loads(archive.read("pack.json"))
+    exported_by_id = {
+        item["generator_id"]: item for item in exported_metadata["catalog_items"]
+    }
+    assert exported_by_id["portable-success"]["validated_ok"] is True
+    assert exported_by_id["portable-disabled"]["disabled"] is True
+    assert exported_metadata["catalog_notes"][0]["generator_id"] == "portable-disabled"
+
+    second_root = tmp_path / "second-install"
+    monkeypatch.setenv("CORETG_INSTALLED_GENERATORS_DIR", str(second_root))
+    roundtrip_zip = tmp_path / "roundtrip.zip"
+    roundtrip_zip.write_bytes(exported)
+    ok, note = app_backend._install_generator_pack(
+        zip_path=str(roundtrip_zip), pack_label="roundtrip", pack_origin="test"
+    )
+    assert ok is True, note
+    second_pack = app_backend._load_installed_generator_packs_state()["packs"][-1]
+    second_items = {
+        app_backend._installed_generator_marker_source_id(item): item
+        for item in second_pack["installed"]
+    }
+    assert second_items["portable-success"]["validated_ok"] is True
+    assert second_items["portable-disabled"]["disabled"] is True
+    assert second_items["portable-disabled"]["validated_ok"] is None
+    assert second_items["portable-disabled"]["note"] == "Keep disabled until it has dataset execution evidence."
 
 
 def test_generator_pack_rolls_back_files_when_state_commit_fails(tmp_path, monkeypatch):
@@ -886,7 +967,7 @@ services:
     export_metadata = __import__('json').loads(inner.read('pack.json').decode('utf-8'))
     assert export_metadata['catalog_notes'] == [{
         'kind': 'flag-generator',
-        'generator_id': str((pack.get('installed') or [{}])[0]['id']),
+        'generator_id': gen_id,
         'note': '',
         'note_color': 'green',
     }]

@@ -67,8 +67,22 @@ def register(
                 if item.get('disabled') is not None:
                     entry['disabled'] = bool(item.get('disabled'))
                     entry['disabled_by_operator'] = bool(item.get('disabled_by_operator'))
+                    entry['disabled_by_catalog'] = bool(item.get('disabled_by_catalog'))
                 if item.get('persistent') is not None:
                     entry['persistent'] = bool(item.get('persistent'))
+                if 'validated_ok' in item:
+                    entry['validated_ok'] = (
+                        bool(item.get('validated_ok'))
+                        if item.get('validated_ok') is not None
+                        else None
+                    )
+                for bool_key in ('validated_incomplete',):
+                    if bool_key in item:
+                        entry[bool_key] = bool(item.get(bool_key))
+                for text_key in ('validated_at', 'validation_source', 'disabled_reason'):
+                    value = str(item.get(text_key) or '').strip()
+                    if value:
+                        entry[text_key] = value
                 # Only carry an entry that actually says something.
                 if len(entry) > 1:
                     state_items.append(entry)

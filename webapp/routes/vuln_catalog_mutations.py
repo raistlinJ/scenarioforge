@@ -122,6 +122,7 @@ def register(
                 if int(item.get('id') or 0) == item_id:
                     item['disabled'] = disabled
                     item['disabled_due_to_missing_files'] = False
+                    item['disabled_by_operator'] = True
                     updated = True
                     break
             catalog['compose_items'] = items
@@ -325,17 +326,21 @@ def register(
                 if action == 'enable':
                     item['disabled'] = False
                     item['disabled_due_to_missing_files'] = False
+                    item['disabled_by_operator'] = True
                 elif action == 'disable':
                     item['disabled'] = True
                     item['disabled_due_to_missing_files'] = False
+                    item['disabled_by_operator'] = True
                 elif action == 'override_success':
                     item['validated_ok'] = True
                     item['validated_incomplete'] = False
                     item['validated_at'] = validated_at
+                    item['validation_source'] = 'ScenarioForge operator override'
                 elif action == 'override_fail':
                     item['validated_ok'] = False
                     item['validated_incomplete'] = False
                     item['validated_at'] = validated_at
+                    item['validation_source'] = 'ScenarioForge operator override'
                 elif action == 'persistent':
                     item['persistent'] = True
                 elif action == 'unpersistent':
