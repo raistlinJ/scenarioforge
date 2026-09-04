@@ -46,6 +46,7 @@ CORE_REPO_URL="${SF_CORE_REPO_URL:-https://github.com/raistlinJ/core.git}"
 CORE_REPO_REF="${SF_CORE_REPO_REF:-master}"
 SCENARIOFORGE_URL="${SF_SCENARIOFORGE_URL:-https://github.com/raistlinJ/scenarioforge.git}"
 SCENARIOFORGE_REF="${SF_SCENARIOFORGE_REF:-main}"
+CORE_USE_SYSTEMD_RESOLVED_STUB="${SF_CORE_USE_SYSTEMD_RESOLVED_STUB:-0}"
 FLAG_GENERATORS_URL="${SF_FLAG_GENERATORS_URL:-https://github.com/raistlinJ/flag-generators.git}"
 TESTED_FLAG_GENERATORS_COMMIT="5f612eecb8ff5df74a0e517d0de1e54385a62044"
 FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$TESTED_FLAG_GENERATORS_COMMIT}"
@@ -930,6 +931,15 @@ set -Eeuo pipefail
 exec > >(tee -a /var/log/scenarioforge-core-bootstrap.log) 2>&1
 source /etc/scenarioforge-installer.env
 
+# Docker's daemon performs registry lookups from the host namespace. On VMware,
+# querying Fusion's DNS proxy directly can return spurious NXDOMAIN responses,
+# while systemd-resolved handles the same upstream correctly.
+if [[ "${CORE_USE_SYSTEMD_RESOLVED_STUB:-0}" == 1 \
+    && -e /run/systemd/resolve/stub-resolv.conf ]]; then
+    ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    systemctl restart systemd-resolved
+fi
+
 install -d -m 0755 /var/lib/scenarioforge
 set_bootstrap_status() {
     local percent="$1"
@@ -1564,6 +1574,7 @@ write_cloud_init_files() {
         shell_assignment CORE_REPO_REF "$CORE_REPO_REF"
         shell_assignment SCENARIOFORGE_URL "$SCENARIOFORGE_URL"
         shell_assignment SCENARIOFORGE_REF "$SCENARIOFORGE_REF"
+        shell_assignment CORE_USE_SYSTEMD_RESOLVED_STUB "$CORE_USE_SYSTEMD_RESOLVED_STUB"
         shell_assignment CORE_MANAGEMENT_IP "$(plain_ip "$CORE_MANAGEMENT_CIDR")"
     } > "$WORK_DIR/core-installer.env"
     {

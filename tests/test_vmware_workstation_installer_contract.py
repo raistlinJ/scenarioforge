@@ -175,6 +175,7 @@ def test_topology_native_app_and_graphical_guest_contracts() -> None:
     assert "terminator xdot xfce4" in shared
     assert "scenarioforge-json-viewer.desktop" in shared
     assert "Exec=mousepad %F" in shared
+    assert "ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf" in shared
     assert "_install_generator_pack_or_bundle" in shared
     assert "/opt/scenarioforge/outputs/installed_generators" in shared
     assert "_install_vuln_catalog_zip_file" in shared
@@ -285,6 +286,8 @@ write_vmware_cloud_init_files
         parsed = yaml.safe_load(cloud_config)
         assert "open-vm-tools" in parsed["packages"]
         assert "open-vm-tools-desktop" in parsed["packages"]
+    core_environment = (tmp_path / "core-installer.env").read_text(encoding="utf-8")
+    assert "CORE_USE_SYSTEMD_RESOLVED_STUB=1" in core_environment
 
 
 def test_host_network_table_parsing_and_hitl_dhcp_guard() -> None:
