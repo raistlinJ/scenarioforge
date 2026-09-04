@@ -37,8 +37,8 @@ core_ref=master
 scenarioforge_ref=main
 flag_generators_ref=5f612eecb8ff5df74a0e517d0de1e54385a62044
 
-flag_generators=false
-vulnhub=false
+flag_generators=true
+vulnhub=true
 wait_minutes=90
 no_wait=false
 verbose=false
