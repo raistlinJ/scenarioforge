@@ -296,44 +296,6 @@
               </form>
             </dialog>
 
-            <div class="modal fade" id="flowComposeDialog" tabindex="-1" aria-hidden="true" data-bs-backdrop="static"
-              data-bs-keyboard="false">
-              <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable"
-                style="max-width: 1200px; width: calc(100% - 2rem);">
-                <div class="modal-content">
-                  <div class="modal-header">
-                    <div class="d-flex align-items-center gap-2 w-100">
-                      <span id="flowComposeSpinner" class="spinner-border spinner-border-sm" role="status"
-                        aria-hidden="true"></span>
-                      <h5 class="modal-title mb-0" id="flowComposeTitle">Generator Output</h5>
-                      <span
-                        class="small text-muted ms-auto text-nowrap d-none"
-                        id="flowComposeImages"
-                        title="Generator images built or pulled this run, and images reused from the local cache"
-                      ></span>
-                    </div>
-                  </div>
-                  <div class="modal-body">
-                    <div class="small text-muted mb-2" id="flowComposeStatus">Running generators…</div>
-                    <div class="progress mb-3" role="progressbar" aria-label="Generator progress" aria-valuemin="0"
-                      aria-valuemax="100">
-                      <div class="progress-bar progress-bar-striped progress-bar-animated" id="flowComposeProgressBar"
-                        style="width: 100%">Working…</div>
-                    </div>
-                    <div class="small text-muted mb-1" id="flowComposeStepsLabel">Progress steps</div>
-                    <div id="flowComposeSteps" class="small mb-3 border rounded bg-light p-2" style="max-height: 140px; overflow-y: auto;"></div>
-                    <div class="small text-muted mb-1" id="flowComposeLogLabel">Output / Log</div>
-                    <div id="flowComposeBody" class="small bg-light p-2 mb-0" style="max-height: 55vh; overflow: auto;">
-                    </div>
-                  </div>
-                  <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary" id="flowComposeCloseBtn"
-                      data-bs-dismiss="modal" disabled>Close</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
             <dialog id="flowSubstituteDialog" class="p-0 border rounded"
               style="max-width: 1150px; width: calc(100% - 2rem); max-height: 85vh; overflow: hidden;">
               <form method="dialog" class="m-0" style="display:flex;flex-direction:column;max-height:85vh;">
@@ -374,6 +336,47 @@
 {% set xml_preview_enabled = True %}
 {% set xml_preview_text = xml_preview %}
 {% include 'partials/dock.html' %}
+
+<!-- Keep Bootstrap modals at page level. The visualization card can receive a
+     CSS filter when its chain is stale; filtered ancestors create a stacking
+     context that would otherwise trap this modal underneath its backdrop. -->
+<div class="modal fade" id="flowComposeDialog" tabindex="-1" aria-hidden="true" data-bs-backdrop="static"
+  data-bs-keyboard="false">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable"
+    style="max-width: 1200px; width: calc(100% - 2rem);">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="d-flex align-items-center gap-2 w-100">
+          <span id="flowComposeSpinner" class="spinner-border spinner-border-sm" role="status"
+            aria-hidden="true"></span>
+          <h5 class="modal-title mb-0" id="flowComposeTitle">Generator Output</h5>
+          <span
+            class="small text-muted ms-auto text-nowrap d-none"
+            id="flowComposeImages"
+            title="Generator images built or pulled this run, and images reused from the local cache"
+          ></span>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="small text-muted mb-2" id="flowComposeStatus">Running generators…</div>
+        <div class="progress mb-3" role="progressbar" aria-label="Generator progress" aria-valuemin="0"
+          aria-valuemax="100">
+          <div class="progress-bar progress-bar-striped progress-bar-animated" id="flowComposeProgressBar"
+            style="width: 100%">Working…</div>
+        </div>
+        <div class="small text-muted mb-1" id="flowComposeStepsLabel">Progress steps</div>
+        <div id="flowComposeSteps" class="small mb-3 border rounded bg-light p-2" style="max-height: 140px; overflow-y: auto;"></div>
+        <div class="small text-muted mb-1" id="flowComposeLogLabel">Output / Log</div>
+        <div id="flowComposeBody" class="small bg-light p-2 mb-0" style="max-height: 55vh; overflow: auto;">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" id="flowComposeCloseBtn"
+          data-bs-dismiss="modal" disabled>Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Loading overlay shown during slow operations (e.g., resolving hint templates via generator runs). -->
 <div id="flowLoadingOverlay" class="position-fixed top-0 start-0 w-100 h-100 d-none" style="z-index: 2000;">

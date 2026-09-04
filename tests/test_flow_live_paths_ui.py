@@ -87,6 +87,19 @@ def test_flow_generator_output_shows_phase_timings() -> None:
     assert not missing, "Missing phase timing display wiring in flow template: " + "; ".join(missing)
 
 
+def test_flow_results_modal_is_not_trapped_in_filtered_visualization_card() -> None:
+    """A stale card's CSS filter must not stack the modal below its backdrop."""
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    visualization_index = text.index('id="flowVizCard"')
+    content_end_index = text.index("{% endblock %}", visualization_index)
+    body_container_index = text.index("{% block body_container %}")
+    modal_index = text.index('id="flowComposeDialog"')
+
+    assert modal_index > body_container_index
+    assert not visualization_index < modal_index < content_end_index
+
+
 def test_flow_sequencing_progress_is_request_scoped_and_visible() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
