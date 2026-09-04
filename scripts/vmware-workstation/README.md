@@ -144,16 +144,18 @@ guest.
 ScenarioForge's pack importer. Their files and pack state live under
 `/opt/scenarioforge/outputs/installed_generators`, and provisioning verifies
 that both catalog kinds are visible. The default revision is the previously
-tested metadata snapshot `cabfbaa33c256310156740fa8636b11c4e7d111e`.
+tested metadata snapshot `5f612eecb8ff5df74a0e517d0de1e54385a62044`.
 Its portable `pack.json` records 147 successfully tested generators, with 144
 enabled overall and exactly the 85 enabled flag-node generators represented by
 the paper and resolved dataset. Three working samples remain catalog-disabled;
 the one generator without successful evidence remains disabled and unvalidated.
+All 148 generators include portable notes describing their evidence and state.
 `--vulnhub` imports the same snapshot through the vulnerability-catalog
 importer, makes it active, and imports portable success state for 294
 self-contained recipes. Twelve documented recipes remain disabled and
 unvalidated: 10 require build-time Internet access, one has missing required
-paths, and one is outside the validated research catalog. A custom
+paths, and one is outside the validated research catalog. All 306 recipes carry
+portable notes: green for validated evidence and usage, red for exclusions. A custom
 `--flag-generators-ref REF` or `SF_FLAG_GENERATORS_REF=REF` imports only the
 portable metadata present in that revision. Both options add install time and
 disk usage.
@@ -252,7 +254,7 @@ The commonly useful settings are:
 | `SF_CORE_REPO_URL` / `SF_CORE_REPO_REF` | `raistlinJ/core.git` / `master` |
 | `SF_SCENARIOFORGE_URL` / `SF_SCENARIOFORGE_REF` | `raistlinJ/scenarioforge.git` / `main` |
 | `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
-| `SF_FLAG_GENERATORS_URL` / `SF_FLAG_GENERATORS_REF` | `raistlinJ/flag-generators.git` / `cabfbaa33c256310156740fa8636b11c4e7d111e` (tested metadata snapshot) |
+| `SF_FLAG_GENERATORS_URL` / `SF_FLAG_GENERATORS_REF` | `raistlinJ/flag-generators.git` / `5f612eecb8ff5df74a0e517d0de1e54385a62044` (tested metadata snapshot) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
 

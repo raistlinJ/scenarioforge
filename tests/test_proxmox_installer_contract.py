@@ -116,7 +116,7 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
 def test_optional_catalogs_default_to_and_verify_portable_metadata_snapshot() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
 
-    tested_commit = "cabfbaa33c256310156740fa8636b11c4e7d111e"
+    tested_commit = "5f612eecb8ff5df74a0e517d0de1e54385a62044"
     expected_snippets = [
         f'TESTED_FLAG_GENERATORS_COMMIT="{tested_commit}"',
         'FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$TESTED_FLAG_GENERATORS_COMMIT}"',

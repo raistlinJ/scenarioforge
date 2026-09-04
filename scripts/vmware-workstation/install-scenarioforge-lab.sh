@@ -169,7 +169,7 @@ Repository overrides:
   --core-minimal-ref REF       default: main
   --core-ref REF               default: master
   --scenarioforge-ref REF      default: main
-  --flag-generators-ref REF    default: tested metadata snapshot cabfbaa33c25
+  --flag-generators-ref REF    default: tested metadata snapshot 5f612eecb8ff
 
 Before installation, create vmnet2 in Workstation's Virtual Network Editor as a
 custom network with DHCP, NAT, and the host virtual adapter disabled. See the

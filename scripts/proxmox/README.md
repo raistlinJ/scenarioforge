@@ -183,21 +183,23 @@ catalog and pack state live under
 `/opt/scenarioforge/outputs/installed_generators`; APP provisioning fails
 instead of claiming readiness unless both catalog kinds are visible. The
 default repository revision is the tested metadata snapshot
-`cabfbaa33c256310156740fa8636b11c4e7d111e`. Its `pack.json` travels through
+`5f612eecb8ff5df74a0e517d0de1e54385a62044`. Its `pack.json` travels through
 the normal pack importer and records 147 successfully tested generators. The
 enabled catalog contains 144 generators overall and exactly the 85 enabled
 flag-node generators exercised by the paper and resolved dataset. Three working
 `Sample:` generators remain catalog-disabled, while
 `http_support_ticket_portal` remains disabled and unvalidated because no
-successful test evidence is recorded.
+successful test evidence is recorded. All 148 generators carry an imported
+note explaining their evidence and current catalog state.
 `--vulnhub` similarly imports the repository's `vulnhub/` snapshot through
 ScenarioForge's vulnerability-catalog importer; on a fresh VM that catalog
 becomes active. Its `.scenarioforge/catalog_items.json` metadata enables and
 records success for the 294 self-contained recipes represented by the IEEE TPS
 paper and `scenarioforge-dataset`. Twelve recipes remain disabled and
 unvalidated: 10 require build-time Internet access, one has missing required
-paths, and one is outside the validated research catalog. Authored notes explain
-each exception. A custom `--flag-generators-ref REF` or
+paths, and one is outside the validated research catalog. All 306 recipes carry
+an authored note; green notes summarize validation and resolved-dataset usage,
+while red notes explain each exception. A custom `--flag-generators-ref REF` or
 `SF_FLAG_GENERATORS_REF` imports whatever portable metadata that revision
 contains; it is never silently granted the tested snapshot's status. These
 flags add download, transfer, disk, and import time.
@@ -354,7 +356,7 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_SCENARIOFORGE_REF` | `main` |
 | `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
 | `SF_FLAG_GENERATORS_URL` | `https://github.com/raistlinJ/flag-generators.git` |
-| `SF_FLAG_GENERATORS_REF` | `cabfbaa33c256310156740fa8636b11c4e7d111e` (tested metadata snapshot) |
+| `SF_FLAG_GENERATORS_REF` | `5f612eecb8ff5df74a0e517d0de1e54385a62044` (tested metadata snapshot) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
 | `SF_WAIT_MINUTES` | `90` |

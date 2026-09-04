@@ -47,7 +47,7 @@ CORE_REPO_REF="${SF_CORE_REPO_REF:-master}"
 SCENARIOFORGE_URL="${SF_SCENARIOFORGE_URL:-https://github.com/raistlinJ/scenarioforge.git}"
 SCENARIOFORGE_REF="${SF_SCENARIOFORGE_REF:-main}"
 FLAG_GENERATORS_URL="${SF_FLAG_GENERATORS_URL:-https://github.com/raistlinJ/flag-generators.git}"
-TESTED_FLAG_GENERATORS_COMMIT="cabfbaa33c256310156740fa8636b11c4e7d111e"
+TESTED_FLAG_GENERATORS_COMMIT="5f612eecb8ff5df74a0e517d0de1e54385a62044"
 FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$TESTED_FLAG_GENERATORS_COMMIT}"
 FLAG_GENERATORS_RESOLVED_COMMIT=""
 INSTALL_FLAG_GENERATORS="${SF_INSTALL_FLAG_GENERATORS:-0}"
@@ -227,7 +227,7 @@ Repository overrides:
   --core-minimal-ref REF       Default: main
   --core-ref REF               Default: master
   --scenarioforge-ref REF      Default: main
-  --flag-generators-ref REF    Default: tested metadata snapshot cabfbaa33c25
+  --flag-generators-ref REF    Default: tested metadata snapshot 5f612eecb8ff
 
 Environment variables with the SF_ prefix can set every default; see
 scripts/proxmox/README.md for the complete list.
