@@ -116,6 +116,94 @@ def test_cli_preview_plan_phase_persists_preview_metadata(tmp_path, monkeypatch,
     assert payload['preview_plan_path'] == str(xml_path.resolve())
 
 
+def test_cli_preview_plan_resolves_display_name_to_canonical_xml_name(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="CLIExportExample"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+
+    captured: dict[str, object] = {}
+
+    def _persist(**kwargs):
+        captured.update(kwargs)
+        return {
+            'xml_path': kwargs['xml_path'],
+            'scenario': kwargs['scenario'],
+            'seed': 42,
+            'preview_plan_path': kwargs['xml_path'],
+            'full_preview': {'seed': 42, 'hosts': [], 'routers': []},
+            'plan': {'routers_planned': 0, 'role_counts': {'Host': 1}},
+            'persisted': True,
+            'persist_error': '',
+        }
+
+    fake_backend = SimpleNamespace(
+        _scenario_names_from_xml=lambda _path: ['CLIExportExample'],
+        _sanitize_scenario_name_strict=lambda value, fallback: ''.join(
+            character for character in str(value or fallback) if character.isalnum()
+        ),
+        _planner_persist_flow_plan=_persist,
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'preview-plan',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'CLI Export Example',
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert captured['scenario'] == 'CLIExportExample'
+    assert payload['scenario'] == 'CLIExportExample'
+
+
+def test_cli_preview_plan_reports_xml_persistence_failure(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+
+    fake_backend = SimpleNamespace(
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+        _planner_persist_flow_plan=lambda **_kwargs: {
+            'scenario': 'Scenario One',
+            'persisted': False,
+            'persist_error': 'ScenarioEditor not found',
+        },
+    )
+    argv0 = cli.sys.argv[:]
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'preview-plan', '--xml', str(xml_path)]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload['ok'] is False
+    assert payload['phase'] == 'preview-plan'
+    assert 'ScenarioEditor not found' in payload['error']
+
+
 def test_cli_attack_graph_phase_exports_all_formats(tmp_path, monkeypatch, capsys):
     xml_path = tmp_path / 'scenario.xml'
     root = ET.Element('Scenarios')

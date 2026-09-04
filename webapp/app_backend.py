@@ -40735,6 +40735,8 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
             'updated_at': _local_timestamp_display(),
         },
     }
+    persisted_ok = False
+    persisted_detail = ''
     try:
         if isinstance(flow_meta, dict) and flow_meta:
             persisted_ok, persisted_detail = _persist_plan_preview_and_flow_state_in_xml(
@@ -40761,7 +40763,8 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
                 )
             except Exception:
                 pass
-    except Exception:
+    except Exception as exc:
+        persisted_detail = str(exc)
         try:
             app.logger.exception(
                 '[planner] Failed to persist plan/preview into XML at %s (scenario=%s)',
@@ -40780,6 +40783,8 @@ def _planner_persist_flow_plan(*, xml_path: str, scenario: str | None, seed: int
         'preview_plan_path': xml_path,
         'full_preview': full_prev,
         'plan': plan,
+        'persisted': bool(persisted_ok),
+        'persist_error': '' if persisted_ok else str(persisted_detail or 'unknown XML persistence error'),
     }
 
 

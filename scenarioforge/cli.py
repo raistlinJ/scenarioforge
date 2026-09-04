@@ -6196,8 +6196,6 @@ def _response_payload_and_status(response: Any) -> tuple[int, Any]:
 
 def _cli_phase_scenario(args: Any, *, backend: Any | None = None) -> str | None:
     scenario_name = str(getattr(args, 'scenario', '') or '').strip()
-    if scenario_name:
-        return scenario_name
     backend_module = backend
     if backend_module is None:
         try:
@@ -6208,10 +6206,45 @@ def _cli_phase_scenario(args: Any, *, backend: Any | None = None) -> str | None:
         try:
             names = backend_module._scenario_names_from_xml(os.path.abspath(args.xml))
             if isinstance(names, list) and names:
+                if scenario_name:
+                    exact = next(
+                        (
+                            str(name or '').strip()
+                            for name in names
+                            if str(name or '').strip().lower() == scenario_name.lower()
+                        ),
+                        '',
+                    )
+                    if exact:
+                        return exact
+                    try:
+                        requested_strict = backend_module._sanitize_scenario_name_strict(
+                            scenario_name,
+                            scenario_name,
+                        ).lower()
+                        strict_matches = [
+                            str(name or '').strip()
+                            for name in names
+                            if backend_module._sanitize_scenario_name_strict(
+                                name,
+                                str(name or ''),
+                            ).lower() == requested_strict
+                        ]
+                    except Exception:
+                        requested_strict = re.sub(r'[^A-Za-z0-9]', '', scenario_name).lower()
+                        strict_matches = [
+                            str(name or '').strip()
+                            for name in names
+                            if re.sub(r'[^A-Za-z0-9]', '', str(name or '')).lower()
+                            == requested_strict
+                        ]
+                    if len(strict_matches) == 1:
+                        return strict_matches[0]
+                    return scenario_name
                 return str(names[0] or '').strip() or None
         except Exception:
             pass
-    return None
+    return scenario_name or None
 
 
 def _cli_phase_chain_ids(args: Any) -> list[str]:
@@ -6257,6 +6290,23 @@ def _run_preview_plan_phase(args: Any) -> int:
                 'xml_path': xml_path,
                 'scenario': scenario_name,
                 'error': str(exc),
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    if result.get('persisted') is False:
+        persistence_error = str(
+            result.get('persist_error') or 'the XML writer did not report a reason'
+        ).strip()
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'preview-plan',
+                'xml_path': xml_path,
+                'scenario': result.get('scenario') or scenario_name,
+                'error': f'Failed to persist preview plan into scenario XML: {persistence_error}',
             },
             output_path=args.plan_output,
             stream=sys.stderr,
@@ -7247,7 +7297,7 @@ def _run_flag_sequencing_phase(args: Any) -> int:
         return 1
 
     try:
-        backend._planner_persist_flow_plan(
+        planner_result = backend._planner_persist_flow_plan(
             xml_path=xml_path,
             scenario=scenario_name,
             seed=args.seed,
@@ -7261,6 +7311,22 @@ def _run_flag_sequencing_phase(args: Any) -> int:
                 'xml_path': xml_path,
                 'scenario': scenario_name,
                 'error': f'Failed to prepare preview plan: {exc}',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+    if isinstance(planner_result, dict) and planner_result.get('persisted') is False:
+        persistence_error = str(
+            planner_result.get('persist_error') or 'the XML writer did not report a reason'
+        ).strip()
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'flag-sequencing',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': f'Failed to prepare preview plan: {persistence_error}',
             },
             output_path=args.plan_output,
             stream=sys.stderr,
@@ -8380,7 +8446,7 @@ def main():
     if backend_for_cli is not None:
         try:
             resolved_scenario_name = _cli_phase_scenario(args, backend=backend_for_cli)
-            if resolved_scenario_name and not args.scenario:
+            if resolved_scenario_name:
                 args.scenario = resolved_scenario_name
         except Exception:
             resolved_scenario_name = args.scenario
@@ -8391,7 +8457,7 @@ def main():
                 pass
         try:
             resolved_scenario_name = _cli_phase_scenario(args, backend=backend_for_cli)
-            if resolved_scenario_name and not args.scenario:
+            if resolved_scenario_name:
                 args.scenario = resolved_scenario_name
         except Exception:
             resolved_scenario_name = args.scenario
