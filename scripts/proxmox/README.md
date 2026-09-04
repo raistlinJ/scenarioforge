@@ -190,8 +190,10 @@ state is still untested, is imported but disabled and receives no success
 override.
 `--vulnhub` similarly imports the repository's `vulnhub/` snapshot through
 ScenarioForge's vulnerability-catalog importer; on a fresh VM that catalog
-becomes active. On the tested snapshot, all 306 recipes with saved successful
-results are enabled and recorded as successful. A custom
+becomes active. On the tested snapshot, 295 recipes with saved successful
+results are enabled and recorded as successful. The importer keeps 11 recipes
+disabled: 10 require build-time Internet access, and one additional recipe is
+missing required files. They receive no success override. A custom
 `--flag-generators-ref REF` or `SF_FLAG_GENERATORS_REF` is still imported, but
 the installer deliberately skips these known-good overrides because that
 content revision was not the one tested. These flags add download, transfer,

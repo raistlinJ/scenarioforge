@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.7.3"
+SCRIPT_VERSION="0.7.4"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -1149,6 +1149,7 @@ if int(entry.get("compose_count") or 0) < 1:
 resolved_commit = str(sys.argv[2] or "").strip()
 known_good_commit = str(sys.argv[3] or "").strip()
 overridden = 0
+safety_disabled = 0
 if resolved_commit == known_good_commit:
     state = app_backend._load_vuln_catalogs_state()
     catalogs = state.get("catalogs") if isinstance(state, dict) else []
@@ -1169,13 +1170,26 @@ if resolved_commit == known_good_commit:
             "Known-good Vulhub snapshot did not import the expected 306 recipes"
         )
     for item in items:
+        if (
+            bool(item.get("disabled"))
+            or bool(item.get("disabled_due_to_build_network"))
+            or bool(item.get("disabled_due_to_missing_files"))
+        ):
+            item["disabled"] = True
+            safety_disabled += 1
+            continue
         item["disabled"] = False
-        item["disabled_due_to_missing_files"] = False
         item["validated_ok"] = True
         item["validated_incomplete"] = False
         item["validated_at"] = app_backend._local_timestamp_display()
         item["validation_override_source"] = f"known-good@{known_good_commit}"
         overridden += 1
+    if overridden != 295 or safety_disabled != 11:
+        raise SystemExit(
+            "Expected to override 295 known-good Vulhub recipes and preserve "
+            f"11 safety-disabled recipes; updated {overridden} and preserved "
+            f"{safety_disabled}"
+        )
     target["compose_items"] = items
     target["compose_count"] = len(items)
     target["csv_paths"] = app_backend._write_vuln_catalog_csv_from_items(
@@ -1184,7 +1198,10 @@ if resolved_commit == known_good_commit:
     )
     state["catalogs"] = catalogs
     app_backend._write_vuln_catalogs_state(state)
-    print(f"Enabled and marked {overridden} previously tested Vulhub recipes successful")
+    print(
+        f"Enabled and marked {overridden} previously tested Vulhub recipes "
+        f"successful; kept {safety_disabled} dependency-incompatible recipes disabled"
+    )
 else:
     print(
         "Skipped known-good Vulhub overrides because the requested ref resolved "

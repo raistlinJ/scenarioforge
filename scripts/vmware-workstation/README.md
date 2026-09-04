@@ -149,8 +149,10 @@ enables and records success for its 147 generators with saved successful test
 results, leaving the one untested generator imported but disabled and without
 an override. `--vulnhub`
 imports the same snapshot through the vulnerability-catalog importer, makes it
-active, and enables/records success for all 306 recipes with saved successful
-results. A custom `--flag-generators-ref REF` or
+active, and enables/records success for 295 recipes with saved successful
+results. It preserves 11 disabled recipes: 10 require build-time Internet
+access, and one additional recipe is missing required files. A custom
+`--flag-generators-ref REF` or
 `SF_FLAG_GENERATORS_REF=REF` is imported without known-good overrides. Both
 options add install time and disk usage.
 
