@@ -157,6 +157,7 @@
                       <li><a class="dropdown-item" href="#" id="flowDownloadAttackGraphPdf">Attack Graph (pdf)</a></li>
                       <li><a class="dropdown-item" href="#" id="flowDownloadParticipantGuide">Participant Steps Guide (html)</a></li>
                       <li><a class="dropdown-item" href="#" id="flowDownloadFacilitatorGuide">Facilitator Guide (html)</a></li>
+                      <li><a class="dropdown-item" href="#" id="flowDownloadSolutionsScript">Solutions Script (sh)</a></li>
                     </ul>
                   </div>
                 </div>
@@ -378,6 +379,29 @@
   </div>
 </div>
 
+<div class="modal fade" id="flowDownloadDialog" tabindex="-1" aria-hidden="true" data-bs-backdrop="static"
+  data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="flowDownloadTitle">Generating download…</h5>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex align-items-center gap-3">
+          <div class="spinner-border text-primary" id="flowDownloadSpinner" role="status" aria-hidden="true"></div>
+          <div>
+            <div class="fw-semibold" id="flowDownloadStatus">Preparing artifact…</div>
+            <div class="small text-muted" id="flowDownloadDetail">Please wait while ScenarioForge generates the download.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer d-none" id="flowDownloadFooter">
+        <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Loading overlay shown during slow operations (e.g., resolving hint templates via generator runs). -->
 <div id="flowLoadingOverlay" class="position-fixed top-0 start-0 w-100 h-100 d-none" style="z-index: 2000;">
   <div class="position-absolute top-0 start-0 w-100 h-100 bg-dark bg-opacity-50"></div>
@@ -474,6 +498,13 @@
     const downloadAttackGraphPdfLink = document.getElementById('flowDownloadAttackGraphPdf');
     const downloadParticipantGuideLink = document.getElementById('flowDownloadParticipantGuide');
     const downloadFacilitatorGuideLink = document.getElementById('flowDownloadFacilitatorGuide');
+    const downloadSolutionsScriptLink = document.getElementById('flowDownloadSolutionsScript');
+    const flowDownloadDialogEl = document.getElementById('flowDownloadDialog');
+    const flowDownloadTitleEl = document.getElementById('flowDownloadTitle');
+    const flowDownloadStatusEl = document.getElementById('flowDownloadStatus');
+    const flowDownloadDetailEl = document.getElementById('flowDownloadDetail');
+    const flowDownloadSpinnerEl = document.getElementById('flowDownloadSpinner');
+    const flowDownloadFooterEl = document.getElementById('flowDownloadFooter');
     const scenarioListEl = document.getElementById('flowScenarioList');
     const clearScenarioBtn = document.getElementById('flowScenarioFilterClear');
 
@@ -10463,9 +10494,10 @@
     if (metaStatsEl) metaStatsEl.textContent = formatStats(lastStats) || '-';
   }
 
-  async function refreshAssignmentsFromChain() {
-    if (!Array.isArray(currentChain) || currentChain.length === 0) return;
-    setStatus('Updating…', false);
+  async function refreshAssignmentsFromChain(options) {
+    const opts = options || {};
+    if (!Array.isArray(currentChain) || currentChain.length === 0) return null;
+    if (!opts.silent) setStatus('Updating…', false);
     try {
       // Recompute assignments + validity based on the current chain order.
       const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
@@ -10552,13 +10584,18 @@
           flags_enabled: !!(data && data.flags_enabled),
         }, null, 2);
       }
-      renderChainEditor();
-      const diagram = buildMermaid(currentChain);
-      await renderMermaid(diagram);
+      if (!opts.skipRender) {
+        renderChainEditor();
+        const diagram = buildMermaid(currentChain);
+        await renderMermaid(diagram);
+      }
       updateMeta();
-      setStatus('Ready.', false);
+      if (!opts.silent) setStatus('Ready.', false);
+      return data;
     } catch (err) {
       setStatus(String(err && err.message || err), true);
+      if (opts.throwOnError) throw err;
+      return null;
     }
   }
 
@@ -13793,104 +13830,6 @@ ${out.join('\n')}
     return lines.join('\n');
   }
 
-  let guideDownloadInProgress = false;
-
-  function setGuideDownloadLinksBusy(busy) {
-    try {
-      [downloadParticipantGuideLink, downloadFacilitatorGuideLink].forEach((link) => {
-        if (!link) return;
-        link.classList.toggle('disabled', !!busy);
-        if (busy) link.setAttribute('aria-disabled', 'true');
-        else link.removeAttribute('aria-disabled');
-      });
-    } catch (e) { }
-  }
-
-  function startHtmlDownload(html, filename) {
-    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  async function prepareAndDownloadGuide(options) {
-    if (guideDownloadInProgress) return;
-    const facilitator = !!(options && options.facilitator);
-    const guideLabel = facilitator ? 'Facilitator guide' : 'Participant steps guide';
-    const guideSteps = [
-      'Refreshing chain assignments',
-      'Collecting vulnerability notes',
-      'Collecting participant network setup',
-      'Building guide HTML',
-      'Starting download',
-    ];
-
-    try {
-      if (!Array.isArray(currentChain) || currentChain.length === 0) {
-        setStatus('Nothing to download yet (generate first).', true);
-        return;
-      }
-
-      guideDownloadInProgress = true;
-      setGuideDownloadLinksBusy(true);
-      setStatus(`Preparing ${guideLabel.toLowerCase()}…`, false);
-      showLoading(`Preparing ${guideLabel}…`);
-      setLoadingSteps(guideSteps, 0);
-      await waitForFlowUiPaint();
-
-      try { await refreshAssignmentsFromChain(); } catch (err) { }
-      const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
-      const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
-      const count = String(Array.isArray(currentChain) ? currentChain.length : 0);
-      const fname = facilitator
-        ? 'facilitator_guide_' + norm + '_' + count + '.html'
-        : 'participant_steps_' + norm + '_' + count + '.html';
-
-      setLoadingSteps(guideSteps, 1);
-      await waitForFlowUiPaint();
-      const vulnReadmeEntries = await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments);
-
-      setLoadingSteps(guideSteps, 2);
-      await waitForFlowUiPaint();
-      const participantNetworkSetup = await loadParticipantNetworkSetupForGuide(scenario);
-
-      setLoadingSteps(guideSteps, 3);
-      await waitForFlowUiPaint();
-      const markdown = buildParticipantGuideMarkdown(scenario, currentChain, currentFlagAssignments, { facilitator, vulnReadmeEntries, participantNetworkSetup });
-      const title = facilitator ? `Facilitator Guide - ${scenario}` : `Participant Steps Guide - ${scenario}`;
-      const html = markdownToHtmlDocument(title, markdown);
-
-      setLoadingSteps(guideSteps, 4);
-      await waitForFlowUiPaint();
-      startHtmlDownload(html, fname);
-      setStatus(`${guideLabel} download started.`, false);
-    } catch (err) {
-      setStatus(String(err && err.message || err), true);
-    } finally {
-      guideDownloadInProgress = false;
-      setGuideDownloadLinksBusy(false);
-      hideLoading();
-    }
-  }
-
-  if (downloadParticipantGuideLink) {
-    downloadParticipantGuideLink.addEventListener('click', async (e) => {
-      e.preventDefault();
-      await prepareAndDownloadGuide({ facilitator: false });
-    });
-  }
-
-  if (downloadFacilitatorGuideLink) {
-    downloadFacilitatorGuideLink.addEventListener('click', async (e) => {
-      e.preventDefault();
-      await prepareAndDownloadGuide({ facilitator: true });
-    });
-  }
   /* Shared verification logic */
   async function verifyFlowFiles(scenario, xmlPath) {
     if (!scenario) return { ok: false, error: 'No scenario' };
@@ -14486,162 +14425,190 @@ ${out.join('\n')}
   // Handlers for Save/Preview are registered above.
   if (downloadXmlEl) downloadXmlEl.addEventListener('click', (e) => { e.preventDefault(); downloadXml(); });
 
-  if (downloadAfbLink) {
-    downloadAfbLink.addEventListener('click', async (e) => {
-      try {
-        e.preventDefault();
-        if (!Array.isArray(currentChain) || currentChain.length === 0) {
-          setStatus('Nothing to download yet (generate first).', true);
-          return;
-        }
+  let flowDownloadModalInstance = null;
+  let flowDownloadInProgress = false;
 
-        // Keep UI validity state in sync before exporting.
-        try { await refreshAssignmentsFromChain(); } catch (err) { }
+  const flowDownloadActions = [
+    [downloadAfbLink, 'afb'],
+    [downloadAttackGraphDotLink, 'attack-graph-dot'],
+    [downloadAttackGraphJsonLink, 'attack-graph-json'],
+    [downloadAttackGraphPdfLink, 'attack-graph-pdf'],
+    [downloadParticipantGuideLink, 'participant-guide'],
+    [downloadFacilitatorGuideLink, 'facilitator-guide'],
+    [downloadSolutionsScriptLink, 'solutions-script'],
+  ];
 
-        setStatus('Building .afb…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
-        setFlowValidityFromPayload(data);
-        const afb = data && data.afb ? data.afb : null;
-        if (!afb) {
-          setStatus('No .afb returned by server.', true);
-          return;
-        }
-        const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
-        const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
-        const fname = 'attackflow_builder_' + norm + '_' + String(Array.isArray(currentChain) ? currentChain.length : 0) + '.afb';
-        const blob = new Blob([JSON.stringify(afb, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setStatus('Ready.', false);
-      } catch (err) {
-        setStatus(String(err && err.message || err), true);
-      }
-    });
+  function flowDownloadLabel(kind) {
+    const labels = {
+      'afb': 'Attack Flow (.afb)',
+      'attack-graph-dot': 'Attack Graph (.dot)',
+      'attack-graph-json': 'Attack Graph (.json)',
+      'attack-graph-pdf': 'Attack Graph (.pdf)',
+      'participant-guide': 'Participant Steps Guide',
+      'facilitator-guide': 'Facilitator Guide',
+      'solutions-script': 'Solutions Script',
+    };
+    return labels[String(kind || '').trim()] || 'download';
   }
 
-  if (downloadAttackGraphJsonLink) {
-    downloadAttackGraphJsonLink.addEventListener('click', async (e) => {
-      try {
-        e.preventDefault();
-        if (!Array.isArray(currentChain) || currentChain.length === 0) {
-          setStatus('Nothing to download yet (generate first).', true);
-          return;
-        }
-
-        // Keep UI validity state in sync before exporting.
-        try { await refreshAssignmentsFromChain(); } catch (err) { }
-
-        setStatus('Building attack graph…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
-        setFlowValidityFromPayload(data);
-        const graph = data && data.attack_graph ? data.attack_graph : null;
-        if (!graph) {
-          setStatus('No attack graph returned by server.', true);
-          return;
-        }
-        const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
-        const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
-        const fname = 'attack_graph_' + norm + '_' + String(Array.isArray(currentChain) ? currentChain.length : 0) + '.json';
-        const blob = new Blob([JSON.stringify(graph, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setStatus('Ready.', false);
-      } catch (err) {
-        setStatus(String(err && err.message || err), true);
-      }
-    });
+  function ensureFlowDownloadModal() {
+    if (!flowDownloadModalInstance && flowDownloadDialogEl && window.bootstrap && window.bootstrap.Modal) {
+      flowDownloadModalInstance = bootstrap.Modal.getOrCreateInstance(
+        flowDownloadDialogEl,
+        { backdrop: 'static', keyboard: false }
+      );
+    }
   }
 
-  if (downloadAttackGraphDotLink) {
-    downloadAttackGraphDotLink.addEventListener('click', async (e) => {
-      try {
-        e.preventDefault();
-        if (!Array.isArray(currentChain) || currentChain.length === 0) {
-          setStatus('Nothing to download yet (generate first).', true);
-          return;
-        }
-
-        // Keep UI validity state in sync before exporting.
-        try { await refreshAssignmentsFromChain(); } catch (err) { }
-
-        setStatus('Building attack graph (.dot)…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
-        setFlowValidityFromPayload(data);
-        const dot = data && data.attack_graph_dot ? String(data.attack_graph_dot) : '';
-        if (!dot) {
-          setStatus('No attack graph .dot returned by server.', true);
-          return;
-        }
-        const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
-        const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
-        const fname = 'attack_graph_' + norm + '_' + String(Array.isArray(currentChain) ? currentChain.length : 0) + '.dot';
-        const blob = new Blob([dot], { type: 'text/vnd.graphviz' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setStatus('Ready.', false);
-      } catch (err) {
-        setStatus(String(err && err.message || err), true);
-      }
+  function setFlowDownloadLinksBusy(busy) {
+    flowDownloadActions.forEach(([link]) => {
+      if (!link) return;
+      link.classList.toggle('disabled', !!busy);
+      if (busy) link.setAttribute('aria-disabled', 'true');
+      else link.removeAttribute('aria-disabled');
     });
+    if (flowDownloadDropdownEl) flowDownloadDropdownEl.disabled = !!busy;
+    if (!busy) updateDownloadDropdownState();
   }
 
-  if (downloadAttackGraphPdfLink) {
-    downloadAttackGraphPdfLink.addEventListener('click', async (e) => {
+  function setFlowDownloadModalStatus(status, detail) {
+    if (flowDownloadStatusEl) flowDownloadStatusEl.textContent = String(status || 'Preparing artifact…');
+    if (flowDownloadDetailEl && detail) flowDownloadDetailEl.textContent = String(detail);
+  }
+
+  async function showFlowDownloadModal(kind) {
+    ensureFlowDownloadModal();
+    const label = flowDownloadLabel(kind);
+    if (flowDownloadTitleEl) flowDownloadTitleEl.textContent = 'Generating download…';
+    setFlowDownloadModalStatus(`Preparing ${label}…`, 'Please keep this page open while ScenarioForge generates the artifact.');
+    if (flowDownloadSpinnerEl) flowDownloadSpinnerEl.classList.remove('d-none');
+    if (flowDownloadFooterEl) flowDownloadFooterEl.classList.add('d-none');
+    if (flowDownloadModalInstance) flowDownloadModalInstance.show();
+    await waitForFlowUiPaint();
+  }
+
+  function hideFlowDownloadModal() {
+    ensureFlowDownloadModal();
+    if (flowDownloadModalInstance) flowDownloadModalInstance.hide();
+  }
+
+  function showFlowDownloadError(message) {
+    ensureFlowDownloadModal();
+    if (flowDownloadTitleEl) flowDownloadTitleEl.textContent = 'Download generation failed';
+    setFlowDownloadModalStatus('Unable to generate the requested artifact.', String(message || 'An unexpected error occurred.'));
+    if (flowDownloadSpinnerEl) flowDownloadSpinnerEl.classList.add('d-none');
+    if (flowDownloadFooterEl) flowDownloadFooterEl.classList.remove('d-none');
+    if (flowDownloadModalInstance) flowDownloadModalInstance.show();
+  }
+
+  function startFlowArtifactDownload(blob, filename) {
+    if (!(blob instanceof Blob) || !blob.size) throw new Error('Generated artifact was empty.');
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  async function buildAndDownloadFlowArtifact(kind) {
+    if (!Array.isArray(currentChain) || currentChain.length === 0) {
+      throw new Error('Nothing to download yet. Generate a chain first.');
+    }
+
+    setFlowDownloadModalStatus('Refreshing chain assignments…');
+    const exportData = await refreshAssignmentsFromChain({ silent: true, throwOnError: true, skipRender: true });
+    if (!exportData || exportData.ok === false) {
+      throw new Error(String(exportData && (exportData.error || exportData.message) || 'Export data was unavailable.'));
+    }
+
+    const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
+    const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
+    const count = String(Array.isArray(currentChain) ? currentChain.length : 0);
+    let blob = null;
+    let filename = '';
+
+    if (kind === 'participant-guide' || kind === 'facilitator-guide') {
+      const facilitator = kind === 'facilitator-guide';
+      setFlowDownloadModalStatus('Collecting vulnerability notes…');
+      const vulnReadmeEntries = await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments);
+      setFlowDownloadModalStatus('Collecting participant network setup…');
+      const participantNetworkSetup = await loadParticipantNetworkSetupForGuide(scenario);
+      setFlowDownloadModalStatus('Building guide HTML…');
+      const markdown = buildParticipantGuideMarkdown(
+        scenario,
+        currentChain,
+        currentFlagAssignments,
+        { facilitator, vulnReadmeEntries, participantNetworkSetup }
+      );
+      const title = facilitator ? `Facilitator Guide - ${scenario}` : `Participant Steps Guide - ${scenario}`;
+      blob = new Blob([markdownToHtmlDocument(title, markdown)], { type: 'text/html;charset=utf-8' });
+      filename = facilitator
+        ? `facilitator_guide_${norm}_${count}.html`
+        : `participant_steps_${norm}_${count}.html`;
+    } else if (kind === 'afb') {
+      if (!exportData.afb) throw new Error('No Attack Flow artifact was returned by the server.');
+      blob = new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json;charset=utf-8' });
+      filename = `attackflow_builder_${norm}_${count}.afb`;
+    } else if (kind === 'attack-graph-json') {
+      if (!exportData.attack_graph) throw new Error('No attack graph was returned by the server.');
+      blob = new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json;charset=utf-8' });
+      filename = `attack_graph_${norm}_${count}.json`;
+    } else if (kind === 'attack-graph-dot') {
+      const dot = String(exportData.attack_graph_dot || '');
+      if (!dot.trim()) throw new Error('No attack graph .dot artifact was returned by the server.');
+      blob = new Blob([dot], { type: 'text/vnd.graphviz;charset=utf-8' });
+      filename = `attack_graph_${norm}_${count}.dot`;
+    } else if (kind === 'attack-graph-pdf') {
+      const encodedPdf = String(exportData.attack_graph_pdf_base64 || '');
+      if (!encodedPdf) throw new Error('Attack graph PDF is unavailable. Verify that Graphviz is installed on the ScenarioForge server.');
+      let binaryPdf;
       try {
-        e.preventDefault();
-        if (!Array.isArray(currentChain) || currentChain.length === 0) {
-          setStatus('Nothing to download yet (generate first).', true);
-          return;
-        }
+        binaryPdf = Uint8Array.from(atob(encodedPdf), (character) => character.charCodeAt(0));
+      } catch (_err) {
+        throw new Error('The server returned an invalid attack graph PDF.');
+      }
+      blob = new Blob([binaryPdf], { type: 'application/pdf' });
+      filename = `attack_graph_${norm}_${count}.pdf`;
+    } else if (kind === 'solutions-script') {
+      const script = String(exportData.solutions_script || '');
+      if (!script.trim()) throw new Error('No solutions script was returned by the server. Resolve the flow and try again.');
+      blob = new Blob([script], { type: 'text/x-shellscript;charset=utf-8' });
+      filename = `solutions_${norm}_${count}.sh`;
+    } else {
+      throw new Error('Unknown download type.');
+    }
 
-        // Keep UI validity state in sync before exporting.
-        try { await refreshAssignmentsFromChain(); } catch (err) { }
+    setFlowDownloadModalStatus('Starting download…', `${flowDownloadLabel(kind)} is ready.`);
+    await waitForFlowUiPaint();
+    startFlowArtifactDownload(blob, filename);
+    setStatus(`${flowDownloadLabel(kind)} download started.`, false);
+  }
 
-        setStatus('Building attack graph (.pdf)…', false);
-        const data = await postJson('/api/flag-sequencing/afb_from_chain', buildFlowExportPayload());
-        setFlowValidityFromPayload(data);
-        const b64 = data && data.attack_graph_pdf_base64 ? String(data.attack_graph_pdf_base64) : '';
-        if (!b64) {
-          setStatus('Attack graph PDF unavailable (Graphviz not installed).', true);
-          return;
-        }
-        const scenario = (scenarioEl && scenarioEl.value || activeScenario || 'scenario').toString().trim();
-        const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
-        const fname = 'attack_graph_' + norm + '_' + String(Array.isArray(currentChain) ? currentChain.length : 0) + '.pdf';
-        const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-        const blob = new Blob([bin], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setStatus('Ready.', false);
+  flowDownloadActions.forEach(([link, kind]) => {
+    if (!link) return;
+    link.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (flowDownloadInProgress) return;
+      flowDownloadInProgress = true;
+      setFlowDownloadLinksBusy(true);
+      try {
+        await showFlowDownloadModal(kind);
+        await buildAndDownloadFlowArtifact(kind);
+        hideFlowDownloadModal();
       } catch (err) {
-        setStatus(String(err && err.message || err), true);
+        const message = String(err && err.message || err);
+        setStatus(message, true);
+        showFlowDownloadError(message);
+      } finally {
+        flowDownloadInProgress = false;
+        setFlowDownloadLinksBusy(false);
       }
     });
-  }
+  });
 
   // Wire scenario list.
   if (scenarioListEl) {

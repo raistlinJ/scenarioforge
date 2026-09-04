@@ -69,6 +69,47 @@ def test_flow_has_no_allow_duplicates_toggle_and_download_follows_options() -> N
     assert 'allow_node_duplicates: false,' in text
 
 
+def test_flow_downloads_share_a_working_modal_and_cover_every_export_artifact() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_downloads = {
+        'flowDownloadAfb': 'afb',
+        'flowDownloadAttackGraphDot': 'attack-graph-dot',
+        'flowDownloadAttackGraphJson': 'attack-graph-json',
+        'flowDownloadAttackGraphPdf': 'attack-graph-pdf',
+        'flowDownloadParticipantGuide': 'participant-guide',
+        'flowDownloadFacilitatorGuide': 'facilitator-guide',
+        'flowDownloadSolutionsScript': 'solutions-script',
+    }
+    for element_id, kind in expected_downloads.items():
+        assert f'id="{element_id}"' in text
+        assert f"'{kind}'" in text
+
+    expected_modal_wiring = [
+        'id="flowDownloadDialog"',
+        'data-bs-backdrop="static"',
+        'data-bs-keyboard="false"',
+        "async function showFlowDownloadModal(kind)",
+        "await waitForFlowUiPaint();",
+        "setFlowDownloadModalStatus('Refreshing chain assignments…');",
+        "const exportData = await refreshAssignmentsFromChain({ silent: true, throwOnError: true, skipRender: true });",
+        "JSON.stringify(exportData.afb, null, 2)",
+        "JSON.stringify(exportData.attack_graph, null, 2)",
+        "String(exportData.attack_graph_dot || '')",
+        "String(exportData.attack_graph_pdf_base64 || '')",
+        "String(exportData.solutions_script || '')",
+        "buildParticipantGuideMarkdown(",
+        "startFlowArtifactDownload(blob, filename);",
+        "showFlowDownloadError(message);",
+    ]
+    missing = [snippet for snippet in expected_modal_wiring if snippet not in text]
+    assert not missing, "Missing unified flow-download behavior: " + "; ".join(missing)
+
+    assert "if (opts.throwOnError) throw err;" in text
+    assert "if (!opts.skipRender)" in text
+    assert "Generated artifact was empty." in text
+
+
 def test_flow_generator_output_shows_phase_timings() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -369,15 +410,17 @@ def test_flow_guide_downloads_show_preparation_progress() -> None:
 
     expected_snippets = [
         "function waitForFlowUiPaint()",
-        "let guideDownloadInProgress = false;",
-        "function setGuideDownloadLinksBusy(busy)",
-        "async function prepareAndDownloadGuide(options)",
-        "showLoading(`Preparing ${guideLabel}",
-        "setLoadingSteps(guideSteps, 0);",
+        "let flowDownloadInProgress = false;",
+        "function setFlowDownloadLinksBusy(busy)",
+        "async function buildAndDownloadFlowArtifact(kind)",
+        "await showFlowDownloadModal(kind);",
+        "setFlowDownloadModalStatus('Collecting vulnerability notes…');",
+        "setFlowDownloadModalStatus('Collecting participant network setup…');",
+        "setFlowDownloadModalStatus('Building guide HTML…');",
         "await waitForFlowUiPaint();",
-        "startHtmlDownload(html, fname);",
-        "await prepareAndDownloadGuide({ facilitator: false });",
-        "await prepareAndDownloadGuide({ facilitator: true });",
+        "startFlowArtifactDownload(blob, filename);",
+        "[downloadParticipantGuideLink, 'participant-guide']",
+        "[downloadFacilitatorGuideLink, 'facilitator-guide']",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
