@@ -276,6 +276,25 @@ def test_flow_save_button_skips_redundant_xml_rewrite() -> None:
     assert not missing, "Missing Flow Save XML no-op guard snippets: " + "; ".join(missing)
 
 
+def test_flow_save_button_acknowledges_click_and_reports_noop() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    start = text.find("async function saveXmlStay()")
+    end = text.find("// Bottom-bar buttons:", start)
+    assert start >= 0 and end > start
+    block = text[start:end]
+
+    expected_snippets = [
+        "function showFlowSaveFeedback(message, variant = 'success', delay = 2600) {",
+        'saveXmlEl.innerHTML = \'<span class="spinner-border spinner-border-sm me-1"',
+        "showFlowSaveFeedback('Saved flow state to '",
+        "showFlowSaveFeedback('Save confirmed — XML is already up to date.');",
+        "showFlowSaveFeedback('Save failed: '",
+        "saveXmlEl.innerHTML = originalSaveButtonHtml;",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing Flow Save XML acknowledgement feedback: " + "; ".join(missing)
+
+
 def test_flow_preview_skips_xml_rewrite_when_saved_state_matches() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

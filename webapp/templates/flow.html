@@ -2598,6 +2598,49 @@
     } catch (e) { }
   }
 
+  function showFlowSaveFeedback(message, variant = 'success', delay = 2600) {
+    try {
+      let container = document.getElementById('flowSaveToastContainer');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'flowSaveToastContainer';
+        container.className = 'toast-container position-fixed top-0 end-0 p-3';
+        container.style.zIndex = '3000';
+        container.setAttribute('aria-live', 'polite');
+        container.setAttribute('aria-atomic', 'true');
+        document.body.appendChild(container);
+      }
+
+      const toastEl = document.createElement('div');
+      toastEl.className = `toast align-items-center border-0 text-bg-${variant}`;
+      toastEl.setAttribute('role', variant === 'danger' ? 'alert' : 'status');
+      toastEl.setAttribute('aria-live', variant === 'danger' ? 'assertive' : 'polite');
+      const row = document.createElement('div');
+      row.className = 'd-flex';
+      const body = document.createElement('div');
+      body.className = 'toast-body';
+      body.textContent = String(message || 'Save complete.');
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'btn-close btn-close-white me-2 m-auto';
+      close.setAttribute('aria-label', 'Close');
+      row.appendChild(body);
+      row.appendChild(close);
+      toastEl.appendChild(row);
+      container.appendChild(toastEl);
+
+      if (window.bootstrap && bootstrap.Toast) {
+        close.setAttribute('data-bs-dismiss', 'toast');
+        toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove(), { once: true });
+        bootstrap.Toast.getOrCreateInstance(toastEl, { autohide: true, delay }).show();
+      } else {
+        toastEl.classList.add('show');
+        close.addEventListener('click', () => toastEl.remove(), { once: true });
+        window.setTimeout(() => toastEl.remove(), delay);
+      }
+    } catch (e) { }
+  }
+
   function closeComposeModal(force) {
     try {
       if (!composeDialogEl) return;
@@ -14048,9 +14091,13 @@ ${out.join('\n')}
   }
 
   async function saveXmlStay() {
+    const originalSaveButtonHtml = saveXmlEl ? saveXmlEl.innerHTML : '';
     try {
       persistFlowState();
-      if (saveXmlEl) saveXmlEl.disabled = true;
+      if (saveXmlEl) {
+        saveXmlEl.disabled = true;
+        saveXmlEl.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Saving…';
+      }
       showLoading('Saving flow state…');
 
       const scenario = (scenarioEl && scenarioEl.value || activeScenario || '').trim();
@@ -14095,19 +14142,25 @@ ${out.join('\n')}
           }
           if (!hintResolveFailed) {
             setStatus('Saved flow state to XML: ' + basenameFromPath(xmlPath), false);
+            showFlowSaveFeedback('Saved flow state to ' + basenameFromPath(xmlPath) + '.');
           }
           try { await refreshXmlDockPreview({ force: true }); } catch (e) { }
         } else if (!hintResolveFailed) {
           setStatus('XML is already up to date: ' + basenameFromPath(xmlPath), false);
+          showFlowSaveFeedback('Save confirmed — XML is already up to date.');
         }
       } else {
         setStatus('Saved XML (missing path).', false);
       }
     } catch (e) {
       setStatus('Save failed: ' + String(e && e.message || e), true);
+      showFlowSaveFeedback('Save failed: ' + String(e && e.message || e), 'danger', 5000);
     } finally {
       hideLoading();
-      if (saveXmlEl) saveXmlEl.disabled = false;
+      if (saveXmlEl) {
+        saveXmlEl.innerHTML = originalSaveButtonHtml;
+        saveXmlEl.disabled = false;
+      }
     }
   }
 
