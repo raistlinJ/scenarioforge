@@ -17,6 +17,7 @@ The CLI supports these phases:
 - `new`: create a starter ScenarioForge XML with one scenario and empty section rows.
 - `preview-plan`: compute and persist embedded `PlanPreview` metadata into the XML.
 - `flag-sequencing`: compute or reuse a Flow chain and optionally resolve generator outputs into embedded `FlowState`.
+- `attack-graph`: export JSON, Graphviz DOT, PDF, and/or Attack Flow Builder artifacts from embedded `FlowState`.
 - `topo`: compute the topology and build it in CORE, then stop before segmentation, traffic, report generation, and session start.
 - `execute`: run the full legacy/default execute path.
 - `check-artifacts`: validate a running CORE session against its scenario (containers, services, ports, injects, segmentation, traffic, reachability).
@@ -187,6 +188,39 @@ Preview prerequisite behavior:
 
 - The CLI `flag-sequencing` phase first asks the planner to persist `PlanPreview` into the XML, so a separate `preview-plan` run is usually not required.
 - An explicit `preview-plan` run is still useful when you want to inspect or save preview metadata before moving on to Flow work.
+
+## Attack Graph Phase
+
+Run `flag-sequencing` first so the XML contains a non-empty `FlagSequencing/FlowState`, then export the attack graph:
+
+```bash
+python -m scenarioforge.cli attack-graph \
+  --xml /abs/path/labs/my-lab.xml \
+  --scenario "MyLab" \
+  --format json \
+  --format dot
+```
+
+When `--format` is omitted, JSON and DOT are written. Other choices are `pdf`,
+`afb`, and `all`. The default destination is an `attack-graphs/` directory next
+to the scenario XML. Use `--output-dir` to place the files elsewhere and
+`--output-prefix` to choose their filename prefix. Existing artifacts are not
+overwritten unless `--force` is supplied.
+
+```bash
+python -m scenarioforge.cli attack-graph \
+  --xml /abs/path/labs/my-lab.xml \
+  --scenario "MyLab" \
+  --format all \
+  --output-dir /abs/path/exports \
+  --output-prefix exercise-01 \
+  --force
+```
+
+The phase writes a machine-readable summary to stdout and optionally to
+`--plan-output`. It uses the same graph builders as the Web UI, so JSON, DOT,
+PDF, and AFB describe the same ordered chain. PDF output requires the Graphviz
+`dot` executable.
 
 ## Topo Phase
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import base64
 from copy import deepcopy
 import datetime
 import fnmatch
@@ -7413,7 +7414,256 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     return 0 if status_code < 400 else 1
 
 
-CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'topo', 'check-artifacts', 'list-sessions')
+def _run_attack_graph_phase(args: Any) -> int:
+    """Export Web UI-equivalent attack graph artifacts from embedded FlowState."""
+    backend = _load_web_backend_module()
+    xml_path = os.path.abspath(str(args.xml or '').strip())
+    scenario_name = _cli_phase_scenario(args, backend=backend)
+    if not scenario_name:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'error': 'No scenario specified.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    flow_state = _flow_state_from_xml(xml_path, scenario_name)
+    if not isinstance(flow_state, dict):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': 'No embedded FlagSequencing/FlowState found. Run the flag-sequencing phase first.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    chain: list[dict[str, Any]] = []
+    raw_chain = flow_state.get('chain') if isinstance(flow_state.get('chain'), list) else []
+    for item in raw_chain:
+        if isinstance(item, dict):
+            node_id = str(item.get('id') or item.get('node_id') or '').strip()
+            if not node_id:
+                continue
+            node = dict(item)
+            node['id'] = node_id
+            node.setdefault('name', str(item.get('name') or node_id))
+            chain.append(node)
+        else:
+            node_id = str(item or '').strip()
+            if node_id:
+                chain.append({'id': node_id, 'name': node_id})
+    if not chain:
+        for item in (flow_state.get('chain_ids') or []):
+            node_id = str(item or '').strip()
+            if node_id:
+                chain.append({'id': node_id, 'name': node_id})
+    if not chain:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': 'Embedded FlowState contains no chain. Run flag-sequencing with a non-empty chain first.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    export_view = None
+    try:
+        export_view = backend.app.view_functions.get('api_flow_afb_from_chain')
+    except Exception:
+        export_view = None
+    if export_view is None:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': 'Attack graph export route is not registered.',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    request_payload = {
+        'scenario': scenario_name,
+        'xml_path': xml_path,
+        'chain': chain,
+        'flag_assignments': (
+            flow_state.get('flag_assignments')
+            if isinstance(flow_state.get('flag_assignments'), list)
+            else []
+        ),
+    }
+    try:
+        with backend.app.test_request_context(
+            '/api/flag-sequencing/afb_from_chain',
+            method='POST',
+            json=request_payload,
+        ):
+            response = export_view()
+        status_code, export_payload = _response_payload_and_status(response)
+    except Exception as exc:
+        status_code, export_payload = 500, {'ok': False, 'error': str(exc)}
+    if status_code >= 400 or not isinstance(export_payload, dict) or export_payload.get('ok') is False:
+        error = (
+            str(export_payload.get('error') or f'HTTP {status_code}')
+            if isinstance(export_payload, dict)
+            else f'HTTP {status_code}'
+        )
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': f'Attack graph export failed: {error}',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    requested_formats = [str(item or '').strip().lower() for item in (args.attack_graph_formats or [])]
+    if not requested_formats:
+        requested_formats = ['json', 'dot']
+    if 'all' in requested_formats:
+        requested_formats = ['json', 'dot', 'pdf', 'afb']
+    requested_formats = list(dict.fromkeys(requested_formats))
+
+    output_dir = str(args.output_dir or '').strip()
+    if not output_dir:
+        output_dir = os.path.join(os.path.dirname(xml_path), 'attack-graphs')
+    output_dir = os.path.abspath(os.path.expanduser(output_dir))
+    prefix = str(args.output_prefix or '').strip() or scenario_name
+    prefix = re.sub(r'[^A-Za-z0-9._-]+', '-', os.path.basename(prefix)).strip('.-_') or 'attack-graph'
+    base_path = os.path.join(output_dir, prefix)
+    output_paths = {
+        'json': f'{base_path}.attack-graph.json',
+        'dot': f'{base_path}.attack-graph.dot',
+        'pdf': f'{base_path}.attack-graph.pdf',
+        'afb': f'{base_path}.attack-flow.afb',
+    }
+
+    artifact_bytes: dict[str, bytes] = {}
+    try:
+        for format_name in requested_formats:
+            if format_name == 'json':
+                graph = export_payload.get('attack_graph')
+                if not isinstance(graph, dict):
+                    raise ValueError('export response did not include attack_graph JSON')
+                artifact_bytes[format_name] = (json.dumps(graph, indent=2) + '\n').encode('utf-8')
+            elif format_name == 'dot':
+                dot_text = str(export_payload.get('attack_graph_dot') or '').strip()
+                if not dot_text:
+                    raise ValueError('export response did not include Graphviz DOT')
+                artifact_bytes[format_name] = (dot_text + '\n').encode('utf-8')
+            elif format_name == 'pdf':
+                pdf_base64 = str(export_payload.get('attack_graph_pdf_base64') or '').strip()
+                if not pdf_base64:
+                    raise ValueError('PDF export requires the Graphviz dot executable')
+                artifact_bytes[format_name] = base64.b64decode(pdf_base64, validate=True)
+            elif format_name == 'afb':
+                afb = export_payload.get('afb')
+                if afb in (None, ''):
+                    raise ValueError('export response did not include an Attack Flow Builder document')
+                if isinstance(afb, str):
+                    artifact_bytes[format_name] = (afb.rstrip() + '\n').encode('utf-8')
+                else:
+                    artifact_bytes[format_name] = (json.dumps(afb, indent=2) + '\n').encode('utf-8')
+    except Exception as exc:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': f'Could not prepare requested attack graph formats: {exc}',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    existing = [output_paths[name] for name in requested_formats if os.path.exists(output_paths[name])]
+    if existing and not bool(args.force):
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': 'Output file already exists; pass --force to overwrite it.',
+                'existing_outputs': existing,
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        for format_name in requested_formats:
+            output_path = output_paths[format_name]
+            temporary_path = f'{output_path}.tmp-{os.getpid()}'
+            try:
+                with open(temporary_path, 'wb') as handle:
+                    handle.write(artifact_bytes[format_name])
+                os.replace(temporary_path, output_path)
+            finally:
+                try:
+                    if os.path.exists(temporary_path):
+                        os.unlink(temporary_path)
+                except Exception:
+                    pass
+    except Exception as exc:
+        _emit_phase_json(
+            {
+                'ok': False,
+                'phase': 'attack-graph',
+                'xml_path': xml_path,
+                'scenario': scenario_name,
+                'error': f'Failed writing attack graph artifacts: {exc}',
+            },
+            output_path=args.plan_output,
+            stream=sys.stderr,
+        )
+        return 1
+
+    written_outputs = {name: output_paths[name] for name in requested_formats}
+    _emit_phase_json(
+        {
+            'ok': True,
+            'phase': 'attack-graph',
+            'xml_path': xml_path,
+            'scenario': scenario_name,
+            'chain_length': len(chain),
+            'formats': requested_formats,
+            'outputs': written_outputs,
+            'flow_valid': bool(export_payload.get('flow_valid', True)),
+            'flow_errors': list(export_payload.get('flow_errors') or []),
+        },
+        output_path=args.plan_output,
+    )
+    return 0
+
+
+CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'attack-graph', 'topo', 'check-artifacts', 'list-sessions')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
     'Run "cli.py list-sessions" to see running CORE sessions with their scenario and XML, then '
@@ -7484,7 +7734,7 @@ def _add_cli_phase_arg(container: Any) -> None:
         nargs='?',
         choices=list(CLI_PHASES),
         default='execute',
-        help='Phase to run: execute, new, preview-plan, flag-sequencing, topo, check-artifacts, or list-sessions',
+        help='Phase to run: execute, new, ai, preview-plan, flag-sequencing, attack-graph, topo, check-artifacts, or list-sessions',
     )
 
 
@@ -7793,6 +8043,28 @@ def _add_cli_flag_sequencing_args(container: Any) -> None:
     container.add_argument('--flow-dependency-level', type=int, default=3, help='Flag-sequencing dependency strictness level (1-5)')
 
 
+def _add_cli_attack_graph_args(container: Any, *, include_force: bool = True) -> None:
+    container.add_argument(
+        '--format',
+        dest='attack_graph_formats',
+        action='append',
+        choices=['json', 'dot', 'pdf', 'afb', 'all'],
+        help='Artifact format to write; repeat for multiple formats, or use all (default: json and dot)',
+    )
+    container.add_argument(
+        '--output-dir',
+        default='',
+        help='Artifact directory (default: an attack-graphs directory beside the scenario XML)',
+    )
+    container.add_argument(
+        '--output-prefix',
+        default='',
+        help='Artifact filename prefix (default: sanitized scenario name)',
+    )
+    if include_force:
+        container.add_argument('--force', action='store_true', help='Overwrite existing attack graph artifacts')
+
+
 def _add_cli_execute_topo_args(container: Any) -> None:
     container.add_argument('--prefix', default='10.0.0.0/24', help='IPv4 prefix for auto-assigned addresses')
     container.add_argument(
@@ -8027,6 +8299,8 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     _add_cli_core_connection_args(ap)
     _add_cli_execute_topo_args(ap)
     _add_cli_flag_sequencing_args(ap)
+    # --force is already registered by the new-phase options in the combined parser.
+    _add_cli_attack_graph_args(ap, include_force=False)
     _add_cli_artifact_check_args(ap)
     return ap
 
@@ -8059,6 +8333,8 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     elif phase == 'flag-sequencing':
         _add_cli_core_connection_args(ap)
         _add_cli_flag_sequencing_args(ap)
+    elif phase == 'attack-graph':
+        _add_cli_attack_graph_args(ap)
     elif phase in {'execute', 'topo'}:
         _add_cli_core_connection_args(ap)
         _add_cli_execute_topo_args(ap)
@@ -8262,6 +8538,8 @@ def main():
         return _run_ai_phase(args)
     if args.phase == 'flag-sequencing':
         return _run_flag_sequencing_phase(args)
+    if args.phase == 'attack-graph':
+        return _run_attack_graph_phase(args)
 
     # Expose FlowState assignments so compose prep can overlay flow artifacts.
     try:

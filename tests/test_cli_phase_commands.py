@@ -1,4 +1,5 @@
 import io
+import base64
 import inspect
 import json
 from types import SimpleNamespace
@@ -113,6 +114,134 @@ def test_cli_preview_plan_phase_persists_preview_metadata(tmp_path, monkeypatch,
     assert payload['phase'] == 'preview-plan'
     assert payload['scenario'] == 'Scenario One'
     assert payload['preview_plan_path'] == str(xml_path.resolve())
+
+
+def test_cli_attack_graph_phase_exports_all_formats(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    root = ET.Element('Scenarios')
+    scenario_el = ET.SubElement(root, 'Scenario', {'name': 'Scenario One'})
+    editor_el = ET.SubElement(scenario_el, 'ScenarioEditor')
+    sequencing_el = ET.SubElement(editor_el, 'FlagSequencing')
+    flow_el = ET.SubElement(sequencing_el, 'FlowState')
+    flow_el.text = json.dumps({
+        'chain': [
+            {'id': 'node-a', 'name': 'Entry'},
+            {'id': 'node-b', 'name': 'Target', 'is_vuln': True},
+        ],
+        'chain_ids': ['node-a', 'node-b'],
+        'flag_assignments': [{'node_id': 'node-a', 'id': 'generator-a'}],
+    })
+    ET.ElementTree(root).write(xml_path, encoding='utf-8', xml_declaration=True)
+
+    app = Flask(__name__)
+
+    @app.route('/api/flag-sequencing/afb_from_chain', methods=['POST'], endpoint='api_flow_afb_from_chain')
+    def api_flow_afb_from_chain():
+        request_payload = request.get_json() or {}
+        assert request_payload['xml_path'] == str(xml_path.resolve())
+        assert [node['id'] for node in request_payload['chain']] == ['node-a', 'node-b']
+        return jsonify({
+            'ok': True,
+            'flow_valid': True,
+            'flow_errors': [],
+            'attack_graph': {
+                'schema_version': 2,
+                'nodes': [{'id': 'node-a'}, {'id': 'node-b'}],
+                'edges': [{'source': 'node-a', 'target': 'node-b'}],
+            },
+            'attack_graph_dot': 'digraph attack_graph {\n  "node-a" -> "node-b";\n}',
+            'attack_graph_pdf_base64': base64.b64encode(b'%PDF-1.4\nmock\n').decode('ascii'),
+            'afb': {'type': 'diagram', 'objects': []},
+        })
+
+    fake_backend = SimpleNamespace(
+        app=app,
+        _scenario_names_from_xml=lambda _path: ['Scenario One'],
+    )
+    output_dir = tmp_path / 'exports'
+    summary_path = tmp_path / 'summary.json'
+    argv0 = cli.sys.argv[:]
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+
+    try:
+        cli.sys.argv = [
+            'scenarioforge.cli',
+            'attack-graph',
+            '--xml',
+            str(xml_path),
+            '--scenario',
+            'Scenario One',
+            '--format',
+            'all',
+            '--output-dir',
+            str(output_dir),
+            '--output-prefix',
+            'targeted',
+            '--plan-output',
+            str(summary_path),
+        ]
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['ok'] is True
+    assert payload['phase'] == 'attack-graph'
+    assert payload['chain_length'] == 2
+    assert payload['formats'] == ['json', 'dot', 'pdf', 'afb']
+    assert json.loads((output_dir / 'targeted.attack-graph.json').read_text())['schema_version'] == 2
+    assert 'node-a' in (output_dir / 'targeted.attack-graph.dot').read_text()
+    assert (output_dir / 'targeted.attack-graph.pdf').read_bytes().startswith(b'%PDF-1.4')
+    assert json.loads((output_dir / 'targeted.attack-flow.afb').read_text())['type'] == 'diagram'
+    assert json.loads(summary_path.read_text())['outputs'] == payload['outputs']
+
+
+def test_cli_attack_graph_phase_defaults_to_json_dot_and_refuses_overwrite(tmp_path, monkeypatch, capsys):
+    xml_path = tmp_path / 'scenario.xml'
+    root = ET.Element('Scenarios')
+    scenario_el = ET.SubElement(root, 'Scenario', {'name': 'Default Graph'})
+    editor_el = ET.SubElement(scenario_el, 'ScenarioEditor')
+    sequencing_el = ET.SubElement(editor_el, 'FlagSequencing')
+    flow_el = ET.SubElement(sequencing_el, 'FlowState')
+    flow_el.text = json.dumps({'chain_ids': ['n1'], 'flag_assignments': []})
+    ET.ElementTree(root).write(xml_path, encoding='utf-8', xml_declaration=True)
+
+    app = Flask(__name__)
+
+    @app.route('/api/flag-sequencing/afb_from_chain', methods=['POST'], endpoint='api_flow_afb_from_chain')
+    def api_flow_afb_from_chain_default():
+        return jsonify({
+            'ok': True,
+            'attack_graph': {'schema_version': 2, 'nodes': [{'id': 'n1'}], 'edges': []},
+            'attack_graph_dot': 'digraph attack_graph {}',
+            'attack_graph_pdf_base64': '',
+            'afb': {},
+            'flow_valid': True,
+            'flow_errors': [],
+        })
+
+    fake_backend = SimpleNamespace(app=app, _scenario_names_from_xml=lambda _path: ['Default Graph'])
+    argv0 = cli.sys.argv[:]
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: fake_backend)
+    command = ['scenarioforge.cli', 'attack-graph', '--xml', str(xml_path)]
+    try:
+        cli.sys.argv = command
+        first_ret = cli.main()
+        first_payload = json.loads(capsys.readouterr().out)
+        cli.sys.argv = command
+        second_ret = cli.main()
+        second_output = capsys.readouterr()
+    finally:
+        cli.sys.argv = argv0
+
+    assert first_ret == 0
+    assert first_payload['formats'] == ['json', 'dot']
+    assert second_ret == 1
+    error_payload = json.loads(second_output.err)
+    assert '--force' in error_payload['error']
+    assert (tmp_path / 'attack-graphs' / 'Default-Graph.attack-graph.json').exists()
+    assert (tmp_path / 'attack-graphs' / 'Default-Graph.attack-graph.dot').exists()
 
 
 def test_load_preview_plan_from_xml_repairs_legacy_routing_placeholder(tmp_path):

@@ -251,7 +251,7 @@ See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with loca
 
 ## Additional documentation
 - [docs/README.md](docs/README.md) – Index of project documentation pages
-- [docs/CLI_EXECUTION_DEEP_DIVE.md](docs/CLI_EXECUTION_DEEP_DIVE.md) – End-to-end CLI phases, remote CORE delegation, Flow behavior, and starter XML workflow
+- [docs/CLI_EXECUTION_DEEP_DIVE.md](docs/CLI_EXECUTION_DEEP_DIVE.md) – End-to-end CLI phases, remote CORE delegation, Flow behavior, starter XML workflow, and JSON/DOT/PDF/AFB attack-graph export
 - [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md) – CLI preflight and live batch testing for vulnerability and flag generator catalogs
 - [docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md](docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md) – Integration contract for CLI-driven batch evaluators
 - [docs/reference/API.md](docs/reference/API.md) – REST endpoints exposed by the Web UI backend

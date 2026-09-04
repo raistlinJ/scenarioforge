@@ -69,6 +69,7 @@ Explicit phase commands are also available:
 python -m scenarioforge.cli new --xml /abs/path/scenarios.xml --scenario "Scenario 1"
 python -m scenarioforge.cli preview-plan --xml /abs/path/scenarios.xml --scenario "Scenario 1"
 python -m scenarioforge.cli flag-sequencing --xml /abs/path/scenarios.xml --scenario "Scenario 1" --flow-mode resolve --flow-length 3
+python -m scenarioforge.cli attack-graph --xml /abs/path/scenarios.xml --scenario "Scenario 1" --format json --format dot
 python -m scenarioforge.cli topo --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
 python -m scenarioforge.cli execute --xml /abs/path/scenarios.xml --scenario "Scenario 1" --host 127.0.0.1 --port 50051
 ```
@@ -141,6 +142,7 @@ Phase command notes:
 - `preview-plan` persists embedded `PlanPreview` metadata back into the XML and prints the resulting preview payload as JSON.
 - During remote `execute`/`topo`, the CLI now forwards the resolved scenario name and preview-plan context to the delegated remote CLI so the remote path matches the Web UI more closely.
 - `flag-sequencing` runs the same preview/resolve helper used by the Web UI and persists the resulting `FlowState` back into the XML.
+- `attack-graph` reads that embedded `FlowState` and exports the Web UI-equivalent ordered attack graph without requiring a Web login. JSON and Graphviz DOT are written by default; repeat `--format` for `pdf` or `afb`, or use `--format all`.
 - In generator-running Flow modes such as `resolve`, the CLI now treats remote-capable CORE VM execution as required unless you explicitly pass `--flow-run-local`; it no longer silently falls back to local generator execution when remote setup fails.
 - `flag-sequencing` JSON output now includes `generator_execution_requested` and `generator_execution_mode` so you can confirm whether generator work ran in `remote` or `local` mode.
 - `topo` builds the topology in CORE and stops before segmentation, traffic, report generation, and session start.

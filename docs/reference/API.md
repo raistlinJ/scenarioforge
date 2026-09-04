@@ -1084,7 +1084,7 @@ Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope
 - `--xml` (required): Scenario XML path.
 - Direct CLI execution uses the exact `--xml` file as ground truth. WebUI execution first persists its validated CORE connection into the selected scenario XML; saved page state is not allowed to redirect the CLI to another VM.
 - `--scenario`: Scenario name (defaults to the first in the file).
-- `--force`: Overwrite an existing XML file when used with the `new` phase.
+- `--force`: Overwrite an existing XML file with `new`, or existing graph artifacts with `attack-graph`.
 - `--density-count`: Scenario-level Count for Density base host pool for density-driven planning in the `new` phase. Defaults to `10`, matching the Web UI starter payload.
 - `--seed-role`: Repeatable `ROLE=COUNT` seeding for the `new` phase.
 - `--seed-routing`: Repeatable routing-row seeding for the `new` phase. Accepts `NAME`, `NAME=density`, or `NAME=COUNT`.
@@ -1109,6 +1109,9 @@ Targets are `vulns`, `flag-generators`, `flag-node-generators`, and `all`. Scope
 - `--seed`: RNG seed for deterministic planner/build randomness. Reuse the same value across `preview-plan`, `flag-sequencing`, `topo`, and `execute` when you want repeatable results. If an explicit `--preview-plan` carries a saved seed and `--seed` is omitted, the CLI reuses that saved seed when available.
 - `-post-execution-validation`, `--post-execution-validation`: After `execute`, export the live CORE session and run the WebUI-equivalent node, Docker, Flow, generator, and inject validator. The CLI prints red errors, yellow warnings, emits `VALIDATION_SUMMARY_JSON`, and saves `core-post/validation-session-<id>.json` beside the scenario XML.
 - `--plan-output`: Optional file path for JSON output from phase commands.
+- `--format`: Repeatable `attack-graph` output selection: `json`, `dot`, `pdf`, `afb`, or `all`. Defaults to JSON and DOT when omitted.
+- `--output-dir`: `attack-graph` artifact directory; defaults to `attack-graphs/` beside the XML.
+- `--output-prefix`: Optional filename prefix for `attack-graph` artifacts; defaults to the sanitized scenario name.
 - `--layout-density`: `compact | normal | spacious` (default `normal`).
 - `--router-mesh-style`: `full | ring | tree` (fallback when routing items omit `r2r_mode`).
 

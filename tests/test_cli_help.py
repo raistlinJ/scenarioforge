@@ -29,10 +29,22 @@ def test_flag_sequencing_help_shows_flow_defaults() -> None:
     assert '(default: 3)' in help_text
 
 
+def test_attack_graph_help_shows_export_formats() -> None:
+    help_text = cli._build_cli_help_parser('attack-graph').format_help()
+
+    assert '--format {json,dot,pdf,afb,all}' in help_text
+    assert '--output-dir' in help_text
+    assert '--output-prefix' in help_text
+    assert '--force' in help_text
+    assert 'default: json and dot' in help_text
+    assert '--flow-mode' not in help_text
+
+
 def test_general_help_points_to_phase_specific_help() -> None:
     help_text = cli._build_cli_help_parser(None).format_help()
 
     assert 'flag-sequencing' in help_text
+    assert 'attack-graph' in help_text
     assert 'Use "cli.py <phase> --help" to view phase-specific options.' in help_text
     assert 'cleanup-scenarioforge-docker --dry-run' in help_text
     assert 'cleanup-scenarioforge-docker --force' in help_text
