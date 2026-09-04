@@ -8,6 +8,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "proxmox" / "install-scenarioforge-lab.sh"
+CONFIG_EXAMPLE = ROOT / "scripts" / "proxmox" / "scenarioforge-lab.conf.example"
 
 
 def test_installer_has_valid_bash_syntax() -> None:
@@ -38,6 +39,7 @@ def test_installer_help_does_not_require_proxmox() -> None:
     assert "--app-password" in result.stdout
     assert "--participant-password" in result.stdout
     assert "--web-admin-password" in result.stdout
+    assert "--config FILE" in result.stdout
     assert "cleanup [--dry-run] [--force] [--yes]" in result.stdout
     assert "--cleanup" in result.stdout
 
@@ -164,6 +166,79 @@ printf '%s\n' "$REQUESTED_CORE_PASSWORD" "$REQUESTED_APP_PASSWORD" \
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == list(values)
+
+
+def test_config_file_is_safe_and_lower_precedence_than_environment_and_cli(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "lab.conf"
+    side_effect_path = tmp_path / "must-not-exist"
+    config_path.write_text(
+        "\n".join(
+            [
+                "# literal installer data",
+                "storage=config-storage",
+                "core_vmid=9511",
+                'core_password="config value # with = sign"',
+                f"app_password=$(touch {side_effect_path})",
+                "flag_generators=yes",
+                "no_wait=true",
+                "verbose=false",
+                "interval=7",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    probe = f"""
+export SF_CORE_VMID=9611
+source {shlex.quote(str(INSTALLER))}
+parse_args install --config {shlex.quote(str(config_path))} --storage cli-storage --verbose
+printf 'VALUES|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  "$VM_STORAGE" "$CORE_VMID" "$REQUESTED_CORE_PASSWORD" "$REQUESTED_APP_PASSWORD" \
+  "$INSTALL_FLAG_GENERATORS" "$WAIT_FOR_BOOTSTRAP" "$VERBOSE" "$STATUS_INTERVAL"
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    values_line = next(line for line in result.stdout.splitlines() if line.startswith("VALUES|"))
+    assert values_line.split("|")[1:] == [
+        "cli-storage",
+        "9611",
+        "config value # with = sign",
+        f"$(touch {side_effect_path})",
+        "1",
+        "0",
+        "1",
+        "7",
+    ]
+    assert not side_effect_path.exists()
+
+
+def test_config_file_rejects_unknown_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.conf"
+    config_path.write_text("storage=local-lvm\nnot_an_option=value\n", encoding="utf-8")
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+parse_args install --config {shlex.quote(str(config_path))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0
+    assert "unknown Proxmox config key: not_an_option" in result.stderr
+
+
+def test_example_config_parses_successfully() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+parse_args install --config {shlex.quote(str(CONFIG_EXAMPLE))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_default_passwords_are_ten_character_alphanumeric_values() -> None:

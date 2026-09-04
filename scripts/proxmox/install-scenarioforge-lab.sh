@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.8.0"
+SCRIPT_VERSION="0.9.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -72,6 +72,8 @@ VERBOSE="${SF_VERBOSE:-0}"
 STATUS_WATCH=0
 STATUS_INTERVAL="${SF_STATUS_INTERVAL:-10}"
 FORCE_CLEANUP=0
+CONFIG_FILE=""
+CONFIG_LINE=0
 PARTICIPANT_BOOTSTRAP_REQUIRED=1
 PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
 COMMAND="install"
@@ -162,6 +164,141 @@ die() {
     exit 1
 }
 
+trim_config_value() {
+    local value="$1"
+    while [[ "$value" == [[:space:]]* ]]; do value="${value:1}"; done
+    while [[ "$value" == *[[:space:]] ]]; do value="${value:0:${#value}-1}"; done
+    printf '%s' "$value"
+}
+
+parse_config_boolean() {
+    local key="$1" value
+    value="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    case "$value" in
+        1|true|yes|on) CONFIG_BOOLEAN_VALUE=1 ;;
+        0|false|no|off) CONFIG_BOOLEAN_VALUE=0 ;;
+        *) die "$CONFIG_FILE:$CONFIG_LINE: $key must be true or false" ;;
+    esac
+}
+
+assign_config_setting() {
+    local target="$1" environment_name="$2" value="$3"
+    if [[ -z "$environment_name" ]] || ! declare -p "$environment_name" >/dev/null 2>&1; then
+        printf -v "$target" '%s' "$value"
+    fi
+}
+
+load_installer_config_file() {
+    local callback="$1" path="$2" raw_line key value first last
+    [[ -n "$path" ]] || die "--config requires a file"
+    [[ -f "$path" ]] || die "config file not found: $path"
+    [[ -r "$path" ]] || die "config file is not readable: $path"
+    CONFIG_FILE="$path"
+    CONFIG_LINE=0
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        CONFIG_LINE=$((CONFIG_LINE + 1))
+        raw_line="${raw_line%$'\r'}"
+        raw_line="$(trim_config_value "$raw_line")"
+        [[ -z "$raw_line" || "$raw_line" == \#* ]] && continue
+        [[ "$raw_line" == *=* ]] || die "$CONFIG_FILE:$CONFIG_LINE: expected key=value"
+        key="$(trim_config_value "${raw_line%%=*}")"
+        value="$(trim_config_value "${raw_line#*=}")"
+        [[ "$key" =~ ^[a-z][a-z0-9_]*$ ]] \
+            || die "$CONFIG_FILE:$CONFIG_LINE: invalid config key: $key"
+        if (( ${#value} >= 2 )); then
+            first="${value:0:1}"
+            last="${value: -1}"
+            if [[ "$first" == \" || "$first" == "'" ]]; then
+                [[ "$last" == "$first" ]] \
+                    || die "$CONFIG_FILE:$CONFIG_LINE: unmatched quote for $key"
+                value="${value:1:${#value}-2}"
+            fi
+        fi
+        "$callback" "$key" "$value"
+    done < "$path"
+    log "Using installer config from $path"
+}
+
+load_config_from_args() {
+    local callback="$1" found="" option
+    shift
+    while [[ $# -gt 0 ]]; do
+        option="$1"
+        case "$option" in
+            --config)
+                [[ $# -ge 2 ]] || die "--config requires a file"
+                [[ -z "$found" ]] || die "--config may only be specified once"
+                found="$2"
+                shift 2
+                ;;
+            --config=*)
+                [[ -z "$found" ]] || die "--config may only be specified once"
+                found="${option#--config=}"
+                shift
+                ;;
+            --storage|--snippet-storage|--uplink-bridge|--management-bridge|--hitl-bridge|\
+            --core-vmid|--app-vmid|--participant-vmid|--lab-dir|--management-vmnet|--hitl-vmnet|\
+            --ssh-public-key|--core-password|--app-password|--participant-password|--web-admin-password|\
+            --wait-minutes|--interval|--app-management-cidr|--core-management-cidr|--core-hitl-cidr|\
+            --participant-cidr|--core-minimal-ref|--core-ref|--scenarioforge-ref|--flag-generators-ref)
+                shift 2
+                ;;
+            *) shift ;;
+        esac
+    done
+    [[ -z "$found" ]] || load_installer_config_file "$callback" "$found"
+}
+
+apply_proxmox_config_value() {
+    local key="$1" value="$2"
+    case "$key" in
+        storage) assign_config_setting VM_STORAGE SF_VM_STORAGE "$value" ;;
+        snippet_storage) assign_config_setting SNIPPET_STORAGE SF_SNIPPET_STORAGE "$value" ;;
+        uplink_bridge) assign_config_setting UPLINK_BRIDGE SF_UPLINK_BRIDGE "$value" ;;
+        management_bridge) assign_config_setting MANAGEMENT_BRIDGE SF_MANAGEMENT_BRIDGE "$value" ;;
+        hitl_bridge) assign_config_setting HITL_BRIDGE SF_HITL_BRIDGE "$value" ;;
+        core_vmid) assign_config_setting CORE_VMID SF_CORE_VMID "$value" ;;
+        app_vmid) assign_config_setting APP_VMID SF_APP_VMID "$value" ;;
+        participant_vmid) assign_config_setting PARTICIPANT_VMID SF_PARTICIPANT_VMID "$value" ;;
+        ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
+        core_password) assign_config_setting REQUESTED_CORE_PASSWORD SF_CORE_PASSWORD "$value" ;;
+        app_password) assign_config_setting REQUESTED_APP_PASSWORD SF_APP_PASSWORD "$value" ;;
+        participant_password) assign_config_setting REQUESTED_PARTICIPANT_PASSWORD SF_PARTICIPANT_PASSWORD "$value" ;;
+        web_admin_password) assign_config_setting REQUESTED_WEB_ADMIN_PASSWORD SF_WEB_ADMIN_PASSWORD "$value" ;;
+        flag_generators)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting INSTALL_FLAG_GENERATORS SF_INSTALL_FLAG_GENERATORS "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        vulnhub)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting INSTALL_VULNHUB SF_INSTALL_VULNHUB "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        wait_minutes) assign_config_setting WAIT_MINUTES SF_WAIT_MINUTES "$value" ;;
+        no_wait)
+            parse_config_boolean "$key" "$value"
+            WAIT_FOR_BOOTSTRAP=$((1 - CONFIG_BOOLEAN_VALUE))
+            ;;
+        verbose)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting VERBOSE SF_VERBOSE "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        watch) parse_config_boolean "$key" "$value"; STATUS_WATCH="$CONFIG_BOOLEAN_VALUE" ;;
+        interval) assign_config_setting STATUS_INTERVAL SF_STATUS_INTERVAL "$value" ;;
+        yes) parse_config_boolean "$key" "$value"; ASSUME_YES="$CONFIG_BOOLEAN_VALUE" ;;
+        dry_run) parse_config_boolean "$key" "$value"; DRY_RUN="$CONFIG_BOOLEAN_VALUE" ;;
+        force) parse_config_boolean "$key" "$value"; FORCE_CLEANUP="$CONFIG_BOOLEAN_VALUE" ;;
+        app_management_cidr) assign_config_setting APP_MANAGEMENT_CIDR SF_APP_MANAGEMENT_CIDR "$value" ;;
+        core_management_cidr) assign_config_setting CORE_MANAGEMENT_CIDR SF_CORE_MANAGEMENT_CIDR "$value" ;;
+        core_hitl_cidr) assign_config_setting CORE_HITL_CIDR SF_CORE_HITL_CIDR "$value" ;;
+        participant_cidr) assign_config_setting PARTICIPANT_CIDR SF_PARTICIPANT_CIDR "$value" ;;
+        core_minimal_ref) assign_config_setting CORE_MINIMAL_REF SF_CORE_MINIMAL_REF "$value" ;;
+        core_ref) assign_config_setting CORE_REPO_REF SF_CORE_REPO_REF "$value" ;;
+        scenarioforge_ref) assign_config_setting SCENARIOFORGE_REF SF_SCENARIOFORGE_REF "$value" ;;
+        flag_generators_ref) assign_config_setting FLAG_GENERATORS_REF SF_FLAG_GENERATORS_REF "$value" ;;
+        *) die "$CONFIG_FILE:$CONFIG_LINE: unknown Proxmox config key: $key" ;;
+    esac
+}
+
 on_unexpected_error() {
     local line="$1" exit_code="$2"
     emit ERROR "unexpected installer failure at line $line (exit $exit_code)" >&2
@@ -192,6 +329,7 @@ Provision three cloud-image VMs on the current Proxmox VE node:
   - Debian 12 + a minimal XFCE participant desktop
 
 Important options:
+  --config FILE                Read lower-precedence key=value options from FILE
   --storage ID                 VM disk storage (default: local-lvm)
   --snippet-storage ID         Directory storage for Cloud-Init snippets (default: local)
   --uplink-bridge NAME         Existing LAN/Internet bridge (default: vmbr0)
@@ -230,11 +368,12 @@ Repository overrides:
   --flag-generators-ref REF    Default: tested metadata snapshot 5f612eecb8ff
 
 Environment variables with the SF_ prefix can set every default; see
-scripts/proxmox/README.md for the complete list.
+scripts/proxmox/README.md for the complete list and config-file format.
 EOF
 }
 
 parse_args() {
+    load_config_from_args apply_proxmox_config_value "$@"
     if [[ $# -gt 0 && "$1" != -* ]]; then
         COMMAND="$1"
         shift
@@ -244,6 +383,8 @@ parse_args() {
         case "$1" in
             -h|--help) usage; exit 0 ;;
             --version) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
+            --config) [[ $# -ge 2 ]] || die "--config requires a file"; shift 2 ;;
+            --config=*) shift ;;
             --storage) VM_STORAGE="${2:?missing value for --storage}"; shift 2 ;;
             --snippet-storage) SNIPPET_STORAGE="${2:?missing value for --snippet-storage}"; shift 2 ;;
             --uplink-bridge) UPLINK_BRIDGE="${2:?missing value for --uplink-bridge}"; shift 2 ;;

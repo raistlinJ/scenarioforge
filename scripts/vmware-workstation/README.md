@@ -95,6 +95,29 @@ Default VM files are stored in:
 Change that location with `--lab-dir /absolute/path` or
 `SF_VMWARE_LAB_DIR=/absolute/path`.
 
+### Config file
+
+Provisioning options can be stored in a non-executable `key=value` config file.
+Copy the tracked example, replace its placeholder home path, and protect it if
+you add credentials:
+
+```bash
+cp scenarioforge-lab.conf.example "$HOME/.config/scenarioforge-vmware-lab.conf"
+chmod 600 "$HOME/.config/scenarioforge-vmware-lab.conf"
+./install-scenarioforge-lab.sh install \
+  --config "$HOME/.config/scenarioforge-vmware-lab.conf" \
+  --verbose
+```
+
+The precedence is **built-in defaults < config file < `SF_*` environment
+variables < CLI flags**. Config keys are the lowercase long-option names with
+dashes replaced by underscores, such as `lab_dir`, `management_vmnet`,
+`flag_generators`, and `headless`. Booleans accept `true`/`false`, `yes`/`no`,
+`on`/`off`, or `1`/`0`. Blank lines and full-line `#` comments are ignored;
+matching single or double quotes around a value are removed without performing
+shell expansion. The installer rejects unknown keys and malformed values before
+creating files or VMs. Only one `--config` file may be supplied per invocation.
+
 ### Custom credentials
 
 Passwords are generated as 10-character alphanumeric values by default. Supply
@@ -114,7 +137,8 @@ independently. Because command-line secrets can appear in shell history and the
 host process list, unattended installations should prefer
 `SF_CORE_PASSWORD`, `SF_APP_PASSWORD`, `SF_PARTICIPANT_PASSWORD`, and
 `SF_WEB_ADMIN_PASSWORD`. Final credentials are still printed at completion and
-saved in the installer credentials file.
+saved in the installer credentials file. A mode-`0600` config file is another
+way to keep those values out of shell history and the process list.
 
 ### Optional flag-generator and Vulhub catalogs
 

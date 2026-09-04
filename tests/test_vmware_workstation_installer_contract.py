@@ -11,6 +11,9 @@ INSTALLER = (
     ROOT / "scripts" / "vmware-workstation" / "install-scenarioforge-lab.sh"
 )
 README = ROOT / "scripts" / "vmware-workstation" / "README.md"
+CONFIG_EXAMPLE = (
+    ROOT / "scripts" / "vmware-workstation" / "scenarioforge-lab.conf.example"
+)
 
 
 def run_bash(script: str) -> subprocess.CompletedProcess[str]:
@@ -52,6 +55,7 @@ def test_help_does_not_require_linux_or_vmware() -> None:
         "--app-password",
         "--participant-password",
         "--web-admin-password",
+        "--config FILE",
         "--verbose",
         "--watch",
         "--cleanup",
@@ -75,6 +79,61 @@ printf '%s\n' "$REQUESTED_CORE_PASSWORD" "$REQUESTED_APP_PASSWORD" \
     result = run_bash(probe)
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == list(values)
+
+
+def test_config_file_is_safe_and_lower_precedence_than_environment_and_cli(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "lab.conf"
+    side_effect_path = tmp_path / "must-not-exist"
+    config_path.write_text(
+        "\n".join(
+            [
+                f'lab_dir="{tmp_path / "config lab"}"',
+                "management_vmnet=vmnet4",
+                "hitl_vmnet=vmnet5",
+                'core_password="config value # with = sign"',
+                f"app_password=$(touch {side_effect_path})",
+                "vulnhub=on",
+                "headless=true",
+                "no_wait=yes",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cli_lab = tmp_path / "cli-lab"
+    probe = f"""
+export SF_VMWARE_MANAGEMENT_VMNET=vmnet8
+source {shlex.quote(str(INSTALLER))}
+parse_args install --config={shlex.quote(str(config_path))} --lab-dir {shlex.quote(str(cli_lab))}
+printf 'VALUES|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  "$LAB_DIR" "$MANAGEMENT_VMNET" "$HITL_VMNET" "$REQUESTED_CORE_PASSWORD" \
+  "$REQUESTED_APP_PASSWORD" "$INSTALL_VULNHUB" "$HEADLESS" "$WAIT_FOR_BOOTSTRAP"
+"""
+    result = run_bash(probe)
+    assert result.returncode == 0, result.stderr
+    values_line = next(line for line in result.stdout.splitlines() if line.startswith("VALUES|"))
+    assert values_line.split("|")[1:] == [
+        str(cli_lab),
+        "vmnet8",
+        "vmnet5",
+        "config value # with = sign",
+        f"$(touch {side_effect_path})",
+        "1",
+        "1",
+        "0",
+    ]
+    assert not side_effect_path.exists()
+
+
+def test_example_config_parses_successfully() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+parse_args install --config {shlex.quote(str(CONFIG_EXAMPLE))}
+"""
+    result = run_bash(probe)
+    assert result.returncode == 0, result.stderr
 
 
 def test_topology_native_app_and_graphical_guest_contracts() -> None:

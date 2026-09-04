@@ -14,7 +14,7 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
-SCRIPT_VERSION="0.4.0"
+SCRIPT_VERSION="0.5.0"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 VMRUN_TYPE="ws"
 
@@ -138,6 +138,7 @@ Provision three graphical VMs on x86_64 Linux with VMware Workstation:
   - Debian 12 + a minimal XFCE participant desktop
 
 Important options:
+  --config FILE               read lower-precedence key=value options from FILE
   --lab-dir PATH              VM directory (default: ~/vmware/ScenarioForge-Lab)
   --management-vmnet NAME     APP/CORE management network (default: vmnet1)
   --hitl-vmnet NAME           isolated CORE/participant network (default: vmnet2)
@@ -177,13 +178,59 @@ adjacent README for prerequisites and all SF_* environment overrides.
 EOF
 }
 
+apply_vmware_config_value() {
+    local key="$1" value="$2"
+    case "$key" in
+        lab_dir) assign_config_setting LAB_DIR SF_VMWARE_LAB_DIR "$value" ;;
+        management_vmnet) assign_config_setting MANAGEMENT_VMNET SF_VMWARE_MANAGEMENT_VMNET "$value" ;;
+        hitl_vmnet) assign_config_setting HITL_VMNET SF_VMWARE_HITL_VMNET "$value" ;;
+        ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
+        core_password) assign_config_setting REQUESTED_CORE_PASSWORD SF_CORE_PASSWORD "$value" ;;
+        app_password) assign_config_setting REQUESTED_APP_PASSWORD SF_APP_PASSWORD "$value" ;;
+        participant_password) assign_config_setting REQUESTED_PARTICIPANT_PASSWORD SF_PARTICIPANT_PASSWORD "$value" ;;
+        web_admin_password) assign_config_setting REQUESTED_WEB_ADMIN_PASSWORD SF_WEB_ADMIN_PASSWORD "$value" ;;
+        flag_generators)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting INSTALL_FLAG_GENERATORS SF_INSTALL_FLAG_GENERATORS "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        vulnhub)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting INSTALL_VULNHUB SF_INSTALL_VULNHUB "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        wait_minutes) assign_config_setting WAIT_MINUTES SF_WAIT_MINUTES "$value" ;;
+        no_wait) parse_config_boolean "$key" "$value"; WAIT_FOR_BOOTSTRAP=$((1 - CONFIG_BOOLEAN_VALUE)) ;;
+        headless) parse_config_boolean "$key" "$value"; HEADLESS="$CONFIG_BOOLEAN_VALUE" ;;
+        verbose)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting VERBOSE SF_VERBOSE "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        watch) parse_config_boolean "$key" "$value"; STATUS_WATCH="$CONFIG_BOOLEAN_VALUE" ;;
+        interval) assign_config_setting STATUS_INTERVAL SF_STATUS_INTERVAL "$value" ;;
+        yes) parse_config_boolean "$key" "$value"; ASSUME_YES="$CONFIG_BOOLEAN_VALUE" ;;
+        dry_run) parse_config_boolean "$key" "$value"; DRY_RUN="$CONFIG_BOOLEAN_VALUE" ;;
+        force) parse_config_boolean "$key" "$value"; FORCE_CLEANUP="$CONFIG_BOOLEAN_VALUE" ;;
+        app_management_cidr) assign_config_setting APP_MANAGEMENT_CIDR SF_APP_MANAGEMENT_CIDR "$value" ;;
+        core_management_cidr) assign_config_setting CORE_MANAGEMENT_CIDR SF_CORE_MANAGEMENT_CIDR "$value" ;;
+        core_hitl_cidr) assign_config_setting CORE_HITL_CIDR SF_CORE_HITL_CIDR "$value" ;;
+        participant_cidr) assign_config_setting PARTICIPANT_CIDR SF_PARTICIPANT_CIDR "$value" ;;
+        core_minimal_ref) assign_config_setting CORE_MINIMAL_REF SF_CORE_MINIMAL_REF "$value" ;;
+        core_ref) assign_config_setting CORE_REPO_REF SF_CORE_REPO_REF "$value" ;;
+        scenarioforge_ref) assign_config_setting SCENARIOFORGE_REF SF_SCENARIOFORGE_REF "$value" ;;
+        flag_generators_ref) assign_config_setting FLAG_GENERATORS_REF SF_FLAG_GENERATORS_REF "$value" ;;
+        *) die "$CONFIG_FILE:$CONFIG_LINE: unknown VMware config key: $key" ;;
+    esac
+}
+
 # shellcheck disable=SC2034
 parse_args() {
+    load_config_from_args apply_vmware_config_value "$@"
     if [[ $# -gt 0 && "$1" != -* ]]; then COMMAND="$1"; shift; fi
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help) usage; exit 0 ;;
             --version) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
+            --config) [[ $# -ge 2 ]] || die "--config requires a file"; shift 2 ;;
+            --config=*) shift ;;
             --cleanup) COMMAND=cleanup; shift ;;
             --lab-dir) LAB_DIR="${2:?missing value for --lab-dir}"; shift 2 ;;
             --management-vmnet) MANAGEMENT_VMNET="${2:?missing value for --management-vmnet}"; shift 2 ;;

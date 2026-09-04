@@ -1,0 +1,40 @@
+# ScenarioForge VMware Workstation/Linux installer configuration
+#
+# Format: one lowercase key=value per line. Blank lines and full-line comments
+# are ignored. Values may be unquoted or wrapped in matching single/double
+# quotes. The file is parsed as data and is never sourced as shell code.
+#
+# Precedence: built-in defaults < this file < SF_* environment < CLI flags.
+# If passwords are stored here, protect the copy with: chmod 600 FILE
+
+lab_dir="/home/your-user/vmware/ScenarioForge-Lab"
+management_vmnet=vmnet1
+hitl_vmnet=vmnet2
+
+app_management_cidr=172.31.250.2/24
+core_management_cidr=172.31.250.3/24
+core_hitl_cidr=10.254.200.3/24
+participant_cidr=10.254.200.10/24
+
+ssh_public_key=
+core_password=
+app_password=
+participant_password=
+web_admin_password=
+
+core_minimal_ref=main
+core_ref=master
+scenarioforge_ref=main
+flag_generators_ref=5f612eecb8ff5df74a0e517d0de1e54385a62044
+
+flag_generators=false
+vulnhub=false
+wait_minutes=90
+no_wait=false
+headless=false
+verbose=false
+watch=false
+interval=10
+yes=false
+dry_run=false
+force=false

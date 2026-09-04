@@ -91,6 +91,31 @@ unattended invocation. CORE, ScenarioForge, and the participant desktop build
 concurrently and commonly take 20–60 minutes depending on the node and Internet
 connection. The default timeout is 90 minutes.
 
+### Config file
+
+Every provisioning option can also be stored in a non-executable `key=value`
+config file. Start from the tracked example, restrict its permissions if it
+contains credentials, and pass it to any installer command:
+
+```bash
+cp scripts/proxmox/scenarioforge-lab.conf.example /root/scenarioforge-lab.conf
+chmod 600 /root/scenarioforge-lab.conf
+sudo scripts/proxmox/install-scenarioforge-lab.sh install \
+  --config /root/scenarioforge-lab.conf \
+  --verbose
+```
+
+The precedence is **built-in defaults < config file < `SF_*` environment
+variables < CLI flags**, so the example above enables verbose output even when
+`verbose=false` is saved in the file. Use lowercase names matching the long
+options without leading dashes, replacing dashes with underscores—for example
+`core_vmid=2201`, `flag_generators=true`, and `no_wait=true`. Blank lines and
+full-line `#` comments are ignored. Values may be unquoted or enclosed in
+matching single or double quotes; contents are treated literally, with no shell
+expansion or command execution. Unknown keys, malformed lines, unmatched
+quotes, and invalid boolean values stop before Proxmox validation or mutation.
+Only one `--config` file may be supplied per invocation.
+
 Output is timestamped and classified as `PROGRESS`, `INFO`, `WARN`, `ERROR`,
 `DEBUG`, or `DRY-RUN`. Normal mode reports every major stage, image download,
 VM creation, and the recurring readiness state of all three guests. Add
@@ -143,6 +168,7 @@ Command-line password values may be retained in shell history or briefly
 visible in the host process list. For unattended installation, prefer the
 corresponding `SF_CORE_PASSWORD`, `SF_APP_PASSWORD`,
 `SF_PARTICIPANT_PASSWORD`, and `SF_WEB_ADMIN_PASSWORD` environment variables.
+The root-readable config file described above is also suitable for credentials.
 Regardless of how they are supplied, the final values are written to the same
 root-only credentials file and printed in the completion summary.
 
