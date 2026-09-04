@@ -727,13 +727,21 @@ start_vm() {
 }
 vm_running() { vmrun -T "$VMRUN_TYPE" list 2>/dev/null | tail -n +2 | grep -Fxq -- "$1"; }
 
+guest_tools_running() {
+    local state
+    state="$(vmrun -T "$VMRUN_TYPE" checkToolsState "$1" 2>/dev/null || true)"
+    [[ "$state" == running ]]
+}
+
 guest_file_exists() {
     local vmx="$1" username="$2" password="$3" path="$4"
+    guest_tools_running "$vmx" || return 1
     timeout 5 vmrun -T "$VMRUN_TYPE" -gu "$username" -gp "$password" \
         fileExistsInGuest "$vmx" "$path" >/dev/null 2>&1
 }
 guest_file_text() {
     local vmx="$1" username="$2" password="$3" path="$4" temp
+    guest_tools_running "$vmx" || return 0
     temp="$(mktemp "${TMPDIR:-/tmp}/scenarioforge-vmware-read.XXXXXX")"
     if timeout 5 vmrun -T "$VMRUN_TYPE" -gu "$username" -gp "$password" \
         CopyFileFromGuestToHost "$vmx" "$path" "$temp" >/dev/null 2>&1; then

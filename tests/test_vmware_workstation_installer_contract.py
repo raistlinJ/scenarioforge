@@ -295,6 +295,24 @@ def test_progress_credentials_and_cleanup_guards_are_present() -> None:
     assert "VMware Workstation Linux three-VM installer" in root_readme
 
 
+def test_guest_operations_wait_for_vmware_tools_before_opening_vix_pipe(
+    tmp_path: Path,
+) -> None:
+    unexpected = tmp_path / "unexpected-guest-operation"
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+vmrun() {{
+    if [[ "$*" == *checkToolsState* ]]; then printf 'installed\\n'; return 0; fi
+    touch {shlex.quote(str(unexpected))}
+    return 99
+}}
+guest_file_exists /tmp/test.vmx user pass /tmp/marker && exit 98
+[[ ! -e {shlex.quote(str(unexpected))} ]]
+"""
+    result = run_bash(probe)
+    assert result.returncode == 0, result.stderr
+
+
 def test_dry_run_reaches_completion_without_creating_vm_files(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     lab_dir = tmp_path / "lab"
