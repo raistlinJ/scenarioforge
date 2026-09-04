@@ -2,6 +2,8 @@ import copy
 import json
 import os
 import re
+import xml.etree.ElementTree as ET
+
 from webapp.app_backend import app
 
 
@@ -49,6 +51,44 @@ def test_save_xml_api_writes_file(tmp_path, monkeypatch):
     path = data.get('result_path')
     assert path and os.path.isabs(path)
     assert os.path.exists(path)
+
+
+def test_save_xml_api_rebases_embedded_preview_to_new_snapshot(tmp_path, monkeypatch):
+    client = app.test_client()
+    _login(client)
+    outdir = tmp_path / 'outputs'
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    from webapp import app_backend as backend
+
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(outdir))
+    payload = {
+        'scenarios': [{
+            'name': 'PreviewScenario',
+            'base': {'filepath': ''},
+            'sections': {},
+            'plan_preview': {
+                'full_preview': {'seed': 17, 'routers': [], 'hosts': [], 'switches': []},
+                'metadata': {'xml_path': '/tmp/old-snapshot.xml', 'scenario': 'PreviewScenario'},
+                'input_signature': 'stable-input',
+            },
+        }],
+        'active_index': 0,
+    }
+
+    resp = client.post('/save_xml_api', data=json.dumps(payload), content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    path = data['result_path']
+
+    root = ET.parse(path).getroot()
+    raw_preview = root.findtext('./Scenario/ScenarioEditor/PlanPreview')
+    preview = json.loads(raw_preview)
+    assert preview['metadata']['xml_path'] == path
+    assert preview['metadata']['scenario'] == 'PreviewScenario'
+    assert preview['metadata']['seed'] == 17
+    assert preview['metadata']['origin'] == 'planner'
+    assert preview['input_signature'] == 'stable-input'
 
 
 def test_save_xml_api_repairs_router_rows_misplaced_in_node_information(tmp_path, monkeypatch):

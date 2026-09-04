@@ -1,4 +1,9 @@
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+import pytest
 
 
 INDEX_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "webapp" / "templates" / "index.html"
@@ -119,16 +124,75 @@ def test_save_xml_skips_redundant_flow_plan_persist_when_preview_is_current() ->
     text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
+        "function scenarioForXmlPreviewSignature(value) {",
+        "'flow_state', 'flowState',",
+        "'fullPreview', 'preview', 'saved_xml_path', 'savedXmlPath',",
+        "previewState.planNeedsPersist = true;",
+        "previewState.planNeedsPersist === true",
+        "previewState.dirty === true || previewState.planNeedsPersist === true",
         "const currentPreviewSignature = buildXmlPreviewSignature();",
         "input_signature: currentPreviewSignature,",
-        "const hasMeaningfulFlowState = (flowState) => {",
         "const matchingCurrentPreview = !!(",
         "activeScenario.plan_preview.input_signature === currentPreviewSignature",
-        "if (!hasMeaningfulFlowState(flowState) && matchingCurrentPreview) return;",
+        "if (matchingCurrentPreview) return;",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]
     assert not missing, "Missing no-op flow-plan persist guard snippets: " + "; ".join(missing)
+
+
+def test_unchanged_topology_save_reuses_existing_xml_without_new_snapshot() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+
+    expected_snippets = [
+        "function isXmlPreviewUnchanged(source = null) {",
+        "function currentSavedXmlPathForActiveScenario() {",
+        "if (existingXmlPath && isXmlPreviewUnchanged()) {",
+        "[xml-save] No changes detected; reusing ${existingXmlPath}",
+        "return existingXmlPath;",
+    ]
+
+    missing = [snippet for snippet in expected_snippets if snippet not in text]
+    assert not missing, "Missing unchanged XML-save fast path snippets: " + "; ".join(missing)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to execute the signature helper")
+def test_xml_preview_signature_ignores_generated_outputs_but_detects_topology_edits() -> None:
+    text = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    start = text.find("function scenarioForXmlPreviewSignature(value) {")
+    end = text.find("function noteXmlPreviewSavedSignature", start)
+    assert start >= 0 and end > start
+    helpers = text[start:end]
+
+    harness = f"""
+let state = {{
+  scenarios: [{{name: 'Demo', sections: {{Routing: {{items: [{{selected: 'RIP'}}]}}}}}}],
+  core: {{host: '127.0.0.1', port: 50051}},
+}};
+let activeIdx = 0;
+globalThis.window = {{coretgGetSeedForScenario: () => 17}};
+function getCoreConfig() {{ return state.core; }}
+{helpers}
+const before = buildXmlPreviewSignature();
+state.scenarios[0].plan_preview = {{full_preview: {{routers: [1]}}, input_signature: before}};
+state.scenarios[0].flow_state = {{chain_ids: ['1', '2'], updated_at: Date.now()}};
+state.scenarios[0].saved_xml_path = '/tmp/Demo.xml';
+const generated = buildXmlPreviewSignature();
+if (before !== generated) throw new Error('generated outputs changed the input signature');
+state.scenarios[0].sections.Routing.items[0].selected = 'OSPFv2';
+const edited = buildXmlPreviewSignature();
+if (edited === generated) throw new Error('topology edit did not change the input signature');
+console.log('OK');
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+        handle.write(harness)
+        path = handle.name
+    try:
+        result = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
+    finally:
+        Path(path).unlink(missing_ok=True)
 
 
 def test_topology_save_xml_ajax_uses_local_autosave() -> None:
@@ -195,6 +259,23 @@ def test_flow_save_and_preview_do_not_swallow_flow_state_save_failures() -> None
     assert not present, "Unexpected swallowed Flag Sequencing save failure snippets still present: " + "; ".join(present)
 
 
+def test_flow_save_button_skips_redundant_xml_rewrite() -> None:
+    text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    start = text.find("async function saveXmlStay()")
+    end = text.find("// Bottom-bar buttons:", start)
+    assert start >= 0 and end > start
+    block = text[start:end]
+
+    expected_snippets = [
+        "const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);",
+        "if (shouldPersistFlowState) {",
+        "if (!(await saveFlowStateToXml(xmlPath))) {",
+        "XML is already up to date:",
+    ]
+    missing = [snippet for snippet in expected_snippets if snippet not in block]
+    assert not missing, "Missing Flow Save XML no-op guard snippets: " + "; ".join(missing)
+
+
 def test_flow_preview_skips_xml_rewrite_when_saved_state_matches() -> None:
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
@@ -205,6 +286,7 @@ def test_flow_preview_skips_xml_rewrite_when_saved_state_matches() -> None:
         "if (!latestXmlPath || latestXmlPath !== targetXmlPath) return true;",
         "const currentSig = flowStateXmlSignature(buildCurrentFlowStatePayload({ includeUpdatedAt: false }));",
         "return !currentSig || !savedSig || currentSig !== savedSig;",
+        "if (xmlPath && shouldSaveFlowStateToXml(xmlPath)) {",
     ]
 
     missing = [snippet for snippet in expected_snippets if snippet not in text]

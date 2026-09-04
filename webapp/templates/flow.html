@@ -1058,7 +1058,7 @@
     try { persistFlowState(); } catch (e) { }
     try {
       const xmlPath = _bestEffortCurrentScenarioXmlPath();
-      if (xmlPath) {
+      if (xmlPath && shouldSaveFlowStateToXml(xmlPath)) {
         saveFlowStateToXml(xmlPath).catch(() => { });
       }
     } catch (e) { }
@@ -14088,13 +14088,18 @@ ${out.join('\n')}
           }
         } catch (e) { }
 
-        if (!(await saveFlowStateToXml(xmlPath))) {
-          throw new Error('Failed to save Flag Sequencing state into XML.');
+        const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);
+        if (shouldPersistFlowState) {
+          if (!(await saveFlowStateToXml(xmlPath))) {
+            throw new Error('Failed to save Flag Sequencing state into XML.');
+          }
+          if (!hintResolveFailed) {
+            setStatus('Saved flow state to XML: ' + basenameFromPath(xmlPath), false);
+          }
+          try { await refreshXmlDockPreview({ force: true }); } catch (e) { }
+        } else if (!hintResolveFailed) {
+          setStatus('XML is already up to date: ' + basenameFromPath(xmlPath), false);
         }
-        if (!hintResolveFailed) {
-          setStatus('Saved flow state to XML: ' + basenameFromPath(xmlPath), false);
-        }
-        try { await refreshXmlDockPreview({ force: true }); } catch (e) { }
       } else {
         setStatus('Saved XML (missing path).', false);
       }
@@ -14169,11 +14174,16 @@ ${out.join('\n')}
           downloadXmlEl.removeAttribute('title');
         }
       } catch (e) { }
-      if (!(await saveFlowStateToXml(xmlPath))) {
-        throw new Error('Failed to save Flag Sequencing state into XML.');
+      const shouldPersistFlowState = shouldSaveFlowStateToXml(xmlPath);
+      if (shouldPersistFlowState) {
+        if (!(await saveFlowStateToXml(xmlPath))) {
+          throw new Error('Failed to save Flag Sequencing state into XML.');
+        }
+        setStatus('Saved flow state to XML: ' + basenameFromPath(xmlPath), false);
+        try { await refreshXmlDockPreview({ force: true }); } catch (e) { }
+      } else {
+        setStatus('XML is already up to date: ' + basenameFromPath(xmlPath), false);
       }
-      setStatus('Saved flow state to XML: ' + basenameFromPath(xmlPath), false);
-      try { await refreshXmlDockPreview({ force: true }); } catch (e) { }
       return xmlPath;
     } catch (err) {
       setStatus(String(err && err.message || err), true);

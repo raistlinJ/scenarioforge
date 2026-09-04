@@ -6558,19 +6558,49 @@
         fullPreviewHistory: [],
         xmlSaved: !!(state.result_path),
         dirty: false,
+        planNeedsPersist: false,
         coreTested: false
     };
     const FULL_PREVIEW_ARTIFACT_VERSION = 2;
 
     let xmlPreviewSavedSignature = null;
+    function scenarioForXmlPreviewSignature(value) {
+        try {
+            const scenario = JSON.parse(JSON.stringify((value && typeof value === 'object') ? value : {}));
+            // Generated/saved data is an output of planning, not an input.  Including
+            // it here made the signature self-referential: generating a preview
+            // changed the signature simply by attaching that preview to the scenario.
+            for (const key of [
+                'plan_preview', 'planPreview', 'preview_plan', 'previewPlan',
+                'preview_plan_path', 'previewPlanPath', 'full_preview',
+                'fullPreview', 'preview', 'saved_xml_path', 'savedXmlPath',
+                'flow_state', 'flowState',
+            ]) {
+                try { delete scenario[key]; } catch (e) { }
+            }
+            return scenario;
+        } catch (e) {
+            return {};
+        }
+    }
+
     function buildXmlPreviewSignature(source = null) {
         try {
-            const scenarios = (source && Array.isArray(source.scenarios)) ? source.scenarios : (state.scenarios || []);
+            const sourceScenarios = (source && Array.isArray(source.scenarios)) ? source.scenarios : (state.scenarios || []);
+            const scenarios = sourceScenarios.map(scenarioForXmlPreviewSignature);
+            const seeds = {};
+            sourceScenarios.forEach((scenario) => {
+                try {
+                    const name = String((scenario && scenario.name) || '').trim();
+                    if (!name || typeof window.coretgGetSeedForScenario !== 'function') return;
+                    seeds[name] = window.coretgGetSeedForScenario(name);
+                } catch (e) { }
+            });
             const activeIndex = Number.isInteger(source?.active_index)
                 ? source.active_index
                 : (Number.isInteger(activeIdx) ? activeIdx : 0);
             const core = (source && source.core !== undefined) ? source.core : getCoreConfig(true);
-            return JSON.stringify({ scenarios, active_index: activeIndex, core });
+            return JSON.stringify({ scenarios, active_index: activeIndex, core, seeds });
         } catch (e) {
             return null;
         }
@@ -6584,9 +6614,41 @@
         }
     }
 
+    function isXmlPreviewUnchanged(source = null) {
+        try {
+            if (!previewState.xmlSaved || previewState.dirty === true || previewState.planNeedsPersist === true) return false;
+            const currentSignature = buildXmlPreviewSignature(source);
+            return !!(
+                xmlPreviewSavedSignature
+                && currentSignature
+                && xmlPreviewSavedSignature === currentSignature
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function currentSavedXmlPathForActiveScenario() {
+        try {
+            const scenario = Array.isArray(state?.scenarios) ? state.scenarios[activeIdx] : null;
+            const candidates = [
+                scenario?.saved_xml_path,
+                scenario?.savedXmlPath,
+                Array.isArray(state?.saved_xml_paths_by_index) ? state.saved_xml_paths_by_index[activeIdx] : '',
+                state?.result_path,
+            ];
+            for (const candidate of candidates) {
+                const path = String(candidate || '').trim();
+                if (path && path.endsWith('.xml')) return path;
+            }
+        } catch (e) { }
+        return '';
+    }
+
     function markXmlPreviewSaved(source = null) {
         try { previewState.xmlSaved = true; } catch (e) { }
         try { previewState.dirty = false; } catch (e) { }
+        try { previewState.planNeedsPersist = false; } catch (e) { }
         try { noteXmlPreviewSavedSignature(source); } catch (e) { }
         try { updatePlanButtons(); } catch (e) { }
     }
@@ -6595,6 +6657,7 @@
         window.noteXmlPreviewSavedSignature = noteXmlPreviewSavedSignature;
         window.buildXmlPreviewSignature = buildXmlPreviewSignature;
         window.setXmlPreviewSavedSignature = (sig) => { xmlPreviewSavedSignature = sig; };
+        window.coretgIsXmlPreviewUnchanged = isXmlPreviewUnchanged;
     } catch (e) { }
 
     try {
@@ -6612,7 +6675,7 @@
 
     function hasUnsavedChanges() {
         try {
-            if (previewState && previewState.dirty === true) return true;
+            if (previewState && (previewState.dirty === true || previewState.planNeedsPersist === true)) return true;
         } catch (e) { }
         try {
             const currentSig = buildXmlPreviewSignature();
@@ -6757,6 +6820,7 @@
         previewState.fullPreview = fullPreview;
         previewState.xmlSaved = true;
         previewState.dirty = false;
+        previewState.planNeedsPersist = false;
         try { buildFullPreviewArtifacts(previewState.fullPreview); } catch (e) { }
         try { renderFullPreviewStructured(); } catch (e) { }
         try { updatePlanButtons(); } catch (e) { }
@@ -7269,14 +7333,28 @@
                     const activeScenario = state?.scenarios?.[activeIdx];
                     const currentPreviewSignature = buildXmlPreviewSignature();
                     if (activeScenario && typeof activeScenario === 'object') {
+                        const generatedAt = new Date().toISOString();
+                        const generatedScenarioName = String(
+                            data.scenario || body.scenario || body.scenario_name || activeScenario.name || ''
+                        ).trim();
                         activeScenario.plan_preview = {
                             full_preview: previewState.fullPreview,
                             plan: data.plan || null,
                             breakdowns: data.breakdowns || null,
                             flow_meta: data.flow_meta || null,
+                            metadata: {
+                                xml_path: newXmlPath,
+                                scenario: generatedScenarioName,
+                                seed: previewState.fullPreview?.seed ?? null,
+                                origin: 'planner',
+                                flow: data.flow_meta || {},
+                                created_at: generatedAt,
+                                updated_at: generatedAt,
+                            },
                             input_signature: currentPreviewSignature,
-                            saved_at: new Date().toISOString(),
+                            saved_at: generatedAt,
                         };
+                        previewState.planNeedsPersist = true;
                     }
                 } catch (e) { }
                 try { persistEditorState(); } catch (e) { }
@@ -8558,6 +8636,17 @@
             try { showToast('Builder view is read-only.', { autohide: true, delay: 2500 }); } catch (_) { }
             return Promise.reject(new Error('Builder view is read-only'));
         }
+        // A second Save with no intervening editor change should be a true no-op.
+        // Besides avoiding another timestamped snapshot, this also avoids rebuilding
+        // segmentation/traffic preview artifacts through persist_flow_plan.
+        try {
+            const existingXmlPath = currentSavedXmlPathForActiveScenario();
+            if (existingXmlPath && isXmlPreviewUnchanged()) {
+                try { logInfo(`[xml-save] No changes detected; reusing ${existingXmlPath}`); } catch (e) { }
+                try { updateDownloadButtonState(); } catch (e) { }
+                return existingXmlPath;
+            }
+        } catch (e) { }
         return new Promise((resolve, reject) => {
             try {
                 const originalScenarios = state.scenarios;
@@ -8715,17 +8804,6 @@
                     persistEditorState();
                 };
                 const persistFlowPlanAfterSave = async () => {
-                    const hasMeaningfulFlowState = (flowState) => {
-                        if (!flowState || typeof flowState !== 'object') return false;
-                        return Object.keys(flowState).some((key) => {
-                            const value = flowState[key];
-                            if (value === null || value === undefined) return false;
-                            if (typeof value === 'string') return value.trim().length > 0;
-                            if (Array.isArray(value)) return value.length > 0;
-                            if (typeof value === 'object') return Object.keys(value).length > 0;
-                            return true;
-                        });
-                    };
                     try {
                         const rp = String(state?.result_path || '').trim();
                 const clearSavedXmlState = () => {
@@ -8753,9 +8831,6 @@
                         const activeScenario = state?.scenarios?.[activeIdx];
                         const scenarioName = (activeScenario && activeScenario.name) ? String(activeScenario.name).trim() : '';
                         if (!scenarioName) return;
-                        const flowState = activeScenario && typeof activeScenario === 'object'
-                            ? (activeScenario.flow_state || activeScenario.flowState || null)
-                            : null;
                         const planPreview = activeScenario && typeof activeScenario === 'object'
                             ? _extractPlanPreviewPayload(activeScenario.plan_preview || activeScenario.planPreview || null)
                             : null;
@@ -8770,7 +8845,10 @@
                             && currentPreviewSignature
                             && activeScenario.plan_preview.input_signature === currentPreviewSignature
                         );
-                        if (!hasMeaningfulFlowState(flowState) && matchingCurrentPreview) return;
+                        // A matching preview already contains the current topology plan.
+                        // FlowState is persisted independently in the same XML, so its
+                        // presence is not a reason to rebuild all preview artifacts.
+                        if (matchingCurrentPreview) return;
 
                         const payload = { xml_path: rp, scenario: scenarioName };
                         if (Number.isInteger(activeScenarioSeedForSave) && activeScenarioSeedForSave > 0) {

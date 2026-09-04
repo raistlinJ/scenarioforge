@@ -108,6 +108,31 @@ def register(
 
         return backend._concretize_scenarios_for_save(scenarios_payload, seed=seed)
 
+    def _scenario_for_output_path(scenario: Any, output_path: str, scenario_name: str) -> Any:
+        """Rebase embedded preview metadata onto the XML snapshot being written."""
+        if not isinstance(scenario, dict):
+            return scenario
+        preview_key = 'plan_preview' if isinstance(scenario.get('plan_preview'), dict) else 'planPreview'
+        preview = scenario.get(preview_key)
+        if not isinstance(preview, dict) or not preview:
+            return scenario
+        out = copy.deepcopy(scenario)
+        preview_out = copy.deepcopy(preview)
+        metadata = preview_out.get('metadata') if isinstance(preview_out.get('metadata'), dict) else {}
+        metadata = dict(metadata)
+        metadata['xml_path'] = os.path.abspath(output_path)
+        metadata['scenario'] = str(scenario_name or '').strip()
+        if metadata.get('seed') in (None, ''):
+            full_preview = preview_out.get('full_preview') if isinstance(preview_out.get('full_preview'), dict) else {}
+            if full_preview.get('seed') not in (None, ''):
+                metadata['seed'] = full_preview.get('seed')
+        metadata.setdefault('origin', 'planner')
+        preview_out['metadata'] = metadata
+        out['plan_preview'] = preview_out
+        if preview_key != 'plan_preview':
+            out.pop(preview_key, None)
+        return out
+
     def _import_connection_overrides(raw: Any) -> dict[str, Any]:
         source = raw if isinstance(raw, dict) else {}
         mapping = {
@@ -934,8 +959,10 @@ def register(
                             stem = f'{base}-{suffix}'
                             out_path = os.path.join(out_dir, f'{stem}.xml')
                             suffix += 1
+                    scen_to_write = _scenario_for_output_path(scen, out_path, display_name)
+                    scenarios_list[idx] = scen_to_write
                     try:
-                        tree = build_scenarios_xml({'scenarios': [scen], 'core': normalized_core})
+                        tree = build_scenarios_xml({'scenarios': [scen_to_write], 'core': normalized_core})
                         raw = ET.tostring(tree.getroot(), encoding='utf-8')
                         if LET is not None:
                             lroot = LET.fromstring(raw)
@@ -947,7 +974,7 @@ def register(
                                 f.write(raw)
                     except Exception:
                         try:
-                            tree = build_scenarios_xml({'scenarios': [scen], 'core': normalized_core})
+                            tree = build_scenarios_xml({'scenarios': [scen_to_write], 'core': normalized_core})
                             tree.write(out_path, encoding='utf-8', xml_declaration=True)
                         except Exception:
                             continue
@@ -1583,8 +1610,10 @@ def register(
                             stem = f'{base}-{suffix}'
                             out_path = os.path.join(out_dir, f'{stem}.xml')
                             suffix += 1
+                    scen_to_write = _scenario_for_output_path(scen, out_path, display_name)
+                    scenarios[idx] = scen_to_write
                     try:
-                        tree = build_scenarios_xml({'scenarios': [scen], 'core': normalized_core})
+                        tree = build_scenarios_xml({'scenarios': [scen_to_write], 'core': normalized_core})
                         raw = ET.tostring(tree.getroot(), encoding='utf-8')
                         if LET is not None:
                             lroot = LET.fromstring(raw)
@@ -1596,7 +1625,7 @@ def register(
                                 f.write(raw)
                     except Exception:
                         try:
-                            tree = build_scenarios_xml({'scenarios': [scen], 'core': normalized_core})
+                            tree = build_scenarios_xml({'scenarios': [scen_to_write], 'core': normalized_core})
                             tree.write(out_path, encoding='utf-8', xml_declaration=True)
                         except Exception:
                             continue
@@ -1605,7 +1634,7 @@ def register(
                         root = parsed.getroot()
                         scenario_count = len(root.findall('Scenario'))
                         if scenario_count != 1:
-                            tree = build_scenarios_xml({'scenarios': [scen], 'core': normalized_core})
+                            tree = build_scenarios_xml({'scenarios': [scen_to_write], 'core': normalized_core})
                             tree.write(out_path, encoding='utf-8', xml_declaration=True)
                     except Exception:
                         pass
