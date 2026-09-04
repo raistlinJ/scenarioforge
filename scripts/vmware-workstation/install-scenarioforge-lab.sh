@@ -14,7 +14,7 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
-SCRIPT_VERSION="0.3.4"
+SCRIPT_VERSION="0.3.5"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 VMRUN_TYPE="ws"
 
@@ -106,8 +106,9 @@ verbose() { [[ "$VERBOSE" -eq 1 ]] && emit DEBUG "$@" || true; }
 progress() {
     INSTALL_PERCENT="$1"
     shift
+    CURRENT_STEP=$((CURRENT_STEP + 1))
     INSTALL_PHASE="$*"
-    emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] $*"
+    emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] [$CURRENT_STEP/$TOTAL_STEPS] $*"
     write_runtime_status running "$INSTALL_PHASE" ""
     write_state_if_present
 }
@@ -859,13 +860,21 @@ perform_cleanup() {
 perform_install() {
     INSTALL_STARTED_EPOCH="$(date +%s)"
     RUNTIME_TRACKING=1
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        configure_install_progress 2
+    else
+        configure_install_progress 6
+    fi
     progress 2 "Validating Linux, VMware Workstation, networks, paths, and resources"
     require_linux_workstation
     validate_inputs
     confirm_install
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        prepare_optional_content
-        emit PROGRESS "[100%] Dry-run validation complete; no resources were changed"
+        if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
+            progress 4 "Authenticating and preparing requested APP catalogs"
+            prepare_optional_content
+        fi
+        progress 100 "Dry-run validation complete; no resources were changed"
         return
     fi
 

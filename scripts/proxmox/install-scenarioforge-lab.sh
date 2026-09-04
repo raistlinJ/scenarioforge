@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.7.4"
+SCRIPT_VERSION="0.7.5"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -134,6 +134,15 @@ progress() {
         write_runtime_status running "$*" ""
     fi
     record_install_phase "$*"
+}
+
+configure_install_progress() {
+    local base_steps="$1"
+    CURRENT_STEP=0
+    TOTAL_STEPS="$base_steps"
+    if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
+        TOTAL_STEPS=$((TOTAL_STEPS + 1))
+    fi
 }
 
 verbose() {
@@ -2471,6 +2480,7 @@ perform_cleanup() {
 
 perform_install() {
     INSTALL_STARTED_EPOCH="$(date +%s)"
+    configure_install_progress 8
     progress 2 "Validating Proxmox, storage, VMIDs, and requested networks"
     validate_install_inputs
     preflight_proxmox

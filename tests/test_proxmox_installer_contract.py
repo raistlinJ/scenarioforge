@@ -214,6 +214,33 @@ printf 'combined=%s\\n' "$(current_install_percent)"
     assert "combined=69" in result.stdout
 
 
+def test_optional_catalog_phase_increases_progress_total() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+COMMAND=status
+INSTALL_FLAG_GENERATORS=0
+INSTALL_VULNHUB=0
+configure_install_progress 8
+progress 2 'Without optional catalogs'
+INSTALL_FLAG_GENERATORS=1
+configure_install_progress 8
+for step in $(seq 1 9); do
+  progress 2 "With optional catalogs phase $step"
+done
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "[1/8] Without optional catalogs" in result.stdout
+    assert "[1/9] With optional catalogs phase 1" in result.stdout
+    assert "[9/9] With optional catalogs phase 9" in result.stdout
+    assert "/8] With optional catalogs" not in result.stdout
+
+
 def test_initial_progress_does_not_rewrite_existing_lab_state(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     state_dir.mkdir()

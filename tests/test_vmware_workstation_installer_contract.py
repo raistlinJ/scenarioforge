@@ -246,7 +246,7 @@ perform_install
 """
     result = run_bash(probe)
     assert result.returncode == 0, result.stderr
-    assert "[100%] Dry-run validation complete" in result.stdout
+    assert "[100%] [2/2] Dry-run validation complete" in result.stdout
     assert not state_dir.exists()
     assert not lab_dir.exists()
 
