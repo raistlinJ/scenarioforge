@@ -1464,7 +1464,7 @@ def test_cli_new_phase_vm_mode_errors_when_vm_defaults_missing(tmp_path, monkeyp
     assert 'CORETG_VM_MODE_HITL_CORE_IFX_NAME (vm-mode HITL interface name)' in missing
 
 
-def test_cli_flag_sequencing_vm_mode_requires_saved_core_connection(tmp_path, monkeypatch, capsys):
+def test_cli_flag_sequencing_vm_mode_requires_a_core_connection_source(tmp_path, monkeypatch, capsys):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
     fake_backend = SimpleNamespace(
@@ -1494,7 +1494,115 @@ def test_cli_flag_sequencing_vm_mode_requires_saved_core_connection(tmp_path, mo
     payload = json.loads(capsys.readouterr().err)
     assert payload['ok'] is False
     missing = payload.get('missing') if isinstance(payload.get('missing'), list) else []
-    assert 'scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)' in missing
+    assert 'CORE VM connection data is missing from both the scenario XML and .scenarioforge.env' in missing
+
+
+def test_cli_vm_mode_uses_environment_core_connection_without_cli_flags(
+    tmp_path,
+    monkeypatch,
+):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<Scenarios>\n'
+        '  <CoreConnection host="old.example" port="50051" ssh_enabled="true" '
+        'ssh_host="old.example" ssh_port="22" ssh_username="old-user" />\n'
+        '  <Scenario name="CLIExportExample"><ScenarioEditor /></Scenario>\n'
+        '</Scenarios>\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'vm')
+    monkeypatch.setenv('CORE_HOST', '172.31.250.3')
+    monkeypatch.setenv('CORE_PORT', '50051')
+    monkeypatch.setenv('CORE_SSH_HOST', '172.31.250.3')
+    monkeypatch.setenv('CORE_SSH_PORT', '22')
+    monkeypatch.setenv('CORE_SSH_USERNAME', 'corevm')
+    monkeypatch.setenv('CORE_SSH_PASSWORD', 'env-secret')
+    argv0 = cli.sys.argv[:]
+    cli.sys.argv = [
+        'scenarioforge.cli',
+        'flag-sequencing',
+        '--xml',
+        str(xml_path),
+        '--scenario',
+        'CLI Export Example',
+    ]
+
+    try:
+        _scenario_norm, core_cfg, has_saved_core_source = cli._resolve_cli_core_context(
+            SimpleNamespace(xml=str(xml_path)),
+            backend=backend,
+            scenario_name='CLIExportExample',
+        )
+    finally:
+        cli.sys.argv = argv0
+
+    # VM mode intentionally ignores stale transport stored in XML and uses the
+    # deployment-wide environment connection instead.
+    assert has_saved_core_source is False
+    assert core_cfg['host'] == '172.31.250.3'
+    assert core_cfg['ssh_host'] == '172.31.250.3'
+    assert core_cfg['ssh_username'] == 'corevm'
+    assert core_cfg['ssh_password'] == 'env-secret'
+
+    has_env_core_source = cli._cli_has_env_remote_source(backend, core_cfg)
+    assert has_env_core_source is True
+    assert cli._cli_vm_mode_config_issues(
+        backend,
+        phase='flag-sequencing',
+        core_cfg=core_cfg,
+        has_saved_core_source=has_saved_core_source,
+        has_env_core_source=has_env_core_source,
+    ) == []
+
+
+def test_cli_vm_mode_explicit_core_flags_override_environment(tmp_path, monkeypatch):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="ScenarioOne"><ScenarioEditor /></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('CORETG_WEBUI_MODE', 'vm')
+    monkeypatch.setenv('CORE_HOST', '172.31.250.3')
+    monkeypatch.setenv('CORE_SSH_HOST', '172.31.250.3')
+    monkeypatch.setenv('CORE_SSH_USERNAME', 'corevm')
+    monkeypatch.setenv('CORE_SSH_PASSWORD', 'env-secret')
+    argv0 = cli.sys.argv[:]
+    cli.sys.argv = [
+        'scenarioforge.cli',
+        'flag-sequencing',
+        '--xml',
+        str(xml_path),
+        '--ssh-host',
+        '10.20.30.40',
+        '--ssh-username',
+        'override-user',
+        '--ssh-password',
+        'override-secret',
+    ]
+
+    try:
+        _scenario_norm, core_cfg, _has_saved = cli._resolve_cli_core_context(
+            SimpleNamespace(
+                xml=str(xml_path),
+                ssh_host='10.20.30.40',
+                ssh_username='override-user',
+                ssh_password='override-secret',
+            ),
+            backend=backend,
+            scenario_name='ScenarioOne',
+        )
+    finally:
+        cli.sys.argv = argv0
+
+    assert core_cfg['host'] == '10.20.30.40'
+    assert core_cfg['ssh_host'] == '10.20.30.40'
+    assert core_cfg['ssh_username'] == 'override-user'
+    assert core_cfg['ssh_password'] == 'override-secret'
 
 
 def test_cli_vm_mode_execute_honors_xml_hitl_disabled_even_when_env_hitl_enabled():
@@ -1564,7 +1672,7 @@ def test_cli_vm_mode_execute_preflight_failure_emits_validation_summary(tmp_path
         phase='execute',
         xml_path=str(xml_path),
         scenario_name='Scenario One',
-        issues=['scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)'],
+        issues=['CORE VM connection data is missing from both the scenario XML and .scenarioforge.env'],
         json_output=False,
         emit_validation_marker=True,
     )
@@ -1575,7 +1683,7 @@ def test_cli_vm_mode_execute_preflight_failure_emits_validation_summary(tmp_path
     assert summary['ok'] is False
     assert summary['validation_unavailable'] is True
     assert summary['validation_unavailable_details'] == [
-        'scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)'
+        'CORE VM connection data is missing from both the scenario XML and .scenarioforge.env'
     ]
 
 
@@ -2780,7 +2888,10 @@ def test_cli_execute_remote_delegate_includes_resolved_scenario_and_preview_plan
     assert '--preview-plan /tmp/remote/preview.xml' in fake_client.command
 
 
-def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote_exists(tmp_path, monkeypatch, caplog, capsys):
+def test_cli_execute_vm_mode_uses_env_remote_without_saved_xml_core_config(
+    tmp_path,
+    monkeypatch,
+):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
     fake_client = _FakeSshClient(exit_code=0)
@@ -2827,7 +2938,13 @@ def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote
         _select_remote_python_interpreter=lambda *_a, **_k: '/opt/core/venv/bin/python',
         _remote_core_target_host=lambda *_a, **_k: '127.0.0.1',
         _coerce_bool=lambda value: bool(value),
-        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write('REMOTE ENV CLI OK\n'),
+        _relay_remote_channel_to_log=lambda _channel, handle, redact_tokens=None: handle.write(
+            'CORE_SESSION_ID: 42\nREMOTE ENV CLI OK\n'
+        ),
+        _extract_session_id_from_text=lambda text: 42 if 'CORE_SESSION_ID: 42' in text else None,
+        _list_active_core_sessions_via_remote_python=lambda *_a, **_k: [
+            {'id': 42, 'state': 'RUNTIME', 'nodes': 3}
+        ],
         _webui_runtime_mode=lambda: 'vm',
     )
     args = SimpleNamespace(
@@ -2836,20 +2953,16 @@ def test_cli_execute_vm_mode_requires_saved_xml_core_config_even_when_env_remote
         preview_plan=None,
         host='localhost',
         port=50051,
-        post_execution_validation=True,
+        post_execution_validation=False,
     )
     argv0 = cli.sys.argv[:]
 
     try:
-        caplog.set_level('ERROR')
         cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario One']
         ret = cli._maybe_delegate_cli_to_remote(args, backend=fake_backend, scenario_name='Scenario One')
     finally:
         cli.sys.argv = argv0
 
-    assert ret == 1
-    summary = cli._extract_last_json_marker(capsys.readouterr().err, 'VALIDATION_SUMMARY_JSON:')
-    assert summary is not None
-    assert summary['validation_unavailable'] is True
-    assert any('VM mode requires additional configuration before the execute phase can run.' in rec.message for rec in caplog.records)
-    assert any('scenario XML is missing saved CORE VM connection data' in rec.message for rec in caplog.records)
+    assert ret == 0
+    assert fake_client.command is not None
+    assert '/tmp/remote-env/scenario.xml' in fake_client.command

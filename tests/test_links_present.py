@@ -31,6 +31,19 @@ def cli_run():
 
     env = os.environ.copy()
     env.setdefault("PYTHONPATH", str(REPO_ROOT))
+    # This subprocess imports the runtime environment loader afresh, outside
+    # pytest's per-test monkeypatch fixture. Pin it to local/native mode so a
+    # developer's real .scenarioforge.env cannot redirect this closed-port
+    # failure test to a provisioned CORE VM.
+    env.update({
+        "CORETG_WEBUI_MODE": "native",
+        "CORETG_CLI_DISABLE_REMOTE_DELEGATION": "1",
+        "CORE_HOST": "127.0.0.1",
+        "CORE_PORT": "50051",
+        "CORE_SSH_HOST": "",
+        "CORE_SSH_USERNAME": "",
+        "CORE_SSH_PASSWORD": "",
+    })
     # A closed port: the run must reach the CORE connection attempt and stop
     # there, without a live daemon.
     cmd = [

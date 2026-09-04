@@ -4045,14 +4045,22 @@ def _cli_vm_mode_config_issues(
     phase: str,
     core_cfg: dict[str, Any],
     has_saved_core_source: bool,
+    has_env_core_source: bool = False,
     hitl_config: dict[str, Any] | None = None,
 ) -> list[str]:
     if _cli_runtime_mode(backend) != 'vm':
         return []
 
     issues: list[str] = []
-    if phase in {'execute', 'topo', 'flag-sequencing'} and not has_saved_core_source:
-        issues.append('scenario XML is missing saved CORE VM connection data (CoreConnection or HardwareInLoop/CoreConnection)')
+    if (
+        phase in {'execute', 'topo', 'flag-sequencing'}
+        and not has_saved_core_source
+        and not has_env_core_source
+    ):
+        issues.append(
+            'CORE VM connection data is missing from both the scenario XML '
+            'and .scenarioforge.env'
+        )
 
     host = str(core_cfg.get('host') or '').strip()
     try:
@@ -4224,10 +4232,27 @@ def _resolve_cli_core_context(args: Any, *, backend: Any, scenario_name: str | N
                 if credential_fill.get('ssh_password') in (None, ''):
                     credential_fill['ssh_password'] = saved_core_cfg.get('ssh_password')
 
-    # The XML is the connection ground truth. Saved WebUI state may provide a
-    # matching password, while explicit CLI options remain the final override.
+    # Native mode treats the XML as connection ground truth. VM mode instead
+    # declares one deployment-wide CORE VM in .scenarioforge.env; the backend
+    # intentionally strips stale XML transport fields in that mode. Start with
+    # those environment defaults so direct CLI phases use the same connection
+    # as the Web UI, then retain XML metadata and finally apply explicit CLI
+    # options as the highest-precedence override.
+    connection_base = credential_fill
+    if _cli_runtime_mode(backend) == 'vm':
+        try:
+            env_core_cfg = backend._core_backend_defaults(include_password=True)
+        except Exception:
+            env_core_cfg = None
+        if isinstance(env_core_cfg, dict) and env_core_cfg:
+            connection_base = backend._merge_core_configs(
+                env_core_cfg,
+                credential_fill,
+                include_password=True,
+            )
+
     merged = backend._merge_core_configs(
-        credential_fill,
+        connection_base,
         cli_override if cli_override else None,
         include_password=True,
     )
@@ -5783,6 +5808,7 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
         phase=str(args.phase or 'execute'),
         core_cfg=core_cfg,
         has_saved_core_source=has_saved_core_source,
+        has_env_core_source=env_remote_source,
         hitl_config=getattr(args, '_prefetched_hitl_config', None),
     )
     if vm_mode_issues:
@@ -7358,11 +7384,13 @@ def _run_flag_sequencing_phase(args: Any) -> int:
         backend=backend,
         scenario_name=scenario_name,
     )
+    env_remote_source = _cli_has_env_remote_source(backend, resolved_core_cfg)
     vm_mode_issues = _cli_vm_mode_config_issues(
         backend,
         phase='flag-sequencing',
         core_cfg=resolved_core_cfg,
         has_saved_core_source=has_saved_core_source,
+        has_env_core_source=env_remote_source,
         hitl_config=None,
     )
     if vm_mode_issues:
@@ -7374,7 +7402,6 @@ def _run_flag_sequencing_phase(args: Any) -> int:
             output_path=args.plan_output,
             json_output=True,
         )
-    env_remote_source = _cli_has_env_remote_source(backend, resolved_core_cfg)
     flow_backend: Any = backend
     if (has_saved_core_source or env_remote_source) and isinstance(resolved_core_cfg, dict) and resolved_core_cfg:
         flow_backend = _BackendProxy(
