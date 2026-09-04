@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.7.1"
+SCRIPT_VERSION="0.7.2"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -981,7 +981,7 @@ runuser -u scenarioforge -- /opt/scenarioforge/.venv/bin/python -m pip install \
 
 install_optional_content() {
     [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]] || return 0
-    local archive=/tmp/scenarioforge-optional-content.tar.gz payload_dir vulnhub_zip
+    local archive=/tmp/scenarioforge-optional-content.tar.gz payload_dir generator_zip vulnhub_zip
     set_bootstrap_status 45 'waiting for requested generator/vulnerability content from the installer host'
     for attempt in $(seq 1 180); do
         [[ -f "$archive" ]] && break
@@ -999,14 +999,51 @@ install_optional_content() {
     rm -f -- "$archive"
 
     if [[ "$INSTALL_FLAG_GENERATORS" == "1" ]]; then
-        set_bootstrap_status 50 'installing flag-generator and flag-node-generator catalogs'
+        set_bootstrap_status 50 'importing flag-generator and flag-node-generator catalogs'
         [[ -d "$payload_dir/flag_generators" && -d "$payload_dir/flag_node_generators" ]] \
             || fail_bootstrap 'optional payload is missing generator catalogs'
-        rm -rf -- /opt/scenarioforge/flag_generators /opt/scenarioforge/flag_node_generators
-        cp -a -- "$payload_dir/flag_generators" "$payload_dir/flag_node_generators" /opt/scenarioforge/
-        find /opt/scenarioforge/flag_generators /opt/scenarioforge/flag_node_generators \
-            -name manifest.yaml -print -quit | grep -q . \
-            || fail_bootstrap 'no generator manifests were installed'
+        generator_zip=/tmp/scenarioforge-generator-catalogs.zip
+        python3 - "$payload_dir" "$generator_zip" <<'GENERATOR_ZIP'
+from pathlib import Path
+import sys
+import zipfile
+
+source = Path(sys.argv[1])
+with zipfile.ZipFile(sys.argv[2], "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    for catalog_dir in ("flag_generators", "flag_node_generators"):
+        for path in (source / catalog_dir).rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(source).as_posix())
+GENERATOR_ZIP
+        chown scenarioforge:scenarioforge "$generator_zip"
+        runuser -u scenarioforge -- env \
+            HOME=/home/scenarioforge PYTHONPATH=/opt/scenarioforge \
+            /opt/scenarioforge/.venv/bin/python - "$generator_zip" <<'GENERATOR_INSTALL'
+import sys
+from webapp import app_backend
+
+ok, note = app_backend._install_generator_pack_or_bundle(
+    zip_path=sys.argv[1],
+    pack_label="raistlinJ flag-generators",
+    pack_origin="https://github.com/raistlinJ/flag-generators",
+)
+if not ok:
+    raise SystemExit(f"Generator catalog import failed: {note}")
+
+flag_generators, flag_errors = app_backend._flag_generators_from_all_installed_sources()
+node_generators, node_errors = app_backend._flag_node_generators_from_all_installed_sources()
+if not flag_generators or not node_generators:
+    errors = [*(flag_errors or []), *(node_errors or [])]
+    detail = f": {errors[0]}" if errors else ""
+    raise SystemExit(
+        "Generator catalog import did not expose both generator kinds" + detail
+    )
+print(
+    f"{note}; visible catalogs contain {len(flag_generators)} flag generators "
+    f"and {len(node_generators)} flag-node generators"
+)
+GENERATOR_INSTALL
+        rm -f -- "$generator_zip"
     fi
 
     if [[ "$INSTALL_VULNHUB" == "1" ]]; then
@@ -1045,7 +1082,7 @@ VULNHUB_INSTALL
         rm -f -- "$vulnhub_zip"
     fi
     chown -R scenarioforge:scenarioforge \
-        /opt/scenarioforge/flag_generators /opt/scenarioforge/flag_node_generators \
+        /opt/scenarioforge/outputs/installed_generators \
         /opt/scenarioforge/outputs/installed_vuln_catalogs 2>/dev/null || true
     rm -rf -- "$payload_dir"
     set_bootstrap_status 60 'requested generator/vulnerability content is installed'

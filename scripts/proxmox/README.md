@@ -177,12 +177,16 @@ directories, and sends them to APP with a generated one-time SSH key. GitHub
 credentials are never copied into a VM, and the transfer key is removed from
 APP after the archive is verified.
 
-`--flag-generators` installs both `flag_generators/` and
-`flag_node_generators/` under `/opt/scenarioforge`. `--vulnhub` imports the
-repository's `vulnhub/` snapshot through ScenarioForge's catalog importer; on
-a fresh VM that catalog becomes the active vulnerability catalog. These flags
-add download, transfer, disk, and import time. They can be pinned with
-`--flag-generators-ref REF` or `SF_FLAG_GENERATORS_REF`.
+`--flag-generators` imports both `flag_generators/` and
+`flag_node_generators/` through ScenarioForge's pack importer. The resulting
+catalog and pack state live under
+`/opt/scenarioforge/outputs/installed_generators`; APP provisioning fails
+instead of claiming readiness unless both catalog kinds are visible.
+`--vulnhub` similarly imports the repository's `vulnhub/` snapshot through
+ScenarioForge's vulnerability-catalog importer; on a fresh VM that catalog
+becomes active. These flags add download, transfer, disk, and import time. They
+can be pinned with `--flag-generators-ref REF` or
+`SF_FLAG_GENERATORS_REF`.
 
 The optional repository contains deliberately vulnerable recipes and challenge
 key material. Use it only in an isolated, trusted lab, and do not expose the

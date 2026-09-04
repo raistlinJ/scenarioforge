@@ -140,10 +140,12 @@ only the selected content with a generated one-time SSH key, and removes that
 key from APP after verification. GitHub credentials are not copied into any
 guest.
 
-`--flag-generators` places the flag and flag-node generator catalogs under
-`/opt/scenarioforge`. `--vulnhub` imports the repository's pinned `vulnhub/`
-snapshot through ScenarioForge's catalog importer and makes it active on a
-fresh install. Use `--flag-generators-ref REF` or
+`--flag-generators` imports the flag and flag-node generator catalogs through
+ScenarioForge's pack importer. Their files and pack state live under
+`/opt/scenarioforge/outputs/installed_generators`, and provisioning verifies
+that both catalog kinds are visible. `--vulnhub` imports the repository's
+pinned `vulnhub/` snapshot through the vulnerability-catalog importer and
+makes it active on a fresh install. Use `--flag-generators-ref REF` or
 `SF_FLAG_GENERATORS_REF=REF` to pin another revision. Both options add install
 time and disk usage.
 

@@ -87,6 +87,10 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "transfer_optional_content_to_app" in source
     assert "INSTALL_FLAG_GENERATORS" in source
     assert "INSTALL_VULNHUB" in source
+    assert "_install_generator_pack_or_bundle" in source
+    assert "_flag_generators_from_all_installed_sources" in source
+    assert "_flag_node_generators_from_all_installed_sources" in source
+    assert "/opt/scenarioforge/outputs/installed_generators" in source
     assert "_install_vuln_catalog_zip_file" in source
     assert "PYTHONPATH=/opt/scenarioforge" in source
     assert "do not embed credentials in SF_FLAG_GENERATORS_URL" in source
@@ -597,6 +601,8 @@ write_cloud_init_files
 
     app_script = (tmp_path / "app-bootstrap.sh").read_text(encoding="utf-8")
     for start, end in (
+        ("<<'GENERATOR_ZIP'\n", "\nGENERATOR_ZIP"),
+        ("<<'GENERATOR_INSTALL'\n", "\nGENERATOR_INSTALL"),
         ("<<'VULNHUB_ZIP'\n", "\nVULNHUB_ZIP"),
         ("<<'VULNHUB_INSTALL'\n", "\nVULNHUB_INSTALL"),
     ):
