@@ -529,9 +529,10 @@ write_vmware_cloud_init_files() {
     local file
     for file in core-user.yaml app-user.yaml participant-user.yaml; do
         sed \
-            -e 's/packages: \[git, curl, ca-certificates, qemu-guest-agent\]/packages: [git, curl, ca-certificates, open-vm-tools, open-vm-tools-desktop]/' \
-            -e 's/packages: \[qemu-guest-agent\]/packages: [open-vm-tools, open-vm-tools-desktop]/' \
+            -e 's/packages: \[git, curl, ca-certificates, qemu-guest-agent, spice-vdagent\]/packages: [git, curl, ca-certificates, open-vm-tools, open-vm-tools-desktop]/' \
+            -e 's/packages: \[qemu-guest-agent, spice-vdagent\]/packages: [open-vm-tools, open-vm-tools-desktop]/' \
             -e 's/qemu-guest-agent/open-vm-tools.service/' \
+            -e '/spice-vdagentd\.socket.*spice-vdagentd\.service/d' \
             "$WORK_DIR/$file" > "$WORK_DIR/$file.new"
         mv -f -- "$WORK_DIR/$file.new" "$WORK_DIR/$file"
     done

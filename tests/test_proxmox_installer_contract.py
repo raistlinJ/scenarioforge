@@ -65,6 +65,8 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "command -v core-gui" in source
     assert "systemctl enable --now lightdm" in source
     assert "--serial0 socket --vga std,clipboard=vnc" in source
+    assert source.count("qemu-guest-agent, spice-vdagent") == 3
+    assert source.count("[systemctl, start, spice-vdagentd.socket, spice-vdagentd.service]") == 3
     assert "/var/lib/scenarioforge/participant-ready" in source
     assert 'qm set "$PARTICIPANT_VMID" --delete net1' in source
     assert "report_guest_activity CORE" in source
@@ -717,6 +719,16 @@ write_cloud_init_files
         "ssh-ed25519 AAAAuser operator",
         "ssh-ed25519 AAAAtransfer scenarioforge-installer-transfer",
     ]
+
+    for user_data in (core_user, app_user, participant_user):
+        assert "qemu-guest-agent" in user_data["packages"]
+        assert "spice-vdagent" in user_data["packages"]
+        assert [
+            "systemctl",
+            "start",
+            "spice-vdagentd.socket",
+            "spice-vdagentd.service",
+        ] in user_data["runcmd"]
 
     for path in tmp_path.glob("*.yaml"):
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))

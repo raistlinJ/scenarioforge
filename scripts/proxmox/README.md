@@ -321,7 +321,10 @@ Use the VM usernames and passwords printed at completion. The CORE desktop has a
 automatically in the background. The app and participant desktops start through
 LightDM as soon as their bootstrap completes, without an additional VM reboot.
 The noVNC clipboard control is available because each VM is created with
-`vga: std,clipboard=vnc`.
+`vga: std,clipboard=vnc`. Cloud-Init installs `spice-vdagent` in all three
+guests and starts its system daemon; its standard XDG autostart entry launches
+the per-user clipboard agent at each XFCE login. Use the clipboard button in
+noVNC's left-side control panel to transfer text to or from the guest clipboard.
 The APP desktop includes Epiphany and a **ScenarioForge** launcher that opens
 `https://localhost/`; the self-signed certificate produces an expected warning.
 It also includes Terminator, the Evince PDF viewer, the xdot Graphviz viewer,

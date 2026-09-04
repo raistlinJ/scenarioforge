@@ -1605,7 +1605,7 @@ $standard_public_key
 chpasswd:
   expire: false
 package_update: true
-packages: [git, curl, ca-certificates, qemu-guest-agent]
+packages: [git, curl, ca-certificates, qemu-guest-agent, spice-vdagent]
 write_files:
   - path: /etc/scenarioforge-installer.env
     owner: root:root
@@ -1619,6 +1619,7 @@ write_files:
     content: $core_script_b64
 runcmd:
   - [systemctl, enable, --now, qemu-guest-agent]
+  - [systemctl, start, spice-vdagentd.socket, spice-vdagentd.service]
   - [bash, /usr/local/sbin/scenarioforge-core-bootstrap]
 EOF
 
@@ -1640,7 +1641,7 @@ $app_public_key
 chpasswd:
   expire: false
 package_update: true
-packages: [git, curl, ca-certificates, qemu-guest-agent]
+packages: [git, curl, ca-certificates, qemu-guest-agent, spice-vdagent]
 write_files:
   - path: /etc/scenarioforge-installer.env
     owner: root:root
@@ -1654,6 +1655,7 @@ write_files:
     content: $app_script_b64
 runcmd:
   - [systemctl, enable, --now, qemu-guest-agent]
+  - [systemctl, start, spice-vdagentd.socket, spice-vdagentd.service]
   - [bash, /usr/local/sbin/scenarioforge-app-bootstrap]
 EOF
 
@@ -1675,7 +1677,7 @@ $standard_public_key
 chpasswd:
   expire: false
 package_update: true
-packages: [qemu-guest-agent]
+packages: [qemu-guest-agent, spice-vdagent]
 write_files:
   - path: /usr/local/sbin/scenarioforge-participant-bootstrap
     owner: root:root
@@ -1684,6 +1686,7 @@ write_files:
     content: $participant_script_b64
 runcmd:
   - [systemctl, enable, --now, qemu-guest-agent]
+  - [systemctl, start, spice-vdagentd.socket, spice-vdagentd.service]
   - [bash, /usr/local/sbin/scenarioforge-participant-bootstrap]
 final_message: Participant XFCE VM is ready
 EOF

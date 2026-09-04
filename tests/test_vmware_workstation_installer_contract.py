@@ -233,6 +233,7 @@ write_vmware_cloud_init_files
     for role in ("core", "app", "participant"):
         cloud_config = (tmp_path / f"{role}-user.yaml").read_text(encoding="utf-8")
         assert "qemu-guest-agent" not in cloud_config
+        assert "spice-vdagent" not in cloud_config
         assert "open-vm-tools" in cloud_config
         assert "open-vm-tools-desktop" in cloud_config
         assert "open-vm-tools.service" in cloud_config
