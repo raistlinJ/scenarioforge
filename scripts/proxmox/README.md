@@ -297,16 +297,44 @@ The noVNC clipboard control is available because each VM is created with
 The APP desktop includes Epiphany and a **ScenarioForge** launcher that opens
 `https://localhost/`; the self-signed certificate produces an expected warning.
 
-ScenarioForge itself is not containerized on the app VM. Its source and Python
-environment live under `/opt/scenarioforge`; systemd starts the backend on
-`127.0.0.1:9090`, and native nginx publishes HTTPS on port 443. Useful checks
-inside that VM are:
+ScenarioForge itself is not containerized on the app VM. A complete Git clone
+and its Python environment live under `/opt/scenarioforge`; systemd starts the
+backend on `127.0.0.1:9090`, and native nginx publishes HTTPS on port 443. The
+installer puts `uv` and `uvx` in `/usr/local/bin` and synchronizes `.venv` from
+the committed `pyproject.toml` and `uv.lock`. Useful checks inside that VM are:
 
 ```bash
 sudo systemctl status scenarioforge-web nginx
 sudo journalctl -u scenarioforge-web -u nginx -n 100 --no-pager
 curl -k https://127.0.0.1/healthz
 ```
+
+To update application code and locked runtime dependencies on the APP VM:
+
+```bash
+sudo -u scenarioforge git -C /opt/scenarioforge pull --ff-only origin main
+sudo -u scenarioforge env HOME=/home/scenarioforge UV_CACHE_DIR=/home/scenarioforge/.cache/uv \
+  uv sync --frozen --no-dev --project /opt/scenarioforge
+sudo systemctl restart scenarioforge-web
+curl -fsS http://127.0.0.1:9090/healthz
+```
+
+An APP VM provisioned by an older installer may not have `uv` yet. Install it
+once without changing the ScenarioForge environment, then use the update steps
+above:
+
+```bash
+sudo python3 -m venv /opt/uv
+sudo /opt/uv/bin/python -m pip install --disable-pip-version-check --no-cache-dir --upgrade uv
+sudo ln -sfn /opt/uv/bin/uv /usr/local/bin/uv
+sudo ln -sfn /opt/uv/bin/uvx /usr/local/bin/uvx
+uv --version
+```
+
+The pull and sync leave `.scenarioforge.env` and `outputs/` intact because both
+are excluded from Git. Installer-owned systemd, nginx, OS-package, and desktop
+changes still require manual application or fresh provisioning; `uv sync`
+updates only the repository-managed Python environment.
 
 The TLS certificate is self-signed, so browsers show a trust warning until it is
 replaced with a certificate trusted by the operator's environment.

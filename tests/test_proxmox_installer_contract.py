@@ -70,7 +70,13 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "on_unexpected_error" in source
     assert "guest_progress_text" in source
     assert "set_bootstrap_status 10 'installing system packages and building CORE from source'" in source
-    assert "set_bootstrap_status 30 'creating the native ScenarioForge Python environment'" in source
+    assert "set_bootstrap_status 27 'installing uv for ScenarioForge dependency management'" in source
+    assert "/opt/uv/bin/python -m pip install --disable-pip-version-check --no-cache-dir --upgrade uv" in source
+    assert "ln -sfn /opt/uv/bin/uv /usr/local/bin/uv" in source
+    assert "ln -sfn /opt/uv/bin/uvx /usr/local/bin/uvx" in source
+    assert "set_bootstrap_status 30 'synchronizing the native ScenarioForge Python environment with uv'" in source
+    assert "uv sync --frozen --no-dev --project /opt/scenarioforge" in source
+    assert "-r /opt/scenarioforge/webapp/requirements.txt" not in source
     assert "set_bootstrap_status 25 'installing the minimal XFCE desktop'" in source
     assert 'set_bootstrap_status "$percent" "failed (exit $exit_code at bootstrap line $line: $command)"' in source
     assert 'trap \'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"\' ERR' in source

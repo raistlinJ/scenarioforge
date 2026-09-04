@@ -1000,11 +1000,16 @@ else
 fi
 chown -R scenarioforge:scenarioforge /opt/scenarioforge
 
-set_bootstrap_status 30 'creating the native ScenarioForge Python environment'
-runuser -u scenarioforge -- python3 -m venv /opt/scenarioforge/.venv
-runuser -u scenarioforge -- /opt/scenarioforge/.venv/bin/python -m pip install --upgrade pip
-runuser -u scenarioforge -- /opt/scenarioforge/.venv/bin/python -m pip install \
-    -r /opt/scenarioforge/webapp/requirements.txt
+set_bootstrap_status 27 'installing uv for ScenarioForge dependency management'
+python3 -m venv /opt/uv
+/opt/uv/bin/python -m pip install --disable-pip-version-check --no-cache-dir --upgrade uv
+ln -sfn /opt/uv/bin/uv /usr/local/bin/uv
+ln -sfn /opt/uv/bin/uvx /usr/local/bin/uvx
+uv --version
+
+set_bootstrap_status 30 'synchronizing the native ScenarioForge Python environment with uv'
+runuser -u scenarioforge -- env HOME=/home/scenarioforge UV_CACHE_DIR=/home/scenarioforge/.cache/uv \
+    uv sync --frozen --no-dev --project /opt/scenarioforge
 
 install_optional_content() {
     [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]] || return 0
