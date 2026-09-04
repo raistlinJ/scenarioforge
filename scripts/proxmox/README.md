@@ -327,6 +327,8 @@ the per-user clipboard agent at each XFCE login. Use the clipboard button in
 noVNC's left-side control panel to transfer text to or from the guest clipboard.
 The APP desktop includes Epiphany and a **ScenarioForge** launcher that opens
 `https://localhost/`; the self-signed certificate produces an expected warning.
+Its XFCE session requests an initial 1600x900 display when available and leaves
+an already larger display alone.
 It also includes Terminator, the Evince PDF viewer, the xdot Graphviz viewer,
 and a **JSON Viewer** application backed by Mousepad. The `jq` command is
 available for structured JSON inspection in a terminal.

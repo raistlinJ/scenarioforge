@@ -1123,7 +1123,7 @@ apt-get update
 apt-get install -y --no-install-recommends \
     build-essential dbus-x11 epiphany-browser evince graphviz jq lightdm lightdm-gtk-greeter \
     mousepad nginx openssl python3-dev python3-full python3-venv terminator xdot xfce4 xorg \
-    xserver-xorg-input-all xserver-xorg-video-all xterm
+    x11-xserver-utils xserver-xorg-input-all xserver-xorg-video-all xterm
 systemctl set-default graphical.target
 systemctl enable --now lightdm
 for desktop_command in epiphany evince jq mousepad terminator xdot; do
@@ -1154,6 +1154,38 @@ Categories=Education;Network;WebBrowser;
 SCENARIOFORGE_DESKTOP
 chown scenarioforge:scenarioforge /home/scenarioforge/Desktop/scenarioforge.desktop
 chmod 0755 /home/scenarioforge/Desktop/scenarioforge.desktop
+
+# Start the APP desktop at a useful working size while preserving VMware/SPICE
+# dynamic resize support. Never shrink an already larger display, and tolerate
+# hypervisors that do not advertise every fallback mode.
+cat > /usr/local/bin/scenarioforge-app-display <<'APP_DISPLAY_SCRIPT'
+#!/bin/sh
+command -v xrandr >/dev/null 2>&1 || exit 0
+output="$(xrandr --query 2>/dev/null | awk '$2 == "connected" { print $1; exit }')"
+[ -n "$output" ] || exit 0
+current="$(xrandr --query 2>/dev/null | awk '$2 == "connected" { for (i = 3; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+\+/) { split($i, size, /[x+]/); print size[1], size[2]; exit } }')"
+set -- $current
+if [ "${1:-0}" -ge 1600 ] 2>/dev/null && [ "${2:-0}" -ge 900 ] 2>/dev/null; then
+    exit 0
+fi
+for mode in 1600x900 1440x900 1366x768; do
+    xrandr --output "$output" --mode "$mode" >/dev/null 2>&1 && exit 0
+done
+exit 0
+APP_DISPLAY_SCRIPT
+chmod 0755 /usr/local/bin/scenarioforge-app-display
+install -d -o scenarioforge -g scenarioforge -m 0755 /home/scenarioforge/.config/autostart
+cat > /home/scenarioforge/.config/autostart/scenarioforge-display.desktop <<'APP_DISPLAY_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=ScenarioForge display setup
+Comment=Set a comfortable initial APP desktop resolution
+Exec=/usr/local/bin/scenarioforge-app-display
+OnlyShowIn=XFCE;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+APP_DISPLAY_DESKTOP
+chown scenarioforge:scenarioforge /home/scenarioforge/.config/autostart/scenarioforge-display.desktop
 
 set_bootstrap_status 20 'cloning the ScenarioForge repository'
 if [[ ! -d /opt/scenarioforge/.git ]]; then

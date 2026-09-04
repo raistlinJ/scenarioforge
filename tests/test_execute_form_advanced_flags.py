@@ -123,6 +123,19 @@ def test_execute_summary_uses_validation_unavailable_details() -> None:
     assert not missing, "Missing validation_unavailable details summary wiring: " + "; ".join(missing)
 
 
+def test_execute_summary_status_icons_do_not_require_emoji_fonts() -> None:
+    text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
+    renderer = text.split(
+        "function renderExecuteSummaryItem(label, ok, detail, items = [])", maxsplit=1
+    )[1].split("function normalizeExecuteRunErrorMessage", maxsplit=1)[0]
+
+    assert "icon.innerHTML = ok" in renderer
+    assert '<svg viewBox="0 0 20 20"' in renderer
+    assert "icon.setAttribute('aria-label', ok ? 'Passed' : 'Failed')" in renderer
+    assert "✅" not in renderer
+    assert "❌" not in renderer
+
+
 def test_execute_summary_includes_flow_live_paths() -> None:
     text = TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 

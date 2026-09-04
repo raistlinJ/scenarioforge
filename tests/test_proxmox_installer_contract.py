@@ -96,6 +96,10 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert "evince graphviz jq" in source
     assert "mousepad nginx" in source
     assert "terminator xdot xfce4" in source
+    assert "x11-xserver-utils xserver-xorg-input-all" in source
+    assert "/usr/local/bin/scenarioforge-app-display" in source
+    assert "for mode in 1600x900 1440x900 1366x768" in source
+    assert "/home/scenarioforge/.config/autostart/scenarioforge-display.desktop" in source
     assert "scenarioforge-json-viewer.desktop" in source
     assert "Exec=mousepad %F" in source
     assert "MimeType=application/json;application/ld+json;" in source

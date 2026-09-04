@@ -148,6 +148,13 @@ def test_preview_execution_modal_shows_summary_generation_and_cannot_be_hidden()
     assert "status: 'Calculating Execution Report Summary, please wait...'" in script_text
     assert "id('executeProgressHideBtn')" not in script_text
     assert 'function renderExecuteSummaryItem(label, ok, detail, items = [])' in script_text
+    summary_renderer = script_text.split(
+        'function renderExecuteSummaryItem(label, ok, detail, items = [])', maxsplit=1
+    )[1].split('function normalizeExecuteRunError', maxsplit=1)[0]
+    assert 'icon.innerHTML = ok' in summary_renderer
+    assert '<svg viewBox="0 0 20 20"' in summary_renderer
+    assert '✅' not in summary_renderer
+    assert '❌' not in summary_renderer
     assert "'Generator inject sources present on CORE VM'" in script_text
 
 

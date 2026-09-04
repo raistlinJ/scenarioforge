@@ -199,7 +199,9 @@ adapter before returning; CORE and APP continue in the background.
 
 The certificate is self-signed, so the browser warning is expected. The APP
 desktop includes a ScenarioForge launcher, Epiphany, Terminator, Evince, xdot,
-Mousepad, and `jq`. No VM restart is required after installation.
+Mousepad, and `jq`. Its XFCE session requests an initial 1600x900 display when
+the virtual display supports it, without shrinking a larger display. No VM
+restart is required after installation.
 
 ## Cleanup
 

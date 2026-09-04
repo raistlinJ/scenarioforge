@@ -19856,8 +19856,14 @@
         const li = document.createElement('li');
         li.className = 'list-group-item d-flex align-items-start gap-2';
         const icon = document.createElement('span');
-        icon.textContent = ok ? '✅' : '❌';
-        icon.className = 'me-1';
+        icon.className = `me-1 flex-shrink-0 ${ok ? 'text-success' : 'text-danger'}`;
+        icon.setAttribute('role', 'img');
+        icon.setAttribute('aria-label', ok ? 'Passed' : 'Failed');
+        // Keep status rendering independent of color-emoji fonts. Minimal
+        // provisioned Linux desktops otherwise show empty glyph boxes here.
+        icon.innerHTML = ok
+            ? '<svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor"></circle><path d="M5.5 10.2 8.6 13.2 14.5 6.8" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>'
+            : '<svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor"></circle><path d="M6.8 6.8 13.2 13.2 M13.2 6.8 6.8 13.2" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"></path></svg>';
         const body = document.createElement('div');
         body.className = 'flex-grow-1';
         const title = document.createElement('div');

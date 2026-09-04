@@ -15,7 +15,9 @@ interface name `ens19`. ScenarioForge is installed natively, not with Docker.
 
 The APP desktop has a **ScenarioForge** launcher that opens the local Web GUI
 in Epiphany at `https://localhost/`. Its self-signed certificate causes an
-expected browser warning; no VM restart is required after provisioning.
+expected browser warning; no VM restart is required after provisioning. Its
+XFCE session requests an initial 1600x900 display when available and leaves an
+already larger display alone.
 The desktop also includes Terminator, Evince for PDFs, xdot for Graphviz files,
 and a **JSON Viewer** backed by Mousepad; `jq` is available in the terminal.
 
