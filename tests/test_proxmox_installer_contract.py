@@ -133,6 +133,21 @@ printf '%s\n' "$REQUESTED_CORE_PASSWORD" "$REQUESTED_APP_PASSWORD" \
     assert result.stdout.splitlines() == list(values)
 
 
+def test_default_passwords_are_ten_character_alphanumeric_values() -> None:
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+for _ in $(seq 1 20); do random_password; done
+"""
+    result = subprocess.run(
+        ["bash", "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    passwords = result.stdout.splitlines()
+    assert len(passwords) == 20
+    assert len(set(passwords)) == 20
+    assert all(len(password) == 10 and password.isalnum() for password in passwords)
+
+
 def test_progress_output_and_parallel_guest_weighting() -> None:
     probe = f"""
 source {shlex.quote(str(INSTALLER))}

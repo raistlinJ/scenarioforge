@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.7.0"
+SCRIPT_VERSION="0.7.1"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -680,7 +680,12 @@ prepare_optional_content() {
 }
 
 random_password() {
-    openssl rand -hex 16
+    local password="" chunk
+    while (( ${#password} < 10 )); do
+        chunk="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9')"
+        password+="$chunk"
+    done
+    printf '%s\n' "${password:0:10}"
 }
 
 random_mac() {
