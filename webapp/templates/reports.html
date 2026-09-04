@@ -206,23 +206,52 @@ function setReportGenerationNavigationGuard(enabled){
   else window.removeEventListener('beforeunload', reportGenerationBeforeUnload);
 }
 
-function showReportGenerationModal(kindLabel){
+function waitForReportUiPaint(){
+  return new Promise((resolve) => {
+    try {
+      const raf = window.requestAnimationFrame
+        ? (callback) => window.requestAnimationFrame(callback)
+        : (callback) => window.setTimeout(callback, 0);
+      raf(() => raf(resolve));
+    } catch (_err) {
+      window.setTimeout(resolve, 0);
+    }
+  });
+}
+
+function setReportGenerationStatus(status, detail){
+  if (reportGenerationModalStatusEl) reportGenerationModalStatusEl.textContent = String(status || 'Generating…');
+  if (reportGenerationModalDetailEl && detail) reportGenerationModalDetailEl.textContent = String(detail);
+}
+
+function setReportDownloadLinksBusy(busy){
+  document.querySelectorAll('.report-download-action').forEach((link) => {
+    link.classList.toggle('disabled', !!busy);
+    if (busy) link.setAttribute('aria-disabled', 'true');
+    else link.removeAttribute('aria-disabled');
+  });
+}
+
+async function showReportGenerationModal(kindLabel){
   ensureReportGenerationModal();
   reportGenerationState.active = true;
   setReportGenerationNavigationGuard(true);
+  setReportDownloadLinksBusy(true);
   if (reportGenerationModalTitleEl) reportGenerationModalTitleEl.textContent = 'Generating…';
-  if (reportGenerationModalStatusEl) reportGenerationModalStatusEl.textContent = 'Generating…';
-  if (reportGenerationModalDetailEl) reportGenerationModalDetailEl.textContent = kindLabel
-    ? `Please wait while ${kindLabel} is prepared.`
-    : 'Please wait while the report artifact is prepared.';
+  setReportGenerationStatus(
+    kindLabel ? `Preparing ${kindLabel}…` : 'Preparing download…',
+    'Please keep this page open while ScenarioForge generates the artifact.'
+  );
   if (reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl.classList.remove('d-none');
   if (reportGenerationModalFooterEl) reportGenerationModalFooterEl.classList.add('d-none');
   if (reportGenerationModalInst) reportGenerationModalInst.show();
+  await waitForReportUiPaint();
 }
 
 function hideReportGenerationModal(){
   reportGenerationState.active = false;
   setReportGenerationNavigationGuard(false);
+  setReportDownloadLinksBusy(false);
   ensureReportGenerationModal();
   if (reportGenerationModalInst) reportGenerationModalInst.hide();
 }
@@ -231,9 +260,9 @@ function showReportGenerationError(message){
   ensureReportGenerationModal();
   reportGenerationState.active = false;
   setReportGenerationNavigationGuard(false);
+  setReportDownloadLinksBusy(false);
   if (reportGenerationModalTitleEl) reportGenerationModalTitleEl.textContent = 'Generation failed';
-  if (reportGenerationModalStatusEl) reportGenerationModalStatusEl.textContent = 'Unable to generate the requested download.';
-  if (reportGenerationModalDetailEl) reportGenerationModalDetailEl.textContent = String(message || 'An unexpected error occurred.');
+  setReportGenerationStatus('Unable to generate the requested download.', String(message || 'An unexpected error occurred.'));
   if (reportGenerationModalSpinnerEl) reportGenerationModalSpinnerEl.classList.add('d-none');
   if (reportGenerationModalFooterEl) reportGenerationModalFooterEl.classList.remove('d-none');
   if (reportGenerationModalInst) reportGenerationModalInst.show();
@@ -318,14 +347,22 @@ function buildSummaryDownloadHtml(r){
 }
 
 function downloadBlob(blob, filename) {
+  if (!(blob instanceof Blob) || !blob.size) throw new Error('Generated artifact was empty.');
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+async function startReportArtifactDownload(blob, filename, kindLabel) {
+  setReportGenerationStatus('Starting download…', `${kindLabel || 'Artifact'} is ready.`);
+  await waitForReportUiPaint();
+  downloadBlob(blob, filename);
 }
 
 const guideHtmlBlockRegistry = new Map();
@@ -2496,60 +2533,73 @@ async function handleReportDownloadAction(link) {
   const previewPlanPath = String(link.dataset.previewPlan || '').trim();
   const xmlPath = String(link.dataset.xmlPath || '').trim();
   if (!kind || !scenario) throw new Error('Missing report export context.');
+  setReportGenerationStatus('Loading saved Flow data…');
   const preview = await fetchReportFlowPreview(scenario, previewPlanPath, xmlPath);
   const chain = Array.isArray(preview.chain) ? preview.chain : [];
   const assignments = Array.isArray(preview.flag_assignments) ? preview.flag_assignments : [];
   const norm = normalizeScenarioNorm(scenario).replace(/\s+/g, '_') || 'scenario';
   const len = String(chain.length || 0);
   if (kind === 'preview-plan-html') {
+    setReportGenerationStatus('Building Flow/Preview Plan HTML…');
     const markdown = buildFlowPreviewPlanMarkdown(scenario, preview);
     const html = markdownToHtmlDocument(`Flow/Preview Plan - ${scenario}`, markdown);
-    downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), `flow_preview_plan_${norm}_${len}.html`);
+    await startReportArtifactDownload(new Blob([html], { type: 'text/html;charset=utf-8' }), `flow_preview_plan_${norm}_${len}.html`, reportDownloadLabel(kind));
     return;
   }
   if (kind === 'participant-guide' || kind === 'facilitator-guide') {
+    setReportGenerationStatus('Collecting vulnerability notes…');
     const vulnReadmeEntries = await _reportGuideBuildVulnReadmeEntries(chain, assignments);
+    setReportGenerationStatus('Building guide HTML…');
     const markdown = buildReportGuideMarkdown(scenario, chain, assignments, { facilitator: kind === 'facilitator-guide', vulnReadmeEntries, participantNetworkSetup: preview.participant_network_setup, preview });
     const fname = kind === 'facilitator-guide'
       ? `facilitator_guide_${norm}_${len}.html`
       : `participant_steps_${norm}_${len}.html`;
     const html = markdownToHtmlDocument(kind === 'facilitator-guide' ? `Facilitator Guide - ${scenario}` : `Participant Steps Guide - ${scenario}`, markdown);
-    downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), fname);
+    await startReportArtifactDownload(new Blob([html], { type: 'text/html;charset=utf-8' }), fname, reportDownloadLabel(kind));
     return;
   }
+  setReportGenerationStatus(`Building ${reportDownloadLabel(kind)}…`);
   const exportData = await fetchReportFlowExports(scenario, chain, assignments, {
     previewPlanPath: preview.preview_plan_path || previewPlanPath || xmlPath,
     xmlPath: xmlPath || preview.preview_plan_path || previewPlanPath,
   });
+  if (!exportData || exportData.ok === false) {
+    throw new Error(String(exportData && (exportData.error || exportData.message) || 'Export data was unavailable.'));
+  }
   const exportChain = Array.isArray(exportData.chain) ? exportData.chain : chain;
   const exportLen = String(exportChain.length || chain.length || 0);
   if (kind === 'afb') {
-    if (!exportData.afb) throw new Error('No .afb returned by server.');
-    downloadBlob(new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json' }), `attackflow_builder_${norm}_${exportLen}.afb`);
+    if (!exportData.afb) throw new Error('No Attack Flow artifact was returned by the server.');
+    await startReportArtifactDownload(new Blob([JSON.stringify(exportData.afb, null, 2)], { type: 'application/json;charset=utf-8' }), `attackflow_builder_${norm}_${exportLen}.afb`, reportDownloadLabel(kind));
     return;
   }
   if (kind === 'attack-graph-json') {
-    if (!exportData.attack_graph) throw new Error('No attack graph returned by server.');
-    downloadBlob(new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json' }), `attack_graph_${norm}_${exportLen}.json`);
+    if (!exportData.attack_graph) throw new Error('No attack graph was returned by the server.');
+    await startReportArtifactDownload(new Blob([JSON.stringify(exportData.attack_graph, null, 2)], { type: 'application/json;charset=utf-8' }), `attack_graph_${norm}_${exportLen}.json`, reportDownloadLabel(kind));
     return;
   }
   if (kind === 'attack-graph-dot') {
-    const dot = exportData.attack_graph_dot ? String(exportData.attack_graph_dot) : '';
-    if (!dot) throw new Error('No attack graph .dot returned by server.');
-    downloadBlob(new Blob([dot], { type: 'text/vnd.graphviz' }), `attack_graph_${norm}_${exportLen}.dot`);
+    const dot = String(exportData.attack_graph_dot || '');
+    if (!dot.trim()) throw new Error('No attack graph .dot artifact was returned by the server.');
+    await startReportArtifactDownload(new Blob([dot], { type: 'text/vnd.graphviz;charset=utf-8' }), `attack_graph_${norm}_${exportLen}.dot`, reportDownloadLabel(kind));
     return;
   }
   if (kind === 'attack-graph-pdf') {
-    const b64 = exportData.attack_graph_pdf_base64 ? String(exportData.attack_graph_pdf_base64) : '';
-    if (!b64) throw new Error('Attack graph PDF unavailable (Graphviz not installed).');
-    const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    downloadBlob(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${exportLen}.pdf`);
+    const b64 = String(exportData.attack_graph_pdf_base64 || '');
+    if (!b64) throw new Error('Attack graph PDF is unavailable. Verify that Graphviz is installed on the ScenarioForge server.');
+    let bin;
+    try {
+      bin = Uint8Array.from(atob(b64), (character) => character.charCodeAt(0));
+    } catch (_err) {
+      throw new Error('The server returned an invalid attack graph PDF.');
+    }
+    await startReportArtifactDownload(new Blob([bin], { type: 'application/pdf' }), `attack_graph_${norm}_${exportLen}.pdf`, reportDownloadLabel(kind));
     return;
   }
   if (kind === 'solutions-script') {
-    const script = exportData.solutions_script ? String(exportData.solutions_script) : '';
-    if (!script.trim()) throw new Error('No solutions script returned by server (flow may not be resolved).');
-    downloadBlob(new Blob([script], { type: 'application/x-sh;charset=utf-8' }), `solutions_${norm}_${exportLen}.sh`);
+    const script = String(exportData.solutions_script || '');
+    if (!script.trim()) throw new Error('No solutions script was returned by the server. Resolve the flow and try again.');
+    await startReportArtifactDownload(new Blob([script], { type: 'text/x-shellscript;charset=utf-8' }), `solutions_${norm}_${exportLen}.sh`, reportDownloadLabel(kind));
     return;
   }
   throw new Error('Unknown download type.');
@@ -2588,8 +2638,8 @@ document.addEventListener('click', async (event) => {
   event.preventDefault();
   if (link.dataset.busy === '1' || reportGenerationState.active) return;
   link.dataset.busy = '1';
-  showReportGenerationModal(reportDownloadLabel(link.dataset.kind));
   try {
+    await showReportGenerationModal(reportDownloadLabel(link.dataset.kind));
     await handleReportDownloadAction(link);
     hideReportGenerationModal();
   } catch (err) {

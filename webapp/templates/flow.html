@@ -14427,6 +14427,12 @@ ${out.join('\n')}
 
   let flowDownloadModalInstance = null;
   let flowDownloadInProgress = false;
+  const flowDownloadBeforeUnload = (event) => {
+    if (!flowDownloadInProgress) return undefined;
+    event.preventDefault();
+    event.returnValue = '';
+    return '';
+  };
 
   const flowDownloadActions = [
     [downloadAfbLink, 'afb'],
@@ -14478,6 +14484,7 @@ ${out.join('\n')}
 
   async function showFlowDownloadModal(kind) {
     ensureFlowDownloadModal();
+    window.addEventListener('beforeunload', flowDownloadBeforeUnload);
     const label = flowDownloadLabel(kind);
     if (flowDownloadTitleEl) flowDownloadTitleEl.textContent = 'Generating download…';
     setFlowDownloadModalStatus(`Preparing ${label}…`, 'Please keep this page open while ScenarioForge generates the artifact.');
@@ -14488,12 +14495,14 @@ ${out.join('\n')}
   }
 
   function hideFlowDownloadModal() {
+    window.removeEventListener('beforeunload', flowDownloadBeforeUnload);
     ensureFlowDownloadModal();
     if (flowDownloadModalInstance) flowDownloadModalInstance.hide();
   }
 
   function showFlowDownloadError(message) {
     ensureFlowDownloadModal();
+    window.removeEventListener('beforeunload', flowDownloadBeforeUnload);
     if (flowDownloadTitleEl) flowDownloadTitleEl.textContent = 'Download generation failed';
     setFlowDownloadModalStatus('Unable to generate the requested artifact.', String(message || 'An unexpected error occurred.'));
     if (flowDownloadSpinnerEl) flowDownloadSpinnerEl.classList.add('d-none');

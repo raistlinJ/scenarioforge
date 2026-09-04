@@ -90,6 +90,8 @@ def test_flow_downloads_share_a_working_modal_and_cover_every_export_artifact() 
         'data-bs-backdrop="static"',
         'data-bs-keyboard="false"',
         "async function showFlowDownloadModal(kind)",
+        "window.addEventListener('beforeunload', flowDownloadBeforeUnload);",
+        "window.removeEventListener('beforeunload', flowDownloadBeforeUnload);",
         "await waitForFlowUiPaint();",
         "setFlowDownloadModalStatus('Refreshing chain assignments…');",
         "const exportData = await refreshAssignmentsFromChain({ silent: true, throwOnError: true, skipRender: true });",
