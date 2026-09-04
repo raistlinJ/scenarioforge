@@ -93,6 +93,10 @@ WAIT_FOR_BOOTSTRAP=1
 STATUS_WATCH=0
 VERBOSE="${SF_VERBOSE:-0}"
 HEADLESS=0
+MANAGE_HITL_NETWORK="${SF_VMWARE_MANAGE_HITL_NETWORK:-0}"
+INSTALLER_CREATED_HITL_VMNET=""
+INSTALLER_CREATED_HITL_SUBNET=""
+INSTALLER_CREATED_HITL_NETMASK=""
 WORK_DIR=""
 INSTALL_PERCENT=0
 INSTALL_PHASE=""
@@ -210,6 +214,10 @@ apply_vmware_config_value() {
             parse_config_boolean "$key" "$value"
             assign_config_setting INSTALL_VULNHUB SF_INSTALL_VULNHUB "$CONFIG_BOOLEAN_VALUE"
             ;;
+        manage_hitl_network)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting MANAGE_HITL_NETWORK SF_VMWARE_MANAGE_HITL_NETWORK "$CONFIG_BOOLEAN_VALUE"
+            ;;
         wait_minutes) assign_config_setting WAIT_MINUTES SF_WAIT_MINUTES "$value" ;;
         no_wait) parse_config_boolean "$key" "$value"; WAIT_FOR_BOOTSTRAP=$((1 - CONFIG_BOOLEAN_VALUE)) ;;
         headless) parse_config_boolean "$key" "$value"; HEADLESS="$CONFIG_BOOLEAN_VALUE" ;;
@@ -255,6 +263,8 @@ parse_args() {
             --web-admin-password) REQUESTED_WEB_ADMIN_PASSWORD="${2:?missing value for --web-admin-password}"; shift 2 ;;
             --flag-generators) INSTALL_FLAG_GENERATORS=1; shift ;;
             --vulnhub) INSTALL_VULNHUB=1; shift ;;
+            --manage-hitl-network) MANAGE_HITL_NETWORK=1; shift ;;
+            --no-manage-hitl-network) MANAGE_HITL_NETWORK=0; shift ;;
             --wait-minutes) WAIT_MINUTES="${2:?missing value for --wait-minutes}"; shift 2 ;;
             --no-wait) WAIT_FOR_BOOTSTRAP=0; shift ;;
             --headless) HEADLESS=1; shift ;;
@@ -363,6 +373,22 @@ validate_hitl_isolation() {
     fi
 }
 
+validate_host_networks() {
+    host_network_exists "$MANAGEMENT_VMNET" \
+        || die "management network $MANAGEMENT_VMNET was not found in $VMWARE_PRODUCT_NAME"
+    host_network_exists "$HITL_VMNET" \
+        || die "HITL network $HITL_VMNET was not found; create it in $VMWARE_NETWORK_EDITOR_NAME first"
+    validate_hitl_isolation
+}
+
+# Platform wrappers can plan and apply host-network changes. Workstation keeps
+# its existing manual network-editor behavior; Fusion overrides these hooks.
+prepare_host_network_plan() { :; }
+validate_host_network_plan() { validate_host_networks; }
+apply_host_network_plan() { :; }
+describe_host_network_cleanup() { :; }
+cleanup_host_networks() { :; }
+
 validate_inputs() {
     validate_paths
     validate_name "management vmnet" "$MANAGEMENT_VMNET"
@@ -396,9 +422,7 @@ validate_inputs() {
     for vmx in "$CORE_VMX" "$APP_VMX" "$PARTICIPANT_VMX"; do
         [[ ! -e "$vmx" ]] || die "VM already exists: $vmx"
     done
-    host_network_exists "$MANAGEMENT_VMNET" || die "management network $MANAGEMENT_VMNET was not found in $VMWARE_PRODUCT_NAME"
-    host_network_exists "$HITL_VMNET" || die "HITL network $HITL_VMNET was not found; create it in $VMWARE_NETWORK_EDITOR_NAME first"
-    validate_hitl_isolation
+    validate_host_network_plan
 }
 
 confirm_install() {
@@ -464,6 +488,9 @@ write_state() {
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
         shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
         shell_assignment FLAG_GENERATORS_RESOLVED_COMMIT "$FLAG_GENERATORS_RESOLVED_COMMIT"
+        shell_assignment INSTALLER_CREATED_HITL_VMNET "$INSTALLER_CREATED_HITL_VMNET"
+        shell_assignment INSTALLER_CREATED_HITL_SUBNET "$INSTALLER_CREATED_HITL_SUBNET"
+        shell_assignment INSTALLER_CREATED_HITL_NETMASK "$INSTALLER_CREATED_HITL_NETMASK"
     } > "$temp"
     {
         shell_assignment CORE_VM_USERNAME corevm
@@ -918,6 +945,7 @@ perform_cleanup() {
     done
     log "  state and credentials: $STATE_DIR"
     log "  cached base images are preserved: $IMAGE_CACHE"
+    describe_host_network_cleanup
     if cleanup_healthy; then
         if [[ "$DRY_RUN" -eq 0 ]]; then
             [[ "$FORCE_CLEANUP" -eq 1 ]] || die "the lab is complete and running; use cleanup --force to remove it"
@@ -949,6 +977,7 @@ perform_cleanup() {
         log "Removing installer-owned VM directory $directory"
         run rm -rf -- "$directory"
     done
+    cleanup_host_networks
     log "Removing installer state and credentials"
     run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE" "$RUNTIME_STATUS_FILE" \
         "$STATE_FILE.new" "$CREDENTIALS_FILE.new" "$RUNTIME_STATUS_FILE.new"
@@ -966,6 +995,7 @@ perform_install() {
     fi
     progress 2 "Validating $HOST_VALIDATION_LABEL"
     require_linux_workstation
+    prepare_host_network_plan
     validate_inputs
     confirm_install
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -1000,6 +1030,9 @@ perform_install() {
     PARTICIPANT_NET0_MAC="$(random_vmware_mac)"
     PARTICIPANT_NET1_MAC="$(random_vmware_mac)"
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=1
+    write_state
+    apply_host_network_plan
+    validate_host_networks
     write_state
 
     progress 10 "Downloading and verifying Debian 12 and Ubuntu 24.04 cloud images"

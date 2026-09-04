@@ -11,6 +11,10 @@
 # lab_dir="/absolute/path/to/ScenarioForge-Lab"
 management_vmnet=vmnet1
 hitl_vmnet=vmnet2
+# true explicitly authorizes creating an unused isolated vmnet when hitl_vmnet
+# is unavailable/unsafe; false requires a network prepared in Fusion.
+# When omitted, interactive installs propose and confirm the change.
+# manage_hitl_network=true
 
 app_management_cidr=172.31.250.2/24
 core_management_cidr=172.31.250.3/24

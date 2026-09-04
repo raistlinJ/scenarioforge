@@ -41,24 +41,48 @@ on Apple silicon. VMware documents the architecture restriction and recommends
 UEFI, NVMe, and `vmxnet3` for ARM Linux guests in its
 [Apple-silicon compatibility guidance](https://knowledge.broadcom.com/external/article/315602/compatibility-considerations-for-arm-gue.html).
 
-## One-time Fusion network setup
+## Automatic isolated network setup
 
-Open **VMware Fusion > Settings > Network**, unlock the pane, and create a
-custom network for `vmnet2`. Configure it as an isolated host-only network with:
+The installer checks the requested HITL network before creating any VMs. If it
+is missing or has DHCP, NAT, or host-Mac access enabled, an interactive install
+automatically proposes the first unused `vmnet` instead of modifying the
+existing network. It prints the complete change and requires you to type
+`INSTALL+NETWORK` before proceeding. macOS then asks for administrator
+credentials when the change is applied.
+
+For example, if `vmnet2` is already used by another VM, the installer may
+create `vmnet3` with:
 
 - DHCP disabled.
 - NAT disabled.
 - Host Mac access/virtual adapter disabled.
+
+Fusion's networking services restart briefly after the change, so networking
+in already-running VMs may disconnect momentarily. The installer verifies the
+result and restores the previous configuration if activation fails. Cleanup
+removes only an unchanged, installer-created network; it will preserve a
+network that somebody modified or attached to another running VM.
+
+For explicitly authorized unattended network creation, combine:
+
+```bash
+./install-scenarioforge-lab.sh --manage-hitl-network --yes --verbose
+```
+
+`--yes` by itself never authorizes a host-network change. Use
+`--no-manage-hitl-network` to require a manually prepared network instead. To
+prepare one manually, open **VMware Fusion > Settings > Network**, unlock the
+pane, create a custom network, and disable the three settings above.
 
 Keep `vmnet1` as the management network. DHCP may remain enabled on `vmnet1`;
 the APP and CORE management NICs use static addresses and only require shared
 Layer-2 connectivity.
 
 The installer validates both networks through Fusion's `vmrun` interface and
-also inspects `/Library/Preferences/VMware Fusion/networking`. It refuses a
-HITL network with DHCP, NAT, or a host adapter because the participant network
-must not reach macOS, the LAN, or the Internet. It never edits Fusion's global
-network configuration or restarts its networking services.
+also inspects `/Library/Preferences/VMware Fusion/networking`. It refuses to
+use a HITL network with DHCP, NAT, or a host adapter because the participant
+network must not reach macOS, the LAN, or the Internet. Automated changes are
+limited to a newly selected, previously unused `vmnet`.
 
 VMware describes custom Fusion networks and the Network settings pane in its
 [Fusion DHCP/network editor guidance](https://knowledge.broadcom.com/external/article/311759/modifying-the-dhcp-settings-of-vmnet1-an.html).
@@ -197,7 +221,7 @@ the verified base-image cache under
 ## Troubleshooting
 
 - If `vmnet2 has DHCP enabled`, correct it in Fusion's Network settings; do not
-  bypass the check.
+  bypass the check, or let the interactive installer propose a new network.
 - If Fusion tools are elsewhere, set `SF_FUSION_APP` to the application bundle.
 - Guest logs are `/var/log/scenarioforge-{core,app,participant}-bootstrap.log`.
 - Use `status --watch --interval 5` while CORE builds from source.
