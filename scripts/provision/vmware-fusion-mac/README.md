@@ -196,10 +196,18 @@ adapter before returning; CORE and APP continue in the background.
 
 ## Access after installation
 
+The installer ends with an **Open ScenarioForge** block showing the APP VM's
+current URL for your Mac's browser, such as `https://<app-nat-ip>/`. You can
+retrieve the current address later with `./install-scenarioforge-lab.sh status`.
+
 - CORE desktop: `corevm`
 - APP desktop: `scenarioforge`
 - Participant desktop: `participant`
 - ScenarioForge Web GUI: `coreadmin` at `https://<app-nat-ip>/`
+
+Inside the APP VM, open ScenarioForge using the **ScenarioForge** desktop icon
+or navigate to [https://localhost](https://localhost) in the VM's browser.
+Log in to the Web GUI as `coreadmin`.
 
 The certificate is self-signed, so the browser warning is expected. The APP
 desktop includes a ScenarioForge launcher, Epiphany, Terminator, Evince, xdot,

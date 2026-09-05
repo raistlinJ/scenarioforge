@@ -13,8 +13,9 @@ The APP VM receives a private `.scenarioforge.env` configured with the CORE
 VM's management address, SSH credentials, gRPC port `50051`, and CORE's HITL
 interface name `ens19`. ScenarioForge is installed natively, not with Docker.
 
-The APP desktop has a **ScenarioForge** launcher that opens the local Web GUI
-in Epiphany at `https://localhost/`. Its self-signed certificate causes an
+Inside the APP VM, open ScenarioForge using the **ScenarioForge** desktop icon
+or navigate to [https://localhost](https://localhost) in the VM's browser.
+Its self-signed certificate causes an
 expected browser warning; no VM restart is required after provisioning. Its
 XFCE session requests an initial 1600x900 display when available and leaves an
 already larger display alone.
@@ -226,12 +227,20 @@ in a mode-`0600` file owned by the installing user:
 ~/.local/state/scenarioforge-vmware-lab/credentials.env
 ```
 
+The installer ends with an **Open ScenarioForge** block showing the APP VM's
+current URL for your host's browser, such as `https://<app-nat-ip>/`. You can
+retrieve the current address later with `./install-scenarioforge-lab.sh status`.
+
 The default accounts are:
 
 - CORE VM: `corevm`
 - APP VM: `scenarioforge`
 - PARTICIPANT VM: `participant`
 - ScenarioForge Web GUI: `coreadmin`
+
+Inside the APP VM, use the **ScenarioForge** desktop icon or navigate to
+[https://localhost](https://localhost) in the VM's browser, then log in as
+`coreadmin`.
 
 Passwords are independently generated as 10-character alphanumeric values on
 each fresh install. The Web GUI is available at `https://<app-nat-ip>/`; its

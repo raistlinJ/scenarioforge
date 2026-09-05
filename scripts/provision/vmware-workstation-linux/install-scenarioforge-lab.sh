@@ -896,10 +896,20 @@ show_credentials() {
     printf '  APP VM:         scenarioforge / %s\n' "$APP_VM_PASSWORD"
     printf '  PARTICIPANT VM: participant / %s\n' "$PARTICIPANT_VM_PASSWORD"
     printf '  ScenarioForge:  coreadmin / %s\n' "$SCENARIOFORGE_ADMIN_PASSWORD"
-    [[ -z "$address" ]] || printf '  Web GUI:         https://%s/\n' "$address"
     printf '  APP browser:     Epiphany with a ScenarioForge desktop launcher\n'
     printf '  APP tools:       Terminator, Evince (PDF), xdot (Graphviz), and Mousepad/jq (JSON)\n'
     printf '  Stored securely: %s (mode 0600)\n\n' "$CREDENTIALS_FILE"
+    printf 'Open ScenarioForge\n'
+    if [[ "$INSTALL_COMPLETE" != 1 ]]; then
+        printf '  Wait for APP provisioning to finish before opening the Web GUI.\n'
+    fi
+    if [[ -n "$address" ]]; then
+        printf '  From your host browser: https://%s/\n' "$address"
+    else
+        printf '  Host address not available yet; run: %s status\n' "$0"
+    fi
+    printf '  Inside the APP VM: use the ScenarioForge desktop icon or https://localhost/\n'
+    printf '  Web GUI username: coreadmin (password above)\n\n'
 }
 
 show_status_once() {
