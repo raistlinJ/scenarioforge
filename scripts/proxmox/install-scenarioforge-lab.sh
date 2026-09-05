@@ -1140,6 +1140,11 @@ apt-get install -y --no-install-recommends \
     build-essential dbus-x11 epiphany-browser evince graphviz jq lightdm lightdm-gtk-greeter \
     mousepad nginx openssl python3-dev python3-full python3-venv terminator xdot xfce4 xorg \
     x11-xserver-utils xserver-xorg-input-all xserver-xorg-video-all xterm
+# GNU install applies ownership only to explicitly named directories. Name
+# .config too: a root-owned parent prevents xfconfd from creating its settings
+# and XFCE reports "Unable to load a failsafe session" at first login.
+install -d -o scenarioforge -g scenarioforge -m 0755 \
+    /home/scenarioforge/.config /home/scenarioforge/.config/autostart
 systemctl set-default graphical.target
 systemctl enable --now lightdm
 for desktop_command in epiphany evince jq mousepad terminator xdot; do
@@ -1190,7 +1195,6 @@ done
 exit 0
 APP_DISPLAY_SCRIPT
 chmod 0755 /usr/local/bin/scenarioforge-app-display
-install -d -o scenarioforge -g scenarioforge -m 0755 /home/scenarioforge/.config/autostart
 cat > /home/scenarioforge/.config/autostart/scenarioforge-display.desktop <<'APP_DISPLAY_DESKTOP'
 [Desktop Entry]
 Type=Application
@@ -1523,6 +1527,10 @@ for attempt in $(seq 1 60); do
 done
 
 set_bootstrap_status 95 'verifying the APP XFCE graphical login'
+if ! runuser -u scenarioforge -- test -w /home/scenarioforge/.config; then
+    ls -ld /home/scenarioforge /home/scenarioforge/.config
+    fail_bootstrap 'APP XFCE configuration directory is not writable by scenarioforge'
+fi
 if ! systemctl is-active --quiet lightdm; then
     systemctl reset-failed lightdm || true
     systemctl restart lightdm || true
