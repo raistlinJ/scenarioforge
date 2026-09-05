@@ -1201,6 +1201,9 @@ def test_run_cli_async_blocks_invalid_hitl_proxmox_interface_ids(client, tmp_pat
     )
     monkeypatch.setattr(backend, '_prefer_explicit_or_ssh_core_host', lambda cfg, *args: cfg)
 
+    # This test checks interface validation, not execution on a real CORE VM.
+    monkeypatch.setattr(backend.threading, 'Thread', _NoRunThread)
+
     resp = client.post('/run_cli_async', data={'xml_path': str(xml_path), 'scenario': 'Scenario A', 'flow_enabled': '0'})
 
     assert resp.status_code == 202

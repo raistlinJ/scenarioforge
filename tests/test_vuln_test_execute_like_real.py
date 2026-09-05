@@ -1,7 +1,26 @@
 import os
+from types import SimpleNamespace
+
+import pytest
 
 from webapp import app_backend
 from webapp.routes import vuln_catalog_batch
+
+
+@pytest.fixture
+def queued_cli_tasks(monkeypatch):
+    """Capture batch job scheduling without launching a real SSH worker."""
+    queued = []
+
+    class RecordingThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.task = {'target': target, 'args': args, 'name': name, 'daemon': daemon}
+
+        def start(self):
+            queued.append(self.task)
+
+    monkeypatch.setattr(app_backend, 'threading', SimpleNamespace(Thread=RecordingThread))
+    return queued
 
 
 def test_vuln_test_build_ephemeral_execute_job_builds_xml_and_job_spec(tmp_path, monkeypatch):
@@ -305,7 +324,7 @@ def test_vuln_catalog_test_start_uses_ssh_host_when_core_host_not_explicit(monke
         app_backend.RUNS.pop(run_id, None)
 
 
-def test_vuln_catalog_batch_prefers_ssh_host_when_core_host_not_explicit(monkeypatch, tmp_path):
+def test_vuln_catalog_batch_prefers_ssh_host_when_core_host_not_explicit(monkeypatch, tmp_path, queued_cli_tasks):
     compose_path = tmp_path / 'catalog-compose.yml'
     compose_path.write_text("version: '3.8'\nservices:\n  app:\n    image: alpine:latest\n", encoding='utf-8')
 
@@ -369,6 +388,9 @@ def test_vuln_catalog_batch_prefers_ssh_host_when_core_host_not_explicit(monkeyp
     assert seen['core_cfg']['grpc_host'] == 'core-vm.example.test'
 
     run_id = str(payload.get('run_id') or '')
+    assert len(queued_cli_tasks) == 1
+    assert queued_cli_tasks[0]['target'] is app_backend._run_cli_background_task
+    assert queued_cli_tasks[0]['args'][0] == run_id
     if run_id:
         app_backend.RUNS.pop(run_id, None)
 
@@ -461,7 +483,7 @@ def test_vuln_catalog_test_start_native_mode_prefers_ssh_host_when_not_explicit(
         app_backend.RUNS.pop(run_id, None)
 
 
-def test_vuln_catalog_batch_native_mode_prefers_ssh_host_when_not_explicit(monkeypatch, tmp_path):
+def test_vuln_catalog_batch_native_mode_prefers_ssh_host_when_not_explicit(monkeypatch, tmp_path, queued_cli_tasks):
     compose_path = tmp_path / 'catalog-compose.yml'
     compose_path.write_text("version: '3.8'\nservices:\n  app:\n    image: alpine:latest\n", encoding='utf-8')
 
@@ -526,6 +548,9 @@ def test_vuln_catalog_batch_native_mode_prefers_ssh_host_when_not_explicit(monke
     assert seen['core_cfg']['grpc_host'] == 'core-vm.example.test'
 
     run_id = str(payload.get('run_id') or '')
+    assert len(queued_cli_tasks) == 1
+    assert queued_cli_tasks[0]['target'] is app_backend._run_cli_background_task
+    assert queued_cli_tasks[0]['args'][0] == run_id
     if run_id:
         app_backend.RUNS.pop(run_id, None)
 

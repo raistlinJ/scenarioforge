@@ -386,12 +386,15 @@ def test_native_remote_import_uses_one_time_prompt_password(tmp_path, monkeypatc
     assert source_path.endswith("/demo")
 
 
-def test_import_requirements_request_password_for_remote_destination(tmp_path, monkeypatch):
+@pytest.mark.parametrize("core_host,core_port", [("localhost", 50051), ("127.0.0.1", 50061)])
+def test_import_requirements_request_password_for_remote_destination(monkeypatch, core_host, core_port):
     monkeypatch.setattr(backend, "_webui_runtime_mode", lambda: "vm")
     monkeypatch.setattr(
         backend,
         "_core_backend_defaults",
         lambda **_kwargs: {
+            "host": core_host,
+            "port": core_port,
             "ssh_host": "core.local",
             "ssh_username": "core",
             "ssh_password": "",
@@ -412,8 +415,8 @@ def test_import_requirements_request_password_for_remote_destination(tmp_path, m
     assert requirements["password_required"] is True
     assert requirements["connection"]["ssh_host"] == "core.local"
     assert requirements["connection"]["ssh_username"] == "core"
-    assert requirements["connection"]["core_host"] == "127.0.0.1"
-    assert requirements["connection"]["core_port"] == 50051
+    assert requirements["connection"]["core_host"] == core_host
+    assert requirements["connection"]["core_port"] == core_port
     assert {item["field"] for item in requirements["missing_configuration"]} == {"ssh_password"}
 
 

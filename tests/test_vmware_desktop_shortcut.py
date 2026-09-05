@@ -1,7 +1,8 @@
-import plistlib
 from pathlib import Path
 import shlex
 import subprocess
+import tempfile
+import re
 
 import pytest
 
@@ -15,10 +16,12 @@ def installer(request):
 
 
 def run_bash(installer, script):
-    result = subprocess.run(
-        ["bash", "-c", f"unset SF_DESKTOP_SHORTCUT; source {shlex.quote(str(installer))}\n{script}"],
-        capture_output=True, text=True, check=False,
-    )
+    with tempfile.TemporaryDirectory() as state_dir:
+        result = subprocess.run(
+            ["bash", "-c", f"unset SF_DESKTOP_SHORTCUT; source {shlex.quote(str(installer))}\n"
+             f"STATE_DIR={shlex.quote(state_dir)}\nSTATE_FILE=\"$STATE_DIR/state.env\"\n{script}"],
+            capture_output=True, text=True, check=False,
+        )
     assert result.returncode == 0, result.stderr
     return result.stdout
 
@@ -42,34 +45,45 @@ printf '%s\n' "$CREATE_DESKTOP_SHORTCUT"
     assert [line for line in output.splitlines() if line in {"0", "1"}] == ["1", "0", "1", "0", "1"]
 
 
+def shortcut_arguments(content, fusion):
+    if fusion:
+        return shlex.split(content.splitlines()[-1])[1:]
+    line = next(line[5:] for line in content.splitlines() if line.startswith("Exec="))
+    # Undo Desktop Entry string escaping, then quoted arguments and field codes.
+    line = line.replace('\\\\', '\\')
+    return [re.sub(r'\\([\\"`$])', r'\1', token).replace('%%', '%')
+            for token in re.findall(r'"((?:\\.|[^"\\])*)"', line)]
+
+
 def test_native_shortcut_refresh_and_cleanup(installer, tmp_path):
     fusion = "fusion" in str(installer)
-    shortcut = tmp_path / "Desktop with spaces" / ("ScenarioForge.webloc" if fusion else "ScenarioForge.desktop")
+    shortcut = tmp_path / "Desktop with spaces" / ("ScenarioForge.command" if fusion else "ScenarioForge.desktop")
     initial = tmp_path / "initial"
     refreshed = tmp_path / "refreshed"
     run_bash(installer, f'''
 HOST_DESKTOP_SHORTCUT={shlex.quote(str(shortcut))}
-create_host_desktop_shortcut 192.168.42.10
+create_host_desktop_shortcut ""
 cp "$HOST_DESKTOP_SHORTCUT" {shlex.quote(str(initial))}
-create_host_desktop_shortcut 192.168.42.20
+APP_VMX={shlex.quote(str(tmp_path / 'new-app.vmx'))}
+create_host_desktop_shortcut ""
 cp "$HOST_DESKTOP_SHORTCUT" {shlex.quote(str(refreshed))}
 DRY_RUN=1
 cleanup_host_desktop_shortcut
 test -f "$HOST_DESKTOP_SHORTCUT"
 DRY_RUN=0
 cleanup_host_desktop_shortcut
+cleanup_host_desktop_launcher
+test ! -e "$HOST_DESKTOP_LAUNCHER"
 ''')
     assert not shortcut.exists()
-    if fusion:
-        assert plistlib.loads(initial.read_bytes())["URL"] == "https://192.168.42.10/"
-        assert plistlib.loads(refreshed.read_bytes())["URL"] == "https://192.168.42.20/"
-    else:
-        assert "Exec=xdg-open https://192.168.42.10/" in initial.read_text()
-        assert "Exec=xdg-open https://192.168.42.20/" in refreshed.read_text()
-        assert refreshed.stat().st_mode & 0o111
+    args = shortcut_arguments(refreshed.read_text(), fusion)
+    assert args[args.index("--mode") + 1] == "browser"
+    assert args[args.index("--app") + 1] == str(tmp_path / 'new-app.vmx')
+    assert initial.read_bytes() != refreshed.read_bytes()
+    assert refreshed.stat().st_mode & 0o111
 
 
-def test_shortcut_skips_disabled_dry_run_and_unavailable_address(installer, tmp_path):
+def test_shortcut_skips_disabled_and_dry_run(installer, tmp_path):
     shortcut = tmp_path / "must-not-exist"
     run_bash(installer, f'''
 HOST_DESKTOP_SHORTCUT={shlex.quote(str(shortcut))}
@@ -78,9 +92,6 @@ create_host_desktop_shortcut 192.168.42.10
 CREATE_DESKTOP_SHORTCUT=1
 DRY_RUN=1
 create_host_desktop_shortcut 192.168.42.10
-DRY_RUN=0
-create_host_desktop_shortcut ""
-create_host_desktop_shortcut 'error: no guest address'
 ''')
     assert not shortcut.exists()
 
@@ -136,13 +147,11 @@ cleanup_participant_desktop_shortcut
 ''')
     assert not shortcut.exists()
     assert snapshot.stat().st_mode & 0o111
-    if fusion:
-        command = shlex.split(snapshot.read_text().splitlines()[-1])
-        assert command == ["exec", "open", "-a", "/Applications/VMware Fusion.app", str(vmx)]
-    else:
-        command = next(line[5:] for line in snapshot.read_text().splitlines() if line.startswith("Exec="))
-        assert shlex.split(command) == ["vmware", str(vmx)]
-        assert "Terminal=false" in snapshot.read_text()
+    args = shortcut_arguments(snapshot.read_text(), fusion)
+    assert args[args.index("--mode") + 1] == "participant"
+    assert args[args.index("--participant") + 1] == str(vmx)
+    if not fusion:
+        assert "Terminal=true" in snapshot.read_text()
 
 
 def test_participant_shortcut_skips_disabled_dry_run_and_missing_vm(installer, tmp_path):
@@ -211,16 +220,9 @@ HOST_PARTICIPANT_SHORTCUT={shlex.quote(str(shortcut))}
 create_participant_desktop_shortcut
 ''')
     content = shortcut.read_text()
-    if fusion:
-        assert shlex.split(content.splitlines()[-1]) == ["exec", "open", "-a", str(fusion_app), str(vmx)]
-    else:
-        # Undo Desktop Entry string escaping, Exec quoting, and field-code
-        # escaping, in that order. The result must remain one literal VM path.
-        import re
-        argument = next(line[len('Exec=vmware "'):-1] for line in content.splitlines() if line.startswith('Exec='))
-        argument = argument.replace('\\\\', '\\')
-        argument = re.sub(r'\\([\\"`$])', r'\1', argument).replace('%%', '%')
-        assert argument == str(vmx)
+    args = shortcut_arguments(content, fusion)
+    assert args[args.index("--participant") + 1] == str(vmx)
+    assert args[args.index("--fusion-app") + 1] == str(fusion_app)
 
 
 def test_linux_participant_shortcut_uses_xdg_desktop_without_app_address(tmp_path):
@@ -235,7 +237,7 @@ create_host_desktop_shortcut ""
 create_participant_desktop_shortcut
 ''')
     assert (desktop / "ScenarioForge Participant VM.desktop").is_file()
-    assert not (desktop / "ScenarioForge.desktop").exists()
+    assert (desktop / "ScenarioForge.desktop").is_file()
 
 
 def test_participant_shortcut_ownership_survives_saved_state(installer, tmp_path):
@@ -264,3 +266,148 @@ cleanup_participant_desktop_shortcut
 ''')
     assert not shortcut.exists()
     assert "HOST_PARTICIPANT_SHORTCUT_SHA256=" in (state_dir / "state.env").read_text()
+
+
+def test_fusion_migrates_owned_webloc_after_writing_command(tmp_path):
+    import hashlib
+    import plistlib
+    installer = ROOT / "scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh"
+    old = tmp_path / "ScenarioForge.webloc"
+    old.write_bytes(plistlib.dumps({"URL": "https://192.168.42.10/"}))
+    digest = hashlib.sha256(old.read_bytes()).hexdigest()
+    run_bash(installer, f'''
+HOST_DESKTOP_SHORTCUT={shlex.quote(str(old))}
+HOST_DESKTOP_SHORTCUT_SHA256={shlex.quote(digest)}
+create_host_desktop_shortcut ""
+test "$HOST_DESKTOP_SHORTCUT" = {shlex.quote(str(old.with_suffix('.command')))}
+''')
+    assert not old.exists()
+    args = shortcut_arguments(old.with_suffix('.command').read_text(), True)
+    assert args[args.index('--mode') + 1] == 'browser'
+
+
+@pytest.mark.parametrize("conflict", ["modified-webloc", "existing-command"])
+def test_fusion_migration_preserves_user_files(tmp_path, conflict):
+    import hashlib
+    installer = ROOT / "scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh"
+    old = tmp_path / "ScenarioForge.webloc"
+    old.write_text("existing browser link")
+    digest = hashlib.sha256(old.read_bytes()).hexdigest()
+    new = old.with_suffix('.command')
+    if conflict == "modified-webloc":
+        old.write_text("user edit")
+    else:
+        new.write_text("user launcher")
+    before = old.read_bytes()
+    run_bash(installer, f'''
+HOST_DESKTOP_SHORTCUT={shlex.quote(str(old))}
+HOST_DESKTOP_SHORTCUT_SHA256={shlex.quote(digest)}
+create_host_desktop_shortcut ""
+''')
+    assert old.read_bytes() == before
+    if new.exists():
+        assert new.read_text() == "user launcher"
+
+
+def test_modified_runtime_helper_is_preserved(installer, tmp_path):
+    shortcut = tmp_path / "browser.shortcut"
+    runtime = tmp_path / "desktop-launcher.py"
+    run_bash(installer, f'''
+HOST_DESKTOP_SHORTCUT={shlex.quote(str(shortcut))}
+HOST_DESKTOP_LAUNCHER={shlex.quote(str(runtime))}
+create_host_desktop_shortcut ""
+printf 'user runtime edit' > "$HOST_DESKTOP_LAUNCHER"
+create_host_desktop_shortcut ""
+cleanup_host_desktop_shortcut
+cleanup_host_desktop_launcher
+''')
+    assert runtime.read_text() == "user runtime edit"
+
+
+@pytest.mark.parametrize("hung_start", [False, True])
+def test_generated_browser_shortcut_checks_and_prompts_before_opening(installer, tmp_path, hung_start):
+    """Run the actual generated shortcut and installed helper with fake host CLIs."""
+    import json
+    import os
+    import sys
+    fusion = "fusion" in str(installer)
+    fake_bin = tmp_path / "fake bin"
+    fake_bin.mkdir()
+    state = tmp_path / "vm-state.json"
+    state.write_text(json.dumps({"running": [], "calls": [], "consent": False}))
+    fake = f'''#!{sys.executable}
+import fcntl
+import json
+from pathlib import Path
+import sys
+import time
+state_path = Path({str(state)!r})
+lock = open(str(state_path) + '.lock', 'w')
+fcntl.flock(lock, fcntl.LOCK_EX)
+state = json.loads(state_path.read_text())
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+state['calls'].append([name] + args)
+status = 0
+if name == 'vmrun':
+    action = args[2]
+    if action == 'list':
+        print('Total running VMs: ' + str(len(state['running'])))
+        print('\\n'.join(state['running']))
+    elif action == 'start':
+        state['running'].append(args[3])
+    elif action == 'getGuestIPAddress':
+        print('192.168.42.99')
+elif name in ('osascript', 'zenity'):
+    status = 0 if state['consent'] else 1
+    if status and name == 'osascript':
+        print('User canceled. (-128)', file=sys.stderr)
+state_path.write_text(json.dumps(state))
+lock.close()
+if {hung_start!r} and name == 'vmrun' and args[2] == 'start':
+    time.sleep(120)
+sys.exit(status)
+'''
+    for name in ("vmrun", "osascript", "zenity", "open", "xdg-open"):
+        path = fake_bin / name
+        path.write_text(fake)
+        path.chmod(0o755)
+    core, app = tmp_path / "CORE VM.vmx", tmp_path / "APP VM.vmx"
+    core.touch()
+    app.touch()
+    shortcut = tmp_path / ("ScenarioForge.command" if fusion else "ScenarioForge.desktop")
+    helper = tmp_path / "installed launcher.py"
+    run_bash(installer, f'''
+PATH={shlex.quote(str(fake_bin))}:"$PATH"
+CORE_VMX={shlex.quote(str(core))}
+APP_VMX={shlex.quote(str(app))}
+FUSION_VMRUN={shlex.quote(str(fake_bin / 'vmrun'))}
+HOST_DESKTOP_SHORTCUT={shlex.quote(str(shortcut))}
+HOST_DESKTOP_LAUNCHER={shlex.quote(str(helper))}
+create_host_desktop_shortcut ""
+''')
+    args = ["sh", str(shortcut)] if fusion else shortcut_arguments(shortcut.read_text(), False)
+    env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ['PATH'])
+    result = subprocess.run(args, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(state.read_text())
+    assert data['running'] == []
+    assert not any(call[0] in ('open', 'xdg-open') for call in data['calls'])
+    data['consent'] = True
+    data['calls'] = []
+    state.write_text(json.dumps(data))
+    result = subprocess.run(args, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(state.read_text())
+    assert data['running'] == [str(core), str(app)]
+    start_calls = [call for call in data['calls'] if call[0] == 'vmrun' and call[3] == 'start']
+    assert len(start_calls) == 2
+    assert all(call[-1] == 'gui' for call in start_calls)
+    if fusion:
+        attachment = next(i for i, call in enumerate(data['calls']) if call[:3] == ['open', '-g', '-a'])
+        assert data['calls'][attachment][-2:] == [str(core), str(app)]
+        network = next(i for i, call in enumerate(data['calls']) if 'getGuestIPAddress' in call)
+        assert attachment < network
+    assert data['calls'][-1] == ['open' if fusion else 'xdg-open', 'https://192.168.42.99/']
+    prompts = [call for call in data['calls'] if call[0] in ('osascript', 'zenity')]
+    assert len(prompts) == 1

@@ -132,11 +132,27 @@ chmod 600 "$HOME/.config/scenarioforge-fusion-lab.conf"
 
 The installer creates two shortcuts on your host desktop by default:
 
-- **ScenarioForge** opens the APP VM's HTTPS site in your default browser
-  (`.webloc` on macOS, `.desktop` on Linux).
-- **ScenarioForge Participant VM** opens the participant VM in VMware Fusion
-  on macOS (`.command`) or VMware Workstation on Linux (`.desktop`). It works
-  without a guest IP address and opens the local VMware console.
+- **ScenarioForge** checks that the CORE and APP VMs are running, then opens
+  the APP VM's HTTPS site in your default browser.
+- **ScenarioForge Participant VM** checks that the CORE and participant VMs
+  are running, then opens the participant console in VMware.
+
+If required VMs are stopped, the launcher lists them and asks whether to start
+those VMs. Canceling opens nothing and leaves them stopped. Accepting starts
+only the missing VMs, with CORE first, and checks that they are running before
+continuing. Startup or VMware status errors are shown instead of opening the
+browser or console. Shortcut starts use VMware's GUI mode so you can see the
+VMs resume and respond to any startup questions. On macOS, the launcher also
+connects the required VMs to Fusion, including VMs previously started headlessly,
+so its dashboard and VMware Tools checks reflect their current state.
+The browser launcher waits up to two minutes for the APP
+VM's current network address; it does not use an old saved address. The web
+service may need a little longer to finish booting after the browser opens.
+
+Both shortcuts use `.command` files on macOS and `.desktop` files on Linux.
+They open a terminal for progress and use a native macOS dialog or Linux Zenity
+confirmation when available, with a terminal confirmation as the fallback.
+The installed launcher does not need the repository checkout or guest passwords.
 
 Set `desktop_shortcut=false` in the config or pass `--no-desktop-shortcut` to
 skip both shortcuts; `--desktop-shortcut` enables them explicitly. The environment
@@ -144,12 +160,14 @@ equivalent is `SF_DESKTOP_SHORTCUT=0` or `1`. This setting is independent of
 `--headless`. Linux uses the desktop directory reported by `xdg-user-dir`,
 falling back to `~/Desktop` when that tool is unavailable.
 
-For an existing lab, run `./install-scenarioforge-lab.sh status` to add the
-participant VM shortcut. If the APP address is not available yet, a later
-`status` check creates the browser shortcut; status checks also refresh it when
-the address changes. Cleanup removes installer-created shortcuts only if they
-have not been edited. Existing unrelated shortcuts are preserved. On Linux,
+For an existing lab, run `./install-scenarioforge-lab.sh status` to update the
+shortcuts and install the VM checks. On macOS, an unchanged installer-created
+`ScenarioForge.webloc` is replaced with `ScenarioForge.command`. Browser shortcut
+creation no longer requires the APP VM to have an IP address at install time.
+Cleanup removes unchanged installer-created shortcuts and their unused runtime
+helper. Existing or edited shortcuts and helpers are preserved. On Linux,
 the desktop may ask you to allow launching a shortcut the first time you open it.
+
 
 Precedence is **built-in defaults < config file < environment < CLI flags**.
 The config is parsed as data and is never executed. Matching quotes are removed

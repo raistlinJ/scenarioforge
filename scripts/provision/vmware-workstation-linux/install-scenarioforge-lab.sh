@@ -14,6 +14,8 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/provision/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
+VMWARE_DESKTOP_LAUNCHER_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/desktop-launcher.py"
+
 SCRIPT_VERSION="0.5.0"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 EXPECTED_INSTALLER_OWNER="$INSTALLER_OWNER"
@@ -100,6 +102,8 @@ HOST_DESKTOP_SHORTCUT=""
 HOST_DESKTOP_SHORTCUT_SHA256=""
 HOST_PARTICIPANT_SHORTCUT=""
 HOST_PARTICIPANT_SHORTCUT_SHA256=""
+HOST_DESKTOP_LAUNCHER=""
+HOST_DESKTOP_LAUNCHER_SHA256=""
 MANAGE_HITL_NETWORK="${SF_VMWARE_MANAGE_HITL_NETWORK:-0}"
 INSTALLER_CREATED_HITL_VMNET=""
 INSTALLER_CREATED_HITL_SUBNET=""
@@ -507,6 +511,8 @@ write_state() {
         shell_assignment HOST_DESKTOP_SHORTCUT_SHA256 "$HOST_DESKTOP_SHORTCUT_SHA256"
         shell_assignment HOST_PARTICIPANT_SHORTCUT "$HOST_PARTICIPANT_SHORTCUT"
         shell_assignment HOST_PARTICIPANT_SHORTCUT_SHA256 "$HOST_PARTICIPANT_SHORTCUT_SHA256"
+        shell_assignment HOST_DESKTOP_LAUNCHER "$HOST_DESKTOP_LAUNCHER"
+        shell_assignment HOST_DESKTOP_LAUNCHER_SHA256 "$HOST_DESKTOP_LAUNCHER_SHA256"
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
         shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
@@ -885,127 +891,108 @@ host_desktop_directory() {
     printf '%s\n' "$desktop"
 }
 
-create_host_desktop_shortcut() {
-    local address="$1" desktop="$HOME/Desktop" path digest
-    [[ "$CREATE_DESKTOP_SHORTCUT" == 1 && "$DRY_RUN" == 0 ]] || return 0
-    if [[ -z "$address" ]]; then
-        warn "APP address unavailable; run status later to create the host desktop shortcut"
-        return 0
-    fi
-    if ! desktop="$(host_desktop_directory)"; then
-        warn "Host desktop directory is disabled; skipping the ScenarioForge shortcut"
-        return 0
-    fi
-    path="$desktop/ScenarioForge.desktop"
-    [[ "$VMRUN_TYPE" != fusion ]] || path="$desktop/ScenarioForge.webloc"
-    [[ -z "$HOST_DESKTOP_SHORTCUT" ]] || path="$HOST_DESKTOP_SHORTCUT"
+install_host_desktop_launcher() {
+    local path="${HOST_DESKTOP_LAUNCHER:-$STATE_DIR/desktop-launcher.py}" digest
     if [[ -e "$path" || -L "$path" ]]; then
-        if ! host_desktop_shortcut_owned; then
-            warn "Preserving existing desktop shortcut: $path"
-            return 0
+        if ! host_desktop_shortcut_owned "$HOST_DESKTOP_LAUNCHER" "$HOST_DESKTOP_LAUNCHER_SHA256"; then
+            warn "Preserving existing or modified desktop launcher: $path"
+            return 1
         fi
     fi
-    # Parse the guest address before putting it into a launcher command. Use
-    # plistlib for native macOS URL files, including proper XML escaping.
-    if ! digest="$(python3 - "$path" "$VMRUN_TYPE" "$address" <<'PY'
-import hashlib
-import ipaddress
-from pathlib import Path
-import plistlib
-import sys
-
-path = Path(sys.argv[1])
-address = ipaddress.ip_address(sys.argv[3])
-host = f"[{address}]" if address.version == 6 else str(address)
-url = f"https://{host}/"
-if sys.argv[2] == "fusion":
-    content = plistlib.dumps({"URL": url})
-    mode = 0o644
-else:
-    content = (
-        "[Desktop Entry]\nType=Application\nName=ScenarioForge\n"
-        "Comment=Open the ScenarioForge lab in your browser\n"
-        f"Exec=xdg-open {url}\nIcon=web-browser\nTerminal=false\n"
-    ).encode()
-    mode = 0o755
-path.parent.mkdir(parents=True, exist_ok=True)
-if not path.exists() or path.read_bytes() != content:
-    path.write_bytes(content)
-path.chmod(mode)
-print(hashlib.sha256(content).hexdigest())
-PY
-    )"; then
-        warn "Could not create the host desktop shortcut; use the Web GUI URL shown by status"
-        return 0
+    if ! install -d -m 0700 "$(dirname "$path")" || ! install -m 0700 "$VMWARE_DESKTOP_LAUNCHER_SOURCE" "$path"; then
+        warn "Could not install the desktop VM checks"
+        return 1
     fi
-    if [[ "$HOST_DESKTOP_SHORTCUT" != "$path" || "$HOST_DESKTOP_SHORTCUT_SHA256" != "$digest" ]]; then
-        HOST_DESKTOP_SHORTCUT="$path"
-        HOST_DESKTOP_SHORTCUT_SHA256="$digest"
-        write_state_if_present
-        log "Host desktop shortcut: $path"
-    fi
+    digest="$(sha256sum "$path" | cut -d ' ' -f 1)"
+    HOST_DESKTOP_LAUNCHER="$path"
+    HOST_DESKTOP_LAUNCHER_SHA256="$digest"
+    write_state_if_present
 }
 
-create_participant_desktop_shortcut() {
-    local desktop path digest
+create_vm_desktop_shortcut() {
+    local kind="$1" desktop path digest previous previous_digest vmrun_path vmware_path
     [[ "$CREATE_DESKTOP_SHORTCUT" == 1 && "$DRY_RUN" == 0 ]] || return 0
-    if [[ ! -f "$PARTICIPANT_VMX" ]]; then
+    if [[ "$kind" == participant && ! -f "$PARTICIPANT_VMX" ]]; then
         warn "Participant VM unavailable; run status after provisioning to create its desktop shortcut"
         return 0
     fi
     if ! desktop="$(host_desktop_directory)"; then
-        warn "Host desktop directory is disabled; skipping the participant VM shortcut"
+        warn "Host desktop directory is disabled; skipping the $kind shortcut"
         return 0
     fi
-    path="$desktop/ScenarioForge Participant VM.desktop"
-    [[ "$VMRUN_TYPE" != fusion ]] || path="$desktop/ScenarioForge Participant VM.command"
-    [[ -z "$HOST_PARTICIPANT_SHORTCUT" ]] || path="$HOST_PARTICIPANT_SHORTCUT"
+    if [[ "$kind" == browser ]]; then
+        path="$desktop/ScenarioForge.desktop"
+        [[ "$VMRUN_TYPE" != fusion ]] || path="$desktop/ScenarioForge.command"
+        previous="$HOST_DESKTOP_SHORTCUT"
+        previous_digest="$HOST_DESKTOP_SHORTCUT_SHA256"
+    else
+        path="$desktop/ScenarioForge Participant VM.desktop"
+        [[ "$VMRUN_TYPE" != fusion ]] || path="$desktop/ScenarioForge Participant VM.command"
+        previous="$HOST_PARTICIPANT_SHORTCUT"
+        previous_digest="$HOST_PARTICIPANT_SHORTCUT_SHA256"
+    fi
+    if [[ -n "$previous" ]]; then
+        path="$previous"
+        # A URL-only macOS shortcut cannot perform VM checks. Replace an owned,
+        # unchanged .webloc only after its new executable launcher is written.
+        if [[ "$kind" == browser && "$VMRUN_TYPE" == fusion && "$previous" == *.webloc ]]; then
+            if [[ -e "$previous" || -L "$previous" ]]; then
+                if ! host_desktop_shortcut_owned "$previous" "$previous_digest"; then
+                    warn "Preserving modified desktop shortcut: $previous"
+                    return 0
+                fi
+            fi
+            path="${previous%.webloc}.command"
+        fi
+    fi
     if [[ -e "$path" || -L "$path" ]]; then
-        if ! host_desktop_shortcut_owned "$HOST_PARTICIPANT_SHORTCUT" "$HOST_PARTICIPANT_SHORTCUT_SHA256"; then
-            warn "Preserving existing participant VM shortcut: $path"
+        if [[ "$path" != "$previous" ]] || ! host_desktop_shortcut_owned "$previous" "$previous_digest"; then
+            warn "Preserving existing desktop shortcut: $path"
             return 0
         fi
     fi
-    if ! digest="$(python3 - "$path" "$VMRUN_TYPE" "$PARTICIPANT_VMX" "${FUSION_APP:-}" <<'PY'
-import hashlib
-from pathlib import Path
-import shlex
-import sys
-
-path = Path(sys.argv[1])
-vmx = sys.argv[3]
-if sys.argv[2] == "fusion":
-    content = (
-        "#!/bin/sh\n# Open the ScenarioForge participant VM in VMware Fusion.\n"
-        f"exec open -a {shlex.quote(sys.argv[4])} {shlex.quote(vmx)}\n"
-    ).encode()
-else:
-    # Desktop Entry Exec quoting has two escape layers; literal percent signs
-    # must also be escaped so a VM path cannot be interpreted as a field code.
-    # https://specifications.freedesktop.org/desktop-entry/latest/exec-variables.html
-    argument = ''.join('\\' + ch if ch in '\\"`$' else ch for ch in vmx)
-    argument = argument.replace('\\', '\\\\').replace('%', '%%')
-    argument = argument.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-    content = (
-        "[Desktop Entry]\nType=Application\nName=ScenarioForge Participant VM\n"
-        "Comment=Open the participant VM in VMware Workstation\n"
-        f'Exec=vmware "{argument}"\nIcon=computer\nTerminal=false\n'
-    ).encode()
-path.parent.mkdir(parents=True, exist_ok=True)
-if not path.exists() or path.read_bytes() != content:
-    path.write_bytes(content)
-path.chmod(0o755)
-print(hashlib.sha256(content).hexdigest())
-PY
-    )"; then
-        warn "Could not create the participant VM shortcut; open $PARTICIPANT_VMX in $VMWARE_PRODUCT_NAME"
+    install_host_desktop_launcher || return 0
+    vmrun_path="$(type -P vmrun || true)"
+    [[ "$VMRUN_TYPE" != fusion ]] || vmrun_path="$FUSION_VMRUN"
+    vmware_path="$(type -P vmware || true)"
+    if ! digest="$(python3 "$VMWARE_DESKTOP_LAUNCHER_SOURCE" \
+        --write-shortcut "$path" --launcher "$HOST_DESKTOP_LAUNCHER" \
+        --mode "$kind" --platform "$VMRUN_TYPE" \
+        --vmrun "${vmrun_path:-vmrun}" --vmware "${vmware_path:-vmware}" \
+        --fusion-app "${FUSION_APP:-/Applications/VMware Fusion.app}" \
+        --core "$CORE_VMX" --app "$APP_VMX" --participant "$PARTICIPANT_VMX")"; then
+        warn "Could not create the $kind desktop shortcut"
         return 0
     fi
-    if [[ "$HOST_PARTICIPANT_SHORTCUT" != "$path" || "$HOST_PARTICIPANT_SHORTCUT_SHA256" != "$digest" ]]; then
+    if [[ -n "$previous" && "$previous" != "$path" ]] && host_desktop_shortcut_owned "$previous" "$previous_digest"; then
+        rm -f -- "$previous"
+    fi
+    if [[ "$kind" == browser ]]; then
+        HOST_DESKTOP_SHORTCUT="$path"
+        HOST_DESKTOP_SHORTCUT_SHA256="$digest"
+    else
         HOST_PARTICIPANT_SHORTCUT="$path"
         HOST_PARTICIPANT_SHORTCUT_SHA256="$digest"
-        write_state_if_present
-        log "Host participant VM shortcut: $path"
+    fi
+    write_state_if_present
+    if [[ "$previous" != "$path" || "$previous_digest" != "$digest" ]]; then
+        log "Host $kind shortcut: $path"
+    fi
+}
+
+create_host_desktop_shortcut() { create_vm_desktop_shortcut browser; }
+create_participant_desktop_shortcut() { create_vm_desktop_shortcut participant; }
+
+cleanup_host_desktop_launcher() {
+    [[ -n "$HOST_DESKTOP_LAUNCHER" ]] || return 0
+    # Modified shortcuts are deliberately preserved and may still use it.
+    if [[ -e "$HOST_DESKTOP_SHORTCUT" || -L "$HOST_DESKTOP_SHORTCUT" \
+        || -e "$HOST_PARTICIPANT_SHORTCUT" || -L "$HOST_PARTICIPANT_SHORTCUT" ]]; then
+        warn "Preserving desktop launcher used by a retained shortcut: $HOST_DESKTOP_LAUNCHER"
+    elif host_desktop_shortcut_owned "$HOST_DESKTOP_LAUNCHER" "$HOST_DESKTOP_LAUNCHER_SHA256"; then
+        run rm -f -- "$HOST_DESKTOP_LAUNCHER"
+    else
+        warn "Preserving modified desktop launcher: $HOST_DESKTOP_LAUNCHER"
     fi
 }
 
@@ -1180,6 +1167,7 @@ perform_cleanup() {
     log "  state and credentials: $STATE_DIR"
     [[ -z "$HOST_DESKTOP_SHORTCUT" ]] || log "  desktop shortcut (if unchanged): $HOST_DESKTOP_SHORTCUT"
     [[ -z "$HOST_PARTICIPANT_SHORTCUT" ]] || log "  participant VM shortcut (if unchanged): $HOST_PARTICIPANT_SHORTCUT"
+    [[ -z "$HOST_DESKTOP_LAUNCHER" ]] || log "  desktop launcher (if unchanged and unused): $HOST_DESKTOP_LAUNCHER"
     log "  cached base images are preserved: $IMAGE_CACHE"
     describe_host_network_cleanup
     if cleanup_healthy; then
@@ -1216,6 +1204,7 @@ perform_cleanup() {
     cleanup_host_networks
     cleanup_host_desktop_shortcut
     cleanup_participant_desktop_shortcut
+    cleanup_host_desktop_launcher
     log "Removing installer state and credentials"
     run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE" "$RUNTIME_STATUS_FILE" \
         "$STATE_FILE.new" "$CREDENTIALS_FILE.new" "$RUNTIME_STATUS_FILE.new"
