@@ -265,15 +265,17 @@ def test_cli_flag_or_xml_enables_it():
     assert _seg_accessible_by_pivot(Off()) is False
 
 
-def test_ui_renders_the_toggle_only_for_segmentation():
+def test_ui_renders_pivot_controls_only_on_segmentation_rows():
     html = Path("webapp/templates/index.html").read_text(encoding="utf-8")
-    assert "Accessible by pivot" in html
-    assert 'data-field="accessible_by_pivot"' in html
-    block = html[html.index("const pivotOn ="):]
-    assert "never consume vulnerability or flag-node-generator slot capacity" in block[:1400]
-    # Change (not input) drives it, so one click does not write state twice.
-    handler = html[html.index("field === 'accessible_by_pivot'"):]
-    assert "ev?.type === 'input'" in handler[:300]
+    assert 'data-field="accessible_by_pivot"' not in html
+    assert 'segAccessibleByPivot' not in html
+    block_start = html.index("if (secName === 'Segmentation') {", html.index('function renderItemRow'))
+    block_end = html.index("// Build first cell content", block_start)
+    block = html[block_start:block_end]
+    assert 'Pivot-Accessible' in block
+    assert 'data-field="pivot_enabled"' in block
+    assert 'data-field="pivot_provider"' in block
+    assert 'data-item-idx="${iidx}"' in block
 
 
 def test_backend_round_trips_the_toggle_through_xml():

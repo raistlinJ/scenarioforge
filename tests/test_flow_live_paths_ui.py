@@ -205,18 +205,19 @@ def test_flow_loading_progress_uses_scrollable_container() -> None:
     assert not present, "Progress output should not use bullet-list markup: " + "; ".join(present)
 
 
-def test_report_guides_include_chain_io_and_pivot_sections() -> None:
+def test_report_guides_keep_pivot_paths_without_chain_io_tables() -> None:
     reports_text = REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
     flow_text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     expected_snippets = [
-        "### Chain Inputs / Outputs",
         "### Pivot Path",
         "const pivotEntries = Array.isArray(assignment.pivot)",
-        "...normalizeChainFacts(assignment.requires)",
-        "...normalizeChainFacts(assignment.produces)",
+        "...normalizeChainFacts(entry.requires)",
+        "...normalizeChainFacts(entry.produces)",
         "entry.provider_label || entry.provider",
     ]
+    assert "### Chain Inputs / Outputs" not in reports_text
+    assert "### Chain Inputs / Outputs" not in flow_text
     reports_missing = [snippet for snippet in expected_snippets if snippet not in reports_text]
     assert not reports_missing, "Missing pivot/chain IO report-guide rendering snippets: " + "; ".join(reports_missing)
 

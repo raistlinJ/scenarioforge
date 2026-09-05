@@ -98,6 +98,8 @@ HEADLESS=0
 CREATE_DESKTOP_SHORTCUT="${SF_DESKTOP_SHORTCUT:-1}"
 HOST_DESKTOP_SHORTCUT=""
 HOST_DESKTOP_SHORTCUT_SHA256=""
+HOST_PARTICIPANT_SHORTCUT=""
+HOST_PARTICIPANT_SHORTCUT_SHA256=""
 MANAGE_HITL_NETWORK="${SF_VMWARE_MANAGE_HITL_NETWORK:-0}"
 INSTALLER_CREATED_HITL_VMNET=""
 INSTALLER_CREATED_HITL_SUBNET=""
@@ -173,8 +175,8 @@ Important options:
   --vulnhub                   install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N            bootstrap timeout (default: 90)
   --no-wait                   return after participant isolation is complete
-  --desktop-shortcut          create a host desktop browser shortcut (default)
-  --no-desktop-shortcut       skip the host desktop browser shortcut
+  --desktop-shortcut          create host browser and participant VM shortcuts (default)
+  --no-desktop-shortcut       skip both host desktop shortcuts
   --headless                  start VMs without opening Workstation windows
   --verbose                   show detailed commands and guest progress
   --watch                     keep printing status until provisioning completes
@@ -503,6 +505,8 @@ write_state() {
         shell_assignment CREATE_DESKTOP_SHORTCUT "$CREATE_DESKTOP_SHORTCUT"
         shell_assignment HOST_DESKTOP_SHORTCUT "$HOST_DESKTOP_SHORTCUT"
         shell_assignment HOST_DESKTOP_SHORTCUT_SHA256 "$HOST_DESKTOP_SHORTCUT_SHA256"
+        shell_assignment HOST_PARTICIPANT_SHORTCUT "$HOST_PARTICIPANT_SHORTCUT"
+        shell_assignment HOST_PARTICIPANT_SHORTCUT_SHA256 "$HOST_PARTICIPANT_SHORTCUT_SHA256"
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
         shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
@@ -867,9 +871,18 @@ app_ip() {
 }
 
 host_desktop_shortcut_owned() {
-    [[ -n "$HOST_DESKTOP_SHORTCUT" && -n "$HOST_DESKTOP_SHORTCUT_SHA256" \
-        && -f "$HOST_DESKTOP_SHORTCUT" && ! -L "$HOST_DESKTOP_SHORTCUT" ]] \
-        && [[ "$(sha256sum "$HOST_DESKTOP_SHORTCUT" | cut -d ' ' -f 1)" == "$HOST_DESKTOP_SHORTCUT_SHA256" ]]
+    local path="${1-$HOST_DESKTOP_SHORTCUT}" digest="${2-$HOST_DESKTOP_SHORTCUT_SHA256}"
+    [[ -n "$path" && -n "$digest" && -f "$path" && ! -L "$path" ]] \
+        && [[ "$(sha256sum "$path" | cut -d ' ' -f 1)" == "$digest" ]]
+}
+
+host_desktop_directory() {
+    local desktop="$HOME/Desktop"
+    if [[ "$VMRUN_TYPE" != fusion ]] && command -v xdg-user-dir >/dev/null 2>&1; then
+        desktop="$(xdg-user-dir DESKTOP)" || desktop="$HOME/Desktop"
+        [[ -n "$desktop" && "$desktop" != "$HOME" ]] || return 1
+    fi
+    printf '%s\n' "$desktop"
 }
 
 create_host_desktop_shortcut() {
@@ -879,12 +892,9 @@ create_host_desktop_shortcut() {
         warn "APP address unavailable; run status later to create the host desktop shortcut"
         return 0
     fi
-    if [[ "$VMRUN_TYPE" != fusion ]] && command -v xdg-user-dir >/dev/null 2>&1; then
-        desktop="$(xdg-user-dir DESKTOP)" || desktop="$HOME/Desktop"
-        if [[ -z "$desktop" || "$desktop" == "$HOME" ]]; then
-            warn "Host desktop directory is disabled; skipping the ScenarioForge shortcut"
-            return 0
-        fi
+    if ! desktop="$(host_desktop_directory)"; then
+        warn "Host desktop directory is disabled; skipping the ScenarioForge shortcut"
+        return 0
     fi
     path="$desktop/ScenarioForge.desktop"
     [[ "$VMRUN_TYPE" != fusion ]] || path="$desktop/ScenarioForge.webloc"
@@ -933,6 +943,79 @@ PY
         HOST_DESKTOP_SHORTCUT_SHA256="$digest"
         write_state_if_present
         log "Host desktop shortcut: $path"
+    fi
+}
+
+create_participant_desktop_shortcut() {
+    local desktop path digest
+    [[ "$CREATE_DESKTOP_SHORTCUT" == 1 && "$DRY_RUN" == 0 ]] || return 0
+    if [[ ! -f "$PARTICIPANT_VMX" ]]; then
+        warn "Participant VM unavailable; run status after provisioning to create its desktop shortcut"
+        return 0
+    fi
+    if ! desktop="$(host_desktop_directory)"; then
+        warn "Host desktop directory is disabled; skipping the participant VM shortcut"
+        return 0
+    fi
+    path="$desktop/ScenarioForge Participant VM.desktop"
+    [[ "$VMRUN_TYPE" != fusion ]] || path="$desktop/ScenarioForge Participant VM.command"
+    [[ -z "$HOST_PARTICIPANT_SHORTCUT" ]] || path="$HOST_PARTICIPANT_SHORTCUT"
+    if [[ -e "$path" || -L "$path" ]]; then
+        if ! host_desktop_shortcut_owned "$HOST_PARTICIPANT_SHORTCUT" "$HOST_PARTICIPANT_SHORTCUT_SHA256"; then
+            warn "Preserving existing participant VM shortcut: $path"
+            return 0
+        fi
+    fi
+    if ! digest="$(python3 - "$path" "$VMRUN_TYPE" "$PARTICIPANT_VMX" "${FUSION_APP:-}" <<'PY'
+import hashlib
+from pathlib import Path
+import shlex
+import sys
+
+path = Path(sys.argv[1])
+vmx = sys.argv[3]
+if sys.argv[2] == "fusion":
+    content = (
+        "#!/bin/sh\n# Open the ScenarioForge participant VM in VMware Fusion.\n"
+        f"exec open -a {shlex.quote(sys.argv[4])} {shlex.quote(vmx)}\n"
+    ).encode()
+else:
+    # Desktop Entry Exec quoting has two escape layers; literal percent signs
+    # must also be escaped so a VM path cannot be interpreted as a field code.
+    # https://specifications.freedesktop.org/desktop-entry/latest/exec-variables.html
+    argument = ''.join('\\' + ch if ch in '\\"`$' else ch for ch in vmx)
+    argument = argument.replace('\\', '\\\\').replace('%', '%%')
+    argument = argument.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+    content = (
+        "[Desktop Entry]\nType=Application\nName=ScenarioForge Participant VM\n"
+        "Comment=Open the participant VM in VMware Workstation\n"
+        f'Exec=vmware "{argument}"\nIcon=computer\nTerminal=false\n'
+    ).encode()
+path.parent.mkdir(parents=True, exist_ok=True)
+if not path.exists() or path.read_bytes() != content:
+    path.write_bytes(content)
+path.chmod(0o755)
+print(hashlib.sha256(content).hexdigest())
+PY
+    )"; then
+        warn "Could not create the participant VM shortcut; open $PARTICIPANT_VMX in $VMWARE_PRODUCT_NAME"
+        return 0
+    fi
+    if [[ "$HOST_PARTICIPANT_SHORTCUT" != "$path" || "$HOST_PARTICIPANT_SHORTCUT_SHA256" != "$digest" ]]; then
+        HOST_PARTICIPANT_SHORTCUT="$path"
+        HOST_PARTICIPANT_SHORTCUT_SHA256="$digest"
+        write_state_if_present
+        log "Host participant VM shortcut: $path"
+    fi
+}
+
+cleanup_participant_desktop_shortcut() {
+    [[ -n "$HOST_PARTICIPANT_SHORTCUT" ]] || return 0
+    if host_desktop_shortcut_owned "$HOST_PARTICIPANT_SHORTCUT" "$HOST_PARTICIPANT_SHORTCUT_SHA256"; then
+        log "Removing installer-created participant VM shortcut $HOST_PARTICIPANT_SHORTCUT"
+        run rm -f -- "$HOST_PARTICIPANT_SHORTCUT"
+    elif [[ -e "$HOST_PARTICIPANT_SHORTCUT" || -L "$HOST_PARTICIPANT_SHORTCUT" ]]; then
+        warn "Preserving modified participant VM shortcut: $HOST_PARTICIPANT_SHORTCUT"
     fi
 }
 
@@ -1030,6 +1113,7 @@ show_status_once() {
     if [[ "$INSTALL_COMPLETE" != 1 && "$percent" -ge 60 ]]; then percent=$(( 60 + (cp + ap + pp) * 39 / 300 )); fi
     [[ "$INSTALL_COMPLETE" != 1 ]] || percent=100
     address="$(app_ip)"
+    create_participant_desktop_shortcut
     create_host_desktop_shortcut "$address"
     printf 'ScenarioForge VMware lab [%3d%%]\n' "$percent"
     printf '  CORE        %-7s bootstrap=%3s%%  %s\n' "$(vm_power_text "$CORE_VMX")" "$cp" "$cphase"
@@ -1095,6 +1179,7 @@ perform_cleanup() {
     done
     log "  state and credentials: $STATE_DIR"
     [[ -z "$HOST_DESKTOP_SHORTCUT" ]] || log "  desktop shortcut (if unchanged): $HOST_DESKTOP_SHORTCUT"
+    [[ -z "$HOST_PARTICIPANT_SHORTCUT" ]] || log "  participant VM shortcut (if unchanged): $HOST_PARTICIPANT_SHORTCUT"
     log "  cached base images are preserved: $IMAGE_CACHE"
     describe_host_network_cleanup
     if cleanup_healthy; then
@@ -1130,6 +1215,7 @@ perform_cleanup() {
     done
     cleanup_host_networks
     cleanup_host_desktop_shortcut
+    cleanup_participant_desktop_shortcut
     log "Removing installer state and credentials"
     run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE" "$RUNTIME_STATUS_FILE" \
         "$STATE_FILE.new" "$CREDENTIALS_FILE.new" "$RUNTIME_STATUS_FILE.new"

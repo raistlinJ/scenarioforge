@@ -4479,7 +4479,7 @@
     addDefault('low', `Target: ${nodeIp ? `${nodeName} @ ${nodeIp}` : nodeName}`);
     const outputs = (source.resolved_outputs && typeof source.resolved_outputs === 'object' && !Array.isArray(source.resolved_outputs)) ? source.resolved_outputs : {};
     const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
-    addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the access instructions and resolved facts for this step.');
+    addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the target details and access instructions for this step.');
     addDefault('high', 'Work through the access instructions for this step in order.');
     return out;
   }
@@ -12485,9 +12485,13 @@
       cells.push(current.trim());
       return cells;
     };
-    const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || '');
+    const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(line || '');
     const lines = String(markdown || '').split(/\r?\n/);
     const out = [];
+    const contents = [];
+    let sectionNumber = 0;
+    let pendingStepId = '';
+    let detailsDepth = 0;
     let inCode = false;
     let codeLines = [];
     let listType = '';
@@ -12534,14 +12538,27 @@
         if (html) out.push(html);
         continue;
       }
-      if (/^<\/?details>$/.test(trimmed)) {
+      const stepMatch = trimmed.match(/^<details class="guide-step" id="(guide-step-\d+)"( open)?>$/);
+      if (stepMatch) {
         closeList();
+        pendingStepId = stepMatch[1];
+        detailsDepth += 1;
+        out.push(`<details class="guide-step" id="${pendingStepId}"${stepMatch[2] || ''}>`);
+        continue;
+      }
+      if (/^<(?:details(?: open)?|\/details)>$/.test(trimmed)) {
+        closeList();
+        detailsDepth += trimmed === '</details>' ? -1 : 1;
         out.push(trimmed);
         continue;
       }
       const summaryMatch = trimmed.match(/^<summary>(.*)<\/summary>$/);
       if (summaryMatch) {
         closeList();
+        if (pendingStepId) {
+          contents.push({ id: pendingStepId, label: summaryMatch[1], step: true });
+          pendingStepId = '';
+        }
         out.push(`<summary>${inlineHtml(summaryMatch[1])}</summary>`);
         continue;
       }
@@ -12549,7 +12566,11 @@
       if (headingMatch) {
         closeList();
         const level = Math.min(6, headingMatch[1].length);
-        out.push(`<h${level}>${inlineHtml(headingMatch[2])}</h${level}>`);
+        const id = level === 2
+          ? (headingMatch[2] === 'Completion' && detailsDepth === 0 ? 'guide-completion' : `guide-section-${++sectionNumber}`)
+          : '';
+        if (id && detailsDepth === 0) contents.push({ id, label: headingMatch[2], step: false });
+        out.push(`<h${level}${id ? ` id="${id}"` : ''}>${inlineHtml(headingMatch[2])}</h${level}>`);
         continue;
       }
       if (trimmed.startsWith('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
@@ -12571,6 +12592,12 @@
         out.push('</tbody></table>');
         continue;
       }
+      const checklistMatch = trimmed.match(/^- \[([ xX])\] (.+)$/);
+      if (checklistMatch) {
+        openList('ul');
+        out.push(`<li class="guide-checklist"><label><input type="checkbox"${checklistMatch[1].toLowerCase() === 'x' ? ' checked' : ''}> <span>${inlineHtml(checklistMatch[2])}</span></label></li>`);
+        continue;
+      }
       const unorderedMatch = trimmed.match(/^-\s+(.+)$/);
       if (unorderedMatch) {
         openList('ul');
@@ -12588,6 +12615,7 @@
     }
     if (inCode) out.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
     closeList();
+    const contentsHtml = contents.map((item) => `<li${item.step ? ' class="guide-contents-step"' : ''}><a href="#${item.id}">${inlineHtml(item.label)}</a></li>`).join('');
     const safeTitle = escapeHtml(title || 'Export');
     return `<!doctype html>
 <html lang="en">
@@ -12597,9 +12625,51 @@
   <title>${safeTitle}</title>
   <style>
     :root { color-scheme: light; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; margin: 2rem auto; max-width: 1120px; padding: 0 1rem; color: #172033; background: #f8fafc; }
-    h1, h2, h3, h4 { color: #0f172a; line-height: 1.2; margin-top: 1.6rem; }
-    h1 { margin-top: 0; border-bottom: 2px solid #cbd5e1; padding-bottom: .45rem; }
+    * { box-sizing: border-box; }
+    html { scroll-padding-top: 1.5rem; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.65; margin: 0; color: #172033; background: #f1f5f9; }
+    a { color: #075985; text-underline-offset: .18em; }
+    a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid #0284c7; outline-offset: 4px; }
+    .guide-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 2rem; max-width: 1320px; margin: 0 auto; padding: 2rem; }
+    .guide-sidebar { position: sticky; top: 1.5rem; align-self: start; max-height: calc(100vh - 3rem); overflow-y: auto; font-size: .9rem; }
+    .guide-sidebar h2 { margin: 0 0 .75rem; font-size: 1rem; }
+    .guide-sidebar ol { list-style: none; padding: 0; margin: 0; }
+    .guide-sidebar a { display: block; padding: .45rem .65rem; border-radius: .4rem; text-decoration: none; overflow-wrap: anywhere; }
+    .guide-sidebar a:hover { background: #e0f2fe; }
+    .guide-sidebar .guide-contents-step { border-left: 2px solid #cbd5e1; margin-left: .65rem; }
+    main { min-width: 0; background: white; padding: 2rem; border: 1px solid #e2e8f0; border-radius: .8rem; }
+    h1, h2, h3, h4 { color: #0f172a; line-height: 1.25; margin-top: 1.8rem; }
+    h1 { margin-top: 0; font-size: 2rem; }
+    h2 { border-top: 1px solid #e2e8f0; padding-top: 1.5rem; font-size: 1.4rem; }
+    h3 { font-size: 1.08rem; }
+    p, li, td { overflow-wrap: anywhere; }
+    .guide-toolbar { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.5rem; }
+    button { font: inherit; cursor: pointer; border: 1px solid #cbd5e1; border-radius: .4rem; padding: .4rem .75rem; color: #075985; background: #f8fafc; }
+    button:hover { background: #e0f2fe; }
+    .guide-step { scroll-margin-top: 1.5rem; border-left: 3px solid #0284c7; }
+    .guide-step > summary { font-size: 1.15rem; }
+    .guide-step-navigation { display: flex; justify-content: space-between; gap: 1rem; border-top: 1px solid #e2e8f0; padding-top: 1rem; margin-top: 1.5rem; }
+    .guide-checklist { list-style: none; padding-left: 0; }
+    .guide-checklist label { display: flex; gap: .6rem; align-items: baseline; }
+    .guide-checklist input { accent-color: #0284c7; }
+    .guide-skip { position: absolute; left: -9999px; }
+    .guide-skip:focus { left: 1rem; top: 1rem; background: white; padding: .6rem; z-index: 1; }
+    @media (max-width: 800px) {
+      .guide-layout { display: block; padding: 1rem; }
+      .guide-sidebar { position: static; max-height: 15rem; margin-bottom: 1.5rem; }
+      main { padding: 1.2rem; }
+    }
+    @media print {
+      body, main { background: white; }
+      .guide-layout { display: block; padding: 0; }
+      .guide-sidebar, .guide-toolbar, .guide-step-navigation, .guide-skip { display: none; }
+      main { border: 0; padding: 0; }
+      details { break-inside: auto; }
+      summary, h2, h3, h4 { break-after: avoid; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+      .guide-flow-scroll { max-height: none !important; overflow: visible !important; }
+      .guide-flow-figure svg { min-width: 0 !important; max-width: 100%; height: auto; }
+    }
     table { width: 100%; border-collapse: collapse; margin: 1rem 0; background: #fff; }
     th, td { border: 1px solid #cbd5e1; padding: .45rem .55rem; text-align: left; vertical-align: top; }
     th { background: #e2e8f0; }
@@ -12618,7 +12688,58 @@
   </style>
 </head>
 <body>
-${out.join('\n')}
+<a class="guide-skip" href="#guide-main">Skip to guide</a>
+<div class="guide-layout">
+  <nav class="guide-sidebar" id="guide-contents" aria-label="Guide contents">
+    <h2>Contents</h2>
+    <ol>${contentsHtml}</ol>
+  </nav>
+  <main id="guide-main">
+    <div class="guide-toolbar" aria-label="Guide controls">
+      <button type="button" data-guide-action="expand">Expand all steps</button>
+      <button type="button" data-guide-action="collapse">Collapse all steps</button>
+      <button type="button" data-guide-action="print">Print guide</button>
+    </div>
+    ${out.join('\n')}
+  </main>
+</div>
+<script>
+(() => {
+  const openDestination = (hash = window.location.hash) => {
+    const target = document.getElementById(hash.slice(1));
+    if (!target) return;
+    if (target.matches('details')) target.open = true;
+    let parent = target.parentElement;
+    while (parent) {
+      if (parent.matches('details')) parent.open = true;
+      parent = parent.parentElement;
+    }
+    target.scrollIntoView({ block: 'start' });
+  };
+  document.querySelectorAll('[data-guide-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const action = button.dataset.guideAction;
+      if (action === 'print') { window.print(); return; }
+      document.querySelectorAll('details.guide-step').forEach((step) => { step.open = action === 'expand'; });
+    });
+  });
+  document.querySelectorAll('a[href^="#"]').forEach((link) => {
+    link.addEventListener('click', () => {
+      openDestination(link.hash);
+    });
+  });
+  window.addEventListener('hashchange', () => openDestination());
+  openDestination();
+  let printState = [];
+  window.addEventListener('beforeprint', () => {
+    printState = Array.from(document.querySelectorAll('details'), (item) => [item, item.open]);
+    printState.forEach(([item]) => { item.open = true; });
+  });
+  window.addEventListener('afterprint', () => {
+    printState.forEach(([item, open]) => { item.open = open; });
+  });
+})();
+<\/script>
 </body>
 </html>`;
   }
@@ -13352,16 +13473,6 @@ ${out.join('\n')}
       }
       return out;
     };
-    const normalizeGuidePathFact = (label, value, guidePathArtifacts) => {
-      const original = String(value || '').trim();
-      if (!original || !isGuidePathLikeLabel(label)) return { value: original, status: '' };
-      const match = (Array.isArray(guidePathArtifacts) ? guidePathArtifacts : [])
-        .find((artifact) => artifact && artifact.status === 'container' && guidePathValuesMatch(original, artifact));
-      if (match && match.value) return { value: match.value, status: 'container' };
-      if (isCanonicalGuideContainerPath(original)) return { value: original, status: 'container' };
-      return { value: original, status: 'missing-container' };
-    };
-
       const escapeGuideShellValue = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
       const normalizeParticipantNetworkSetup = (rawSetup) => {
         const source = (rawSetup && typeof rawSetup === 'object') ? rawSetup : {};
@@ -13423,18 +13534,39 @@ ${out.join('\n')}
     };
 
     const lines = [];
-    lines.push('# Participant Steps Guide');
+    lines.push(facilitatorMode ? '# Facilitator Guide' : '# Participant Steps Guide');
     lines.push('');
-    appendParticipantNetworkSetup(lines);
     lines.push(`Scenario: ${scen}`);
     lines.push(`Generated: ${now}`);
-    lines.push(`Total steps: ${nodes.length}`);
+    lines.push(`Challenge steps: ${nodes.length}`);
     lines.push('');
+    lines.push(facilitatorMode ? '## Prepare the Session' : '## Quick Start');
+    lines.push('');
+    if (facilitatorMode) {
+      lines.push('Use this guide to prepare the exercise, coach participants, and check their results.');
+      lines.push('');
+      lines.push('1. Confirm the scenario is running and verify participant network access.');
+      lines.push('2. Review the challenge sequence and any pivot requirements before the session.');
+      lines.push('3. Give participants the participant guide; keep answer checks and reference notes for yourself.');
+      lines.push('4. Offer hints progressively, then validate the evidence collected at each step.');
+    } else {
+      lines.push('Work through the challenge steps below and keep a record of your findings.');
+      lines.push('');
+      lines.push('1. Complete the network setup and confirm your connection.');
+      lines.push('2. Open a challenge step and follow its access instructions.');
+      lines.push('3. If you get stuck, reveal one hint at a time, starting with the lowest level.');
+      lines.push('4. Record your evidence and any flags before moving on.');
+    }
+    lines.push('');
+    appendParticipantNetworkSetup(lines);
     if (facilitatorMode) appendGuideFlowVisualizerFigure(lines, scen, nodes, alignedAssignments);
-    lines.push('Use this as an operator-friendly chain checklist.');
+    lines.push('## Challenge Steps');
+    lines.push('');
+    lines.push('Use the contents to jump to a step. Follow any pivot instructions before attempting the target.');
     lines.push('');
 
     nodes.forEach((node, index) => {
+      const _cell = (value) => String(value == null ? '' : value).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
       const step = index + 1;
       const assignment = (alignedAssignments[index] && typeof alignedAssignments[index] === 'object')
         ? alignedAssignments[index]
@@ -13457,11 +13589,6 @@ ${out.join('\n')}
           .filter(Boolean)
         : [];
       let structuredHintLevels = normalizeGuideHintLevels(assignment);
-      const suppliedRequiredLabel = String(assignment.chain_supplied_requirement_label || `Seq ${step} required`).trim() || `Seq ${step} required`;
-      const suppliedRequiredInputCategory = `Input (${suppliedRequiredLabel})`;
-      const seqOneRequiredInputs = (Array.isArray(assignment.chain_supplied_inputs))
-        ? new Set(assignment.chain_supplied_inputs.map((value) => String(value || '').trim()).filter(Boolean))
-        : new Set();
       const sequenceOneRequiredHintLines = (Array.isArray(assignment.chain_supplied_input_hints))
         ? assignment.chain_supplied_input_hints
           .map((value) => _applyHintOutputTemplates(String(value || '').trim(), assignment))
@@ -13478,16 +13605,12 @@ ${out.join('\n')}
       const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
       const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
       const resolvedInjects = normalizeGuidePathArtifacts(assignment);
-      const resolvedInputFacts = resolvedInputs.map(([k, v]) => [k, normalizeGuidePathFact(k, v, resolvedInjects)]);
-      const resolvedOutputFacts = resolvedOutputs.map(([k, v]) => [k, normalizeGuidePathFact(k, v, resolvedInjects)]);
 
-      const _cell = (value) => String(value == null ? '' : value).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
 
-      lines.push(`<details>`);
+      lines.push(`<details class="guide-step" id="guide-step-${step}"${step === 1 ? ' open' : ''}>`);
       lines.push(`<summary>Step ${step}: ${_cell(nodeName)}</summary>`);
       lines.push('');
-      lines.push(`Goal: Complete this stage on ${nodeName} and collect the expected artifacts.`);
-      lines.push(`Why it matters: This step unlocks prerequisites for the next link in the chain.`);
+      lines.push(`Objective: Complete the challenge on ${nodeName} and record evidence of your result.`);
       lines.push('');
 
       const ipCandidates = [
@@ -13502,79 +13625,69 @@ ${out.join('\n')}
       descHints = descHints.map((value) => renderGuideHintLine(value, assignment, guideContext)).filter(Boolean);
       structuredHintLevels = ensureFlowGuideHintLevelCoverage(structuredHintLevels, assignment, guideContext);
 
-      lines.push('### Critical Access');
+      // A pivot that is nobody else's challenge is its own step, and has to be
+      // performed before anything in the subnet it opens can be reached.
+      try {
+        ownStepPivotsFor(alignedAssignments).forEach((d) => {
+          if (Number(d.insert_before) !== index) return;
+          lines.push(`### \u2605 Pivot step: reach ${_cell(String(d.subnet || ''))}`);
+          lines.push('');
+          lines.push(String(d.instruction || d.reason || ''));
+          lines.push('');
+          lines.push('This pivot is not part of another challenge, so it counts as a step of its own.');
+          lines.push('');
+          // Tiered by how discoverable the provider is: a challenge node the
+          // participant is scanning anyway earns a medium nudge, a bare SSH box
+          // the most explicit tier, since nothing about it says "this is the door".
+          pivotHintGroupsFor(d).forEach((group) => {
+            lines.push('<details>');
+            lines.push(`<summary>${group.title}</summary>`);
+            lines.push('');
+            group.values.forEach((value) => lines.push(`- ${value}`));
+            lines.push('</details>');
+            lines.push('');
+          });
+          // Facilitator-only: which node the pivot runs on and why it is there.
+          // A participant is meant to find the provider, so naming it and its
+          // address in their guide would hand over the step.
+          if (facilitatorMode) {
+            const rows = [];
+            if (d.provider_node) rows.push(['Provider node', String(d.provider_node)]);
+            if (d.entry_kind) rows.push(['Entry', `${d.entry_kind}${d.entry_port ? `:${d.entry_port}` : ''}`]);
+            if (d.reason) rows.push(['Why its own step', String(d.reason)]);
+            if (Array.isArray(d.granting_facts) && d.granting_facts.length) {
+              rows.push(['Facts it grants', d.granting_facts.join(', ')]);
+            }
+            if (d.hint_level) rows.push(['Hint tier', String(d.hint_level)]);
+            if (rows.length) {
+              lines.push('| Pivot detail | Value |');
+              lines.push('| --- | --- |');
+              rows.forEach(([k, v]) => lines.push(`| ${_cell(k)} | ${_cell(v)} |`));
+              lines.push('');
+            }
+          }
+        });
+      } catch (e) { }
+
+      lines.push('### Target');
       lines.push('');
       lines.push('| Key | Value |');
       lines.push('| --- | --- |');
       lines.push(`| Node | ${_cell(nodeName)} |`);
       lines.push(`| IP Address | ${_cell(nodeIp)} |`);
-      if (nodeId) lines.push(`| Node ID | ${_cell(nodeId)} |`);
+      if (facilitatorMode && nodeId) lines.push(`| Node ID | ${_cell(nodeId)} |`);
       // Facilitators only. Naming the generator that built a challenge tells a
       // participant how it was constructed, which is the same disclosure that
       // start hints deliberately omit.
       if (facilitatorMode && (generatorLabel || generatorId)) lines.push(`| Technique Source | ${_cell([generatorLabel, generatorId].filter(Boolean).join(' / '))} |`);
       lines.push('');
 
-      const requiredInputsRaw = Array.isArray(assignment.input_fields_required)
-        ? assignment.input_fields_required
-        : [];
-      const optionalInputsRaw = Array.isArray(assignment.input_fields_optional)
-        ? assignment.input_fields_optional
-        : [];
-      const fallbackInputsRaw = Array.isArray(assignment.input_fields)
-        ? assignment.input_fields
-        : [];
-      const requiredInputs = Array.from(new Set(requiredInputsRaw.map((v) => String(v || '').trim()).filter(Boolean)));
-      let optionalInputs = Array.from(new Set(optionalInputsRaw.map((v) => String(v || '').trim()).filter(Boolean)));
-      if (!requiredInputs.length && !optionalInputs.length && fallbackInputsRaw.length) {
-        fallbackInputsRaw
-          .map((v) => String(v || '').trim())
-          .filter(Boolean)
-          .forEach((v) => requiredInputs.push(v));
-      }
-      optionalInputs = optionalInputs.filter((v) => !requiredInputs.includes(v));
-
-      lines.push('### Input Requirements');
-      lines.push('');
-      lines.push('Required inputs are blocking: participants need them to complete this step.');
-      lines.push('Optional inputs are non-blocking: they can help, but participants can still complete this step without them.');
-      lines.push('');
-      if (!requiredInputs.length && !optionalInputs.length) {
-        lines.push('No explicit input requirements were declared for this step.');
-      } else {
-        lines.push('| Input | Requirement | Needed to complete this step? |');
-        lines.push('| --- | --- | --- |');
-        requiredInputs.forEach((name) => lines.push(`| ${_cell(name)} | ${seqOneRequiredInputs.has(name) ? suppliedRequiredLabel : 'Required'} | Yes |`));
-        optionalInputs.forEach((name) => lines.push(`| ${_cell(name)} | Optional | No |`));
-      }
-      lines.push('');
-
       const normalizeChainFacts = (value) => guideFigureNormalizeFactNames(value, ['artifact', 'name', 'field'])
         .map((item) => String(item || '').trim())
         .filter(Boolean);
-      const chainInputFacts = Array.from(new Set([
-        ...normalizeChainFacts(assignment.requires),
-        ...normalizeChainFacts(assignment.inputs),
-      ]));
-      const chainOutputFacts = Array.from(new Set([
-        ...normalizeChainFacts(assignment.produces),
-        ...normalizeChainFacts(assignment.outputs),
-      ]));
       const pivotEntries = Array.isArray(assignment.pivot)
         ? assignment.pivot.filter((item) => item && typeof item === 'object')
         : [];
-
-      lines.push('### Chain Inputs / Outputs');
-      lines.push('');
-      if (!chainInputFacts.length && !chainOutputFacts.length) {
-        lines.push('No chain-level facts were declared for this step.');
-      } else {
-        lines.push('| Direction | Fact |');
-        lines.push('| --- | --- |');
-        chainInputFacts.forEach((fact) => lines.push(`| Input | ${_cell(fact)} |`));
-        chainOutputFacts.forEach((fact) => lines.push(`| Output | ${_cell(fact)} |`));
-      }
-      lines.push('');
 
       if (pivotEntries.length) {
         lines.push('### Pivot Path');
@@ -13753,22 +13866,42 @@ ${out.join('\n')}
         lines.push('');
       }
 
+      lines.push('### Check Your Progress');
+      lines.push('');
+      lines.push('- Record what you did and the evidence that the challenge is complete.');
+      lines.push('- Save any recovered flags or credentials for submission or later steps.');
+      lines.push('');
+      if (facilitatorMode) {
+        const expectedFlag = String(assignment.flag_value || (resolvedOutputs.find(([key]) => key === 'Flag') || [])[1] || '').trim();
+        const evidencePaths = resolvedInjects.filter((item) => item.status === 'container');
+        if (expectedFlag || evidencePaths.length) {
+          lines.push('<details>');
+          lines.push('<summary>Facilitator answer check</summary>');
+          lines.push('');
+          if (expectedFlag) lines.push(`Expected flag: \`${expectedFlag}\``);
+          if (evidencePaths.length) {
+            lines.push('');
+            lines.push('| Deployed evidence file |');
+            lines.push('| --- |');
+            evidencePaths.forEach((item) => lines.push(`| ${_cell(item.value)} |${guidePathMarkerForStatus(item.status)}`));
+          }
+          lines.push('');
+          lines.push('</details>');
+          lines.push('');
+        }
+      }
+
       const hasStructuredHintLevels = FLOW_HINT_LEVEL_ORDER.some((level) => Array.isArray(structuredHintLevels[level]) && structuredHintLevels[level].length);
       if (hasStructuredHintLevels) {
-        lines.push('### Hints');
+        lines.push('### Need a Hint?');
         lines.push('');
         flowHintDisplayGroups(structuredHintLevels, assignment).forEach((group) => {
           const values = group.values.map((value) => formatGuideHintLine(value)).filter(Boolean);
           if (!values.length) return;
-          const firstValue = values[0];
-          lines.push('<details>');
-          lines.push(`<summary>${group.title}: ${firstValue}${values.length > 1 ? ` (${values.length - 1} other path${(values.length - 1) === 1 ? '' : 's'} exist - click to see)` : ''}</summary>`);
+          lines.push(group.title === 'Helpful Fact' ? '<details open>' : '<details>');
+          lines.push(`<summary>${group.title}</summary>`);
           lines.push('');
-          if (values.length === 1) {
-            lines.push(firstValue);
-          } else {
-            values.slice(1).forEach((value) => lines.push(`- ${value}`));
-          }
+          values.forEach((value) => lines.push(`- ${value}`));
           lines.push('');
           lines.push('</details>');
           lines.push('');
@@ -13776,8 +13909,8 @@ ${out.join('\n')}
       }
 
       const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
-      if (stepVulnReadmes.length) {
-        lines.push('#### Vulnerability README Notes');
+      if (facilitatorMode && stepVulnReadmes.length) {
+        lines.push('### Reference Notes');
         lines.push('');
         stepVulnReadmes.forEach((entry) => {
           const label = String(entry.vulnName || `Vulnerability ${entry.itemId || ''}`).trim();
@@ -13798,62 +13931,10 @@ ${out.join('\n')}
         });
       }
 
-      lines.push('### Resolved Facts');
-      lines.push('');
-      const factRows = [];
-      resolvedInputFacts.forEach(([k, pathInfo]) => factRows.push([seqOneRequiredInputs.has(k) ? suppliedRequiredInputCategory : 'Input', k, pathInfo.value, pathInfo.status]));
-      resolvedOutputFacts.forEach(([k, pathInfo]) => factRows.push(['Output', k, pathInfo.value, pathInfo.status]));
-      resolvedInjects.forEach((item, idx) => factRows.push(['File Artifact', `Artifact ${idx + 1}`, item.value, item.status]));
-      if (factRows.length) {
-        lines.push('| Category | Key | Value |');
-        lines.push('| --- | --- | --- |');
-        factRows.forEach(([cat, key, val, pathStatus]) => lines.push(`| ${_cell(cat)} | ${_cell(key)} | ${_cell(val)} |${guidePathMarkerForStatus(pathStatus)}`));
-      } else {
-        lines.push('No resolved inputs, outputs, or file artifacts were captured for this step.');
-      }
-      lines.push('');
-
-      lines.push('- Success evidence:');
-      if (resolvedOutputs.length) {
-        lines.push('  - One or more resolved outputs captured for this step.');
-      }
-      if (resolvedInjects.length) {
-        lines.push('  - One or more resolved file artifacts mapped for this step.');
-      }
-      if (assignment.flag_value) {
-        lines.push('  - Flag output present for this step.');
-      }
-      if (!resolvedOutputs.length && !resolvedInjects.length && !assignment.flag_value) {
-        lines.push('  - No resolved values were captured for this step.');
-      }
-      if (hint) lines.push(`- Next-Step Hint: ${hint}`);
-      if (facilitatorMode) {
-        lines.push('- Facilitator details:');
-        if (resolvedInputs.length) {
-          lines.push('  - Resolved inputs:');
-          resolvedInputFacts.forEach(([k, pathInfo]) => lines.push(`    - ${k}: ${pathInfo.value}`));
-        } else {
-          lines.push('  - Resolved inputs: none');
-        }
-        if (resolvedOutputs.length) {
-          lines.push('  - Resolved outputs:');
-          resolvedOutputFacts.forEach(([k, pathInfo]) => lines.push(`    - ${k}: ${pathInfo.value}`));
-        } else {
-          lines.push('  - Resolved outputs: none');
-        }
-        if (allHints.length) {
-          lines.push('  - All next-step hints:');
-          allHints.forEach((h) => lines.push(`    - ${h}`));
-        }
-        if (descHints.length) {
-          lines.push('  - Description hints:');
-          descHints.forEach((h) => lines.push(`    - ${h}`));
-        }
-        if (assignment.flag_value) {
-          lines.push(`  - Flag value: ${String(assignment.flag_value)}`);
-        }
-      }
-      lines.push(`- Checklist: [ ] Step ${step} completed`);
+      lines.push(`- [ ] Step ${step} completed`);
+      const previousLink = step > 1 ? `<a href="#guide-step-${step - 1}">Previous step</a>` : '<a href="#guide-contents">Contents</a>';
+      const nextLink = step < nodes.length ? `<a href="#guide-step-${step + 1}">Next step</a>` : '<a href="#guide-completion">Finish the exercise</a>';
+      lines.push(registerGuideHtmlBlock(`<nav class="guide-step-navigation" aria-label="Step ${step} navigation">${previousLink}${nextLink}</nav>`));
       lines.push('');
       lines.push('</details>');
       lines.push('');
@@ -13866,8 +13947,12 @@ ${out.join('\n')}
 
     lines.push('## Completion');
     lines.push('');
-    lines.push('- [ ] All steps completed in order');
-    lines.push('- [ ] All expected artifacts and flags validated');
+    lines.push('- [ ] All challenge steps and required pivots completed');
+    lines.push('- [ ] Findings and flags recorded and submitted as instructed');
+    if (facilitatorMode) {
+      lines.push('');
+      lines.push('Debrief: Discuss the approach taken, where participants needed hints, and how each pivot changed what they could reach.');
+    }
     lines.push('');
 
     return lines.join('\n');
@@ -14606,7 +14691,7 @@ ${out.join('\n')}
     if (kind === 'participant-guide' || kind === 'facilitator-guide') {
       const facilitator = kind === 'facilitator-guide';
       setFlowDownloadModalStatus('Collecting vulnerability notes…');
-      const vulnReadmeEntries = await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments);
+      const vulnReadmeEntries = facilitator ? await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments) : [];
       setFlowDownloadModalStatus('Collecting participant network setup…');
       const participantNetworkSetup = await loadParticipantNetworkSetupForGuide(scenario);
       setFlowDownloadModalStatus('Building guide HTML…');

@@ -115,18 +115,26 @@ chmod 600 "$HOME/.config/scenarioforge-vmware-lab.conf"
   --verbose
 ```
 
-The installer creates a **ScenarioForge** shortcut on your host desktop by
-default, opening the APP VM's HTTPS site in your default browser (`.webloc` on
-macOS, `.desktop` on Linux). Set `desktop_shortcut=false` in the config or pass
-`--no-desktop-shortcut` to disable it; `--desktop-shortcut` enables it explicitly.
-The environment equivalent is `SF_DESKTOP_SHORTCUT=0` or `1`. This setting is
-independent of `--headless`. Linux uses the desktop directory reported by
-`xdg-user-dir`, falling back to `~/Desktop` when that tool is unavailable.
-If the APP address is not available yet, a later `status` check creates the
-shortcut; status checks also refresh it when the address changes. Cleanup
-removes the installer-created shortcut if it has not been edited. Existing
-unrelated shortcuts are preserved. On Linux, the desktop may ask you to allow
-launching the shortcut the first time you open it.
+The installer creates two shortcuts on your host desktop by default:
+
+- **ScenarioForge** opens the APP VM's HTTPS site in your default browser
+  (`.webloc` on macOS, `.desktop` on Linux).
+- **ScenarioForge Participant VM** opens the participant VM in VMware Fusion
+  on macOS (`.command`) or VMware Workstation on Linux (`.desktop`). It works
+  without a guest IP address and opens the local VMware console.
+
+Set `desktop_shortcut=false` in the config or pass `--no-desktop-shortcut` to
+skip both shortcuts; `--desktop-shortcut` enables them explicitly. The environment
+equivalent is `SF_DESKTOP_SHORTCUT=0` or `1`. This setting is independent of
+`--headless`. Linux uses the desktop directory reported by `xdg-user-dir`,
+falling back to `~/Desktop` when that tool is unavailable.
+
+For an existing lab, run `./install-scenarioforge-lab.sh status` to add the
+participant VM shortcut. If the APP address is not available yet, a later
+`status` check creates the browser shortcut; status checks also refresh it when
+the address changes. Cleanup removes installer-created shortcuts only if they
+have not been edited. Existing unrelated shortcuts are preserved. On Linux,
+the desktop may ask you to allow launching a shortcut the first time you open it.
 
 The precedence is **built-in defaults < config file < `SF_*` environment
 variables < CLI flags**. Config keys are the lowercase long-option names with
