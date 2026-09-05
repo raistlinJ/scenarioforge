@@ -4,14 +4,14 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-WORKSTATION_INSTALLER="$SCRIPT_DIR/../vmware-workstation/install-scenarioforge-lab.sh"
+WORKSTATION_INSTALLER="$SCRIPT_DIR/../vmware-workstation-linux/install-scenarioforge-lab.sh"
 [[ -r "$WORKSTATION_INSTALLER" ]] || {
     printf 'ERROR: shared VMware installer not found: %s\n' "$WORKSTATION_INSTALLER" >&2
     exit 1
 }
 # Fusion and Workstation use the same VMX/vmrun model. Source the tested Linux
 # implementation, then replace only the macOS host and architecture seams.
-# shellcheck source=scripts/vmware-workstation/install-scenarioforge-lab.sh
+# shellcheck source=scripts/provision/vmware-workstation-linux/install-scenarioforge-lab.sh
 source "$WORKSTATION_INSTALLER"
 
 SCRIPT_VERSION="0.2.0"

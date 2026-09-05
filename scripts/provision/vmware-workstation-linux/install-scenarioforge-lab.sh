@@ -11,7 +11,7 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 }
 # Reuse the tested guest bootstrap and Cloud-Init generators. Its main function is
 # guarded, so sourcing it does not perform any Proxmox operations.
-# shellcheck source=scripts/proxmox/install-scenarioforge-lab.sh
+# shellcheck source=scripts/provision/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
 SCRIPT_VERSION="0.5.0"

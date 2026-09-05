@@ -4,9 +4,9 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "scripts" / "vmware-fusion" / "install-scenarioforge-lab.sh"
-README = ROOT / "scripts" / "vmware-fusion" / "README.md"
-CONFIG_EXAMPLE = ROOT / "scripts" / "vmware-fusion" / "scenarioforge-lab.conf.example"
+INSTALLER = ROOT / "scripts" / "provision" / "vmware-fusion-mac" / "install-scenarioforge-lab.sh"
+README = ROOT / "scripts" / "provision" / "vmware-fusion-mac" / "README.md"
+CONFIG_EXAMPLE = ROOT / "scripts" / "provision" / "vmware-fusion-mac" / "scenarioforge-lab.conf.example"
 
 
 def run_bash(script: str) -> subprocess.CompletedProcess[str]:
@@ -341,10 +341,10 @@ printf 'VALUES|%s|%s|%s\n' "$INSTALLER_CREATED_HITL_VMNET" \
 def test_fusion_contract_reuses_graphical_guest_provisioning() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     workstation = (
-        ROOT / "scripts" / "vmware-workstation" / "install-scenarioforge-lab.sh"
+        ROOT / "scripts" / "provision" / "vmware-workstation-linux" / "install-scenarioforge-lab.sh"
     ).read_text(encoding="utf-8")
     shared = (
-        ROOT / "scripts" / "proxmox" / "install-scenarioforge-lab.sh"
+        ROOT / "scripts" / "provision" / "proxmox" / "install-scenarioforge-lab.sh"
     ).read_text(encoding="utf-8")
 
     assert 'VMRUN_TYPE="fusion"' in source

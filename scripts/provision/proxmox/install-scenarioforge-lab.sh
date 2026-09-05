@@ -369,7 +369,7 @@ Repository overrides:
   --flag-generators-ref REF    Default: tested metadata snapshot 5f612eecb8ff
 
 Environment variables with the SF_ prefix can set every default; see
-scripts/proxmox/README.md for the complete list and config-file format.
+scripts/provision/proxmox/README.md for the complete list and config-file format.
 EOF
 }
 

@@ -84,8 +84,8 @@ then install:
 
 ```bash
 cd scenarioforge
-sudo scripts/proxmox/install-scenarioforge-lab.sh install --dry-run
-sudo scripts/proxmox/install-scenarioforge-lab.sh install --verbose
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh install --dry-run
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh install --verbose
 ```
 
 The confirmation prompt requires typing `INSTALL`. Use `--yes` for an
@@ -100,9 +100,9 @@ config file. Start from the tracked example, restrict its permissions if it
 contains credentials, and pass it to any installer command:
 
 ```bash
-cp scripts/proxmox/scenarioforge-lab.conf.example /root/scenarioforge-lab.conf
+cp scripts/provision/proxmox/scenarioforge-lab.conf.example /root/scenarioforge-lab.conf
 chmod 600 /root/scenarioforge-lab.conf
-sudo scripts/proxmox/install-scenarioforge-lab.sh install \
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh install \
   --config /root/scenarioforge-lab.conf \
   --verbose
 ```
@@ -138,7 +138,7 @@ monitoring is still active.
 To use different VMIDs, storage, uplink, and an SSH public key:
 
 ```bash
-sudo scripts/proxmox/install-scenarioforge-lab.sh install \
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh install \
   --storage fast-lvm \
   --snippet-storage local \
   --uplink-bridge vmbr0 \
@@ -155,7 +155,7 @@ values. To assign known credentials when creating a new lab, provide any or all
 of these options:
 
 ```bash
-sudo scripts/proxmox/install-scenarioforge-lab.sh install \
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh install \
   --core-password 'CORE-VM-password' \
   --app-password 'APP-VM-password' \
   --participant-password 'participant-password' \
@@ -181,13 +181,13 @@ The installer can populate a fresh APP VM from the private
 
 ```bash
 # Install flag and flag-node generator catalogs.
-sudo scripts/proxmox/install-scenarioforge-lab.sh --flag-generators
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh --flag-generators
 
 # Import the repository's pinned Vulhub recipe snapshot into ScenarioForge.
-sudo scripts/proxmox/install-scenarioforge-lab.sh --vulnhub
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh --vulnhub
 
 # Install both optional content sets.
-sudo scripts/proxmox/install-scenarioforge-lab.sh --flag-generators --vulnhub
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh --flag-generators --vulnhub
 ```
 
 Authenticate GitHub on the Proxmox host before running one of these options.
@@ -246,14 +246,14 @@ temporary uplink is removed, without waiting for CORE and ScenarioForge to
 finish. Check progress later with:
 
 ```bash
-sudo scripts/proxmox/install-scenarioforge-lab.sh status
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh status
 ```
 
 For a continuously updating view in a second Proxmox shell—even while the
 original installer is still running—use:
 
 ```bash
-sudo scripts/proxmox/install-scenarioforge-lab.sh status --watch
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh status --watch
 ```
 
 It reports each VM's power state, QEMU guest-agent availability, readiness
@@ -439,8 +439,8 @@ bootstrap failure so the failure can be inspected. To preview and then remove a
 partial, stopped, or incomplete installation, run:
 
 ```bash
-sudo scripts/proxmox/install-scenarioforge-lab.sh cleanup --dry-run
-sudo scripts/proxmox/install-scenarioforge-lab.sh cleanup
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh cleanup --dry-run
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh cleanup
 ```
 
 `--cleanup` is an alias for the `cleanup` command. Cleanup displays its exact
@@ -472,7 +472,7 @@ To intentionally remove one, supply `--force` in addition to the normal
 confirmation (or `--yes`):
 
 ```bash
-sudo scripts/proxmox/install-scenarioforge-lab.sh cleanup --force
+sudo scripts/provision/proxmox/install-scenarioforge-lab.sh cleanup --force
 ```
 
 Cleanup is permanent. Always inspect `cleanup --dry-run` before using `--yes`.

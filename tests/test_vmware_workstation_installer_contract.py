@@ -10,11 +10,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = (
-    ROOT / "scripts" / "vmware-workstation" / "install-scenarioforge-lab.sh"
+    ROOT / "scripts" / "provision" / "vmware-workstation-linux" / "install-scenarioforge-lab.sh"
 )
-README = ROOT / "scripts" / "vmware-workstation" / "README.md"
+README = ROOT / "scripts" / "provision" / "vmware-workstation-linux" / "README.md"
 CONFIG_EXAMPLE = (
-    ROOT / "scripts" / "vmware-workstation" / "scenarioforge-lab.conf.example"
+    ROOT / "scripts" / "provision" / "vmware-workstation-linux" / "scenarioforge-lab.conf.example"
 )
 
 
@@ -140,7 +140,7 @@ parse_args install --config {shlex.quote(str(CONFIG_EXAMPLE))}
 
 def test_topology_native_app_and_graphical_guest_contracts() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
-    shared = (ROOT / "scripts" / "proxmox" / "install-scenarioforge-lab.sh").read_text(
+    shared = (ROOT / "scripts" / "provision" / "proxmox" / "install-scenarioforge-lab.sh").read_text(
         encoding="utf-8"
     )
 

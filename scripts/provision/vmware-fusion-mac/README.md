@@ -97,7 +97,7 @@ VMware describes custom Fusion networks and the Network settings pane in its
 Run from this repository as your normal macOS desktop user, not with `sudo`:
 
 ```bash
-cd scripts/vmware-fusion
+cd scripts/provision/vmware-fusion-mac
 ./install-scenarioforge-lab.sh --verbose
 ```
 

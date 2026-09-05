@@ -7,8 +7,8 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "scripts" / "proxmox" / "install-scenarioforge-lab.sh"
-CONFIG_EXAMPLE = ROOT / "scripts" / "proxmox" / "scenarioforge-lab.conf.example"
+INSTALLER = ROOT / "scripts" / "provision" / "proxmox" / "install-scenarioforge-lab.sh"
+CONFIG_EXAMPLE = ROOT / "scripts" / "provision" / "proxmox" / "scenarioforge-lab.conf.example"
 
 
 def test_installer_has_valid_bash_syntax() -> None:

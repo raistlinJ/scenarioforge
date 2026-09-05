@@ -1,7 +1,7 @@
 # DeployForge / Proxmox deployment
 
 The first automated deployment target is now available as the
-[Proxmox three-VM installer](../scripts/proxmox/README.md). Run it in the shell
+[Proxmox three-VM installer](../scripts/provision/proxmox/README.md). Run it in the shell
 of a single Proxmox VE node to provision:
 
 - A ScenarioForge Ubuntu application VM.
@@ -16,5 +16,5 @@ checksums, generates credentials, installs ScenarioForge's custom CORE services,
 and waits for guest-side health markers.
 
 See [VM Mode Setup](VM_MODE_SETUP.md) for the architecture and
-[the installer guide](../scripts/proxmox/README.md) for requirements, options,
+[the installer guide](../scripts/provision/proxmox/README.md) for requirements, options,
 failure recovery, and security notes.

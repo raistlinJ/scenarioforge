@@ -76,7 +76,7 @@ running VMs.
 Run from a clone of this repository as your graphical desktop user:
 
 ```bash
-cd scripts/vmware-workstation
+cd scripts/provision/vmware-workstation-linux
 ./install-scenarioforge-lab.sh --verbose
 ```
 
