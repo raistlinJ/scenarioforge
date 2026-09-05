@@ -95,6 +95,9 @@ WAIT_FOR_BOOTSTRAP=1
 STATUS_WATCH=0
 VERBOSE="${SF_VERBOSE:-0}"
 HEADLESS=0
+CREATE_DESKTOP_SHORTCUT="${SF_DESKTOP_SHORTCUT:-1}"
+HOST_DESKTOP_SHORTCUT=""
+HOST_DESKTOP_SHORTCUT_SHA256=""
 MANAGE_HITL_NETWORK="${SF_VMWARE_MANAGE_HITL_NETWORK:-0}"
 INSTALLER_CREATED_HITL_VMNET=""
 INSTALLER_CREATED_HITL_SUBNET=""
@@ -170,6 +173,8 @@ Important options:
   --vulnhub                   install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N            bootstrap timeout (default: 90)
   --no-wait                   return after participant isolation is complete
+  --desktop-shortcut          create a host desktop browser shortcut (default)
+  --no-desktop-shortcut       skip the host desktop browser shortcut
   --headless                  start VMs without opening Workstation windows
   --verbose                   show detailed commands and guest progress
   --watch                     keep printing status until provisioning completes
@@ -220,6 +225,10 @@ apply_vmware_config_value() {
             parse_config_boolean "$key" "$value"
             assign_config_setting MANAGE_HITL_NETWORK SF_VMWARE_MANAGE_HITL_NETWORK "$CONFIG_BOOLEAN_VALUE"
             ;;
+        desktop_shortcut)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting CREATE_DESKTOP_SHORTCUT SF_DESKTOP_SHORTCUT "$CONFIG_BOOLEAN_VALUE"
+            ;;
         wait_minutes) assign_config_setting WAIT_MINUTES SF_WAIT_MINUTES "$value" ;;
         no_wait) parse_config_boolean "$key" "$value"; WAIT_FOR_BOOTSTRAP=$((1 - CONFIG_BOOLEAN_VALUE)) ;;
         headless) parse_config_boolean "$key" "$value"; HEADLESS="$CONFIG_BOOLEAN_VALUE" ;;
@@ -269,6 +278,8 @@ parse_args() {
             --no-manage-hitl-network) MANAGE_HITL_NETWORK=0; shift ;;
             --wait-minutes) WAIT_MINUTES="${2:?missing value for --wait-minutes}"; shift 2 ;;
             --no-wait) WAIT_FOR_BOOTSTRAP=0; shift ;;
+            --desktop-shortcut) CREATE_DESKTOP_SHORTCUT=1; shift ;;
+            --no-desktop-shortcut) CREATE_DESKTOP_SHORTCUT=0; shift ;;
             --headless) HEADLESS=1; shift ;;
             --verbose) VERBOSE=1; shift ;;
             --watch) STATUS_WATCH=1; shift ;;
@@ -400,6 +411,8 @@ validate_inputs() {
         || die "SF_INSTALL_FLAG_GENERATORS must be 0 or 1"
     [[ "$INSTALL_VULNHUB" == "0" || "$INSTALL_VULNHUB" == "1" ]] \
         || die "SF_INSTALL_VULNHUB must be 0 or 1"
+    [[ "$CREATE_DESKTOP_SHORTCUT" == "0" || "$CREATE_DESKTOP_SHORTCUT" == "1" ]] \
+        || die "SF_DESKTOP_SHORTCUT must be 0 or 1"
     validate_ref "flag-generators ref" "$FLAG_GENERATORS_REF"
     validate_password_override "CORE password" "$REQUESTED_CORE_PASSWORD"
     validate_password_override "APP password" "$REQUESTED_APP_PASSWORD"
@@ -433,6 +446,7 @@ confirm_install() {
     log "  Management: $MANAGEMENT_VMNET (APP $APP_MANAGEMENT_CIDR <-> CORE $CORE_MANAGEMENT_CIDR)"
     log "  HITL: $HITL_VMNET (CORE ens19, no IP <-> participant $PARTICIPANT_CIDR)"
     log "  Uplink: VMware NAT for CORE and APP; temporary for participant provisioning"
+    log "  Host desktop shortcut: $CREATE_DESKTOP_SHORTCUT (1=enabled, 0=disabled)"
     if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
         log "  Optional content: flag-generators=$INSTALL_FLAG_GENERATORS vulnhub=$INSTALL_VULNHUB (ref $FLAG_GENERATORS_REF)"
     fi
@@ -486,6 +500,9 @@ write_state() {
         shell_assignment INSTALL_PHASE "$INSTALL_PHASE"
         shell_assignment INSTALL_COMPLETE "$INSTALL_COMPLETE"
         shell_assignment HEADLESS "$HEADLESS"
+        shell_assignment CREATE_DESKTOP_SHORTCUT "$CREATE_DESKTOP_SHORTCUT"
+        shell_assignment HOST_DESKTOP_SHORTCUT "$HOST_DESKTOP_SHORTCUT"
+        shell_assignment HOST_DESKTOP_SHORTCUT_SHA256 "$HOST_DESKTOP_SHORTCUT_SHA256"
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
         shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
@@ -848,6 +865,87 @@ vm_power_text() { vm_running "$1" && printf running || printf stopped; }
 app_ip() {
     timeout 15 vmrun -T "$VMRUN_TYPE" getGuestIPAddress "$APP_VMX" -wait 2>/dev/null | tail -n 1 || true
 }
+
+host_desktop_shortcut_owned() {
+    [[ -n "$HOST_DESKTOP_SHORTCUT" && -n "$HOST_DESKTOP_SHORTCUT_SHA256" \
+        && -f "$HOST_DESKTOP_SHORTCUT" && ! -L "$HOST_DESKTOP_SHORTCUT" ]] \
+        && [[ "$(sha256sum "$HOST_DESKTOP_SHORTCUT" | cut -d ' ' -f 1)" == "$HOST_DESKTOP_SHORTCUT_SHA256" ]]
+}
+
+create_host_desktop_shortcut() {
+    local address="$1" desktop="$HOME/Desktop" path digest
+    [[ "$CREATE_DESKTOP_SHORTCUT" == 1 && "$DRY_RUN" == 0 ]] || return 0
+    if [[ -z "$address" ]]; then
+        warn "APP address unavailable; run status later to create the host desktop shortcut"
+        return 0
+    fi
+    if [[ "$VMRUN_TYPE" != fusion ]] && command -v xdg-user-dir >/dev/null 2>&1; then
+        desktop="$(xdg-user-dir DESKTOP)" || desktop="$HOME/Desktop"
+        if [[ -z "$desktop" || "$desktop" == "$HOME" ]]; then
+            warn "Host desktop directory is disabled; skipping the ScenarioForge shortcut"
+            return 0
+        fi
+    fi
+    path="$desktop/ScenarioForge.desktop"
+    [[ "$VMRUN_TYPE" != fusion ]] || path="$desktop/ScenarioForge.webloc"
+    [[ -z "$HOST_DESKTOP_SHORTCUT" ]] || path="$HOST_DESKTOP_SHORTCUT"
+    if [[ -e "$path" || -L "$path" ]]; then
+        if ! host_desktop_shortcut_owned; then
+            warn "Preserving existing desktop shortcut: $path"
+            return 0
+        fi
+    fi
+    # Parse the guest address before putting it into a launcher command. Use
+    # plistlib for native macOS URL files, including proper XML escaping.
+    if ! digest="$(python3 - "$path" "$VMRUN_TYPE" "$address" <<'PY'
+import hashlib
+import ipaddress
+from pathlib import Path
+import plistlib
+import sys
+
+path = Path(sys.argv[1])
+address = ipaddress.ip_address(sys.argv[3])
+host = f"[{address}]" if address.version == 6 else str(address)
+url = f"https://{host}/"
+if sys.argv[2] == "fusion":
+    content = plistlib.dumps({"URL": url})
+    mode = 0o644
+else:
+    content = (
+        "[Desktop Entry]\nType=Application\nName=ScenarioForge\n"
+        "Comment=Open the ScenarioForge lab in your browser\n"
+        f"Exec=xdg-open {url}\nIcon=web-browser\nTerminal=false\n"
+    ).encode()
+    mode = 0o755
+path.parent.mkdir(parents=True, exist_ok=True)
+if not path.exists() or path.read_bytes() != content:
+    path.write_bytes(content)
+path.chmod(mode)
+print(hashlib.sha256(content).hexdigest())
+PY
+    )"; then
+        warn "Could not create the host desktop shortcut; use the Web GUI URL shown by status"
+        return 0
+    fi
+    if [[ "$HOST_DESKTOP_SHORTCUT" != "$path" || "$HOST_DESKTOP_SHORTCUT_SHA256" != "$digest" ]]; then
+        HOST_DESKTOP_SHORTCUT="$path"
+        HOST_DESKTOP_SHORTCUT_SHA256="$digest"
+        write_state_if_present
+        log "Host desktop shortcut: $path"
+    fi
+}
+
+cleanup_host_desktop_shortcut() {
+    [[ -n "$HOST_DESKTOP_SHORTCUT" ]] || return 0
+    if host_desktop_shortcut_owned; then
+        log "Removing installer-created desktop shortcut $HOST_DESKTOP_SHORTCUT"
+        run rm -f -- "$HOST_DESKTOP_SHORTCUT"
+    elif [[ -e "$HOST_DESKTOP_SHORTCUT" || -L "$HOST_DESKTOP_SHORTCUT" ]]; then
+        warn "Preserving modified desktop shortcut: $HOST_DESKTOP_SHORTCUT"
+    fi
+}
+
 transfer_optional_content_to_app() {
     [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]] || return 0
     [[ -f "$OPTIONAL_CONTENT_ARCHIVE" && -f "$CATALOG_TRANSFER_KEY" ]] \
@@ -932,6 +1030,7 @@ show_status_once() {
     if [[ "$INSTALL_COMPLETE" != 1 && "$percent" -ge 60 ]]; then percent=$(( 60 + (cp + ap + pp) * 39 / 300 )); fi
     [[ "$INSTALL_COMPLETE" != 1 ]] || percent=100
     address="$(app_ip)"
+    create_host_desktop_shortcut "$address"
     printf 'ScenarioForge VMware lab [%3d%%]\n' "$percent"
     printf '  CORE        %-7s bootstrap=%3s%%  %s\n' "$(vm_power_text "$CORE_VMX")" "$cp" "$cphase"
     printf '  APP         %-7s bootstrap=%3s%%  %s\n' "$(vm_power_text "$APP_VMX")" "$ap" "$aphase"
@@ -995,6 +1094,7 @@ perform_cleanup() {
         fi
     done
     log "  state and credentials: $STATE_DIR"
+    [[ -z "$HOST_DESKTOP_SHORTCUT" ]] || log "  desktop shortcut (if unchanged): $HOST_DESKTOP_SHORTCUT"
     log "  cached base images are preserved: $IMAGE_CACHE"
     describe_host_network_cleanup
     if cleanup_healthy; then
@@ -1029,6 +1129,7 @@ perform_cleanup() {
         run rm -rf -- "$directory"
     done
     cleanup_host_networks
+    cleanup_host_desktop_shortcut
     log "Removing installer state and credentials"
     run rm -f -- "$STATE_FILE" "$CREDENTIALS_FILE" "$RUNTIME_STATUS_FILE" \
         "$STATE_FILE.new" "$CREDENTIALS_FILE.new" "$RUNTIME_STATUS_FILE.new"

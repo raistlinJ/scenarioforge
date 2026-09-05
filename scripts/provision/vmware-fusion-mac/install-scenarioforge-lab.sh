@@ -147,6 +147,8 @@ Important options:
   --vulnhub                   install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N            bootstrap timeout (default: 90)
   --no-wait                   return after participant isolation is complete
+  --desktop-shortcut          create a host desktop browser shortcut (default)
+  --no-desktop-shortcut       skip the host desktop browser shortcut
   --headless                  start VMs without opening Fusion windows
   --verbose                   show detailed commands and guest progress
   --watch                     keep printing status until provisioning completes
@@ -196,6 +198,10 @@ apply_vmware_config_value() {
         manage_hitl_network)
             parse_config_boolean "$key" "$value"
             assign_config_setting MANAGE_HITL_NETWORK SF_FUSION_MANAGE_HITL_NETWORK "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        desktop_shortcut)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting CREATE_DESKTOP_SHORTCUT SF_DESKTOP_SHORTCUT "$CONFIG_BOOLEAN_VALUE"
             ;;
         wait_minutes) assign_config_setting WAIT_MINUTES SF_WAIT_MINUTES "$value" ;;
         no_wait) parse_config_boolean "$key" "$value"; WAIT_FOR_BOOTSTRAP=$((1 - CONFIG_BOOLEAN_VALUE)) ;;
@@ -534,6 +540,7 @@ confirm_install() {
     log "  Management: $MANAGEMENT_VMNET (APP $APP_MANAGEMENT_CIDR <-> CORE $CORE_MANAGEMENT_CIDR)"
     log "  HITL: $HITL_VMNET (CORE ens19, no IP <-> participant $PARTICIPANT_CIDR)"
     log "  Uplink: VMware NAT for CORE and APP; temporary for participant provisioning"
+    log "  Host desktop shortcut: $CREATE_DESKTOP_SHORTCUT (1=enabled, 0=disabled)"
     if [[ "$FUSION_NETWORK_PLAN" -eq 1 ]]; then
         warn "Requested $FUSION_ORIGINAL_HITL_VMNET is missing or not safely isolated"
         log "  Network change: create $HITL_VMNET as $FUSION_PLANNED_HITL_SUBNET/$FUSION_PLANNED_HITL_NETMASK"

@@ -115,6 +115,19 @@ chmod 600 "$HOME/.config/scenarioforge-vmware-lab.conf"
   --verbose
 ```
 
+The installer creates a **ScenarioForge** shortcut on your host desktop by
+default, opening the APP VM's HTTPS site in your default browser (`.webloc` on
+macOS, `.desktop` on Linux). Set `desktop_shortcut=false` in the config or pass
+`--no-desktop-shortcut` to disable it; `--desktop-shortcut` enables it explicitly.
+The environment equivalent is `SF_DESKTOP_SHORTCUT=0` or `1`. This setting is
+independent of `--headless`. Linux uses the desktop directory reported by
+`xdg-user-dir`, falling back to `~/Desktop` when that tool is unavailable.
+If the APP address is not available yet, a later `status` check creates the
+shortcut; status checks also refresh it when the address changes. Cleanup
+removes the installer-created shortcut if it has not been edited. Existing
+unrelated shortcuts are preserved. On Linux, the desktop may ask you to allow
+launching the shortcut the first time you open it.
+
 The precedence is **built-in defaults < config file < `SF_*` environment
 variables < CLI flags**. Config keys are the lowercase long-option names with
 dashes replaced by underscores, such as `lab_dir`, `management_vmnet`,

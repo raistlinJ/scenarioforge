@@ -36,6 +36,8 @@ vulnhub=true
 wait_minutes=90
 no_wait=false
 headless=false
+# Browser shortcut on the host desktop (independent of VM windows).
+desktop_shortcut=true
 verbose=false
 watch=false
 interval=10
