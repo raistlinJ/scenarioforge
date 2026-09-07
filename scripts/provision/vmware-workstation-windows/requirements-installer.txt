@@ -1,0 +1,3 @@
+# Native image preparation only; the installed shortcuts need neither package.
+passlib==1.7.4
+pycdlib==1.14.0

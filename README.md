@@ -45,6 +45,7 @@ Replay-only packages and plain XML do not run generators during import.
 - [Screenshots](docs/screenshots.md)
 - [VM-mode setup](#vm-mode-setup-recommended)
 - [Proxmox three-VM installer](scripts/provision/proxmox/README.md) — graphical XFCE guests, a browser, native ScenarioForge, and optional generator/Vulhub catalogs
+- [VMware Workstation Windows three-VM installer](scripts/provision/vmware-workstation-windows/README.md) — native PowerShell/Python installation and Windows desktop shortcuts; no WSL required
 - [VMware Workstation Linux three-VM installer](scripts/provision/vmware-workstation-linux/README.md) — the same graphical lab and optional catalogs on an x86_64 Linux desktop
 - [VMware Fusion macOS three-VM installer](scripts/provision/vmware-fusion-mac/README.md) — the graphical lab on Intel or Apple silicon Macs, with architecture-matched Debian/Ubuntu guests
 - [Other operating modes](#other-operating-modes)
@@ -106,6 +107,7 @@ Full step-by-step setup guides:
 - [docs/CORE_INSTALL.md](docs/CORE_INSTALL.md) – install CORE from our fork ([github.com/raistlinJ/core](https://github.com/raistlinJ/core)), which ships the fixes and updates ScenarioForge depends on — most easily via the [coreemu-minimal](https://github.com/raistlinJ/coreemu-minimal) installer — or apply those updates to a vanilla CORE install.
 - [docs/VM_MODE_SETUP.md](docs/VM_MODE_SETUP.md) – building the CORE VM, the three-interface layout (management, HITL/participant, uplink), wiring the three machines on any hypervisor, and the complete VM-mode `.scenarioforge.env` reference.
 - [scripts/provision/proxmox/README.md](scripts/provision/proxmox/README.md) – provision the complete graphical CORE, browser-equipped native ScenarioForge, and XFCE participant VM layout from a Proxmox shell; optional flags install the private generator and Vulhub catalogs.
+- [scripts/provision/vmware-workstation-windows/README.md](scripts/provision/vmware-workstation-windows/README.md) – provision the graphical lab on x64 Windows with Workstation Pro and PowerShell.
 - [scripts/provision/vmware-workstation-linux/README.md](scripts/provision/vmware-workstation-linux/README.md) – provision the same three graphical VMs and optional catalogs with VMware Workstation on an x86_64 Linux host.
 - [scripts/provision/vmware-fusion-mac/README.md](scripts/provision/vmware-fusion-mac/README.md) – provision the same lab with VMware Fusion on Intel or Apple silicon macOS hosts.
 - [docs/NATIVE_MODE_SETUP.md](docs/NATIVE_MODE_SETUP.md) – local and remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox **VM / Access** workflow (credentials, required API privileges, CORE VM selection, HITL bridge apply).

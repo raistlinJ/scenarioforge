@@ -56,3 +56,21 @@ jobs:
             examples/latest.errors
           if-no-files-found: ignore
           retention-days: 7
+
+  windows-vmware-scripts:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native image-builder test dependencies
+        shell: pwsh
+        run: python -m pip install pytest -r scripts/provision/vmware-workstation-windows/requirements-installer.txt
+      - name: Test Windows VMware installer without VMware or SSH
+        shell: pwsh
+        run: ./tests/test_vmware_windows.ps1
+      - name: Test native Windows image preparation without WSL
+        shell: pwsh
+        run: python -m pytest -q tests/test_vmware_windows_installer_contract.py
