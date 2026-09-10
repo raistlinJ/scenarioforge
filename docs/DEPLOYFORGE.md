@@ -7,7 +7,8 @@ of a single Proxmox VE node to provision:
 - A ScenarioForge Ubuntu application VM.
 - A Debian 12 CORE VM installed from [our CORE fork](https://github.com/raistlinJ/core)
   through the `coreemu-minimal --from-source` path.
-- A minimal Debian 12 participant VM.
+- A minimal Debian 12 participant VM, or Kali Linux with XFCE and standard tools
+  when selected with `--participant-os kali`.
 - Separate management, participant/HITL, and uplink networks.
 
 The installer uses Proxmox Cloud-Init rather than a separate DeployForge file.

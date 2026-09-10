@@ -16,6 +16,8 @@ hitl_bridge=sfhitl0
 core_vmid=9401
 app_vmid=9402
 participant_vmid=9403
+# debian (minimal XFCE) or kali (XFCE and standard Kali tools)
+participant_os=debian
 
 app_management_cidr=172.31.250.2/24
 core_management_cidr=172.31.250.3/24

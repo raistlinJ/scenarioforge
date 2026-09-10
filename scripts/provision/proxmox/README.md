@@ -12,10 +12,11 @@ lab on one Proxmox VE node:
   Epiphany browser and a launcher for the local ScenarioForge Web GUI, plus
   Terminator, Evince for PDFs, xdot for Graphviz files, and Mousepad/`jq` for
   graphical and terminal JSON inspection.
-- Debian 12 with a minimal XFCE participant desktop, connected only to the
+- Debian 12 with a minimal XFCE participant desktop (default), or Kali Linux
+  with XFCE and the standard Kali tools, connected only to the
   HITL network after provisioning.
 
-The installer uses official Debian and Ubuntu cloud images, Proxmox Cloud-Init,
+The installer uses official Debian, Ubuntu, and optional Kali cloud images, Proxmox Cloud-Init,
 and VirtIO interfaces. It supports amd64 Proxmox hosts in this first release.
 
 ## Network layout
@@ -409,8 +410,9 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_MANAGEMENT_BRIDGE` | `sfmgmt0` |
 | `SF_HITL_BRIDGE` | `sfhitl0` |
 | `SF_CORE_VMID` / `SF_APP_VMID` / `SF_PARTICIPANT_VMID` | `9401` / `9402` / `9403` |
+| `SF_PARTICIPANT_OS` | `debian` (or `kali`) |
 | `SF_CORE_MEMORY_MB` / `SF_APP_MEMORY_MB` / `SF_PARTICIPANT_MEMORY_MB` | `8192` / `4096` / `2048` |
-| `SF_CORE_DISK_GB` / `SF_APP_DISK_GB` / `SF_PARTICIPANT_DISK_GB` | `80` / `40` / `20` |
+| `SF_CORE_DISK_GB` / `SF_APP_DISK_GB` / `SF_PARTICIPANT_DISK_GB` | `80` / `40` / `20` (Kali: `40`) |
 | `SF_APP_MANAGEMENT_CIDR` | `172.31.250.2/24` |
 | `SF_CORE_MANAGEMENT_CIDR` | `172.31.250.3/24` |
 | `SF_CORE_HITL_CIDR` | `10.254.200.3/24` |
@@ -430,7 +432,8 @@ Every option has an `SF_` environment equivalent. Useful values include:
 Repository and image URLs can also be overridden with
 `SF_CORE_MINIMAL_URL`, `SF_CORE_REPO_URL`, `SF_SCENARIOFORGE_URL`,
 `SF_FLAG_GENERATORS_URL`, `SF_DEBIAN_IMAGE_URL`, `SF_DEBIAN_SUMS_URL`,
-`SF_UBUNTU_IMAGE_URL`, and `SF_UBUNTU_SUMS_URL`.
+`SF_UBUNTU_IMAGE_URL`, `SF_UBUNTU_SUMS_URL`, `SF_KALI_IMAGE_URL`, and
+`SF_KALI_SUMS_URL`.
 
 ## Failure behavior and cleanup
 
@@ -493,3 +496,39 @@ Cleanup is permanent. Always inspect `cleanup --dry-run` before using `--yes`.
   frozen deployment. The defaults follow the maintained branches.
 - Treat content installed by `--flag-generators` and `--vulnhub` as sensitive,
   intentionally unsafe lab material. Keep it on isolated, trusted systems.
+
+
+### Kali participant option
+
+For a new lab, add `--participant-os kali` to the installer command:
+
+```bash
+bash scripts/provision/proxmox/install-scenarioforge-lab.sh install --participant-os kali --dry-run
+bash scripts/provision/proxmox/install-scenarioforge-lab.sh install --participant-os kali --yes
+```
+
+Alternatively set `participant_os=kali` in the config file or
+`SF_PARTICIPANT_OS=kali` in the environment. Precedence is config, environment,
+then CLI. Debian remains the default; CORE continues to use Debian 12.
+
+Kali uses the official 2026.2 amd64 generic cloud archive, verifies its SHA256
+against the published checksum list, and extracts its sparse `disk.raw`.
+It installs `kali-desktop-xfce` and `kali-linux-default` during first boot.
+The login remains `participant` with the generated or supplied participant
+password. Its defaults are 2048 MB RAM, 2 CPUs, and a 40 GB disk; override with
+`SF_PARTICIPANT_MEMORY_MB`, `SF_PARTICIPANT_CORES`, and
+`SF_PARTICIPANT_DISK_GB`.
+
+The temporary uplink stays attached until desktop/tool provisioning succeeds,
+then is removed through the existing isolation workflow, including with
+`--no-wait`. Allow additional download time for the Kali tools; increase
+`--wait-minutes` on slower connections.
+
+For another Kali release, override both `SF_KALI_IMAGE_URL` and
+`SF_KALI_SUMS_URL`. Use an amd64 generic cloud `.tar.xz` containing
+`disk.raw`, as linked from [Kali's official downloads](https://www.kali.org/get-kali/#kali-cloud).
+These settings are independent of the CORE Debian image settings.
+
+This option provisions new VMs; it does not convert an existing Debian VM.
+Validate desktop login, tool availability, HITL connectivity, and uplink removal
+on your Proxmox host before using the Kali lab with participants.

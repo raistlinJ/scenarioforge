@@ -2,6 +2,11 @@ from pathlib import Path
 import base64
 import shlex
 import subprocess
+import os
+import tarfile
+import io
+
+import pytest
 
 import yaml
 
@@ -680,7 +685,8 @@ confirm_cleanup
     assert "rerun cleanup with --force" in result.stderr
 
 
-def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path) -> None:
+@pytest.mark.parametrize("participant_os", ["debian", "kali"])
+def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path, participant_os: str) -> None:
     user_key = tmp_path / "user.pub"
     transfer_key = tmp_path / "transfer.pub"
     user_key.write_text("ssh-ed25519 AAAAuser operator\n", encoding="utf-8")
@@ -691,6 +697,7 @@ def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path) -> Non
     render = f"""
 source {INSTALLER!s}
 WORK_DIR={tmp_path!s}
+parse_args install --participant-os {participant_os}
 SSH_PUBLIC_KEY_FILE={shlex.quote(str(user_key))}
 CATALOG_TRANSFER_PUBLIC_KEY_FILE={shlex.quote(str(transfer_key))}
 CORE_PASSWORD=core-password-for-test
@@ -864,3 +871,146 @@ prepare_optional_content
     assert "vulnhub/content/demo/docker-compose.yml" in vulnhub_listing
     assert "flag_generators/" not in vulnhub_listing
     assert "flag_node_generators/" not in vulnhub_listing
+
+
+@pytest.mark.parametrize(
+    "configured,environment,cli,expected,memory,disk",
+    [
+        ("debian", None, None, "debian", "2048", "20"),
+        ("kali", None, None, "kali", "2048", "40"),
+        ("kali", "debian", None, "debian", "2048", "20"),
+        ("debian", "debian", "kali", "kali", "2048", "40"),
+    ],
+)
+def test_participant_os_precedence_and_defaults(
+    tmp_path, configured, environment, cli, expected, memory, disk
+):
+    config = tmp_path / "lab.conf"
+    config.write_text(f"participant_os={configured}\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SF_")}
+    if environment:
+        env["SF_PARTICIPANT_OS"] = environment
+    args = f"install --config {shlex.quote(str(config))}"
+    if cli:
+        args += f" --participant-os {cli}"
+    result = subprocess.run(
+        ["bash", "-c", f"""
+source {shlex.quote(str(INSTALLER))}
+parse_args {args}
+printf '%s %s %s' "$PARTICIPANT_OS" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_DISK_GB"
+"""], env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == f"{expected} {memory} {disk}"
+
+
+def test_kali_preserves_explicit_resources_and_rejects_unknown_os():
+    env = dict(os.environ, SF_PARTICIPANT_MEMORY_MB="8192", SF_PARTICIPANT_DISK_GB="80")
+    result = subprocess.run(
+        ["bash", "-c", f"""
+source {shlex.quote(str(INSTALLER))}
+parse_args install --participant-os kali
+printf '%s %s' "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_DISK_GB"
+"""], env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "8192 80"
+    result = subprocess.run(
+        ["bash", "-c", f"source {shlex.quote(str(INSTALLER))}; parse_args install --participant-os invalid"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "--participant-os must be debian or kali" in result.stderr
+
+
+@pytest.mark.parametrize("participant_os,dry_run", [("debian", 0), ("kali", 0), ("kali", 1)])
+def test_participant_image_selection_and_extraction(tmp_path, participant_os, dry_run):
+    archive = tmp_path / "kali-genericcloud-amd64.tar.xz"
+    with tarfile.open(archive, "w:xz") as tar:
+        data = b"participant disk fixture"
+        member = tarfile.TarInfo("disk.raw")
+        member.size = len(data)
+        tar.addfile(member, io.BytesIO(data))
+    result = subprocess.run(
+        ["bash", "-c", f"""
+source {shlex.quote(str(INSTALLER))}
+IMAGE_CACHE={shlex.quote(str(tmp_path))}
+DEBIAN_IMAGE=/images/core-debian.qcow2
+PARTICIPANT_OS={participant_os}
+DRY_RUN={dry_run}
+download_verified_image() {{
+    [[ "$1" == "$KALI_IMAGE_URL" && "$2" == "$KALI_SUMS_URL" && "$3" == sha256 ]]
+}}
+prepare_participant_image
+printf 'selected=%s core=%s\n' "$PARTICIPANT_IMAGE" "$DEBIAN_IMAGE"
+"""], capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "core=/images/core-debian.qcow2" in result.stdout
+    image = tmp_path / "kali-genericcloud-amd64.raw"
+    if participant_os == "kali":
+        assert f"selected={image}" in result.stdout
+        if not dry_run:
+            assert image.read_bytes() == data
+    else:
+        assert "selected=/images/core-debian.qcow2" in result.stdout
+    if participant_os == "debian" or dry_run:
+        assert not image.exists()
+
+
+@pytest.mark.parametrize("member_name", ["missing.raw", "disk.raw"])
+def test_kali_rejects_missing_or_symlink_disk(tmp_path, member_name):
+    archive = tmp_path / "kali-genericcloud-amd64.tar.xz"
+    with tarfile.open(archive, "w:xz") as tar:
+        member = tarfile.TarInfo(member_name)
+        member.type = tarfile.SYMTYPE
+        member.linkname = "nonexistent"
+        tar.addfile(member)
+    result = subprocess.run(
+        ["bash", "-c", f"""
+source {shlex.quote(str(INSTALLER))}
+IMAGE_CACHE={shlex.quote(str(tmp_path))}
+DEBIAN_IMAGE=/images/core-debian.qcow2
+PARTICIPANT_OS=kali
+download_verified_image() {{ :; }}
+prepare_participant_image
+"""], capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "kali-genericcloud-amd64.raw").exists()
+    assert not list(tmp_path.glob("kali-extract.*"))
+
+
+@pytest.mark.parametrize("os_id", ["debian", "kali"])
+def test_participant_bootstrap_installs_selected_desktop(tmp_path, os_id):
+    # Execute the generated package-selection block with apt mocked; no packages
+    # or services on the test host are changed.
+    result = subprocess.run(
+        ["bash", "-c", f"""
+source {shlex.quote(str(INSTALLER))}
+WORK_DIR={shlex.quote(str(tmp_path))}
+write_guest_bootstraps
+"""], capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    source = (tmp_path / "participant-bootstrap.sh").read_text()
+    block = source.split("source /etc/os-release\n", 1)[1].split(
+        "set_bootstrap_status 85", 1
+    )[0]
+    result = subprocess.run(
+        ["bash", "-c", f"""
+set -eu
+ID={os_id}
+set_bootstrap_status() {{ :; }}
+apt-get() {{ printf '%s\n' "$*"; }}
+{block}
+"""], capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "update"
+    if os_id == "kali":
+        assert lines[1] == "install -y kali-desktop-xfce kali-linux-default"
+    else:
+        assert "xfce4 xorg" in lines[1]
+        assert "kali-" not in result.stdout

@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="0.9.0"
+SCRIPT_VERSION="0.10.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -24,6 +24,7 @@ PARTICIPANT_VMID="${SF_PARTICIPANT_VMID:-9403}"
 CORE_NAME="${SF_CORE_NAME:-scenarioforge-core}"
 APP_NAME="${SF_APP_NAME:-scenarioforge-app}"
 PARTICIPANT_NAME="${SF_PARTICIPANT_NAME:-scenarioforge-participant}"
+PARTICIPANT_OS="${SF_PARTICIPANT_OS:-debian}"
 
 CORE_MEMORY_MB="${SF_CORE_MEMORY_MB:-8192}"
 APP_MEMORY_MB="${SF_APP_MEMORY_MB:-4096}"
@@ -62,6 +63,8 @@ DEBIAN_IMAGE_URL="${SF_DEBIAN_IMAGE_URL:-https://cloud.debian.org/images/cloud/b
 DEBIAN_SUMS_URL="${SF_DEBIAN_SUMS_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS}"
 UBUNTU_IMAGE_URL="${SF_UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 UBUNTU_SUMS_URL="${SF_UBUNTU_SUMS_URL:-https://cloud-images.ubuntu.com/noble/current/SHA256SUMS}"
+KALI_IMAGE_URL="${SF_KALI_IMAGE_URL:-https://kali.download/cloud-images/kali-2026.2/kali-linux-2026.2-cloud-genericcloud-amd64.tar.xz}"
+KALI_SUMS_URL="${SF_KALI_SUMS_URL:-https://kali.download/cloud-images/kali-2026.2/SHA256SUMS}"
 IMAGE_CACHE="${SF_IMAGE_CACHE:-/var/lib/vz/template/cache/scenarioforge}"
 
 SSH_PUBLIC_KEY_FILE="${SF_SSH_PUBLIC_KEY_FILE:-}"
@@ -241,7 +244,7 @@ load_config_from_args() {
             --core-vmid|--app-vmid|--participant-vmid|--lab-dir|--management-vmnet|--hitl-vmnet|\
             --ssh-public-key|--core-password|--app-password|--participant-password|--web-admin-password|\
             --wait-minutes|--interval|--app-management-cidr|--core-management-cidr|--core-hitl-cidr|\
-            --participant-cidr|--core-minimal-ref|--core-ref|--scenarioforge-ref|--flag-generators-ref)
+            --participant-os|--participant-cidr|--core-minimal-ref|--core-ref|--scenarioforge-ref|--flag-generators-ref)
                 shift 2
                 ;;
             *) shift ;;
@@ -260,6 +263,7 @@ apply_proxmox_config_value() {
         hitl_bridge) assign_config_setting HITL_BRIDGE SF_HITL_BRIDGE "$value" ;;
         core_vmid) assign_config_setting CORE_VMID SF_CORE_VMID "$value" ;;
         app_vmid) assign_config_setting APP_VMID SF_APP_VMID "$value" ;;
+        participant_os) assign_config_setting PARTICIPANT_OS SF_PARTICIPANT_OS "$value" ;;
         participant_vmid) assign_config_setting PARTICIPANT_VMID SF_PARTICIPANT_VMID "$value" ;;
         ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
         core_password) assign_config_setting REQUESTED_CORE_PASSWORD SF_CORE_PASSWORD "$value" ;;
@@ -327,7 +331,7 @@ Usage:
 Provision three cloud-image VMs on the current Proxmox VE node:
   - Debian 12 + CORE GUI/XFCE from raistlinJ/core via coreemu-minimal --from-source
   - Ubuntu 24.04 + XFCE and a native ScenarioForge Python service behind nginx
-  - Debian 12 + a minimal XFCE participant desktop
+  - Debian 12 + a minimal XFCE participant desktop, or Kali Linux + XFCE/tools
 
 Important options:
   --config FILE                Read lower-precedence key=value options from FILE
@@ -338,6 +342,7 @@ Important options:
   --hitl-bridge NAME           Isolated participant/HITL bridge (default: sfhitl0)
   --core-vmid ID               CORE VMID (default: 9401)
   --app-vmid ID                ScenarioForge VMID (default: 9402)
+  --participant-os OS          Participant OS: debian (default) or kali
   --participant-vmid ID        Participant VMID (default: 9403)
   --ssh-public-key FILE        Add one OpenSSH public key to all guest users
   --core-password PASSWORD     Set the corevm password (default: generated)
@@ -393,6 +398,7 @@ parse_args() {
             --hitl-bridge) HITL_BRIDGE="${2:?missing value for --hitl-bridge}"; shift 2 ;;
             --core-vmid) CORE_VMID="${2:?missing value for --core-vmid}"; shift 2 ;;
             --app-vmid) APP_VMID="${2:?missing value for --app-vmid}"; shift 2 ;;
+            --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-vmid) PARTICIPANT_VMID="${2:?missing value for --participant-vmid}"; shift 2 ;;
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
             --core-password) REQUESTED_CORE_PASSWORD="${2:?missing value for --core-password}"; shift 2 ;;
@@ -430,13 +436,21 @@ parse_args() {
         || die "SF_INSTALL_VULNHUB must be 0 or 1"
     [[ "$STATUS_WATCH" -eq 0 || "$COMMAND" == "status" ]] || die "--watch is only valid with the status command"
     [[ "$FORCE_CLEANUP" -eq 0 || "$COMMAND" == "cleanup" ]] || die "--force is only valid with the cleanup command"
+    case "$PARTICIPANT_OS" in
+        debian) ;;
+        kali)
+            PARTICIPANT_MEMORY_MB="${SF_PARTICIPANT_MEMORY_MB:-2048}"
+            PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-40}"
+            ;;
+        *) die "--participant-os must be debian or kali" ;;
+    esac
     validate_integer "status interval" "$STATUS_INTERVAL" 2
 }
 
 require_root_and_pve() {
     [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "run this command as root on a Proxmox VE node"
     local command_name
-    for command_name in pveversion pvesh pvesm qm curl openssl python3 sha256sum sha512sum; do
+    for command_name in pveversion pvesh pvesm qm curl openssl python3 sha256sum sha512sum tar xz; do
         command -v "$command_name" >/dev/null 2>&1 || die "required command not found: $command_name"
     done
     case "$(dpkg --print-architecture 2>/dev/null || true)" in
@@ -636,6 +650,7 @@ confirm_install() {
     log "Proxmox node:        $PVE_NODE"
     log "VM storage:         $VM_STORAGE"
     log "Cloud-Init snippets:$SNIPPET_STORAGE"
+    log "Participant OS:     $PARTICIPANT_OS"
     log "VMIDs:              CORE=$CORE_VMID APP=$APP_VMID PARTICIPANT=$PARTICIPANT_VMID"
     log "Bridges:            uplink=$UPLINK_BRIDGE management=$MANAGEMENT_BRIDGE HITL=$HITL_BRIDGE"
     log "Addresses:          app=$APP_MANAGEMENT_CIDR core=$CORE_MANAGEMENT_CIDR participant=$PARTICIPANT_CIDR"
@@ -789,6 +804,31 @@ download_verified_image() {
     actual="$("$checksum_command" "$temporary" | awk '{print $1}')"
     [[ "$actual" == "$expected" ]] || { rm -f "$temporary"; die "checksum verification failed for $filename"; }
     mv "$temporary" "$destination"
+}
+
+prepare_participant_image() {
+    PARTICIPANT_IMAGE="$DEBIAN_IMAGE"
+    [[ "$PARTICIPANT_OS" == kali ]] || return 0
+    local archive="$IMAGE_CACHE/kali-genericcloud-amd64.tar.xz" staging
+    download_verified_image "$KALI_IMAGE_URL" "$KALI_SUMS_URL" sha256 "$archive"
+    PARTICIPANT_IMAGE="$IMAGE_CACHE/kali-genericcloud-amd64.raw"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        emit DRY-RUN "extract verified Kali disk.raw -> $PARTICIPANT_IMAGE"
+        return 0
+    fi
+    # Extract only the official archive's disk member; preserve its sparse layout.
+    # Always re-extract so the imported disk matches the verified archive.
+    staging="$(mktemp -d "$IMAGE_CACHE/kali-extract.XXXXXX")"
+    if ! tar -xJf "$archive" -C "$staging" -- disk.raw; then
+        rm -rf "$staging"
+        die "could not extract disk.raw from the Kali cloud image"
+    fi
+    if [[ ! -f "$staging/disk.raw" || -L "$staging/disk.raw" ]]; then
+        rm -rf "$staging"
+        die "Kali cloud archive must contain a regular disk.raw"
+    fi
+    mv "$staging/disk.raw" "$PARTICIPANT_IMAGE"
+    rmdir "$staging"
 }
 
 prepare_optional_content() {
@@ -1582,12 +1622,18 @@ fail_bootstrap() {
 trap 'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
-set_bootstrap_status 10 'updating Debian package metadata'
+source /etc/os-release
+set_bootstrap_status 10 'updating participant package metadata'
 apt-get update
-set_bootstrap_status 25 'installing the minimal XFCE desktop'
-apt-get install -y --no-install-recommends \
-    dbus-x11 lightdm lightdm-gtk-greeter xfce4 xorg \
-    xserver-xorg-input-all xserver-xorg-video-all xterm
+if [[ "$ID" == kali ]]; then
+    set_bootstrap_status 25 'installing Kali XFCE and the default Kali tools'
+    apt-get install -y kali-desktop-xfce kali-linux-default
+else
+    set_bootstrap_status 25 'installing the minimal XFCE desktop'
+    apt-get install -y --no-install-recommends \
+        dbus-x11 lightdm lightdm-gtk-greeter xfce4 xorg \
+        xserver-xorg-input-all xserver-xorg-video-all xterm
+fi
 set_bootstrap_status 85 'enabling the XFCE graphical login'
 systemctl set-default graphical.target
 systemctl enable --now lightdm
@@ -1847,7 +1893,7 @@ create_vms() {
     run qm set "$APP_VMID" --cicustom \
         "user=$SNIPPET_STORAGE:snippets/scenarioforge-app-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-app-network.yaml"
 
-    create_vm "$PARTICIPANT_VMID" "$PARTICIPANT_NAME" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DISK_GB" "$DEBIAN_IMAGE" \
+    create_vm "$PARTICIPANT_VMID" "$PARTICIPANT_NAME" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DISK_GB" "$PARTICIPANT_IMAGE" \
         --startup order=30,up=15 \
         --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE" \
         --net1 "virtio=$PARTICIPANT_NET1_MAC,bridge=$UPLINK_BRIDGE"
@@ -1876,6 +1922,7 @@ write_state() {
         shell_assignment CORE_NAME "$CORE_NAME"
         shell_assignment APP_NAME "$APP_NAME"
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
+        shell_assignment PARTICIPANT_OS "$PARTICIPANT_OS"
         shell_assignment INSTALL_COMPLETE "${INSTALL_COMPLETE:-0}"
         shell_assignment PARTICIPANT_BOOTSTRAP_REQUIRED "$PARTICIPANT_BOOTSTRAP_REQUIRED"
         shell_assignment PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED"
@@ -2712,11 +2759,12 @@ perform_install() {
     progress 12 "Preparing Cloud-Init snippet storage"
     ensure_snippet_storage
 
-    progress 18 "Downloading and verifying Debian and Ubuntu cloud images"
+    progress 18 "Downloading and verifying guest cloud images"
     DEBIAN_IMAGE="$IMAGE_CACHE/debian-12-genericcloud-amd64.qcow2"
     UBUNTU_IMAGE="$IMAGE_CACHE/noble-server-cloudimg-amd64.img"
     download_verified_image "$DEBIAN_IMAGE_URL" "$DEBIAN_SUMS_URL" sha512 "$DEBIAN_IMAGE"
     download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha256 "$UBUNTU_IMAGE"
+    prepare_participant_image
 
     progress 28 "Generating guest bootstrap scripts and Cloud-Init data"
     write_guest_bootstraps
