@@ -55,22 +55,15 @@ separately.
 
 ## One-time network setup
 
-Open **Edit > Virtual Network Editor** in VMware Workstation. Keep the normal
-`vmnet1` host-only network for APP-to-CORE management, then create `vmnet2` as a
-host-only/custom network with all of these disabled:
+Keep an existing management network (normally `vmnet1`) and VMware NAT network.
+By default, the installer reuses an isolated HITL network or creates an unused
+custom vmnet with DHCP, NAT, and the host adapter disabled. If the requested
+`vmnet2` is occupied, it selects another unused number and records that choice.
 
-- **Use local DHCP service to distribute IP addresses to VMs**
-- **Connect a host virtual adapter to this network**
-- NAT
-
-`vmnet2` is the participant exercise wire and must not reach the host, LAN, or
-Internet. The installer refuses a `vmnet2` that `vmrun` reports as NAT, bridged,
-or DHCP-enabled. It also checks `/etc/vmware/networking` for enabled DHCP, NAT,
-or a host adapter when that file is readable.
-
-The installer intentionally does not edit `/etc/vmware/networking` or restart
-VMware networking. Those are host-global operations that could interrupt other
-running VMs.
+Creation uses `sudo` and restarts VMware networking, briefly interrupting host
+VM networking. To configure HITL yourself in **Edit > Virtual Network Editor**,
+use `--no-manage-hitl-network` or `manage_hitl_network=false`; disable DHCP, NAT,
+and the host virtual adapter. Management and NAT remain prerequisites.
 
 ## Install
 
@@ -341,7 +334,44 @@ Image and checksum URLs can also be pinned with `SF_DEBIAN_IMAGE_URL`,
 ## Current scope
 
 This first version targets VMware Workstation on x86_64 Linux. It does not yet
-cover VMware Fusion on macOS, Workstation on Windows, ARM guests, or automatic
-host-network creation. VM lifecycle and guest-status behavior depend on the
+cover VMware Fusion on macOS, Workstation on Windows, or ARM guests. VM lifecycle and guest-status behavior depend on the
 current Workstation `vmrun` CLI, including `listHostNetworks`,
 `listNetworkAdapters`, and `deleteNetworkAdapter`.
+
+
+## Kali participant
+
+For a new lab, add `--participant-os kali` to the installer command, or set
+`participant_os=kali` in the config file (`SF_PARTICIPANT_OS=kali` also works).
+Config values are overridden by environment values, then CLI flags.
+Debian remains the default; CORE continues to use Debian 12.
+
+Kali gets XFCE, `kali-linux-default`, **2048 MB RAM**, 2 CPUs, and a 40 GB
+disk. Resource overrides remain `SF_PARTICIPANT_MEMORY_MB`,
+`SF_PARTICIPANT_CORES`, and `SF_PARTICIPANT_DISK_GB` (Kali minimum: 25 GB).
+The username remains `participant`.
+
+The installer verifies the official Kali 2026.2 cloud archive, extracts its raw
+disk, and converts it to VMDK. The Kali participant uses an NVMe controller.
+During VMware provisioning, it installs the full Kali kernel for graphics and
+reboots automatically before checking the desktop. Its temporary NAT adapter
+remains attached until provisioning finishes; `--no-wait` also waits for this
+isolation step. Allow extra time for tool downloads with `--wait-minutes`.
+
+Image overrides are `SF_KALI_IMAGE_URL` and `SF_KALI_SUMS_URL`; use a matching
+official generic cloud archive containing `disk.raw` and its SHA256 list.
+Existing Debian VMs are not converted by this option.
+
+
+### Force cleanup and host networks
+
+Cleanup removes the HITL vmnet recorded as created by this installation, including
+its per-network directory. `cleanup --force` also permits changed network settings
+and cleanup of running installer-owned VMs. `--keep-hitl-network` preserves it.
+Pre-existing HITL, management, and NAT networks remain untouched. Networks still
+referenced by other running VMs cannot be removed, even with force.
+
+The installer updates `/etc/vmware/networking` using Workstation's
+`vmware-networks --migrate-network-settings` and restarts networking. Failed
+creation or removal retains ownership state when resources remain, for cleanup
+and retry. Review the error and run cleanup again after resolving the failure.

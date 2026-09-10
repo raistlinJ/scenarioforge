@@ -14,7 +14,7 @@ WORKSTATION_INSTALLER="$SCRIPT_DIR/../vmware-workstation-linux/install-scenariof
 # shellcheck source=scripts/provision/vmware-workstation-linux/install-scenarioforge-lab.sh
 source "$WORKSTATION_INSTALLER"
 
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.3.0"
 INSTALLER_OWNER="scenarioforge-vmware-fusion-v1"
 EXPECTED_INSTALLER_OWNER="$INSTALLER_OWNER"
 VMRUN_TYPE="fusion"
@@ -42,6 +42,7 @@ MANAGEMENT_VMNET="${SF_FUSION_MANAGEMENT_VMNET:-vmnet1}"
 HITL_VMNET="${SF_FUSION_HITL_VMNET:-vmnet2}"
 MANAGE_HITL_NETWORK="${SF_FUSION_MANAGE_HITL_NETWORK:-ask}"
 FUSION_NETWORK_PLAN=0
+KEEP_HITL_NETWORK=0
 FUSION_ORIGINAL_HITL_VMNET=""
 FUSION_PLANNED_HITL_VMNET=""
 FUSION_PLANNED_HITL_SUBNET=""
@@ -80,6 +81,8 @@ case "$HOST_ARCH" in
         exit 1
         ;;
 esac
+
+KALI_IMAGE_URL="${SF_KALI_IMAGE_URL:-https://kali.download/cloud-images/kali-2026.2/kali-linux-2026.2-cloud-genericcloud-${GUEST_ARCH}.tar.xz}"
 
 CORE_DIR="$LAB_DIR/$CORE_NAME$VM_BUNDLE_SUFFIX"
 APP_DIR="$LAB_DIR/$APP_NAME$VM_BUNDLE_SUFFIX"
@@ -129,7 +132,7 @@ Usage:
 Provision three graphical VMs with VMware Fusion on Intel or Apple silicon:
   - Debian 12 + CORE GUI/XFCE from raistlinJ/core via coreemu-minimal --from-source
   - Ubuntu 24.04 + XFCE, browser, tools, and native ScenarioForge behind nginx
-  - Debian 12 + a minimal XFCE participant desktop
+  - Debian 12 + a minimal XFCE participant desktop, or Kali Linux + XFCE/tools
 
 Important options:
   --config FILE               read lower-precedence key=value options from FILE
@@ -141,6 +144,7 @@ Important options:
   --ssh-public-key FILE       add an OpenSSH public key to all guest users
   --core-password PASSWORD    set the corevm password (default: generated)
   --app-password PASSWORD     set the scenarioforge VM password (default: generated)
+  --participant-os OS         participant OS: debian (default) or kali
   --participant-password PASS set the participant password (default: generated)
   --web-admin-password PASS   set the coreadmin Web UI password (default: generated)
   --flag-generators           install raistlinJ flag-generator catalogs on APP
@@ -156,7 +160,8 @@ Important options:
   --yes                       do not ask for confirmation
   --dry-run                   validate and show the plan without changing files or VMs
   --cleanup                   alias for the cleanup command
-  --force                     allow cleanup of a complete, running lab
+  --force                     remove a running lab and its tracked vmnet even if changed
+  --keep-hitl-network         cleanup the lab while preserving its host vmnet
 
 Network/address overrides:
   --app-management-cidr CIDR   default: 172.31.250.2/24
@@ -185,6 +190,7 @@ apply_vmware_config_value() {
         ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
         core_password) assign_config_setting REQUESTED_CORE_PASSWORD SF_CORE_PASSWORD "$value" ;;
         app_password) assign_config_setting REQUESTED_APP_PASSWORD SF_APP_PASSWORD "$value" ;;
+        participant_os) assign_config_setting PARTICIPANT_OS SF_PARTICIPANT_OS "$value" ;;
         participant_password) assign_config_setting REQUESTED_PARTICIPANT_PASSWORD SF_PARTICIPANT_PASSWORD "$value" ;;
         web_admin_password) assign_config_setting REQUESTED_WEB_ADMIN_PASSWORD SF_WEB_ADMIN_PASSWORD "$value" ;;
         flag_generators)
@@ -384,13 +390,13 @@ validate_host_networks() {
 }
 
 build_fusion_networking_candidate() {
-    local action="$1" source="$2" destination="$3" vmnet="$4" subnet="$5" netmask="$6"
-    python3 - "$action" "$source" "$destination" "$vmnet" "$subnet" "$netmask" <<'PY'
+    local action="$1" source="$2" destination="$3" vmnet="$4" subnet="$5" netmask="$6" force="${7:-0}"
+    python3 - "$action" "$source" "$destination" "$vmnet" "$subnet" "$netmask" "$force" <<'PY'
 from pathlib import Path
 import re
 import sys
 
-action, source_name, destination_name, vmnet, subnet, netmask = sys.argv[1:]
+action, source_name, destination_name, vmnet, subnet, netmask, force = sys.argv[1:]
 number = vmnet.removeprefix("vmnet")
 prefix = f"VNET_{number}_"
 source = Path(source_name)
@@ -420,7 +426,7 @@ if action == "add":
         end,
     ])
 elif action == "remove":
-    if not values:
+    if not values and force != "1":
         destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         raise SystemExit(3)
     required = {
@@ -430,9 +436,9 @@ elif action == "remove":
         "VIRTUAL_ADAPTER": "no",
     }
     for key, expected in required.items():
-        if values.get(key) != expected:
+        if force != "1" and values.get(key) != expected:
             raise SystemExit(f"{vmnet} {key} changed; preserving the network")
-    if values.get("NAT", "no") != "no":
+    if force != "1" and values.get("NAT", "no") != "no":
         raise SystemExit(f"{vmnet} NAT changed; preserving the network")
     lines = [
         line for line in lines
@@ -492,6 +498,10 @@ apply_host_network_plan() {
 
 describe_host_network_cleanup() {
     [[ -n "${INSTALLER_CREATED_HITL_VMNET:-}" ]] || return 0
+    if [[ "$KEEP_HITL_NETWORK" -eq 1 ]]; then
+        log "  Preserve Fusion network: $INSTALLER_CREATED_HITL_VMNET (--keep-hitl-network)"
+        return 0
+    fi
     log "  Installer-created Fusion network: $INSTALLER_CREATED_HITL_VMNET"
     log "  Fusion networking services will restart briefly during removal"
 }
@@ -499,39 +509,77 @@ describe_host_network_cleanup() {
 cleanup_host_networks() {
     local vmnet="${INSTALLER_CREATED_HITL_VMNET:-}"
     [[ -n "$vmnet" ]] || return 0
+    if [[ "$KEEP_HITL_NETWORK" -eq 1 ]]; then
+        log "Preserving $vmnet and releasing the old lab's network ownership (--keep-hitl-network)"
+        if [[ "$DRY_RUN" -eq 0 ]]; then
+            rm -f -- "$STATE_DIR/fusion-networking.cleanup-before" "$STATE_DIR/fusion-networking.cleanup-candidate"
+            INSTALLER_CREATED_HITL_VMNET=""
+        fi
+        return 0
+    fi
+    [[ "$vmnet" =~ ^vmnet([0-9]+)$ ]] \
+        || die "invalid installer-created vmnet in state: $vmnet"
+    local number="${BASH_REMATCH[1]}"
+    [[ "$number" -ge 2 && "$number" -le 255 && "$number" -ne 8 && "$vmnet" != "$MANAGEMENT_VMNET" ]] \
+        || die "refusing to remove a reserved or management network: $vmnet"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        log "Would remove installer-created isolated network $vmnet"
+        log "Would remove installer-created network $vmnet and its network directory (force=$FORCE_CLEANUP)"
         return 0
     fi
     fusion_vmnet_is_used_by_running_vm "$vmnet" \
         && die "another running VM references installer-created $vmnet; stop or reconfigure it before cleanup"
-    if ! fusion_vmnet_is_configured "$vmnet"; then
+    local network_dir="${VMWARE_NETWORKING_FILE%/*}/$vmnet"
+    if ! fusion_vmnet_is_configured "$vmnet" && [[ ! -e "$network_dir" ]]; then
         log "Installer-created network $vmnet is already absent"
+        INSTALLER_CREATED_HITL_VMNET=""
         return 0
     fi
     local backup="$STATE_DIR/fusion-networking.cleanup-before" candidate="$STATE_DIR/fusion-networking.cleanup-candidate"
+    local network_backup="$STATE_DIR/fusion-$vmnet.cleanup-before"
+    [[ ! -e "$network_backup" ]] || die "network backup already exists at $network_backup; restore or review it before retrying cleanup"
     cp -p -- "$VMWARE_NETWORKING_FILE" "$backup"
     if ! build_fusion_networking_candidate remove "$backup" "$candidate" "$vmnet" \
-        "$INSTALLER_CREATED_HITL_SUBNET" "$INSTALLER_CREATED_HITL_NETMASK"; then
-        die "$vmnet changed since installation; preserving it and installer state for manual review"
+        "$INSTALLER_CREATED_HITL_SUBNET" "$INSTALLER_CREATED_HITL_NETMASK" "$FORCE_CLEANUP"; then
+        die "$vmnet changed since installation; rerun cleanup --force to remove the tracked network, or --keep-hitl-network to preserve it."
     fi
     cmp -s "$backup" "$VMWARE_NETWORKING_FILE" \
         || die "Fusion network configuration changed while preparing cleanup; rerun cleanup"
-    log "Removing installer-created isolated network $vmnet; macOS may request an administrator password"
-    if ! sudo install -o root -g wheel -m 0644 "$candidate" "$VMWARE_NETWORKING_FILE" \
-        || ! fusion_reload_networking; then
-        fusion_restore_networking "$backup" || true
-        die "could not remove $vmnet; the previous network configuration was restored"
+    log "Removing installer-created network $vmnet and its network directory; macOS may request an administrator password"
+    # Stop first: a running Fusion daemon may otherwise write the removed
+    # network back. Its per-vmnet directory must also be removed before configure.
+    sudo "$FUSION_VMNET_CLI" --stop || die "could not stop Fusion networking; no configuration was removed"
+    if [[ -e "$network_dir" ]]; then
+        if ! sudo mv -- "$network_dir" "$network_backup"; then
+            sudo "$FUSION_VMNET_CLI" --start || true
+            die "could not back up $vmnet; no configuration was removed"
+        fi
     fi
-    local attempt
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
-        fusion_vmnet_is_configured "$vmnet" || break
-        sleep 1
-    done
-    fusion_vmnet_is_configured "$vmnet" \
-        && die "Fusion still reports $vmnet after cleanup; installer state was preserved"
+    local removed=0 attempt
+    if sudo install -o root -g wheel -m 0644 "$candidate" "$VMWARE_NETWORKING_FILE" \
+        && sudo "$FUSION_VMNET_CLI" --configure \
+        && sudo "$FUSION_VMNET_CLI" --start; then
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if ! fusion_vmnet_is_configured "$vmnet"; then
+                removed=1
+                break
+            fi
+            sleep 1
+        done
+    fi
+    if [[ "$removed" -ne 1 ]]; then
+        sudo "$FUSION_VMNET_CLI" --stop || true
+        if [[ -e "$network_backup" ]]; then
+            sudo rm -rf -- "$network_dir"
+            sudo mv -- "$network_backup" "$network_dir" \
+                || die "could not restore $vmnet; backup retained at $network_backup"
+        fi
+        fusion_restore_networking "$backup" || true
+        die "could not remove $vmnet; rollback was attempted and installer state was preserved"
+    fi
+    [[ ! -e "$network_backup" ]] || sudo rm -rf -- "$network_backup"
     rm -f -- "$backup" "$candidate"
     INSTALLER_CREATED_HITL_VMNET=""
+
 }
 
 confirm_install() {

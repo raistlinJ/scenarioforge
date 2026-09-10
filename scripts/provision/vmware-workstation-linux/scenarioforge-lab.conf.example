@@ -8,7 +8,16 @@
 # If passwords are stored here, protect the copy with: chmod 600 FILE
 
 lab_dir="/home/your-user/vmware/ScenarioForge-Lab"
+# Management connects APP and CORE; an enabled host virtual adapter also
+# lets your host reach those VMs. This network must already be configured:
+# setting management_vmnet=vmnet3 does NOT create vmnet3 automatically.
 management_vmnet=vmnet1
+
+# HITL connects CORE and the participant on a separate exercise network.
+# With managed HITL creation enabled (see manage_hitl_network), an unused
+# hitl_vmnet=vmnet3 is created automatically with DHCP, NAT, and host access
+# disabled. If the requested network is occupied and unsuitable, the installer
+# selects another unused vmnet. Keep HITL separate from management.
 hitl_vmnet=vmnet2
 
 app_management_cidr=172.31.250.2/24
@@ -44,3 +53,9 @@ interval=10
 yes=false
 dry_run=false
 force=false
+
+# Participant: debian (default) or kali; both use 2048 MB RAM.
+participant_os=debian
+
+# Automatically create a dedicated isolated HITL network when needed.
+manage_hitl_network=true

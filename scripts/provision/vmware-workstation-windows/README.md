@@ -58,24 +58,27 @@ No Linux commands or OpenSSL installation are needed on the host. The adjacent
 Linux/Proxmox installer file supplies the shared guest bootstrap text; the native
 builder never executes that file on Windows.
 
-The lab installer runs as your normal Windows user. Only the optional QEMU
-setup wizard requests elevation. The script does not install Workstation or
-modify host networks.
+The lab installer runs as your normal Windows user. The optional QEMU
+setup wizard and automatic HITL network changes request elevation. The script
+does not install Workstation.
 
 ## 2. Configure Workstation networking
 
-Open **Edit → Virtual Network Editor → Change Settings** and configure:
+Configure management and NAT in **Edit → Virtual Network Editor → Change Settings**.
+The installer automatically creates an isolated HITL network when needed:
 
 | Network | Type and subnet | DHCP | Host virtual adapter |
 | --- | --- | --- | --- |
 | VMnet1 | Host-only, `172.31.250.0/24` | Off | May remain enabled |
-| VMnet2 | Host-only, `10.254.200.0/24` | Off | **Off** |
+| VMnet2 (or another unused vmnet, automatic) | Host-only, `10.254.200.0/24` | Off | **Off** |
 | VMnet8 | NAT, your existing subnet | On | Default |
 
-Use a spare custom network if VMnet1 or VMnet2 is already in use, and set
+Use a spare management network if VMnet1 is already in use, and set
 `management_vmnet` / `hitl_vmnet` in the config. This version uses fixed guest
 management and HITL addresses, so the corresponding subnets must match the table.
-The installer checks the networks and rejects a bridged/NAT/DHCP-enabled HITL
+Set `manage_hitl_network` to `false` or pass `-NoManageHitlNetwork` to configure
+HITL manually. Automatic creation selects an unused vmnet if the requested one
+is occupied. The installer checks the networks and rejects a bridged/NAT/DHCP-enabled HITL
 network or an active host adapter on it.
 
 CORE connects to management, HITL, and NAT. APP connects to NAT and management.
@@ -182,7 +185,7 @@ installation and reinstall; `resume` requires all three VMX files.
 Cleanup lists and removes only verified installer-owned VM directories. Shut down
 running VMs first, or use `-Force` to permit a graceful shutdown before deletion.
 An unresponsive VM stops cleanup; it is not forcibly powered off. `-Yes` skips the
-`CLEANUP` confirmation. Host networks and cached base images are preserved.
+`CLEANUP` confirmation. Pre-existing host networks and cached base images are preserved.
 Locally edited/untracked shortcuts and helpers are preserved too.
 
 ## Validation
@@ -198,3 +201,41 @@ create and read real seed ISOs, verify download checksums and catalog permission
 and convert a small real disk when `qemu-img` is available.
 A complete Windows Workstation installation still needs verification on a real
 Windows host; the test suite does not boot VMs.
+
+
+## Kali participant
+
+For a new lab, add `-ParticipantOS kali`, set `"participant_os": "kali"`
+in your JSON config, or set `SF_PARTICIPANT_OS=kali`. Precedence is JSON,
+environment, then the CLI parameter. Debian remains the default.
+
+Kali uses **2048 MB RAM**, 2 CPUs, and a 40 GB disk by default. The optional
+`participant_memory_mb`, `participant_cores`, and `participant_disk_gb`
+JSON settings override these values. When changing an older config that
+explicitly sets `participant_disk_gb` to 20, remove that override or increase
+it to 40 (minimum 25). CORE continues to use Debian 12.
+
+The native Python builder verifies and extracts the official Kali 2026.2 amd64
+cloud image and converts its raw disk to VMDK without Bash or WSL. Kali uses
+NVMe; its guest bootstrap installs XFCE, the standard Kali tools, and the full
+kernel for VMware graphics, then reboots automatically. The login remains
+`participant`. The existing readiness and temporary NAT removal flow waits
+for the reboot and desktop check. Increase `wait_minutes` for slow downloads.
+
+Optional `kali_image_url` and `kali_sums_url` JSON settings select another
+amd64 generic cloud `.tar.xz` containing `disk.raw` and its SHA256 list.
+This provisions new VMs; it does not convert an existing participant VM.
+
+
+### Force cleanup and host networks
+
+Cleanup removes the HITL vmnet recorded as created by this installation.
+`cleanup -Force` also permits changed network settings and cleanup of running
+installer-owned VMs. `-KeepHitlNetwork` preserves the tracked network instead.
+Pre-existing HITL, management, and NAT networks remain untouched. Networks still
+referenced by other running VMs cannot be removed, even with force.
+
+Creation and removal use Workstation's `vnetlib64.exe` or `vnetlib.exe` with a
+Windows elevation prompt. Ownership is saved before creation; a canceled prompt
+or failed operation retains state for cleanup and retry. Older installation
+states without network ownership records preserve their networks.

@@ -1014,3 +1014,64 @@ apt-get() {{ printf '%s\n' "$*"; }}
     else:
         assert "xfce4 xorg" in lines[1]
         assert "kali-" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "force,recorded,state_found,comment,ports,bridge,owned",
+    [
+        (0, "1", 1, "changed", "", "sfhitl0", False),
+        (1, "1", 1, "changed", "", "sfhitl0", True),
+        (1, "0", 1, "changed", "", "sfhitl0", False),
+        (1, "1", 0, "changed", "", "sfhitl0", False),
+        (1, "creating", 1, "changed", "", "sfhitl0", False),
+        (1, "1", 1, "changed", "eno1", "sfhitl0", False),
+        (1, "1", 1, "changed", "", "vmbr0", False),
+        (0, "1", 1, "ScenarioForge isolated participant HITL", "", "sfhitl0", True),
+    ],
+)
+def test_force_bridge_cleanup_requires_recorded_ownership(
+    force, recorded, state_found, comment, ports, bridge, owned
+):
+    import json
+    payload = json.dumps({"type": "bridge", "comments": comment, "bridge_ports": ports})
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+PVE_NODE=test
+FORCE_CLEANUP={force}
+CLEANUP_STATE_FOUND={state_found}
+pvesh() {{ printf '%s\n' {shlex.quote(payload)}; }}
+if bridge_owned_by_installer {bridge} {recorded} 'ScenarioForge isolated participant HITL'; then
+    echo owned
+else
+    echo preserved
+fi
+"""
+    result = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ("owned" if owned else "preserved")
+
+
+def test_cleanup_retains_state_when_another_guest_uses_bridge(tmp_path):
+    state = tmp_path / "state.env"
+    state.write_text("recovery state")
+    result = subprocess.run(["bash", "-c", f"""
+source {shlex.quote(str(INSTALLER))}
+STATE_DIR={shlex.quote(str(tmp_path))}
+STATE_FILE={shlex.quote(str(state))}
+CLEANUP_STATE_FOUND=1
+CLEANUP_BRIDGES=(sfhitl0)
+load_cleanup_scope() {{ :; }}
+discover_cleanup_snippets() {{ :; }}
+discover_cleanup_bridges() {{ :; }}
+preflight_cleanup_network() {{ :; }}
+confirm_cleanup() {{ :; }}
+stop_and_destroy_cleanup_vms() {{ :; }}
+bridge_in_use_after_cleanup() {{ return 0; }}
+apply_network_changes() {{ :; }}
+remove_cleanup_files() {{ echo must-not-remove >&2; exit 90; }}
+perform_cleanup
+"""], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "installer state and credentials were retained" in result.stderr
+    assert "must-not-remove" not in result.stderr
+    assert state.read_text() == "recovery state"

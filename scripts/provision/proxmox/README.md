@@ -532,3 +532,16 @@ These settings are independent of the CORE Debian image settings.
 This option provisions new VMs; it does not convert an existing Debian VM.
 Validate desktop login, tool availability, HITL connectivity, and uplink removal
 on your Proxmox host before using the Kali lab with participants.
+
+
+### Force cleanup and network ownership
+
+`cleanup --force` removes bridges recorded as successfully created by this
+installer even if their descriptive comments changed. It still preserves
+pre-existing bridges, the uplink bridge, bridges with configured ports, and
+bridges referenced by other VMs or containers. Without an ownership record,
+changed comments are not enough to identify a bridge for forced removal.
+
+If a tracked bridge cannot be removed, cleanup retains installer state and
+credentials so you can resolve its remaining dependencies and retry. A bridge
+already removed manually does not need to be recreated for cleanup.

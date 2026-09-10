@@ -44,10 +44,11 @@ Replay-only packages and plain XML do not run generators during import.
 - [Highlights](#highlights)
 - [Screenshots](docs/screenshots.md)
 - [VM-mode setup](#vm-mode-setup-recommended)
+- [Kali participant installation](#kali-participant-installation)
 - [Proxmox three-VM installer](scripts/provision/proxmox/README.md) — graphical XFCE guests, a browser, native ScenarioForge, and optional generator/Vulhub catalogs
 - [VMware Workstation Windows three-VM installer](scripts/provision/vmware-workstation-windows/README.md) — native PowerShell/Python installation and Windows desktop shortcuts; no WSL required
 - [VMware Workstation Linux three-VM installer](scripts/provision/vmware-workstation-linux/README.md) — the same graphical lab and optional catalogs on an x86_64 Linux desktop
-- [VMware Fusion macOS three-VM installer](scripts/provision/vmware-fusion-mac/README.md) — the graphical lab on Intel or Apple silicon Macs, with architecture-matched Debian/Ubuntu guests
+- [VMware Fusion macOS three-VM installer](scripts/provision/vmware-fusion-mac/README.md) — the graphical lab on Intel or Apple silicon Macs, with architecture-matched guests and an optional Kali participant
 - [Other operating modes](#other-operating-modes)
 - [CORE install](docs/CORE_INSTALL.md)
 - [Quick start](docs/QUICK_START.md)
@@ -111,6 +112,58 @@ Full step-by-step setup guides:
 - [scripts/provision/vmware-workstation-linux/README.md](scripts/provision/vmware-workstation-linux/README.md) – provision the same three graphical VMs and optional catalogs with VMware Workstation on an x86_64 Linux host.
 - [scripts/provision/vmware-fusion-mac/README.md](scripts/provision/vmware-fusion-mac/README.md) – provision the same lab with VMware Fusion on Intel or Apple silicon macOS hosts.
 - [docs/NATIVE_MODE_SETUP.md](docs/NATIVE_MODE_SETUP.md) – local and remote CORE targets, the native-mode `.scenarioforge.env` reference, and the Proxmox **VM / Access** workflow (credentials, required API privileges, CORE VM selection, HITL bridge apply).
+
+### Kali Participant Installation
+
+All four automated installers offer a **Kali Linux participant VM** with XFCE
+and the standard Kali tools. Its defaults are **2 GB RAM (2048 MB), 2 CPUs,
+and a 40 GB disk**. Debian 12 remains the default participant OS, and the CORE
+VM uses Debian 12 with either choice.
+
+After completing the prerequisites in the platform guide above, run the
+appropriate command from the repository root:
+
+| Platform | Install with a Kali participant |
+| --- | --- |
+| Proxmox (root shell on the node) | `bash scripts/provision/proxmox/install-scenarioforge-lab.sh install --participant-os kali` |
+| Linux / VMware Workstation | `bash scripts/provision/vmware-workstation-linux/install-scenarioforge-lab.sh install --participant-os kali` |
+| macOS / VMware Fusion | `bash scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh install --participant-os kali` |
+| Windows / PowerShell 7.4+ | `./scripts/provision/vmware-workstation-windows/install-scenarioforge-lab.ps1 install -ParticipantOS kali` |
+
+You can also set `participant_os=kali` in the shell installers' config files,
+`"participant_os": "kali"` in the Windows JSON config, or
+`SF_PARTICIPANT_OS=kali` in the environment. CLI options take precedence over
+environment settings, which take precedence over config files.
+
+Fusion selects ARM64 images for Apple silicon and amd64 images for Intel Macs.
+The participant login remains `participant`, using the generated or supplied
+password. On VMware, Kali provisioning includes a kernel installation and
+automatic reboot before the desktop readiness check. The installer removes
+the participant's temporary internet adapter after provisioning completes.
+
+These options create a new lab; they do not convert existing Debian VMs.
+For resource overrides, image settings, download timeouts, and network setup,
+see the platform guides above. In an older Windows config, remove an explicit
+`"participant_disk_gb": 20` setting or change it to 40 when selecting Kali.
+
+### Cleanup and Host Networks
+
+Use the platform installer's `cleanup --force` command
+(`cleanup -Force` on Windows) to permit removal of running installer-owned VMs.
+
+| Platform | Host-network cleanup |
+| --- | --- |
+| macOS / Fusion | Removes the tracked installer-created HITL vmnet and its directory. `--force` permits changed settings; `--keep-hitl-network` explicitly preserves it. |
+| Proxmox | Removes installer-created bridges. `--force` permits changed comments when saved state confirms ownership. |
+| Linux / Windows Workstation | Automatically creates a dedicated HITL vmnet when needed and removes it during cleanup. Force permits changed settings; `--keep-hitl-network` / `-KeepHitlNetwork` preserves it. |
+
+Workstation management and NAT networks remain prerequisites. Automatic HITL
+creation uses sudo on Linux and elevation on Windows; disable it with
+`--no-manage-hitl-network` / `-NoManageHitlNetwork`.
+
+Networks still used by other guests remain protected. An incomplete
+installer-created network cleanup retains state for a retry. See the platform
+guides for ownership checks and recovery details.
 
 ### Recommended Lab Layout
 

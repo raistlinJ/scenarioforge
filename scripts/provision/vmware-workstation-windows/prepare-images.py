@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import urllib.request
 import uuid
@@ -30,6 +31,8 @@ CATALOG_URL = 'https://github.com/raistlinJ/flag-generators.git'
 IMAGES = {
     'debian': ('https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2',
                'https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS', 'sha512'),
+    'kali': ('https://kali.download/cloud-images/kali-2026.2/kali-linux-2026.2-cloud-genericcloud-amd64.tar.xz',
+             'https://kali.download/cloud-images/kali-2026.2/SHA256SUMS', 'sha256'),
     'ubuntu': ('https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img',
                'https://cloud-images.ubuntu.com/noble/current/SHA256SUMS', 'sha256'),
 }
@@ -119,6 +122,29 @@ def download_verified(url, sums_url, algorithm, cache):
         finally:
             if temporary:
                 temporary.unlink(missing_ok=True)
+
+
+def extract_kali_disk(archive, work):
+    """Copy only the regular disk.raw member, never archive-controlled paths."""
+    destination = work / 'kali-disk.raw'
+    try:
+        with tarfile.open(archive, 'r:xz') as tar:
+            members = [member for member in tar.getmembers() if member.name == 'disk.raw']
+            if len(members) != 1 or not members[0].isreg():
+                raise BuildError('Kali archive must contain one regular disk.raw.')
+            with tar.extractfile(members[0]) as source, destination.open('wb') as output:
+                # Skip writing zero blocks in the cloud image. Filesystems that
+                # support holes can retain a sparse file with identical bytes.
+                while block := source.read(1024 * 1024):
+                    if block.count(0) == len(block):
+                        output.seek(len(block), os.SEEK_CUR)
+                    else:
+                        output.write(block)
+                output.truncate(members[0].size)
+        return destination
+    except (tarfile.TarError, OSError, BuildError) as exc:
+        destination.unlink(missing_ok=True)
+        raise BuildError(f'Could not extract Kali disk.raw: {exc}') from exc
 
 
 def prepare_catalogs(config, work, lab):
@@ -269,6 +295,11 @@ def write_vmx(path, role, config, macs, networks, userdata, metadata, network):
                    'guestinfo.metadata': encode_guestinfo(json.dumps({**metadata, 'network': network, 'redact': ['userdata']})),
                    'guestinfo.metadata.encoding': 'gzip+base64', 'guestinfo.userdata': encode_guestinfo(userdata),
                    'guestinfo.userdata.encoding': 'gzip+base64'})
+    if role == 'participant' and config.get('participant_os', 'debian') == 'kali':
+        for key in ('scsi0.present', 'scsi0.virtualDev', 'scsi0:0.present', 'scsi0:0.fileName'):
+            values.pop(key)
+        values.update({'nvme0.present': 'TRUE', 'nvme0:0.present': 'TRUE',
+                       'nvme0:0.fileName': name + '.vmdk'})
     for index, (kind, network_name) in enumerate(networks):
         for key, value in {'present': 'TRUE', 'virtualDev': 'vmxnet3', 'startConnected': 'TRUE',
                            'addressType': 'static', 'address': macs[index], 'connectionType': kind}.items():
@@ -280,10 +311,10 @@ def write_vmx(path, role, config, macs, networks, userdata, metadata, network):
     path.write_text(''.join(f'{key} = "{value}"\n' for key, value in values.items()), encoding='utf-8', newline='\n')
 
 
-def prepare_disk(qemu, source, destination, size_gb, work):
+def prepare_disk(qemu, source, destination, size_gb, work, source_format="qcow2"):
     overlay = work / 'resize.qcow2'
     try:
-        run([qemu, 'create', '-f', 'qcow2', '-F', 'qcow2', '-b', source, overlay], capture=True)
+        run([qemu, 'create', '-f', 'qcow2', '-F', source_format, '-b', source, overlay], capture=True)
         run([qemu, 'resize', overlay, f'{size_gb}G'])
         run([qemu, 'convert', '-p', '-f', 'qcow2', '-O', 'vmdk', '-o', 'subformat=monolithicSparse,adapter_type=lsilogic',
              overlay, destination])
@@ -292,13 +323,25 @@ def prepare_disk(qemu, source, destination, size_gb, work):
 
 
 def prepare_images(config, work):
+    participant_os = config.get('participant_os', 'debian')
+    if participant_os not in ('debian', 'kali'):
+        raise BuildError('participant_os must be debian or kali.')
     scripts = guest_scripts()
     lab = Path(config['lab_dir'])
     for role in scripts:
         if (lab / ('scenarioforge-' + role)).exists():
             raise BuildError(f'VM destination already exists: scenarioforge-{role}')
     checksum, commit = prepare_catalogs(config, work, lab)
-    images = {name: download_verified(*parameters, Path(config['image_cache'])) for name, parameters in IMAGES.items()}
+    selected = ['debian', 'ubuntu'] + (['kali'] if participant_os == 'kali' else [])
+    images = {}
+    for name in selected:
+        parameters = IMAGES[name]
+        if name == 'kali':
+            parameters = (config.get('kali_image_url') or parameters[0],
+                          config.get('kali_sums_url') or parameters[1], parameters[2])
+        images[name] = download_verified(*parameters, Path(config['image_cache']))
+    if participant_os == 'kali':
+        images['kali'] = extract_kali_disk(images['kali'], work)
     used_macs = set()
     for role, script in scripts.items():
         name = 'scenarioforge-' + role
@@ -316,8 +359,13 @@ def prepare_images(config, work):
         metadata = {'instance-id': f'scenarioforge-{role}-{uuid.uuid4()}', 'local-hostname': name}
         write_seed(directory / (name + '-cidata.iso'), userdata, metadata, network)
         print(f'Preparing {role} disk...', flush=True)
-        prepare_disk(config['qemu_img'], images['ubuntu' if role == 'app' else 'debian'],
-                     directory / (name + '.vmdk'), config[role + '_disk_gb'], work)
+        image_os = 'ubuntu' if role == 'app' else (participant_os if role == 'participant' else 'debian')
+        disk_args = (config['qemu_img'], images[image_os], directory / (name + '.vmdk'),
+                     config[role + '_disk_gb'], work)
+        if image_os == 'kali':
+            prepare_disk(*disk_args, source_format='raw')
+        else:
+            prepare_disk(*disk_args)
         write_vmx(directory / (name + '.vmx'), role, config, macs, networks, userdata, metadata, network)
 
 

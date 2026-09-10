@@ -35,7 +35,7 @@ def config(tmp_path):
     request = json.loads((SOURCE / 'scenarioforge-lab.json.example').read_text())
     lab = tmp_path / 'Windows lab with spaces'
     lab.mkdir()
-    request.update(lab_dir=str(lab), image_cache=str(tmp_path / 'cache'), qemu_img='qemu-img',
+    request.update(participant_disk_gb=20, lab_dir=str(lab), image_cache=str(tmp_path / 'cache'), qemu_img='qemu-img',
                    install_id='windows-test-owner', core_password='core $literal', app_password='app password',
                    participant_password='participant password', web_admin_password='web password')
     return request
@@ -77,16 +77,26 @@ def read_iso(path):
         iso.close()
 
 
+@pytest.mark.parametrize('participant_os', ['debian', 'kali'])
 @pytest.mark.parametrize('catalogs', [False, True])
-def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypatch, tmp_path, catalogs):
+def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypatch, tmp_path, catalogs, participant_os):
     from passlib.hash import sha512_crypt
-    config.update(flag_generators=catalogs, vulnhub=catalogs)
+    config.update(flag_generators=catalogs, vulnhub=catalogs, participant_os=participant_os,
+                  participant_disk_gb=40 if participant_os == 'kali' else 20)
     lab = Path(config['lab_dir'])
     monkeypatch.setattr(builder, 'download_verified', lambda *args: tmp_path / 'fake.qcow2')
-    monkeypatch.setattr(builder, 'prepare_disk', lambda qemu, image, disk, size, work: disk.write_bytes(b'fake disk'))
+    disk_calls = []
+    def prepare(qemu, image, disk, size, work, source_format='qcow2'):
+        disk_calls.append((disk.parent.name, image, source_format, size))
+        disk.write_bytes(b'fake disk')
+    monkeypatch.setattr(builder, 'prepare_disk', prepare)
+    monkeypatch.setattr(builder, 'extract_kali_disk', lambda *args: tmp_path / 'kali.raw')
     monkeypatch.setattr(builder, 'prepare_catalogs', lambda *args: ('catalog-checksum', 'catalog-commit') if catalogs else ('', ''))
     monkeypatch.setattr(builder.subprocess, 'run', lambda *a, **k: pytest.fail('Host Bash must not be needed'))
     builder.prepare_images(config, tmp_path)
+    participant_call = next(call for call in disk_calls if call[0] == 'scenarioforge-participant')
+    assert participant_call[2] == ('raw' if participant_os == 'kali' else 'qcow2')
+    assert all(call[2] == 'qcow2' for call in disk_calls if call[0] != 'scenarioforge-participant')
     for role in ('core', 'app', 'participant'):
         vmx = lab / f'scenarioforge-{role}/scenarioforge-{role}.vmx'
         text = vmx.read_text()
@@ -107,6 +117,10 @@ def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypa
         guest = next(f for f in userdata['write_files'] if f['path'].endswith(f'{role}-bootstrap'))
         assert base64.b64decode(guest['content']).decode() == builder.guest_scripts()[role]
         if role == 'participant':
+            assert values['memsize'] == '"2048"'
+            if participant_os == 'kali':
+                assert values['nvme0.present'] == '"TRUE"'
+                assert 'scsi0.present' not in values
             assert values['ethernet0.vnet'] == '"vmnet2"'
             assert values['ethernet1.connectionType'] == '"nat"'
         if role == 'core':
@@ -135,15 +149,16 @@ def test_network_layout_matches_guest_interfaces(config):
     assert 'gateway4' not in net['ethernets']['participant']
 
 
-def test_native_qemu_converts_and_grows_without_modifying_base(tmp_path):
+@pytest.mark.parametrize('source_format', ['qcow2', 'raw'])
+def test_native_qemu_converts_and_grows_without_modifying_base(tmp_path, source_format):
     qemu = shutil.which('qemu-img')
     if not qemu:
         pytest.skip('Real qemu-img validation requires QEMU; command construction is tested separately')
-    base = tmp_path / 'base disk.qcow2'
+    base = tmp_path / ('base disk.' + source_format)
     destination = tmp_path / 'guest disk.vmdk'
-    subprocess.run([qemu, 'create', '-f', 'qcow2', str(base), '16M'], check=True, capture_output=True)
+    subprocess.run([qemu, 'create', '-f', source_format, str(base), '16M'], check=True, capture_output=True)
     original_hash = builder.file_hash(base)
-    builder.prepare_disk(qemu, base, destination, 1, tmp_path)
+    builder.prepare_disk(qemu, base, destination, 1, tmp_path, source_format=source_format)
     assert builder.file_hash(base) == original_hash
     info = json.loads(subprocess.check_output([qemu, 'info', '--output=json', str(destination)], text=True))
     assert info['format'] == 'vmdk'
@@ -230,3 +245,32 @@ def test_native_installer_has_no_wsl_or_host_bash_dependency():
     config = json.loads((SOURCE / 'scenarioforge-lab.json.example').read_text())
     assert config['desktop_shortcut'] is True
     assert 'python_exe' in config and 'qemu_img' in config
+
+
+@pytest.mark.parametrize('member_type', ['regular', 'symlink', 'missing'])
+def test_kali_archive_extraction(tmp_path, member_type):
+    archive = tmp_path / 'kali.tar.xz'
+    payload = b'header' + bytes(2 * 1024 * 1024) + b'tail'
+    with tarfile.open(archive, 'w:xz') as tar:
+        member = tarfile.TarInfo('missing.raw' if member_type == 'missing' else 'disk.raw')
+        if member_type == 'symlink':
+            member.type = tarfile.SYMTYPE
+            member.linkname = '/outside'
+            tar.addfile(member)
+        else:
+            member.size = len(payload)
+            tar.addfile(member, io.BytesIO(payload))
+    if member_type == 'regular':
+        disk = builder.extract_kali_disk(archive, tmp_path)
+        assert disk.read_bytes() == payload
+    else:
+        with pytest.raises(builder.BuildError, match='regular disk.raw'):
+            builder.extract_kali_disk(archive, tmp_path)
+        assert not (tmp_path / 'kali-disk.raw').exists()
+
+
+def test_invalid_kali_archive_has_clear_error(tmp_path):
+    archive = tmp_path / 'bad.tar.xz'
+    archive.write_bytes(b'not an archive')
+    with pytest.raises(builder.BuildError, match='Could not extract Kali'):
+        builder.extract_kali_disk(archive, tmp_path)

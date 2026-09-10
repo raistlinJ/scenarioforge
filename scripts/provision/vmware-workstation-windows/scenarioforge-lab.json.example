@@ -14,7 +14,6 @@
   "participant_cores": 2,
   "core_disk_gb": 80,
   "app_disk_gb": 40,
-  "participant_disk_gb": 20,
   "ssh_public_key": "",
   "core_password": "",
   "app_password": "",
@@ -28,5 +27,7 @@
   "flag_generators_ref": "5f612eecb8ff5df74a0e517d0de1e54385a62044",
   "python_exe": "",
   "qemu_img": "",
-  "git_exe": ""
+  "git_exe": "",
+  "participant_os": "debian",
+  "manage_hitl_network": true
 }

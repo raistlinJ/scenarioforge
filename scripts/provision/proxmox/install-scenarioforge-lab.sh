@@ -103,6 +103,7 @@ CATALOG_TRANSFER_KEY=""
 CATALOG_TRANSFER_PUBLIC_KEY_FILE=""
 RUNTIME_TRACKING=0
 CLEANUP_STATE_FOUND=0
+CLEANUP_NETWORK_INCOMPLETE=0
 declare -a CLEANUP_VMIDS=()
 declare -a CLEANUP_LABELS=()
 declare -a CLEANUP_SNIPPETS=()
@@ -809,9 +810,9 @@ download_verified_image() {
 prepare_participant_image() {
     PARTICIPANT_IMAGE="$DEBIAN_IMAGE"
     [[ "$PARTICIPANT_OS" == kali ]] || return 0
-    local archive="$IMAGE_CACHE/kali-genericcloud-amd64.tar.xz" staging
+    local archive="$IMAGE_CACHE/kali-genericcloud-${GUEST_ARCH:-amd64}.tar.xz" staging
     download_verified_image "$KALI_IMAGE_URL" "$KALI_SUMS_URL" sha256 "$archive"
-    PARTICIPANT_IMAGE="$IMAGE_CACHE/kali-genericcloud-amd64.raw"
+    PARTICIPANT_IMAGE="$IMAGE_CACHE/kali-genericcloud-${GUEST_ARCH:-amd64}.raw"
     if [[ "$DRY_RUN" -eq 1 ]]; then
         emit DRY-RUN "extract verified Kali disk.raw -> $PARTICIPANT_IMAGE"
         return 0
@@ -880,7 +881,8 @@ prepare_optional_content() {
         cp -a -- "$source_dir/vulnhub" "$staging_dir/"
     fi
     OPTIONAL_CONTENT_ARCHIVE="$WORK_DIR/scenarioforge-optional-content.tar.gz"
-    tar -C "$staging_dir" -czf "$OPTIONAL_CONTENT_ARCHIVE" .
+    # Prevent macOS tar from emitting AppleDouble resource-fork sidecars.
+    COPYFILE_DISABLE=1 tar -C "$staging_dir" -czf "$OPTIONAL_CONTENT_ARCHIVE" .
     OPTIONAL_CONTENT_SHA256="$(sha256sum "$OPTIONAL_CONTENT_ARCHIVE" | awk '{print $1}')"
     CATALOG_TRANSFER_KEY="$WORK_DIR/catalog-transfer-key"
     ssh-keygen -q -t ed25519 -N '' -C scenarioforge-installer-transfer -f "$CATALOG_TRANSFER_KEY"
@@ -1304,7 +1306,10 @@ with zipfile.ZipFile(sys.argv[2], "w", compression=zipfile.ZIP_DEFLATED) as arch
         archive.write(metadata, "pack.json")
     for catalog_dir in ("flag_generators", "flag_node_generators"):
         for path in (source / catalog_dir).rglob("*"):
-            if path.is_file():
+            if path.is_file() and not any(
+                part.startswith("._") or part in {"__MACOSX", ".DS_Store"}
+                for part in path.relative_to(source).parts
+            ):
                 archive.write(path, path.relative_to(source).as_posix())
 GENERATOR_ZIP
         chown scenarioforge:scenarioforge "$generator_zip"
@@ -1380,7 +1385,10 @@ import zipfile
 source = Path(sys.argv[1])
 with zipfile.ZipFile(sys.argv[2], "w", compression=zipfile.ZIP_DEFLATED) as archive:
     for path in source.rglob("*"):
-        if path.is_file():
+        if path.is_file() and not any(
+            part.startswith("._") or part in {"__MACOSX", ".DS_Store"}
+            for part in path.relative_to(source).parts
+        ):
             archive.write(path, path.relative_to(source).as_posix())
 VULNHUB_ZIP
         chown scenarioforge:scenarioforge "$vulnhub_zip"
@@ -1634,6 +1642,37 @@ else
         dbus-x11 lightdm lightdm-gtk-greeter xfce4 xorg \
         xserver-xorg-input-all xserver-xorg-video-all xterm
 fi
+if [[ "$ID" == kali ]] && systemd-detect-virt --quiet --vm \
+    && [[ "$(systemd-detect-virt)" == vmware && "$(uname -r)" == *cloud* ]]; then
+    [[ ! -f /var/lib/scenarioforge/participant-kernel-reboot ]] \
+        || fail_bootstrap 'Kali did not boot the full kernel after reboot'
+    set_bootstrap_status 75 'installing the full Kali kernel for VMware graphics'
+    architecture="$(dpkg --print-architecture)"
+    case "$architecture" in amd64|arm64) ;; *) fail_bootstrap 'unsupported Kali architecture' ;; esac
+    apt-get install -y "linux-image-$architecture"
+    kernel="$(find /boot -maxdepth 1 -name "vmlinuz-*-$architecture" ! -name '*cloud*' | sort -V | tail -n 1)"
+    [[ -n "$kernel" ]] || fail_bootstrap 'full Kali kernel was not installed'
+    install -d /etc/default/grub.d
+    printf 'GRUB_TOP_LEVEL="%s"\nGRUB_DEFAULT=0\n' "$kernel" > /etc/default/grub.d/99-scenarioforge-kernel.cfg
+    update-grub
+    cat > /etc/systemd/system/scenarioforge-participant-bootstrap.service <<'UNIT'
+[Unit]
+Description=Finish ScenarioForge participant provisioning after kernel reboot
+Wants=network-online.target
+After=network-online.target cloud-final.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/scenarioforge-participant-bootstrap
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable scenarioforge-participant-bootstrap.service
+    touch /var/lib/scenarioforge/participant-kernel-reboot
+    set_bootstrap_status 80 'rebooting into the full Kali kernel'
+    systemd-run --unit=scenarioforge-participant-reboot --on-active=10s /usr/bin/systemctl reboot
+    exit 0
+fi
 set_bootstrap_status 85 'enabling the XFCE graphical login'
 systemctl set-default graphical.target
 systemctl enable --now lightdm
@@ -1652,6 +1691,9 @@ if ! systemctl is-active --quiet lightdm; then
     fail_bootstrap 'participant XFCE graphical login did not become active'
 fi
 
+if [[ -f /etc/systemd/system/scenarioforge-participant-bootstrap.service ]]; then
+    systemctl disable scenarioforge-participant-bootstrap.service
+fi
 touch /var/lib/scenarioforge/participant-ready
 set_bootstrap_status 100 'ready'
 echo 'Participant XFCE provisioning complete.'
@@ -2508,10 +2550,15 @@ bridge_owned_by_installer() {
     local bridge="$1" recorded_created="$2" expected_comment="$3" config
     config="$(pvesh get "/nodes/$PVE_NODE/network/$bridge" --output-format json 2>/dev/null)" || return 1
     [[ "$(storage_field "$config" type)" == "bridge" ]] || return 1
-    [[ "$(storage_field "$config" comments)" == "$expected_comment" ]] || return 1
-    if [[ "$recorded_created" == "0" ]]; then
-        return 1
+    [[ "$recorded_created" != "0" ]] || return 1
+    [[ "$bridge" != "$UPLINK_BRIDGE" && "$bridge" != vmbr0 ]] || return 1
+    local ports
+    ports="$(storage_field "$config" bridge_ports)"
+    [[ -z "$ports" || "$ports" == none ]] || return 1
+    if [[ "$FORCE_CLEANUP" -eq 1 && "$CLEANUP_STATE_FOUND" -eq 1 && "$recorded_created" == "1" ]]; then
+        return 0
     fi
+    [[ "$(storage_field "$config" comments)" == "$expected_comment" ]] || return 1
     [[ "$recorded_created" == "1" || "$recorded_created" == "creating" || -z "$recorded_created" ]]
 }
 
@@ -2519,10 +2566,18 @@ discover_cleanup_bridges() {
     if bridge_owned_by_installer "$MANAGEMENT_BRIDGE" "${CREATED_MANAGEMENT_BRIDGE:-}" \
         "ScenarioForge isolated CORE management"; then
         CLEANUP_BRIDGES+=("$MANAGEMENT_BRIDGE")
+    elif [[ "${CREATED_MANAGEMENT_BRIDGE:-0}" == "1" ]] \
+        && ip link show "$MANAGEMENT_BRIDGE" >/dev/null 2>&1; then
+        warn "preserving changed or uninspectable installer-created bridge $MANAGEMENT_BRIDGE"
+        CLEANUP_NETWORK_INCOMPLETE=1
     fi
     if bridge_owned_by_installer "$HITL_BRIDGE" "${CREATED_HITL_BRIDGE:-}" \
         "ScenarioForge isolated participant HITL"; then
         CLEANUP_BRIDGES+=("$HITL_BRIDGE")
+    elif [[ "${CREATED_HITL_BRIDGE:-0}" == "1" ]] \
+        && ip link show "$HITL_BRIDGE" >/dev/null 2>&1; then
+        warn "preserving changed or uninspectable installer-created bridge $HITL_BRIDGE"
+        CLEANUP_NETWORK_INCOMPLETE=1
     fi
     return 0
 }
@@ -2637,6 +2692,7 @@ remove_cleanup_bridges() {
     for bridge in "${CLEANUP_BRIDGES[@]}"; do
         if bridge_in_use_after_cleanup "$bridge"; then
             warn "preserving installer-created bridge $bridge because another VM or container still uses it"
+            CLEANUP_NETWORK_INCOMPLETE=1
             continue
         fi
         log "Removing installer-created bridge $bridge"
@@ -2645,7 +2701,7 @@ remove_cleanup_bridges() {
         removed+=("$bridge")
     done
     apply_network_changes
-    if [[ "$DRY_RUN" -eq 0 ]]; then
+    if [[ "$DRY_RUN" -eq 0 && "${#removed[@]}" -gt 0 ]]; then
         for bridge in "${removed[@]}"; do
             if ip link show "$bridge" >/dev/null 2>&1; then
                 die "bridge $bridge still exists after applying its removal"
@@ -2698,6 +2754,9 @@ perform_cleanup() {
     confirm_cleanup
     stop_and_destroy_cleanup_vms
     remove_cleanup_bridges
+    if [[ "$CLEANUP_NETWORK_INCOMPLETE" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+        die "network cleanup is incomplete; installer state and credentials were retained. Use cleanup --force for changed installer-created bridges; bridges with uplink ports or other guest references must be resolved first."
+    fi
     remove_cleanup_files
     if [[ "$DRY_RUN" -eq 1 ]]; then
         log "Cleanup dry run complete; no resources were changed"

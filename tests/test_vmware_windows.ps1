@@ -39,6 +39,27 @@ try {
     @{ app_password = $literal } | ConvertTo-Json | Set-Content $configFile
     Assert ((Read-InstallerConfig $configFile).app_password -ceq $literal) 'Config preserves literal passwords'
 
+    # OS selection changes only the participant defaults and honors explicit resources.
+    @{ participant_os = 'kali' } | ConvertTo-Json | Set-Content $configFile
+    $kali = Read-InstallerConfig $configFile
+    Assert ($kali.participant_os -eq 'kali') 'Kali JSON option'
+    Assert ($kali.participant_memory_mb -eq 2048) 'Kali has 2 GB RAM'
+    Assert ($kali.participant_disk_gb -eq 40) 'Kali has 40 GB disk'
+    Assert ($kali.core_disk_gb -eq 80) 'CORE defaults preserved'
+    $debian = Read-InstallerConfig $configFile 'debian'
+    Assert ($debian.participant_disk_gb -eq 20) 'CLI overrides JSON OS'
+    @{ participant_os = 'kali'; participant_memory_mb = 3072; participant_disk_gb = 60 } | ConvertTo-Json | Set-Content $configFile
+    $kali = Read-InstallerConfig $configFile
+    Assert ($kali.participant_memory_mb -eq 3072 -and $kali.participant_disk_gb -eq 60) 'Explicit resource overrides preserved'
+    @{ participant_os = 'invalid' } | ConvertTo-Json | Set-Content $configFile
+    Assert-Throws { Read-InstallerConfig $configFile } 'participant_os must'
+    $oldOS = $env:SF_PARTICIPANT_OS
+    try {
+        $env:SF_PARTICIPANT_OS = 'kali'
+        Assert ((Read-InstallerConfig '').participant_disk_gb -eq 40) 'Environment OS selection'
+        Assert ((Read-InstallerConfig '' 'debian').participant_os -eq 'debian') 'CLI overrides environment'
+    } finally { $env:SF_PARTICIPANT_OS = $oldOS }
+
     # Exercise the real native process argument handling, including embedded quotes.
     $probe = Join-Path $temp 'argument probe.ps1'
     'param([string]$Value); [Console]::Write($Value)' | Set-Content $probe

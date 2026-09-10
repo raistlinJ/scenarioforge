@@ -16,7 +16,7 @@ source "$PROXMOX_INSTALLER"
 
 VMWARE_DESKTOP_LAUNCHER_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/desktop-launcher.py"
 
-SCRIPT_VERSION="0.5.0"
+SCRIPT_VERSION="0.6.0"
 INSTALLER_OWNER="scenarioforge-vmware-linux-v1"
 EXPECTED_INSTALLER_OWNER="$INSTALLER_OWNER"
 CORE_USE_SYSTEMD_RESOLVED_STUB=1
@@ -104,7 +104,7 @@ HOST_PARTICIPANT_SHORTCUT=""
 HOST_PARTICIPANT_SHORTCUT_SHA256=""
 HOST_DESKTOP_LAUNCHER=""
 HOST_DESKTOP_LAUNCHER_SHA256=""
-MANAGE_HITL_NETWORK="${SF_VMWARE_MANAGE_HITL_NETWORK:-0}"
+MANAGE_HITL_NETWORK="${SF_VMWARE_MANAGE_HITL_NETWORK:-1}"
 INSTALLER_CREATED_HITL_VMNET=""
 INSTALLER_CREATED_HITL_SUBNET=""
 INSTALLER_CREATED_HITL_NETMASK=""
@@ -163,7 +163,7 @@ Usage:
 Provision three graphical VMs on x86_64 Linux with VMware Workstation:
   - Debian 12 + CORE GUI/XFCE from raistlinJ/core via coreemu-minimal --from-source
   - Ubuntu 24.04 + XFCE and native ScenarioForge behind nginx
-  - Debian 12 + a minimal XFCE participant desktop
+  - Debian 12 + a minimal XFCE participant desktop, or Kali Linux + XFCE/tools
 
 Important options:
   --config FILE               read lower-precedence key=value options from FILE
@@ -173,6 +173,10 @@ Important options:
   --ssh-public-key FILE       add an OpenSSH public key to all guest users
   --core-password PASSWORD    set the corevm password (default: generated)
   --app-password PASSWORD     set the scenarioforge VM password (default: generated)
+  --manage-hitl-network       create an isolated HITL vmnet when needed (default)
+  --no-manage-hitl-network    require a preconfigured isolated HITL vmnet
+  --keep-hitl-network         preserve the tracked host vmnet during cleanup
+  --participant-os OS         participant OS: debian (default) or kali
   --participant-password PASS set the participant password (default: generated)
   --web-admin-password PASS   set the coreadmin Web UI password (default: generated)
   --flag-generators           install raistlinJ flag-generator catalogs on APP
@@ -217,6 +221,7 @@ apply_vmware_config_value() {
         ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
         core_password) assign_config_setting REQUESTED_CORE_PASSWORD SF_CORE_PASSWORD "$value" ;;
         app_password) assign_config_setting REQUESTED_APP_PASSWORD SF_APP_PASSWORD "$value" ;;
+        participant_os) assign_config_setting PARTICIPANT_OS SF_PARTICIPANT_OS "$value" ;;
         participant_password) assign_config_setting REQUESTED_PARTICIPANT_PASSWORD SF_PARTICIPANT_PASSWORD "$value" ;;
         web_admin_password) assign_config_setting REQUESTED_WEB_ADMIN_PASSWORD SF_WEB_ADMIN_PASSWORD "$value" ;;
         flag_generators)
@@ -276,6 +281,7 @@ parse_args() {
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
             --core-password) REQUESTED_CORE_PASSWORD="${2:?missing value for --core-password}"; shift 2 ;;
             --app-password) REQUESTED_APP_PASSWORD="${2:?missing value for --app-password}"; shift 2 ;;
+            --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-password) REQUESTED_PARTICIPANT_PASSWORD="${2:?missing value for --participant-password}"; shift 2 ;;
             --web-admin-password) REQUESTED_WEB_ADMIN_PASSWORD="${2:?missing value for --web-admin-password}"; shift 2 ;;
             --flag-generators) INSTALL_FLAG_GENERATORS=1; shift ;;
@@ -293,6 +299,10 @@ parse_args() {
             --yes|-y) ASSUME_YES=1; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
             --force) FORCE_CLEANUP=1; shift ;;
+            --keep-hitl-network)
+                KEEP_HITL_NETWORK=1
+                shift
+                ;;
             --app-management-cidr) APP_MANAGEMENT_CIDR="${2:?missing value}"; shift 2 ;;
             --core-management-cidr) CORE_MANAGEMENT_CIDR="${2:?missing value}"; shift 2 ;;
             --core-hitl-cidr) CORE_HITL_CIDR="${2:?missing value}"; shift 2 ;;
@@ -304,7 +314,14 @@ parse_args() {
             *) die "unknown option: $1" ;;
         esac
     done
+    case "$PARTICIPANT_OS" in
+        debian) ;;
+        kali) PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-40}" ;;
+        *) die "--participant-os must be debian or kali" ;;
+    esac
     case "$COMMAND" in install|status|cleanup) ;; *) die "unknown command: $COMMAND" ;; esac
+    [[ "${KEEP_HITL_NETWORK:-0}" -eq 0 || "$COMMAND" == cleanup ]] \
+        || die "--keep-hitl-network is only valid with cleanup"
 
     CORE_DIR="$LAB_DIR/$CORE_NAME$VM_BUNDLE_SUFFIX"
     APP_DIR="$LAB_DIR/$APP_NAME$VM_BUNDLE_SUFFIX"
@@ -359,7 +376,7 @@ require_workstation_runtime() {
 require_linux_workstation() {
     require_workstation_runtime
     local command
-    for command in vmware-vdiskmanager qemu-img curl openssl python3 timeout sha256sum sha512sum; do
+    for command in vmware-vdiskmanager qemu-img curl openssl python3 timeout sha256sum sha512sum tar xz; do
         command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
     done
     if ! command -v xorriso >/dev/null 2>&1 && ! command -v genisoimage >/dev/null 2>&1; then
@@ -400,13 +417,8 @@ validate_host_networks() {
     validate_hitl_isolation
 }
 
-# Platform wrappers can plan and apply host-network changes. Workstation keeps
-# its existing manual network-editor behavior; Fusion overrides these hooks.
-prepare_host_network_plan() { :; }
-validate_host_network_plan() { validate_host_networks; }
-apply_host_network_plan() { :; }
-describe_host_network_cleanup() { :; }
-cleanup_host_networks() { :; }
+# Fusion overrides these hooks after sourcing this installer.
+source "${BASH_SOURCE[0]%/*}/host-networks.sh"
 
 validate_inputs() {
     validate_paths
@@ -432,6 +444,9 @@ validate_inputs() {
     validate_uint "CORE memory" "$CORE_MEMORY_MB" 2048
     validate_uint "APP memory" "$APP_MEMORY_MB" 2048
     validate_uint "participant memory" "$PARTICIPANT_MEMORY_MB" 1024
+    if [[ "$PARTICIPANT_OS" == kali ]]; then
+        validate_uint "Kali participant disk" "$PARTICIPANT_DISK_GB" 25
+    fi
     validate_cidr "APP management CIDR" "$APP_MANAGEMENT_CIDR"
     validate_cidr "CORE management CIDR" "$CORE_MANAGEMENT_CIDR"
     validate_cidr "CORE HITL CIDR" "$CORE_HITL_CIDR"
@@ -450,8 +465,13 @@ confirm_install() {
     log "VMware Workstation lab plan:"
     log "  VM files: $LAB_DIR"
     log "  Management: $MANAGEMENT_VMNET (APP $APP_MANAGEMENT_CIDR <-> CORE $CORE_MANAGEMENT_CIDR)"
+    log "  Participant OS: $PARTICIPANT_OS (RAM: $PARTICIPANT_MEMORY_MB MB, disk: $PARTICIPANT_DISK_GB GB)"
     log "  HITL: $HITL_VMNET (CORE ens19, no IP <-> participant $PARTICIPANT_CIDR)"
     log "  Uplink: VMware NAT for CORE and APP; temporary for participant provisioning"
+    if [[ "${WORKSTATION_NETWORK_PLAN:-0}" -eq 1 ]]; then
+        log "  Create dedicated HITL network: $HITL_VMNET (DHCP/NAT/host adapter disabled)"
+        log "  VMware networking services will restart; sudo may request your password"
+    fi
     log "  Host desktop shortcut: $CREATE_DESKTOP_SHORTCUT (1=enabled, 0=disabled)"
     if [[ "$INSTALL_FLAG_GENERATORS" == "1" || "$INSTALL_VULNHUB" == "1" ]]; then
         log "  Optional content: flag-generators=$INSTALL_FLAG_GENERATORS vulnhub=$INSTALL_VULNHUB (ref $FLAG_GENERATORS_REF)"
@@ -493,6 +513,7 @@ write_state() {
         shell_assignment CORE_NAME "$CORE_NAME"
         shell_assignment APP_NAME "$APP_NAME"
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
+        shell_assignment PARTICIPANT_OS "$PARTICIPANT_OS"
         shell_assignment CORE_VMX "$CORE_VMX"
         shell_assignment APP_VMX "$APP_VMX"
         shell_assignment PARTICIPANT_VMX "$PARTICIPANT_VMX"
@@ -654,9 +675,9 @@ append_guestinfo_cloud_init() {
 }
 
 prepare_disk() {
-    local source="$1" destination="$2" size_gb="$3"
+    local source="$1" destination="$2" size_gb="$3" source_format="${4:-qcow2}"
     log "Converting $(basename "$source") to VMware VMDK for $(basename "$(dirname "$destination")")"
-    qemu-img convert -p -f qcow2 -O vmdk -o subformat=monolithicSparse,adapter_type=lsilogic \
+    qemu-img convert -p -f "$source_format" -O vmdk -o subformat=monolithicSparse,adapter_type=lsilogic \
         "$source" "$destination"
     vmware-vdiskmanager -x "${size_gb}GB" "$destination"
 }
@@ -763,8 +784,15 @@ create_vms() {
     append_nic "$APP_VMX" 0 nat "" "$APP_NET0_MAC"
     append_nic "$APP_VMX" 1 custom "$MANAGEMENT_VMNET" "$APP_NET1_MAC"
 
-    prepare_disk "$debian" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" "$PARTICIPANT_DISK_GB"
+    local participant_image="$debian" participant_format=qcow2
+    if [[ "$PARTICIPANT_OS" == kali ]]; then
+        participant_image="$PARTICIPANT_IMAGE"
+        participant_format=raw
+    fi
+    prepare_disk "$participant_image" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" "$PARTICIPANT_DISK_GB" "$participant_format"
     create_seed_iso participant "$PARTICIPANT_NAME" "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
+    local VMWARE_DISK_BUS="$VMWARE_DISK_BUS"
+    [[ "$PARTICIPANT_OS" != kali ]] || VMWARE_DISK_BUS=nvme
     create_vmx "$PARTICIPANT_VMX" "$PARTICIPANT_NAME" "$DEBIAN_GUEST_OS" \
         "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" \
         "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
@@ -1189,10 +1217,18 @@ perform_cleanup() {
             if [[ "$DRY_RUN" -eq 1 ]]; then
                 run vmrun -T "$VMRUN_TYPE" stop "$vmx" soft
             else
-                run vmrun -T "$VMRUN_TYPE" stop "$vmx" soft || true
+                log "Requesting graceful shutdown of $vmx (30-second command timeout)"
+                timeout 30 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" stop "$vmx" soft || true
                 local deadline=$(( $(date +%s) + 60 ))
                 while vm_running "$vmx" && (( $(date +%s) < deadline )); do sleep 2; done
-                vm_running "$vmx" && run vmrun -T "$VMRUN_TYPE" stop "$vmx" hard
+                if vm_running "$vmx"; then
+                    warn "Guest did not shut down; powering off $vmx"
+                    timeout 30 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" stop "$vmx" hard \
+                        || die "could not power off $vmx; preserving its files and installer state"
+                fi
+                if vm_running "$vmx"; then
+                    die "VM is still running; preserving its files and installer state"
+                fi
             fi
         fi
         directory="$(dirname "$vmx")"
@@ -1262,9 +1298,11 @@ perform_install() {
     validate_host_networks
     write_state
 
-    progress 10 "Downloading and verifying Debian 12 and Ubuntu 24.04 cloud images"
+    progress 10 "Downloading and verifying guest cloud images"
     download_verified_image "$DEBIAN_IMAGE_URL" "$DEBIAN_SUMS_URL" sha512 "$IMAGE_CACHE/$DEBIAN_IMAGE_CACHE_NAME"
     download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha256 "$IMAGE_CACHE/$UBUNTU_IMAGE_CACHE_NAME"
+    DEBIAN_IMAGE="$IMAGE_CACHE/$DEBIAN_IMAGE_CACHE_NAME"
+    prepare_participant_image
 
     progress 25 "Generating CORE, native ScenarioForge, participant, XFCE, and Cloud-Init configuration"
     write_vmware_cloud_init_files

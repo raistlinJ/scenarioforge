@@ -373,6 +373,7 @@ parse_args install --dry-run --yes --lab-dir {shlex.quote(str(lab_dir))}
 require_linux_workstation() {{ :; }}
 host_network_exists() {{ return 0; }}
 validate_hitl_isolation() {{ :; }}
+workstation_hitl_network_is_safe() {{ return 0; }}
 perform_install
 """
     result = run_bash(probe)

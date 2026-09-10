@@ -65,8 +65,9 @@ create `vmnet3` with:
 Fusion's networking services restart briefly after the change, so networking
 in already-running VMs may disconnect momentarily. The installer verifies the
 result and restores the previous configuration if activation fails. Cleanup
-removes only an unchanged, installer-created network; it will preserve a
-network that somebody modified or attached to another running VM.
+normally removes only an unchanged, installer-created network. With `cleanup
+--force`, it also removes that tracked vmnet if its settings changed. A network
+referenced by another running VM is always preserved.
 
 For explicitly authorized unattended network creation, combine:
 
@@ -282,3 +283,59 @@ the verified base-image cache under
 - Use `status --watch --interval 5` while CORE builds from source.
 - On Apple silicon, failures limited to a particular vulnerability container
   may indicate that its upstream image is available only for x86_64.
+
+
+## Kali participant
+
+For a new lab, add `--participant-os kali` to the installer command, or set
+`participant_os=kali` in the config file (`SF_PARTICIPANT_OS=kali` also works).
+Config values are overridden by environment values, then CLI flags.
+Debian remains the default; CORE continues to use Debian 12.
+
+Kali gets XFCE, `kali-linux-default`, **2048 MB RAM**, 2 CPUs, and a 40 GB
+disk. Resource overrides remain `SF_PARTICIPANT_MEMORY_MB`,
+`SF_PARTICIPANT_CORES`, and `SF_PARTICIPANT_DISK_GB` (Kali minimum: 25 GB).
+The username remains `participant`.
+
+The installer verifies the official Kali 2026.2 cloud archive, extracts its raw
+disk, and converts it to VMDK. The Kali participant uses an NVMe controller.
+During VMware provisioning, it installs the full Kali kernel for graphics and
+reboots automatically before checking the desktop. Its temporary NAT adapter
+remains attached until provisioning finishes; `--no-wait` also waits for this
+isolation step. Allow extra time for tool downloads with `--wait-minutes`.
+
+Image overrides are `SF_KALI_IMAGE_URL` and `SF_KALI_SUMS_URL`; use a matching
+official generic cloud archive containing `disk.raw` and its SHA256 list.
+Existing Debian VMs are not converted by this option.
+
+Apple silicon uses the ARM64 Kali image; Intel Macs use amd64. Image URL
+overrides must match the host architecture.
+
+
+### Cleanup after a manually removed or changed vmnet
+
+Fusion may still report a vmnet after it was removed, or the same vmnet number
+may now describe a different network. Normal cleanup preserves networks whose
+settings no longer match the installer-owned HITL network.
+
+To remove the tracked network and finish cleanup, run:
+
+```bash
+bash scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh cleanup --force
+```
+
+This stops Fusion networking, removes the tracked vmnet's configuration and
+per-network directory, restarts networking, and verifies removal. The installer
+attempts rollback if removal fails. It does not remove management/default vmnets
+or a network referenced by another running VM.
+
+To keep the current network and finish cleaning up the old lab, run:
+
+```bash
+bash scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh cleanup --keep-hitl-network
+```
+
+This preserves the host vmnet and skips networking service restarts while
+releasing the old lab's network ownership. Normal cleanup still applies to
+installer-owned VMs, shortcuts, and state. Add `--dry-run` to preview.
+The option is valid only for Fusion cleanup.

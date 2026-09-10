@@ -2,6 +2,8 @@ from pathlib import Path
 import shlex
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "provision" / "vmware-fusion-mac" / "install-scenarioforge-lab.sh"
@@ -404,3 +406,150 @@ perform_install
     assert "[100%] [2/2] Dry-run validation complete" in result.stdout
     assert not state_dir.exists()
     assert not lab_dir.exists()
+
+
+def test_cleanup_can_preserve_a_replaced_network(tmp_path: Path) -> None:
+    networking = tmp_path / "networking"
+    contents = ("VERSION=1,0\nanswer VNET_3_DHCP yes\n"
+                "answer VNET_3_HOSTONLY_SUBNET 172.16.124.0\n")
+    networking.write_text(contents)
+    backup = tmp_path / "fusion-networking.cleanup-before"
+    backup.write_text("previous cleanup backup")
+    probe = f"""
+source {shlex.quote(str(INSTALLER))}
+STATE_DIR={shlex.quote(str(tmp_path))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(networking))}
+INSTALLER_CREATED_HITL_VMNET=vmnet3
+parse_args cleanup --keep-hitl-network
+sudo() {{ echo 'must not modify host networking' >&2; exit 90; }}
+fusion_vmnet_is_used_by_running_vm() {{ echo 'must preserve even a reused network' >&2; exit 91; }}
+cleanup_host_networks
+printf 'OWNERSHIP=%s\n' "$INSTALLER_CREATED_HITL_VMNET"
+"""
+    result = run_bash(probe)
+    assert result.returncode == 0, result.stderr
+    assert "OWNERSHIP=\n" in result.stdout
+    assert networking.read_text() == contents
+    assert not backup.exists()
+
+
+def test_keep_network_dry_run_retains_state_and_backup(tmp_path: Path) -> None:
+    backup = tmp_path / "fusion-networking.cleanup-before"
+    backup.write_text("backup")
+    result = run_bash(f"""
+source {shlex.quote(str(INSTALLER))}
+STATE_DIR={shlex.quote(str(tmp_path))}
+INSTALLER_CREATED_HITL_VMNET=vmnet3
+parse_args cleanup --keep-hitl-network --dry-run
+cleanup_host_networks
+printf 'OWNERSHIP=%s\n' "$INSTALLER_CREATED_HITL_VMNET"
+""")
+    assert result.returncode == 0, result.stderr
+    assert "OWNERSHIP=vmnet3" in result.stdout
+    assert backup.read_text() == "backup"
+
+
+def test_changed_network_still_requires_explicit_keep_option(tmp_path: Path) -> None:
+    networking = tmp_path / "networking"
+    contents = "answer VNET_3_DHCP yes\nanswer VNET_3_HOSTONLY_SUBNET 172.16.124.0\n"
+    networking.write_text(contents)
+    result = run_bash(f"""
+source {shlex.quote(str(INSTALLER))}
+STATE_DIR={shlex.quote(str(tmp_path))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(networking))}
+INSTALLER_CREATED_HITL_VMNET=vmnet3
+INSTALLER_CREATED_HITL_SUBNET=10.254.200.0
+INSTALLER_CREATED_HITL_NETMASK=255.255.255.0
+fusion_vmnet_is_used_by_running_vm() {{ return 1; }}
+fusion_vmnet_is_configured() {{ return 0; }}
+cleanup_host_networks
+""")
+    assert result.returncode != 0
+    assert "changed since installation" in result.stderr
+    assert "--keep-hitl-network" in result.stderr
+    assert networking.read_text() == contents
+
+
+def test_keep_network_option_is_cleanup_only() -> None:
+    result = run_bash(f"source {shlex.quote(str(INSTALLER))}; parse_args install --keep-hitl-network")
+    assert result.returncode != 0
+    assert "only valid with cleanup" in result.stderr
+
+
+@pytest.mark.parametrize("reload_fails", [False, True])
+def test_force_cleanup_removes_changed_vmnet_and_its_directory(tmp_path: Path, reload_fails: bool) -> None:
+    config = tmp_path / "networking"
+    config.write_text("answer VNET_1_DHCP yes\nanswer VNET_3_DHCP yes\n"
+                      "answer VNET_3_HOSTONLY_SUBNET 172.16.124.0\n")
+    directory = tmp_path / "vmnet3"
+    directory.mkdir()
+    (directory / "dhcpd.conf").write_text("stale vmnet configuration")
+    state = tmp_path / "state"
+    state.mkdir()
+    events = tmp_path / "events"
+    original = config.read_text()
+    result = run_bash(f"""
+source {shlex.quote(str(INSTALLER))}
+STATE_DIR={shlex.quote(str(state))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+INSTALLER_CREATED_HITL_VMNET=vmnet3
+INSTALLER_CREATED_HITL_SUBNET=10.254.200.0
+INSTALLER_CREATED_HITL_NETMASK=255.255.255.0
+parse_args cleanup --force
+fusion_vmnet_is_used_by_running_vm() {{ return 1; }}
+fusion_vmnet_is_configured() {{ grep -q VNET_3_ "$VMWARE_NETWORKING_FILE"; }}
+sudo() {{
+    if [[ "$1" == "$FUSION_VMNET_CLI" ]]; then
+        echo "$2" >> {shlex.quote(str(events))}
+        if [[ "$2" == --configure && {int(reload_fails)} -eq 1 ]]; then return 81; fi
+        if [[ "$2" == --configure ]]; then
+            [[ ! -e {shlex.quote(str(directory))} ]] || return 80
+        fi
+    elif [[ "$1" == install ]]; then
+        cp "$8" "$9"
+    else
+        "$@"
+    fi
+}}
+cleanup_host_networks
+echo "OWNERSHIP=$INSTALLER_CREATED_HITL_VMNET"
+""")
+    if reload_fails:
+        assert result.returncode != 0
+        assert "rollback was attempted" in result.stderr
+        assert config.read_text() == original
+        assert (directory / "dhcpd.conf").read_text() == "stale vmnet configuration"
+        assert (state / "fusion-networking.cleanup-before").exists()
+        return
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == "answer VNET_1_DHCP yes\n"
+    assert not directory.exists()
+    assert not list(state.iterdir())
+    assert events.read_text().splitlines() == ["--stop", "--configure", "--start"]
+    assert "OWNERSHIP=\n" in result.stdout
+
+
+def test_force_cleanup_does_not_remove_network_used_by_running_vm(tmp_path: Path) -> None:
+    result = run_bash(f"""
+source {shlex.quote(str(INSTALLER))}
+STATE_DIR={shlex.quote(str(tmp_path))}
+INSTALLER_CREATED_HITL_VMNET=vmnet3
+parse_args cleanup --force
+fusion_vmnet_is_used_by_running_vm() {{ return 0; }}
+sudo() {{ exit 90; }}
+cleanup_host_networks
+""")
+    assert result.returncode != 0
+    assert "another running VM references" in result.stderr
+
+
+def test_force_cleanup_never_removes_reserved_network() -> None:
+    for vmnet in ("vmnet0", "vmnet1", "vmnet8", "../vmnet3"):
+        result = run_bash(f"""
+source {shlex.quote(str(INSTALLER))}
+INSTALLER_CREATED_HITL_VMNET={shlex.quote(vmnet)}
+parse_args cleanup --force
+cleanup_host_networks
+""")
+        assert result.returncode != 0
+        assert "refusing to remove" in result.stderr or "invalid installer-created" in result.stderr

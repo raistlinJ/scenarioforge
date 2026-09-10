@@ -18,7 +18,10 @@ param(
     [string]$VmwareDir,
     [string]$PythonExe,
     [string]$QemuImg,
+    [ValidateSet('debian', 'kali')][string]$ParticipantOS,
     [switch]$NoDesktopShortcut,
+    [switch]$NoManageHitlNetwork,
+    [switch]$KeepHitlNetwork,
     [switch]$NoWait,
     [switch]$Watch,
     [switch]$DryRun,
@@ -28,14 +31,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'ScenarioForge.VMware.psm1') -Force -DisableNameChecking
+. (Join-Path $PSScriptRoot 'host-networks.ps1')
 
 function Read-InstallerConfig {
-    param([string]$Path)
+    param([string]$Path, [string]$ParticipantOSOverride)
+    $provided = @{}
     $config = @{
         lab_dir = $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'Virtual Machines/ScenarioForge-Lab' } else { '' })
         vmware_dir = ''; python_exe = ''; qemu_img = ''; git_exe = ''
         image_cache = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'ScenarioForge/image-cache' } else { '' }); management_vmnet = 'vmnet1'; hitl_vmnet = 'vmnet2'
-        desktop_shortcut = $true; no_wait = $false; wait_minutes = 90
+        desktop_shortcut = $true; no_wait = $false; wait_minutes = 90; manage_hitl_network = $true
+        participant_os = 'debian'; kali_image_url = ''; kali_sums_url = ''
         core_memory_mb = 8192; app_memory_mb = 4096; participant_memory_mb = 2048
         core_cores = 4; app_cores = 2; participant_cores = 2
         core_disk_gb = 80; app_disk_gb = 40; participant_disk_gb = 20
@@ -52,12 +58,22 @@ function Read-InstallerConfig {
             $config[$key] = $provided[$key]
         }
     }
+    if ($env:SF_PARTICIPANT_OS) { $config.participant_os = $env:SF_PARTICIPANT_OS }
+    if ($ParticipantOSOverride) { $config.participant_os = $ParticipantOSOverride }
+    if ($config.participant_os -cnotin @('debian', 'kali')) { throw 'participant_os must be debian or kali.' }
+    if ($config.participant_os -eq 'kali' -and -not $provided.ContainsKey('participant_disk_gb')) {
+        $config.participant_disk_gb = 40
+    }
     return $config
 }
 
 function Assert-InstallerConfig {
     param($Config)
-    foreach ($key in @('desktop_shortcut', 'no_wait', 'flag_generators', 'vulnhub')) {
+    if ($Config.participant_os -cnotin @('debian', 'kali')) { throw 'participant_os must be debian or kali.' }
+    if ($Config.participant_os -eq 'kali' -and $Config.participant_disk_gb -lt 25) {
+        throw 'Kali participant_disk_gb must be at least 25 (default: 40).'
+    }
+    foreach ($key in @('desktop_shortcut', 'no_wait', 'flag_generators', 'vulnhub', 'manage_hitl_network')) {
         if ($Config[$key] -isnot [bool]) { throw "$key must be a JSON boolean." }
     }
     foreach ($key in @('core_memory_mb', 'app_memory_mb', 'participant_memory_mb', 'core_cores', 'app_cores', 'participant_cores', 'core_disk_gb', 'app_disk_gb', 'participant_disk_gb', 'wait_minutes')) {
@@ -71,7 +87,7 @@ function Assert-InstallerConfig {
         if ($Config[$key] -notmatch '^vmnet([1-7]|9|1[0-9])$') { throw "$key must be a custom vmnet1..19 network, excluding NAT vmnet8." }
     }
     if ($Config.management_vmnet -eq $Config.hitl_vmnet) { throw 'Management and HITL networks must differ.' }
-    foreach ($key in @('lab_dir', 'vmware_dir', 'python_exe', 'qemu_img', 'git_exe', 'image_cache', 'ssh_public_key', 'core_minimal_ref', 'core_ref', 'scenarioforge_ref', 'flag_generators_ref', 'core_password', 'app_password', 'participant_password', 'web_admin_password')) {
+    foreach ($key in @('participant_os', 'kali_image_url', 'kali_sums_url', 'lab_dir', 'vmware_dir', 'python_exe', 'qemu_img', 'git_exe', 'image_cache', 'ssh_public_key', 'core_minimal_ref', 'core_ref', 'scenarioforge_ref', 'flag_generators_ref', 'core_password', 'app_password', 'participant_password', 'web_admin_password')) {
         if ($Config[$key] -isnot [string] -or $Config[$key] -match '[\r\n\x00]') { throw "Invalid text value: $key" }
     }
     # Host VM files belong on a local Windows drive, not a UNC share or a drive root.
@@ -100,6 +116,7 @@ function Assert-HostNetworks {
     param($State)
     $result = Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'listHostNetworks')
     foreach ($item in @(@($State.Config.management_vmnet, '172.31.250.0'), @($State.Config.hitl_vmnet, '10.254.200.0'))) {
+        if ($item[0] -eq $State.Config.hitl_vmnet -and $State.ContainsKey('HitlNetworkPlan') -and $State.HitlNetworkPlan) { continue }
         $pattern = '^\s*\d+\s+' + [regex]::Escape($item[0]) + '\s+hostOnly\s+false\s+' + [regex]::Escape($item[1]) + '\s+255\.255\.255\.0\s*$'
         if (-not @($result.Out -split '\r?\n' | Where-Object { $_ -match $pattern }).Count) {
             throw "Configure $($item[0]) as host-only, subnet $($item[1])/24, with DHCP disabled in Workstation's Virtual Network Editor. No host networks were changed."
@@ -273,7 +290,9 @@ function Remove-Lab {
         $paths += $path
         Write-Host "Remove owned VM: $directory"
     }
-    if ($Preview) { Write-Host 'Preview only. Cached images and host networks are preserved.'; return }
+    Write-Host "Preserve pre-existing management and NAT networks: $($State.Config.management_vmnet) and vmnet8."
+    Remove-OwnedHitlNetwork $State $StateFile -Preview -Force:$AllowRunning -Keep:$KeepHitlNetwork
+    if ($Preview) { Write-Host 'Preview only. No files, VMs, or host networks are changed.'; return }
     if (@($paths | Where-Object { $running -contains $_ }).Count -and -not $AllowRunning) { throw 'VMs are running. Shut them down, or use cleanup -Force to permit graceful shutdown before removal.' }
     if (-not $Confirmed -and (Read-Host 'Type CLEANUP to permanently remove these lab VMs') -cne 'CLEANUP') { throw 'Cleanup canceled.' }
     foreach ($path in $paths) {
@@ -283,6 +302,7 @@ function Remove-Lab {
         }
         Remove-Item -LiteralPath (Split-Path $path -Parent) -Recurse -Force
     }
+    Remove-OwnedHitlNetwork $State $StateFile -Force:$AllowRunning -Keep:$KeepHitlNetwork
     foreach ($path in $State.Files.Keys) {
         if ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $State.Files[$path]) {
             Remove-Item -LiteralPath $path -Force
@@ -298,6 +318,7 @@ function Remove-Lab {
 }
 
 function Invoke-Installer {
+    if ($KeepHitlNetwork -and $Command -ne 'cleanup') { throw '-KeepHitlNetwork is only valid with cleanup.' }
     if ($Command -eq 'help') {
         Write-Host @'
 ScenarioForge VMware Workstation for Windows (PowerShell 7.4+)
@@ -308,6 +329,9 @@ ScenarioForge VMware Workstation for Windows (PowerShell 7.4+)
   ./install-scenarioforge-lab.ps1 cleanup [-DryRun] [-Force] [-Yes]
 Overrides: -LabDir, -StateDir, -VmwareDir, -PythonExe, -QemuImg, -NoDesktopShortcut
 Desktop shortcuts default to enabled. Missing QEMU can be downloaded with confirmation.
+Use -ParticipantOS kali for a Kali XFCE participant with standard tools (2 GB RAM, 40 GB disk).
+HITL networking is created automatically when needed; use -NoManageHitlNetwork to require an existing vmnet.
+Cleanup removes owned HITL networks; -Force allows changed settings, -KeepHitlNetwork preserves the network.
 Image preparation uses Windows Python and qemu-img.exe.
 See the adjacent README for prerequisites and isolated network configuration.
 '@
@@ -324,6 +348,7 @@ See the adjacent README for prerequisites and isolated network configuration.
         if ($Command -eq 'credentials') { $credentials.GetEnumerator() | Sort-Object Key | Format-Table Name, Value; return }
         if ($Command -eq 'resume') {
             if ($NoWait) { $state.Config.no_wait = $true }
+            Create-OwnedHitlNetwork $state $stateFile
             Assert-HostNetworks $state
             Complete-LabSetup $state $credentials $stateFile
             Install-LabShortcuts $state $stateFile $PSScriptRoot
@@ -344,13 +369,14 @@ See the adjacent README for prerequisites and isolated network configuration.
         } while ($true)
         return
     }
-    $config = Read-InstallerConfig $ConfigFile
+    $config = Read-InstallerConfig $ConfigFile $ParticipantOS
     foreach ($pair in @(@('LabDir', 'lab_dir'), @('VmwareDir', 'vmware_dir'), @('PythonExe', 'python_exe'), @('QemuImg', 'qemu_img'))) {
         $value = Get-Variable -Name $pair[0] -ValueOnly
         if ($value) { $config[$pair[1]] = $value }
     }
     if ($NoDesktopShortcut) { $config.desktop_shortcut = $false }
     if ($NoWait) { $config.no_wait = $true }
+    if ($NoManageHitlNetwork) { $config.manage_hitl_network = $false }
     Assert-InstallerConfig $config
     $config.lab_dir = [IO.Path]::GetFullPath($config.lab_dir)
     if ($config.image_cache -notmatch '^[A-Za-z]:[\\/].+') { throw 'image_cache must be an absolute Windows directory.' }
@@ -373,6 +399,8 @@ See the adjacent README for prerequisites and isolated network configuration.
         $state.VMs[$role] = @{ Path = Join-Path $config.lab_dir "$name/$name.vmx"; User = $(switch ($role) { core { 'corevm' } app { 'scenarioforge' } participant { 'participant' } }) }
     }
     foreach ($key in @('core_password', 'app_password', 'participant_password', 'web_admin_password')) { $state.Config.Remove($key) }
+    Plan-HitlNetwork $state
+    $config.hitl_vmnet = $state.Config.hitl_vmnet
     Assert-HostNetworks $state
     $totalMemory = $config.core_memory_mb + $config.app_memory_mb + $config.participant_memory_mb
     $hostMemory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
@@ -394,6 +422,8 @@ See the adjacent README for prerequisites and isolated network configuration.
     # Export-Clixml encrypts SecureString values with DPAPI for this Windows user.
     $secrets | Export-Clixml -LiteralPath (Join-Path $StateDir 'credentials.xml')
     Save-LabState $state $stateFile
+    Create-OwnedHitlNetwork $state $stateFile
+    Assert-HostNetworks $state
     $request = $config.Clone()
     $request.install_id = $state.InstallId
     $requestFile = Join-Path $StateDir 'build-request.json'
