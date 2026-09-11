@@ -7507,6 +7507,54 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     return 0 if status_code < 400 else 1
 
 
+def _add_cli_guide_args(container: Any) -> None:
+    container.add_argument('--guide-audience', choices=['both', 'facilitator', 'participant'], default='both', help='Guides to export (default: both)')
+    container.add_argument('--guide-format', choices=['both', 'html', 'markdown'], default='both', help='Guide output format (default: both)')
+
+
+def _run_guides_phase(args: Any) -> int:
+    from pathlib import Path
+    from .utils.guide_export import render_guides
+
+    try:
+        backend = _load_web_backend_module()
+        xml_path = os.path.abspath(args.xml)
+        scenario = _cli_phase_scenario(args, backend=backend)
+        state = _flow_state_from_xml(xml_path, scenario)
+        if not isinstance(state, dict) or not (state.get('chain') or state.get('chain_ids')):
+            raise ValueError('No saved flow chain found. Run flag-sequencing first.')
+        view = backend.app.view_functions['api_flow_attackflow_preview']
+        with backend.app.test_request_context('/api/flag-sequencing/attackflow_preview', query_string={
+            'scenario': scenario, 'xml_path': xml_path, 'prefer_preview': '1', 'prefer_flow': '1',
+        }):
+            status, preview = _response_payload_and_status(view())
+        if status >= 400 or preview.get('ok') is False:
+            raise ValueError(preview.get('error') or f'Flow preview failed: HTTP {status}')
+        if preview.get('flow_valid') is False:
+            raise ValueError('Saved flow is invalid: ' + '; '.join(str(error) for error in preview.get('flow_errors', [])))
+        if not preview.get('chain'):
+            raise ValueError('No saved flow chain found. Run flag-sequencing first.')
+        audiences = ['facilitator', 'participant'] if args.guide_audience == 'both' else [args.guide_audience]
+        formats = ['html', 'markdown'] if args.guide_format == 'both' else [args.guide_format]
+        output_dir = Path(args.output_dir).expanduser() if args.output_dir else Path(xml_path).parent / 'guides'
+        prefix = re.sub(r'[^A-Za-z0-9._-]+', '-', os.path.basename(args.output_prefix or scenario)).strip('.-_') or 'scenario'
+        paths = {(audience, fmt): output_dir / f"{prefix}.{audience}-guide.{ 'md' if fmt == 'markdown' else 'html'}"
+                 for audience in audiences for fmt in formats}
+        if not args.force and any(path.exists() for path in paths.values()):
+            raise ValueError('Output file already exists; pass --force to overwrite it.')
+        rendered = render_guides(scenario, preview, audiences)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for (audience, fmt), path in paths.items():
+            path.write_text(rendered[audience][fmt], encoding='utf-8')
+        payload = {'ok': True, 'phase': 'guides', 'scenario': scenario,
+                   'outputs': {audience: {fmt: str(paths[audience, fmt].resolve()) for fmt in formats} for audience in audiences}}
+    except Exception as exc:
+        _emit_phase_json({'ok': False, 'phase': 'guides', 'error': str(exc)}, output_path=args.plan_output, stream=sys.stderr)
+        return 1
+    _emit_phase_json(payload, output_path=args.plan_output)
+    return 0
+
+
 def _run_attack_graph_phase(args: Any) -> int:
     """Export Web UI-equivalent attack graph artifacts from embedded FlowState."""
     backend = _load_web_backend_module()
@@ -7756,7 +7804,7 @@ def _run_attack_graph_phase(args: Any) -> int:
     return 0
 
 
-CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'attack-graph', 'topo', 'check-artifacts', 'list-sessions')
+CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'attack-graph', 'guides', 'topo', 'check-artifacts', 'list-sessions')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
     'Run "cli.py list-sessions" to see running CORE sessions with their scenario and XML, then '
@@ -7827,7 +7875,7 @@ def _add_cli_phase_arg(container: Any) -> None:
         nargs='?',
         choices=list(CLI_PHASES),
         default='execute',
-        help='Phase to run: execute, new, ai, preview-plan, flag-sequencing, attack-graph, topo, check-artifacts, or list-sessions',
+        help='Phase to run: execute, new, ai, preview-plan, flag-sequencing, attack-graph, guides, topo, check-artifacts, or list-sessions',
     )
 
 
@@ -8395,6 +8443,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     # --force is already registered by the new-phase options in the combined parser.
     _add_cli_attack_graph_args(ap, include_force=False)
     _add_cli_artifact_check_args(ap)
+    _add_cli_guide_args(ap)
     return ap
 
 
@@ -8426,6 +8475,11 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     elif phase == 'flag-sequencing':
         _add_cli_core_connection_args(ap)
         _add_cli_flag_sequencing_args(ap)
+    elif phase == 'guides':
+        _add_cli_guide_args(ap)
+        ap.add_argument('--output-dir', help='Output directory (default: guides beside XML)')
+        ap.add_argument('--output-prefix', help='Output filename prefix (default: scenario name)')
+        ap.add_argument('--force', action='store_true', help='Overwrite existing guide files')
     elif phase == 'attack-graph':
         _add_cli_attack_graph_args(ap)
     elif phase in {'execute', 'topo'}:
@@ -8623,6 +8677,8 @@ def main():
         )
         return 0 if ok else 1
 
+    if args.phase == 'guides':
+        return _run_guides_phase(args)
     if args.phase == 'preview-plan':
         return _run_preview_plan_phase(args)
     if args.phase == 'new':

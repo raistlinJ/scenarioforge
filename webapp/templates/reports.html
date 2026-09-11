@@ -302,7 +302,9 @@ function updateHeader(){
   }
   if(runsDeleteBtn){ runsDeleteBtn.disabled = selectedRunIds.size===0; }
 }
+// GUIDE_ESCAPE_BEGIN
 function escapeHtml(str){ return String(str||'').replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+// GUIDE_ESCAPE_END
 function firstScenarioName(r){
   const names = Array.isArray(r && r.scenario_names) ? r.scenario_names : [];
   const first = names.length ? String(names[0] || '').trim() : '';
@@ -365,6 +367,7 @@ async function startReportArtifactDownload(blob, filename, kindLabel) {
   downloadBlob(blob, filename);
 }
 
+// GUIDE_RENDERER_BEGIN
 const guideHtmlBlockRegistry = new Map();
 function registerGuideHtmlBlock(html) {
   const id = `guide-html-${Math.random().toString(36).slice(2, 12)}-${Date.now().toString(36)}`;
@@ -2282,6 +2285,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   return lines.join('\n');
 }
 
+// GUIDE_RENDERER_END
 function _reportGuideNormalizeVulnToken(text) {
   return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }

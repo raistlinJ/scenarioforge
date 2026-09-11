@@ -17,6 +17,7 @@ The CLI supports these phases:
 - `new`: create a starter ScenarioForge XML with one scenario and empty section rows.
 - `preview-plan`: compute and persist embedded `PlanPreview` metadata into the XML.
 - `flag-sequencing`: compute or reuse a Flow chain and optionally resolve generator outputs into embedded `FlowState`.
+- `guides`: export facilitator and participant guides in HTML and Markdown from the saved Flow.
 - `attack-graph`: export JSON, Graphviz DOT, PDF, and/or Attack Flow Builder artifacts from embedded `FlowState`.
 - `topo`: compute the topology and build it in CORE, then stop before segmentation, traffic, report generation, and session start.
 - `execute`: run the full legacy/default execute path.
@@ -178,7 +179,7 @@ Important behavior:
 Useful flags:
 
 - `--flow-mode resolve`: pick or reuse a chain and resolve generator outputs.
-- `--flow-mode preview`: pick or reuse a chain without resolving generator outputs.
+- `--flow-mode hint`: resolve hints without running generators. Use `resolve` when exporting guides with generated answers.
 - `--flow-chain-id`: force one or more explicit chain node ids.
 - `--flow-run-remote`: force remote generator execution.
 - `--flow-run-local`: force local generator execution even when remote-capable CORE config exists.
@@ -419,21 +420,56 @@ The checks run after execute and post-execution validation, so they add findings
 
 ### New Scenario From Scratch
 
-The CLI can create the starter XML, but it does not fully author scenario content for you. After `new`, you still need to populate the planning rows either in the Web UI or by editing the XML.
-
-Recommended sequence:
+Run these commands from the repository root with the Python environment installed,
+your CORE connection configured in `.scenarioforge.env`, enabled flag-node-generator
+catalog entries installed, and Node.js (`node` on PATH) available for guide rendering.
+The `new` phase saves the CORE connection defaults into the XML. Seeding rows at
+creation time lets this workflow stay entirely in the CLI.
 
 ```bash
-python -m scenarioforge.cli new --xml /abs/path/labs/my-lab.xml --scenario "My Lab"
+source .venv/bin/activate
+LAB_XML="$PWD/labs/training-lab.xml"
 
-# Populate scenario sections in the Web UI or by editing the XML.
+# 1. Create two workstations and three generator challenge hosts.
+python -m scenarioforge.cli new \
+  --xml "$LAB_XML" --scenario TrainingLab \
+  --seed-role Workstation=2 \
+  --seed-random-flag-node-generator-count 3 \
+  --seed-routing OSPFv2=2 --seed-service SSH=2 --seed 42
 
-python -m scenarioforge.cli preview-plan --xml /abs/path/labs/my-lab.xml --scenario "MyLab" --seed 42
+# 2. Persist the topology preview.
+python -m scenarioforge.cli preview-plan \
+  --xml "$LAB_XML" --scenario TrainingLab --seed 42
 
-python -m scenarioforge.cli flag-sequencing --xml /abs/path/labs/my-lab.xml --scenario "MyLab" --flow-mode resolve --flow-length 5 --flow-best-effort
+# 3. Resolve the challenge sequence and save hints and answers.
+python -m scenarioforge.cli flag-sequencing \
+  --xml "$LAB_XML" --scenario TrainingLab \
+  --flow-mode resolve --flow-length 3 --flow-best-effort --seed 42
 
-python -m scenarioforge.cli execute --xml /abs/path/labs/my-lab.xml --scenario "MyLab" --verbose
+# 4. Deploy and start the lab in CORE (optional for guide-only exports).
+python -m scenarioforge.cli execute \
+  --xml "$LAB_XML" --scenario TrainingLab --seed 42 --verbose
+
+# 5. Export both audiences in HTML and Markdown.
+python -m scenarioforge.cli guides \
+  --xml "$LAB_XML" --scenario TrainingLab \
+  --output-dir "$PWD/exports/training-lab" --output-prefix training-lab
 ```
+
+Stop if a phase fails before running the next one. Random challenge selection depends
+on the installed catalog, so the seed alone does not guarantee the same challenges
+across machines. `--flow-best-effort` permits a shorter chain when necessary.
+
+The `execute` step starts the lab; skip it if you only need guides. Its normal cleanup
+behavior applies (see [Execute Phase](#execute-phase)). Guide export itself runs
+locally and does not start a CORE session. The separate preview step is useful for
+inspection, although `flag-sequencing` also persists a preview.
+
+The export directory contains `training-lab.facilitator-guide.html`,
+`training-lab.facilitator-guide.md`, `training-lab.participant-guide.html`, and
+`training-lab.participant-guide.md`. Add `--force` to the `guides` command to replace
+existing exports. See [guide export options](#export-facilitator-and-participant-guides)
+for audience/format selection and the catalog README appendix limitation.
 
 ### Saved XML From the Web UI
 
@@ -657,7 +693,40 @@ This is intentional and mirrors the Web UI execute path.
 
 - There is no single `run-all` phase yet.
 - `new` creates a starter XML but does not populate scenario rows for you.
-- `flag-sequencing` depends on an existing XML-embedded `PlanPreview`.
+- `flag-sequencing` persists `PlanPreview` before resolving the flow; a separate `preview-plan` step is optional.
 - The CLI is designed for ScenarioForge planning XML, not for raw CORE session XML as a planning input.
 - Nested pivots are not supported: a provider behind another provider is flattened, and the ordering is carried by the challenges rather than the network.
 - Segmentation settings supplied only at execute cannot be honoured against a plan built without them; execute names them and uses the plan's values.
+
+## Export facilitator and participant guides
+
+After `flag-sequencing` has saved a flow in the scenario XML, export both guides:
+
+```bash
+python -m scenarioforge.cli guides --xml scenario.xml --scenario "Training"
+```
+
+The `guides` phase writes facilitator and participant guides in both HTML and
+Markdown to a `guides/` directory beside the XML. HTML includes the interactive
+step navigation and printable layout used by Reports. Participant guides exclude
+facilitator answer checks and private provider details.
+
+```bash
+python -m scenarioforge.cli guides --xml scenario.xml \
+  --guide-audience participant --guide-format html \
+  --output-dir ./exports --output-prefix training
+```
+
+- `--guide-audience both|facilitator|participant` defaults to `both`.
+- `--guide-format both|html|markdown` defaults to `both`.
+- `--output-dir` and `--output-prefix` control artifact paths; for example,
+  `exports/training.participant-guide.html`.
+- Existing files are protected unless `--force` is passed.
+- `--plan-output result.json` optionally saves the JSON result containing output paths.
+
+This phase runs locally without starting a CORE session or requiring a running
+web server. It requires the ScenarioForge source checkout, its WebUI Python
+dependencies, and Node.js (`node` on PATH), because it runs the Reports page's
+shared JavaScript guide renderer. It uses the saved flow preview, including
+resolved hints, pivots, and participant network setup. It does not download the
+catalog README appendices that the browser adds to facilitator exports.

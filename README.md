@@ -286,6 +286,53 @@ uv run catalog-rest-batch-test --target all --scope all \
 
 The `catalog-rest-batch-test` scope names match the Web UI filters (`untested`, `failed`, `all`) and writes JSON exports under `outputs/catalog-rest-batch-tests/`. CORE VM connection info can be passed via `--core-json`, `--core-secret-id`, or discrete `--core-host`/`--core-port`/`--core-ssh-host`/`--core-ssh-port`/`--core-ssh-username`/`--core-ssh-password`/`--core-venv-bin` flags; in VM mode (`CORETG_WEBUI_MODE=vm`) it can also fall back to `.scenarioforge.env`. See [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md#native-and-vm-mode).
 
+### CLI: create a lab and export its guides
+
+Run from the repository root after installing the Python environment and configuring
+the CORE connection in `.scenarioforge.env`. This example uses three random challenges
+from the installed, enabled flag-node-generator catalog. Guide export requires Node.js
+(`node` on PATH).
+
+```bash
+source .venv/bin/activate
+LAB_XML="$PWD/labs/training-lab.xml"
+
+# 1. Create two workstations and three generator challenge hosts.
+python -m scenarioforge.cli new \
+  --xml "$LAB_XML" --scenario TrainingLab \
+  --seed-role Workstation=2 \
+  --seed-random-flag-node-generator-count 3 \
+  --seed-routing OSPFv2=2 --seed-service SSH=2 --seed 42
+
+# 2. Persist the topology preview.
+python -m scenarioforge.cli preview-plan \
+  --xml "$LAB_XML" --scenario TrainingLab --seed 42
+
+# 3. Resolve the challenge sequence and save hints and answers.
+python -m scenarioforge.cli flag-sequencing \
+  --xml "$LAB_XML" --scenario TrainingLab \
+  --flow-mode resolve --flow-length 3 --flow-best-effort --seed 42
+
+# 4. Deploy and start the lab in CORE (optional for guide-only exports).
+python -m scenarioforge.cli execute \
+  --xml "$LAB_XML" --scenario TrainingLab --seed 42 --verbose
+
+# 5. Export both audiences in HTML and Markdown.
+python -m scenarioforge.cli guides \
+  --xml "$LAB_XML" --scenario TrainingLab \
+  --output-dir "$PWD/exports/training-lab" --output-prefix training-lab
+```
+
+Run each step only after the previous one succeeds. Skip `execute` to generate guides
+without launching a lab. The final command writes facilitator and participant guides
+in both `.html` and `.md` formats under `exports/training-lab/`; add `--force` to
+regenerate existing guide files. Participant guides exclude facilitator answer checks.
+CLI exports do not download catalog README appendices.
+
+See the [complete CLI workflow](docs/CLI_EXECUTION_DEEP_DIVE.md#new-scenario-from-scratch)
+and [guide export options](docs/CLI_EXECUTION_DEEP_DIVE.md#export-facilitator-and-participant-guides)
+for details.
+
 ### DeployForge
 
 A ready-to-deploy DeployForge file is coming soon: [docs/DEPLOYFORGE.md](docs/DEPLOYFORGE.md).
@@ -308,7 +355,7 @@ See [docs/OPERATING_MODES.md](docs/OPERATING_MODES.md) for native mode with loca
 
 ## Additional documentation
 - [docs/README.md](docs/README.md) – Index of project documentation pages
-- [docs/CLI_EXECUTION_DEEP_DIVE.md](docs/CLI_EXECUTION_DEEP_DIVE.md) – End-to-end CLI phases, remote CORE delegation, Flow behavior, starter XML workflow, and JSON/DOT/PDF/AFB attack-graph export
+- [docs/CLI_EXECUTION_DEEP_DIVE.md](docs/CLI_EXECUTION_DEEP_DIVE.md) – End-to-end CLI phases, remote CORE delegation, Flow behavior, starter XML workflow, JSON/DOT/PDF/AFB attack-graph export, and facilitator/participant guide export
 - [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md) – CLI preflight and live batch testing for vulnerability and flag generator catalogs
 - [docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md](docs/SCENARIOFORGE_EVAL_COMPATIBILITY.md) – Integration contract for CLI-driven batch evaluators
 - [docs/reference/API.md](docs/reference/API.md) – REST endpoints exposed by the Web UI backend
