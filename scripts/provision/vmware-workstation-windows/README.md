@@ -31,7 +31,8 @@ You can start setup from the built-in Windows PowerShell 5.1. The installer
 finds PowerShell 7.4+ on PATH or in its standard installation locations and
 continues there with your original arguments and working directory. If it is
 missing or too old, a separate **[y/N] confirmation** offers to install or
-upgrade Microsoft PowerShell using WinGet's MSI package. Windows may request
+upgrade Microsoft PowerShell using WinGet's MSI package. The prompt explains
+that this will take a few minutes. Windows may request
 administrator approval. Declining or a failed installation stops setup before
 any lab changes. `-Yes` does not accept this prompt; `-DryRun` reports the
 missing runtime without installing it or prompting.

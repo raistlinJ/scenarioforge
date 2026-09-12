@@ -46,7 +46,7 @@ try {
         }
         if ($data.Preview) { throw 'PowerShell 7 needs script execution consent. Run install-scenarioforge-lab.cmd, or configure this session before retrying -DryRun.' }
         $answer = Read-Host 'Allow the reviewed ScenarioForge scripts to run in this PowerShell process only? No saved execution policy will change [y/N]'
-        if ($answer -notmatch '^(?i:y|yes)$') { throw 'Script execution declined; setup stopped.' }
+        if (([string]$answer).Trim() -notmatch '^(?i:y|yes)$') { throw 'Script execution declined; setup stopped. Enter Y or Yes at the execution prompt to continue.' }
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
         if ((Get-ExecutionPolicy) -ne 'Bypass') { throw 'Execution policy remains blocked; contact your administrator.' }
     }
@@ -77,15 +77,17 @@ function Invoke-PowerShellBootstrap {
         $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue
         if (-not $winget) { throw "PowerShell 7.4+ and WinGet were not found. $instructions" }
         Write-Host "This shell is PowerShell $($PSVersionTable.PSVersion); the installer needs 7.4 or newer."
-        $answer = Read-Host 'Install or upgrade Microsoft PowerShell using WinGet, then continue? Windows may request administrator approval [y/N]'
-        if ($answer -notmatch '^(?i:y|yes)$') { throw 'PowerShell installation declined; setup stopped.' }
-        & $winget.Source install --id Microsoft.PowerShell --exact --source winget --installer-type wix | Out-Host
+        $answer = Read-Host 'Install or upgrade Microsoft PowerShell using WinGet, then continue? This will take a few minutes. Windows may request administrator approval [y/N]'
+        if (([string]$answer).Trim() -notmatch '^(?i:y|yes)$') { throw 'PowerShell installation declined; setup stopped.' }
+        & $winget.Source install --id Microsoft.PowerShell --exact --source winget --installer-type wix
         if ($LASTEXITCODE -ne 0) { throw "PowerShell installation failed or was canceled (exit $LASTEXITCODE). $instructions" }
         $pwsh = Find-InstallerPowerShell
         if (-not $pwsh) { throw "Setup finished, but PowerShell 7.4+ was not found. $instructions" }
     }
     Write-Host "Continuing in $pwsh"
     $encoded = New-InstallerEncodedCommand -ScriptPath $ScriptPath -Parameters $Parameters -Preview:$Preview
-    & $pwsh -NoLogo -NoProfile -EncodedCommand $encoded | Out-Host
-    return $LASTEXITCODE
+    # Keep the child attached to the console so Read-Host can receive consent.
+    # Neither this call nor Invoke-PowerShellBootstrap may capture/pipeline output.
+    & $pwsh -NoLogo -NoProfile -EncodedCommand $encoded
+    $global:LASTEXITCODE = $LASTEXITCODE
 }

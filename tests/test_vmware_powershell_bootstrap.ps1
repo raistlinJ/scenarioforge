@@ -54,6 +54,7 @@ exit 23
     foreach ($case in @(
         @{ Policy = 'Restricted'; Managed = 'Undefined'; Answer = ''; Preview = $false; Exit = 1 },
         @{ Policy = 'Restricted'; Managed = 'Undefined'; Answer = 'yes'; Preview = $false; Exit = 0 },
+        @{ Policy = 'Restricted'; Managed = 'Undefined'; Answer = ' Y '; Preview = $false; Exit = 0 },
         @{ Policy = 'Restricted'; Managed = 'Undefined'; Answer = 'unexpected'; Preview = $true; Exit = 1 },
         @{ Policy = 'AllSigned'; Managed = 'AllSigned'; Answer = 'unexpected'; Preview = $false; Exit = 1 },
         @{ Policy = 'Bypass'; Managed = 'Undefined'; Answer = 'unexpected'; Preview = $true; Exit = 0 }
@@ -129,9 +130,14 @@ $global:LASTEXITCODE = 0
             return $null
         }
         function Get-Command { return @{ Source = $setup } }
-        function Read-Host { return 'y' }
+        function Read-Host {
+            param($Prompt)
+            Assert ($Prompt -match 'take a few minutes') 'Upgrade prompt explains installation time'
+            return ' y '
+        }
         function New-InstallerEncodedCommand { [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('exit 0')) }
-        Assert ((Invoke-PowerShellBootstrap $probe @{}) -eq 0) 'Accepted installation continues'
+        Invoke-PowerShellBootstrap $probe @{}
+        Assert ($LASTEXITCODE -eq 0) 'Accepted installation continues'
         Assert ($script:discoveryCalls -eq 2) 'Runtime rediscovered after install without restarting terminal'
     }
     & {
@@ -142,7 +148,8 @@ $global:LASTEXITCODE = 0
         'exit 17' | Set-Content $simple
         # Policy checks are covered separately; this tests discovery/relaunch routing.
         function New-InstallerEncodedCommand { [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('exit 17')) }
-        Assert ((Invoke-PowerShellBootstrap $simple @{} -Preview) -eq 17) 'Existing runtime reused and exit propagated'
+        Invoke-PowerShellBootstrap $simple @{} -Preview
+        Assert ($LASTEXITCODE -eq 17) 'Existing runtime reused and exit propagated'
     }
     if ($PSVersionTable.PSVersion.Major -eq 5) {
         # Real 5.1 entry -> installed 7 -> installer help, with no VM actions.

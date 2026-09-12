@@ -33,8 +33,8 @@ $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion -lt [version]'7.4') {
     try {
         . (Join-Path $PSScriptRoot 'powershell-bootstrap.ps1')
-        $bootstrapExit = Invoke-PowerShellBootstrap -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -Preview:$DryRun
-        exit $bootstrapExit
+        Invoke-PowerShellBootstrap -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -Preview:$DryRun
+        exit $LASTEXITCODE
     } catch { Write-Error $_ -ErrorAction Continue; exit 1 }
 }
 Import-Module (Join-Path $PSScriptRoot 'ScenarioForge.VMware.psm1') -Force -DisableNameChecking
