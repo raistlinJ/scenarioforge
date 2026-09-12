@@ -71,6 +71,9 @@ jobs:
       - name: Test Windows VMware installer without VMware or SSH
         shell: pwsh
         run: ./tests/test_vmware_windows.ps1
+      - name: Test PowerShell bootstrap from Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/test_vmware_powershell_bootstrap.ps1
       - name: Test native Windows image preparation without WSL
         shell: pwsh
         run: python -m pytest -q tests/test_vmware_windows_installer_contract.py

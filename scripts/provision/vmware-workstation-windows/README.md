@@ -27,8 +27,18 @@ Workstation Pro, PowerShell **7.4 or newer** (`pwsh`), and enough resources for
 14 GB of guest RAM plus Windows. Allow room for up to 140 GB of growing
 VM disks, plus cached cloud images. Windows ARM is not supported by this script.
 
-Install PowerShell using [Microsoft's Windows installation instructions](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows).
-Use `pwsh`, not the built-in Windows PowerShell 5.1.
+You can start setup from the built-in Windows PowerShell 5.1. The installer
+finds PowerShell 7.4+ on PATH or in its standard installation locations and
+continues there with your original arguments and working directory. If it is
+missing or too old, a separate **[y/N] confirmation** offers to install or
+upgrade Microsoft PowerShell using WinGet's MSI package. Windows may request
+administrator approval. Declining or a failed installation stops setup before
+any lab changes. `-Yes` does not accept this prompt; `-DryRun` reports the
+missing runtime without installing it or prompting.
+
+If WinGet is unavailable, setup prints
+[Microsoft's manual installation instructions](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows).
+The VM provisioning code still runs in PowerShell **7.4 or newer**.
 
 Install [Python for Windows](https://www.python.org/downloads/windows/) (3.11 or
 newer). You can let the lab installer download QEMU when needed, or install the
@@ -50,7 +60,7 @@ checksum checks, and canceled setup stop the lab installation and remove its
 temporary download. QEMU itself remains installed when the lab is cleaned up.
 
 Clone the **whole ScenarioForge repository** onto a local Windows drive, then
-open PowerShell 7 in this installer directory and prepare a Windows Python
+open PowerShell in this installer directory and prepare a Windows Python
 environment:
 
 ```powershell
@@ -95,7 +105,7 @@ whose temporary NAT adapter is still attached.
 
 ## 3. Install
 
-Open PowerShell 7 in this directory. Copy the example and change `lab_dir` to an
+Open PowerShell in this directory. Copy the example and change `lab_dir` to an
 unused directory under your Windows account:
 
 ```powershell
@@ -105,9 +115,21 @@ notepad .\lab.json
 .\install-scenarioforge-lab.ps1 install -ConfigFile .\lab.json -PythonExe .\.venv\Scripts\python.exe
 ```
 
-If your execution policy blocks locally reviewed scripts, allow them for this
-terminal session with `Set-ExecutionPolicy -Scope Process RemoteSigned`. Do not
-change machine policy just for this installer.
+If execution policy blocks the `.ps1` before it can display a prompt, use the
+adjacent `.cmd` launcher with the same arguments:
+
+```powershell
+.\install-scenarioforge-lab.cmd install -ConfigFile .\lab.json -PythonExe .\.venv\Scripts\python.exe
+```
+
+The launcher asks before allowing the reviewed repository scripts to execute
+with `Bypass` for this run only; it makes no saved user or machine execution-policy
+changes. This execution consent is required even for a launcher dry run, and is
+never skipped by `-Yes`. No answer within 30 seconds defaults to declining.
+When switching shells directly from the `.ps1`, the new PowerShell process also
+asks for execution consent if its policy requires it. Organization-managed
+policies remain authoritative; setup stops with administrator guidance when
+they prevent this temporary allowance. Review the repository before accepting.
 
 Built-in defaults are overridden by JSON settings, then command-line overrides:
 `-LabDir`, `-VmwareDir`, `-PythonExe`, `-QemuImg`, `-NoDesktopShortcut`, and
@@ -196,6 +218,11 @@ Locally edited/untracked shortcuts and helpers are preserved too.
 ## Validation
 
 Run `pwsh -NoProfile -File tests/test_vmware_windows.ps1` from the repository root.
+Run `powershell -NoProfile -File tests/test_vmware_powershell_bootstrap.ps1` on
+Windows to test the 5.1 entry point, runtime installation consent, cancellation,
+execution-policy decisions, argument forwarding, and relaunch exit codes. These
+tests simulate dependency installation and do not install PowerShell or change
+saved execution policies. CI includes this Windows PowerShell 5.1 check.
 These tests exercise native argument quoting, configuration validation, state
 ownership, startup consent, dependency selection, network checks, and participant
 isolation using simulated VMware commands. QEMU download tests cover separate

@@ -1,4 +1,4 @@
-#requires -Version 7.4
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Provision the graphical CORE, ScenarioForge APP, and participant lab on Windows.
@@ -30,6 +30,13 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion -lt [version]'7.4') {
+    try {
+        . (Join-Path $PSScriptRoot 'powershell-bootstrap.ps1')
+        $bootstrapExit = Invoke-PowerShellBootstrap -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -Preview:$DryRun
+        exit $bootstrapExit
+    } catch { Write-Error $_ -ErrorAction Continue; exit 1 }
+}
 Import-Module (Join-Path $PSScriptRoot 'ScenarioForge.VMware.psm1') -Force -DisableNameChecking
 . (Join-Path $PSScriptRoot 'host-networks.ps1')
 
