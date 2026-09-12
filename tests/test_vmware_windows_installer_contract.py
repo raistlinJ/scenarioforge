@@ -102,6 +102,9 @@ def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypa
         vmx = lab / f'scenarioforge-{role}/scenarioforge-{role}.vmx'
         text = vmx.read_text()
         assert str(tmp_path) not in text
+        assert 'serial0.present = "TRUE"' in text
+        assert 'serial0.fileType = "file"' in text
+        assert 'serial0.fileName = "serial-console.log"' in text
         assert 'scenarioforge.install.owner = "windows-test-owner"' in text
         assert vmx.with_name('.scenarioforge-owner').read_text().strip() == 'windows-test-owner'
         values = dict(line.split(' = ', 1) for line in text.splitlines() if ' = ' in line)
@@ -211,6 +214,9 @@ def test_download_cache_checks_hash_and_never_keeps_partial_files(tmp_path, monk
 
 
 def test_optional_catalog_archive_preserves_unix_mode_without_checkout(config, tmp_path, monkeypatch):
+    monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+    monkeypatch.setenv('GIT_CONFIG_KEY_0', 'core.autocrlf')
+    monkeypatch.setenv('GIT_CONFIG_VALUE_0', 'true')
     git = shutil.which('git')
     if not git:
         pytest.skip('Git is needed for optional catalog tests')

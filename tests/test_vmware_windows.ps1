@@ -15,6 +15,19 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ('scenarioforge-windows-test-' + [G
 if ($IsMacOS) { $temp = Join-Path '/private/tmp' (Split-Path $temp -Leaf) }
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
+    if ($IsWindows) {
+        $protectedDirectory = Join-Path $temp 'protected-state'
+        Protect-LabDirectory $protectedDirectory
+        Protect-LabDirectory $protectedDirectory
+        $protectedAcl = Get-Acl -LiteralPath $protectedDirectory
+        Assert $protectedAcl.AreAccessRulesProtected 'Repeated directory protection disables inherited access'
+        $allowedSids = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18')
+        $rules = $protectedAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+        Assert ($rules.Count -eq 2) 'Only installer user and SYSTEM retain access'
+        foreach ($rule in $rules) {
+            Assert ($rule.IdentityReference.Value -in $allowedSids -and $rule.FileSystemRights -eq 'FullControl') 'Protected directory grants expected access'
+        }
+    }
     $reinstallDirectory = Join-Path $temp 'empty-cleaned-lab'
     $reinstallState = Join-Path $temp 'reinstall-state.json'
     Assert-NewLabDestination $reinstallDirectory $reinstallState
@@ -218,6 +231,17 @@ try {
     Assert-Throws { Complete-LabSetup $state @{} $stateFile } 'Image preparation did not complete'
     $loaded = Read-LabState $stateFile
     Assert (Test-OwnedVM $loaded core) 'Owned VM recognized'
+    $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+    if ($IsWindows -and $desktop) {
+        # Read only: exercise the actual Windows known folder, including a
+        # OneDrive Desktop, without creating or removing a user's shortcut.
+        $shortcut = Join-Path $desktop 'ScenarioForge.lnk'
+        $state.Files[$shortcut] = 'fixture-hash'
+        Save-LabState $state $stateFile
+        Assert ((Read-LabState $stateFile).Files.ContainsKey($shortcut)) 'Known Desktop shortcut accepted in saved state'
+        $state.Files.Remove($shortcut)
+        Save-LabState $state $stateFile
+    }
     $loaded.VMs.core.Path = Join-Path $temp 'unrelated.vmx'
     Save-LabState $loaded $stateFile
     Assert-Throws { Read-LabState $stateFile } 'Invalid saved core VM path'

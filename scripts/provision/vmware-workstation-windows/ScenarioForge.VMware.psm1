@@ -135,7 +135,10 @@ function Protect-LabDirectory {
         $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
         $acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    # Persist only the owner and DACL changed above. PowerShell's Set-Acl
+    # provider can also attempt to write the SACL on an existing directory,
+    # requiring SeSecurityPrivilege even when this user owns the directory.
+    [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Path), $acl)
 }
 
 function Save-LabState {
@@ -158,10 +161,22 @@ function Read-LabState {
     }
     $allowedFiles = @('ScenarioForge.VMware.psm1', 'desktop-launcher.ps1') | ForEach-Object { Join-Path (Split-Path $StateFile -Parent) $_ }
     $desktop = [Environment]::GetFolderPath('DesktopDirectory')
-    if ($desktop) { $allowedFiles += @('ScenarioForge.lnk', 'ScenarioForge Participant VM.lnk') | ForEach-Object { Join-Path $desktop $_ } }
+    $desktopFiles = @()
+    if ($desktop) {
+        $desktopFiles = @('ScenarioForge.lnk', 'ScenarioForge Participant VM.lnk') | ForEach-Object { Join-Path $desktop $_ }
+        $allowedFiles += $desktopFiles
+    }
     foreach ($path in $state.Files.Keys) {
         if ($path -notin $allowedFiles) { throw "Unexpected tracked file in installer state: $path" }
-        Assert-NoReparsePoint $path
+        if ($path -in $desktopFiles) {
+            # Windows may designate a OneDrive cloud-reparse directory as the
+            # Desktop. Only these exact, hashed shortcut files are removed,
+            # never the directory. Still reject a redirected shortcut itself.
+            if ((Test-Path -LiteralPath $path) -and
+                ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Refusing a link/junction in shortcut path: $path"
+            }
+        } else { Assert-NoReparsePoint $path }
     }
     return $state
 }

@@ -57,9 +57,19 @@ function Get-VMnetRegistryNames {
 function Get-VMnetHostAdapters {
     param([string]$Name)
     $pattern = '\b' + [regex]::Escape($Name) + '\b'
-    @(Get-NetAdapter -IncludeHidden | Where-Object {
-        $_.Name -match $pattern -or $_.InterfaceDescription -match $pattern
-    })
+    # PnP may still be deleting registry keys after vnetlib returns. Retry
+    # enumeration, but never interpret an inspection failure as an absent NIC.
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        try {
+            $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop)
+            return @($adapters | Where-Object {
+                $_.Name -match $pattern -or $_.InterfaceDescription -match $pattern
+            })
+        } catch {
+            if ($attempt -eq 4) { throw }
+            Start-Sleep -Seconds 2
+        }
+    }
 }
 
 function Test-IsolatedHitl {
@@ -234,7 +244,7 @@ finally { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null }
         $wrapper = $wrapper.Replace('__LOG__', (& $quote $log)).Replace('__COMMAND__', $command)
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
         try {
-            $process = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', $policy, '-EncodedCommand', $encoded)
+            $process = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -WindowStyle Hidden -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', $policy, '-EncodedCommand', $encoded)
         } catch { throw "$role $Operation could not start with administrator privileges: $($_.Exception.Message). Installer state was retained." }
         try {
             if ($process.ExitCode -ne 0) {
@@ -324,6 +334,22 @@ function Invoke-NativeNetworkAction {
         # network/adapter state instead of applying normal process exit semantics.
         $result = Invoke-HostCommand $vnetlib (@('--') + $Arguments) -AllowFailure -TimeoutSeconds 120
         if ($result.Code -notin @(0, 1)) {
+            if ($Arguments[0] -in @('enable', 'disable') -and $Arguments[1] -eq 'adapter') {
+                $adapters = @(Get-VMnetHostAdapters $Name)
+                $unexpected = @($adapters | Where-Object {
+                    if ($Arguments[0] -eq 'disable') { $_.Status -ne 'Disabled' }
+                    else { $_.Status -eq 'Disabled' }
+                })
+                if ($adapters.Count -gt 0 -and $unexpected.Count -eq 0) {
+                    Write-Host "$Name adapter state matches $($Arguments[0]) (vnetlib exit $($result.Code)); continuing verification."
+                    return
+                }
+            }
+            if ($Arguments[0] -eq 'add' -and $Arguments[1] -eq 'adapter' -and
+                @(Get-VMnetHostAdapters $Name).Count -gt 0) {
+                Write-Host "$Name host adapter exists after creation (vnetlib exit $($result.Code)); continuing configuration and verification."
+                return
+            }
             if ($removingAdapter -and @(Get-VMnetHostAdapters $Name).Count -eq 0) {
                 Write-Host "$Name host adapter is absent after removal (vnetlib exit $($result.Code)); continuing verification."
                 return

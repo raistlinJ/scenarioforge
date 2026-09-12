@@ -179,7 +179,8 @@ def prepare_catalogs(config, work, lab):
     raw_archive = work / 'catalog.tar'
     # git archive preserves Unix executable bits and symlinks without a Windows
     # checkout or tar executable. It also avoids CRLF conversion in guest scripts.
-    run(prefix + ['archive', '--format=tar', '--output=' + str(raw_archive), 'FETCH_HEAD', '--', *selected])
+    run(prefix + ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
+                  'archive', '--format=tar', '--output=' + str(raw_archive), 'FETCH_HEAD', '--', *selected])
     archive = lab / 'scenarioforge-optional-content.tar.gz'
     with raw_archive.open('rb') as source, gzip.open(archive, 'wb') as output:
         shutil.copyfileobj(source, output)
@@ -287,6 +288,11 @@ def write_vmx(path, role, config, macs, networks, userdata, metadata, network):
                    'cpuid.coresPerSocket': config[role + '_cores'],
                    'sata0.present': 'TRUE', 'sata0:1.present': 'TRUE', 'sata0:1.deviceType': 'cdrom-image',
                    'sata0:1.fileName': name + '-cidata.iso', 'sata0:1.startConnected': 'TRUE',
+                   # Cloud images may select ttyS0 as /dev/console during
+                   # initramfs disk growth; a missing UART can panic PID 1.
+                   'serial0.present': 'TRUE', 'serial0.fileType': 'file',
+                   'serial0.fileName': 'serial-console.log', 'serial0.startConnected': 'TRUE',
+                   'serial0.yieldOnMsrRead': 'TRUE',
                    'usb.present': 'TRUE', 'ehci.present': 'TRUE', 'usb_xhci.present': 'TRUE',
                    'sound.present': 'TRUE', 'sound.autoDetect': 'TRUE', 'mks.enable3d': 'FALSE', 'tools.syncTime': 'TRUE',
                    'scenarioforge.install.owner': config['install_id'], 'scenarioforge.install.role': name,

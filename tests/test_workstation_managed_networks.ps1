@@ -12,9 +12,24 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ('sf-network-test-' + [Guid]::NewGu
 New-Item -ItemType Directory $temp | Out-Null
 try {
     & {
+        $script:enumerations = 0
+        function Start-Sleep { param($Seconds) }
+        function Get-NetAdapter {
+            param([switch]$IncludeHidden, $ErrorAction)
+            $script:enumerations++
+            if ($script:enumerations -lt 3) { throw 'Registry key marked for deletion' }
+            [pscustomobject]@{ Name = 'VMware Network Adapter VMnet2'; InterfaceDescription = 'VMware'; Status = 'Up' }
+        }
+        Assert (@(Get-VMnetHostAdapters vmnet2).Count -eq 1) 'Adapter enumeration recovers from PnP race'
+        Assert ($script:enumerations -eq 3) 'Transient enumeration errors retried'
+        function Get-NetAdapter { throw 'Persistent enumeration failure' }
+        Assert-Throws { Get-VMnetHostAdapters vmnet2 } 'Persistent enumeration failure'
+    }
+    & {
         function Get-ExecutionPolicy { 'Bypass' }
         function Start-Process {
-            param($FilePath, $Verb, [switch]$PassThru, [switch]$Wait, $ArgumentList)
+            param($FilePath, $Verb, $WindowStyle, [switch]$PassThru, [switch]$Wait, $ArgumentList)
+            Assert ($WindowStyle -eq 'Hidden') 'Network helper stays hidden'
             Assert ($Verb -eq 'RunAs') 'Network action requests elevation'
             Assert ($ArgumentList[1] -eq '-ExecutionPolicy' -and $ArgumentList[2] -eq 'Bypass') 'Current execution policy forwarded'
             $wrapper = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($ArgumentList[-1]))
@@ -171,6 +186,8 @@ try {
         # the host adapter enabled, unlike the isolated HITL network.
         $script:nativeCommands = @()
         $script:managementReady = $false
+        $script:adapterCreated = $false
+        function Get-VMnetHostAdapters { param($Name) if ($script:adapterCreated) { @{ Status = 'Up' } } }
         function Get-HostNetworkRows {
             param($State)
             if ($script:managementReady) { return @{ vmnet4 = @{ Type='hostOnly'; DHCP='false'; Subnet='172.31.250.0'; Mask='255.255.255.0' } } }
@@ -181,7 +198,8 @@ try {
             param($File, $Arguments, [switch]$AllowFailure, $TimeoutSeconds)
             $command = $Arguments -join ' '
             $script:nativeCommands += $command
-            if ($command -eq '-- enable adapter vmnet4') { $script:managementReady = $true }
+            if ($command -eq '-- add adapter vmnet4') { $script:adapterCreated = $true; return @{ Code = 12 } }
+            if ($command -eq '-- enable adapter vmnet4') { $script:managementReady = $true; return @{ Code = 12 } }
             return @{ Code = 1 }
         }
         Invoke-NativeNetworkAction Create vmnet4 vmnet3 $temp Management
