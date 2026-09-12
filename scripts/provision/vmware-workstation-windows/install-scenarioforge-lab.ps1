@@ -382,7 +382,28 @@ function Remove-Lab {
     }
     $archive = Join-Path $State.LabDir 'scenarioforge-optional-content.tar.gz'
     if ((Test-Path -LiteralPath $archive) -and $State.ArchiveHash -and (Get-FileHash -LiteralPath $archive).Hash -eq $State.ArchiveHash) { Remove-Item -LiteralPath $archive }
+    if (Test-Path -LiteralPath $State.LabDir -PathType Container) {
+        Assert-NoReparsePoint $State.LabDir
+        if (@(Get-ChildItem -LiteralPath $State.LabDir -Force).Count -eq 0) {
+            # Nonrecursive deletion also refuses files added after the check.
+            [IO.Directory]::Delete($State.LabDir, $false)
+        } else {
+            Write-Host "Preserved files remain in $($State.LabDir). Move them or select a different lab_dir before reinstalling."
+        }
+    }
     Write-Host 'Cleanup complete. Pre-existing host networks, modified files, and downloaded image cache were preserved.'
+}
+
+function Assert-NewLabDestination {
+    param([string]$LabDirectory, [string]$StateFile)
+    if (Test-Path -LiteralPath $StateFile) { throw "Lab state already exists at $StateFile. Use status, resume, or cleanup." }
+    Assert-NoReparsePoint $LabDirectory
+    if (Test-Path -LiteralPath $LabDirectory) {
+        if (-not (Test-Path -LiteralPath $LabDirectory -PathType Container) -or
+            @(Get-ChildItem -LiteralPath $LabDirectory -Force).Count -gt 0) {
+            throw "Lab path is not an empty directory: $LabDirectory. Move preserved files or choose a different lab_dir; existing files will not be overwritten."
+        }
+    }
 }
 
 function Invoke-Installer {
@@ -453,7 +474,7 @@ See the adjacent README for prerequisites and isolated network configuration.
     Assert-NoReparsePoint $config.image_cache
     if ($config.ssh_public_key) { $config.ssh_public_key = (Resolve-Path -LiteralPath $config.ssh_public_key).Path }
     Assert-NoReparsePoint $config.lab_dir
-    if ((Test-Path -LiteralPath $stateFile) -or (Test-Path -LiteralPath $config.lab_dir)) { throw 'Lab/state already exists. Use status, resume, or cleanup; existing files will not be overwritten.' }
+    Assert-NewLabDestination $config.lab_dir $stateFile
     if ((Test-Path -LiteralPath $StateDir) -and @(Get-ChildItem -LiteralPath $StateDir -Force).Count) { throw 'StateDir must be new or empty; existing files will not be overwritten.' }
     if ($StateDir -notmatch '^[A-Za-z]:[\\/].+' -or $StateDir.Substring(2) -match '[:"<>|?*]') { throw 'StateDir must be an absolute local Windows directory.' }
     $vmwareDirectory = Find-Workstation $config.vmware_dir

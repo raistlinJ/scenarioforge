@@ -15,6 +15,17 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ('scenarioforge-windows-test-' + [G
 if ($IsMacOS) { $temp = Join-Path '/private/tmp' (Split-Path $temp -Leaf) }
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
+    $reinstallDirectory = Join-Path $temp 'empty-cleaned-lab'
+    $reinstallState = Join-Path $temp 'reinstall-state.json'
+    Assert-NewLabDestination $reinstallDirectory $reinstallState
+    New-Item -ItemType Directory $reinstallDirectory | Out-Null
+    Assert-NewLabDestination $reinstallDirectory $reinstallState
+    $preserved = Join-Path $reinstallDirectory '.preserved'
+    'keep me' | Set-Content $preserved
+    Assert-Throws { Assert-NewLabDestination $reinstallDirectory $reinstallState } 'not an empty directory'
+    Assert ((Get-Content $preserved) -eq 'keep me') 'Reinstall preserves unknown files'
+    '{}' | Set-Content $reinstallState
+    Assert-Throws { Assert-NewLabDestination $reinstallDirectory $reinstallState } 'Lab state already exists at'
     # Parse all shipped scripts before mocking any commands.
     foreach ($file in Get-ChildItem -LiteralPath $source -Include *.ps1,*.psm1 -Recurse) {
         $tokens = $null; $errors = $null
