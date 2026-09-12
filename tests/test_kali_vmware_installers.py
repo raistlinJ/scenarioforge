@@ -133,6 +133,12 @@ fail_bootstrap() {{ printf '%s\n' "$*" >&2; exit 1; }}
     commands = log.read_text()
     assert f"APT install -y linux-image-{architecture}" in commands
     assert "enable scenarioforge-participant-bootstrap.service" in commands
+    unit = (tmp_path / "etc/systemd/system/scenarioforge-participant-bootstrap.service").read_text()
+    assert "After=network-online.target\n" in unit
+    # cloud-final runs after multi-user.target. Making this oneshot a
+    # prerequisite of multi-user.target creates a cycle and skips recovery.
+    assert "cloud-final.service" not in unit
+    assert "WantedBy=multi-user.target" in unit
     assert "REBOOT --unit=scenarioforge-participant-reboot" in commands
     assert str(boot / f"vmlinuz-7.0.10+kali-{architecture}") in (
         tmp_path / "etc/default/grub.d/99-scenarioforge-kernel.cfg"

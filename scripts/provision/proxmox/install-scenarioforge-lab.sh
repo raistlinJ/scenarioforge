@@ -1672,7 +1672,7 @@ if [[ "$ID" == kali ]] && systemd-detect-virt --quiet --vm \
 [Unit]
 Description=Finish ScenarioForge participant provisioning after kernel reboot
 Wants=network-online.target
-After=network-online.target cloud-final.service
+After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/scenarioforge-participant-bootstrap

@@ -182,6 +182,8 @@ removes its NAT adapter, while CORE and APP continue provisioning.
 Both **ScenarioForge.lnk** and **ScenarioForge Participant VM.lnk** are created
 on your Windows desktop by default. Set `desktop_shortcut=false` in JSON or use
 `-NoDesktopShortcut` to skip both.
+Shortcuts support a Windows Desktop redirected into OneDrive. Keep VM disks and
+installer state in local, unsynced directories.
 
 - ScenarioForge checks CORE + APP, then opens the APP's current HTTPS address.
 - Participant checks CORE + participant, then opens the participant console.
@@ -233,6 +235,9 @@ secrets and should stay private.
 
 For bootstrap failures, inspect the guest console and
 `/var/log/cloud-init-output.log` or `/var/log/scenarioforge-*-bootstrap.log`.
+Each VM also has a `serial-console.log` in its VM directory. The virtual serial
+port is required by cloud images that use `ttyS0` during early boot and disk
+growth; omitting it can cause a kernel panic before cloud-init starts.
 If image preparation failed before VM creation completed, clean up the partial
 installation and reinstall; `resume` requires all three VMX files.
 
