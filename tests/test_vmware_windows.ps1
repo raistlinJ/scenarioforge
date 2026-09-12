@@ -24,7 +24,8 @@ try {
     $config = Read-InstallerConfig (Join-Path $source 'scenarioforge-lab.json.example')
     Assert $config.desktop_shortcut 'Desktop shortcuts default on'
     Assert (-not $config.ContainsKey('wsl_distribution')) 'No Linux host dependency in config'
-    Assert (-not $config.flag_generators -and -not $config.vulnhub) 'Public install needs no private repository access'
+    $defaults = Read-InstallerConfig ''
+    Assert (-not $defaults.flag_generators -and -not $defaults.vulnhub) 'Public install needs no private repository access'
     Assert-InstallerConfig $config
     $config.hitl_vmnet = $config.management_vmnet
     Assert-Throws { Assert-InstallerConfig $config } 'must differ'

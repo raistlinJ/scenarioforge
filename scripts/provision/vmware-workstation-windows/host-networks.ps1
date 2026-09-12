@@ -77,19 +77,39 @@ function Plan-HitlNetwork {
     if (Test-IsolatedHitl $rows $requested) { return }
     if (-not $State.Config.manage_hitl_network) { throw "Configure $requested as an isolated HITL network or enable manage_hitl_network." }
     Find-Vnetlib (Split-Path $State.Vmrun -Parent) | Out-Null
-    $used = @($rows.Keys) + @(Get-VMnetRegistryNames)
+    $registryNames = @(Get-VMnetRegistryNames)
+    $rejections = [Collections.Generic.List[string]]::new()
     $candidates = @($requested) + @(2..19 | Where-Object { $_ -ne 8 } | ForEach-Object { "vmnet$_" })
     foreach ($name in $candidates | Select-Object -Unique) {
-        if ($name -eq $State.Config.management_vmnet -or $name -in $used -or
-            $name -notmatch '^vmnet([2-7]|9|1[0-9])$') { continue }
-        if (@(Get-VMnetHostAdapters $name).Count) { continue }
-        try { Assert-VMnetNotInUse $State $name } catch { continue }
+        if ($name -notmatch '^vmnet([2-7]|9|1[0-9])$') { continue }
+        if ($name -eq $State.Config.management_vmnet) {
+            $rejections.Add("${name}: reserved for management")
+            continue
+        }
+        if ($rows.ContainsKey($name)) {
+            $rejections.Add("${name}: already configured in Workstation")
+            continue
+        }
+        if ($name -in $registryNames) {
+            $rejections.Add("${name}: VMware registry configuration exists")
+            continue
+        }
+        if (@(Get-VMnetHostAdapters $name).Count) {
+            $rejections.Add("${name}: a host adapter exists (including hidden or disabled adapters)")
+            continue
+        }
+        try { Assert-VMnetNotInUse $State $name } catch {
+            $rejections.Add("${name}: $($_.Exception.Message)")
+            continue
+        }
         $State.Config.hitl_vmnet = $name
         $State.HitlNetworkPlan = $true
         Write-Host "Create dedicated $name for HITL (DHCP/NAT/host access disabled); Windows will request elevation."
         return
     }
-    throw 'No unused Workstation vmnet2..19 is available for HITL.'
+    throw ("No unused Workstation vmnet2..19 is available for HITL. Rejection details:`n" +
+        ($rejections -join "`n") + "`nNo networks were changed. Inspect these entries in Workstation's Virtual Network Editor. " +
+        'An existing dedicated HITL network can be selected with hitl_vmnet once it meets the isolation settings in the README.')
 }
 
 function Invoke-ElevatedNetworkAction {

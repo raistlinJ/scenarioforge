@@ -232,6 +232,7 @@ def test_optional_catalog_archive_preserves_unix_mode_without_checkout(config, t
 
 
 def test_public_builder_does_not_invoke_git(config, monkeypatch, tmp_path):
+    config.update(flag_generators=False, vulnhub=False)
     monkeypatch.setattr(builder, 'run', lambda *args, **kwargs: pytest.fail('Public install must not access Git catalogs'))
     assert builder.prepare_catalogs(config, tmp_path, Path(config['lab_dir'])) == ('', '')
 

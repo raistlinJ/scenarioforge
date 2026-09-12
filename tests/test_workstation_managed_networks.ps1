@@ -71,5 +71,20 @@ try {
     $state.Config.hitl_vmnet = 'vmnet2'
     $state.Config.manage_hitl_network = $false
     Assert-Throws { Plan-HitlNetwork $state } 'enable manage_hitl_network'
+    $state.Config.manage_hitl_network = $true
+    $state.HitlNetworkPlan = $false
+    & {
+        function Assert-VMnetNotInUse { throw 'Could not read VMware power status.' }
+        Assert-Throws { Plan-HitlNetwork $state } 'vmnet3: Could not read VMware power status'
+        Assert (-not $state.ContainsKey('HitlNetworkPlan') -or -not $state.HitlNetworkPlan) 'Failed planning cannot schedule creation'
+    }
+    & {
+        function Get-VMnetRegistryNames { @(2..19 | ForEach-Object { "vmnet$_" }) }
+        Assert-Throws { Plan-HitlNetwork $state } 'vmnet3: VMware registry configuration exists'
+    }
+    & {
+        function Get-VMnetHostAdapters { param($Name) @{ Status = 'Disabled' } }
+        Assert-Throws { Plan-HitlNetwork $state } 'vmnet3: a host adapter exists'
+    }
     Write-Host 'Managed Workstation networking tests passed.'
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }

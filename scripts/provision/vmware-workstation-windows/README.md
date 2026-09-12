@@ -161,9 +161,10 @@ on your Windows desktop by default. Set `desktop_shortcut=false` in JSON or use
 
 ### Optional catalogs
 
-The first installation works without access to private Git repositories.
-`flag_generators` and `vulnhub` default to `false` on Windows. Enable either in JSON
-to include the corresponding private catalogs. Authenticate Git for
+The example config enables both `flag_generators` and `vulnhub` to include the
+private catalogs. Set both to `false` for an installation without private Git
+repository access. The built-in defaults remain `false` when no config is supplied.
+For the enabled catalogs, authenticate Git for
 `https://github.com/raistlinJ/flag-generators.git` using **Git for Windows** first.
 Git is only required for these optional catalogs; it is discovered on PATH or
 through the `git_exe` setting. The native builder archives the tested snapshot
