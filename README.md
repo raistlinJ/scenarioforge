@@ -311,7 +311,7 @@ python -m scenarioforge.cli preview-plan \
 # 3. Resolve the challenge sequence and save hints and answers.
 python -m scenarioforge.cli flag-sequencing \
   --xml "$LAB_XML" --scenario TrainingLab \
-  --flow-mode resolve --flow-length 3 --flow-best-effort --seed 42
+  --flow-mode resolve --flow-length 3 --seed 42
 
 # 4. Deploy and start the lab in CORE (optional for guide-only exports).
 python -m scenarioforge.cli execute \

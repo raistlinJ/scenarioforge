@@ -7499,6 +7499,17 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     if str(args.flow_mode or '').strip().lower() in {'resolve', 'resolve_hints', 'hint', 'hint_only'}:
         response_payload.setdefault('generator_execution_requested', True)
         response_payload.setdefault('generator_execution_mode', 'remote' if bool(payload.get('run_remote')) else 'local')
+        if response_payload.get('generation_failures'):
+            # Best-effort sequencing may return HTTP 200 with failed generators.
+            # Those saved assignments cannot pass Execute's runtime preflight.
+            status_code = max(status_code, 422)
+            response_payload['ok'] = False
+            response_payload.setdefault(
+                'error',
+                'Generator resolution failed; the saved Flow is not ready for Execute. '
+                'Inspect generation_failures and generator_runs, fix the reported failures, '
+                'then rerun flag-sequencing --flow-mode resolve.',
+            )
     _emit_phase_json(
         response_payload,
         output_path=args.plan_output,

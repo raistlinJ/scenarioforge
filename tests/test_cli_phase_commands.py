@@ -1687,7 +1687,8 @@ def test_cli_vm_mode_execute_preflight_failure_emits_validation_summary(tmp_path
     ]
 
 
-def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("generation_failed", [False, True])
+def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monkeypatch, capsys, generation_failed):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
 
@@ -1707,7 +1708,8 @@ def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monk
 
     def _fake_prepare(*, backend):
         captured['payload'] = request.get_json()
-        return jsonify({'ok': True, 'flow_valid': True, 'flag_assignments': [], 'phase_result': 'resolved'})
+        return jsonify({'ok': True, 'flow_valid': True, 'flag_assignments': [], 'phase_result': 'resolved',
+                        'generation_failures': [{'generator_id': '139', 'node_id': '7', 'error': 'outputs.json missing'}] if generation_failed else []})
 
     fake_backend = SimpleNamespace(
         app=app,
@@ -1748,14 +1750,19 @@ def test_cli_flag_sequencing_phase_invokes_backend_prepare_helper(tmp_path, monk
             '--flow-chain-id',
             'node-b',
             '--flow-run-local',
+            '--flow-best-effort',
         ]
         ret = cli.main()
     finally:
         cli.sys.argv = argv0
 
-    assert ret == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload['ok'] is True
+    assert ret == (1 if generation_failed else 0)
+    captured_output = capsys.readouterr()
+    payload = json.loads(captured_output.err if generation_failed else captured_output.out)
+    assert payload['ok'] is (not generation_failed)
+    if generation_failed:
+        assert 'not ready for Execute' in payload['error']
+        assert payload['generation_failures'][0]['generator_id'] == '139'
     assert payload['phase'] == 'flag-sequencing'
     sent = captured['payload']
     assert isinstance(sent, dict)
