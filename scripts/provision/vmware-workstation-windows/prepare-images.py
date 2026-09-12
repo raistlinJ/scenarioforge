@@ -25,6 +25,8 @@ import urllib.request
 import uuid
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / 'common'))
+import cyber_agent_flow as caf
 SHARED = HERE.parent / 'proxmox' / 'install-scenarioforge-lab.sh'
 TESTED_CATALOG_COMMIT = '5f612eecb8ff5df74a0e517d0de1e54385a62044'
 CATALOG_URL = 'https://github.com/raistlinJ/flag-generators.git'
@@ -218,6 +220,8 @@ def cloud_config(role, config, script, checksum='', commit=''):
                           TESTED_FLAG_GENERATORS_COMMIT=TESTED_CATALOG_COMMIT)
         files.append(dict(path='/etc/scenarioforge-installer.env', owner='root:root', permissions='0600',
                           encoding='b64', content=base64.b64encode(shell_environment(values).encode()).decode()))
+    if role == 'participant':
+        script = caf.inject(script, config)
     script_path = f'/usr/local/sbin/scenarioforge-{role}-bootstrap'
     files.append(dict(path=script_path, owner='root:root', permissions='0700', encoding='b64',
                       content=base64.b64encode(script.encode()).decode()))
@@ -248,6 +252,9 @@ def network_layout(role, config, macs):
         interfaces = {'participant': nic(0, 'ens18', addresses=['10.254.200.10/24'], dhcp4=False, dhcp6=False,
                                           **{'accept-ra': False}),
                       'bootstrap-uplink': nic(1, 'ens19', dhcp4=True, dhcp6=False)}
+    if role == 'participant' and config.get('cyber_agent_flow', False):
+        networks.append(('custom', config.get('llm_vmnet', 'vmnet8')))
+        interfaces['llm'] = caf.interface(config, macs[2])
     return networks, {'version': 2, 'ethernets': interfaces}
 
 
@@ -323,6 +330,7 @@ def prepare_disk(qemu, source, destination, size_gb, work, source_format="qcow2"
 
 
 def prepare_images(config, work):
+    caf.validate(config)
     participant_os = config.get('participant_os', 'debian')
     if participant_os not in ('debian', 'kali'):
         raise BuildError('participant_os must be debian or kali.')
@@ -349,7 +357,7 @@ def prepare_images(config, work):
         directory.mkdir()
         (directory / '.scenarioforge-owner').write_text(config['install_id'] + '\n', encoding='utf-8')
         macs = []
-        while len(macs) < (3 if role == 'core' else 2):
+        while len(macs) < (3 if role == 'core' or (role == 'participant' and config.get('cyber_agent_flow', False)) else 2):
             mac = f'00:50:56:{secrets.randbelow(64):02x}:' + ':'.join(f'{byte:02x}' for byte in secrets.token_bytes(2))
             if mac not in used_macs:
                 used_macs.add(mac)

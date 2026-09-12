@@ -380,3 +380,55 @@ The installer updates `/etc/vmware/networking` using Workstation's
 `vmware-networks --migrate-network-settings` and restarts networking. Failed
 creation or removal retains ownership state when resources remain, for cleanup
 and retry. Review the error and run cleanup again after resolving the failure.
+
+## Optional CyberAgentFlow on Kali
+
+Set `participant_os=kali` and `cyber_agent_flow=true` in the grouped example
+config section (Windows JSON uses `"participant_os": "kali"` and
+`"cyber_agent_flow": true`). The shell installers also accept
+`--cyber-agent-flow`; Windows accepts `-CyberAgentFlow`.
+
+Setup clones `https://github.com/raistlinJ/cyber-agent-flow.git`, the upstream
+of the sibling `../cyber-agent-flow` checkout. Override `cyber_agent_flow_url`
+and `cyber_agent_flow_ref` to select a repository/ref or commit. Uncommitted local
+changes are not copied. The guest needs access to that repository during bootstrap;
+private-repository host credentials are not copied into Kali.
+
+Configure these values before enabling the option:
+
+| Setting | Meaning |
+| --- | --- |
+| `llm_provider_address` | Fixed IPv4 address of the external LLM provider |
+| `llm_provider_url` | Full HTTP(S) endpoint using that same IP, including port/path |
+| `llm_provider_type` | `ollama_direct`, `litellm`, `openai`, or `claude` |
+| `llm_model` | Model name used by CyberAgentFlow |
+| `llm_interface_cidr` | Reserved, unused static address/prefix for Kali on the egress network |
+| `llm_gateway` | Reachable router address in that network |
+| `llm_vmnet` | VMware: existing egress vmnet, default `vmnet8` |
+| `llm_bridge` | Proxmox: existing egress bridge; empty uses `uplink_bridge` |
+
+Use the gateway/subnet actually configured on your chosen vmnet/bridge. The LLM
+network must differ from HITL and management. A third Kali NIC is matched by MAC
+and named `ens20`; cloud-init persists its static address and a provider-specific
+`/32` route via the gateway (direct link route for a provider in the same subnet).
+It has no DHCP, IPv6 autoconfiguration, or default route. The ordinary bootstrap
+NIC `ens19` is still removed after provisioning; the new LLM NIC remains. Guest
+readiness checks `ip -4 route get ADDRESS` and refuses to mark setup complete if
+that route does not use `ens20`. This checks routing, not provider availability or
+authentication. The dedicated NIC is not a firewall: other addresses on its local
+subnet remain reachable, and guests with sudo can change routing.
+
+CyberAgentFlow is installed in `/opt/cyber-agent-flow` using its prerequisites
+script while the temporary Internet connection is available. It is not started
+automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
+to launch web mode through `start_ws.sh`.
+The generated `configs/cli.json` contains the endpoint/provider/model; set
+`MCP_API_KEY` in your guest session when authentication is needed. No API keys are
+placed in the provisioning config. The WebUI uses `configs/cli.json` for initial provider, URL, model, TLS, and
+limit settings; existing browser-saved settings take precedence. API keys are
+not embedded in the page. Provisioning applies a bundled compatibility patch
+for this behavior and skips it if the same patch is already present upstream.
+
+This option applies to new labs; cleanup removes the extra NIC with its VM and
+preserves the pre-existing egress vmnet/bridge. Reinstall to add it to an existing
+lab. When disabled, the original two-interface participant layout is unchanged.

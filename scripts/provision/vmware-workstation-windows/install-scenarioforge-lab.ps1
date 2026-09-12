@@ -23,6 +23,7 @@ param(
     [switch]$NoManageHitlNetwork,
     [switch]$KeepHitlNetwork,
     [switch]$NoWait,
+    [switch]$CyberAgentFlow,
     [switch]$Watch,
     [switch]$DryRun,
     [switch]$Yes,
@@ -48,6 +49,9 @@ function Read-InstallerConfig {
         vmware_dir = ''; python_exe = ''; qemu_img = ''; git_exe = ''
         image_cache = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'ScenarioForge/image-cache' } else { '' }); management_vmnet = 'vmnet1'; hitl_vmnet = 'vmnet2'
         desktop_shortcut = $true; no_wait = $false; wait_minutes = 90; manage_hitl_network = $true
+        cyber_agent_flow = $false; cyber_agent_flow_url = 'https://github.com/raistlinJ/cyber-agent-flow.git'; cyber_agent_flow_ref = 'main'
+        llm_provider_address = ''; llm_provider_url = ''; llm_provider_type = 'ollama_direct'; llm_model = ''
+        llm_interface_cidr = ''; llm_gateway = ''; llm_vmnet = 'vmnet8'
         participant_os = 'debian'; kali_image_url = ''; kali_sums_url = ''
         core_memory_mb = 8192; app_memory_mb = 4096; participant_memory_mb = 2048
         core_cores = 4; app_cores = 2; participant_cores = 2
@@ -77,10 +81,11 @@ function Read-InstallerConfig {
 function Assert-InstallerConfig {
     param($Config)
     if ($Config.participant_os -cnotin @('debian', 'kali')) { throw 'participant_os must be debian or kali.' }
+    if ($Config.cyber_agent_flow -and $Config.participant_os -ne 'kali') { throw 'cyber_agent_flow requires participant_os=kali.' }
     if ($Config.participant_os -eq 'kali' -and $Config.participant_disk_gb -lt 25) {
         throw 'Kali participant_disk_gb must be at least 25 (default: 40).'
     }
-    foreach ($key in @('desktop_shortcut', 'no_wait', 'flag_generators', 'vulnhub', 'manage_hitl_network')) {
+    foreach ($key in @('desktop_shortcut', 'no_wait', 'flag_generators', 'vulnhub', 'manage_hitl_network', 'cyber_agent_flow')) {
         if ($Config[$key] -isnot [bool]) { throw "$key must be a JSON boolean." }
     }
     foreach ($key in @('core_memory_mb', 'app_memory_mb', 'participant_memory_mb', 'core_cores', 'app_cores', 'participant_cores', 'core_disk_gb', 'app_disk_gb', 'participant_disk_gb', 'wait_minutes')) {
@@ -94,7 +99,7 @@ function Assert-InstallerConfig {
         if ($Config[$key] -notmatch '^vmnet([1-7]|9|1[0-9])$') { throw "$key must be a custom vmnet1..19 network, excluding NAT vmnet8." }
     }
     if ($Config.management_vmnet -eq $Config.hitl_vmnet) { throw 'Management and HITL networks must differ.' }
-    foreach ($key in @('participant_os', 'kali_image_url', 'kali_sums_url', 'lab_dir', 'vmware_dir', 'python_exe', 'qemu_img', 'git_exe', 'image_cache', 'ssh_public_key', 'core_minimal_ref', 'core_ref', 'scenarioforge_ref', 'flag_generators_ref', 'core_password', 'app_password', 'participant_password', 'web_admin_password')) {
+    foreach ($key in @('cyber_agent_flow_url', 'cyber_agent_flow_ref', 'llm_provider_address', 'llm_provider_url', 'llm_provider_type', 'llm_model', 'llm_interface_cidr', 'llm_gateway', 'llm_vmnet', 'participant_os', 'kali_image_url', 'kali_sums_url', 'lab_dir', 'vmware_dir', 'python_exe', 'qemu_img', 'git_exe', 'image_cache', 'ssh_public_key', 'core_minimal_ref', 'core_ref', 'scenarioforge_ref', 'flag_generators_ref', 'core_password', 'app_password', 'participant_password', 'web_admin_password')) {
         if ($Config[$key] -isnot [string] -or $Config[$key] -match '[\r\n\x00]') { throw "Invalid text value: $key" }
     }
     # Host VM files belong on a local Windows drive, not a UNC share or a drive root.
@@ -129,6 +134,11 @@ function Assert-HostNetworks {
         if (-not @($result.Out -split '\r?\n' | Where-Object { $_ -match $pattern }).Count) {
             throw "Configure $($item[0]) as host-only, subnet $($item[1])/24, with DHCP disabled in Workstation's Virtual Network Editor. No host networks were changed."
         }
+    }
+    if ($State.Config.ContainsKey('cyber_agent_flow') -and $State.Config.cyber_agent_flow) {
+        $llm = $State.Config.llm_vmnet
+        if ($llm -in @($State.Config.hitl_vmnet, $State.Config.management_vmnet) -or
+            -not (Get-HostNetworkRows $State).ContainsKey($llm)) { throw 'llm_vmnet must be an existing egress network separate from management and HITL.' }
     }
     $hitl = $State.Config.hitl_vmnet
     $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object {
@@ -309,6 +319,12 @@ function Find-ImageTools {
         $Config.python_exe = Install-InstallerPython -Preview:$Preview
     }
     $Config.python_exe = (Resolve-Path -LiteralPath $Config.python_exe).Path
+    if ($Config.cyber_agent_flow) {
+        $cafConfig = @{}
+        foreach ($key in @('cyber_agent_flow', 'cyber_agent_flow_url', 'cyber_agent_flow_ref', 'llm_provider_address', 'llm_provider_url', 'llm_provider_type', 'llm_model', 'llm_interface_cidr', 'llm_gateway', 'llm_vmnet', 'participant_os')) { $cafConfig[$key] = $Config[$key] }
+        $common = Join-Path (Split-Path $PSScriptRoot -Parent) 'common'
+        Invoke-HostCommand $Config.python_exe @('-c', 'import sys,json; sys.path.insert(0,sys.argv[1]); import cyber_agent_flow; cyber_agent_flow.validate(json.loads(sys.argv[2]))', $common, ($cafConfig | ConvertTo-Json -Compress)) | Out-Null
+    }
     $Config.qemu_img = Install-MissingQemu $Config.qemu_img -Preview:$Preview
     if ($Config.flag_generators -or $Config.vulnhub) {
         if (-not $Config.git_exe) {
@@ -416,6 +432,7 @@ ScenarioForge VMware Workstation for Windows (PowerShell 7.4+)
   ./install-scenarioforge-lab.ps1 resume [-NoWait]
   ./install-scenarioforge-lab.ps1 credentials
   ./install-scenarioforge-lab.ps1 cleanup [-DryRun] [-Force] [-Yes]
+Use -CyberAgentFlow with Kali and the grouped LLM settings in the example JSON.
 Overrides: -LabDir, -StateDir, -VmwareDir, -PythonExe, -QemuImg, -NoDesktopShortcut
 Desktop shortcuts default to enabled. Missing QEMU can be downloaded with confirmation.
 Use -ParticipantOS kali for a Kali XFCE participant with standard tools (2 GB RAM, 40 GB disk).
@@ -466,6 +483,7 @@ See the adjacent README for prerequisites and isolated network configuration.
     }
     if ($NoDesktopShortcut) { $config.desktop_shortcut = $false }
     if ($NoWait) { $config.no_wait = $true }
+    if ($CyberAgentFlow) { $config.cyber_agent_flow = $true }
     if ($NoManageHitlNetwork) { $config.manage_hitl_network = $false }
     Assert-InstallerConfig $config
     $config.lab_dir = [IO.Path]::GetFullPath($config.lab_dir)

@@ -59,3 +59,23 @@ participant_os=debian
 
 # Automatically create a dedicated isolated HITL network when needed.
 manage_hitl_network=true
+
+# --- Optional CyberAgentFlow and dedicated LLM interface (Kali only) ---
+# Set participant_os=kali above and enable this to install the application.
+# Source is the project at ../cyber-agent-flow; guests clone its upstream repo.
+cyber_agent_flow=false
+cyber_agent_flow_url=https://github.com/raistlinJ/cyber-agent-flow.git
+cyber_agent_flow_ref=main
+# Fixed IPv4 destination; the URL must use this same IP (no hostname resolution).
+llm_provider_address=
+llm_provider_url=
+llm_provider_type=ollama_direct
+llm_model=
+# Reserve an unused static guest address on the selected egress network.
+# Set its real gateway; no default route or DHCP is enabled on this interface.
+llm_interface_cidr=
+llm_gateway=
+# Existing NAT/custom network with access to the provider, separate from HITL/management.
+llm_vmnet=vmnet8
+# Example: provider 192.0.2.20, URL https://192.0.2.20:443/v1.
+# Do not use documentation addresses for a real installation.

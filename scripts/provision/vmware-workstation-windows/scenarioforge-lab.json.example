@@ -29,5 +29,16 @@
   "qemu_img": "",
   "git_exe": "",
   "participant_os": "debian",
-  "manage_hitl_network": true
+  "manage_hitl_network": true,
+
+  "cyber_agent_flow": false,
+  "cyber_agent_flow_url": "https://github.com/raistlinJ/cyber-agent-flow.git",
+  "cyber_agent_flow_ref": "main",
+  "llm_provider_address": "",
+  "llm_provider_url": "",
+  "llm_provider_type": "ollama_direct",
+  "llm_model": "",
+  "llm_interface_cidr": "",
+  "llm_gateway": "",
+  "llm_vmnet": "vmnet8"
 }

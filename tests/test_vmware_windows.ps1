@@ -265,11 +265,13 @@ try {
             @{Code = 0; Out = ''; Error = ''}
         }
     }
+    @('ethernet2.present = "TRUE"', 'ethernet2.connectionType = "custom"', 'ethernet2.vnet = "vmnet8"') | Add-Content -LiteralPath $state.VMs.participant.Path
     Remove-ParticipantUplink $state $stateFile
     Assert (-not $state.UplinkAttached) 'Participant isolation persisted'
     $vmx = Get-Content -LiteralPath $state.VMs.participant.Path -Raw
     Assert ($vmx -notmatch 'ethernet1\.') 'Temporary NAT removed'
     Assert ($vmx -match 'ethernet0.vnet = "vmnet2"') 'HITL retained'
+    Assert ($vmx -match 'ethernet2.vnet = "vmnet8"') 'Dedicated LLM interface retained'
     Assert (-not (Read-LabState $stateFile).UplinkAttached) 'Recovery state stored'
 
     # Test host-network validation using representative vmrun output.

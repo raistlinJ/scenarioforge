@@ -286,3 +286,27 @@ def test_invalid_kali_archive_has_clear_error(tmp_path):
     archive.write_bytes(b'not an archive')
     with pytest.raises(builder.BuildError, match='Could not extract Kali'):
         builder.extract_kali_disk(archive, tmp_path)
+
+
+def test_cyber_agent_flow_kali_has_dedicated_llm_nic_and_route(config, monkeypatch, tmp_path):
+    config.update(cyber_agent_flow=True, participant_os='kali', participant_disk_gb=40,
+                  flag_generators=False, vulnhub=False,
+                  llm_provider_address='203.0.113.20', llm_provider_url='http://203.0.113.20:11434',
+                  llm_interface_cidr='192.168.80.10/24', llm_gateway='192.168.80.2', llm_vmnet='vmnet8')
+    monkeypatch.setattr(builder, 'download_verified', lambda *args: tmp_path / 'image')
+    monkeypatch.setattr(builder, 'extract_kali_disk', lambda *args: tmp_path / 'kali.raw')
+    monkeypatch.setattr(builder, 'prepare_disk', lambda *args, **kwargs: args[2].write_bytes(b'disk'))
+    builder.prepare_images(config, tmp_path)
+    directory = Path(config['lab_dir']) / 'scenarioforge-participant'
+    vmx = (directory / 'scenarioforge-participant.vmx').read_text()
+    assert 'ethernet1.connectionType = "nat"' in vmx
+    assert 'ethernet2.vnet = "vmnet8"' in vmx
+    seed = read_iso(directory / 'scenarioforge-participant-cidata.iso')
+    llm = seed['network-config']['ethernets']['llm']
+    assert llm['set-name'] == 'ens20' and llm['dhcp4'] is False
+    assert llm['routes'] == [{'to': '203.0.113.20/32', 'via': '192.168.80.2'}]
+    assert f'ethernet2.address = "{llm["match"]["macaddress"]}"' in vmx
+    guest = next(f for f in seed['user-data']['write_files'] if f['path'].endswith('participant-bootstrap'))
+    bootstrap = base64.b64decode(guest['content']).decode()
+    assert 'cyber-agent-flow.git' in bootstrap
+    assert 'ip -4 route get 203.0.113.20' in bootstrap

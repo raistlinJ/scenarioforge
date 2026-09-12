@@ -176,6 +176,7 @@ Important options:
   --manage-hitl-network       create an isolated HITL vmnet when needed (default)
   --no-manage-hitl-network    require a preconfigured isolated HITL vmnet
   --keep-hitl-network         preserve the tracked host vmnet during cleanup
+  --cyber-agent-flow          install CyberAgentFlow on Kali (LLM settings required in config)
   --participant-os OS         participant OS: debian (default) or kali
   --participant-password PASS set the participant password (default: generated)
   --web-admin-password PASS   set the coreadmin Web UI password (default: generated)
@@ -221,6 +222,7 @@ apply_vmware_config_value() {
         ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
         core_password) assign_config_setting REQUESTED_CORE_PASSWORD SF_CORE_PASSWORD "$value" ;;
         app_password) assign_config_setting REQUESTED_APP_PASSWORD SF_APP_PASSWORD "$value" ;;
+        cyber_agent_flow|cyber_agent_flow_url|cyber_agent_flow_ref|llm_provider_address|llm_provider_url|llm_provider_type|llm_model|llm_interface_cidr|llm_gateway|llm_vmnet|llm_bridge) apply_caf_config "$key" "$value" ;;
         participant_os) assign_config_setting PARTICIPANT_OS SF_PARTICIPANT_OS "$value" ;;
         participant_password) assign_config_setting REQUESTED_PARTICIPANT_PASSWORD SF_PARTICIPANT_PASSWORD "$value" ;;
         web_admin_password) assign_config_setting REQUESTED_WEB_ADMIN_PASSWORD SF_WEB_ADMIN_PASSWORD "$value" ;;
@@ -281,6 +283,7 @@ parse_args() {
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
             --core-password) REQUESTED_CORE_PASSWORD="${2:?missing value for --core-password}"; shift 2 ;;
             --app-password) REQUESTED_APP_PASSWORD="${2:?missing value for --app-password}"; shift 2 ;;
+            --cyber-agent-flow) CYBER_AGENT_FLOW=1; shift ;;
             --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-password) REQUESTED_PARTICIPANT_PASSWORD="${2:?missing value for --participant-password}"; shift 2 ;;
             --web-admin-password) REQUESTED_WEB_ADMIN_PASSWORD="${2:?missing value for --web-admin-password}"; shift 2 ;;
@@ -421,6 +424,11 @@ validate_host_networks() {
 source "${BASH_SOURCE[0]%/*}/host-networks.sh"
 
 validate_inputs() {
+    validate_caf
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+        [[ "$LLM_VMNET" != "$HITL_VMNET" && "$LLM_VMNET" != "$MANAGEMENT_VMNET" ]] || die "LLM vmnet must differ from HITL and management"
+        host_network_exists "$LLM_VMNET" || die "LLM vmnet $LLM_VMNET must already exist"
+    fi
     validate_paths
     validate_name "management vmnet" "$MANAGEMENT_VMNET"
     validate_name "HITL vmnet" "$HITL_VMNET"
@@ -514,6 +522,7 @@ write_state() {
         shell_assignment APP_NAME "$APP_NAME"
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
         shell_assignment PARTICIPANT_OS "$PARTICIPANT_OS"
+        save_caf_state
         shell_assignment CORE_VMX "$CORE_VMX"
         shell_assignment APP_VMX "$APP_VMX"
         shell_assignment PARTICIPANT_VMX "$PARTICIPANT_VMX"
@@ -623,7 +632,9 @@ download_verified_image() {
 
 write_vmware_cloud_init_files() {
     write_guest_bootstraps
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh"; fi
     write_cloud_init_files
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" >> "$WORK_DIR/participant-network.yaml"; fi
     local file
     for file in core-user.yaml app-user.yaml participant-user.yaml; do
         sed \
@@ -799,6 +810,9 @@ create_vms() {
     append_guestinfo_cloud_init "$PARTICIPANT_VMX" participant
     append_nic "$PARTICIPANT_VMX" 0 custom "$HITL_VMNET" "$PARTICIPANT_NET0_MAC"
     append_nic "$PARTICIPANT_VMX" 1 nat "" "$PARTICIPANT_NET1_MAC"
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+        append_nic "$PARTICIPANT_VMX" 2 custom "$LLM_VMNET" "$PARTICIPANT_NET2_MAC"
+    fi
 }
 
 start_vm() {
@@ -852,7 +866,20 @@ detach_participant_uplink() {
         warn "participant did not stop gracefully; forcing power off before network isolation"
         vmrun -T "$VMRUN_TYPE" stop "$PARTICIPANT_VMX" hard
     fi
-    vmrun -T "$VMRUN_TYPE" deleteNetworkAdapter "$PARTICIPANT_VMX" 1
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+        # Keep ethernet2 and its MAC stable so the persistent ens20 route survives.
+        python3 - "$PARTICIPANT_VMX" <<'CAF_REMOVE_BOOTSTRAP'
+import re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+text = path.read_text()
+if not re.search(r'^ethernet2\.present = "TRUE"$', text, re.M):
+    raise SystemExit('Dedicated LLM interface is missing; refusing to detach bootstrap')
+path.write_text(''.join(line for line in text.splitlines(keepends=True) if not re.match(r'^ethernet1\.', line)))
+CAF_REMOVE_BOOTSTRAP
+    else
+        vmrun -T "$VMRUN_TYPE" deleteNetworkAdapter "$PARTICIPANT_VMX" 1
+    fi
     if vmrun -T "$VMRUN_TYPE" listNetworkAdapters "$PARTICIPANT_VMX" 2>/dev/null | grep -Eq '^1[[:space:]]'; then
         die "participant NAT adapter is still attached; remove ethernet1 in $VMWARE_PRODUCT_NAME before using the lab"
     fi
@@ -1292,6 +1319,7 @@ perform_install() {
     APP_NET1_MAC="$(random_vmware_mac)"
     PARTICIPANT_NET0_MAC="$(random_vmware_mac)"
     PARTICIPANT_NET1_MAC="$(random_vmware_mac)"
+    PARTICIPANT_NET2_MAC="$(random_vmware_mac)"
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=1
     write_state
     apply_host_network_plan

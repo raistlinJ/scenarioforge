@@ -144,6 +144,7 @@ Important options:
   --ssh-public-key FILE       add an OpenSSH public key to all guest users
   --core-password PASSWORD    set the corevm password (default: generated)
   --app-password PASSWORD     set the scenarioforge VM password (default: generated)
+  --cyber-agent-flow          install CyberAgentFlow on Kali (LLM settings required in config)
   --participant-os OS         participant OS: debian (default) or kali
   --participant-password PASS set the participant password (default: generated)
   --web-admin-password PASS   set the coreadmin Web UI password (default: generated)
@@ -190,6 +191,7 @@ apply_vmware_config_value() {
         ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
         core_password) assign_config_setting REQUESTED_CORE_PASSWORD SF_CORE_PASSWORD "$value" ;;
         app_password) assign_config_setting REQUESTED_APP_PASSWORD SF_APP_PASSWORD "$value" ;;
+        cyber_agent_flow|cyber_agent_flow_url|cyber_agent_flow_ref|llm_provider_address|llm_provider_url|llm_provider_type|llm_model|llm_interface_cidr|llm_gateway|llm_vmnet|llm_bridge) apply_caf_config "$key" "$value" ;;
         participant_os) assign_config_setting PARTICIPANT_OS SF_PARTICIPANT_OS "$value" ;;
         participant_password) assign_config_setting REQUESTED_PARTICIPANT_PASSWORD SF_PARTICIPANT_PASSWORD "$value" ;;
         web_admin_password) assign_config_setting REQUESTED_WEB_ADMIN_PASSWORD SF_WEB_ADMIN_PASSWORD "$value" ;;

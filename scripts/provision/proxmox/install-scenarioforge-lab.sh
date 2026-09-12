@@ -3,6 +3,8 @@
 
 set -Eeuo pipefail
 
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../common/cyber-agent-flow.sh"
+
 SCRIPT_VERSION="0.10.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
@@ -264,6 +266,7 @@ apply_proxmox_config_value() {
         hitl_bridge) assign_config_setting HITL_BRIDGE SF_HITL_BRIDGE "$value" ;;
         core_vmid) assign_config_setting CORE_VMID SF_CORE_VMID "$value" ;;
         app_vmid) assign_config_setting APP_VMID SF_APP_VMID "$value" ;;
+        cyber_agent_flow|cyber_agent_flow_url|cyber_agent_flow_ref|llm_provider_address|llm_provider_url|llm_provider_type|llm_model|llm_interface_cidr|llm_gateway|llm_vmnet|llm_bridge) apply_caf_config "$key" "$value" ;;
         participant_os) assign_config_setting PARTICIPANT_OS SF_PARTICIPANT_OS "$value" ;;
         participant_vmid) assign_config_setting PARTICIPANT_VMID SF_PARTICIPANT_VMID "$value" ;;
         ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
@@ -343,6 +346,7 @@ Important options:
   --hitl-bridge NAME           Isolated participant/HITL bridge (default: sfhitl0)
   --core-vmid ID               CORE VMID (default: 9401)
   --app-vmid ID                ScenarioForge VMID (default: 9402)
+  --cyber-agent-flow          install CyberAgentFlow on Kali (LLM settings required in config)
   --participant-os OS          Participant OS: debian (default) or kali
   --participant-vmid ID        Participant VMID (default: 9403)
   --ssh-public-key FILE        Add one OpenSSH public key to all guest users
@@ -399,6 +403,7 @@ parse_args() {
             --hitl-bridge) HITL_BRIDGE="${2:?missing value for --hitl-bridge}"; shift 2 ;;
             --core-vmid) CORE_VMID="${2:?missing value for --core-vmid}"; shift 2 ;;
             --app-vmid) APP_VMID="${2:?missing value for --app-vmid}"; shift 2 ;;
+            --cyber-agent-flow) CYBER_AGENT_FLOW=1; shift ;;
             --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-vmid) PARTICIPANT_VMID="${2:?missing value for --participant-vmid}"; shift 2 ;;
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
@@ -537,6 +542,12 @@ PY
 }
 
 validate_install_inputs() {
+    validate_caf
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+        [[ -n "$LLM_BRIDGE" ]] || LLM_BRIDGE="$UPLINK_BRIDGE"
+        [[ "$LLM_BRIDGE" != "$HITL_BRIDGE" && "$LLM_BRIDGE" != "$MANAGEMENT_BRIDGE" ]] || die "LLM bridge must differ from HITL and management"
+        ip link show "$LLM_BRIDGE" >/dev/null 2>&1 || die "LLM bridge $LLM_BRIDGE must already exist"
+    fi
     local value
     for value in "$CORE_VMID" "$APP_VMID" "$PARTICIPANT_VMID"; do
         validate_integer "VMID" "$value" 100
@@ -1941,6 +1952,9 @@ create_vms() {
         --startup order=30,up=15 \
         --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE" \
         --net1 "virtio=$PARTICIPANT_NET1_MAC,bridge=$UPLINK_BRIDGE"
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+        run qm set "$PARTICIPANT_VMID" --net2 "virtio=$PARTICIPANT_NET2_MAC,bridge=$LLM_BRIDGE"
+    fi
     run qm set "$PARTICIPANT_VMID" --cicustom \
         "user=$SNIPPET_STORAGE:snippets/scenarioforge-participant-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-participant-network.yaml"
 }
@@ -1967,6 +1981,7 @@ write_state() {
         shell_assignment APP_NAME "$APP_NAME"
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
         shell_assignment PARTICIPANT_OS "$PARTICIPANT_OS"
+        save_caf_state
         shell_assignment INSTALL_COMPLETE "${INSTALL_COMPLETE:-0}"
         shell_assignment PARTICIPANT_BOOTSTRAP_REQUIRED "$PARTICIPANT_BOOTSTRAP_REQUIRED"
         shell_assignment PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED"
@@ -2799,6 +2814,7 @@ perform_install() {
     APP_NET1_MAC="$(random_mac)"
     PARTICIPANT_NET0_MAC="$(random_mac)"
     PARTICIPANT_NET1_MAC="$(random_mac)"
+    PARTICIPANT_NET2_MAC="$(random_mac)"
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=1
     INSTALL_COMPLETE=0
     INSTALL_PHASE="Preflight complete; preparing Proxmox resources"
@@ -2829,7 +2845,9 @@ perform_install() {
 
     progress 28 "Generating guest bootstrap scripts and Cloud-Init data"
     write_guest_bootstraps
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh"; fi
     write_cloud_init_files
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" >> "$WORK_DIR/participant-network.yaml"; fi
     install_snippets
 
     progress 38 "Creating the CORE, ScenarioForge, and participant VMs"
