@@ -22,6 +22,11 @@ already larger display alone.
 The desktop also includes Terminator, Evince for PDFs, xdot for Graphviz files,
 and a **JSON Viewer** backed by Mousepad; `jq` is available in the terminal.
 
+
+The shared APP guest bootstrap installs Node.js and verifies `node --version`
+for CLI HTML and Markdown guide export. For existing APP guests, run
+`sudo apt update && sudo apt install -y nodejs`, then verify `node --version`.
+
 ## Requirements
 
 - An x86_64 Linux host with VMware Workstation installed and runnable by your

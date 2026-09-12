@@ -16,6 +16,11 @@ management address, SSH credentials, gRPC port `50051`, and HITL interface
 Tools integration is installed in every guest for guest operations, display
 integration, and clipboard support.
 
+
+The shared APP guest bootstrap installs Node.js and verifies `node --version`
+for CLI HTML and Markdown guide export. For existing APP guests, run
+`sudo apt update && sudo apt install -y nodejs`, then verify `node --version`.
+
 ## Host and architecture support
 
 - VMware Fusion 13 or newer, installed in `/Applications/VMware Fusion.app`.

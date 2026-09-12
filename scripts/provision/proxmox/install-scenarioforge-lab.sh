@@ -1180,8 +1180,10 @@ set_bootstrap_status 5 'installing XFCE and native ScenarioForge system packages
 apt-get update
 apt-get install -y --no-install-recommends \
     build-essential dbus-x11 epiphany-browser evince graphviz jq lightdm lightdm-gtk-greeter \
-    mousepad nginx openssl python3-dev python3-full python3-venv terminator xdot xfce4 xorg \
+    mousepad nginx nodejs openssl python3-dev python3-full python3-venv terminator xdot xfce4 xorg \
     x11-xserver-utils xserver-xorg-input-all xserver-xorg-video-all xterm
+# CLI guide export runs the shared Reports renderer with Node.js.
+node --version
 # GNU install applies ownership only to explicitly named directories. Name
 # .config too: a root-owned parent prevents xfconfd from creating its settings
 # and XFCE reports "Unable to load a failsafe session" at first login.

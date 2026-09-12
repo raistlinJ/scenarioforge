@@ -12,12 +12,18 @@ lab on one Proxmox VE node:
   Epiphany browser and a launcher for the local ScenarioForge Web GUI, plus
   Terminator, Evince for PDFs, xdot for Graphviz files, and Mousepad/`jq` for
   graphical and terminal JSON inspection.
+  Node.js is installed and verified for CLI HTML and Markdown guide export.
 - Debian 12 with a minimal XFCE participant desktop (default), or Kali Linux
   with XFCE and the standard Kali tools, connected only to the
   HITL network after provisioning.
 
 The installer uses official Debian, Ubuntu, and optional Kali cloud images, Proxmox Cloud-Init,
 and VirtIO interfaces. It supports amd64 Proxmox hosts in this first release.
+
+The APP guest bootstrap is shared with the VMware Workstation (Linux and Windows)
+and VMware Fusion provisioners, so they also install Node.js. For existing guests,
+install it with `sudo apt update && sudo apt install -y nodejs`, then verify
+`node --version` before running guide export.
 
 ## Network layout
 

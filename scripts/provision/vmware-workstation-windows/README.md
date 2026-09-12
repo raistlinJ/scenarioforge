@@ -15,6 +15,11 @@ VMX files; native `qemu-img.exe` converts the cloud disks. The existing guest
 bootstrap scripts are read as text and run later inside the Linux VMs.
 PowerShell and `vmrun.exe` control the VMs and desktop shortcuts.
 
+
+The shared APP guest bootstrap installs Node.js and verifies `node --version`
+for CLI HTML and Markdown guide export. For existing APP guests, run
+`sudo apt update && sudo apt install -y nodejs`, then verify `node --version`.
+
 ## 1. Prepare the host
 
 Use an x64 Windows host supported by your Workstation release, with VMware

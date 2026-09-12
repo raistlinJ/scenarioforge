@@ -171,3 +171,37 @@ def test_the_id_map_really_does_collide(colliding_root):
     # other as its source id -- so the id map answers for whichever won.
     assert ('flag-generator', '126') in by_id
     assert len(by_path) == 2, 'the path map keeps them distinct'
+
+
+@pytest.mark.parametrize('category', ['dns', 'network/dns'])
+def test_categorized_foreign_paths_keep_disabled_state_on_the_right_generator(tmp_path, category, monkeypatch):
+    from scripts.run_flag_generator import find_generator
+
+    monkeypatch.delenv('CORETG_INSTALLED_GENERATORS_DIR', raising=False)
+    root = tmp_path / 'outputs' / 'installed_generators'
+    items = []
+    for assigned, source, disabled in [('77', '139', False), ('139', 'other', True)]:
+        relative = pathlib.Path('flag_node_generators') / category / f'p_test__{assigned}'
+        directory = root / relative
+        directory.mkdir(parents=True)
+        (directory / 'manifest.yaml').write_text(
+            f'manifest_version: 1\nid: "{assigned}"\nkind: flag-node-generator\n'
+            'runtime: {type: command, cmd: [echo, test]}\n'
+        )
+        (directory / '.coretg_pack.json').write_text(json.dumps({
+            'generator_id': assigned, 'source_generator_id': source,
+        }))
+        items.append({'id': assigned, 'kind': 'flag-node-generator',
+                      'disabled': disabled, 'path': f'{FOREIGN_ROOT}/{relative.as_posix()}'})
+    (root / '_packs_state.json').write_text(json.dumps({'packs': [{'id': 'p', 'installed': items}]}))
+
+    _, by_path = _installed_generator_state_maps(root)
+    enabled_path = root / 'flag_node_generators' / category / 'p_test__77'
+    disabled_path = root / 'flag_node_generators' / category / 'p_test__139'
+    assert by_path[str(enabled_path.resolve())]['disabled'] is False
+    assert by_path[str(disabled_path.resolve())]['disabled'] is True
+    generator, manifest = find_generator(
+        tmp_path, 'flag-node-generator', '139', source_dir=enabled_path,
+    )
+    assert generator['id'] == '139'
+    assert manifest == enabled_path.resolve() / 'manifest.yaml'

@@ -364,12 +364,26 @@ def _reroot_installed_item_path(item_path: Path, installed_root: Path) -> Path:
     Item paths are stored absolute, so a state file synced to the CORE VM points
     at directories that only exist on the authoring machine. The layout under
     `installed_root` is the same on both, so match on the trailing
-    `<kind>/<pack_dir>` and keep the original path when nothing matches.
+    `<kind>/<category...>/<pack_dir>` and keep the original path when nothing matches.
     """
     try:
         parts = item_path.parts
     except Exception:
         return item_path
+    # Category folders are part of the identity. Dropping them loses the path
+    # map and falls back to overlapping assigned/source generator IDs.
+    for index, part in enumerate(parts):
+        if part != 'installed_generators':
+            continue
+        suffix = parts[index + 1:]
+        if not suffix or suffix[0] not in {'flag_generators', 'flag_node_generators'}:
+            continue
+        candidate = installed_root.joinpath(*suffix)
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError:
+            pass
     for depth in (2, 1):
         if len(parts) < depth:
             continue
