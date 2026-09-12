@@ -48,6 +48,8 @@ def test_shared_guest_bodies_are_read_without_running_bash(monkeypatch):
     assert '--from-source "$CORE_REPO_URL" "$CORE_REPO_REF"' in scripts['core']
     assert 'CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19' in scripts['app']
     assert 'participant-ready' in scripts['participant']
+    assert 'After=network-online.target\n' in scripts['participant']
+    assert 'After=network-online.target cloud-final.service' not in scripts['participant']
     assert all(script.startswith('#!/usr/bin/env bash\n') for script in scripts.values())
 
 
@@ -105,6 +107,7 @@ def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypa
         assert 'serial0.present = "TRUE"' in text
         assert 'serial0.fileType = "file"' in text
         assert 'serial0.fileName = "serial-console.log"' in text
+        assert 'answer.msg.serial.file.open = "Append"' in text
         assert 'scenarioforge.install.owner = "windows-test-owner"' in text
         assert vmx.with_name('.scenarioforge-owner').read_text().strip() == 'windows-test-owner'
         values = dict(line.split(' = ', 1) for line in text.splitlines() if ' = ' in line)

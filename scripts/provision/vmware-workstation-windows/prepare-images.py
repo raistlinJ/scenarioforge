@@ -293,6 +293,7 @@ def write_vmx(path, role, config, macs, networks, userdata, metadata, network):
                    'serial0.present': 'TRUE', 'serial0.fileType': 'file',
                    'serial0.fileName': 'serial-console.log', 'serial0.startConnected': 'TRUE',
                    'serial0.yieldOnMsrRead': 'TRUE',
+                   'answer.msg.serial.file.open': 'Append',
                    'usb.present': 'TRUE', 'ehci.present': 'TRUE', 'usb_xhci.present': 'TRUE',
                    'sound.present': 'TRUE', 'sound.autoDetect': 'TRUE', 'mks.enable3d': 'FALSE', 'tools.syncTime': 'TRUE',
                    'scenarioforge.install.owner': config['install_id'], 'scenarioforge.install.role': name,
