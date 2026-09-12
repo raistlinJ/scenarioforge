@@ -302,6 +302,11 @@ function Invoke-NativeNetworkAction {
     Assert-VMnetNotInUse $state $Name
     $vnetlib = Find-Vnetlib $Directory
     function Invoke-Vnet([string[]]$Arguments) {
+        $removingAdapter = $Arguments[0] -eq 'remove' -and $Arguments[1] -eq 'adapter'
+        if ($removingAdapter -and @(Get-VMnetHostAdapters $Name).Count -eq 0) {
+            Write-Host "$Name has no host adapter; skipping adapter removal."
+            return
+        }
         # A partial create may never have enabled these services. Avoid asking
         # VMware to remove a service it explicitly reports as already absent.
         if ($Arguments[0] -eq 'remove' -and $Arguments[1] -in @('dhcp', 'nat')) {
@@ -319,6 +324,10 @@ function Invoke-NativeNetworkAction {
         # network/adapter state instead of applying normal process exit semantics.
         $result = Invoke-HostCommand $vnetlib (@('--') + $Arguments) -AllowFailure -TimeoutSeconds 120
         if ($result.Code -notin @(0, 1)) {
+            if ($removingAdapter -and @(Get-VMnetHostAdapters $Name).Count -eq 0) {
+                Write-Host "$Name host adapter is absent after removal (vnetlib exit $($result.Code)); continuing verification."
+                return
+            }
             $details = @()
             if ($result.ContainsKey('Out') -and $result.Out) { $details += $result.Out.Trim() }
             if ($result.ContainsKey('Error') -and $result.Error) { $details += $result.Error.Trim() }

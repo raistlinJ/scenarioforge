@@ -194,6 +194,7 @@ try {
     & {
         function Get-HostNetworkRows { param($State) return @{ vmnet2 = @{ Type='hostOnly'; DHCP='false' } } }
         $script:removalCalls = @()
+        function Get-VMnetHostAdapters { param($Name) @{ Status = 'Disabled' } }
         function Invoke-HostCommand {
             param($File, $Arguments, [switch]$AllowFailure, $TimeoutSeconds)
             $script:removalCalls += ($Arguments -join ' ')
@@ -201,6 +202,32 @@ try {
         }
         Assert-Throws { Invoke-NativeNetworkAction Remove vmnet2 vmnet3 $temp } 'vnetlib -- remove adapter vmnet2 failed \(exit 12\).*fixture adapter failure'
         Assert ($script:removalCalls.Count -eq 1) 'Already-disabled DHCP and NAT are not removed again'
+    }
+    & {
+        function Get-HostNetworkRows { param($State) return @{ vmnet2 = @{ Type='hostOnly'; DHCP='false' } } }
+        $script:adapterChecks = 0
+        function Get-VMnetHostAdapters {
+            param($Name)
+            $script:adapterChecks++
+            if ($script:adapterChecks -gt 1) { throw 'Reached final adapter verification' }
+            return @()
+        }
+        function Invoke-HostCommand { throw 'Must not remove absent services or adapters' }
+        # Stop at final verification before reaching real registry cleanup.
+        Assert-Throws { Invoke-NativeNetworkAction Remove vmnet2 vmnet3 $temp } 'Reached final adapter verification'
+    }
+    & {
+        function Get-HostNetworkRows { param($State) return @{ vmnet2 = @{ Type='hostOnly'; DHCP='false' } } }
+        $script:adapterChecks = 0
+        function Get-VMnetHostAdapters {
+            param($Name)
+            $script:adapterChecks++
+            if ($script:adapterChecks -eq 1) { return @{ Status = 'Disabled' } }
+            if ($script:adapterChecks -gt 2) { throw 'Reached final adapter verification' }
+            return @()
+        }
+        function Invoke-HostCommand { return @{ Code = 4; Out = ''; Error = '' } }
+        Assert-Throws { Invoke-NativeNetworkAction Remove vmnet2 vmnet3 $temp } 'Reached final adapter verification'
     }
     Write-Host 'Managed Workstation networking tests passed.'
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
