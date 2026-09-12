@@ -302,10 +302,29 @@ function Invoke-NativeNetworkAction {
     Assert-VMnetNotInUse $state $Name
     $vnetlib = Find-Vnetlib $Directory
     function Invoke-Vnet([string[]]$Arguments) {
+        # A partial create may never have enabled these services. Avoid asking
+        # VMware to remove a service it explicitly reports as already absent.
+        if ($Arguments[0] -eq 'remove' -and $Arguments[1] -in @('dhcp', 'nat')) {
+            $rows = Get-HostNetworkRows $state
+            if ($rows.ContainsKey($Name)) {
+                $row = $rows[$Name]
+                if (($Arguments[1] -eq 'dhcp' -and $row.DHCP -eq 'false') -or
+                    ($Arguments[1] -eq 'nat' -and $row.Type -in @('hostOnly', 'bridged'))) {
+                    Write-Host "$Name $($Arguments[1]) is already disabled; skipping removal."
+                    return
+                }
+            }
+        }
         # vnetlib uses both 0 and 1 for successful operations. Verify actual
         # network/adapter state instead of applying normal process exit semantics.
         $result = Invoke-HostCommand $vnetlib (@('--') + $Arguments) -AllowFailure -TimeoutSeconds 120
-        if ($result.Code -notin @(0, 1)) { throw "vnetlib failed (exit $($result.Code))." }
+        if ($result.Code -notin @(0, 1)) {
+            $details = @()
+            if ($result.ContainsKey('Out') -and $result.Out) { $details += $result.Out.Trim() }
+            if ($result.ContainsKey('Error') -and $result.Error) { $details += $result.Error.Trim() }
+            throw ("vnetlib -- $($Arguments -join ' ') failed (exit $($result.Code)). " + ($details -join ' ') +
+                ' Open Workstation > Edit > Virtual Network Editor > Change Settings to inspect this network. Installer ownership state was retained.')
+        }
     }
     if ($Operation -eq 'Create') {
         if ((Get-HostNetworkRows $state).ContainsKey($Name) -or $Name -in @(Get-VMnetRegistryNames) -or

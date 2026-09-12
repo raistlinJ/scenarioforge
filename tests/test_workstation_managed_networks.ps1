@@ -191,5 +191,16 @@ try {
         Assert ($script:nativeCommands -contains '-- enable adapter vmnet4') 'Native management enables host adapter'
         Assert ($script:nativeCommands -notcontains '-- disable adapter vmnet4') 'Management host adapter remains enabled'
     }
+    & {
+        function Get-HostNetworkRows { param($State) return @{ vmnet2 = @{ Type='hostOnly'; DHCP='false' } } }
+        $script:removalCalls = @()
+        function Invoke-HostCommand {
+            param($File, $Arguments, [switch]$AllowFailure, $TimeoutSeconds)
+            $script:removalCalls += ($Arguments -join ' ')
+            return @{ Code = 12; Out = ''; Error = 'fixture adapter failure' }
+        }
+        Assert-Throws { Invoke-NativeNetworkAction Remove vmnet2 vmnet3 $temp } 'vnetlib -- remove adapter vmnet2 failed \(exit 12\).*fixture adapter failure'
+        Assert ($script:removalCalls.Count -eq 1) 'Already-disabled DHCP and NAT are not removed again'
+    }
     Write-Host 'Managed Workstation networking tests passed.'
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
