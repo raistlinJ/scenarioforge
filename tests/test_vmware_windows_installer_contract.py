@@ -96,7 +96,8 @@ def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypa
     builder.prepare_images(config, tmp_path)
     participant_call = next(call for call in disk_calls if call[0] == 'scenarioforge-participant')
     assert participant_call[2] == ('raw' if participant_os == 'kali' else 'qcow2')
-    assert all(call[2] == 'qcow2' for call in disk_calls if call[0] != 'scenarioforge-participant')
+    assert next(call for call in disk_calls if call[0] == 'scenarioforge-core')[2] == 'qcow2'
+    assert next(call for call in disk_calls if call[0] == 'scenarioforge-app')[2] == 'vmdk'
     for role in ('core', 'app', 'participant'):
         vmx = lab / f'scenarioforge-{role}/scenarioforge-{role}.vmx'
         text = vmx.read_text()
@@ -149,14 +150,22 @@ def test_network_layout_matches_guest_interfaces(config):
     assert 'gateway4' not in net['ethernets']['participant']
 
 
-@pytest.mark.parametrize('source_format', ['qcow2', 'raw'])
+@pytest.mark.parametrize('source_format', ['qcow2', 'raw', 'vmdk'])
 def test_native_qemu_converts_and_grows_without_modifying_base(tmp_path, source_format):
     qemu = shutil.which('qemu-img')
     if not qemu:
         pytest.skip('Real qemu-img validation requires QEMU; command construction is tested separately')
     base = tmp_path / ('base disk.' + source_format)
     destination = tmp_path / 'guest disk.vmdk'
-    subprocess.run([qemu, 'create', '-f', source_format, str(base), '16M'], check=True, capture_output=True)
+    if source_format == 'vmdk':
+        raw = tmp_path / 'seed.raw'
+        with raw.open('wb') as stream:
+            stream.write(b'ScenarioForge disk contents' * 100)
+            stream.truncate(16 * 1024 ** 2)
+        subprocess.run([qemu, 'convert', '-f', 'raw', '-O', 'vmdk', '-o', 'subformat=streamOptimized',
+                        str(raw), str(base)], check=True, capture_output=True)
+    else:
+        subprocess.run([qemu, 'create', '-f', source_format, str(base), '16M'], check=True, capture_output=True)
     original_hash = builder.file_hash(base)
     builder.prepare_disk(qemu, base, destination, 1, tmp_path, source_format=source_format)
     assert builder.file_hash(base) == original_hash
@@ -165,6 +174,8 @@ def test_native_qemu_converts_and_grows_without_modifying_base(tmp_path, source_
     assert info['virtual-size'] == 1024 ** 3
     assert 'backing-filename' not in info
     assert not (tmp_path / 'resize.qcow2').exists()
+    subprocess.run([qemu, 'compare', '-f', source_format, '-F', 'vmdk', str(base), str(destination)],
+                   check=True, capture_output=True)
 
 
 def test_disk_resize_uses_argv_and_disposable_overlay(tmp_path, monkeypatch):

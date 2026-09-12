@@ -33,7 +33,7 @@ IMAGES = {
                'https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS', 'sha512'),
     'kali': ('https://kali.download/cloud-images/kali-2026.2/kali-linux-2026.2-cloud-genericcloud-amd64.tar.xz',
              'https://kali.download/cloud-images/kali-2026.2/SHA256SUMS', 'sha256'),
-    'ubuntu': ('https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img',
+    'ubuntu': ('https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.vmdk',
                'https://cloud-images.ubuntu.com/noble/current/SHA256SUMS', 'sha256'),
 }
 
@@ -364,6 +364,10 @@ def prepare_images(config, work):
                      config[role + '_disk_gb'], work)
         if image_os == 'kali':
             prepare_disk(*disk_args, source_format='raw')
+        elif image_os == 'ubuntu':
+            # The upstream VMware disk is a distribution image; normalize it to
+            # our writable sparse layout while growing through the small overlay.
+            prepare_disk(*disk_args, source_format='vmdk')
         else:
             prepare_disk(*disk_args)
         write_vmx(directory / (name + '.vmx'), role, config, macs, networks, userdata, metadata, network)

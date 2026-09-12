@@ -46,6 +46,14 @@ newer). You can let the lab installer download QEMU when needed, or install the
 Windows build linked from [QEMU's official download page](https://www.qemu.org/download/#windows)
 yourself. Only `qemu-img.exe` is used; QEMU does not run the lab VMs.
 
+The APP VM uses Ubuntu's official VMDK cloud image, which currently has a slightly
+smaller download/cache footprint than its QCOW2 image. QEMU still converts it to
+the writable sparse VMDK layout used by the lab and sets its virtual capacity.
+Conversion uses a small copy-on-write overlay, not a full intermediate disk copy.
+CORE continues to use Debian's QCOW2 image. The optional Kali participant retains
+the smaller cloud archive instead of the much larger prebuilt VMware desktop VM.
+Existing cached Ubuntu `.img` files are preserved but no longer used for new builds.
+
 When `qemu-img.exe` is missing, a separate **[y/N] confirmation** offers to download
 QEMU 11.1.0 (2026-08-11, about 200 MB) from `qemu.weilnetz.de`. The script checks
 the downloaded installer against its pinned upstream SHA-512 before opening it.
