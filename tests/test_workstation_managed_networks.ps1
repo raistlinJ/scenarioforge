@@ -11,6 +11,27 @@ function Assert-Throws([scriptblock]$Block, $Pattern) {
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('sf-network-test-' + [Guid]::NewGuid())
 New-Item -ItemType Directory $temp | Out-Null
 try {
+    & {
+        function Get-ExecutionPolicy { 'Bypass' }
+        function Start-Process {
+            param($FilePath, $Verb, [switch]$PassThru, [switch]$Wait, $ArgumentList)
+            Assert ($Verb -eq 'RunAs') 'Network action requests elevation'
+            Assert ($ArgumentList[1] -eq '-ExecutionPolicy' -and $ArgumentList[2] -eq 'Bypass') 'Current execution policy forwarded'
+            $wrapper = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($ArgumentList[-1]))
+            # Run the actual transcript/error wrapper with a failing helper stand-in.
+            $wrapper = $wrapper -replace '(?m)^    & .*$', "    throw 'simulated vnetlib failure'"
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
+            $runtime = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+            & $runtime -NoProfile -EncodedCommand $encoded *> $null
+            $process = [pscustomobject]@{ ExitCode = $LASTEXITCODE }
+            $process | Add-Member ScriptMethod Dispose {}
+            return $process
+        }
+        $probeState = @{ Vmrun = (Join-Path $temp 'vmrun.exe'); Config = @{ hitl_vmnet='vmnet2'; management_vmnet='vmnet3' } }
+        Assert-Throws { Invoke-ElevatedNetworkAction $probeState Create } 'simulated vnetlib failure'
+        function Start-Process { throw 'The operation was canceled by the user' }
+        Assert-Throws { Invoke-ElevatedNetworkAction $probeState Create } 'could not start with administrator privileges.*canceled'
+    }
     # Real registry-key interface, including the display-name-only slots reported
     # on Windows. Unknown values and child keys must continue blocking reuse.
     foreach ($case in @(

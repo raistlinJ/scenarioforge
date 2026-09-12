@@ -215,9 +215,35 @@ function Invoke-ElevatedNetworkAction {
     $role = 'HITL'
     if ($Management) { $name = $State.Config.management_vmnet; $protected = $State.Config.hitl_vmnet; $role = 'Management' }
     $command = "& $(& $quote $helper) -Action $Operation -VMnet $(& $quote $name) -ManagementVMnet $(& $quote $protected) -NetworkRole $role -VmwareDirectory $(& $quote (Split-Path $State.Vmrun -Parent))"
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-    $process = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded)
-    if ($process.ExitCode -ne 0) { throw "$role $Operation failed or was canceled. Installer state was retained for cleanup/retry." }
+    $log = [IO.Path]::GetTempFileName()
+    try {
+        # UAC starts a separate PowerShell process. Carry the execution policy
+        # already in effect for this run; Group Policy still takes precedence.
+        $policy = [string](Get-ExecutionPolicy)
+        $wrapper = @'
+$ErrorActionPreference = 'Stop'
+try {
+    Start-Transcript -LiteralPath __LOG__ -Force | Out-Null
+    $global:LASTEXITCODE = 0
+    __COMMAND__
+    if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }
+    exit 0
+} catch { Write-Error $_ -ErrorAction Continue; exit 1 }
+finally { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null }
+'@
+        $wrapper = $wrapper.Replace('__LOG__', (& $quote $log)).Replace('__COMMAND__', $command)
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
+        try {
+            $process = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile', '-ExecutionPolicy', $policy, '-EncodedCommand', $encoded)
+        } catch { throw "$role $Operation could not start with administrator privileges: $($_.Exception.Message). Installer state was retained." }
+        try {
+            if ($process.ExitCode -ne 0) {
+                $details = Get-Content -LiteralPath $log -Raw
+                if (-not $details) { $details = 'The elevated process produced no log. Check whether Windows denied elevation or blocked PowerShell.' }
+                throw "$role $Operation failed (exit $($process.ExitCode)). Installer state was retained for cleanup/retry.`n$details"
+            }
+        } finally { $process.Dispose() }
+    } finally { Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue }
 }
 
 function Create-OwnedHitlNetwork {
